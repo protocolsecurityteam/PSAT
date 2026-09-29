@@ -1,20 +1,14 @@
 """Every enumeration status the producer can emit must survive the L2 cache.
 
-``services.resolution.mapping_enumerator`` owns the ``status`` vocabulary of
-``EnumerationResult``; ``db.mapping_enumeration_cache`` persists it into a
-fixed-width column. When a new member outgrew that column the write raised
-``StringDataRightTruncation``, the upsert swallowed it as a warning, and the
-*previous* row survived — so an in-TTL ``complete`` kept being served for an
-address whose re-scan had honestly come back truncated, republishing that
-scan's partial member set as authoritative for the rest of the TTL.
+``mapping_enumerator`` owns the ``status`` vocabulary; ``db.mapping_enumeration_cache``
+persists it into a fixed-width column. When a new member outgrew the column the write
+raised ``StringDataRightTruncation``, the upsert swallowed it, and the *previous* row
+survived, so an in-TTL ``complete`` kept being served for an address whose re-scan had come
+back truncated (its partial set republished as authoritative).
 
-The vocabulary is scraped out of the producer module rather than hand-copied
-here: a copied list only ever pins the members someone remembered to add to
-it, and the failure mode this file exists to catch is precisely a member
-nobody thought about. Adding a status to the enumerator therefore extends
-this test automatically.
-
-Marker: offline (PostgreSQL via requires_postgres). No live hypersync.
+The vocabulary is scraped from the producer module, not hand-copied: a copied list only pins
+members someone remembered, and this file exists to catch a member nobody thought about.
+Offline (PostgreSQL via requires_postgres).
 """
 
 from __future__ import annotations
@@ -30,10 +24,8 @@ from tests.conftest import requires_postgres
 
 _PRODUCER = Path(__file__).resolve().parents[2] / "services" / "resolution" / "mapping_enumerator.py"
 
-# A floor, not the vocabulary. If the scraper below breaks (a refactor moves
-# the emissions into a helper, say) it would otherwise return an empty set and
-# pass vacuously. These four are the oldest members and the least likely to be
-# renamed; the scraper must find at least them.
+# A floor, not the vocabulary: if the scraper breaks (say emissions move into a helper) it
+# would return an empty set and pass vacuously. These are the oldest, least-renamed members.
 _SCRAPER_SANITY_FLOOR = {"complete", "error", "incomplete_timeout", "incomplete_max_pages"}
 
 
@@ -42,14 +34,10 @@ def _string_constants(node: ast.AST) -> set[str]:
 
 
 def _scrape_status_vocabulary() -> set[str]:
-    """Collect every string literal the producer can bind to ``status``.
-
-    Two emission shapes exist: a ``status=...`` keyword on an
-    ``EnumerationResult`` / ``EnumerationValueResult`` construction, and a
-    plain or annotated assignment to a local named ``status`` (including the
-    conditional form, whose branches are both reachable). Both are collected
-    by walking the bound expression for string constants, so a future
-    ``"a" if p else "b"`` or tuple form is picked up without changing this.
+    """Collect every string literal the producer can bind to ``status``: a ``status=...``
+    keyword on an ``EnumerationResult`` / ``EnumerationValueResult`` construction, or an
+    assignment to a local named ``status`` (including conditional forms). Walking the bound
+    expression for string constants picks up future ``"a" if p else "b"`` or tuple forms.
     """
     tree = ast.parse(_PRODUCER.read_text(encoding="utf-8"))
     found: set[str] = set()
@@ -73,8 +61,8 @@ SPECS_HASH = "c" * 64
 
 @pytest.fixture()
 def _l2(monkeypatch, db_session):
-    """Point the cache module's own SessionLocal at the test database and
-    clear the key this module writes to, both before and after."""
+    """Point the cache module's SessionLocal at the test database and clear this module's
+    key before and after."""
     import os
 
     from sqlalchemy import create_engine
@@ -107,16 +95,14 @@ def _result(status: str, *, last_block: int = 1) -> dict:
 
 
 def test_scraper_finds_the_known_statuses():
-    """Guards the guard: a scraper that silently stops finding emissions
-    would make every round-trip below vacuous."""
+    """Guards the guard: a scraper that stops finding emissions would make every
+    round-trip vacuous."""
     vocabulary = _scrape_status_vocabulary()
     missing = _SCRAPER_SANITY_FLOOR - vocabulary
     assert not missing, f"status scraper lost known members {sorted(missing)} — it no longer reads the producer"
-    # Constant-indirection blindness guard: the scraper only sees literals in
-    # the covered assignment shapes, so a refactor that moves ONE emission
-    # behind a helper or module constant could drop just that member while
-    # the floor above still passes. Every incomplete_* string literal in the
-    # producer module must therefore be in the scraped set.
+    # Constant-indirection guard: moving ONE emission behind a helper or constant could drop
+    # just that member while the floor above still passes, so every incomplete_* literal in
+    # the producer module must be in the scraped set.
     import re
 
     module_source = _PRODUCER.read_text()
@@ -127,11 +113,8 @@ def test_scraper_finds_the_known_statuses():
 
 @requires_postgres
 def test_every_producible_status_round_trips_through_the_cache(_l2):
-    """The whole vocabulary, through the real column, one member at a time.
-
-    Not a length assertion against a constant — the column width is the
-    thing under test, so the test has to actually make Postgres accept the
-    value and hand it back.
+    """The whole vocabulary through the real column, one member at a time. The column width
+    is the thing under test, so Postgres must actually accept and return the value.
     """
     failures: list[str] = []
     for status in sorted(_scrape_status_vocabulary()):
@@ -151,13 +134,9 @@ def test_every_producible_status_round_trips_through_the_cache(_l2):
 
 @requires_postgres
 def test_truncated_status_displaces_a_prior_complete_row(_l2):
-    """The property the width bug actually broke.
-
-    A rejected upsert is not a lost optimization — it leaves the previous
-    row standing. So the specific damage is directional: the honest
-    truncated verdict must be able to overwrite a fresh ``complete``,
-    because the member set that produced that ``complete`` is exactly what
-    would otherwise keep being republished.
+    """The property the width bug broke: a rejected upsert leaves the previous row standing,
+    so the honest truncated verdict must be able to overwrite a fresh ``complete`` (whose
+    member set would otherwise keep being republished).
     """
     db_cache.upsert(chain="1", address=ADDR, specs_hash=SPECS_HASH, result=_result("complete", last_block=100))
     prior = db_cache.find_fresh(chain="1", address=ADDR, specs_hash=SPECS_HASH, ttl_s=9999)
@@ -174,13 +153,9 @@ def test_truncated_status_displaces_a_prior_complete_row(_l2):
 
 @requires_postgres
 def test_oversized_status_raises_instead_of_silently_leaving_the_stale_row(_l2):
-    """A status the column genuinely cannot hold must be loud.
-
-    The WARN-swallow in ``upsert`` is for transient DB trouble, where
-    dropping a cache write costs one re-scan. A value that does not fit the
-    declared schema is a programming error whose silent form is the bug
-    above, so it raises — this pins that the swallow was narrowed and not
-    just moved.
+    """A status the column cannot hold must be loud. The WARN-swallow in ``upsert`` is for
+    transient DB trouble (one re-scan); a value that doesn't fit the schema is a programming
+    error, so it raises. Pins that the swallow was narrowed, not just moved.
     """
     from sqlalchemy.exc import DataError
 

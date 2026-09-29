@@ -206,7 +206,6 @@ def test_witness_with_demoted_via_member_counts_as_invalid(db_session):
 
 def test_cleared_stamp_with_valid_witnesses_repromoted(db_session):
     protocol, anchor, _proxy, _parked = _freshly_gated(db_session)
-    # Out-of-band clear: witnesses stay valid, stamp vanished.
     anchor.protocol_id = None
     db_session.flush()
 

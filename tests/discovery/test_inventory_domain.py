@@ -103,7 +103,6 @@ class TestRateLimiter:
         start = time.monotonic()
         rl.wait()
         elapsed = time.monotonic() - start
-        # Second call should wait roughly 50ms
         assert elapsed >= 0.04  # allow small timing slack
 
     def test_no_wait_if_enough_time_passed(self):
@@ -218,7 +217,6 @@ class TestExtractAddresses:
         assert _extract_addresses("") == set()
 
     def test_none_values_skipped(self):
-        # Falsy values should be skipped
         assert _extract_addresses("", cast(Any, None)) == set()
 
     def test_deduplication(self):
@@ -510,7 +508,6 @@ class TestLlmSelectDomain:
             {"url": "https://docs.uniswap.org/contracts", "title": "Uniswap Docs"},
             {"url": "https://docs.uniswap.org/guides", "title": "Guides"},
         ]
-        # LLM returns "1" meaning the first (and only) domain
         monkeypatch.setattr(
             "services.discovery.inventory_domain.llm.chat",
             lambda *a, **kw: "1",
@@ -543,13 +540,11 @@ class TestLlmSelectDomain:
         assert extras[0] == "gitbook.uniswap.org"
 
     def test_multiple_domains_deduplication(self, monkeypatch):
-        """LLM returning the same index twice should not produce duplicate extras."""
         results = [
             {"url": "https://a.example.com/p1", "title": "A1"},
             {"url": "https://a.example.com/p2", "title": "A2"},
             {"url": "https://b.example.com/p1", "title": "B1"},
         ]
-        # "1, 1, 2" — index 0 twice, index 1 once
         monkeypatch.setattr(
             "services.discovery.inventory_domain.llm.chat",
             lambda *a, **kw: "1, 1, 2",
@@ -861,13 +856,11 @@ class TestDiscoverContractInventoryPages:
             errors=[],
             extra_domains=["gitbook.example.com"],
         )
-        # Should search both domains
         assert len(search_queries) == 2
         assert any("example.com" in q for q in search_queries)
         assert any("gitbook.example.com" in q for q in search_queries)
 
     def test_combined_results_but_no_in_domain_pages(self, monkeypatch):
-        """When Tavily returns results but none match the target domain."""
         site_results = [
             {"url": "https://other.com/page", "title": "Other", "content": "off-domain"},
         ]
@@ -884,7 +877,6 @@ class TestDiscoverContractInventoryPages:
             max_queries=5,
             errors=[],
         )
-        # combined should have results (off-domain ones), recommended should be empty
         assert len(combined) > 0
         assert recommended == []
 

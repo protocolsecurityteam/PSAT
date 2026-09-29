@@ -1,25 +1,13 @@
 """P2 — accept-side 2-step transfer gates are ``resolved_empty`` (empty-by-design).
 
-``claimGovernance`` (gate ``msg.sender == _pendingGovernor()``) and
-``acceptDefaultAdminTransfer`` (gate ``msg.sender == pendingDefaultAdmin().newAdmin``)
-are the accept halves of a 2-step authority handover: uncallable until a transfer
-is queued. With no transfer pending the pending slot reads empty (or, for the OZ
-struct member, has no getter to read at all), and the binary lowering filed that
-as a silent ``finite_set/lower_bound`` gap. P2 recognizes the ``pending``-prefixed
-accessor and lowers it to ``finite_set([], exact, empty_by_design)`` so the surface
-reports ``resolved_empty`` ("provably nobody, until a transfer is pending") instead
-of an under-resolution.
+``claimGovernance`` (``msg.sender == _pendingGovernor()``) and ``acceptDefaultAdminTransfer``
+(``msg.sender == pendingDefaultAdmin().newAdmin``) are uncallable until a transfer is queued.
+P2 lowers the ``pending``-prefixed accessor to ``finite_set([], exact, empty_by_design)``
+instead of a silent ``lower_bound`` gap.
 
-Operand shapes are the REAL ones (compiled from source):
-  * A — ``view_call _pendingGovernor()`` (internal accessor; reverts/empties).
-  * B — ``state_variable _pendingDefaultAdmin`` member ``newAdmin``: OZ's public
-    ``pendingDefaultAdmin()`` is inlined by provenance to its storage struct read,
-    so the operand is a struct member with no getter — nothing is read.
-
-On main these stay ``lower_bound`` / not ``resolved_empty``, so every flip
-assertion fails; reverting either P1 or P2 restores that.
-
-Pure/offline, ``test_authority_live_getter_resolution`` pattern; the global
+Operand shapes are the REAL ones (compiled from source): A is ``view_call _pendingGovernor()``;
+B is ``state_variable _pendingDefaultAdmin`` member ``newAdmin`` (OZ's public getter is inlined
+by provenance to the struct read, so nothing is read). Pure/offline; the global
 ``_stub_live_authority`` fixture is deliberately not used.
 """
 
@@ -120,7 +108,6 @@ def _assert_empty_by_design(cap: CapabilityExpr) -> None:
 
 # --------------------------------------------------------------------------
 # A — claimGovernance: _pendingGovernor() reverts (proxy) and empties (impl).
-# Both read-failure shapes must promote to empty-by-design.
 # --------------------------------------------------------------------------
 
 
@@ -132,8 +119,7 @@ def test_pending_governor_accept_gate_is_resolved_empty(monkeypatch: pytest.Monk
 
 
 # --------------------------------------------------------------------------
-# B — acceptDefaultAdminTransfer: the real struct-member operand (no getter to
-# read) and, defensively, the public-getter shape returning two zero words.
+# B — acceptDefaultAdminTransfer: struct-member operand and public-getter shape.
 # --------------------------------------------------------------------------
 
 
@@ -144,9 +130,7 @@ def test_pending_default_admin_member_is_resolved_empty(monkeypatch: pytest.Monk
 
 
 def test_pending_default_admin_getter_two_zero_words_is_resolved_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If the gate had stayed a public ``pendingDefaultAdmin()`` view (no
-    inlining), an unset ``(address,uint48)`` return is two zero words → still
-    ``resolved_empty`` (here via the clean-zero read path)."""
+    """A public ``pendingDefaultAdmin()`` view returning two zero words is still ``resolved_empty``."""
     _stub_rpc(monkeypatch, "tuple_zero")
     cap = evaluate_tree(_eq_tree(B_PENDING_DEFAULT_ADMIN_GETTER), _ctx_with_rpc())
 
@@ -156,9 +140,8 @@ def test_pending_default_admin_getter_two_zero_words_is_resolved_empty(monkeypat
 
 
 # --------------------------------------------------------------------------
-# Precision guard — a NON-pending owner() that reverts is a real read failure,
-# NOT "provably nobody". It must stay lower_bound, never resolved_empty;
-# over-reach here re-opens the "open-on-ambiguity" false-positive class.
+# Precision guard — a NON-pending owner() that reverts is a real read failure and must
+# stay lower_bound; over-reach re-opens the "open-on-ambiguity" false-positive class.
 # --------------------------------------------------------------------------
 
 
@@ -174,8 +157,7 @@ def test_non_pending_owner_revert_stays_lower_bound(monkeypatch: pytest.MonkeyPa
 
 
 def test_pending_governor_with_active_transfer_resolves_to_principal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A pending accessor that DOES read a live address (a transfer in flight)
-    resolves to that principal — empty-by-design only kicks in on an empty read."""
+    """A pending accessor that reads a live address resolves to that principal."""
     pending = "0x" + "cd" * 20
     monkeypatch.setattr("services.clients.rpc.rpc_request", lambda *a, **k: "0x" + pending[2:].rjust(64, "0"))
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR), _ctx_with_rpc())
@@ -186,10 +168,9 @@ def test_pending_governor_with_active_transfer_resolves_to_principal(monkeypatch
 
 
 # --------------------------------------------------------------------------
-# Surface contract (pins the capability_surface.py change in isolation): an
-# empty-by-design set is resolved_empty regardless of membership_quality. Built
-# directly with lower_bound so ONLY the new empty_reason branch can classify it
-# (the pre-existing exact-empty check would not) — revert-proof for that file.
+# Surface contract (capability_surface.py): an empty-by-design set is resolved_empty
+# regardless of membership_quality. Built with lower_bound so ONLY the new empty_reason
+# branch can classify it (revert-proof).
 # --------------------------------------------------------------------------
 
 
@@ -210,15 +191,14 @@ def test_lower_bound_without_empty_by_design_is_not_resolved_empty() -> None:
 
 
 def test_resolved_empty_capability_false_for_populated_finite_set() -> None:
-    """A populated finite_set is never 'provably nobody' — the members-present
-    guard short-circuits (reached via AND/OR recursion over a populated child)."""
+    """A populated finite_set is never 'provably nobody' (members-present short-circuit)."""
     populated = capability_to_dict(CapabilityExpr.finite_set(["0x" + "ab" * 20], quality="exact"))
     assert _is_resolved_empty_capability(populated) is False
 
 
 # --------------------------------------------------------------------------
-# Detector precision: only the pending half of view_call / state_variable
-# operands matches; other sources and a missing signature fail closed.
+# Detector precision: only the pending half of view_call / state_variable operands
+# matches; other sources and a missing signature fail closed.
 # --------------------------------------------------------------------------
 
 

@@ -1,17 +1,13 @@
 """Unit coverage for the auth-family claim matchers over the documented Plane-0
 facts interface.
 
-These drive the real production code — ``build_claims``, ``ClaimContext``, the
-registry, and every auth matcher/``_authcommon`` reader — with ``effects``- and
-``predicate_trees``-shaped fact *data* (not faked collaborators), mirroring the
-shapes measured on real corpus contracts (Solmate DSAuth, OZ AccessControl,
-Solady handover, FiatToken rotate, LayerZero composeQueue). No Slither/DB, so
-they run in every offline suite and exercise each standard gate, corroboration
-path, and near-miss branch.
+Drives real ``build_claims``/``ClaimContext``/registry/matchers with ``effects``- and
+``predicate_trees``-shaped fact *data* (no faked collaborators) mirroring shapes
+measured on real contracts (Solmate DSAuth, OZ AccessControl, Solady handover,
+FiatToken rotate, LayerZero composeQueue). No Slither/DB, so it runs offline.
 
-Assertions intersect against :data:`AUTH_FAMILY` so a sibling family's matcher
-(pause, flow, exec, LayerZero) firing on the same synthetic function never
-couples these tests to another stage.
+Assertions intersect against :data:`AUTH_FAMILY` so a sibling family's matcher firing
+on the same synthetic function never couples these tests to another stage.
 """
 
 from __future__ import annotations
@@ -54,7 +50,6 @@ def _sw(var, declared_type, *, hygiene="normal", granularity="var"):
 
 
 def _ca_equality_leaf(var):
-    """A ``msg.sender == <var>`` caller-authority equality leaf."""
     return {
         "op": "LEAF",
         "leaf": {
@@ -70,7 +65,6 @@ def _ca_equality_leaf(var):
 
 
 def _ca_membership_leaf():
-    """A caller-authority *membership* leaf (composeQueue / OZ role check)."""
     return {
         "op": "LEAF",
         "leaf": {
@@ -106,7 +100,6 @@ def _delegated_authority_leaf(var):
 
 
 def _requires_auth_tree(owner_var, authority_var):
-    """Solmate ``msg.sender == owner || authority.canCall(...)``."""
     return {"op": "OR", "children": [_ca_equality_leaf(owner_var), _delegated_authority_leaf(authority_var)]}
 
 
@@ -134,7 +127,6 @@ def _fn(signature, *, state_writes=None, view=False):
 
 
 def _artifact(name, functions):
-    """functions: signature -> (record, tree). Returns (effects, predicate_trees)."""
     effects = {
         "schema_version": "semantic-2",
         "contract_name": name,

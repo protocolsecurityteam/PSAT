@@ -1,10 +1,7 @@
-"""Unit tests for ``services.audits.source_equivalence`` internals.
-
-The DB-integrated coverage behaviours are covered in ``test_audit_coverage.py``.
-What lives here is the network-side contract surface: Etherscan verified-source
-parsing, GitHub raw fetch guards, candidate-path generation, and the
-``verify_audit_covers_impl`` statuses. No DB, no network — we stub
-``requests.get`` and ``services.clients.etherscan.get`` at module scope.
+"""Unit tests for ``services.audits.source_equivalence`` internals: Etherscan verified-source parsing, GitHub raw
+fetch guards, candidate-path generation and the ``verify_audit_covers_impl`` statuses. DB-integrated coverage
+behaviour is in ``test_audit_coverage.py``. No DB or network; ``requests.get`` and
+``services.clients.etherscan.get`` are stubbed at module scope.
 """
 
 from __future__ import annotations
@@ -46,18 +43,13 @@ def _clear_lru_cache():
 
 class TestExtractReviewedCommitsFilters:
     def test_rejects_token_with_fewer_than_three_unique_chars(self):
-        """Tokens like ``ababab`` (2 unique chars) or ``cdcdcdcd`` (2 unique)
-        are noise — usually incidental 7+ char alternations that happen to
-        pass the hex-letter check. Covers the ``len(set(token)) < 3`` guard
-        that the all-digit test doesn't hit."""
-        # "abababab" — 2 unique chars, passes the hex-letter check ('a','b').
+        """Alternations like ``ababab`` pass the hex-letter check but are noise; covers the ``len(set(token)) < 3``
+        guard.
+        """
         assert extract_reviewed_commits("noise abababab more") == []
-        # Mix real + noisy so we prove only the noisy one gets rejected.
         assert extract_reviewed_commits("noise abababab real 1a2b3c4d") == ["1a2b3c4d"]
 
     def test_dedupes_repeat_occurrences(self):
-        """A SHA mentioned twice in the text must appear once in the output,
-        in first-seen position."""
         text = "commit 1a2b3c4d\nseen again 1a2b3c4d\nalso deadbeefcafe01"
         assert extract_reviewed_commits(text) == ["1a2b3c4d", "deadbeefcafe01"]
 
@@ -68,10 +60,9 @@ class TestExtractReviewedCommitsFilters:
 
 
 class TestFetchEtherscanSourceFiles:
-    """The ``services.discovery`` package re-exports ``fetch`` (function)
-    into its namespace, shadowing the submodule — so we patch via the
-    submodule object loaded through ``importlib``. ``services.clients.etherscan.get``
-    is similarly patched at the submodule level for consistency."""
+    """``services.discovery`` re-exports ``fetch``, shadowing the submodule, so patch via the submodule object loaded
+    through ``importlib``; ``etherscan.get`` is patched at the submodule level for consistency.
+    """
 
     def test_returns_verified_source_for_successful_getsourcecode(self, monkeypatch):
         import importlib
@@ -99,9 +90,7 @@ class TestFetchEtherscanSourceFiles:
         assert got.source.files == {"LiquidityPool.sol": _hash_source_text(content)}
 
     def test_returns_unverified_when_parse_sources_empty(self, monkeypatch):
-        """Unverified contracts come back with no parseable source — now
-        surfaced as status='unverified' so the coverage layer can emit a
-        specific ``etherscan_unverified`` equivalence status."""
+        """Unverified contracts surface as status='unverified' so coverage can emit ``etherscan_unverified``."""
         import importlib
 
         fetch_module = importlib.import_module("services.discovery.fetch")
@@ -117,9 +106,9 @@ class TestFetchEtherscanSourceFiles:
         assert got.status == "unverified"
 
     def test_returns_fetch_failed_when_etherscan_raises(self, monkeypatch):
-        """Rate limits, network errors, malformed responses — any exception
-        from Etherscan is converted to status='fetch_failed' so the retry
-        sweep knows it's transient."""
+        """Any Etherscan exception (rate limit, network, malformed) becomes status='fetch_failed' so the retry sweep
+        knows it's transient.
+        """
         import importlib
 
         def boom(*_a, **_k):
@@ -353,8 +342,6 @@ class TestFetchGithubRawRetry:
         assert calls["n"] == 2
 
     def test_retries_exhausted_returns_transport_error(self, monkeypatch):
-        """If the upstream stays bad through every retry, the function should
-        still surface the transport_error (not loop forever)."""
         monkeypatch.setattr("services.audits.source_equivalence._retry_sleep", lambda _s: None, raising=False)
 
         calls = {"n": 0}
@@ -430,11 +417,10 @@ class TestFetchGithubRawRetry:
         assert calls["n"] == 1
 
     def test_success_after_retry_is_memoized_not_the_flake(self, monkeypatch):
-        """The hash-level cache makes the retry strictly necessary: without
-        it, a single transient flake gets memoized as ``transport_error``
-        for the whole worker process, starving every later call to the same
-        URL. With retry, the *successful* outcome is what the cache stores —
-        and what it stores is the content hash, not the body."""
+        """The retry is what makes the hash-level cache safe: without it a flake would be memoized as
+        ``transport_error`` for
+        the worker's life; with it the cache stores the successful content hash.
+        """
         monkeypatch.setattr("services.audits.source_equivalence._retry_sleep", lambda _s: None, raising=False)
 
         calls = {"n": 0}
@@ -483,7 +469,6 @@ class TestFetchGithubRawHashCaching:
         assert got.status == "ok"
         assert got.sha256 == _hash_source_text(body)
         assert got.sha256 is not None and len(got.sha256) == 64
-        # The body itself is not carried on the cached result — only its hash.
         assert not hasattr(got, "content")
 
     def test_lru_cap_is_bounded(self):
@@ -507,9 +492,7 @@ class TestFetchGithubRawHashCaching:
 
 class TestFetchGithubSourceHash:
     def test_returns_invalid_input_on_missing_inputs(self):
-        """The wrapper short-circuits without any HTTP call when any of repo,
-        commit, or path is empty — status='invalid_input' makes that
-        visible to callers."""
+        """Missing repo, commit or path short-circuits with status='invalid_input' and no HTTP call."""
         for args in [("", "abc", "file.sol"), ("r/n", "", "file.sol"), ("r/n", "abc", "")]:
             got = fetch_github_source_hash(*args)
             assert got.sha256 is None
@@ -526,8 +509,6 @@ class TestFetchGithubSourceHash:
         assert got.status == "ok"
 
     def test_propagates_http_404_from_raw(self, monkeypatch):
-        """404 on the raw fetch propagates as status='http_404' so the
-        orchestrator can distinguish path-missing from hash-mismatch."""
         monkeypatch.setattr(
             "services.audits.source_equivalence.requests.get",
             lambda *_a, **_k: _resp(status_code=404),
@@ -587,7 +568,6 @@ class TestVerifyAuditCoversImplStatuses:
         return VerifiedSource(contract_name="X", compiler_version="v0.8", files=files)
 
     def test_proven_on_matching_hash(self, monkeypatch):
-        """Happy path: sha matches → status='proven', matches non-empty."""
         monkeypatch.setattr(
             "services.audits.source_equivalence.fetch_github_source_hash",
             lambda *_a, **_k: source_equivalence.GithubHashResult(sha256="matching", status="ok", detail=""),
@@ -623,7 +603,6 @@ class TestVerifyAuditCoversImplStatuses:
         assert out.status != "proven"
 
     def test_hash_mismatch_when_files_differ(self, monkeypatch):
-        """Both sides fetched content; hashes don't match. Strong negative."""
         monkeypatch.setattr(
             "services.audits.source_equivalence.fetch_github_source_hash",
             lambda *_a, **_k: source_equivalence.GithubHashResult(sha256="different", status="ok", detail=""),
@@ -644,7 +623,6 @@ class TestVerifyAuditCoversImplStatuses:
         def fake_github(repo, commit, path, *, token=None):
             return source_equivalence.GithubHashResult(sha256=None, status="http_404", detail=f"{path} 404")
 
-        # Probe also 404s — commit doesn't exist.
         def fake_raw(url, token):
             return source_equivalence.GithubFetch(content=None, status="http_404", detail="no such commit")
 
@@ -665,7 +643,6 @@ class TestVerifyAuditCoversImplStatuses:
         def fake_github(repo, commit, path, *, token=None):
             return source_equivalence.GithubHashResult(sha256=None, status="http_404", detail=f"{path} 404")
 
-        # Probe succeeds — commit resolves.
         def fake_raw(url, token):
             return source_equivalence.GithubFetch(content="# readme", status="ok", detail="")
 
@@ -680,7 +657,6 @@ class TestVerifyAuditCoversImplStatuses:
         assert out.status == "candidate_path_missing"
 
     def test_no_reviewed_commit(self):
-        """Empty reviewed_commits[] → can't even start."""
         out = source_equivalence.verify_audit_covers_impl(
             reviewed_commits=[],
             scope_name="Pool",
@@ -690,7 +666,6 @@ class TestVerifyAuditCoversImplStatuses:
         assert out.status == "no_reviewed_commit"
 
     def test_no_source_repo(self):
-        """Audit never captured a GitHub repo — can't look anything up."""
         out = source_equivalence.verify_audit_covers_impl(
             reviewed_commits=["abc1234"],
             scope_name="Pool",
@@ -700,8 +675,6 @@ class TestVerifyAuditCoversImplStatuses:
         assert out.status == "no_source_repo"
 
     def test_etherscan_unverified_via_empty_files(self):
-        """impl_source with no files → Etherscan has no verified source
-        (happens when the deployed contract was never verified)."""
         out = source_equivalence.verify_audit_covers_impl(
             reviewed_commits=["abc1234"],
             scope_name="Pool",
@@ -732,7 +705,6 @@ def test_transient_statuses_is_correct():
     Guards a class of typo where a retry-sweep check silently fails to
     find its target status value."""
     assert source_equivalence.TRANSIENT_STATUSES <= source_equivalence.EQUIVALENCE_STATUSES
-    # Permanent-only statuses must NOT be in the transient set.
     for permanent in ("proven", "hash_mismatch", "no_reviewed_commit", "no_source_repo"):
         assert permanent not in source_equivalence.TRANSIENT_STATUSES
 
@@ -753,7 +725,6 @@ class TestExtractReferencedRepos:
         assert got == ["etherfi-protocol/smart-contracts", "etherfi-protocol/cash-v3"]
 
     def test_skips_github_system_paths(self):
-        """GitHub profile paths like /issues, /orgs aren't repos."""
         text = """
         See https://github.com/issues/42 and https://github.com/orgs/etherfi-protocol
         Real repo: github.com/etherfi-protocol/beHYPE
@@ -767,13 +738,11 @@ class TestExtractReferencedRepos:
         assert got == ["owner/myrepo"]
 
     def test_handles_tree_blob_paths(self):
-        """github.com/owner/repo/tree/branch/file should still extract owner/repo."""
         text = """
         https://github.com/etherfi-protocol/smart-contracts/blob/master/src/WeETH.sol
         https://github.com/etherfi-protocol/smart-contracts/tree/abc1234/audits
         """
         got = source_equivalence.extract_referenced_repos(text)
-        # Single dedupe to one entry.
         assert got == ["etherfi-protocol/smart-contracts"]
 
     def test_skips_github_system_repo_names_in_repo_slot(self):
@@ -789,7 +758,6 @@ class TestExtractReferencedRepos:
         assert source_equivalence.extract_referenced_repos(None) == []  # pyright: ignore[reportArgumentType]
 
     def test_lowercases_owner_and_repo(self):
-        """Normalize so fallback comparisons hit regardless of casing."""
         text = "Audited at https://github.com/EtherFi-Protocol/Smart-Contracts"
         got = source_equivalence.extract_referenced_repos(text)
         assert got == ["etherfi-protocol/smart-contracts"]
@@ -801,13 +769,10 @@ class TestExtractReferencedRepos:
 
 
 class TestFallbackReposBehavior:
-    """Multi-repo verification: try source_repo first, then fallback_repos."""
-
     def _src(self, files):
         return source_equivalence.VerifiedSource(contract_name="X", compiler_version="v0.8", files=files)
 
     def test_proven_in_fallback_repo_wins(self, monkeypatch):
-        """source_repo 404s; one of the fallback repos has the matching file."""
         calls = []
 
         def fake_github(repo, commit, path, *, token=None):
@@ -832,7 +797,6 @@ class TestFallbackReposBehavior:
             fallback_repos=["etherfi-protocol/smart-contracts"],
         )
         assert out.status == "proven"
-        # Both repos were tried; source_repo first, fallback second.
         assert "Cyfrin/cyfrin-audit-reports" in calls
         assert "etherfi-protocol/smart-contracts" in calls
 
@@ -863,7 +827,6 @@ class TestFallbackReposBehavior:
         assert out.status == "hash_mismatch"
 
     def test_no_source_repo_and_no_fallback_is_short_circuit(self):
-        """Both repo fields empty → no_source_repo status, no fetches attempted."""
         out = source_equivalence.verify_audit_covers_impl(
             reviewed_commits=["abc1234"],
             scope_name="Pool",
@@ -874,7 +837,6 @@ class TestFallbackReposBehavior:
         assert out.status == "no_source_repo"
 
     def test_fallback_only_works_when_source_repo_is_none(self, monkeypatch):
-        """When source_repo is None but fallback_repos exist, verification proceeds."""
 
         def fake_github(repo, commit, path, *, token=None):
             return source_equivalence.GithubHashResult(sha256="matching", status="ok", detail="")
@@ -915,5 +877,4 @@ def test_pinned_commit_overrides_reviewed_commits_in_verification(monkeypatch):
         specific_commit="def5678",  # narrow to this one
     )
     assert out.status == "proven"
-    # Only the specific commit was fetched, not the full list.
     assert fetched_commits == ["def5678"]

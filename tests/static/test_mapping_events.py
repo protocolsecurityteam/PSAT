@@ -361,11 +361,9 @@ def test_constructor_skipped():
 
 
 def test_non_literal_value_emits_set_direction():
-    """Pre-D: non-literal RHS dropped the writer event (no way to know
-    add vs remove). PR D: emit ``direction="set"`` so the durable
-    indexer / on-demand replay / trace replay can decode the actual
-    value at index time and feed it through ``ValuePredicate``.
-    """
+    """Pre-D: a non-literal RHS dropped the writer event. PR D emits
+    ``direction="set"`` so indexer/replay can decode the value at index time and
+    feed it through ``ValuePredicate``."""
     wards = _mapping("wards")
     guy = _local("guy")
     some = _local("someValue", "uint256")

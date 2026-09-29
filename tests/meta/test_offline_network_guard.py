@@ -1,8 +1,5 @@
-"""Self-tests for the offline network guard installed by ``tests/conftest.py``.
-
-The guard blocks any attempt to reach an external host over ``requests`` or
-``urllib.request`` so the offline suite never makes a real external call. These
-exercise the block path directly and pin the loopback/private host policy.
+"""Self-tests for the offline network guard in ``tests/conftest.py``: it blocks external hosts over
+``requests`` / ``urllib.request``; these pin the block path and the loopback/private host policy.
 """
 
 from __future__ import annotations

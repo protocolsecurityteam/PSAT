@@ -1,16 +1,9 @@
-"""Stage 6 — thread-supervisor + stop-event tests (design §2.5, HR3).
+"""Stage 6 - thread-supervisor + stop-event tests (design §2.5, HR3).
 
-Two layers:
-
-* The ``Supervisor`` (unit under test) is driven with injected fast-failing loop
-  callables — acceptable here because the supervisor's restart/backoff/heartbeat
-  policy is exactly what we're asserting, and a real scan/poll pass is neither
-  fast nor deterministic. The error-heartbeat assertion captures the
-  supervisor's ``record_heartbeat`` calls via a pure spy (no DB) — ``db.queue``'s
-  write path is covered against the real test DB elsewhere.
-* The *real* loops' stop-event plumbing is integration-tested by running
-  ``run_scan_loop`` / ``run_poll_loop`` briefly (only the RPC wire stubbed) and
-  proving a stop request returns promptly instead of sleeping out the interval.
+The ``Supervisor`` is driven with injected fast-failing loops (its restart/backoff/heartbeat
+policy is what's asserted; the error heartbeat is captured by a pure spy, no DB). The real
+``run_scan_loop`` / ``run_poll_loop`` are run briefly with only the RPC wire stubbed to prove
+a stop request returns promptly instead of sleeping out the interval.
 """
 
 from __future__ import annotations
@@ -36,11 +29,8 @@ from workers.protocol_monitor import Supervisor, _build_default_supervisor, main
 
 
 class RecordingEvent(threading.Event):
-    """A stop event that records every ``wait(timeout)`` and auto-stops.
-
-    Lets a synchronous ``_supervise`` call terminate deterministically after N
-    backoff waits while capturing the exact backoff schedule — no real sleeping.
-    """
+    """A stop event that records every ``wait(timeout)`` and auto-stops, so ``_supervise``
+    terminates after N backoff waits while capturing the schedule without sleeping."""
 
     def __init__(self, stop_after_waits: int):
         super().__init__()
@@ -226,8 +216,7 @@ def test_run_scan_loop_honors_stop_event_mid_interval(db_session, monkeypatch):
 
     _stub_scan_wire(monkeypatch)
     stop = threading.Event()
-    # A 3600s interval: if the loop slept it out rather than waiting on the
-    # stop event, the bounded join below would time out.
+    # 3600s interval: sleeping it out instead of waiting on the stop event would time out the join.
     t = threading.Thread(target=run_scan_loop, args=("http://stub", 3600.0), kwargs={"stop_event": stop}, daemon=True)
     t.start()
     time.sleep(0.2)  # let it finish one empty-DB pass and enter the inter-pass wait
@@ -297,19 +286,15 @@ def _monitor_launch_flags(script: str) -> list[str]:
 
 
 def test_start_local_launches_each_monitor_loop_exactly_once():
-    """Flag modes run a loop ALONE; co-launching one beside default mode doubles it.
-
-    The Aug-10 local run started default mode *and* ``--poll`` *and* ``--tvl``,
-    so the poller and TVL loops each had two live instances — the TVL loop has no
-    daemon lease, so both instances ran the full scan.
-    """
+    """Flag modes run a loop ALONE; co-launching one beside default mode doubles it (the
+    Aug-10 local run ran default + ``--poll`` + ``--tvl``; the TVL loop has no daemon lease,
+    so both instances ran the full scan)."""
     root = pathlib.Path(__file__).resolve().parents[2]
     launched = _monitor_launch_flags((root / "deploy/start_local.sh").read_text())
 
     assert launched == ["default"], f"start_local.sh must launch default mode alone, got {launched}"
 
-    # The reconciler is not a default-mode loop, so it needs its own process —
-    # and deploy/start_workers.sh, which start_local.sh runs, is the one that owns it.
+    # The reconciler needs its own process, owned by deploy/start_workers.sh (run by start_local.sh).
     workers_launched = _monitor_launch_flags((root / "deploy/start_workers.sh").read_text())
     assert workers_launched == ["--reconcile"], workers_launched
 
@@ -345,9 +330,8 @@ def test_start_local_launches_each_monitor_loop_exactly_once():
     ],
 )
 def test_main_flag_dispatch(monkeypatch, argv, patch_targets, expected):
-    """Each CLI mode flag routes ``main()`` to exactly its loop entry point with
-    the parsed rpc-url/interval. The loops are patched where ``main`` imports
-    them, so the real functions never run."""
+    """Each CLI mode flag routes ``main()`` to exactly its loop entry point; loops are patched
+    where ``main`` imports them."""
     seen: dict[str, tuple] = {}
 
     for label, (mod_path, attr) in patch_targets.items():

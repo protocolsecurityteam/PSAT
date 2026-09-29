@@ -1,35 +1,13 @@
 """A caller-authored ``monitoring_config`` may not read as an analysis result.
 
-``services/monitoring/enrollment._build_monitoring_config`` gives
-``monitored_contracts.monitoring_config`` a tracking-plan discriminant that is
-always a positive token, stated in its own docstring:
+``enrollment._build_monitoring_config`` stamps a tracking-plan discriminant (``tracked_topics``
+present, or ``tracking_plan_not_determined``), but ``POST /api/protocols/{id}/monitoring`` and
+``PATCH /api/monitored-contracts/{id}`` stored the caller's dict verbatim, so caller-enrolled
+rows (all 3 ``surface_alert`` rows on the PR-161 preview) looked like analyzer output.
 
-* ``tracked_topics`` present (possibly ``[]``) — the plan was read; an empty
-  list is the witnessed "read and named nothing" finding and may be relied on;
-* ``tracking_plan_not_determined``             — the plan was not read; the
-  token says why.
-
-The builder never emits neither key; a row carrying neither predates this
-discriminant (or, before the route fix below, was caller-authored).
-
-``POST /api/protocols/{id}/monitoring`` and ``PATCH /api/monitored-contracts/{id}``
-never called that builder — they stored the caller's dict verbatim — so
-caller-enrolled rows carried neither key and were indistinguishable from
-analyzer output. On the PR-161 preview all 3 ``enrollment_source='surface_alert'``
-rows had that shape, for contracts no tracking-plan artifact was ever
-consulted for.
-
-The siblings that give it teeth are the two keys the live monitor ACTS on, and
-nothing checked where either came from:
-
-* ``tracked_topics`` — ``unified_watcher._scan_topics_union`` unions it over
-  every active row into the live scan filter;
-* ``polling_plan``   — ``unified_watcher.poll_for_state_changes`` turns each
-  entry into an ``eth_call``/``eth_getStorageAt`` and ``_apply_poll_result``
-  mints a ``state_changed_poll`` ``MonitoredEvent`` from the result, keyed on
-  the entry's own ``field`` name. That event carries no provenance of its own,
-  so the config stamp cannot mark it: a caller-chosen slot would surface as a
-  monitor finding indistinguishable from an analyzer-derived one.
+Also pinned: the analyzer-owned keys the live monitor ACTS on are rejected from callers.
+``tracked_topics`` feeds ``_scan_topics_union``; ``polling_plan`` becomes eth_call /
+eth_getStorageAt and a ``state_changed_poll`` event with no provenance of its own.
 """
 
 from __future__ import annotations
@@ -96,16 +74,14 @@ def _post(api_client, protocol_id: int, admin_headers: dict[str, str], config: d
 
 
 def test_caller_enrolled_row_is_stamped_not_silently_proven_absent(api_client, db_session, protocol_id, admin_headers):
-    """The positive case: a plain flags-only config — the exact shape the live
-    fixtures and the Surface alert UI send — comes back carrying the provenance
-    token, so no reader can take its missing ``tracked_topics`` for a finding."""
+    """The positive case: a plain flags-only config (what the live fixtures and Surface alert
+    UI send) comes back carrying the provenance token."""
     resp = _post(api_client, protocol_id, admin_headers, {"watch_upgrades": True, "watch_ownership": True})
     assert resp.status_code == 200, resp.text
 
     body = resp.json()
     assert body["enrollment_source"] == "surface_alert"
     assert body["monitoring_config"]["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
-    # The caller's own flags are untouched.
     assert body["monitoring_config"]["watch_upgrades"] is True
     assert body["monitoring_config"]["watch_ownership"] is True
 
@@ -117,17 +93,16 @@ def test_caller_enrolled_row_is_stamped_not_silently_proven_absent(api_client, d
 
 
 def test_null_monitoring_config_is_stamped_too(api_client, protocol_id, admin_headers):
-    """``monitoring_config`` is optional; the omitted case stored ``None``, which
-    reads as proven-absent just as loudly as ``{}``."""
+    """``monitoring_config`` is optional; an omitted one must not store ``None`` (reads as
+    proven-absent like ``{}``)."""
     resp = _post(api_client, protocol_id, admin_headers, None)
     assert resp.status_code == 200, resp.text
     assert resp.json()["monitoring_config"] == {"tracking_plan_not_determined": CALLER_SUPPLIED_TRACKING_PLAN}
 
 
 def test_a_forged_reason_token_cannot_survive_the_route(api_client, protocol_id, admin_headers):
-    """A caller naming an analyzer reason gets the route's own token instead —
-    the route owns this key. Overwrite rather than reject so that reading a
-    stamped row and writing it back still works."""
+    """A caller naming an analyzer reason gets the route's own token instead: overwrite, not
+    reject, so reading a stamped row and writing it back still works."""
     resp = _post(
         api_client,
         protocol_id,
@@ -139,17 +114,15 @@ def test_a_forged_reason_token_cannot_survive_the_route(api_client, protocol_id,
 
 
 def test_caller_supplied_tracked_topics_are_rejected(api_client, protocol_id, admin_headers):
-    """``tracked_topics`` is an analysis output that feeds the live scan filter.
-    422, not a silent drop — a discarded list would tell the caller those topics
-    are being scanned."""
+    """``tracked_topics`` feeds the live scan filter. 422, not a silent drop, which would
+    tell the caller those topics are being scanned."""
     resp = _post(api_client, protocol_id, admin_headers, {"tracked_topics": [{"topic0": TOPIC0}]})
     assert resp.status_code == 422, resp.text
     assert "tracked_topics" in resp.text
 
 
 def test_caller_supplied_polling_plan_is_rejected(api_client, protocol_id, admin_headers):
-    """``polling_plan`` is the second analyzer-owned key, and the more
-    consequential one: the poller does not merely filter on it, it ACTS on it."""
+    """``polling_plan`` is the more consequential analyzer-owned key: the poller ACTS on it."""
     resp = _post(api_client, protocol_id, admin_headers, {"polling_plan": [_PLAN_ENTRY]})
     assert resp.status_code == 422, resp.text
     assert "polling_plan" in resp.text
@@ -158,16 +131,9 @@ def test_caller_supplied_polling_plan_is_rejected(api_client, protocol_id, admin
 def test_rejected_polling_plan_never_reaches_the_wire_or_the_event_stream(
     api_client, db_session, protocol_id, admin_headers
 ):
-    """The two consequences the rejection exists for, named at the functions that
-    would carry them out.
-
-    ``_rpc_call_for_entry`` shows the entry is one the poller WOULD issue (an
-    ``eth_getStorageAt`` on a slot the caller chose) — a plan the poller ignored
-    would need no rejection. ``_apply_poll_result`` then mints a
-    ``state_changed_poll`` ``MonitoredEvent`` keyed on the entry's own ``field``,
-    and that event carries no provenance, so the caller stamp on the config
-    cannot mark it. Both start from a stored plan; the assertion is that after a
-    422 no row holds one."""
+    """After a 422 no row holds a plan the poller WOULD act on (``_rpc_call_for_entry`` issues
+    an ``eth_getStorageAt`` on a caller-chosen slot; ``_apply_poll_result`` mints a
+    provenance-free ``state_changed_poll`` event)."""
     from services.monitoring.unified_watcher import _rpc_call_for_entry
 
     assert _rpc_call_for_entry(ADDR, _PLAN_ENTRY) == ("eth_getStorageAt", [ADDR, SLOT, "latest"])
@@ -182,12 +148,8 @@ def test_rejected_polling_plan_never_reaches_the_wire_or_the_event_stream(
 
 
 def test_the_watch_flags_stay_caller_settable(api_client, protocol_id, admin_headers):
-    """The negative control on the rejection's reach. ``_build_monitoring_config``
-    also derives the ``watch_*`` booleans, but those only gate whether an
-    already-detected event notifies (``unified_watcher._should_watch``) — no wire
-    call, no minted finding — so they are a caller preference and must survive.
-    Without this, widening the reject-list to every builder-written key would
-    still look correct."""
+    """Negative control on the reject-list's reach: ``watch_*`` booleans only gate
+    notification (``_should_watch``), so they are caller preference and must survive."""
     resp = _post(
         api_client,
         protocol_id,
@@ -232,15 +194,9 @@ def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers
 
 
 def test_caller_supplied_scan_gaps_are_rejected(api_client, protocol_id, admin_headers):
-    """``scan_gaps`` is the scanner's own record of what it never covered.
-
-    It is written only by the cursor-clamp repair and is carried across every
-    subsequent config rebuild (``tracking_plan_state.preserve_scan_plane_facts``),
-    so a forged entry would be indistinguishable from a clamp-authored one and
-    would outlive every enrollment — asserting a coverage hole nobody observed.
-    Rejected rather than dropped, like the analyzer-owned keys: a silently
-    discarded value would leave the caller believing it was recorded.
-    """
+    """``scan_gaps`` is the scanner's own record of uncovered ranges, preserved across config
+    rebuilds, so a forged entry would outlive every enrollment as a coverage hole nobody
+    observed. Rejected, not dropped, like the analyzer-owned keys."""
     gap = [{"from_block": 9_400_001, "to_block": 25_662_000, "reason": "unfloored_runaway"}]
     resp = _post(api_client, protocol_id, admin_headers, {"scan_gaps": gap})
     assert resp.status_code == 422, resp.text

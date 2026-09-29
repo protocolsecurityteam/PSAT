@@ -1,20 +1,13 @@
 """D3: a ``storage_setter`` destination must say WHICH variable, WHO writes it
 inside this unit, and how far that answer reaches.
 
-``_state_var_target_kind`` was already told the variable's name and already held
-the writing function objects; both were discarded, leaving a flow entry that
-says the destination is redirectable without saying by what. This publishes
-them — and, more importantly, publishes the two bounds that stop the writer list
-being read as the closed set:
+Besides the name and writers, this publishes the two bounds that stop the writer
+list being read as the closed set: ``target_writer_scan_complete`` (the
+assembly/delegatecall/alias blind-spot gate) and ``writer_surface_closed``
+(permanently ``not_determined``: this stage analyses ONE compilation unit while the
+deployed address may be a proxy or one of several implementations).
 
-* ``target_writer_scan_complete`` — the existing assembly/delegatecall/alias
-  blind-spot gate, now travelling in the same dict as the payload it qualifies;
-* ``writer_surface_closed`` — permanently ``not_determined``, because this stage
-  analyses ONE compilation unit while the deployed address may be a proxy or one
-  of several implementations, whose writers are outside it.
-
-Everything asserted here comes from a real solc compile through production
-``build_effects``.
+Everything asserted comes from a real solc compile through ``build_effects``.
 """
 
 from __future__ import annotations

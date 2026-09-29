@@ -1,11 +1,7 @@
-"""Integration tests for ``GET /api/audits/pipeline``.
+"""Integration tests for ``GET /api/audits/pipeline`` against real PostgreSQL (``requires_postgres``).
 
-Exercises the monitor-shelf endpoint against real PostgreSQL. Workers
-don't need to run — each test directly seeds ``audit_reports`` rows in
-the states the endpoint slices on (``NULL`` / ``processing`` / ``success``
-/ ``failed``) and asserts the correct bucket picks them up.
-
-Gated by ``requires_postgres``; object storage isn't touched.
+Each test seeds ``audit_reports`` rows in the states the endpoint slices on (NULL / processing /
+success / failed); no workers or object storage involved.
 """
 
 from __future__ import annotations
@@ -107,7 +103,6 @@ def _insert_audit(
 
 
 def test_pipeline_empty_when_no_audits(api_client):
-    """No audit rows at all → both worker panels empty but still well-shaped."""
     r = api_client.get("/api/audits/pipeline")
     assert r.status_code == 200
     body = r.json()
@@ -122,13 +117,9 @@ def test_pipeline_empty_when_no_audits(api_client):
 
 
 def test_pipeline_places_rows_in_correct_buckets(db_session, api_client, seed_protocol):
-    """A row in each terminal + non-terminal state lands in exactly the
-    bucket the frontend expects."""
     pid, _ = seed_protocol
     now = datetime.now(timezone.utc)
 
-    # Text extraction: pending (NULL), processing, success (terminal, ignored),
-    # failed (recent → appears in failed bucket).
     pending_tid = _insert_audit(db_session, pid, text_status=None, auditor="Pending")
     proc_tid = _insert_audit(
         db_session,
@@ -156,7 +147,6 @@ def test_pipeline_places_rows_in_correct_buckets(db_session, api_client, seed_pr
     assert {a["audit_id"] for a in te["processing"]} == {proc_tid}
     assert {a["audit_id"] for a in te["failed"]} == {failed_tid}
 
-    # Shape check on a processing row — every field the frontend card reads.
     proc = next(a for a in te["processing"] if a["audit_id"] == proc_tid)
     assert proc["company"] == seed_protocol[1]
     assert proc["auditor"] == "Processing"
@@ -173,7 +163,6 @@ def test_pipeline_places_rows_in_correct_buckets(db_session, api_client, seed_pr
     assert proc["scope_entry_count"] == 0
     assert proc["classified_commit_count"] == 0
 
-    # Failed row carries its error string so the monitor can show "why".
     failed = next(a for a in te["failed"] if a["audit_id"] == failed_tid)
     assert failed["error"] == "HTTP 404"
 
@@ -200,10 +189,8 @@ def test_scope_pending_excludes_unclaimable_rows(db_session, api_client, seed_pr
     )
     assert text_failed_id  # row exists, just not claimable for scope
 
-    # Text still pending → scope also unclaimable.
     _insert_audit(db_session, pid, text_status=None)
 
-    # Text succeeded + scope NULL → legitimately claimable for scope.
     claimable_id = _insert_audit(
         db_session,
         pid,
@@ -253,8 +240,6 @@ def test_pipeline_excludes_failures_older_than_lookback(db_session, api_client, 
 
 
 def test_scope_bucket_routing(db_session, api_client, seed_protocol):
-    """The scope-extraction worker's three non-terminal states each route
-    to their own bucket the same way text extraction does."""
     pid, _ = seed_protocol
     now = datetime.now(timezone.utc)
 
@@ -305,14 +290,11 @@ def test_scope_bucket_routing(db_session, api_client, seed_protocol):
     assert proc["worker_id"] == "scope-worker-b"
     assert proc["error"] is None
 
-    # Failed row's error is the scope error, not the text error.
     fail = next(a for a in scope["failed"] if a["audit_id"] == failed)
     assert fail["error"] == "LLM timeout"
 
 
 def test_pipeline_item_exposes_stage_metadata(db_session, api_client, seed_protocol):
-    """Rows carry enough additive metadata for the timeline UI to explain
-    what already succeeded and what comes next."""
     pid, _ = seed_protocol
     now = datetime.now(timezone.utc)
 
@@ -356,8 +338,7 @@ def test_pipeline_item_exposes_stage_metadata(db_session, api_client, seed_proto
 
 
 def test_pipeline_caps_buckets_at_limit(db_session, api_client, seed_protocol):
-    """Seeding more rows than the cap in a single bucket still yields a
-    bounded response. Prevents one stuck worker from bricking the monitor."""
+    """Seeding more rows than the cap still yields a bounded response (one stuck worker can't brick the monitor)."""
     from services.aggregations import audits_pipeline as pipeline_module
 
     cap = pipeline_module._PIPELINE_BUCKET_LIMIT
@@ -377,9 +358,7 @@ def test_pipeline_caps_buckets_at_limit(db_session, api_client, seed_protocol):
 
 
 def test_pipeline_joins_protocol_name_per_row(db_session, api_client):
-    """The monitor needs ``company`` on each item so the click-through to
-    the protocol audit tab works. Verify rows from two protocols carry
-    the correct name each."""
+    """The monitor needs ``company`` on each item for the protocol audit-tab click-through."""
     from db.models import AuditContractCoverage, AuditReport, Protocol
 
     name_a = f"pipe-a-{uuid.uuid4().hex[:8]}"
@@ -416,10 +395,8 @@ def test_pipeline_joins_protocol_name_per_row(db_session, api_client):
 
 
 def test_text_pending_ordered_oldest_first(db_session, api_client, seed_protocol):
-    """The monitor's pending list should match the order the worker will
-    actually claim rows in — ``discovered_at`` ascending. Without this the
-    top-of-list entry might be the *newest* audit, which misleads anyone
-    watching a stuck queue."""
+    """Pending follows worker claim order (``discovered_at`` ascending); otherwise the top entry
+    could be the newest audit, misleading anyone watching a stuck queue."""
     pid, _ = seed_protocol
     now = datetime.now(timezone.utc)
 

@@ -1,18 +1,10 @@
-"""Downstream value-reach: which address the money is keyed on, and which
-execution the reach is read from.
+"""Downstream value-reach: which address the money is keyed on, and which execution the reach is read from.
 
-Every one of the six proven ``value_out`` rows on the 2026-07-25 live run carried
-``observed_reach_value_usd: 0.0`` with ``reach_indeterminate: true`` — the
-fallback firing at 100%, and its floor computing to zero on deployments holding
-billions. Two independent causes, both here (and a third the shape itself carried:
-publishing the floor under the key that means MEASURED reach, fixed since):
-
-1. ``contract_balances`` is FETCHED for the proxy (``resolution_worker`` reads
-   ``proxy_address or address``) but STORED on the implementation's contract row.
-   Keying the holder set and the acting floor on ``contracts.address`` therefore
-   named an address that holds nothing and that no ``Transfer`` log can mention.
-2. The reach was read off the UNSEEDED call, which on every seeded verdict is the
-   one that reverted and carries no logs at all.
+All six proven ``value_out`` rows on the 2026-07-25 live run carried ``observed_reach_value_usd: 0.0``
+with ``reach_indeterminate: true`` (floor zero on deployments holding billions). Two causes here:
+1. ``contract_balances`` is FETCHED for the proxy but STORED on the implementation's contract row, so
+   keying on ``contracts.address`` named an address holding nothing that no ``Transfer`` log mentions.
+2. Reach was read off the UNSEEDED call, which on every seeded verdict reverted and has no logs.
 """
 
 from __future__ import annotations
@@ -99,9 +91,7 @@ def test_candidate_floor_and_holder_set_use_the_holding_address(db_session):
 
     cand = next(c for c in select_candidates(db_session, p.id) if c.selector == "0xbbbb0201")
     assert cand.acting_balance_usd == 7_500.0
-    # Per ASSET: ``_balance`` writes a NATIVE row, so the holding is keyed on the
-    # emitter ``eth_simulateV1`` uses for a native move — the address a synthetic
-    # Transfer log for it actually carries.
+    # Per ASSET: ``_balance`` writes a NATIVE row, keyed on the emitter ``eth_simulateV1`` uses for a native move.
     assert AssetHolding(deployment.lower(), NATIVE_ASSET_LOG_EMITTER, 7_500.0) in cand.value_holders
 
 
@@ -109,12 +99,10 @@ def test_candidate_floor_and_holder_set_use_the_holding_address(db_session):
 def test_a_contract_with_no_balance_row_carries_no_floor_not_a_zero(db_session):
     """The absence the INNER join produces must survive the candidate build.
 
-    ``build_authority_graph`` joins ``contract_balances`` INNER precisely so a
-    contract with no current row yields NO ``deployment_balance`` key — "holds
-    nothing", "not fetched" and "fetch failed" are one shape on that plane, so
-    none of them may be published as a bound. The candidate now carries that as
-    ``None``; it used to read the key with ``.get(acting, _ZERO_USD)`` and hand
-    ``_add_reach`` a ``0.0`` floor for a deployment nobody had ever priced.
+    ``build_authority_graph`` joins ``contract_balances`` INNER so a contract with no current row
+    yields NO ``deployment_balance`` key: "holds nothing", "not fetched" and "fetch failed" are one
+    shape and none may be published as a bound. The candidate carries ``None``; it used to
+    ``.get(acting, _ZERO_USD)`` and hand ``_add_reach`` a ``0.0`` floor for a never-priced deployment.
     """
     p = _protocol(db_session, "reach-no-balance")
     impl = _contract(db_session, p.id, ADDR(0x2301))
@@ -138,12 +126,9 @@ def test_a_contract_with_no_balance_row_carries_no_floor_not_a_zero(db_session):
 
 @requires_postgres
 def test_a_priced_zero_balance_row_carries_a_floor_of_zero(db_session):
-    """The discriminating sibling: a row EXISTS and prices to $0.00, which is a
-    witness — weak, but read — so the candidate carries ``0.0`` and not ``None``.
-
-    Without this row, "``None`` whenever the floor is zero" would be
-    indistinguishable from the three-state carry, and the fix would have traded
-    one collapse for another.
+    """The discriminating sibling: a row EXISTS and prices to $0.00, a weak but read witness, so the
+    candidate carries ``0.0`` not ``None`` (else "``None`` whenever the floor is zero" would pass
+    for the three-state carry and trade one collapse for another).
     """
     p = _protocol(db_session, "reach-priced-zero")
     impl = _contract(db_session, p.id, ADDR(0x2401))
@@ -223,13 +208,11 @@ def test_reach_is_read_from_the_execution_the_verdict_came_from():
 
 
 def test_a_holder_that_moved_nothing_still_floors_and_stays_indeterminate():
-    """``reach_indeterminate`` keeps meaning "unmeasured here" — the floor is the
-    acting deployment's own balance, never a claim that reach is zero.
+    """``reach_indeterminate`` keeps meaning "unmeasured here": the floor is the acting deployment's
+    own balance, never a claim that reach is zero.
 
-    KEPT deliberately: this test exercises a LIVE branch. Only the key names moved —
-    the producer now publishes the floor as ``observed_reach_floor_usd`` and withholds
-    ``observed_reach_value_usd``, because the floor being read AS the reach is the
-    defect. The branch, the holder set and the intent are untouched."""
+    KEPT: a LIVE branch. Only the key names moved (the floor is now ``observed_reach_floor_usd`` and
+    ``observed_reach_value_usd`` is withheld, since a floor read AS reach is the defect)."""
     moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
     eff = _value_out([moved], holders=(AssetHolding(HOLDER, TOKEN, 42.0),), floor=250.0)
     assert eff.concrete["observed_reach_floor_usd"] == 250.0
@@ -241,18 +224,11 @@ def test_a_holder_that_moved_nothing_still_floors_and_stays_indeterminate():
 def test_a_zero_balance_deployment_publishes_no_reach_number_at_all():
     """INVERTED, to gate the floor/measured-reach key split.
 
-    The acting deployment holds nothing, so the floor IS zero. This branch fires for
-    every zap / router / adapter that moves value it does not hold — 18 armed
-    ``flow.out`` functions on 6 zero-balance contracts locally — and it used to
-    publish that zero as ``observed_reach_value_usd``. A consumer reading the number
-    and ignoring the flag therefore got **"$0 reach" for a function that may move
-    millions**: a proven absence minted out of a non-observation, which is exactly
-    what the flag beside it was supposed to prevent and could not, because nothing
-    forces a consumer to read two keys.
-
-    The number is now simply not there. ``reach_determined: False`` is the answer,
-    and the floor keeps its own name — this is the only test where that floor is
-    zero, so it is also the one place where the old shape's ambiguity was total.
+    The acting deployment holds nothing, so the floor IS zero. This fires for every zap / router /
+    adapter that moves value it does not hold (18 armed ``flow.out`` functions on 6 zero-balance
+    contracts locally) and used to publish that zero as ``observed_reach_value_usd``: a consumer
+    ignoring the flag got "$0 reach" for a function that may move millions. The number is now simply
+    absent, ``reach_determined: False`` is the answer, and the floor keeps its own name.
     """
     moved_nothing = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
     eff = _value_out([moved_nothing], holders=(AssetHolding(HOLDER, TOKEN, 42.0),), floor=0.0)
@@ -267,16 +243,12 @@ def test_a_zero_balance_deployment_publishes_no_reach_number_at_all():
 
 
 def test_an_unwitnessed_acting_balance_publishes_no_floor_key():
-    """The whole recipe, not just ``_add_reach``: an acting deployment with NO
-    current balance row reaches ``value_out`` as ``acting_balance_usd=None`` and
-    comes out the other side with the floor key ABSENT.
+    """The whole recipe, not just ``_add_reach``: an acting deployment with NO current balance row
+    reaches ``value_out`` as ``acting_balance_usd=None`` and the floor key comes out ABSENT.
 
-    The sibling of the test above, and the pair is the point. There the acting
-    deployment's sheet was READ and summed to zero, which is a (weak) witness and
-    keeps its key. Here nothing was read at all, and a ``0.0`` in its place would
-    be a bound minted out of a failed or never-attempted fetch — the defect the
-    INNER join in ``build_authority_graph`` exists to prevent and that
-    ``selection.py``'s old ``.get(acting, _ZERO_USD)`` undid one line later.
+    Sibling of the test above: there the sheet was READ and summed to zero (a weak witness that keeps
+    its key); here nothing was read, and ``0.0`` would be a bound minted from a failed or
+    never-attempted fetch (what ``selection.py``'s old ``.get(acting, _ZERO_USD)`` undid).
     """
     moved_nothing = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
     eff = _value_out([moved_nothing], holders=(AssetHolding(HOLDER, TOKEN, 42.0),), floor=None)
@@ -284,20 +256,17 @@ def test_an_unwitnessed_acting_balance_publishes_no_floor_key():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.concrete["reach_determined"] is False
     assert eff.concrete["reach_indeterminate"] is True
-    # Not present-and-null: the key does not exist. ``in`` is the assertion,
-    # because a ``null`` is what a naive "carry the None through" would produce
-    # and it reads as a value to every consumer that does a bare ``is not None``
-    # on ``.get()``.
+    # Not present-and-null: the key does not exist. A ``null`` would read as a value to any consumer
+    # doing a bare ``is not None`` on ``.get()``.
     assert "observed_reach_floor_usd" not in eff.concrete
     assert "observed_reach_value_usd" not in eff.concrete
     assert "observed_reach_holders" not in eff.concrete
 
 
 def test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor():
-    """The discriminating sibling: the SAME published number, earned. The holder
-    moved value, the sum of what moved is genuinely 0.0 USD, and no flag is set.
-    Without this row, "0.0 always carries the flag" would be indistinguishable
-    from "the flag is unconditional"."""
+    """The discriminating sibling: the SAME published number, earned. The holder moved value, the sum
+    is genuinely 0.0 USD, and no flag is set (else "0.0 always carries the flag" is indistinguishable
+    from "the flag is unconditional")."""
     moved = SimResult(
         calls=(
             SimCallResult(
@@ -314,9 +283,7 @@ def test_zero_reach_without_the_flag_is_a_measured_zero_not_a_floor():
     assert eff.concrete["observed_reach_holders"] == [HOLDER.lower()]
     assert eff.concrete["reach_determined"] is True
     assert "reach_indeterminate" not in eff.concrete
-    # THE DISCRIMINATION THE KEY SPLIT BUYS: a MEASURED zero and an unmeasured one are now two
-    # different payloads. Before, both published ``observed_reach_value_usd: 0.0``
-    # and differed only by a flag a consumer had to remember to read.
+    # THE DISCRIMINATION THE KEY SPLIT BUYS: a MEASURED zero and an unmeasured one are now two different payloads.
     assert "observed_reach_floor_usd" not in eff.concrete
 
 
@@ -342,15 +309,12 @@ def _native_transfer_out(holder: str = CONTRACT) -> SimResult:
 
 
 def test_a_native_move_does_not_reach_a_holders_token_balance_sheet():
-    """The reproduction. Asset-blind matching attributed a holder's ENTIRE USD to
-    whichever asset happened to move: the weETH proxy moved seeded native ETH and the
-    row published $3.489B of reach — 64.96% of ALL published reach USD in the DB came
-    from two rows of this shape, both truly $0.
+    """The reproduction. Asset-blind matching attributed a holder's ENTIRE USD to whichever asset
+    moved: the weETH proxy moved seeded native ETH and the row published $3.489B of reach (64.96% of
+    ALL published reach USD in the DB came from two such rows, both truly $0).
 
-    The holder DID move value, so this is not the not-witnessed branch: it is
-    witnessed and NOT valued. We hold no native balance row for this deployment, and
-    absence there is "holds nothing" / "not fetched" / "fetch failed" collapsed into
-    one shape — so the only honest USD is unknown."""
+    The holder DID move value, so this is witnessed and NOT valued: with no native balance row,
+    "holds nothing" / "not fetched" / "fetch failed" collapse into one shape, so the only honest USD is unknown."""
     eff = _value_out([_native_transfer_out()], holders=WEETH_SHEET, floor=3_488_955_156.06)
 
     assert eff.verdict == VERDICT_PROVEN
@@ -379,10 +343,9 @@ def test_the_asset_that_moved_contributes_its_own_holding_and_only_it():
 
 
 def test_a_priced_native_holding_is_matched_by_the_emitter_the_node_uses():
-    """The other half of the native fix, and the reason the refuted ``only_asset``
-    proposal would have under-claimed 100%: a native holding IS matchable, as long as
-    it is keyed on the pseudo-address ``traceTransfers`` puts in the log's ``address``
-    field. Measured against the live node (3 reads + a pinned read at 25619159)."""
+    """The other half of the native fix (and why the refuted ``only_asset`` proposal would have
+    under-claimed 100%): a native holding IS matchable when keyed on the pseudo-address
+    ``traceTransfers`` puts in the log (measured live, pinned read at 25619159)."""
     holdings = (AssetHolding(CONTRACT, NATIVE, 4_200.0), AssetHolding(CONTRACT, EETH, 3_488_954_369.29))
     eff = _value_out([_native_transfer_out()], holders=holdings, floor=1.0)
 
@@ -392,10 +355,9 @@ def test_a_priced_native_holding_is_matched_by_the_emitter_the_node_uses():
 
 
 def test_an_unpriced_holding_that_moves_makes_the_total_not_determined():
-    """1001 of 1376 local ``contract_balances`` rows carry ``price_usd = 0``, which the
-    producer writes for "no price known"; ``usd_value`` is NULL on them. Reading that
-    as $0 is a CONFIDENT LOW value where the answer is unknown — "unknown" must rank
-    worse than a proven-benign figure, in its numeric form. The priced part survives as an explicit partial floor."""
+    """1001 of 1376 local ``contract_balances`` rows carry ``price_usd = 0`` ("no price known") with
+    NULL ``usd_value``. Reading that as $0 is a CONFIDENT LOW value where the answer is unknown, and
+    unknown must rank worse than proven-benign. The priced part survives as an explicit partial floor."""
     unpriced = "0x" + "9d" * 20
     holdings = (AssetHolding(CONTRACT, TOKEN, 759.15), AssetHolding(CONTRACT, unpriced, None))
     moved = SimResult(
@@ -449,10 +411,8 @@ def test_two_holders_moving_two_assets_sum_only_those_two_holdings():
 
 
 def test_a_reach_above_protocol_tvl_is_refused_not_published():
-    """The bad row published $3.489B against a protocol TVL of $3.297B and nothing
-    checked. A sum above the ceiling is not clamped — a clamp invents a number nothing
-    measured — it is REFUSED, with both figures recorded so the contradiction is
-    inspectable."""
+    """The bad row published $3.489B against a protocol TVL of $3.297B and nothing checked. A sum
+    above the ceiling is REFUSED, not clamped (a clamp invents a number), with both figures recorded."""
     holdings = (AssetHolding(CONTRACT, TOKEN, 3_488_955_156.06),)
     moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
     eff = _value_out([moved], holders=holdings, floor=1.0, tvl=3_297_344_734.00)
@@ -475,9 +435,8 @@ def test_a_reach_within_protocol_tvl_passes_and_says_it_was_checked():
 
 
 def test_no_tvl_snapshot_skips_the_ceiling_out_loud():
-    """The skip is a PUBLISHED state. An absent ceiling that looked like a passed
-    one would be a mitigation that never fires and cannot be told from one that does —
-    exactly the shape being ruled out."""
+    """The skip is a PUBLISHED state: an absent ceiling that looked like a passed one is a mitigation
+    that never fires and can't be told from one that does."""
     holdings = (AssetHolding(CONTRACT, TOKEN, 100.0),)
     moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
     eff = _value_out([moved], holders=holdings, floor=1.0, tvl=None)
@@ -497,16 +456,14 @@ def _partial_floor(*, floor_usd: float, tvl: float | None):
 
 
 def test_a_priced_floor_above_protocol_tvl_is_refused_like_a_measured_figure():
-    """The ceiling used to guard only the measured branch: the unvalued branch
-    set ``observed_reach_priced_usd`` and RETURNED above ``_reach_tvl_state``, so a
-    floor above the protocol's own measured TVL was publishable with no
-    ``reach_tvl_check`` at all — the same contradiction the ceiling exists to catch,
-    on the sibling key, and worse here than on a measured total: the floor is a LOWER
-    bound over a SUBSET of the assets that moved, so exceeding the ceiling cannot be
-    explained away by an upper bound being loose.
+    """The ceiling used to guard only the measured branch: the unvalued branch set
+    ``observed_reach_priced_usd`` and RETURNED above ``_reach_tvl_state``, so a floor above the
+    protocol's measured TVL was publishable with no ``reach_tvl_check``. Worse than for a measured
+    total: the floor is a LOWER bound over a SUBSET of assets, so exceeding the ceiling can't be
+    blamed on a loose upper bound.
 
-    The unvalued-asset disclosure is an INDEPENDENT fact and survives the refusal —
-    value did leave the holder; what was refused is the priced part's USD."""
+    The unvalued-asset disclosure is INDEPENDENT and survives the refusal (value did leave the
+    holder; only the priced part's USD was refused)."""
     eff = _partial_floor(floor_usd=3_488_955_156.06, tvl=3_297_344_734.00)
 
     assert eff.concrete["reach_determined"] is False
@@ -516,8 +473,7 @@ def test_a_priced_floor_above_protocol_tvl_is_refused_like_a_measured_figure():
     assert eff.concrete["protocol_tvl_usd"] == 3_297_344_734.00
     assert eff.concrete["observed_reach_unvalued_assets"] == [EETH]
     assert eff.concrete["observed_reach_unvalued_reasons"] == ["asset_not_in_recorded_holdings"]
-    # NOT the measured key, and not the never-witnessed floor either: this row's three
-    # states stay exactly where they were.
+    # NOT the measured key, nor the never-witnessed floor: this row's three states stay where they were.
     assert "observed_reach_value_usd" not in eff.concrete
     assert "reach_indeterminate" not in eff.concrete
 
@@ -543,10 +499,9 @@ def test_a_priced_floor_with_no_tvl_snapshot_skips_the_ceiling_out_loud():
 
 
 def test_an_unvalued_branch_with_nothing_priced_publishes_no_ceiling_outcome():
-    """The fourth input shape, and the one that must NOT gain a key: no asset that
-    moved had a priced holding, so there is no figure for a ceiling to bear on.
-    ``within_protocol_tvl`` over an absent number would read as a check that passed
-    on a figure nobody published."""
+    """The fourth input shape, which must NOT gain a key: no moved asset had a priced holding, so
+    there is no figure for a ceiling to bear on (``within_protocol_tvl`` over an absent number would
+    read as a check that passed on a figure nobody published)."""
     logs = (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(EETH, CONTRACT, PAYEE, 5))
     moved = SimResult(calls=(SimCallResult(True, "0x", None, logs),))
     # A holding row exists for TOKEN but carries no price (usd_value None) → unpriced,
@@ -564,24 +519,19 @@ def test_an_unvalued_branch_with_nothing_priced_publishes_no_ceiling_outcome():
 
 
 def test_a_truncated_holdings_list_names_truncation_as_the_reason():
-    """Consumer rule for a capped holdings fetch: it must LOWER CONFIDENCE, never produce a
-    confident low value. An asset absent from a capped list may simply never have been
-    fetched.
+    """Consumer rule for a capped holdings fetch: it must LOWER CONFIDENCE, never produce a confident
+    low value (an asset absent from a capped list may never have been fetched).
 
-    INVERTED: the control arm used to assert ``unrecorded_asset`` for a
-    holder whose list was "whole". Nothing can establish that — the stored rows are the
-    fetch's output AFTER its zero-balance filter, so a below-cap count is consistent
-    with a full page — so the below-cap reason now says only that the asset is not in
-    the holdings we RECORDED. The old name asserted a proven absence derived from a
-    count whose input had already discarded rows."""
+    INVERTED: the control arm used to assert ``unrecorded_asset`` for a "whole" list, which nothing
+    can establish (stored rows are post zero-balance filter), so the below-cap reason now says only
+    that the asset is not in the holdings we RECORDED."""
     holdings = (AssetHolding(CONTRACT, TOKEN, 100.0, completeness=HOLDINGS_COMPLETENESS_AT_PAGE_CAP),)
     moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(EETH, CONTRACT, PAYEE, 5),)),))
     eff = _value_out([moved], holders=holdings, floor=1.0)
 
     assert eff.concrete["reach_determined"] is False
     assert eff.concrete["observed_reach_unvalued_reasons"] == ["holdings_at_page_cap"]
-    # The below-cap arm: still a confidence gap, and the reason no longer claims the
-    # holder does not hold the asset.
+    # The below-cap arm: still a confidence gap, and no longer claims the holder does not hold the asset.
     eff2 = _value_out([moved], holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=1.0)
     assert eff2.concrete["observed_reach_unvalued_reasons"] == ["asset_not_in_recorded_holdings"]
     # NEGATIVE CONTROL, both arms: an asset the holder DOES hold priced is valued, so
@@ -591,18 +541,13 @@ def test_a_truncated_holdings_list_names_truncation_as_the_reason():
 
 
 def test_two_logs_of_one_asset_out_of_one_holder_attribute_that_holding_once():
-    """The attributed figure is a holder's WHOLE recorded balance for an asset, so a
-    second ``Transfer`` log of the same asset out of the same holder must contribute
-    nothing.
+    """The attributed figure is a holder's WHOLE recorded balance for an asset, so a second
+    ``Transfer`` log of the same asset out of the same holder must contribute nothing.
 
-    Summing per LOG published a MULTIPLE of the entire balance under
-    ``observed_reach_value_usd`` — the field whose own docstring calls it "a
-    conservative upper bound (a holder's full on-chain balance attributed when value
-    provably leaves it)". Two logs made a $100 holding read as $200 of reach: not an
-    upper bound, a new over-claim on a published money figure, in the same field and
-    the same direction as the asset-blind over-claim above. The triggering shape is the
-    one ``_resolve_destination_shape`` names verbatim — "a withdrawal that emits
-    several Transfer logs (burn + send, or send + fee to the same address)"."""
+    Summing per LOG published a MULTIPLE of the balance under ``observed_reach_value_usd``, whose
+    docstring calls it a conservative upper bound: two logs made a $100 holding read as $200, a new
+    over-claim on a money figure. Triggering shape (per ``_resolve_destination_shape``): "a withdrawal
+    that emits several Transfer logs (burn + send, or send + fee to the same address)"."""
     holdings = (AssetHolding(CONTRACT, TOKEN, 100.0),)
     one_log = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
     send_and_fee = SimResult(
@@ -624,8 +569,7 @@ def test_two_logs_of_one_asset_out_of_one_holder_attribute_that_holding_once():
     )
     assert doubled.concrete["observed_reach_holders"] == [CONTRACT]
     assert doubled.concrete["observed_reach_assets"] == [TOKEN]
-    # POSITIVE CONTROL: distinct (holder, asset) pairs DO sum — the dedup is on the
-    # pair, not a cap on the total.
+    # POSITIVE CONTROL: distinct (holder, asset) pairs DO sum; the dedup is on the pair.
     two_assets = SimResult(
         calls=(
             SimCallResult(
@@ -646,27 +590,21 @@ def test_two_logs_of_one_asset_out_of_one_holder_attribute_that_holding_once():
 
 
 def test_the_partial_floor_and_the_tvl_ceiling_both_read_the_deduped_sum():
-    """Two knock-ons of the per-log sum, pinned so neither returns.
-
-    (a) ``observed_reach_priced_usd`` is published as a partial FLOOR on the unvalued
-    branch and inherited the same inflation. (b) An inflated sum can trip the TVL
-    ceiling, publishing ``exceeds_protocol_tvl`` + ``reach_determined: false`` for a
-    row that is legitimately within TVL — the envelope refusing a figure only its own
-    arithmetic broke."""
+    """Two knock-ons of the per-log sum: (a) ``observed_reach_priced_usd`` (partial FLOOR on the
+    unvalued branch) inherited the inflation; (b) an inflated sum can trip the TVL ceiling, publishing
+    ``exceeds_protocol_tvl`` + ``reach_determined: false`` for a row legitimately within TVL."""
     logs = (
         transfer_log(TOKEN, CONTRACT, PAYEE, 5),
         transfer_log(TOKEN, CONTRACT, HOLDER, 1),
         transfer_log(EETH, CONTRACT, PAYEE, 5),
     )
     moved = SimResult(calls=(SimCallResult(True, "0x", None, logs),))
-    # EETH has no holding row at all → the total is not determined and the priced part
-    # is the floor. It must be the TOKEN holding once, not twice.
+    # EETH has no holding row -> total not determined, priced part is the floor: the TOKEN holding once, not twice.
     partial = _value_out([moved], holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=0.0)
     assert partial.concrete["reach_determined"] is False
     assert partial.concrete["observed_reach_priced_usd"] == 100.0
 
-    # The ceiling: $100 of reach under a $150 TVL is within it. Per-log summing made
-    # the same call read as $200 and the row was refused.
+    # $100 of reach under a $150 TVL is within it (per-log summing read $200 and refused the row).
     priced = SimResult(
         calls=(
             SimCallResult(
@@ -688,13 +626,11 @@ def test_the_partial_floor_and_the_tvl_ceiling_both_read_the_deduped_sum():
 # 5. The disclosure is keyed the way the arithmetic is: per (holder, asset)
 # ---------------------------------------------------------------------------
 
-# PR-161 verdict 198 in miniature — PriorityWithdrawalQueue.requestWithdrawWithWeETH
-# (0x35e7d6fe…/0x27957a42, value_out/proven). weETH left TWO holders in one call: the
-# queue, which has three recorded balance rows and none for weETH, and the BoringVault,
-# whose weETH row is $8,471,736.29. The published residue named weETH as the only asset
-# that moved AND as the only asset that could not be valued, beside
-# ``observed_reach_priced_usd: 8471736.29`` — the vault's row, under a disclosure that
-# said no such row existed. Replay of the persisted row reproduced it byte-identically.
+# PR-161 verdict 198 in miniature (PriorityWithdrawalQueue.requestWithdrawWithWeETH, value_out/proven):
+# weETH left TWO holders, the queue (no weETH balance row) and the BoringVault (weETH row $8,471,736.29).
+# The residue named weETH as both the only asset that moved AND the only one that could not be
+# valued, beside ``observed_reach_priced_usd: 8471736.29``, the vault's row under a disclosure saying
+# no such row existed. Replay of the persisted row reproduced it byte-identically.
 _VAULT_WEETH_USD = 8_471_736.29
 
 
@@ -733,16 +669,12 @@ def test_an_asset_one_holder_prices_is_not_published_as_unvaluable_for_every_hol
 
 
 def test_a_fully_priced_two_holder_move_is_untouched_by_the_pair_keying():
-    """NEGATIVE CONTROL — the same two holders and the same asset, and this time BOTH
-    have a priced row. Every pair that moved is priced, so this is the measured branch
-    and the payload is exactly what it was before the keying changed: neither new key
-    appears, because ``reach_determined: True`` already says every named holder was
-    priced. Asserted as a whole-dict equality so a new key cannot slip in unnoticed.
+    """NEGATIVE CONTROL: same two holders and asset, BOTH with a priced row. Every pair that moved is
+    priced, so this is the measured branch and the payload is what it was before the keying changed:
+    neither new key appears. Asserted as whole-dict equality so a new key can't slip in.
 
-    The proving execution is popped rather than listed: it is not a REACH key and
-    is written on every proven value_out row whatever branch the reach took, so
-    folding it into the dict below would make this control assert the presence of
-    something that is not this branch's own output."""
+    The proving execution is popped, not listed: it is not a REACH key and is written on every
+    proven value_out row whatever branch reach took."""
     logs = (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(TOKEN, HOLDER, PAYEE, 7))
     moved = SimResult(calls=(SimCallResult(True, "0x", None, logs),))
     holdings = (AssetHolding(CONTRACT, TOKEN, 100.0), AssetHolding(HOLDER, TOKEN, _VAULT_WEETH_USD))
@@ -761,10 +693,9 @@ def test_a_fully_priced_two_holder_move_is_untouched_by_the_pair_keying():
 
 
 def test_an_asset_no_holder_could_value_is_still_named_as_unvaluable():
-    """POSITIVE CONTROL for the narrowed key: it must still fire. Both holders move the
-    asset and NEITHER has a priced row for it, so the asset genuinely contributed
-    nothing to any figure and is named — and with nothing priced there is no figure,
-    no priced holders, and no ceiling outcome."""
+    """POSITIVE CONTROL for the narrowed key: it must still fire. Both holders move the asset and
+    NEITHER has a priced row, so the asset contributed to no figure and is named (no figure, no
+    priced holders, no ceiling outcome)."""
     eff = _two_holders_move_one_asset(None)
 
     assert eff.concrete["observed_reach_unvalued_assets"] == [TOKEN]
@@ -781,9 +712,8 @@ def test_an_asset_no_holder_could_value_is_still_named_as_unvaluable():
 
 
 def test_a_refused_partial_floor_still_names_the_holders_the_figure_came_from():
-    """The ceiling refuses the figure; the refusal records a contradiction, and a
-    contradiction whose subjects are not named cannot be inspected. ``priced_holders``
-    is published on the refused arm too, beside ``observed_reach_rejected_usd``."""
+    """The ceiling refuses the figure and records a contradiction, whose subjects must be named to be
+    inspectable: ``priced_holders`` is published on the refused arm too, beside ``observed_reach_rejected_usd``."""
     eff = _two_holders_move_one_asset(_VAULT_WEETH_USD, tvl=1_000.0)
 
     assert eff.concrete["reach_tvl_check"] == "exceeds_protocol_tvl"
@@ -796,9 +726,8 @@ def test_a_refused_partial_floor_still_names_the_holders_the_figure_came_from():
 
 
 def test_the_single_holder_partial_floor_publishes_the_pair_it_could_not_value():
-    """The common shape (one holder, two assets, one priced) gains the pair key and
-    keeps the asset key: with one holder the two say the same thing, and the asset-level
-    negative is earned because that holder is the only one who moved it."""
+    """The common shape (one holder, two assets, one priced) gains the pair key and keeps the asset
+    key: with one holder they agree, and the asset-level negative is earned."""
     logs = (transfer_log(TOKEN, CONTRACT, PAYEE, 5), transfer_log(EETH, CONTRACT, PAYEE, 5))
     moved = SimResult(calls=(SimCallResult(True, "0x", None, logs),))
     eff = _value_out([moved], holders=(AssetHolding(CONTRACT, TOKEN, 100.0),), floor=0.0, tvl=1_000.0)
@@ -812,12 +741,10 @@ def test_the_single_holder_partial_floor_publishes_the_pair_it_could_not_value()
 
 
 def test_every_reach_key_the_producer_publishes_reaches_the_row_and_the_claim():
-    """The two allowlists are the only path these keys have to a published surface:
-    ``workers.effects_worker._RESIDUE_JSON_KEYS`` gates what lands in
-    ``effect_verdicts.observed_residue`` and ``claims_bridge._REACH_KEYS`` gates what
-    the claim's witness carries. A key the producer publishes but neither list names is
-    computed and then dropped — silently, and indistinguishably from never computed.
-    Pinned over ALL FOUR branches so the next key added has to travel."""
+    """The two allowlists are these keys' only path to a published surface:
+    ``workers.effects_worker._RESIDUE_JSON_KEYS`` (``effect_verdicts.observed_residue``) and
+    ``claims_bridge._REACH_KEYS`` (the claim witness). A key neither names is silently dropped,
+    indistinguishable from never computed. Pinned over ALL FOUR branches so the next key must travel."""
     from services.effects.claims_bridge import _REACH_KEYS
     from workers.effects_worker import _RESIDUE_JSON_KEYS
 

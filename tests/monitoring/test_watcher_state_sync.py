@@ -1,13 +1,9 @@
-"""Watcher state-sync unit tests: poll results, controller-row matching, and
-custom-named controller slots.
+"""Watcher state-sync unit tests: poll results, controller-row matching and custom-named
+controller slots.
 
-Every test here drives the unified watcher's *state* plane — what a poll or an
-event does to ``last_known_state``, ``last_poll_status`` and the relational
-``ControllerValue`` rows — as opposed to the scan/window budgeting
-(``test_unified_watcher_budget.py``) or the pure log decode
-(``test_event_topics_tracked.py``).
-
-Requires PostgreSQL (``TEST_DATABASE_URL``).
+Drives the unified watcher's *state* plane (``last_known_state``, ``last_poll_status`` and
+``ControllerValue`` rows), not scan budgeting (``test_unified_watcher_budget.py``) or log
+decode (``test_event_topics_tracked.py``). Requires PostgreSQL (``TEST_DATABASE_URL``).
 """
 
 from __future__ import annotations
@@ -38,10 +34,7 @@ def ADDR(n: int) -> str:
 
 
 class TestRevertedEthCallPolling:
-    """Verify that reverted or garbage eth_call results don't produce events."""
-
     def test_revert_error_data_not_treated_as_address(self):
-        """Revert ABI data should not be parsed as a valid address."""
         from services.clients.rpc import parse_address_result
 
         # Solidity revert: Error(string) selector + ABI-encoded "nope"
@@ -55,7 +48,6 @@ class TestRevertedEthCallPolling:
         assert result is None, f"Revert data was parsed as address: {result}"
 
     def test_short_revert_returns_none(self):
-        """Short revert responses (< 66 chars) must return None."""
         from services.clients.rpc import parse_address_result
 
         assert parse_address_result("0x") is None
@@ -64,25 +56,20 @@ class TestRevertedEthCallPolling:
         assert parse_address_result("") is None
 
     def test_poll_skips_error_rpc_results(self, db_session: SASession):
-        """An errored poll call produces no value and no event — and the
-        contract's ``last_poll_status`` records the error while a
-        successful-but-undecodable call records ``no_value``, not ``ok``.
-        """
+        """An errored poll call yields no value and no event; ``last_poll_status`` records the
+        error, and a successful-but-undecodable call records ``no_value``, not ``ok``."""
         from services.monitoring.polling_plan import build_polling_plan
         from services.monitoring.unified_watcher import poll_for_state_changes
 
-        # ``custom`` proxy_type yields a single ``implementation()`` poll
-        # entry — same dispatch shape as the prior contract_type-based
-        # path, but exercised through the new polling_plan code path so
-        # this test still pins the "errored RPC result → no event" rule.
+        # ``custom`` proxy_type yields one ``implementation()`` entry via the polling_plan
+        # path; pins "errored RPC result -> no event".
         polling_plan = build_polling_plan(
             contract_type="proxy",
             proxy_type="custom",
             tracking_plan=None,
             tracked_topics=None,
         )
-        # Add an owner entry too so the mock batch's index-1 revert
-        # hits a real poll dispatch slot rather than being out-of-range.
+        # An owner entry too, so the batch's index-1 revert hits a real dispatch slot.
         polling_plan.append(
             {
                 "field": "owner",
@@ -138,9 +125,8 @@ class TestOwnerControllerMatching:
     """Verify ownership_transferred only updates the correct controller rows."""
 
     def test_only_exact_owner_controllers_updated(self, db_session: SASession):
-        """controller_id='token_owner_registry' should NOT be updated when
-        an ownership_transferred event fires — only 'owner' should.
-        """
+        """controller_id='token_owner_registry' must NOT update on ownership_transferred;
+        only 'owner' does."""
         from services.monitoring.unified_watcher import _sync_relational_tables
 
         proto = Protocol(name="TestOwnerMatch1")
@@ -205,7 +191,6 @@ class TestOwnerControllerMatching:
         )
 
     def test_poll_sync_only_updates_exact_owner(self, db_session: SASession):
-        """Same check for _sync_relational_from_poll."""
         from services.monitoring.unified_watcher import _sync_relational_from_poll
 
         proto = Protocol(name="TestOwnerMatch2")
@@ -265,15 +250,9 @@ class TestOwnerControllerMatching:
 
 
 class TestCustomNamedSlotEndToEnd:
-    """End-to-end proof that the tag-driven dispatch handles a controller
-    slot the canonical maps don't know about.
-
-    A protocol with a custom slot named ``protocolAdmin`` that isn't in
-    ``_WRITE_TARGET_TO_STATE`` / ``_WRITE_TARGET_TO_CONFIG_KEYS`` /
-    ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` should still flow through every
-    downstream consumer when the static analyzer attaches
-    ``effect_tags.writes=["protocolAdmin"]`` to its setter event.
-    """
+    """A custom slot (``protocolAdmin``) absent from ``_WRITE_TARGET_TO_STATE`` /
+    ``_WRITE_TARGET_TO_CONFIG_KEYS`` / ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` still flows through
+    every consumer when the analyzer tags its setter with ``effect_tags.writes``."""
 
     def _setup_custom_slot_fixture(self, session: SASession):
         proto = Protocol(name="CustomSlotProtocol")
@@ -288,10 +267,8 @@ class TestCustomNamedSlotEndToEnd:
         session.add(contract)
         session.flush()
 
-        # Pre-existing ControllerValue row under the static-analyzer
-        # canonical id "state_variable:protocolAdmin" — the row the
-        # tag-driven sync must find via the generalized lookup
-        # (write_target, state_variable:write_target, external_contract:write_target).
+        # Pre-existing row under the analyzer's canonical id "state_variable:protocolAdmin",
+        # which the tag-driven sync must find via the generalized lookup.
         cv = ControllerValue(
             contract_id=contract.id,
             controller_id="state_variable:protocolAdmin",
@@ -316,9 +293,8 @@ class TestCustomNamedSlotEndToEnd:
         return mc, cv
 
     def test_state_updates_for_custom_slot(self, db_session: SASession):
-        """``_update_state_from_event`` reflects the custom-slot write
-        via the generic name-match fallback — looks at parsed["newProtocolAdmin"]
-        when the canonical extractor map has no entry for "protocolAdmin"."""
+        """Reflects the custom-slot write via the generic name-match fallback
+        (parsed["newProtocolAdmin"]) when the canonical extractor map has no entry."""
         from services.monitoring.unified_watcher import _update_state_from_event
 
         mc, _ = self._setup_custom_slot_fixture(db_session)
@@ -340,9 +316,7 @@ class TestCustomNamedSlotEndToEnd:
         assert reloaded.last_known_state.get("protocolAdmin") == ADDR(50)
 
     def test_controller_value_syncs_for_custom_slot(self, db_session: SASession):
-        """``_sync_relational_tables`` matches the ControllerValue row
-        under ``state_variable:protocolAdmin`` via the generalized
-        prefix-form lookup."""
+        """``_sync_relational_tables`` matches the row under ``state_variable:protocolAdmin``."""
         from services.monitoring.unified_watcher import _sync_relational_tables
 
         mc, cv = self._setup_custom_slot_fixture(db_session)
@@ -367,10 +341,8 @@ class TestCustomNamedSlotEndToEnd:
         )
 
     def test_reanalysis_does_not_fire_for_unrelated_custom_slot(self):
-        """A custom-named slot that isn't in ``_REANALYSIS_WRITE_TARGETS``
-        (e.g. ``feeRecipient``) must NOT trigger reanalysis even though
-        the event flows through every other dispatch path. Reanalysis
-        is reserved for control-graph-invalidating writes."""
+        """A custom slot outside ``_REANALYSIS_WRITE_TARGETS`` (``feeRecipient``) must NOT trigger
+        reanalysis; that is reserved for control-graph-invalidating writes."""
         from services.monitoring.reanalysis import should_trigger_reanalysis
 
         assert (
@@ -382,14 +354,11 @@ class TestCustomNamedSlotEndToEnd:
         )
 
     def test_reanalysis_fires_for_control_relevant_custom_slot(self):
-        """A custom-named slot that IS a control-relevant rename (e.g. a
-        fork that calls its admin field ``protocolAdmin`` but writes
-        ``admin``) triggers reanalysis via the tag intersection check."""
+        """A fork's ``protocolAdmin`` field that writes ``admin`` triggers reanalysis via the
+        tag intersection check."""
         from services.monitoring.reanalysis import should_trigger_reanalysis
 
-        # The static analyzer tagged the emitter as writing "admin" even
-        # though the surface name is "protocolAdmin" — that's the
-        # generalization payoff.
+        # The analyzer tagged the emitter as writing "admin" despite the surface name.
         assert (
             should_trigger_reanalysis(
                 "controller_changed:state_variable:protocolAdmin",
@@ -399,10 +368,8 @@ class TestCustomNamedSlotEndToEnd:
         )
 
     def test_should_watch_passes_custom_slot_with_default_config(self, db_session: SASession):
-        """``_should_watch`` allows events whose write targets don't map
-        to any specific config flag — there's no way for the user to
-        opt out of an unrecognized slot without a config key, so default
-        is allow."""
+        """``_should_watch`` allows events whose write targets map to no config flag: a user
+        can't opt out of an unrecognized slot, so default is allow."""
         from services.monitoring.unified_watcher import _should_watch
 
         mc, _ = self._setup_custom_slot_fixture(db_session)

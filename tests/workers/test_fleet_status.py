@@ -58,8 +58,7 @@ def _addr(n: int) -> str:
 
 @pytest.fixture()
 def _clean_heartbeats(db_session):
-    """worker_heartbeats isn't in the conftest teardown sweep — clean it
-    around each test so beats don't leak across cases."""
+    """worker_heartbeats isn't in the conftest teardown sweep."""
     db_session.query(WorkerHeartbeat).delete()
     db_session.commit()
     yield
@@ -84,7 +83,6 @@ def test_record_heartbeat_insert_then_upsert(db_session, monkeypatch, _clean_hea
     assert rows[0].detail == {"claimed": 1}
     assert rows[0].beat_at is not None
 
-    # Same process again → upsert (no duplicate row), status + detail updated.
     record_heartbeat(HEARTBEAT_COVERAGE_VERIFY, status="idle", detail={"claimed": 0})
     db_session.expire_all()
     rows = db_session.query(WorkerHeartbeat).all()
@@ -203,9 +201,8 @@ def test_build_fleet_status_surfaces_cursor_backfill_lag(db_session, _clean_hear
 
 @requires_postgres
 def test_build_fleet_status_cursor_lag_is_chain_scoped(db_session, _clean_heartbeats):
-    """Two chains each internally at their own head must read as zero lagging:
-    base's naturally higher block numbers are not a backfill signal for mainnet
-    cursors — lag is measured against each chain's own leader."""
+    """Lag is measured against each chain's own leader: base's higher block numbers are
+    not a backfill signal for mainnet cursors."""
     for i in (20, 21):
         db_session.add(
             IndexedEventCursor(
@@ -405,16 +402,10 @@ def test_reconciler_loop_records_heartbeat(monkeypatch):
 def test_reconcile_and_heartbeat_run_while_scan_blocks(monkeypatch):
     """Regression pin for the reconciler-starvation bug.
 
-    The old loop ran enroll → scan → reconcile → heartbeat serially, so a scan
-    that blocked on a cold from-scratch backfill (the LayerZero endpoint cursor
-    grinding for hours) starved both the deferred-resolution reconcile and the
-    fleet heartbeat — completed etherfi jobs whose authorities had already warmed
-    sat un-reconciled the entire time. The fix runs backfill on its own thread, so
-    reconcile + heartbeat fire every ``interval`` no matter how long scan blocks.
-
-    Block scan indefinitely and assert reconcile + heartbeat still run. On the old
-    serial loop the ``reconcile_called`` wait times out (reconcile is unreachable
-    while scan blocks); on the fix it fires within an interval.
+    The old serial loop let a scan blocked on a cold backfill (LayerZero endpoint
+    cursor, hours) starve the reconcile and fleet heartbeat. Backfill now runs on its
+    own thread; with scan blocked indefinitely, reconcile + heartbeat must still
+    fire every ``interval`` (the old loop times out on ``reconcile_called``).
     """
     from workers import event_log_indexer as idx
 

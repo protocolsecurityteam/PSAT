@@ -1,10 +1,8 @@
 """Unit tests for ``db.storage`` that don't touch a real bucket.
 
-The integration suite (``test_artifact_storage_integration.py``) covers the
-boto3 wire path. These tests pin the in-memory contract that the API layer
-relies on — specifically, ``get_many`` must surface per-key transport
-failures as ``None`` rather than raising, so a flaky bucket can't take down
-``/api/analyses`` or ``/api/jobs/{id}/stage_timings``.
+The boto3 wire path is in ``test_artifact_storage_integration.py``. These pin the in-memory
+contract the API layer relies on: ``get_many`` surfaces per-key transport failures as ``None``
+rather than raising, so a flaky bucket can't take down ``/api/analyses`` or stage_timings.
 """
 
 from __future__ import annotations
@@ -23,9 +21,7 @@ from db.storage import (
 
 
 def _bare_client() -> StorageClient:
-    """Build a StorageClient without going through ``__init__`` (which
-    would try to talk to boto3). The methods we exercise only touch
-    ``self.get`` / ``self.bucket`` — both stubbed in the tests."""
+    """A StorageClient built without ``__init__`` (no boto3); tests stub ``self.get`` / ``self.bucket``."""
     client = StorageClient.__new__(StorageClient)
     client.bucket = "test-bucket"
     client._client = MagicMock()
@@ -40,12 +36,8 @@ def test_get_many_returns_none_for_missing_key() -> None:
 
 
 def test_get_many_swallows_transport_errors_per_key() -> None:
-    """A transport failure on one key must not raise out of get_many — the
-    failed key returns ``None`` and successful keys still resolve. Pre-fix
-    this raised ``StorageUnavailable`` and api.py callers had to wrap it in
-    try/except, with one of the two callers forgetting (``stage_timings``).
-    Pinning the contract here means a future change can't quietly regress.
-    """
+    """A transport failure on one key must not raise out of get_many: it returns ``None`` and other
+    keys still resolve. It used to raise ``StorageUnavailable`` and ``stage_timings`` forgot to wrap it."""
     client = _bare_client()
 
     def fake_get(k: str) -> bytes:
@@ -64,8 +56,6 @@ def test_get_many_swallows_transport_errors_per_key() -> None:
 
 
 def test_get_many_total_outage_returns_all_none() -> None:
-    """Belt-and-suspenders: if every key fails, callers see all-None and
-    can choose how to surface that. The function must not raise."""
     client = _bare_client()
     with patch.object(client, "get", side_effect=StorageUnavailable("bucket gone")):
         result = client.get_many(["a", "b", "c"])
@@ -88,7 +78,6 @@ def test_get_many_dedupes_input_keys() -> None:
 
 
 def test_get_many_empty_input_no_pool_spawned() -> None:
-    """Cheap shortcut: empty input must not spin up a thread pool."""
     client = _bare_client()
     with patch("db.storage.ThreadPoolExecutor") as mock_pool:
         result = client.get_many([])
@@ -122,9 +111,8 @@ def test_preview_prefix_yields_a_stripped_candidate() -> None:
 
 
 def test_audits_keys_are_never_stripped() -> None:
-    """NEGATIVE CONTROL. ``audits/`` keys are written unprefixed and resolve
-    today; they must keep resolving on the first attempt with no fallback, so
-    an audit object that is genuinely gone stays reported as gone."""
+    """NEGATIVE CONTROL: ``audits/`` keys are written unprefixed and must resolve on the first
+    attempt with no fallback, so a genuinely gone audit object stays reported as gone."""
     for key in ("audits/text/183.txt", "audits/scope/183.json", "audits/text/15.txt"):
         assert storage_key_candidates(key) == [key]
 
@@ -163,9 +151,8 @@ def test_get_falls_back_to_the_stripped_key() -> None:
 
 
 def test_get_raises_and_names_every_key_it_tried() -> None:
-    """POSITIVE CONTROL shape: when no candidate holds an object the failure is
-    loud and states exactly what was asked. A fallback must never convert
-    proven-absent into silence."""
+    """POSITIVE CONTROL shape: with no candidate holding an object the failure is loud and names
+    every key tried; a fallback must never convert proven-absent into silence."""
     client = _bare_client()
     with patch.object(client, "_get_one", side_effect=lambda k: (_ for _ in ()).throw(StorageKeyMissing(k))):
         with pytest.raises(StorageKeyMissing) as excinfo:
@@ -193,8 +180,6 @@ def test_transport_failure_is_never_reported_as_absence() -> None:
 
 
 def test_empty_key_is_a_different_fact_from_a_missing_object() -> None:
-    """'The row records no key' and 'the bucket has no object at this key'
-    are distinct states and a consumer can tell them apart."""
     client = _bare_client()
     with pytest.raises(StorageKeyAbsent):
         client.get("")
@@ -203,8 +188,6 @@ def test_empty_key_is_a_different_fact_from_a_missing_object() -> None:
 
 
 def test_get_many_logs_a_missing_object_instead_of_dropping_it(caplog) -> None:
-    """The None return is preserved (one bad key must not fail an API
-    response) but it is no longer silent."""
     import logging
 
     client = _bare_client()
@@ -216,12 +199,8 @@ def test_get_many_logs_a_missing_object_instead_of_dropping_it(caplog) -> None:
 
 
 def test_get_many_results_keeps_absence_and_outage_apart() -> None:
-    """Absence and outage stay apart at the batch layer too.
-
-    ``get_many`` flattens both to ``None``, which is why ``get_all_artifacts``
-    could not tell "the object is gone" from "the bucket is unreachable" — and
-    then dropped both, so its caller could not tell either from "this job has no
-    such artifact"."""
+    """Absence and outage stay apart at the batch layer too: ``get_many`` flattens both to ``None``,
+    which is why ``get_all_artifacts`` could not tell "gone" from "unreachable" from "no such artifact"."""
     client = _bare_client()
 
     def _fake(key: str) -> bytes:

@@ -1,12 +1,7 @@
 """Behavioral-hash ladder tests (EFFECTS_RESOLUTION_SPEC §7 / inv. 2).
 
-Two layers:
-  * a real-Slither compile of a mixin default vs a stricter override, gated
-    behind local solc availability (the offline-suite convention — CI
-    preinstalls one, a fresh clone skips), proving inv. 2 on real IR;
-  * lightweight structural doubles (no solc) so the core invariants — override
-    diverges, internal-callee inlining, immutable masking, unverified
-    determinism, fast-path soundness precondition — are always covered.
+A real-Slither compile of a mixin default vs a stricter override (gated on local solc; CI has one,
+a fresh clone skips), plus solc-free structural doubles so the core invariants are always covered.
 """
 
 from __future__ import annotations
@@ -27,9 +22,7 @@ pytestmark = pytest.mark.compile
 
 
 def test_override_hashes_differently_from_mixin_structural():
-    """inv. 2: a stricter override (extra require gate) MUST hash apart from the
-    mixin default even though names are stripped — the divergence is structural,
-    not name-based."""
+    """inv. 2: a stricter override MUST hash apart from the mixin default even though names are stripped."""
     latch = _var("StateVariable", "_pausedUntil")
     sender = _var("SolidityVariableComposed", "msg.sender")
     guardian = _var("StateVariable", "guardian")
@@ -54,16 +47,12 @@ def test_override_hashes_differently_from_mixin_structural():
 
 
 def test_variable_names_do_not_change_the_hash():
-    """Renaming a local/state var (same structure) must not move the hash —
-    names are stripped, only roles remain."""
     a = _fn("A.f()", nodes=[_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable", "paused"))])])
     b = _fn("B.g()", nodes=[_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable", "frozen"))])])
     assert resolved_function_hash(a) == resolved_function_hash(b)
 
 
 def test_internal_callee_is_inlined():
-    """An internal call to a body with structure hashes differently from an
-    internal call to an empty callee — the callee's IR is inlined."""
     rich_callee = _fn("H.helper()", nodes=[_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable"))])])
     empty_callee = _fn("H.noop()", nodes=[])
     caller_rich = _fn("C.f()", nodes=[_node("EXPRESSION", [_ir("InternalCall", function=rich_callee)])])
@@ -72,14 +61,12 @@ def test_internal_callee_is_inlined():
 
 
 def test_recursion_terminates():
-    """A self-recursive internal call must not blow the stack."""
     fn = _fn("R.loop()", nodes=[])
     fn.nodes = [_node("EXPRESSION", [_ir("InternalCall", function=fn)])]  # pyright: ignore[reportAttributeAccessIssue]
     assert isinstance(resolved_function_hash(fn), str)
 
 
 def test_modifier_gate_participates():
-    """Two identical bodies gated by different modifiers hash apart."""
     body = [_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable"))])]
     mod_a = _fn("m.onlyGuardian()", nodes=[_node("EXPRESSION", [_ir("Binary", read=[_var("StateVariable")])])])
     mod_b = _fn(
@@ -109,18 +96,14 @@ def test_unverified_fallback_is_deterministic_and_strips_metadata():
     core = b"\x60\x80\x60\x40\x52\xfe"
     h1 = bytecode_fallback_hash(_with_metadata(core), "0x12345678")
     h2 = bytecode_fallback_hash("0x" + _with_metadata(core).hex(), "0x12345678")
-    # Two builds differing ONLY in the metadata trailer collapse to one hash.
     alt_meta = b"\xa2\x64DIFF"
     meta2 = core + alt_meta + len(alt_meta).to_bytes(2, "big")
     h3 = bytecode_fallback_hash(meta2, "0x12345678")
     assert h1 == h2 == h3
-    # Different selector -> different hash (dispatch differs).
     assert bytecode_fallback_hash(_with_metadata(core), "0xdeadbeef") != h1
 
 
 def test_immutable_masking_recovers_a_hit():
-    """Two deployments identical except in an immutable byte-range hash apart
-    without masking, and identical WITH the immutableReferences mask."""
     prefix = b"\x60\x80"
     suffix = b"\xfe"
     imm_a = b"\x11" * 32
@@ -138,15 +121,10 @@ def test_immutable_masking_recovers_a_hit():
 def test_masking_never_merges_a_gated_deployment_with_an_ungated_one():
     """The invariant ``calldata._gate_ref`` relies on to emit ``gate:none``.
 
-    ``gate:none`` is what a function gets when it has no predicate tree — a
-    proven-ungated one AND one whose real gate the static plane could not lower.
-    Those two may only ever share a cache identity when the OTHER component,
-    the kernel ``behavior_hash``, also matches; here that hash is the whole
-    runtime bytecode, which contains the gate. Immutable masking is the one
-    thing that deliberately merges distinct deployments, so it is the thing that
-    must not reach the gate: it erases the ADDRESS the gate compares against
-    (two owners, one hash) and leaves the CALLER/EQ/JUMPI comparison standing
-    (gated and ungated stay apart).
+    ``gate:none`` covers both proven-ungated and gate-not-lowerable functions, so they may share a
+    cache identity only if ``behavior_hash`` (the whole runtime bytecode, gate included) also
+    matches. Immutable masking must therefore erase the ADDRESS the gate compares against but leave
+    the CALLER/EQ/JUMPI comparison standing.
     """
     body = bytes.fromhex("6001600155")  # the guarded action: sstore(1, 1)
 
@@ -202,9 +180,8 @@ def _solc_086() -> str:
 
 
 def test_override_vs_mixin_resolved_hashes_differ_real_slither(tmp_path: Path):
-    """inv. 2 on real IR: the mixin `pauseUntil` default and a stricter override
-    resolve to different functions and MUST hash apart (the exact weETH hazard —
-    same name, same inherited file, different gate)."""
+    """inv. 2 on real IR: the mixin `pauseUntil` default and a stricter override MUST hash apart
+    (the exact weETH hazard: same name, same inherited file, different gate)."""
     from slither.slither import Slither
 
     src = textwrap.dedent(

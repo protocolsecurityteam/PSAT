@@ -1,14 +1,9 @@
-"""W1 — the two Tier-1 producers acquire a caller, and the caller stays honest.
+"""W1 - the two Tier-1 producers acquire a caller, and the caller stays honest.
 
-Both modules were already tested as producers. What was untested is everything
-between them and a run: the precondition that decides whether they fire at all,
-the failure domain that decides what a failure of theirs can take down, and the
-provenance the call site is responsible for supplying.
-
-Every arm below is a wiring arm. The producers' own semantics are asserted only
-where the wiring could pre-empt them — the cold-cursor case, which must reach the
-table as ``holders`` NULL / ``coverage`` partial rather than being filtered out
-before the module ever sees it.
+Producer semantics are tested elsewhere; every arm here is wiring: the precondition that
+decides whether they fire, the failure domain of a failure, and the provenance the call site
+supplies. Producer semantics are asserted only where wiring could pre-empt them (the
+cold-cursor case must reach the table as ``holders`` NULL / ``coverage`` partial).
 """
 
 from __future__ import annotations
@@ -420,8 +415,7 @@ class TestResolutionStageComposition:
         session.rollback.assert_called()
 
     def test_an_ungated_registry_reaches_the_real_gate_without_a_chain_read(self, monkeypatch):
-        """No stub on the producer: the default corpus has no cursors, so the
-        gate must close before anything touches the wire."""
+        """No producer stub: the default corpus has no cursors, so the gate must close before the wire."""
         _stub_stage(monkeypatch)
         monkeypatch.setattr(
             "workers.resolution_worker.resolve_role_holder_planes",
@@ -544,9 +538,8 @@ class TestRestakingStepFailClosed:
 
         assert refresh_restaking_plane(db_session, chain_id=8453, rpc_url="https://rpc.example") == 0
         assert spies.order == []
-        # Every refusal still beats, and says which arm refused — a silent
-        # return is indistinguishable from a wedged loop. A chain with no
-        # configured pair is an absence, not a failed observation.
+        # Every refusal still beats and says which arm refused (a silent return looks like a
+        # wedged loop). A chain with no configured pair is an absence, not a failed observation.
         assert spies.cycles[-1]["note"] == "no_manager_pair"
         assert spies.cycles[-1]["partial"] is False
         db_session.rollback()
@@ -563,9 +556,8 @@ class TestRestakingStepFailClosed:
         db_session.rollback()
 
     def test_no_pinned_head_beats_degraded_not_healthy(self, db_session, one_protocol, monkeypatch):
-        """``pinned_head`` returns None only when a read failed or answered
-        inconsistently. Reporting that cycle healthy would let a permanently
-        dead route look like a protocol that simply has no nodes, forever."""
+        """``pinned_head`` returns None only on a failed or inconsistent read; reporting that
+        healthy would let a dead route look like a protocol with no nodes, forever."""
         spies = _RestakingSpies(monkeypatch)
         monkeypatch.setattr(restaking_cycle, "pinned_head", lambda *_a, **_kw: None)
 
@@ -614,9 +606,8 @@ class TestRestakingStepFailClosed:
         assert failed == [first.id]
         assert written == 1
         assert [p["protocol_id"] for p in spies.persisted] == [second.id]
-        # The survivor's rows are published, and the cycle still declares itself
-        # partial — a full-looking heartbeat over a skipped protocol would make
-        # that protocol's absent rows read as an answer.
+        # The survivor's rows publish and the cycle still declares itself partial, else the
+        # skipped protocol's absent rows would read as an answer.
         assert spies.cycles[-1]["partial"] is True
         assert spies.cycles[-1]["note"] == "1_failed"
         db_session.rollback()

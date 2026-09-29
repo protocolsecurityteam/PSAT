@@ -60,8 +60,6 @@ def _info(artifact: EffectsArtifact, signature: str) -> EffectInfo:
 
 
 def test_basic_state_write_emits_state_write_sink(tmp_path):
-    """A bare setter writing one storage slot produces exactly one
-    state_write sink targeting that slot."""
     sl = _compile(
         tmp_path,
         """
@@ -90,8 +88,6 @@ def test_basic_state_write_emits_state_write_sink(tmp_path):
 
 
 def test_internal_helper_writes_surface_on_caller(tmp_path):
-    """An external function that delegates writing to an internal
-    helper still sees the helper's write in its sinks list."""
     sl = _compile(
         tmp_path,
         """
@@ -119,8 +115,6 @@ def test_internal_helper_writes_surface_on_caller(tmp_path):
 
 
 def test_external_call_sink_classification(tmp_path):
-    """A function calling into another contract emits an external_call
-    sink with the dotted ``destVar.method`` target."""
     sl = _compile(
         tmp_path,
         """
@@ -145,8 +139,6 @@ def test_external_call_sink_classification(tmp_path):
 
 
 def test_effect_label_recognition_pause_toggle(tmp_path):
-    """A function that writes a bool state-var read by a modifier
-    gating other functions earns the ``pause_toggle`` label."""
     sl = _compile(
         tmp_path,
         """
@@ -178,10 +170,8 @@ def test_effect_label_recognition_pause_toggle(tmp_path):
 
 
 def test_semantic_effects_includes_unguarded_public_function(tmp_path):
-    """Sanity: the semantic effects artifact MUST surface unguarded
-    externally-callable functions (e.g. an unprotected ``publicSetter``).
-    ``predicate_trees`` deliberately omits these (no revert path) but
-    consumers still need to see the sink."""
+    """The semantic effects artifact MUST surface unguarded external functions;
+    ``predicate_trees`` omits them (no revert path) but consumers need the sink."""
     sl = _compile(
         tmp_path,
         """
@@ -243,9 +233,8 @@ def test_artifact_is_json_serializable(tmp_path):
 
 
 def test_fallback_and_receive_included(tmp_path):
-    """Per module docstring: fallback + receive are real sink-bearing
-    surfaces and MUST be emitted, even though the predicate-tree
-    builder skips them."""
+    """Fallback + receive are real sink-bearing surfaces and MUST be emitted, even
+    though the predicate-tree builder skips them."""
     sl = _compile(
         tmp_path,
         """
@@ -285,23 +274,15 @@ def test_constructor_skipped(tmp_path):
     assert not any(name.startswith("constructor") for name in artifact["functions"]), artifact["functions"]
 
 
-# ---------------------------------------------------------------------------
-# Authorization-capability labels.
-#
-# ownership_transfer / role_management now come from the Plane-1 claims
-# registry (``ownership.*`` selector-gated + ghost-immune; ``roles.*``
-# canonical-selector; a bespoke non-owner caller-authority rotation is
-# ``authorized_caller.rotate``) and are folded into ``effect_labels`` by
-# ``project_effect_labels`` — the same sequence core.py runs. The incidental
-# config-read precision comes from the ownership matcher's standards gate, not
-# a per-function structural scan.
-# ---------------------------------------------------------------------------
+# Authorization-capability labels: ownership_transfer / role_management come from
+# the Plane-1 claims registry (``ownership.*`` selector-gated + ghost-immune;
+# ``roles.*`` canonical-selector; bespoke rotation is ``authorized_caller.rotate``)
+# and are folded in by ``project_effect_labels``, the same sequence core.py runs.
 
 
 def _pipeline_effects(sl, contract_name=None):
-    """Run the exact static label sequence core.py runs — facts, Plane-1 claims,
-    and the effect-label projection — and return the (mutated) effects artifact
-    carrying both ``effect_labels`` and per-function ``claims``."""
+    """Run the static label sequence core.py runs (facts, Plane-1 claims, label
+    projection) and return the mutated effects artifact."""
     contract = _contract(sl, contract_name)
     effects = build_effects(contract)
     predicate_trees, _pause = build_predicate_artifacts_with_pause_info(contract)
@@ -346,7 +327,6 @@ def test_oz_ownable_checkowner_indirection_is_ownership_transfer(tmp_path):
     artifact = _pipeline_effects(_compile(tmp_path, _OZ_OWNABLE), "MyToken")
     assert "ownership_transfer" in _info(artifact, "transferOwnership(address)")["effect_labels"]
     assert "ownership_transfer" in _info(artifact, "renounceOwnership()")["effect_labels"]
-    # The coarse fallback it used to land in is superseded.
     assert "hook_update" not in _info(artifact, "transferOwnership(address)")["effect_labels"]
 
 

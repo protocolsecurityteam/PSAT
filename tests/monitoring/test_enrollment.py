@@ -1,11 +1,4 @@
-"""Unit and integration tests for protocol monitoring enrollment.
-
-All tests require PostgreSQL (TEST_DATABASE_URL env var).
-
-Run:
-    TEST_DATABASE_URL=postgresql://psat:psat@localhost:5433/psat_test \
-        uv run pytest tests/monitoring/test_enrollment.py -v
-"""
+"""Unit and integration tests for protocol monitoring enrollment; all require PostgreSQL (TEST_DATABASE_URL)."""
 
 from __future__ import annotations
 
@@ -92,7 +85,6 @@ def _mock_graph_node(address="0x" + "c" * 40, resolved_type="safe"):
 
 class TestDetermineContractType:
     def test_proxy_from_contract_fields_no_summary(self):
-        """Proxy contracts without a ContractSummary must still be detected."""
         from services.monitoring.enrollment import _determine_contract_type
 
         contract = _mock_contract(is_proxy=True, proxy_type="eip1967")
@@ -100,7 +92,6 @@ class TestDetermineContractType:
         assert result == "proxy"
 
     def test_proxy_from_proxy_type_only(self):
-        """proxy_type set but is_proxy=False (edge case) still detects proxy."""
         from services.monitoring.enrollment import _determine_contract_type
 
         contract = _mock_contract(is_proxy=False, proxy_type="custom")
@@ -108,7 +99,6 @@ class TestDetermineContractType:
         assert result == "proxy"
 
     def test_proxy_from_summary_and_contract(self):
-        """is_upgradeable only produces 'proxy' when the contract is a proxy shell."""
         from services.monitoring.enrollment import _determine_contract_type
 
         contract = _mock_contract(is_proxy=True, proxy_type="eip1967")
@@ -117,7 +107,6 @@ class TestDetermineContractType:
         assert result == "proxy"
 
     def test_upgradeable_implementation_is_not_proxy(self):
-        """UUPS implementations have is_upgradeable=True but are not proxy shells."""
         from services.monitoring.enrollment import _determine_contract_type
 
         contract = _mock_contract(is_proxy=False, proxy_type=None)
@@ -142,9 +131,6 @@ class TestDetermineContractType:
         assert result == "pausable"
 
     def test_controller_type_does_not_propagate(self):
-        """A contract's type is determined by its own properties, not by
-        the resolved_type of its controllers.  Having a safe/timelock owner
-        doesn't make the contract itself a safe or timelock."""
         from services.monitoring.enrollment import _determine_contract_type
 
         contract = _mock_contract(is_proxy=False)
@@ -203,9 +189,6 @@ class TestBuildMonitoringConfig:
         assert config["watch_roles"] is True
 
     def test_tracked_topics_persisted_when_supplied(self):
-        """tracked_topics passed in (from extract_governance_topics) must
-        land on monitoring_config so the scanner can union them into the
-        global topic filter and dispatch per-emitter."""
         from services.monitoring.enrollment import _build_monitoring_config
 
         tracked = [
@@ -221,10 +204,8 @@ class TestBuildMonitoringConfig:
         assert config["tracked_topics"] == tracked
 
     def test_authority_topic_sets_watch_authority_flag(self):
-        """Presence of an authority_updated tracked-topic flips on the
-        watch_authority flag explicitly — the flag-getter defaults to
-        True on missing keys, so this is documentation-on-inspection
-        rather than gating, but it keeps the config self-describing."""
+        """The flag-getter defaults to True on missing keys, so this documents rather than gates; it keeps the config
+        self-describing."""
         from services.monitoring.enrollment import _build_monitoring_config
 
         tracked = [
@@ -240,9 +221,8 @@ class TestBuildMonitoringConfig:
         assert config.get("watch_authority") is True
 
     def test_empty_tracked_topics_witnessed_as_empty_list(self):
-        """No tracked_topics and no not-determined token → the builder emits
-        the positive witnessed-empty ``tracked_topics: []`` (the plan was
-        read and named nothing); key absence is never a builder output."""
+        """No tracked_topics and no not-determined token emits the witnessed-empty ``[]``; key absence is never a
+        builder output."""
         from services.monitoring.enrollment import _build_monitoring_config
 
         config = _build_monitoring_config(None, [], "regular")
@@ -273,11 +253,9 @@ class TestBuildInitialState:
         assert state["owner"] == "0x" + "e" * 40
 
     def test_ignores_pending_owner_and_other_substring_matches(self):
-        """The old substring match latched ``pendingOwner``/``previousOwner``/
-        ``roleOwner``/``ownerFee`` into ``last_known_state.owner`` and the
-        scanner would false-positive an OwnershipTransferred when the live
-        owner finally diverged. Only the canonical Ownable slot counts.
-        """
+        """The old substring match latched ``pendingOwner``/``previousOwner``/``roleOwner``/``ownerFee`` into
+        ``last_known_state.owner``, false-positiving OwnershipTransferred later. Only the canonical Ownable slot
+        counts."""
         from services.monitoring.enrollment import _build_initial_state
 
         contract = _mock_contract()
@@ -291,10 +269,6 @@ class TestBuildInitialState:
         assert state["owner"] == "0x" + "a" * 40
 
     def test_ignores_state_variable_destination_admin(self):
-        """``state_variable:foo.adminAddress`` is not the canonical
-        Ownable admin slot — same lesson as the owner test, applied to
-        admin matching.
-        """
         from services.monitoring.enrollment import _build_initial_state
 
         contract = _mock_contract()
@@ -306,11 +280,8 @@ class TestBuildInitialState:
         assert state["admin"] == "0x" + "1" * 40
 
     def test_zero_address_owner_is_not_seeded(self):
-        """A renounced/zero owner is never a useful baseline: seeding it makes
-        the first live poll of a real owner false-fire a state change (and
-        re-enrollment re-arms it). Leaving it unseeded makes that first
-        observation silent instead.
-        """
+        """Seeding a zero owner makes the first live poll of a real owner false-fire a state change (re-enrollment
+        re-arms it)."""
         from services.monitoring.enrollment import _build_initial_state
 
         contract = _mock_contract()
@@ -349,15 +320,9 @@ class TestBuildInitialState:
 class TestMaybeEnrollProtocol:
     @patch("services.monitoring.enrollment.enroll_protocol_contracts")
     def test_fires_with_in_flight_siblings(self, mock_enroll):
-        """A queued / processing sibling must not block enrollment.
-
-        The trigger used to short-circuit on
-        ``Job.status IN (queued, processing)`` for the protocol; that
-        gate produced silent skips when a sibling crashed before
-        transitioning out of those statuses and had no fallback. The
-        anvil integration counterpart is
-        ``test_in_flight_sibling_job_does_not_block_enrollment``.
-        """
+        """A queued / processing sibling must not block enrollment: the old status gate silently skipped when a
+        sibling crashed before transitioning. Anvil counterpart:
+        ``test_in_flight_sibling_job_does_not_block_enrollment``."""
         from services.monitoring.enrollment import maybe_enroll_protocol
 
         # The single remaining query is the "≥1 completed job" gate;
@@ -396,7 +361,6 @@ PROTO_NAME = "__test_enrollment__"
 
 @pytest.fixture()
 def pg_session():
-    """Full-schema PostgreSQL session. Cleans up only test-created rows."""
     from db.models import (
         Base,
         Contract,
@@ -443,7 +407,6 @@ def pg_session():
 
 
 def _create_completed_job(session, address, protocol_id):
-    """Create a completed Job for a contract address so enrollment picks it up."""
     from db.models import Job, JobStage, JobStatus
 
     job = Job(
@@ -466,19 +429,12 @@ def _grant_primary_authority(
     effect_labels=None,
     details=None,
 ):
-    """Make ``principal_address`` a primary controller of the contract by
-    attaching a ``FunctionPrincipal`` row. ``assign_primary_controllers``
-    uses FP membership as eligibility, so any CGN principal needs at
-    least one matching FP row on the contract to survive the enrollment
-    filter.
+    """Make ``principal_address`` a primary controller by attaching a ``FunctionPrincipal`` row
+    (``assign_primary_controllers`` uses FP membership as eligibility).
 
-    ``resolved_type`` types the FP row (Safe / Timelock / proxy_admin).
-    Enrollment seeds candidates from this when the address has no usable
-    ``control_graph_nodes`` type, mirroring the Surface canvas.
-
-    ``effect_labels`` sets the function's effect labels, which the
-    co-controller rule reads — a privileged label (e.g. ``pause_toggle``)
-    keeps a non-primary caller as a monitored co-controller.
+    ``resolved_type`` types the FP row; enrollment seeds candidates from it when the address has no usable CGN type.
+    ``effect_labels`` feeds the co-controller rule: a privileged label (e.g. ``pause_toggle``) keeps a non-primary
+    caller as a monitored co-controller.
     """
     _grant_shared_authority(
         session,
@@ -500,12 +456,9 @@ def _grant_shared_authority(
     effect_labels=None,
     details=None,
 ):
-    """Attach a single ``EffectiveFunction`` callable by *every* address in
-    *principal_addresses*. The shared caller-set size is what the co-controller
-    rule uses to tell a tightly-gated governance function from a broad
-    permissionless whitelist (e.g. ``createBid`` shared by dozens of bidders),
-    so a faithful bidder model needs one function with many callers — not one
-    function per caller.
+    """Attach one ``EffectiveFunction`` callable by *every* address in *principal_addresses*. The co-controller
+    rule uses the shared caller-set size to tell a gated governance function from a permissionless whitelist
+    (e.g. ``createBid`` shared by dozens of bidders), so a faithful bidder model needs one function with many callers.
     """
     from db.models import EffectiveFunction, FunctionPrincipal
 
@@ -529,11 +482,7 @@ def _grant_shared_authority(
 
 @requires_postgres
 class TestEnrollmentIntegration:
-    """End-to-end enrollment with real Contract, ContractSummary, and
-    ControlGraphNode rows in PostgreSQL."""
-
     def test_enroll_creates_monitored_contracts_from_real_data(self, pg_session):
-        """Full enroll_protocol_contracts with real Contract + ContractSummary."""
         from db.models import Contract, ContractSummary, ControllerValue, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -655,13 +604,9 @@ class TestEnrollmentIntegration:
         assert summary.plan_not_determined == {NO_CURRENT_MATERIALIZATION: 2}
 
     def test_enroll_proxy_without_summary_uses_contract_fields(self, pg_session):
-        """Proxy contracts with is_proxy=True but NO ContractSummary must still
-        be enrolled as type='proxy' with correct monitoring config, WatchedProxy
-        row, and initial state containing the implementation address.
-
-        This is the common case for EIP-1967 proxies whose Slither analysis
-        runs on the implementation contract, not the proxy shell.
-        """
+        """The common EIP-1967 case (Slither ran on the implementation, not the proxy shell): is_proxy=True with NO
+        ContractSummary must still enroll as type='proxy' with a WatchedProxy row and the implementation in initial
+        state."""
         from db.models import Contract, ControllerValue, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -726,9 +671,6 @@ class TestEnrollmentIntegration:
         assert wp.last_known_implementation == impl_addr
 
     def test_enroll_implementation_with_proxy_admin_stays_regular(self, pg_session):
-        """An implementation contract whose controller has resolved_type=proxy_admin
-        should NOT be classified as a proxy — it's the target of a proxy, not a
-        proxy itself."""
         from db.models import Contract, ControllerValue, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -775,12 +717,6 @@ class TestEnrollmentIntegration:
         assert mc.watched_proxy_id is None
 
     def test_enroll_enrolls_primary_controllers(self, pg_session):
-        """Principals that primary-control a contract get their own
-        MonitoredContract rows — Safe and Timelock — while EOAs are dropped
-        (nothing event-bearing to monitor). These are the winner-take-all
-        primaries the Surface canvas groups by; enrollment shares that
-        computation via ``controllers_for_protocol``.
-        """
         from db.models import Contract, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -831,13 +767,9 @@ class TestEnrollmentIntegration:
         assert eoa_mc is None
 
     def test_controllers_enroll_on_the_chain_of_the_contracts_they_govern(self, pg_session, monkeypatch):
-        """Chain-as-island, per controller: a Safe shared across chains gets a
-        MonitoredContract row on EACH chain it governs on, and a base-only
-        controller lands on base — never on a caller-default chain. This is
-        the multichain shape the old single-chain fallback got wrong: a
-        protocol spanning two chains enrolled every controller on the caller's
-        chain, so the base twin of a shared Safe was never monitored.
-        """
+        """Chain-as-island per controller: a shared Safe gets a row on EACH chain it governs, a base-only controller
+        lands on base, never a caller-default chain (the old single-chain fallback never monitored a shared Safe's base
+        twin)."""
         from db.models import Contract, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -889,8 +821,6 @@ class TestEnrollmentIntegration:
         assert [mc.chain for mc in base_rows] == ["base"]
 
     def test_off_allowlist_controller_chain_is_skipped_not_redirected(self, pg_session, monkeypatch):
-        """A controller governing only on a disabled chain gets NO row — not a
-        row on some enabled chain it does not govern on."""
         from db.models import Contract, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -920,15 +850,9 @@ class TestEnrollmentIntegration:
         assert rows == []
 
     def test_enroll_cgn_unknown_governance_safe_still_enrolls(self, pg_session):
-        """A governance Safe whose ControlGraphNode is typed ``unknown`` (the
-        resolution-stage walk never classified it) must still enroll, because
-        enrollment derives controllers from the shared governance computation,
-        which types principals from ``FunctionPrincipal`` and picks the primary
-        controller per contract. The Safe wins primary_for over a co-controlling
-        EOA, and the EOA is dropped (not monitored). Regression for the etherfi
-        governance Safe that showed on Surface but was missing from monitoring
-        because its CGN type was ``unknown``.
-        """
+        """A governance Safe whose CGN is typed ``unknown`` must still enroll: enrollment derives controllers from
+        the shared governance computation (FunctionPrincipal), where the Safe beats a co-controlling EOA.
+        Regression for the etherfi governance Safe visible on Surface but missing from monitoring."""
         from db.models import Contract, ControlGraphNode, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -985,13 +909,9 @@ class TestEnrollmentIntegration:
         assert eoa_mc is None
 
     def test_enroll_excludes_permissionless_bidder_safes(self, pg_session):
-        """Safes whose only authority is a broad, permissionless function are
-        not enrolled — neither as primary (they lose the contest) nor as
-        co-controllers (the function is shared by too many callers to read as a
-        governance gate). Mirrors EtherFi's ``createBid`` on AuctionManager,
-        shared by ~33 whitelisted bidders. The bare FP-authority signal alone
-        over-enrolled every bidder.
-        """
+        """Safes whose only authority is a broad permissionless function are enrolled neither as primary nor as
+        co-controllers. Mirrors EtherFi's ``createBid`` (~33 whitelisted bidders); the bare FP signal over-enrolled
+        every bidder."""
         from db.models import Contract, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -1048,14 +968,9 @@ class TestEnrollmentIntegration:
             ), f"bidder {bidder} should not be enrolled"
 
     def test_enroll_includes_privileged_co_controller(self, pg_session):
-        """A guardian Safe that holds a privileged power (``pause``) on a
-        contract it LOSES the primary contest for is still enrolled — as a
-        co-controller. Regression for EtherFi 0x2aca, a 4-of-7 pause /
-        fund-recovery multisig hidden from monitoring because the
-        timelock-passthrough governance Safe won all 8 of its contracts.
-        Monitoring must watch it even though the Surface canvas groups the
-        contract under the winner.
-        """
+        """A guardian Safe with a privileged power (``pause``) on a contract it LOSES the primary contest for is
+        still enrolled as a co-controller. Regression for EtherFi 0x2aca (4-of-7 pause multisig hidden because the
+        timelock-passthrough Safe won all 8 contracts)."""
         from db.models import Contract, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -1107,7 +1022,6 @@ class TestEnrollmentIntegration:
         assert guardian_mc.monitoring_config["watch_safe_signers"] is True
 
     def test_enroll_is_idempotent(self, pg_session):
-        """Calling enroll_protocol_contracts twice doesn't duplicate rows."""
         from sqlalchemy import func
 
         from db.models import Contract, Protocol
@@ -1141,10 +1055,8 @@ class TestEnrollmentIntegration:
         assert count == 1
 
     def test_reenrollment_merges_state_without_clobbering_observations(self, pg_session):
-        """Re-enrollment must not overwrite a value the watcher already observed
-        — a blind reset re-armed a phantom event every reconcile. Observed keys
-        win; the seed only fills keys the observed state is missing.
-        """
+        """Re-enrollment must not overwrite a watcher-observed value (a blind reset re-armed a phantom event every
+        reconcile); the seed only fills missing keys."""
         from db.models import Contract, ControllerValue, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -1195,12 +1107,8 @@ class TestEnrollmentIntegration:
         assert mc.last_known_state["implementation"] == impl  # missing key re-seeded
 
     def test_reenrollment_merge_hygiene_cleanses_zero_and_prunes_stale(self, pg_session):
-        """Re-enrollment merge hygiene: (a) a zero-address observation is dropped
-        (cleanses a row seeded 0x0 before the seed fix, so it can't fire one last
-        phantom), (b) a key neither seeded nor read by the current polling plan is
-        pruned (last_known_state is served verbatim by the API), and (c) canonical
-        owner/admin/implementation keys survive regardless.
-        """
+        """Merge hygiene: (a) a zero-address observation is dropped, (b) a key neither seeded nor polled is pruned
+        (``last_known_state`` is served verbatim by the API), (c) canonical owner/admin/implementation keys survive."""
         from db.models import Contract, ControllerValue, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -1252,11 +1160,8 @@ class TestEnrollmentIntegration:
         assert state["implementation"] == impl  # canonical seed re-fills the missing key
 
     def test_enroll_iterates_contracts_in_sorted_address_order(self, pg_session):
-        """Contracts are processed in lowercased-address order so concurrent
-        enrollers of the same protocol acquire monitored_contracts row locks in
-        one global order (no AB/BA deadlock). The returned list is built in that
-        iteration order, so its addresses must come out sorted regardless of
-        insert order."""
+        """Contracts are processed in lowercased-address order so concurrent enrollers take row locks in one global
+        order (no AB/BA deadlock); the returned list must come out sorted regardless of insert order."""
         from db.models import Contract, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -1291,10 +1196,8 @@ class TestEnrollmentIntegration:
         return proto
 
     def test_maybe_enroll_skips_and_marks_dirty_when_lock_held(self, pg_session):
-        """The load-bearing assertion: while a sibling holds the enrollment lock,
-        maybe_enroll writes ZERO MonitoredContract rows and leaves a dirty queue
-        row (so the reconciler converges what this run's snapshot missed). Once
-        the holder's txn ends, the next call enrolls normally."""
+        """The load-bearing assertion: while a sibling holds the lock, maybe_enroll writes ZERO rows and leaves a
+        dirty queue row for the reconciler; once the holder's txn ends the next call enrolls."""
         from sqlalchemy import func
 
         from db.models import MonitoringEnrollmentQueue
@@ -1337,8 +1240,6 @@ class TestEnrollmentIntegration:
         assert n2 == 1
 
     def test_advisory_lock_released_on_enroll_commit(self, pg_session):
-        """A normal maybe_enroll holds the lock only for its own transaction —
-        a separate session can acquire it immediately after (release-on-commit)."""
         from services.monitoring.enrollment import maybe_enroll_protocol
 
         proto = self._seed_one_contract_protocol(pg_session)
@@ -1359,10 +1260,8 @@ class TestEnrollmentIntegration:
             other_engine.dispose()
 
     def test_controller_rows_survive_stale_detection(self, pg_session):
-        """Controller addresses enrolled by _enroll_controller_addresses must
-        not be immediately deactivated by the stale-detection query in
-        enroll_protocol_contracts. Regression test for flush-ordering bug.
-        """
+        """Controller rows from ``_enroll_controller_addresses`` must survive the stale-detection query (flush-ordering
+        regression)."""
         from db.models import Contract, ControlGraphNode, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -1409,12 +1308,8 @@ class TestEnrollmentIntegration:
         assert safe_mc.contract_type == "safe"
 
     def test_state_variable_destination_safe_is_not_enrolled(self, pg_session):
-        """A Safe that only appears as a state-variable destination
-        (CGN with no FunctionPrincipal authority on any function) must
-        NOT become an active MonitoredContract — that's the etherfi
-        ``accountantState.payoutAddress`` misclassification this whole
-        pipeline change is fixing.
-        """
+        """A Safe that only appears as a state-variable destination (no FunctionPrincipal authority) must NOT enroll:
+        the etherfi ``accountantState.payoutAddress`` misclassification this pipeline change fixes."""
         from db.models import Contract, ControlGraphNode, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -1476,12 +1371,8 @@ class TestEnrollmentIntegration:
         )
 
     def test_re_enrollment_demotes_safe_that_lost_authority(self, pg_session):
-        """A Safe enrolled in a prior run that has since lost its
-        function-level authority (no remaining FP rows) gets
-        ``is_active=False`` + ``enrollment_source='auto_deprimary'``
-        on the next ``enroll_protocol_contracts`` call. The row is
-        kept (not deleted) so its MonitoredEvent history survives.
-        """
+        """A Safe that lost its function authority is set ``is_active=False`` / ``enrollment_source='auto_deprimary'``
+        on re-enrollment; the row is kept so its MonitoredEvent history survives."""
         from db.models import (
             Contract,
             ControlGraphNode,
@@ -1554,11 +1445,8 @@ class TestEnrollmentIntegration:
         assert demoted.enrollment_source == "auto_deprimary"
 
     def test_stale_detection_is_chain_scoped_for_twins(self, pg_session):
-        """A stale base-chain MonitoredContract whose ethereum twin (same
-        address) is freshly enrolled must be deactivated — the stale comparison
-        keys on (address, chain), not address alone. Without the chain the base
-        row is shadowed by its enrolled eth twin and lingers active forever.
-        """
+        """Stale detection keys on (address, chain): without the chain a stale base row is shadowed by its enrolled
+        eth twin and lingers active forever."""
         from db.models import Contract, Protocol
         from services.monitoring.enrollment import enroll_protocol_contracts
 
@@ -1604,14 +1492,9 @@ class TestEnrollmentIntegration:
         assert base_mc.is_active is False, "stale base twin should be deactivated by the chain-scoped stale check"
 
     def test_zombie_timelock_row_demoted_when_cgn_evidence_disappears(self, pg_session):
-        """A timelock enrolled in a prior run whose CGN node is later
-        rebuilt away — and whose FP authority is also gone — must be
-        deactivated on re-enrollment. Observed on prod-etherfi: 4 of 5
-        monitored timelocks are zombies with no current evidence in
-        CGN, FP, or fund_flows. The deployed code had no path to
-        notice them because the CGN-walk-then-enroll loop only sees
-        addresses still in CGN; orphan rows survived indefinitely.
-        """
+        """A timelock whose CGN node was rebuilt away and whose FP authority is gone must be deactivated. Observed on
+        prod-etherfi: 4 of 5 timelocks were zombies, because the CGN-walk-then-enroll loop only sees addresses still in
+        CGN."""
         from db.models import (
             Contract,
             ControlGraphNode,
@@ -1687,10 +1570,8 @@ class TestEnrollmentIntegration:
 
 @requires_postgres
 class TestControlGraphTypeReconciliation:
-    """``reconcile_control_graph_types`` folds authoritative FunctionPrincipal
-    typing back into ``control_graph_nodes`` so every CGN consumer reads one
-    consistent type — the fix for governance principals the resolution stage
-    left ``unknown``."""
+    """``reconcile_control_graph_types`` folds FunctionPrincipal typing back into ``control_graph_nodes`` (governance
+    principals left ``unknown``)."""
 
     @staticmethod
     def _proto_contract(session, addr, name="EtherFiTimelock"):
@@ -1731,8 +1612,6 @@ class TestControlGraphTypeReconciliation:
         )
 
     def test_upgrades_unknown_cgn_from_fp(self, pg_session):
-        """A node the resolution stage left ``unknown`` is upgraded to the
-        type FunctionPrincipal assigned it."""
         from services.governance.control_graph_types import reconcile_control_graph_types
 
         c = self._proto_contract(pg_session, "0x" + "a3" * 20)
@@ -1745,8 +1624,6 @@ class TestControlGraphTypeReconciliation:
         assert self._node_type(pg_session, c.id, gov_safe) == "safe"
 
     def test_does_not_downgrade_concrete_cgn(self, pg_session):
-        """A graph-walk-determined concrete type is never overwritten, even if
-        FunctionPrincipal disagrees."""
         from services.governance.control_graph_types import reconcile_control_graph_types
 
         c = self._proto_contract(pg_session, "0x" + "a4" * 20)
@@ -1759,8 +1636,6 @@ class TestControlGraphTypeReconciliation:
         assert self._node_type(pg_session, c.id, addr) == "timelock"
 
     def test_skips_non_governance_fp_types(self, pg_session):
-        """EOA / contract FP types are left alone — only Safe / Timelock /
-        proxy admin (monitored principal kinds) are folded back."""
         from services.governance.control_graph_types import reconcile_control_graph_types
 
         c = self._proto_contract(pg_session, "0x" + "a5" * 20)
@@ -1773,7 +1648,6 @@ class TestControlGraphTypeReconciliation:
         assert self._node_type(pg_session, c.id, eoa_addr) == "unknown"
 
     def test_idempotent(self, pg_session):
-        """A second run after convergence upgrades nothing."""
         from services.governance.control_graph_types import reconcile_control_graph_types
 
         c = self._proto_contract(pg_session, "0x" + "a6" * 20)
@@ -1803,10 +1677,8 @@ class TestControlGraphTypeReconciliation:
         )
 
     def test_folds_safe_owners_and_threshold_from_fp(self, pg_session):
-        """Upgrading a node to ``safe`` also folds the signer set + threshold
-        the classifier stored on FunctionPrincipal — so the node doesn't end up
-        asserting ``safe`` with no owners (the bug that hid a multisig's signers
-        on the Surface canvas)."""
+        """Upgrading a node to ``safe`` also folds the signer set + threshold from FunctionPrincipal, so the node
+        doesn't assert ``safe`` with no owners (which hid a multisig's signers on the Surface canvas)."""
         from services.governance.control_graph_types import reconcile_control_graph_types
 
         c = self._proto_contract(pg_session, "0x" + "b1" * 20)
@@ -1830,10 +1702,6 @@ class TestControlGraphTypeReconciliation:
         assert details.get("threshold") == 2
 
     def test_backfills_config_onto_already_typed_node(self, pg_session):
-        """A node a prior *type-only* reconcile already flipped to ``safe`` (no
-        owners) is repaired on the next run — the selector revisits
-        governance-typed rows so existing data converges, and re-running once
-        backfilled changes nothing."""
         from services.governance.control_graph_types import reconcile_control_graph_types
 
         c = self._proto_contract(pg_session, "0x" + "b2" * 20)
@@ -1859,9 +1727,6 @@ class TestControlGraphTypeReconciliation:
         assert reconcile_control_graph_types(pg_session, [c.id]) == 0
 
     def test_does_not_fold_owners_onto_disagreeing_type(self, pg_session):
-        """A safe's owners are never attached to a node the resolution stage
-        concretely typed ``timelock`` — type stays, and no safe-shaped config
-        leaks onto it."""
         from services.governance.control_graph_types import reconcile_control_graph_types
 
         c = self._proto_contract(pg_session, "0x" + "b3" * 20)
@@ -1882,11 +1747,8 @@ class TestControlGraphTypeReconciliation:
         assert not (self._node_details(pg_session, c.id, addr) or {}).get("owners")
 
     def test_folds_per_chain_for_same_address_twins(self, pg_session):
-        """Same principal address on two chains that is a Safe on ethereum and a
-        Timelock on base: each chain's CGN node must keep its own chain's type and
-        config. Folding by bare address alone would let the higher-priority
-        (Safe) type and its owners overwrite the base node's Timelock typing.
-        """
+        """The same address as Safe on ethereum and Timelock on base: each chain's CGN node keeps its own type and
+        config; folding by bare address would overwrite the base Timelock typing."""
         from db.models import Contract, Protocol
         from services.governance.control_graph_types import reconcile_control_graph_types
 
@@ -1947,10 +1809,8 @@ class TestControlGraphTypeReconciliation:
         )
 
     def test_safe_upgrade_stamps_coherent_analysis_state(self, pg_session):
-        """Typing a node ``safe`` must also answer the analyzability question
-        the walk left NULL: ('safe', NULL) claims "typed as a Safe,
-        analyzability not determined" — refuted by the same row. The stamp is
-        exactly what the walk derives for a safe: ``not_analyzable``."""
+        """Typing a node ``safe`` must also stamp ``analysis_state`` (``not_analyzable``, what the walk derives);
+        ('safe', NULL) is a self-refuting pair."""
         from services.governance.control_graph_types import reconcile_control_graph_types
 
         c = self._proto_contract(pg_session, "0x" + "b5" * 20)
@@ -1964,9 +1824,8 @@ class TestControlGraphTypeReconciliation:
         assert self._node_analysis_state(pg_session, c.id, gov_safe) == "not_analyzable"
 
     def test_pretyped_safe_with_null_state_is_healed_and_converges(self, pg_session):
-        """The observed incoherence: rows a prior reconcile already typed
-        ``safe`` while leaving ``analysis_state`` NULL. The next run heals the
-        pair (counts as a change) and then converges."""
+        """Observed incoherence: rows already typed ``safe`` with ``analysis_state`` NULL; the next run heals the pair,
+        then converges."""
         from services.governance.control_graph_types import reconcile_control_graph_types
 
         c = self._proto_contract(pg_session, "0x" + "b6" * 20)
@@ -1982,9 +1841,8 @@ class TestControlGraphTypeReconciliation:
         assert reconcile_control_graph_types(pg_session, [c.id]) == 0
 
     def test_analyzable_upgrade_leaves_analysis_state_null(self, pg_session):
-        """Negative control: a ``timelock`` upgrade types an ANALYZABLE address,
-        for which the walk's derivation is None ("analyzable, unanalysed, not
-        determined") — the column must stay NULL, not gain an invented value."""
+        """Negative control: a ``timelock`` upgrade (ANALYZABLE address) leaves ``analysis_state`` NULL, not an invented
+        value."""
         from services.governance.control_graph_types import reconcile_control_graph_types
 
         c = self._proto_contract(pg_session, "0x" + "b7" * 20)
@@ -1998,8 +1856,6 @@ class TestControlGraphTypeReconciliation:
         assert self._node_analysis_state(pg_session, c.id, addr) is None
 
     def test_determined_analysis_state_never_overwritten(self, pg_session):
-        """A state the walk DID determine (here ``attempt_failed``) survives the
-        type fold — the heal only fills NULL."""
         from db.models import ControlGraphNode
         from services.governance.control_graph_types import reconcile_control_graph_types
 
@@ -2027,22 +1883,12 @@ class TestControlGraphTypeReconciliation:
 class TestTrackingPlanNotDetermined:
     """Not-determined vs. found-nothing at the enrollment boundary.
 
-    ``_load_tracking_plan_artifacts`` returns no topics in four different
-    situations and exactly one of them is a finding about the contract.
-    Enrollment degrades to the baseline registry in all four, but the persisted
-    ``monitoring_config`` must not present the other three as the first — a
-    config with no ``tracked_topics`` is otherwise read as "the analyzer found
-    nothing to track on this contract".
-
-    Every case here goes through the real ``find_by_address`` against real
-    ``contract_materializations`` rows, because the collapse being tested is
-    inside that function: it returns ``None`` for *no row*, for *not ready*,
-    and for *superseded analysis_schema_version* alike. Stubbing it out is how
-    the hole stayed open.
-
-    Row shapes mirror the working DB's 85 joinable monitored contracts:
-    35 with no current materialization (positive), 5 read-with-zero-topics
-    (negative control), 45 read-with-topics.
+    ``_load_tracking_plan_artifacts`` returns no topics in four situations and only one is a finding. Enrollment
+    degrades to the baseline registry in all four, but ``monitoring_config`` must not present the other three as a
+    finding. Every case uses the real ``find_by_address`` against real ``contract_materializations`` rows, because the
+    collapse is inside it (``None`` for no row, not ready, and superseded schema alike); stubbing it hid the hole.
+    Row shapes mirror the working DB's 85 joinable contracts: 35 no materialization, 5 read-with-zero-topics, 45
+    read-with-topics.
     """
 
     # An event topic0 the hand-rolled registry does not already own, so
@@ -2067,7 +1913,6 @@ class TestTrackingPlanNotDetermined:
 
     @pytest.fixture()
     def materialization_factory(self, pg_session):
-        """Insert real ContractMaterialization rows; drop them afterwards."""
         from db.models import ContractMaterialization
 
         made: list[tuple[str, str]] = []
@@ -2106,13 +1951,8 @@ class TestTrackingPlanNotDetermined:
             pg_session.commit()
 
     def test_no_materialization_row_is_not_determined(self, pg_session, materialization_factory):
-        """POSITIVE CONTROL, 35 of 85 rows in the working DB.
-
-        Mirrors ``0x02904af5c3be78481528e0f01780439f024109a6`` (RolesAuthority,
-        ethereum): monitored, zero materialization rows, so ``find_by_address``
-        returns ``None``. Nothing has ever read a tracking plan for it, and the
-        empty ``tracked_topics`` that results must not be persisted bare.
-        """
+        """POSITIVE CONTROL, 35 of 85 rows. Mirrors ``0x02904af5…`` (RolesAuthority, ethereum): no materialization
+        row, so nothing ever read a tracking plan and the empty ``tracked_topics`` must not be persisted bare."""
         from services.monitoring import enrollment as enr
 
         contract = SimpleNamespace(address="0x" + "11" * 20, chain="ethereum")
@@ -2126,16 +1966,9 @@ class TestTrackingPlanNotDetermined:
         assert config["tracking_plan_not_determined"] == "no_current_materialization"
 
     def test_superseded_schema_version_is_not_determined(self, pg_session, materialization_factory):
-        """POSITIVE CONTROL, the subtle arm of the same collapse.
-
-        A ``status='ready'`` row holding a plan with real governance events,
-        stamped at a superseded ``analysis_schema_version``. ``find_by_address``
-        reads that as a miss on purpose ("so a bumped analyzer rebuilds rather
-        than serving a stale bundle") — which is a statement about our
-        analyzer, not about the contract. Publishing zero tracked_topics here
-        would assert that a contract with a ``GuardianChanged`` event has no
-        governance events at all.
-        """
+        """POSITIVE CONTROL, the subtle arm: a ``ready`` row with real governance events at a superseded
+        ``analysis_schema_version``. ``find_by_address`` reads that as a miss on purpose, a statement about our
+        analyzer; publishing zero topics would claim a ``GuardianChanged`` contract has no governance events."""
         from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
         from services.monitoring import enrollment as enr
 
@@ -2155,7 +1988,6 @@ class TestTrackingPlanNotDetermined:
         assert config["tracking_plan_not_determined"] == "no_current_materialization"
 
     def test_unready_row_is_not_determined(self, pg_session, materialization_factory):
-        """POSITIVE CONTROL, third arm: a build still in flight."""
         from services.monitoring import enrollment as enr
 
         address = "0x" + "44" * 20
@@ -2166,12 +1998,8 @@ class TestTrackingPlanNotDetermined:
         assert not_determined == "no_current_materialization"
 
     def test_unreadable_plan_is_stamped_with_its_own_reason(self, pg_session, materialization_factory, monkeypatch):
-        """POSITIVE CONTROL: the row is current, the bucket will not answer.
-
-        Distinct token from the three ``find_by_address`` arms — an outage and
-        a missing materialization are both not-determined but not the same
-        remedy.
-        """
+        """POSITIVE CONTROL: the row is current but the bucket will not answer; a distinct token, since an outage and a
+        missing materialization have different remedies."""
         from db.storage import StorageContentNotDetermined
         from services.monitoring import enrollment as enr
 
@@ -2194,10 +2022,8 @@ class TestTrackingPlanNotDetermined:
     def test_a_plan_object_the_bucket_says_is_gone_gets_its_own_token(
         self, pg_session, materialization_factory, monkeypatch
     ):
-        """POSITIVE CONTROL, fourth arm: the bucket answered, and it holds no
-        such object. Not the same token as an unreachable bucket — that one may
-        answer on the next tick, this one will read the same forever, and the
-        operator remedy differs (re-materialize vs wait)."""
+        """POSITIVE CONTROL, fourth arm: the bucket holds no such object. Distinct from an unreachable bucket (may
+        answer next tick; this reads the same forever), and the remedy differs (re-materialize vs wait)."""
         from db.storage import StorageContentAbsent
         from services.monitoring import enrollment as enr
 
@@ -2218,20 +2044,10 @@ class TestTrackingPlanNotDetermined:
         assert config["tracking_plan_not_determined"] == "plan_object_absent"
 
     def test_a_read_plan_with_no_events_stays_clean(self, pg_session, materialization_factory):
-        """NEGATIVE CONTROL, 5 of 85 rows in the working DB.
-
-        Mirrors ``0x28a6e7ebb6aca8f64145952a9565245c3dc1f32f`` (PriceProvider,
-        ethereum): ready, current schema version, ``tracking_plan`` actually
-        hydrates to a dict, and the analyzer derived no governance events. This
-        is the one shape where an empty ``tracked_topics`` is a finding: it is
-        witnessed as the PRESENT empty list, with no not-determined flag — a
-        fix that stamped every empty config would erase the distinction it
-        exists to make, and one that omitted the key would make the finding
-        indistinguishable from rows the builder never produced.
-
-        The plan is read through the real ``hydrate_tracking_plan``; nothing is
-        stubbed.
-        """
+        """NEGATIVE CONTROL, 5 of 85 rows. Mirrors ``0x28a6e7eb…`` (PriceProvider, ethereum): ready, current schema,
+        plan hydrates, no governance events. The one shape where empty ``tracked_topics`` is a finding: the PRESENT
+        empty list with no not-determined flag. Stamping every empty config would erase the distinction; omitting
+        the key would blur it with rows the builder never produced. Uses the real ``hydrate_tracking_plan``."""
         from services.monitoring import enrollment as enr
 
         address = "0x" + "66" * 20
@@ -2248,7 +2064,6 @@ class TestTrackingPlanNotDetermined:
         assert "tracking_plan_not_determined" not in config
 
     def test_a_read_plan_with_events_stays_clean_and_publishes_them(self, pg_session, materialization_factory):
-        """NEGATIVE CONTROL, 45 of 85 rows: proven-present is untouched."""
         from services.monitoring import enrollment as enr
 
         address = "0x" + "77" * 20
@@ -2264,13 +2079,8 @@ class TestTrackingPlanNotDetermined:
         assert "tracking_plan_not_determined" not in config
 
     def test_unanalyzed_primary_controller_config_is_flagged(self):
-        """The second ``_build_monitoring_config`` call site.
-
-        Primary controllers are enrolled without ever being analyzed, so their
-        config is built with ``tracking_plan=None``. That empty
-        ``tracked_topics`` is the absence of a question, and it reads as a
-        finding unless it is stamped.
-        """
+        """The second ``_build_monitoring_config`` call site: primary controllers are enrolled without analysis
+        (``tracking_plan=None``), so their empty ``tracked_topics`` reads as a finding unless stamped."""
         from services.monitoring import enrollment as enr
 
         config = enr._build_monitoring_config(

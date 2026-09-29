@@ -1,13 +1,8 @@
 """The cross-contract join matches a caller's body sink against the callee's OWN
-canonical selector. So the emitter must record a *canonical* selector for a
-direct high-level call, lowering user-defined parameter types the same way the
-callee's selector was derived — otherwise a call to a sibling function taking a
-struct / enum / interface parameter joins on a keccak of ``addAsset(ERC20)`` that
-is not the real EVM selector, and the claim silently fails to propagate.
-
-A LibraryCall's callee is a library internal with no external selector, and
-nothing joins against it, so its notional selector is left untouched (its shape
-is ubiquitous — churning it would bury the real change).
+canonical selector, so the emitter must record a canonical selector for a direct
+high-level call, lowering struct / enum / interface params as the callee did;
+otherwise the join keys on a keccak of ``addAsset(ERC20)`` and the claim silently
+fails to propagate. A LibraryCall has no external selector and is left untouched.
 """
 
 from __future__ import annotations

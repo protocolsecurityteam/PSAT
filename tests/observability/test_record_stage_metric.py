@@ -1,10 +1,8 @@
 """Unit tests for ``utils.logging.record_stage_metric``.
 
-Mirrors ``test_record_degraded`` — same per-job contextvar accumulator
-pattern, just a dict of progress metrics instead of a list of errors. The
-metrics are folded into the ``stage_timing_<stage>`` artifact by
-``BaseWorker`` so the monitoring UI can show what a stage did without
-scraping logs.
+Mirrors ``test_record_degraded`` with a dict of progress metrics instead of an error list;
+``BaseWorker`` folds them into ``stage_timing_<stage>`` so the monitoring UI shows what a stage
+did without scraping logs.
 """
 
 from __future__ import annotations
@@ -15,7 +13,6 @@ from utils.logging import bind_trace_context, record_stage_metric, stage_metrics
 
 
 def test_record_stage_metric_outside_job_context_is_noop():
-    # No accumulator bound — call must not crash and must not write anywhere.
     record_stage_metric("dependencies", 7)
     # The contextvar default stays None.
     assert stage_metrics_var.get() is None
@@ -36,8 +33,7 @@ def test_record_stage_metric_writes_into_accumulator():
 
 
 def test_record_stage_metric_last_write_wins():
-    """A worker can update a running total — later writes overwrite earlier
-    ones for the same key."""
+    """A worker can update a running total: later writes overwrite earlier ones."""
     metrics: dict = {}
     token = stage_metrics_var.set(metrics)
     try:

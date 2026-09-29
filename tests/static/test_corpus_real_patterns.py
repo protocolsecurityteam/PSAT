@@ -1,28 +1,13 @@
 """Corpus tests — real-world auth patterns end-to-end.
 
-Each test compiles a structurally-faithful version of a canonical
-production control pattern, runs it through the full
-predicate pipeline (provenance → predicate builder → writer-gate
-→ reentrancy/pause → capability evaluator), and asserts the
-expected CapabilityExpr shape.
+Each test compiles a structurally-faithful version of a canonical production control
+pattern, runs the full predicate pipeline (provenance, predicate builder, writer-gate,
+reentrancy/pause, capability evaluator) and asserts the CapabilityExpr shape. These are
+structural fidelity tests, not protocol-bytecode pinning (which needs on-chain fixtures).
 
-These are not protocol-bytecode pinning tests (those require
-on-chain fixtures + an indexer running). They're structural
-fidelity tests: "given source matching this canonical pattern, the
-pipeline emits the right capability shape."
-
-Patterns covered:
-  - OZ role mapping ``grantRole`` via onlyRole modifier with
-    ``_checkRole(getRoleAdmin(role))`` two-hop helper chain
-  - OZ Ownable (single-owner check via require)
-  - OZ Pausable (pause flag toggled by admin)
-  - OZ ReentrancyGuard (status pre/post placeholder)
-  - Maker DSS-style ``wards[ilk][user] == 1`` self-administered ACL
-  - Gnosis Safe-style ``execTransaction`` (threshold_group via
-    signature_auth — abbreviated)
-  - external oracle call returning a boolean
-  - DSAuth-style ``canCall`` external oracle
-  - EIP-1271 contract-signature gate
+Patterns: OZ role mapping (``grantRole`` via onlyRole / ``_checkRole(getRoleAdmin(role))``),
+OZ Ownable / Pausable / ReentrancyGuard, Maker DSS ``wards``, Gnosis Safe-style
+``execTransaction`` (abbreviated), external boolean oracle, DSAuth ``canCall``, EIP-1271.
 """
 
 from __future__ import annotations
@@ -112,9 +97,6 @@ class FakeEventLogRepo:
 
 
 def test_oz_ownable_pattern(tmp_path):
-    """``modifier onlyOwner() { require(msg.sender == _owner); _; }``
-    function f() onlyOwner — predicate tree should classify the
-    leaf as caller_authority via the modifier walk."""
     sl = _compile(
         tmp_path,
         """
@@ -148,16 +130,12 @@ def test_oz_ownable_pattern(tmp_path):
 
 
 def test_oz_role_mapping_full_3_hop_helper_chain(tmp_path):
-    """The actual production OZ role mapping (5.0+) uses a 3-hop
-    helper chain:
+    """The production OZ role mapping (5.0+) uses a 3-hop helper chain:
 
-      onlyRole(role)
-        → _checkRole(role)
-          → _checkRoleAddr(role, _msgSender())
-            → if (!hasRole(role, account)) revert ...
+      onlyRole(role) → _checkRole(role) → _checkRoleAddr(role, _msgSender())
+        → if (!hasRole(role, account)) revert ...
 
-    Pins the ParameterBindingEnv gap until full caller-side
-    substitution lands."""
+    Pins the ParameterBindingEnv gap until full caller-side substitution lands."""
     sl = _compile(
         tmp_path,
         """
@@ -211,19 +189,13 @@ def test_oz_role_mapping_full_3_hop_helper_chain(tmp_path):
 
 
 def test_oz_role_mapping_grantrole_via_onlyrole(tmp_path):
-    """The OZ role-mapping ``grantRole`` is gated by ``onlyRole(
-    getRoleAdmin(role))`` which dispatches to ``_checkRole`` which
-    contains the ``hasRole`` membership check. This is the
-    canonical EtherFiTimelock pattern and the original motivation
-    for the rewrite.
+    """``grantRole`` gated by ``onlyRole(getRoleAdmin(role))`` — the canonical
+    EtherFiTimelock pattern and the original motivation for the rewrite.
 
-    LANDED via cross-function revert detection: RevertDetector
-    now recurses into InternalCall callees (bounded depth) and
-    the predicate builder uses gate.containing_function to walk
-    the condition's defining IR through the helper's scope. The
-    membership leaf inside _checkRole has 2 keys (role param +
-    msg.sender) → caller_authority via Rule B's multi-key
-    direct-promote.
+    Works via cross-function revert detection: RevertDetector recurses into InternalCall
+    callees (bounded depth) and the predicate builder walks the condition's defining IR
+    through the helper's scope, so the 2-key membership leaf inside _checkRole promotes
+    to caller_authority via Rule B.
     """
     sl = _compile(
         tmp_path,
@@ -308,8 +280,6 @@ def test_revert_message_helpers_do_not_become_guards(tmp_path):
 
 
 def test_oz_role_mapping_inline_check(tmp_path):
-    """Some AC contracts inline the role check directly in the
-    function body — this case the pipeline DOES handle today."""
     sl = _compile(
         tmp_path,
         """
@@ -340,8 +310,6 @@ def test_oz_role_mapping_inline_check(tmp_path):
 
 
 def test_oz_pausable_pattern(tmp_path):
-    """``modifier whenNotPaused() { require(!_paused); _; }`` plus
-    an admin-gated ``pause()`` writer."""
     sl = _compile(
         tmp_path,
         """
@@ -411,9 +379,8 @@ def test_oz_reentrancy_guard_pattern(tmp_path):
 
 
 def test_maker_wards_pattern(tmp_path):
-    """Maker uses ``wards[user] == 1`` as the canonical auth check.
-    ``rely(addr)`` is gated by the same ``wards[msg.sender] == 1``
-    (self-administered). My v6 b.ii promotion handles this."""
+    """``rely(addr)`` is gated by the same ``wards[msg.sender] == 1`` (self-administered)
+    as Maker's canonical auth check. My v6 b.ii promotion handles this."""
     sl = _compile(
         tmp_path,
         """
@@ -490,10 +457,8 @@ def test_mapping_value_predicate_polarity_folds_neq_to_eq(tmp_path):
 
 
 def test_owner_or_business_or_branch_preserved(tmp_path):
-    """``require(msg.sender == owner || amount > minThreshold)`` —
-    per codex round-3 blocker #2, business condition must be
-    preserved under OR. Capability is a structural OR of finite_set
-    + conditional_universal."""
+    """``require(msg.sender == owner || amount > minThreshold)`` — per codex round-3
+    blocker #2, the business condition must be preserved under OR."""
     sl = _compile(
         tmp_path,
         """
@@ -525,8 +490,7 @@ def test_owner_or_business_or_branch_preserved(tmp_path):
 
 
 def test_combined_authority_and_side_conditions(tmp_path):
-    """Real production functions stack auth + reentrancy + pause.
-    The predicate tree is AND of all three; capability evaluator
+    """Real production functions stack auth + reentrancy + pause; the capability evaluator
     intersects them, with side conditions appended."""
     sl = _compile(
         tmp_path,
@@ -588,8 +552,6 @@ def test_combined_authority_and_side_conditions(tmp_path):
 
 
 def test_role_shaped_mapping_with_populated_event_repo_resolves_members(tmp_path):
-    """When a descriptor carries an event hint and the generic event repo
-    has matching members, the resolver enumerates them."""
     sl = _compile(
         tmp_path,
         """

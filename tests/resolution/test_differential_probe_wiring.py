@@ -68,7 +68,6 @@ def test_should_probe_only_gated_unknown_external_check():
         _should_differential_probe(CapabilityExpr.external_check_only(ExternalCheck(None, "0x1", extra=deferred_extra)))
         is False
     )
-    # Other kinds are already resolved — not the probe's job.
     assert _should_differential_probe(CapabilityExpr.finite_set(["0x" + "11" * 20])) is False
     assert _should_differential_probe(CapabilityExpr.unsupported("x")) is False
 
@@ -88,10 +87,8 @@ def test_apply_public_result_mints_conditional_universal_that_projects_public():
     )
     opened = _apply_probe_result(cap, result)
     assert opened.kind == "conditional_universal"
-    # Transcript travels into the persisted capability (replayable, §6.1).
     cap_dict = capability_to_dict(opened)
     assert any(step.get("step") == "differential_probe" for step in cap_dict.get("trace", []))
-    # And it re-projects to a PUBLIC verdict.
     surface = project_capability_surface(cap_dict)
     assert surface.authority_public is True
     assert capability_surface_status(cap_dict, surface) == "public"

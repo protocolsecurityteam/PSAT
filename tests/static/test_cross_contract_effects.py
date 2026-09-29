@@ -1,13 +1,9 @@
 """Cross-contract policy-derived claim tests (unit layer).
 
-Drives the real production functions in ``services.static.cross_contract`` — the
-registry, ``emit_claim``, ``resolve_claim_precedence``, and every derivation —
-over ``effects``-shaped fact dicts (input data, not faked collaborators). No
-Slither/DB, so these run in every offline suite.
-
-The legacy propagate-every-effect-label rule is gone: these assert typed
-``policy_derived`` claims only, and that a control-plane label never rides across
-a call boundary.
+Drives the real ``services.static.cross_contract`` functions over ``effects``-shaped fact
+dicts (no Slither/DB). The legacy propagate-every-effect-label rule is gone: these assert
+typed ``policy_derived`` claims only, and that a control-plane label never rides across a
+call boundary.
 """
 
 from __future__ import annotations
@@ -312,8 +308,6 @@ def test_provenance_upgrade_emits_policy_derived():
 
 
 def test_provenance_does_not_override_static_standard_exact():
-    """A static standard_exact upgrade claim on the same function survives the
-    per-function precedence merge; the policy_derived duplicate is dropped."""
     from services.static.claims import Claim, resolve_claim_precedence
 
     pp = proxy_provenance_from_classifications(
@@ -409,9 +403,7 @@ def test_interface_param_callee_joins_via_the_canonical_key():
 
 
 def test_unstamped_interface_param_callee_still_misses_honestly():
-    """An artifact minted before the stamp existed carries no canonical key.
-    Absence is not-determined: the join must NOT guess a lowering, so the
-    pre-fix miss is preserved rather than a claim being manufactured."""
+    """A pre-stamp artifact has no canonical key; absence is not-determined, so the join must not guess a lowering."""
     callee_map = build_callee_claim_map({TOKEN: _interface_param_callee([_std("flow.out")], stamped=False)})
     assert CANONICAL_SWEEP_TO not in callee_map[TOKEN]
     target = _caller("recoverVia(address,address,uint256)", [_external_sink("recovery.sweepTo", CANONICAL_SWEEP_TO)])
@@ -431,8 +423,6 @@ def test_non_propagatable_claims_never_join_even_via_the_canonical_key():
 
 
 def test_elementary_callee_is_not_double_counted_by_the_two_keys():
-    """When canonical == declared the two keys collapse to one map entry, so a
-    caller inherits the claim exactly once."""
     record = {"selector": TRANSFER_SELECTOR, "abi_selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}
     callee_map = build_callee_claim_map({TOKEN: {"functions": {"transfer(address,uint256)": record}}})
     assert list(callee_map[TOKEN]) == [TRANSFER_SELECTOR]

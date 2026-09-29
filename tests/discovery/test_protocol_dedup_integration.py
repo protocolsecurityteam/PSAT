@@ -1,19 +1,10 @@
 """Canonical-slug deduplication for the Protocol table.
 
-Regression test for the prod incident where two rows existed for ether.fi:
-the audit-discovery path created ``protocol_id=3`` ("etherfi") while the
-dapp-crawl/TVL path created ``protocol_id=2`` ("ether fi"). Both reached
-``get_or_create_protocol`` with different free-text strings, so the
-exact-name lookup missed and a duplicate row was inserted.
-
-The fix is canonical external IDs: every caller resolves the input to a
-DefiLlama slug first, and ``get_or_create_protocol`` keys on slug when
-one is provided. The fallback name-based path stays so protocols with no
-DefiLlama match (the resolver returns ``slug=None``) still work.
-
-Tests run against the real Postgres test DB (``db_session`` fixture in
-``tests/conftest.py``). The DefiLlama HTTP call is stubbed at the
-``resolve_protocol`` boundary — that's the seam the workers cross.
+Regression for the prod incident where ether.fi got two rows (``protocol_id=3``
+"etherfi" from audit discovery, ``protocol_id=2`` "ether fi" from dapp-crawl/TVL)
+because free-text names missed the exact-name lookup. Callers now resolve to a
+DefiLlama slug first and ``get_or_create_protocol`` keys on it, keeping the name
+path for ``slug=None``. Real test DB; DefiLlama stubbed at ``resolve_protocol``.
 """
 
 from __future__ import annotations
@@ -32,9 +23,8 @@ pytestmark = [requires_postgres]
 # Resolver stub
 # ---------------------------------------------------------------------------
 
-# All three free-text spellings of ether.fi must resolve to the same family
-# slug — that's the whole point of routing through DefiLlama. The stub mirrors
-# the real resolver's output shape (slug + name + url + chains + all_slugs).
+# All three ether.fi spellings must resolve to the same family slug; the stub
+# mirrors the real resolver's output shape.
 _ETHERFI = {
     "slug": "ether.fi-stake",
     "name": "Ether.fi",
@@ -72,13 +62,8 @@ _RESOLVER_TABLE = {
 
 @pytest.fixture()
 def stub_resolver(monkeypatch):
-    """Replace ``resolve_protocol`` with a deterministic in-memory table.
-
-    The real resolver fetches DefiLlama over HTTP; integration tests can't
-    rely on that. The stub returns the same dict shape, keyed off the input
-    string, so the worker glue (resolve → pick family slug → upsert) works
-    end-to-end.
-    """
+    """Replace ``resolve_protocol`` with a deterministic in-memory table (same
+    dict shape as the real DefiLlama-backed resolver)."""
 
     def _fake_resolve(name: str) -> dict:
         return _RESOLVER_TABLE.get(name, _NO_MATCH)
@@ -88,14 +73,8 @@ def stub_resolver(monkeypatch):
 
 
 def _resolve_and_create(session, name: str, official_domain: str | None = None) -> Protocol:
-    """Mirror what discovery workers do: resolve → pick family slug → upsert.
-
-    Workers receive free-text input (a user-typed company name, a github
-    org, a hostname). They resolve it to a DefiLlama family slug, then
-    hand both name and slug to ``get_or_create_protocol``. This helper
-    bundles those two steps so the integration tests exercise the full
-    code path the prod incident took.
-    """
+    """Mirror the discovery workers: resolve free-text input, pick the family
+    slug, upsert — the code path the prod incident took."""
     from services.discovery.protocol_resolver import pick_family_slug, resolve_protocol
 
     resolved = resolve_protocol(name)
@@ -128,10 +107,9 @@ def test_same_input_twice_yields_one_row(db_session, stub_resolver):
 
 
 def test_whitespace_variants_dedupe_via_slug(db_session, stub_resolver):
-    """``ether fi`` (TVL/dapp-crawl path) and ``etherfi`` (github-org path)
-    must collapse to ONE row. Pre-fix this produced two rows — protocol_id=2
-    and protocol_id=3 in prod, with audits and contracts split across them.
-    """
+    """``ether fi`` (TVL/dapp-crawl) and ``etherfi`` (github-org) must collapse
+    to ONE row; pre-fix prod had two (protocol_id=2 and 3) with audits and
+    contracts split."""
     p1 = _resolve_and_create(db_session, "ether fi", official_domain="ether.fi")
     db_session.commit()
     p2 = _resolve_and_create(db_session, "etherfi", official_domain="ether.fi")
@@ -162,10 +140,8 @@ def test_case_variants_dedupe_via_slug(db_session, stub_resolver):
 
 
 def test_distinct_slugs_keep_protocols_separate(db_session, stub_resolver):
-    """Yearn V2 and Yearn V3 share a brand but are independent DefiLlama
-    entries with distinct slugs. Slug-based lookup must keep them apart —
-    this is why naive normalization (lowercase / strip-punct) was rejected.
-    """
+    """Yearn V2 and V3 are independent DefiLlama entries; slug lookup must keep
+    them apart (why naive normalization was rejected)."""
     p_v2 = _resolve_and_create(db_session, "Yearn V2")
     db_session.commit()
     p_v3 = _resolve_and_create(db_session, "Yearn V3")
@@ -181,11 +157,8 @@ def test_distinct_slugs_keep_protocols_separate(db_session, stub_resolver):
 
 
 def test_no_slug_fallback_uses_name_lookup(db_session, stub_resolver):
-    """When the resolver returns ``slug=None`` (no DefiLlama match), the
-    function must fall back to the legacy name-keyed lookup. This is the
-    'long-tail / private protocol' path — without it those discoveries
-    can't be persisted at all.
-    """
+    """``slug=None`` (no DefiLlama match) falls back to the legacy name-keyed
+    lookup — the long-tail / private protocol path."""
     p1 = _resolve_and_create(db_session, "obscure-private-protocol")
     db_session.commit()
     p2 = _resolve_and_create(db_session, "obscure-private-protocol")
@@ -197,17 +170,12 @@ def test_no_slug_fallback_uses_name_lookup(db_session, stub_resolver):
 
 
 def test_no_slug_then_slug_backfills_canonical(db_session, stub_resolver):
-    """A row first persisted name-only (resolver miss) should be reused
-    when a later resolution succeeds for the same display name. Avoids
-    double-rowing protocols whose DefiLlama listing arrives later.
-    """
-    # First call: resolver returns no match, row keyed by name.
+    """A row first persisted name-only is reused when a later resolution succeeds
+    for the same display name, avoiding double rows once a listing arrives."""
     p1 = _resolve_and_create(db_session, "Ether.fi")  # not in RESOLVER_TABLE → no slug
     db_session.commit()
     assert p1.canonical_slug is None
 
-    # Second call: same display name, but now the slug is known. The same
-    # row is reused and ``canonical_slug`` is filled in.
     p2 = get_or_create_protocol(
         db_session,
         "Ether.fi",

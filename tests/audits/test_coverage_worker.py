@@ -1,11 +1,6 @@
-"""Unit tests for the end-of-pipeline ``CoverageWorker``.
-
-Exercises the readiness-gated claim, the stuck-job escape hatch, and the
-source-equivalence-enabled refresh path. Network calls into
-``services.audits.source_equivalence`` are stubbed at module scope so
-the real coverage code runs end-to-end without GitHub / Etherscan
-traffic — per the test-hygiene rule: never rely on env-var-controlled
-divergence; stub the network helpers directly.
+"""Unit tests for the end-of-pipeline ``CoverageWorker``: readiness-gated claim, stuck-job escape hatch, and the
+source-equivalence refresh path. Network helpers in ``source_equivalence`` are stubbed at module scope (test-hygiene
+rule: never rely on env-var-controlled divergence), so real coverage code runs with no GitHub/Etherscan traffic.
 """
 
 from __future__ import annotations
@@ -26,18 +21,10 @@ pytestmark = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Network-stubbing fixture — every test in this module gets it.
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(autouse=True)
 def _stub_source_equivalence_network(monkeypatch):
-    """Replace GitHub + Etherscan helpers with deterministic no-ops.
-
-    Tests that need a positive equivalence result override these with a
-    local monkeypatch; by default both return None so no match is proven
-    and the temporal matcher's answer stands.
+    """Replace GitHub + Etherscan helpers with no-ops returning None, so no match is proven and the temporal
+    matcher's answer stands; positive-proof tests override locally.
     """
     from services.audits import source_equivalence
 
@@ -45,18 +32,10 @@ def _stub_source_equivalence_network(monkeypatch):
     monkeypatch.setattr(source_equivalence, "fetch_etherscan_source_files", lambda *a, **k: None)
 
 
-# ---------------------------------------------------------------------------
-# Seeding helpers
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def worker():
-    """CoverageWorker with signals patched so pytest's handlers aren't touched.
-
-    Tests call ``_claim_next_job``, ``_claim_stuck_job``, and ``process``
-    directly against ``db_session``; the inherited ``run_loop`` (which
-    opens its own ``SessionLocal``) is never exercised here.
+    """CoverageWorker with signals patched so pytest's handlers aren't touched. Tests call ``_claim_next_job``,
+    ``_claim_stuck_job`` and ``process`` directly; the inherited ``run_loop`` is never exercised.
     """
     from unittest.mock import patch
 
@@ -68,7 +47,6 @@ def worker():
 
 @pytest.fixture()
 def seed_protocol(db_session):
-    """Bare protocol with cleanup of cascading rows + lingering Jobs."""
     from db.models import AuditContractCoverage, AuditReport, Contract, Job, Protocol, UpgradeEvent
 
     name = f"cov-worker-{uuid.uuid4().hex[:10]}"
@@ -122,7 +100,6 @@ def _add_job(
     address: str = "0x" + "e" * 40,
     updated_at: datetime | None = None,
 ):
-    """Insert a Job at the given stage/status, optionally backdated."""
     from db.models import Job
 
     j = Job(
@@ -156,7 +133,6 @@ def _add_audit(
     scope: list[str] | None = None,
     date: str | None = "2024-06-01",
 ):
-    """Create an AuditReport in a specific (text, scope) state pair."""
     from db.models import AuditReport
 
     ar = AuditReport(
@@ -181,14 +157,9 @@ def _add_audit(
 
 
 def test_coverage_worker_claims_and_writes_when_ready(db_session, seed_protocol, worker):
-    """Audit is fully scoped, job is queued at stage=coverage → claim
-    succeeds, process() writes one coverage row for the contract whose
-    name matches scope, and advance_job routes it to done.
-    """
     from db.models import AuditContractCoverage, JobStage, JobStatus
 
     protocol_id, _ = seed_protocol
-    # Contract linked via job_id so the worker's Contract-by-job lookup succeeds.
     job = _add_job(
         db_session,
         protocol_id=protocol_id,
@@ -202,7 +173,6 @@ def test_coverage_worker_claims_and_writes_when_ready(db_session, seed_protocol,
         address="0x" + "a" * 40,
         job_id=job.id,
     )
-    # Audit scoping "Pool" — settled via text+scope success.
     _add_audit(
         db_session,
         protocol_id=protocol_id,
@@ -231,11 +201,8 @@ def test_coverage_worker_claims_and_writes_when_ready(db_session, seed_protocol,
 
 
 def test_coverage_worker_writes_pending_when_audit_is_verifiable(db_session, seed_protocol, worker, monkeypatch):
-    """A scope-completed audit with reviewed_commits + source_repo populated
-    must produce a row with ``equivalence_status='pending'`` after
-    ``process()`` — the verify worker takes it from there. The coverage
-    worker itself MUST NOT make any GitHub / Etherscan HTTP calls; that's
-    the whole point of the deferred-verify split (#82).
+    """A scope-completed audit with reviewed_commits + source_repo yields ``equivalence_status='pending'`` and the
+    coverage worker makes NO GitHub/Etherscan calls; that's the point of the deferred-verify split (#82).
     """
     from db.models import AuditContractCoverage, JobStage, JobStatus
     from services.audits import source_equivalence
@@ -292,19 +259,14 @@ def test_coverage_worker_writes_pending_when_audit_is_verifiable(db_session, see
         .all()
     )
     assert len(rows) == 1
-    # Heuristic match still emitted synchronously…
     assert rows[0].match_type == "direct"
-    # …but cryptographic verification is deferred.
     assert rows[0].equivalence_status == "pending"
-    # And the worker stayed off the network.
     assert calls == {"github": 0, "etherscan": 0}
 
 
 def test_coverage_worker_then_verify_worker_upgrades_to_reviewed_commit(db_session, seed_protocol, worker, monkeypatch):
-    """End-to-end deferred path: coverage worker writes a pending row, then
-    ``verify_one_coverage_row`` (the per-row entry point the verify worker
-    calls) upgrades it to ``reviewed_commit/high`` once the source-
-    equivalence proof goes through.
+    """Deferred path end to end: the coverage worker writes a pending row, then ``verify_one_coverage_row`` upgrades
+    it to ``reviewed_commit/high`` once the proof goes through.
     """
     from db.models import AuditContractCoverage, JobStage, JobStatus
     from services.audits import source_equivalence
@@ -360,7 +322,6 @@ def test_coverage_worker_then_verify_worker_upgrades_to_reviewed_commit(db_sessi
         ),
     )
 
-    # Phase 1: coverage worker lands a pending row.
     claimed = worker._claim_next_job(db_session)
     assert claimed is not None
     worker.process(db_session, claimed)
@@ -375,9 +336,7 @@ def test_coverage_worker_then_verify_worker_upgrades_to_reviewed_commit(db_sessi
     assert row.match_type == "direct"
     assert row.equivalence_status == "pending"
 
-    # Phase 2: drive the per-row verify entry point. The verify worker
-    # calls this from its thread pool; testing it directly keeps the
-    # assertions focused on the row-level behavior.
+    # Phase 2: drive the per-row verify entry point directly to keep assertions row-level.
     status = verify_one_coverage_row(db_session, row.id)
     db_session.commit()
     assert status == "proven"
@@ -396,9 +355,8 @@ def test_coverage_worker_then_verify_worker_upgrades_to_reviewed_commit(db_sessi
 
 
 def test_coverage_worker_waits_for_text_extraction(db_session, seed_protocol, worker):
-    """An audit whose text_extraction_status='processing' keeps readiness
-    false → claim returns None. Once it's flipped to success + scope
-    success, the next claim picks the job up.
+    """A processing text extraction keeps readiness false (claim returns None); once text + scope succeed, the next
+    claim picks the job up.
     """
     from db.models import AuditReport, JobStage, JobStatus
 
@@ -423,16 +381,13 @@ def test_coverage_worker_waits_for_text_extraction(db_session, seed_protocol, wo
         scope_status=None,
     )
 
-    # Readiness predicate is false — claim returns nothing.
     assert worker._claim_next_job(db_session) is None
 
-    # Flip text → success but leave scope NULL. Still blocked (scope mid-flight).
     ar = db_session.get(AuditReport, audit.id)
     ar.text_extraction_status = "success"
     db_session.commit()
     assert worker._claim_next_job(db_session) is None
 
-    # Now mark scope success with a non-matching scope. Settled → claim succeeds.
     ar = db_session.get(AuditReport, audit.id)
     ar.scope_extraction_status = "success"
     ar.scope_contracts = ["SomethingElse"]
@@ -444,10 +399,8 @@ def test_coverage_worker_waits_for_text_extraction(db_session, seed_protocol, wo
 
 
 def test_coverage_worker_unblocks_on_text_extraction_failure(db_session, seed_protocol, worker):
-    """An audit whose text extraction ``failed`` leaves scope_extraction_status
-    NULL forever. The readiness predicate must treat that as settled — NOT
-    blocked — otherwise a single bad PDF would wedge every coverage job in
-    the protocol until the stuck-job timeout kicked in.
+    """A failed text extraction leaves scope_extraction_status NULL forever; readiness must treat that as settled,
+    else one bad PDF wedges every coverage job in the protocol until the stuck-job timeout.
     """
     from db.models import JobStage, JobStatus
 
@@ -483,9 +436,8 @@ def test_coverage_worker_unblocks_on_text_extraction_failure(db_session, seed_pr
 
 
 def test_coverage_worker_claims_stuck_job_past_timeout(db_session, seed_protocol, worker, monkeypatch):
-    """Job has been at stage=coverage, status=queued for > timeout AND
-    an audit is still mid-flight (readiness predicate false). The stuck
-    claim path bypasses readiness so the job doesn't hang forever.
+    """Job queued at stage=coverage past the timeout with an audit still mid-flight: the stuck path bypasses
+    readiness so the job doesn't hang forever.
     """
     import workers.coverage_worker as worker_mod
     from db.models import JobStage, JobStatus
@@ -516,10 +468,8 @@ def test_coverage_worker_claims_stuck_job_past_timeout(db_session, seed_protocol
         job_id=job.id,
     )
 
-    # Readiness-gated claim still blocked by the processing audit.
     assert worker._claim_next_job(db_session) is None
 
-    # Stuck path picks it up.
     claimed = worker._claim_stuck_job(db_session)
     assert claimed is not None
     assert claimed.id == job.id
@@ -532,9 +482,8 @@ def test_coverage_worker_claims_stuck_job_past_timeout(db_session, seed_protocol
 
 
 def test_coverage_worker_claims_job_with_null_protocol(db_session, worker):
-    """A direct address job (no parent company → protocol_id NULL) has
-    no audits to wait on. The NOT EXISTS subquery is vacuously true, so
-    claim fires immediately and process() runs a no-op coverage refresh.
+    """A direct-address job (protocol_id NULL) has no audits to wait on: the NOT EXISTS subquery is vacuously true,
+    so claim fires immediately and process() is a no-op refresh.
     """
     from db.models import AuditContractCoverage, Contract, JobStage, JobStatus
 
@@ -578,9 +527,8 @@ def test_coverage_worker_claims_job_with_null_protocol(db_session, worker):
 
 
 def test_coverage_worker_handles_job_without_contract(db_session, seed_protocol, worker):
-    """If discovery/static never produced a Contract row for the job (e.g.
-    a cached-path reassignment edge case), process() should log and
-    return without crashing — the outer run_loop will then advance to done.
+    """No Contract row for the job (e.g. a cached-path reassignment edge case): process() logs and returns without
+    crashing so run_loop can advance to done.
     """
     from db.models import JobStage, JobStatus
 
@@ -591,12 +539,10 @@ def test_coverage_worker_handles_job_without_contract(db_session, seed_protocol,
         stage=JobStage.coverage,
         status=JobStatus.queued,
     )
-    # No Contract row for this job_id.
 
     claimed = worker._claim_next_job(db_session)
     assert claimed is not None
 
-    # Should not raise.
     worker.process(db_session, claimed)
     db_session.commit()
 
@@ -607,12 +553,8 @@ def test_coverage_worker_handles_job_without_contract(db_session, seed_protocol,
 
 
 def test_coverage_worker_makes_zero_http_calls_on_deferred_path(db_session, seed_protocol, worker, monkeypatch):
-    """The coverage worker MUST NOT touch GitHub / Etherscan even when the
-    audit looks ripe for source-equivalence verification. The whole
-    point of moving verify to a dedicated worker is that the synchronous
-    coverage write sees zero rate-limit-able traffic — that's how we
-    avoid the 4-way Etherscan burst that used to cascade-block other
-    workers behind the shared backoff sleep (#82).
+    """Even when an audit looks ripe for verification, the coverage worker makes zero GitHub/Etherscan calls; this
+    avoids the 4-way Etherscan burst that used to cascade-block other workers behind the shared backoff (#82).
     """
     from db.models import JobStage, JobStatus
     from services.audits import source_equivalence

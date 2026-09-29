@@ -1,16 +1,8 @@
-"""Regression: the effective-permissions function set covers every
-state-changing external/public ABI entry point, even when the authority
-gate and the state writes live in inline assembly the high-level IR can't
-see as a predicate tree or a sink.
-
-Drives the production stack: real Slither compile -> ``build_effects`` ->
-``build_effective_permissions``. The fixture mirrors the Solady
-``EnumerableRoles`` shape (RoleRegistry): ``setRole``/``grantRole``/
-``revokeRole`` mutate role storage via ``sstore`` and gate the caller via
-an assembly owner-read, so neither a sink nor a predicate tree is emitted.
-Such functions must surface as honest ``unsupported`` rows with no
-principals attached, rather than being silently dropped.
-"""
+"""Regression: the effective-permissions function set covers every state-changing
+external/public ABI entry point, even when the authority gate and state writes live
+in inline assembly (Solady ``EnumerableRoles`` shape) that yields neither a sink
+nor a predicate tree. Such functions must surface as ``unsupported`` rows with no
+principals, not be silently dropped. Runs real Slither -> effects -> permissions."""
 
 from __future__ import annotations
 
@@ -28,10 +20,8 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
     build_predicate_artifacts,
 )
 
-# A self-contained Solady EnumerableRoles-style contract. The role-storage
-# mutation and the owner gate are entirely inline assembly, exactly as in
-# Solady's library, so the high-level IR yields no state_write sink and no
-# caller_authority predicate leaf for the three mutators.
+# Solady EnumerableRoles-style: role-storage writes and the owner gate are all inline
+# assembly, so no state_write sink and no caller_authority predicate leaf.
 _SOLADY_ROLES_SOURCE = """
 pragma solidity ^0.8.19;
 
@@ -85,12 +75,9 @@ contract MiniEnumerableRoles {
 """
 
 
-# An EIP-1967-style proxy whose state write AND fallback delegatecall are
-# entirely inline assembly, and — critically — whose mutator ``takeOver`` has
-# NO high-level caller gate at all. Slither emits a ``SolidityCall sstore``
-# IR for the write (no predicate tree, no high-level state_variables_written),
-# so this mutator routes through the assembly-sink path, NOT the predicate-tree
-# path the Solady-roles fixture above exercises.
+# EIP-1967-style proxy: state write and fallback delegatecall are inline assembly, and
+# ``takeOver`` has NO high-level caller gate. Routes through the assembly-sink path,
+# not the predicate-tree path the Solady fixture exercises.
 _TAKEOVER_PROXY_SOURCE = """
 pragma solidity ^0.8.19;
 
@@ -152,8 +139,6 @@ def _build(roles_artifacts):
             "name": "MiniEnumerableRoles",
         },
     }
-    # The resolver ran but found no guard tree for the three mutators (their
-    # gate is invisible to the IR), so it produced no capability for them.
     return build_effective_permissions(
         analysis,
         effects=effects,
@@ -166,11 +151,7 @@ def test_assembly_only_mutators_surface_as_unsupported_rows(roles_artifacts):
     payload = _build(roles_artifacts)
     by_selector = {fn["selector"]: fn for fn in payload["functions"]}
 
-    # Both unsupported reasons describe an unresolved gate: the abi-mutability
-    # surface adds the row when the gate yields no tree at all
-    # (``assembly_only_authority_not_extracted``); when the IR does recover a
-    # tree but the resolver finds no semantic capability, the row is already
-    # produced under the tree union. Either way the function is visible,
+    # Either unsupported reason means an unresolved gate; the function stays visible,
     # gated, and principal-free.
     unsupported_gate_reasons = {
         "assembly_only_authority_not_extracted",
@@ -192,12 +173,10 @@ def test_assembly_only_mutators_surface_as_unsupported_rows(roles_artifacts):
 
 
 def test_abi_only_state_changer_uses_assembly_reason(roles_artifacts):
-    """A state-changing entry point that produced no sink, no predicate tree,
-    and no resolver capability is included via the ABI mutability surface and
-    flagged with the assembly-only reason — never projected public."""
+    """A state-changer with no sink, tree, or capability is included via the ABI
+    mutability surface with the assembly-only reason — never projected public."""
     effects, _ = roles_artifacts
     analysis = {"subject": {"address": "0x000000000000000000000000000000000000dead", "name": "Stub"}}
-    # A bare state-changing record with no sink and no covering tree/cap.
     effects_no_sink = {
         "schema_version": "semantic",
         "contract_name": "Stub",
@@ -227,7 +206,6 @@ def test_view_and_pure_reads_do_not_gain_rows(roles_artifacts):
     payload = _build(roles_artifacts)
     selectors = {fn["selector"] for fn in payload["functions"]}
 
-    # view/pure entry points are NOT part of the state-changing ABI surface.
     assert _selector("hasRole(address,uint256)") not in selectors
     assert _selector("MAX_ROLE()") not in selectors
 
@@ -248,18 +226,11 @@ def test_state_changing_flag_tracks_solidity_mutability(roles_artifacts):
 
 
 def test_assembly_writer_with_invisible_gate_stays_unsupported(takeover_artifacts):
-    """Co-land guard regression: an assembly state writer whose gate is NOT
-    extractable as a predicate tree must route through the *assembly-sink*
-    guard (``assembly_only_signatures``), not the abi-only or predicate-tree
-    branches.
+    """An assembly state writer whose gate is not extractable as a predicate tree must
+    route through the assembly-sink guard (``assembly_only_signatures``).
 
-    ``takeOver`` carries an inline-assembly ``sstore`` sink (so it is removed
-    from ``abi_only_signatures``) and produces no predicate tree (so it is not
-    caught by ``missing_semantic_capability_for_predicate_tree``). The ONLY
-    thing keeping it ``unsupported`` is the assembly-sink guard added by this
-    fix; with that guard removed it projects ``public`` (verified manually).
-    The two structural asserts below pin the routing so the test cannot pass
-    via a different unsupported branch.
+    Without that guard it projects ``public`` (verified manually). The structural
+    asserts pin the routing so the test can't pass via a different unsupported branch.
     """
     effects, predicate_trees = takeover_artifacts
     analysis = {"subject": {"address": "0x000000000000000000000000000000000000dead", "name": "TakeOverProxy"}}
@@ -288,11 +259,9 @@ def test_assembly_writer_with_invisible_gate_stays_unsupported(takeover_artifact
 
 
 def test_inline_assembly_sstore_and_delegatecall_surface_as_sinks(takeover_artifacts):
-    """Effects accuracy regression: the assembly ``sstore`` write and the
-    assembly ``delegatecall`` fallback must each surface as a sink, with the
-    writer selector populated and the delegatecall-execution capability
-    recovered. Fails if the effects.py SolidityCall sstore/delegatecall
-    branches are reverted (both sinks vanish)."""
+    """Assembly ``sstore`` and ``delegatecall`` fallback must each surface as a sink
+    (writer selector populated, delegatecall-execution recovered); fails if the
+    effects.py SolidityCall branches are reverted."""
     effects, _ = takeover_artifacts
     functions = effects["functions"]
 

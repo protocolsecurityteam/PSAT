@@ -1,13 +1,10 @@
-"""F4a — coverage is a guarantee of analysis, not a side effect of recursion.
+"""F4a - coverage is a guarantee of analysis, not a side effect of recursion.
 
-Enrollment reads ``contract_materializations``; until now only the authority
-recursion wrote it, as a side effect of which dependencies it happened to visit.
-136 of 183 monitored contracts therefore watched on the baseline registry alone
-while their own completed jobs held a substantive plan.
-
-These tests pin the producer's contract: what it writes, what it refuses to
-write, and — invariant 7 — that every row it writes says who wrote it and from
-which job.
+Enrollment reads ``contract_materializations``, which only the authority recursion wrote (as a side
+effect of the dependencies it visited), so 136 of 183 monitored contracts watched on the baseline
+registry alone despite completed jobs holding a substantive plan. These tests pin the producer's
+contract: what it writes, what it refuses to write, and (invariant 7) that every row names its
+writer and source job.
 """
 
 from __future__ import annotations
@@ -152,8 +149,8 @@ def test_publish_leaves_a_current_row_alone(cm_db):
 
 @requires_postgres
 def test_publish_refuses_a_bundle_without_an_analysis(cm_db):
-    """A ready row whose analysis hydrates to None reads to the resolution stage
-    as *this contract has no analysis* — a claim a missing artifact never made."""
+    """A ready row whose analysis hydrates to None reads as *this contract has no analysis*, a claim a
+    missing artifact never made."""
     assert _publish(analysis=None) == PUBLISH_INCOMPLETE_BUNDLE
     assert _publish(tracking_plan=None) == PUBLISH_INCOMPLETE_BUNDLE
     assert _row(cm_db) is None
@@ -162,8 +159,7 @@ def test_publish_refuses_a_bundle_without_an_analysis(cm_db):
 @requires_postgres
 def test_publish_refuses_an_address_already_bound_to_other_bytecode(cm_db):
     _publish()
-    # Same address, different keccak: which bytecode is current there is not
-    # something this writer witnessed, and the unique index holds one row.
+    # Same address, different keccak: which bytecode is current is not something this writer witnessed.
     assert _publish(bytecode_keccak=OTHER_KECCAK) == PUBLISH_ADDRESS_BOUND_TO_OTHER_KECCAK
     assert _row(cm_db, OTHER_KECCAK) is None
 
@@ -203,9 +199,8 @@ def test_publish_replaces_a_row_that_serves_nobody(cm_db, status, version, build
 
 @requires_postgres
 def test_recursion_written_rows_name_their_producer(cm_db):
-    """``materialize_or_wait`` is the third producer; its rows say so, with the
-    source job left explicitly null — the recursion materializes whatever
-    dependency it walks onto, so the walking job is not the job it is *of*."""
+    """``materialize_or_wait`` is the third producer; its rows say so with the source job left
+    explicitly null (the walking job is not the job the dependency is *of*)."""
     cm.materialize_or_wait(
         chain="ethereum",
         address=ADDR,
@@ -221,19 +216,15 @@ def test_recursion_written_rows_name_their_producer(cm_db):
 
 def test_provenance_records_an_unknown_job_as_null():
     stamp = build_provenance(PRODUCED_BY_RESOLUTION)
-    # Present-and-null, not absent: "the producer is known and the job is not"
-    # is a fact, and a missing key would be indistinguishable from a row written
-    # before provenance existed.
+    # Present-and-null, not absent: a missing key would look like a row written before provenance existed.
     assert "source_job_id" in stamp
     assert stamp["source_job_id"] is None
 
 
 @requires_postgres
 def test_the_pipeline_refreshes_a_current_row_whose_bundle_differs(cm_db):
-    """Byte-identical code does not imply an identical bundle: the analyzer
-    improves without every improvement earning a version bump, and without this
-    a ready row is frozen forever and later analyzer work never reaches the
-    store enrollment reads."""
+    """Byte-identical code does not imply an identical bundle (improvements don't always bump the
+    version); without a refresh a ready row is frozen and later analyzer work never reaches enrollment."""
     _publish()
     improved = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "state_variable:owner"}]}
 
@@ -250,8 +241,6 @@ def test_the_pipeline_refreshes_a_current_row_whose_bundle_differs(cm_db):
 
 @requires_postgres
 def test_the_sweep_never_overwrites_a_current_row_with_an_older_bundle(cm_db):
-    """The promotion sweep's source is an older job's artifact; refreshing from
-    it would be a downgrade, so the row stands."""
     _publish()
     older = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "stale"}]}
     assert _publish(tracking_plan=older) == PUBLISH_ALREADY_CURRENT
@@ -262,8 +251,6 @@ def test_the_sweep_never_overwrites_a_current_row_with_an_older_bundle(cm_db):
 
 @requires_postgres
 def test_an_already_current_return_leaves_the_stored_payload_untouched(cm_db, monkeypatch):
-    """``already_current`` is a claim about what the row still holds, so the
-    decision has to precede the upload — not follow it."""
     _publish()
     puts: list[str] = []
     monkeypatch.setattr(
@@ -316,10 +303,8 @@ def _job_row(session, *, version: int | None, donor: Any = None) -> Job:
 
 @requires_postgres
 def test_a_cache_hit_jobs_era_is_the_donors(cm_db):
-    """discovery stamps the era only on the fetch path, so a same-address cache
-    hit leaves the column NULL on a job whose artifacts are perfectly current.
-    The stamp is still findable where it was witnessed: all 32 of the working
-    DB's NULL-version cache-hit jobs resolve to a stamped v5 donor."""
+    """discovery stamps the era only on the fetch path, so a cache hit leaves it NULL on a current
+    job; the stamp is findable at the donor (all 32 NULL-version cache-hit jobs resolve to a v5 donor)."""
     donor = _job_row(cm_db, version=ANALYSIS_SCHEMA_VERSION)
     hit = _job_row(cm_db, version=None, donor=donor.id)
     second_hop = _job_row(cm_db, version=None, donor=hit.id)
@@ -331,11 +316,8 @@ def test_a_cache_hit_jobs_era_is_the_donors(cm_db):
 
 @requires_postgres
 def test_a_long_cache_chain_is_walked_to_its_terminus(cm_db):
-    """Every cache-hit re-run appends a hop, so the chain grows on exactly the
-    addresses that get re-analyzed most. The working DB's chains terminate
-    between 1 and 14 hops out; a fixed hop budget would silently convert the far
-    end of that distribution into "no witnessed era" and refuse supply for the
-    busiest contracts."""
+    """Every cache-hit re-run appends a hop; working-DB chains end 1-14 hops out, so a fixed hop
+    budget would turn the far end into "no witnessed era" and refuse supply for the busiest contracts."""
     job = _job_row(cm_db, version=ANALYSIS_SCHEMA_VERSION)
     for _ in range(20):
         job = _job_row(cm_db, version=None, donor=job.id)
@@ -344,8 +326,6 @@ def test_a_long_cache_chain_is_walked_to_its_terminus(cm_db):
 
 @requires_postgres
 def test_an_unwitnessed_era_stays_unwitnessed(cm_db):
-    """A chain that ends without a stamp anywhere is the third state, not
-    "current"."""
     unstamped = _job_row(cm_db, version=None)
     assert proven_analysis_schema_version(cm_db, unstamped) is None
     assert proven_analysis_schema_version(cm_db, _job_row(cm_db, version=None, donor=unstamped.id)) is None
@@ -424,9 +404,8 @@ def test_static_stage_publishes_the_artifacts_it_stored(monkeypatch, captured_pu
 
 
 def test_static_stage_publishes_nothing_for_an_unproven_analyzer_era(monkeypatch, captured_publish):
-    """A row is stamped with the current version, so it may only be written for
-    a bundle proven to be of that era. A same-address cache hit returns before
-    discovery's stamp, leaving the column NULL — and NULL is not "current"."""
+    """A row is stamped with the current version, so only a bundle proven to be of that era may be
+    written; a same-address cache hit leaves the stamp NULL, and NULL is not "current"."""
     _stub_artifacts(
         monkeypatch,
         {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
@@ -441,8 +420,6 @@ def test_static_stage_publishes_nothing_for_an_unproven_analyzer_era(monkeypatch
 
 
 def test_static_stage_publishes_a_cache_hit_whose_donor_proves_the_era(monkeypatch, captured_publish):
-    """The era is recoverable for a cache-hit job: copy_static_cache copied the
-    donor's artifacts, so the donor's stamp IS this job's artifacts' era."""
     _stub_artifacts(
         monkeypatch,
         {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
@@ -454,11 +431,9 @@ def test_static_stage_publishes_a_cache_hit_whose_donor_proves_the_era(monkeypat
 
 
 def test_only_a_bundle_this_job_produced_may_refresh(monkeypatch, captured_publish):
-    """A static-cache job's artifacts are an ancestor's, copied. They pass the
-    era gate (era equality is not recency) but they are not the later record: let
-    them refresh and a fresh analysis and a later cache hit reproducing its
-    ancestor take turns overwriting each other, each flip moving where monitoring
-    watches."""
+    """A static-cache job's artifacts are an ancestor's, copied: they pass the era gate (equality
+    is not recency) but must not refresh, or a fresh analysis and a later cache hit would flip
+    the row back and forth, each flip moving where monitoring watches."""
     _stub_artifacts(
         monkeypatch,
         {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
@@ -473,8 +448,6 @@ def test_only_a_bundle_this_job_produced_may_refresh(monkeypatch, captured_publi
 
 @requires_postgres
 def test_a_copied_bundle_does_not_overwrite_a_freshly_analyzed_row(cm_db):
-    """End to end on the row itself: the fresh analysis stands, and the cache
-    hit reports ``already_current`` rather than flipping it back."""
     fresh_plan = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "state_variable:authority"}]}
     ancestor_plan = {"contract_address": ADDR, "tracked_controllers": [{"controller_id": "ancestors_authority"}]}
     assert _publish(tracking_plan=fresh_plan, refresh_on_differ=True) == PUBLISH_WRITTEN
@@ -492,7 +465,6 @@ def test_static_stage_publishes_nothing_without_a_plan(monkeypatch, captured_pub
 
 
 def test_static_stage_publishes_nothing_without_a_keccak(monkeypatch, captured_publish):
-    """The row is keyed on bytecode; a key we could not read is not a key."""
     _stub_artifacts(
         monkeypatch,
         {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},
@@ -507,8 +479,6 @@ def test_static_stage_publishes_nothing_without_a_keccak(monkeypatch, captured_p
 
 
 def test_static_stage_never_fails_the_job_on_a_publish_error(monkeypatch, captured_publish):
-    """Supply is not the analysis: a failed publish must not sink a job whose
-    analysis succeeded."""
     _stub_artifacts(
         monkeypatch,
         {"contract_analysis": ANALYSIS, "control_tracking_plan": PLAN, "predicate_trees": TREES},

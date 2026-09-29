@@ -1,25 +1,16 @@
 """The analysis perimeter's second spawn site (C3), and its back-link witness.
 
 Ten `ManagerWithMerkleVerification` contracts hold the sole `canCall` on a
-BoringVault's `manage` — `exec.arbitrary` — and none of them has an analysis
-job, so the gate terminates at an unanalysed contract and 30
-`contract_gated_unknown_path` warnings stand. They are not missing by policy:
-all ten sit in `control_graph_nodes` with `analyzed=true`, `node_type='contract'`
-and `details->>'source' = 'semantic_capability:role_grant'`, i.e. they satisfy
-every gate the spawn loop applies. They were never offered to it. The policy
-stage's graph refresh — the only stage that can project role principals, because
-role principals need the `effective_permissions` it computes — rewrote the graph
-and never called the spawn.
+BoringVault's `manage` yet have no analysis job, so 30 `contract_gated_unknown_path`
+warnings stood. They satisfy every spawn gate (`analyzed=true`, `node_type='contract'`,
+`details->>'source' = 'semantic_capability:role_grant'`) but the policy stage's graph
+refresh — the only stage that can project role principals — never called the spawn.
+The spawn keys on that provenance field, never the label: 9 of 19 jobless role-grant
+contracts on the PR-161 corpus are non-managers (Pausers, Solvers, ...).
 
-Measured on the PR-161 corpus: 32 role-grant contract addresses, **19 jobless**,
-every one `analyzed=true`. Only 10 carry the manager label; the other 9 are
-Pausers, BoringSolvers, DelayedWithdraws and an AtomicSolverV3 — which is why
-the spawn keys on the persisted provenance field and never on the label.
-
-The witness the fix makes available is the `vault()` back-link, verified 10/10
-at block 25643300 with a negative control passing 10/10. It corroborates the
-(M, V) PAIRING; it does not establish that M is a manager, and a mismatch is not
-a disproof. See `probe_declared_vault_backlink`.
+The `vault()` back-link witness (verified 10/10 at block 25643300, negative control
+10/10) corroborates the (M, V) PAIRING only; it doesn't establish M is a manager and a
+mismatch is not a disproof. See `probe_declared_vault_backlink`.
 """
 
 from __future__ import annotations
@@ -135,13 +126,11 @@ def _jobs_for(session, address):
 
 
 def test_role_grant_node_spawns_exactly_one_child_with_inherited_scope(db_session, seed, monkeypatch):
-    """The C3 fix. One role-grant contract node ⇒ exactly ONE child job, with
-    the chain stamped from the parent and the protocol inherited — byte-exact
-    request.
+    """One role-grant contract node ⇒ exactly ONE child job, chain stamped from the
+    parent and protocol inherited — byte-exact request.
 
-    ``name`` is the ADDRESS, not the node's ``label``. The label is display copy
-    describing the EDGE ("role principal"), and this value becomes ``Job.name``
-    — an identity for the CONTRACT. Only ``contract_name`` may fill it.
+    ``name`` is the ADDRESS, not the node's ``label`` (display copy describing the
+    EDGE, "role principal"); only ``contract_name`` may fill ``Job.name``.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol_id, parent, address_factory = seed
@@ -169,8 +158,7 @@ def test_role_grant_node_spawns_exactly_one_child_with_inherited_scope(db_sessio
 
 
 def test_a_contract_name_still_names_the_child(db_session, seed, monkeypatch):
-    """The label leg is dropped; the ``contract_name`` leg is not. A node that
-    carries a real compiled name still passes it to the child."""
+    """The label leg is dropped; a real compiled ``contract_name`` still reaches the child."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     manager = address_factory()
@@ -183,9 +171,8 @@ def test_a_contract_name_still_names_the_child(db_session, seed, monkeypatch):
 
 
 def test_spawn_is_idempotent(db_session, seed, monkeypatch):
-    """Run the refresh twice ⇒ still exactly one job. The second pass finds the
-    child via ``find_existing_job_for_address`` and books it out-of-population,
-    not as an omission: an address that already HAS a job was never dropped."""
+    """A second pass finds the child via ``find_existing_job_for_address`` and books it
+    out-of-population, not as an omission."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     manager = address_factory()
@@ -206,8 +193,7 @@ def test_spawn_is_idempotent(db_session, seed, monkeypatch):
 
 
 def test_unanalyzed_node_spawns_nothing(db_session, seed, monkeypatch):
-    """``analyzed=false`` ⇒ zero jobs. The walk did not analyse it, so nothing
-    is known about it — spawning would be acting on an absence."""
+    """``analyzed=false`` ⇒ zero jobs; spawning would be acting on an absence."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     addr = address_factory()
@@ -221,8 +207,8 @@ def test_unanalyzed_node_spawns_nothing(db_session, seed, monkeypatch):
 
 
 def test_principal_node_spawns_nothing(db_session, seed, monkeypatch):
-    """``node_type='principal'`` ⇒ zero jobs. The 7 role-grant PRINCIPAL nodes
-    in the corpus are EOAs/unclassified; an analysis job on one can only fail."""
+    """``node_type='principal'`` ⇒ zero jobs; the corpus's 7 role-grant principals are
+    EOAs/unclassified, so a job could only fail."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     addr = address_factory()
@@ -234,9 +220,8 @@ def test_principal_node_spawns_nothing(db_session, seed, monkeypatch):
 
 
 def test_disabled_chain_spawns_nothing_and_logs_the_reason(db_session, seed, monkeypatch, caplog):
-    """A disabled chain ⇒ zero jobs plus an explicit skip record. This is an
-    OMISSION, not a carve-out: on an enabled deployment the same node would be
-    analysed."""
+    """A disabled chain ⇒ zero jobs plus an explicit skip record (an OMISSION, not a
+    carve-out: an enabled deployment would analyse it)."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     addr = address_factory()
@@ -273,8 +258,8 @@ def test_zero_address_spawns_nothing(db_session, seed, monkeypatch):
 
 
 def test_budget_cut_is_recorded_never_silent(db_session, seed, monkeypatch):
-    """The recursive fanout's budget. A cut candidate is NAMED — the C2 defect
-    was a budget that dropped 0xcd425f44 with nothing but a count to show."""
+    """A cut candidate is NAMED — the C2 defect was a budget that dropped 0xcd425f44
+    with only a count to show."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     addrs = [address_factory() for _ in range(3)]
@@ -288,8 +273,8 @@ def test_budget_cut_is_recorded_never_silent(db_session, seed, monkeypatch):
 
 
 def test_depth_cap_stops_the_recursion(db_session, seed, monkeypatch):
-    """A manager analysed by this fix runs its own policy stage and projects its
-    own role principals. Without a generation cap that recursion has no bound."""
+    """A manager analysed by this fix runs its own policy stage and projects its own
+    role principals; without a generation cap that recursion is unbounded."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     addr = address_factory()
@@ -304,11 +289,9 @@ def test_depth_cap_stops_the_recursion(db_session, seed, monkeypatch):
 
 
 def test_chain_gate_consumes_no_budget(db_session, seed, monkeypatch):
-    """FALSIFIER (A7): ordering is not enforceable by statement order, so the
-    budget is spent at ``create_job`` and nowhere else. With budget=1 and a
-    chain-disabled node FIRST, the disabled node must be recorded as
-    ``chain_not_enabled`` (not ``budget_exhausted``) AND the valid node must
-    still be queued. A gate that consumed budget would starve it."""
+    """FALSIFIER (A7): budget is spent at ``create_job`` and nowhere else. With
+    budget=1 and a chain-disabled node FIRST, it must be ``chain_not_enabled`` (not
+    ``budget_exhausted``) AND the valid node must still be queued."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     blocked, valid = address_factory(), address_factory()
@@ -338,11 +321,8 @@ def test_chain_gate_consumes_no_budget(db_session, seed, monkeypatch):
 
 
 def test_dispositions_totally_partition_the_node_list(db_session, seed, monkeypatch):
-    """FALSIFIER (A4): every node lands in exactly one of the three buckets.
-
-    This is what makes "zero UNLOGGED omissions" checkable: a node that fell out
-    of the loop through an unaccounted ``continue`` would break the total.
-    """
+    """FALSIFIER (A4): every node lands in exactly one of the three buckets, so a node
+    dropped through an unaccounted ``continue`` breaks the total."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     already_jobbed = address_factory()
@@ -350,7 +330,6 @@ def test_dispositions_totally_partition_the_node_list(db_session, seed, monkeypa
     unanalyzed = address_factory()
     principal = address_factory()
 
-    # Give one node a pre-existing job so the dedup arm is exercised.
     _spawn(db_session, parent, _graph(parent.address, [_node(already_jobbed)]), budget=8)
 
     nodes = [
@@ -363,8 +342,7 @@ def test_dispositions_totally_partition_the_node_list(db_session, seed, monkeypa
     ]
     result = _spawn(db_session, parent, _graph(parent.address, nodes), budget=8, depth_cap=2)
 
-    # The partition claim is only licensed by ``walked``; assert the licence
-    # alongside the count it licenses.
+    # The partition claim is only licensed by ``walked``.
     assert result["walked"] is True
     total = len(result["queued"]) + len(result["omitted"]) + len(result["out_of_population"])
     assert total == len(nodes)
@@ -379,8 +357,7 @@ def test_dispositions_totally_partition_the_node_list(db_session, seed, monkeypa
 
 
 def test_resolution_site_keeps_its_unbudgeted_behaviour(db_session, seed, monkeypatch):
-    """Parity: the resolution stage passes no budget, so its spawn is unchanged
-    by this unit. Its bound is the walk's own ``max_depth``."""
+    """Parity: the resolution stage passes no budget; its bound is the walk's ``max_depth``."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     addrs = [address_factory() for _ in range(3)]
@@ -396,8 +373,8 @@ def test_resolution_site_keeps_its_unbudgeted_behaviour(db_session, seed, monkey
     assert len(result["queued"]) == 3
     assert result["omitted"] == []
     assert result["budget"] is None
-    # No generation key when no cap is in force — the resolution stage's
-    # children must not inherit a perimeter generation they never belonged to.
+    # No generation key when no cap is in force — children must not inherit a perimeter
+    # generation they never belonged to.
     from db.models import Job
 
     child = db_session.query(Job).filter(Job.address == addrs[0]).one()
@@ -406,13 +383,9 @@ def test_resolution_site_keeps_its_unbudgeted_behaviour(db_session, seed, monkey
 
 
 def test_partial_spawn_still_yields_a_ledger(db_session, seed, monkeypatch):
-    """FALSIFIER (E1): ``create_job`` raises on the 3rd of 5 nodes. The two
-    children already committed must still be recorded.
-
-    The walker used to BUILD the ledger and return it, so a raise part-way
-    through discarded it entirely — leaving committed children with no record,
-    which is the silent-drop failure in its most damaging form (the jobs exist,
-    the accounting does not).
+    """FALSIFIER (E1): ``create_job`` raises on the 3rd of 5 nodes; the two committed
+    children must still be recorded. A raise part-way used to discard the ledger — the
+    silent-drop failure in its worst form (jobs exist, accounting doesn't).
     """
     from services.discovery import perimeter as perimeter_module
     from services.discovery.perimeter import new_spawn_result
@@ -454,16 +427,10 @@ def test_partial_spawn_still_yields_a_ledger(db_session, seed, monkeypatch):
 
 
 def test_ledger_is_written_even_when_the_refresh_produced_no_graph(db_session, seed, monkeypatch):
-    """FALSIFIER (E2): an ABSENT ledger must never be ambiguous between "the
-    refresh did not happen" and "the refresh happened and omitted nothing".
-
-    An empty graph still publishes the artifact, so absence means exactly one
-    thing: this job predates the ledger.
-
-    And the ledger it publishes must not read as a COMPLETED walk: the walker
-    never ran here, so ``walked`` is False and the three empty lists are a
-    prefix. Pinning the never-ran dict as byte-identical to a walked-and-omitted
-    -nothing one is what this assertion previously did.
+    """FALSIFIER (E2): an ABSENT ledger must not be ambiguous between "refresh didn't
+    happen" and "refresh omitted nothing" — absence means the job predates the ledger.
+    The published ledger must not read as a COMPLETED walk: ``walked`` is False and the
+    empty lists are a prefix.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, _address_factory = seed
@@ -488,11 +455,8 @@ def test_ledger_is_written_even_when_the_refresh_produced_no_graph(db_session, s
 
 
 def test_never_ran_ledger_differs_from_a_walk_that_omitted_nothing(db_session, seed, monkeypatch):
-    """FALSIFIER (fix 6): the two histories must not serialize identically.
-
-    Both produce three empty omission lists. Only the second walked the node
-    list, and only the second may license "nothing was omitted".
-    """
+    """FALSIFIER (fix 6): both histories produce three empty omission lists, but only
+    the second walked the node list and may license "nothing was omitted"."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol_id, parent, address_factory = seed
     from services.discovery.perimeter import new_spawn_result
@@ -500,7 +464,6 @@ def test_never_ran_ledger_differs_from_a_walk_that_omitted_nothing(db_session, s
     never_ran = new_spawn_result(site="policy_refresh", budget=8)
 
     walked = _spawn(db_session, parent, _graph(parent.address, [_node(address_factory())]), budget=8, depth_cap=2)
-    # Same three empty omission lists on both sides — the whole point.
     assert never_ran["omitted"] == walked["omitted"] == []
     assert never_ran["out_of_population"] == walked["out_of_population"] == []
 
@@ -510,9 +473,8 @@ def test_never_ran_ledger_differs_from_a_walk_that_omitted_nothing(db_session, s
 
 
 def test_ledger_survives_a_poisoned_session(db_session, seed, monkeypatch):
-    """The `finally` must not itself be defeated by the failure that triggered
-    it: a mid-loop raise usually leaves the primary transaction aborted, so the
-    write retries on a fresh session."""
+    """A mid-loop raise usually leaves the primary transaction aborted, so the
+    ledger write in ``finally`` must retry on a fresh session."""
     from db.queue import get_artifact
     from services.discovery.perimeter import new_spawn_result
     from workers.policy_worker import _persist_spawn_summary
@@ -549,13 +511,9 @@ def test_ledger_survives_a_poisoned_session(db_session, seed, monkeypatch):
 def _wire_backlink(monkeypatch, *, vault_return, control_answers=False, head: int | None = PINNED_BLOCK):
     """Stub the wire under ``probe_declared_vault_backlink``.
 
-    ``vault_return`` is the raw ``eth_call`` result for ``vault()``, or the
-    string ``"revert"`` to raise.
-
-    ``tests/conftest.py`` neuters ``_resolve_pinned_block`` for the whole offline
-    suite (the head read is unconditional and would dial out). We restore the
-    REAL one here — the C1 pattern — so the height-pinning logic under test is
-    the production one, and drive it from the stubbed wire instead.
+    ``vault_return`` is the raw ``eth_call`` result for ``vault()``, or ``"revert"``.
+    ``tests/conftest.py`` neuters ``_resolve_pinned_block`` offline (the head read would
+    dial out); we restore the REAL one (the C1 pattern) and drive it from the stub.
     """
     from services.resolution import tracking
 
@@ -592,8 +550,7 @@ def _word(address: str) -> str:
 
 
 def test_backlink_confirms_the_pairing(monkeypatch):
-    """The positive. Reproduces the measured 10/10 shape: M declares V, the
-    nonsense selector reverts, and the height is concrete."""
+    """The positive: M declares V, the nonsense selector reverts, the height is concrete."""
     from services.resolution.tracking import probe_declared_vault_backlink
 
     _wire_backlink(monkeypatch, vault_return=_word(VAULT))
@@ -610,18 +567,13 @@ def test_backlink_confirms_the_pairing(monkeypatch):
 
 
 def test_mismatch_payload_is_byte_identical_to_the_never_read_payload(monkeypatch):
-    """FALSIFIER (the mismatch oracle). A DIFFERENT ``vault()`` answer must
-    produce a payload byte-for-byte EQUAL to the one produced when the getter
-    does not answer at all.
+    """FALSIFIER (the mismatch oracle). A DIFFERENT ``vault()`` answer must produce a
+    payload byte-for-byte EQUAL to the never-read payload.
 
-    The first cut of this probe recorded the control verdict before testing the
-    equality. Because the control is fired only once a decodable address is in
-    hand, that made ``negative_control`` a perfect mismatch oracle:
-    ``(negative_control == "passed" AND matches == "not_determined")`` was
-    reachable ONLY by "M declares a vault and it is not V" — precisely the
-    earned negative this witness refuses, published one key over. Withholding
-    ``backlink_address`` alone did not close it. Byte-identity is the assertion
-    that does, because it admits no leaking key.
+    An earlier cut recorded the control verdict before testing equality, making
+    ``(negative_control == "passed" AND matches == "not_determined")`` reachable ONLY by
+    "M declares a vault and it is not V" — the earned negative this witness refuses,
+    leaked one key over. Byte-identity admits no leaking key.
     """
     from services.resolution.tracking import probe_declared_vault_backlink
 
@@ -646,9 +598,8 @@ def test_mismatch_payload_is_byte_identical_to_the_never_read_payload(monkeypatc
 
 
 def test_reverting_getter_is_not_determined(monkeypatch):
-    """The 9 non-manager role-grant contracts (Pauser, BoringSolver, …) have no
-    ``vault()``. A revert is not "no back-link exists" and not a falsification —
-    it is simply undetermined, and it fires no control."""
+    """The 9 non-manager role-grant contracts have no ``vault()``. A revert is
+    undetermined (neither "no back-link" nor a falsification) and fires no control."""
     from services.resolution.tracking import probe_declared_vault_backlink
 
     _wire_backlink(monkeypatch, vault_return="revert")
@@ -661,8 +612,7 @@ def test_reverting_getter_is_not_determined(monkeypatch):
 
 
 def test_catch_all_fallback_cannot_mint_a_backlink(monkeypatch):
-    """An address that answers a selector nothing implements is a catch-all
-    fallback: its ``vault()`` answer is worthless even when it equals V."""
+    """A catch-all fallback answers any selector, so its ``vault()`` is worthless even when it equals V."""
     from services.resolution.tracking import probe_declared_vault_backlink
 
     _wire_backlink(monkeypatch, vault_return=_word(VAULT), control_answers=True)
@@ -675,9 +625,8 @@ def test_catch_all_fallback_cannot_mint_a_backlink(monkeypatch):
 
 
 def test_unpinnable_height_suppresses_the_whole_witness(monkeypatch):
-    """FALSIFIER (A6): a failed head read yields the key WHOLLY ABSENT, not a
-    positive with an unstated height. Two facts on one node row may not carry
-    different unrecorded heights."""
+    """FALSIFIER (A6): a failed head read yields the key WHOLLY ABSENT, not a positive
+    with an unstated height."""
     from services.resolution.tracking import probe_declared_vault_backlink
 
     _wire_backlink(monkeypatch, vault_return=_word(VAULT), head=None)
@@ -685,15 +634,11 @@ def test_unpinnable_height_suppresses_the_whole_witness(monkeypatch):
 
 
 def test_non_manager_backlink_publishes_true_and_attributes_nothing(monkeypatch):
-    """FALSIFIER: a non-manager whose ``vault()`` returns the same V publishes
-    ``True`` exactly as a manager does, so the field earns only the PAIRING,
-    never the TYPE.
+    """FALSIFIER: a non-manager whose ``vault()`` returns V publishes ``True`` like a
+    manager, so the field earns only the PAIRING, never the TYPE.
 
-    This is not an anecdote. Re-measured over all 37 (M, V) pairs the probe sees
-    at 25643300: 20 publish ``True`` and **10 of those 20 are not managers** —
-    Tellers, solvers and vaults. Reading this key as "M is the manager" would
-    mis-type half the positive population. ``TELLER`` is one of the ten and DOES
-    publish ``true`` on chain today.
+    Re-measured over 37 (M, V) pairs at 25643300: 20 publish ``True`` and 10 of those
+    are not managers (Tellers, solvers, vaults); ``TELLER`` publishes ``true`` today.
     """
     from services.resolution.tracking import probe_declared_vault_backlink
 
@@ -703,9 +648,7 @@ def test_non_manager_backlink_publishes_true_and_attributes_nothing(monkeypatch)
     assert out is not None
 
     assert out["declared_vault_matches_gated_contract"] is True
-    # The witness carries no component type, no role, and no gate-holder claim:
-    # the key set is exactly the five below, so there is nothing for a consumer
-    # to read a type off.
+    # Exactly five keys: nothing for a consumer to read a type off.
     assert set(out) == {
         "probe_block",
         "backlink_getter",
@@ -717,9 +660,8 @@ def test_non_manager_backlink_publishes_true_and_attributes_nothing(monkeypatch)
 
 
 def test_probe_fires_only_for_role_grant_contract_nodes(monkeypatch):
-    """Provenance, not name. The gate reads ``details.source`` — a field a named
-    code path wrote — so the label string never participates, and the ~88
-    plain-principal nodes pay no RPC."""
+    """Provenance, not name: the gate reads ``details.source``, never the label, and
+    the ~88 plain-principal nodes pay no RPC."""
     from services.resolution import recursive
 
     calls: list[tuple[str, str]] = []
@@ -730,8 +672,8 @@ def test_probe_fires_only_for_role_grant_contract_nodes(monkeypatch):
 
     monkeypatch.setattr(recursive, "probe_declared_vault_backlink", fake_probe)
 
-    # A node labelled exactly like a manager but WITHOUT the provenance marker
-    # must not be probed; a node with the marker and a useless label must be.
+    # A manager-looking label WITHOUT the marker must not be probed; a marker with a
+    # useless label must be.
     assert (
         recursive._maybe_probe_backlink(
             "https://rpc.example",
@@ -766,8 +708,7 @@ def test_probe_fires_only_for_role_grant_contract_nodes(monkeypatch):
 
 
 def test_probe_failure_never_breaks_the_walk(monkeypatch):
-    """The witness is optional. A raising probe yields no witness and no
-    exception — an absent back-link is honest, a failed graph walk is not."""
+    """The witness is optional: a raising probe yields no witness and no exception."""
     from services.resolution import recursive
 
     def boom(*args, **kwargs):

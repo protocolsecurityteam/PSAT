@@ -1,24 +1,7 @@
-"""Targeted pure-logic tests for audit-pipeline internals.
-
-When the mock-heavy orchestrator tests were deleted in favour of the
-``test_audit_discovery_integration.py`` integration suite, a handful of
-internal-helper branches stopped being exercised:
-
-    - ``_collapse_same_audit_mirrors`` — the heuristic fallback used only
-      when the LLM validate+cluster call fails (integration tests always
-      hit the LLM path).
-    - ``audit_reports_llm._chunked_text`` / ``_extract_one_chunk`` —
-      chunking for long gitbook pages, and the per-chunk LLM error path.
-    - ``extract_report_details`` — dedup across chunks, malformed entries,
-      None-returning LLM.
-    - ``generate_followup_query`` — empty/long/mismatched-quote responses.
-    - ``classify_search_results`` — LLM exception + confidence threshold.
-    - ``text_extraction.process_audit_report`` — download/parse/store error
-      paths that the integration suite's happy path doesn't hit.
-
-All tests here are pure Python (monkeypatched ``llm.chat`` for the LLM
-helpers; ``monkeypatch`` on ``download_pdf`` / ``store_audit_text`` for
-the text-extraction orchestrator). No DB, no HTTP, no object storage.
+"""Pure-logic tests for audit-pipeline internals the integration suite no longer exercises: the
+``_collapse_same_audit_mirrors`` heuristic fallback (used only when LLM validate+cluster fails), chunking
+and extraction helpers, follow-up query cleanup, classifier threshold, and process_audit_report error
+paths. No DB, HTTP or object storage; ``llm.chat`` and storage/download functions are monkeypatched.
 """
 
 from __future__ import annotations
@@ -69,7 +52,6 @@ class TestCollapseSameAuditMirrors:
         entry uses looks like a cross-host mirror — drop it."""
         reports = [
             _report(url="https://real.com/x.pdf", auditor="Halborn"),
-            # Unknown on a different host → classic cross-host mirror signature.
             _report(url="https://mirror.xyz/x.pdf", auditor="Unknown"),
         ]
         out = _collapse_same_audit_mirrors(reports)
@@ -86,7 +68,6 @@ class TestCollapseSameAuditMirrors:
         assert len(out) == 2
 
     def test_cross_host_named_mirror_collapses_to_richest(self):
-        """Pass 2: same (auditor, date) on two hosts → keep the richest."""
         sparse = _report(
             url="https://docs.x.com/audit",
             pdf_url=None,
@@ -142,11 +123,9 @@ class TestCollapseSameAuditMirrors:
             pdf_url="https://github.com/x/y/b.pdf",
             title="Audit B",
         )
-        # Distinct tokens → pass 3 keeps both.
         assert len(_collapse_same_audit_mirrors([a, b])) == 2
 
     def test_pass3_collapses_same_tokens_across_hosts(self):
-        """Pass 3: (auditor, date, title-tokens) match → collapse to richest."""
         a = _report(
             auditor="OpenZeppelin",
             date="2024-06-01",
@@ -194,7 +173,6 @@ class TestChunkedText:
         text = "A" * 45_000
         chunks = _chunked_text(text)
         assert len(chunks) == 3  # _MAX_CHUNKS
-        # Each chunk is at most the cap size.
         assert all(len(c) <= 15_000 for c in chunks)
         # Consecutive chunks overlap by ``overlap`` chars so contracts
         # straddling the boundary aren't lost.
@@ -205,7 +183,6 @@ class TestChunkedText:
         assert _chunked_text(text) == [text]
 
     def test_caps_at_max_chunks_even_for_huge_text(self):
-        """A 300k-char page should not produce 20 chunks — we cap at 3."""
         text = "C" * 300_000
         assert len(_chunked_text(text)) == 3
 
@@ -505,8 +482,6 @@ class TestProcessAuditReportErrorPaths:
         assert "store" in (out.error or "") and "tigris" in (out.error or "")
 
     def test_success_returns_all_metadata(self, monkeypatch):
-        """Happy path — verify the outcome object carries every field the
-        worker persists to the row."""
         pdf = minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
         monkeypatch.setattr(
             "services.audits.text_extraction.download_pdf",
@@ -556,9 +531,6 @@ def test_extraction_outcome_defaults_are_none():
 
 
 class _FakeResp:
-    """Minimal stand-in for the streamed ``requests.Response`` shape that
-    ``_fetch_html_page`` consumes."""
-
     def __init__(self, *, status_code=200, content_type="text/html", chunks=()):
         self.status_code = status_code
         self.headers = {"content-type": content_type}
@@ -618,8 +590,6 @@ class TestFetchHtmlPage:
         assert _fetch_html_page("http://internal.secret/") is None
 
     def test_binary_content_type_rejected(self, monkeypatch):
-        """Content-type binary rejection is preserved: a PDF response is
-        skipped (None) and the body is never streamed."""
         resp = _FakeResp(content_type="application/pdf", chunks=[b"%PDF-1.7 ..."])
         monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: resp)
 
@@ -634,8 +604,6 @@ class TestFetchHtmlPage:
         assert _fetch_html_page("https://example.com/missing") is None
 
     def test_download_cap_still_truncates(self, monkeypatch):
-        """The size cap is preserved: a body far larger than the cap stops at
-        ``_MAX_DOWNLOAD_BYTES`` rather than being read whole."""
         oversized = [b"a" * 64_000 for _ in range(100)]  # 6.4 MB offered
         resp = _FakeResp(chunks=oversized)
         monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: resp)

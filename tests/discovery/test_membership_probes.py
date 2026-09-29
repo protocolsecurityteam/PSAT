@@ -122,7 +122,6 @@ def test_probe_persists_code_creation_and_reads(db_session, monkeypatch, erpc_en
     assert result.creation_block == 55
     assert result.deployer == _CREATOR
     assert set(result.resolved_addresses) == {_OWNER, _IMPL}
-    # Deployer learned by the probe lands on the row.
     assert row.deployer == _CREATOR
 
     witness = db_session.get(ContractCreationWitness, (1, row.address))
@@ -152,7 +151,6 @@ def test_probe_code_absent_prunes_with_proof(db_session, monkeypatch, erpc_env):
     witness = db_session.get(ContractCreationWitness, (1, row.address))
     assert witness is not None and witness.code_absent_at_probe is True
     assert witness.code_probe_block == 100
-    # No resolution reads against an empty address.
     assert seen["calls"] == [] and seen["batch"] == []
     assert gate.resolve_membership_state(db_session, row) == "pruned"
 

@@ -1,23 +1,10 @@
 """Unit tests for ``ProvenanceEngine`` over Slither IR.
 
-Each fixture is a tiny Solidity contract; we run Slither on it, pick a
-function, run the engine, and assert provenance for specific SSA
-values. We do NOT assert internal SSA naming — Slither's SSA renaming
-isn't part of the contract; tests find values by their semantic
-position (function parameter / state read / call return).
-
-The fixtures cover the IR opcodes the predicate builder will read in
-weeks 2-3:
-  - Assignment / TypeConversion / Phi
-  - Binary / Unary
-  - Index / Member (for mapping/struct access)
-  - SolidityCall (ecrecover, keccak256)
-  - InternalCall (recursion + parameter binding)
-  - HighLevelCall (external bool)
-
-These are the foundation that the predicate builder (week 2) sits on
-top of. We don't test the predicate builder here — that's a separate
-test suite.
+Each fixture is a tiny Solidity contract; we run the engine on a function and assert
+provenance for specific SSA values, found by semantic position (parameter / state
+read / call return), not Slither's SSA naming. Covers the opcodes the predicate
+builder reads: Assignment/TypeConversion/Phi, Binary/Unary, Index/Member,
+SolidityCall, InternalCall, HighLevelCall. The predicate builder has its own suite.
 """
 
 from __future__ import annotations
@@ -39,10 +26,6 @@ from services.static.contract_analysis_pipeline.provenance import (  # noqa: E40
     is_top,
     union,
 )
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _compile(tmp_path: Path, source: str) -> Slither:
@@ -71,9 +54,7 @@ def _find_source_with_kind(sources, kind: str) -> Source | None:
     return None
 
 
-# ---------------------------------------------------------------------------
 # Pure lattice tests (no Slither needed).
-# ---------------------------------------------------------------------------
 
 
 def test_lattice_union_basic():
@@ -100,27 +81,19 @@ def test_lattice_empty_identity():
 
 
 def test_is_top_singleton_invariant():
-    """``is_top`` is O(1) (``_TOP_SOURCE in s`` frozenset lookup),
-    which only works if every kind="top" Source equals the bare
-    sentinel. The dataclass ``__post_init__`` enforces it. Pin both
-    halves so a future change can't quietly tag a "top with metadata"
-    and watch ``is_top`` silently miss it.
-    """
+    """``is_top`` is O(1) (``_TOP_SOURCE in s``), which only works if every
+    kind="top" Source equals the bare sentinel; ``__post_init__`` enforces it. Pin
+    both halves so a "top with metadata" can't make ``is_top`` silently miss."""
     import pytest as _pytest
 
-    # 1. The bare sentinel is detected.
     assert is_top(TOP)
     assert is_top(frozenset({Source(kind="top")}))
 
-    # 2. Sets that contain non-top sources aren't.
     assert not is_top(frozenset({Source(kind="parameter", parameter_index=0)}))
     assert not is_top(frozenset())
 
-    # 3. Constructing a Source(kind="top", ...) with any metadata field
-    # set is rejected at construction time — that's how the O(1)
-    # optimization stays correct in the face of future drift. One
-    # rejection assertion per field so a single broken field is named
-    # in the failure rather than buried in a parametrize id.
+    # 3. A top Source with any metadata field set is rejected at construction; one
+    # assertion per field so a broken field is named, not buried in a parametrize id.
     with _pytest.raises(ValueError, match="bare sentinel"):
         Source(kind="top", parameter_index=0)
     with _pytest.raises(ValueError, match="bare sentinel"):
@@ -154,11 +127,6 @@ def test_source_unknown_kind_raises():
         Source(kind="not_a_real_kind")  # pyright: ignore[reportArgumentType]
 
 
-# ---------------------------------------------------------------------------
-# Slither-driven IR tests.
-# ---------------------------------------------------------------------------
-
-
 def test_parameter_seeded(tmp_path):
     sl = _compile(
         tmp_path,
@@ -174,7 +142,6 @@ def test_parameter_seeded(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # Every parameter should have a `parameter` source with the right index.
     for idx, param in enumerate(fn.parameters):
         assert param.name is not None
         sources = eng.provenance.get(param.name)
@@ -199,7 +166,6 @@ def test_assignment_propagates(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # Find the SSA value for `a` — it'll have a name like `a` or `a_1`.
     found = False
     for name, sources in eng.provenance.sources.items():
         if name.startswith("a") and _has_source_kind(sources, "msg_sender"):
@@ -492,12 +458,8 @@ def test_internal_call_recurses_into_callee(tmp_path):
 
 
 def test_internal_call_depth_cap_does_not_crash(tmp_path):
-    """Mutual recursion past the depth cap must terminate cleanly.
-
-    Even though Solidity rarely has infinite mutual recursion in
-    practice, the engine must guard against it to avoid blowing the
-    stack on adversarial fixtures.
-    """
+    """Mutual recursion past the depth cap must terminate cleanly (guards against
+    blowing the stack on adversarial fixtures)."""
     sl = _compile(
         tmp_path,
         """
@@ -513,16 +475,11 @@ def test_internal_call_depth_cap_does_not_crash(tmp_path):
     )
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn, internal_call_depth=3)
-    # Should not raise / loop forever.
     eng.run()
-    # We just want termination — don't assert specific provenance.
+    # Termination only; no specific provenance asserted.
 
 
 def test_block_timestamp_classified(tmp_path):
-    """``block.timestamp`` is a SolidityVariable. When it appears as
-    an operand to a Binary op (the typical require pattern), the
-    binary's SSA result carries a ``block_context`` source through
-    the operand-union path."""
     sl = _compile(
         tmp_path,
         """
@@ -542,11 +499,6 @@ def test_block_timestamp_classified(tmp_path):
     assert has_block, (
         f"binary op with block.timestamp didn't yield block_context source. map={dict(eng.provenance.sources)}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Low-level calls + tuple unpacking.
-# ---------------------------------------------------------------------------
 
 
 def test_low_level_call_classified(tmp_path):
@@ -678,9 +630,6 @@ def test_member_records_field_name(tmp_path):
 
 
 def test_env_override_internal_call_depth(monkeypatch):
-    """``PSAT_PROVENANCE_INTERNAL_CALL_DEPTH`` env var overrides the
-    default recursion depth, so pipeline runs can tune without code
-    changes."""
     from importlib import reload
 
     import services.static.contract_analysis_pipeline.provenance as prov
@@ -696,18 +645,14 @@ def test_env_override_internal_call_depth(monkeypatch):
     reload(prov)
     assert prov.DEFAULT_INTERNAL_CALL_DEPTH == 4
     assert prov.DEFAULT_WORKLIST_ITER_CAP == 200
-    # Clean up — re-import without env vars set.
     monkeypatch.delenv("PSAT_PROVENANCE_INTERNAL_CALL_DEPTH", raising=False)
     monkeypatch.delenv("PSAT_PROVENANCE_WORKLIST_CAP", raising=False)
     reload(prov)
 
 
 def test_loop_phi_converges_with_loop_carried_taint(tmp_path):
-    """A loop-carried variable's provenance must reach a fixed point
-    that includes both the entry-block source AND the loop-body
-    source. The worklist iterator handles Phi unions; this test
-    pins that the result actually converges (no oscillation, no
-    saturation to TOP for a clean monotonic increase)."""
+    """A loop-carried variable's provenance must converge to a fixed point holding
+    both the entry-block and loop-body sources (no oscillation, no saturation to TOP)."""
     sl = _compile(
         tmp_path,
         """
@@ -735,9 +680,7 @@ def test_loop_phi_converges_with_loop_carried_taint(tmp_path):
             found = True
             break
     assert found, f"loop accumulator didn't converge with both seed+vals taint. map={dict(eng.provenance.sources)}"
-    # Negative invariant: the accumulator should NOT have been saturated
-    # to TOP. A monotonic union over a finite source set converges
-    # cleanly in Slither's bounded SSA.
+    # The accumulator must NOT saturate to TOP (a monotonic union over a finite set converges).
     seed_sources = eng.provenance.sources
     has_top_in_loop_var = any(is_top(srcs) for srcs in seed_sources.values())
     assert not has_top_in_loop_var, (
@@ -746,9 +689,8 @@ def test_loop_phi_converges_with_loop_carried_taint(tmp_path):
 
 
 def test_loop_iteration_cap_terminates(tmp_path):
-    """Even with a pathologically deep loop body the worklist must
-    terminate within the iteration cap. We use a tiny cap to force
-    the cap-hit path; the engine must NOT raise or hang."""
+    """A pathologically deep loop body must terminate within the iteration cap; a tiny
+    cap forces the cap-hit path, which must not raise or hang."""
     sl = _compile(
         tmp_path,
         """
@@ -770,18 +712,11 @@ def test_loop_iteration_cap_terminates(tmp_path):
 
 
 def test_sub_engine_memo_collapses_repeated_internal_calls(tmp_path):
-    """Per-engine memo on (callee_full_name, frozenset(bindings.items()))
-    should make repeat InternalCall handling within ONE run() return a
-    cache hit instead of spawning a fresh sub-engine each time. The
-    worklist iterates to fixed point and re-visits the same IR nodes
-    multiple times — without the memo, each visit re-runs the callee's
-    sub-engine which compounds quadratically.
-
-    Memo only fires for InternalCall IRs WITH an lvalue (i.e. helpers
-    that return a value). Modifier-style void internal calls take a
-    different path. Use a return-value helper here so the memo is
-    exercised.
-    """
+    """The per-engine memo on (callee_full_name, frozenset(bindings.items())) makes
+    repeat InternalCall handling within ONE run() a cache hit; without it the
+    fixed-point worklist re-runs the callee sub-engine on every revisit, compounding
+    quadratically. It only fires for InternalCalls WITH an lvalue, so use a
+    return-value helper."""
     sl = _compile(
         tmp_path,
         """
@@ -817,18 +752,10 @@ def test_sub_engine_memo_collapses_repeated_internal_calls(tmp_path):
 
 
 def test_leaf_value_source_cache_collapses_repeat_resolutions(tmp_path):
-    """Per-engine ``_leaf_value_source_cache`` short-circuits the
-    isinstance chain for SolidityVariable / Constant / StateVariable
-    after the first resolution. The worklist iterates to fixed point
-    so the same operand is re-resolved many times — caching by id
-    collapses each unique value to one classification call. Bounded
-    lifetime (= engine instance), so no cross-Slither-instance id
-    reuse risk.
-
-    Pin: a function with msg.sender + state-var reads + a literal
-    constant should populate at least one entry of each leaf kind in
-    the cache after a single run().
-    """
+    """Per-engine ``_leaf_value_source_cache`` short-circuits the isinstance chain for
+    SolidityVariable / Constant / StateVariable, collapsing the many re-resolutions
+    of the fixed-point worklist. Pin: msg.sender + state-var reads + a literal
+    constant populate at least one entry of each leaf kind after one run()."""
     sl = _compile(
         tmp_path,
         """
@@ -855,8 +782,7 @@ def test_leaf_value_source_cache_collapses_repeat_resolutions(tmp_path):
     assert "msg_sender" in cache_kinds, cache_kinds
     assert "state_variable" in cache_kinds, cache_kinds
     assert "constant" in cache_kinds, cache_kinds
-    # Variables (Local/Temporary/Reference) must NOT be cached —
-    # their provenance changes during dataflow convergence.
+    # Variables (Local/Temporary/Reference) must NOT be cached: provenance changes during convergence.
     for sources in eng._leaf_value_source_cache.values():
         for src in sources:
             assert src.kind not in ("parameter", "local", "temporary", "reference"), (
@@ -865,26 +791,17 @@ def test_leaf_value_source_cache_collapses_repeat_resolutions(tmp_path):
 
 
 def test_shared_modifier_phi_does_not_pollute_function_parameter(tmp_path):
-    """Slither shares a modifier's SSA-IR across every caller, so the
-    modifier-entry Phi for a modifier parameter unions ALL call-site
-    arguments — one rvalue per function that uses the modifier. When
-    the modifier parameter shares a NAME with one of the function's
-    parameters (the canonical OZ ``modifier onlyRole(bytes32 role)``
-    + ``function revokeRole(bytes32 role, ...)`` shape), iterating
-    that Phi in the function's engine would pollute the function's
-    parameter provenance with every OTHER caller's argument.
+    """Slither shares a modifier's SSA-IR across every caller, so the modifier-entry
+    Phi for a modifier parameter unions ALL call-site arguments. When it shares a NAME
+    with a function parameter (OZ ``onlyRole(bytes32 role)`` + ``revokeRole(bytes32
+    role, ...)``), iterating that Phi would pollute the function's parameter
+    provenance with every OTHER caller's argument.
 
-    Pre-fix: on CumulativeMerkleDrop this turned a 5-IR function into
-    a 200-iter-cap saturated build (~18 s/fn, 17 min for the contract).
-    The bindings of downstream ``_handle_internal_call`` invocations
-    kept growing — state variables from other call sites accreting —
-    so ``_sub_engine_memo`` keyed on ``(callee, bindings)`` missed
-    every iteration and the same sub-engines respawned 200×.
-
-    The fix: ``_iter_nodes`` no longer yields modifier bodies. The
-    cross-fn revert path (modifier → helper → ``if (!check) revert``)
-    is independently handled by ``RevertDetector`` + ``_build_chain_bindings``,
-    so we lose nothing.
+    Pre-fix on CumulativeMerkleDrop a 5-IR function saturated the 200-iter cap
+    (~18 s/fn, 17 min per contract): bindings kept growing, so ``_sub_engine_memo``
+    missed every iteration. The fix: ``_iter_nodes`` no longer yields modifier
+    bodies; the cross-fn revert path is handled by ``RevertDetector`` +
+    ``_build_chain_bindings``, so nothing is lost.
     """
     sl = _compile(
         tmp_path,
@@ -924,10 +841,8 @@ def test_shared_modifier_phi_does_not_pollute_function_parameter(tmp_path):
 
     role_sources = eng.provenance.get("role")
     assert role_sources, "expected `role` parameter to be seeded"
-    # The function's ``role`` parameter is bound to its caller's
-    # argument — never reads a state variable. If we see the modifier-
-    # entry Phi's rvalues (PAUSER_ROLE / OPERATOR_ROLE state vars), the
-    # bug is back.
+    # The function's ``role`` is bound to its caller's argument, never a state
+    # variable; seeing the modifier Phi's rvalues (PAUSER_ROLE / OPERATOR_ROLE) means the bug is back.
     polluted_state_vars = {s.state_variable_name for s in role_sources if s.kind == "state_variable"}
     assert not polluted_state_vars, (
         f"`role`'s provenance was polluted by the modifier-shared Phi: "
@@ -939,8 +854,6 @@ def test_shared_modifier_phi_does_not_pollute_function_parameter(tmp_path):
 
 
 def test_unpack_propagates_tuple_provenance(tmp_path):
-    """After ``(bool ok, ) = target.call(data);``, the unpacked ``ok``
-    SSA value inherits the tuple's full provenance set."""
     sl = _compile(
         tmp_path,
         """
@@ -956,7 +869,6 @@ def test_unpack_propagates_tuple_provenance(tmp_path):
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # `ok` is unpacked from the tuple; it should carry external_call source.
     has_ok_with_external = any(
         name.startswith("ok") and _has_source_kind(srcs, "external_call")
         for name, srcs in eng.provenance.sources.items()
@@ -966,9 +878,7 @@ def test_unpack_propagates_tuple_provenance(tmp_path):
     )
 
 
-# ---------------------------------------------------------------------------
 # ``callee_args_digest`` is content-stable across processes/seeds.
-# ---------------------------------------------------------------------------
 
 _DIGEST_SNIPPET = """
 import sys
@@ -1017,11 +927,10 @@ def test_callee_args_digest_is_seed_independent():
 
 
 def test_operand_tie_break_is_seed_independent():
-    """Two computed Sources tied on every sort-key field before the digest
-    (same kind, no parameter/state/callee identity) must
-    resolve to the SAME published operand in every process. Before the fix the
-    winner was ordered by a ``hash()``-seeded digest string; 37-46 operand
-    slots flickered across 25/88 production units."""
+    """Two computed Sources tied on every pre-digest sort-key field must resolve to
+    the SAME published operand in every process. Before the fix the winner was
+    ordered by a ``hash()``-seeded digest string; 37-46 operand slots flickered
+    across 25/88 production units."""
     import os
     import subprocess
 

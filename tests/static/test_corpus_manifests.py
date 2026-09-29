@@ -1,21 +1,11 @@
 """YAML-driven corpus harness.
 
-For every ``tests/corpus_manifests/*.yaml`` file:
-
-  1. Compile the Solidity declared inline (or referenced via
-     ``source_path:``) against Slither.
-  2. Run ``build_predicate_artifacts`` on the named subject contract.
-  3. Assert each function in ``expected_functions`` matches the semantic
-     output's leaf fields (authority_role / kind / operator /
-     confidence / unsupported_reason / references_msg_sender /
-     parameter_indices).
-  4. Assert every function in ``unguarded`` is absent from the semantic
-     trees dict (resolver convention: absent = publicly callable).
-
-Manifests live alongside this harness so #18's go/no-go gate has
-authoritative expected output for the canonical real-protocol
-shapes. See ``tests/corpus_manifests/README.md`` for the schema +
-how to add a manifest.
+For every ``tests/corpus_manifests/*.yaml``: compile the Solidity (inline or via
+``source_path:``) against Slither, run ``build_predicate_artifacts`` on the subject
+contract, assert each ``expected_functions`` entry matches the semantic leaf fields, and
+assert every ``unguarded`` function is absent from the trees dict (absent = publicly
+callable). Manifests give #18's go/no-go gate authoritative expected output; schema and
+how to add one: ``tests/corpus_manifests/README.md``.
 """
 
 from __future__ import annotations
@@ -67,8 +57,6 @@ def test_corpus_manifest(manifest_path: Path, tmp_path: Path):
 
     trees = artifact["trees"]
 
-    # Guarded functions must have a tree with at least one leaf
-    # matching the expected fields.
     for fn, expectations in expected_functions.items():
         assert fn in trees, f"manifest expected {fn} to be guarded; semantic trees dict has {sorted(trees.keys())}"
         leaves = list(_walk_leaves(trees[fn]))
@@ -76,7 +64,6 @@ def test_corpus_manifest(manifest_path: Path, tmp_path: Path):
         match_index = _find_matching_leaf(leaves, expectations)
         assert match_index is not None, _format_no_match(fn, leaves, expectations)
 
-    # Unguarded functions must NOT appear (absent = public).
     for fn in unguarded:
         assert fn not in trees, (
             f"manifest expected {fn} to be unguarded but semantic pipeline produced a tree: {trees[fn]}"

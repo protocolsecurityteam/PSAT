@@ -1,19 +1,11 @@
-"""Regression: the event-log indexer enrolls a proxy-linked impl job's
-self-administered role/authority cursors at the **proxy** — where the events are
-emitted and where ``capability_resolver`` reads them — not at ``job.address``
-(the impl, which delegatecalls and emits nothing under its own address).
+"""Regression: the event-log indexer enrolls a proxy-linked impl job's self-administered role/authority
+cursors at the **proxy** (where events are emitted and ``capability_resolver`` reads them), not ``job.address``.
 
-The bug: ``_event_address_for_descriptor`` fell through to ``job.address`` for a
-self-administered OZ AccessControl descriptor (no ``authority_contract``, no
-``event_address`` on the hint — KING Distributor's exact shape: all 40 hints had
-both ``None``). For an ``(impl)`` job that is the implementation address, so the
-cursor landed on an address that emits nothing and the proxy stayed permanently
-un-indexed. Every privileged function then fell back to a ~30–40 s HyperSync
-full-history scan — driving both the ~13-min policy stage AND run-to-run
-controller drift (a cold fold lands on the full set / a truncated subset /
-``external_check`` depending on how the scan races the 45 s timeout). The fix
-routes the fallback through the same ``runtime_addr`` the resolver uses
-(``request['proxy_address']`` when set). See POLICY_STAGE_ROOTCAUSE_VERDICT.md.
+The bug: ``_event_address_for_descriptor`` fell through to ``job.address`` (the impl, which emits nothing) for a
+self-administered OZ AccessControl descriptor (KING Distributor's shape: no ``authority_contract``, no hint
+``event_address``). The proxy stayed un-indexed, every privileged function fell back to a ~30-40 s HyperSync scan,
+inflating the policy stage to ~13 min and causing run-to-run controller drift. The fix routes the fallback through
+the resolver's ``runtime_addr``. See POLICY_STAGE_ROOTCAUSE_VERDICT.md.
 """
 
 from __future__ import annotations
@@ -43,10 +35,8 @@ _ROLE_REVOKED = "0x" + keccak(text="RoleRevoked(bytes32,address,address)").hex()
 
 
 def _self_admin_descriptor() -> dict[str, Any]:
-    """A self-administered OZ AccessControl role set: no ``authority_contract``
-    (the contract administers its own roles) and the hint carries no
-    ``event_address`` — so address resolution falls through to the job-runtime
-    fallback. This is KING Distributor's exact descriptor shape."""
+    """Self-administered OZ AccessControl role set (KING Distributor's exact shape): no ``authority_contract``, no hint
+    ``event_address``."""
     return {
         "kind": "event_indexed",
         "enumeration_hint": [
@@ -123,10 +113,8 @@ def test_external_authority_address_wins_over_proxy():
 
 @pytest.fixture(autouse=True)
 def _no_creation_witness(monkeypatch):
-    """Enrollment grades its seed with three pinned chain reads before writing
-    the cursor. Nothing here asserts that grade — the subject is which ADDRESS
-    the cursor lands on — so the wire is stubbed to the unreachable-RPC failure,
-    whose documented outcome is ``(None, not_determined)``."""
+    """Stub the seed-grading wire to the unreachable-RPC outcome ``(None, not_determined)``; this module asserts which
+    ADDRESS the cursor lands on, not the grade."""
     import workers.event_log_indexer as eli
 
     def _no_wire(*_a, **_kw):

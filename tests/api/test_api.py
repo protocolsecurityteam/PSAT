@@ -241,7 +241,6 @@ def test_version_endpoint_returns_git_sha(api_client, monkeypatch) -> None:
 
 
 def test_admin_key_required_for_non_get(monkeypatch) -> None:
-    """Without a valid admin key, write endpoints must return 401."""
     import api
     from routers.deps import require_admin_key
 
@@ -266,7 +265,6 @@ def test_admin_key_required_for_non_get(monkeypatch) -> None:
 
 @requires_postgres
 def test_cors_allows_configured_origin(monkeypatch, db_session) -> None:
-    """Configured origins should be reflected in CORS responses."""
     from tests.conftest import SessionFactory
 
     monkeypatch.setenv("PSAT_SITE_ORIGIN", "https://psat.example.com")
@@ -409,7 +407,6 @@ def test_artifact_endpoint_serves_json_and_text(mock_session_cls) -> None:
 
 @patch("routers.deps.SessionLocal")
 def test_protocol_tvl_caps_days(mock_session_cls) -> None:
-    """days parameter should be capped to MAX_TVL_HISTORY_DAYS."""
     client = make_client()
 
     fake_protocol = MagicMock()
@@ -450,17 +447,14 @@ def test_protocol_tvl_caps_days(mock_session_cls) -> None:
 
 @patch("routers.deps.SessionLocal")
 def test_stage_timings_endpoint_returns_per_stage_artifacts(mock_session_cls, monkeypatch) -> None:
-    """Bench harness needs a reliable per-stage timing source. The endpoint
-    must collect every ``stage_timing_<stage>`` artifact for the job and
-    return them keyed by stage name (the suffix after ``stage_timing_``).
-    Mirrors what the worker writes via ``_record_stage_timing``."""
+    """Bench harness needs per-stage timings: collect every ``stage_timing_<stage>`` artifact,
+    keyed by the suffix. Mirrors what the worker writes via ``_record_stage_timing``."""
 
     client = make_client()
     fake_job = _make_fake_job()
 
-    # Use the inline path (data set, storage_key NULL) — exercises the same
-    # response-assembly code as the storage path without needing a fake
-    # boto3 client. SimpleNamespace stands in for an ORM Artifact row.
+    # Inline path (data set, storage_key NULL) exercises the same response assembly without a
+    # fake boto3 client.
     art_discovery = SimpleNamespace(
         name="stage_timing_discovery",
         storage_key=None,
@@ -534,9 +528,7 @@ def test_stage_timings_endpoint_404_for_unknown_job(mock_session_cls, monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# Storage-failure degradation. Both endpoints used to 500 on a transport
-# error or a missing storage client; we degrade per-row so a flaky bucket
-# can't take down the whole response.
+# Storage-failure degradation: per-row, so a flaky bucket can't take down the whole response.
 # ---------------------------------------------------------------------------
 
 
@@ -573,7 +565,6 @@ def test_stage_timings_degrades_when_storage_unconfigured(mock_session_cls, mock
     resp = make_client().get(f"/api/jobs/{fake_job.id}/stage_timings")
     assert resp.status_code == 200
     body = resp.json()
-    # Inline row survives; storage row is silently skipped.
     assert set(body["stage_timings"].keys()) == {"discovery"}
 
 
@@ -619,16 +610,9 @@ def test_stage_timings_degrades_on_storage_transport_error(mock_session_cls, moc
 
 @patch("routers.deps.SessionLocal")
 def test_analyses_listing_does_not_touch_object_storage(mock_session_cls) -> None:
-    """The listing endpoint must build entirely from DB rows now — no
-    object-storage GETs. The previous ``get_many`` path was the dominant
-    cost on production (Tigris RTT × N artifacts) and a transient
-    storage outage could degrade every row's name/summary. The new path
-    reads contract names from prefetched Contract rows and lists
-    artifact NAMES only.
-
-    Replaces the older ``test_analyses_degrades_per_row_on_partial_storage_failure``
-    — that test was specifically asserting the per-key fallback behaviour
-    of the old storage path, which no longer exists in this endpoint.
+    """The listing builds entirely from DB rows — no object-storage GETs (Tigris RTT x N
+    artifacts was the dominant production cost, and a storage outage could degrade every row).
+    Names come from prefetched Contract rows; only artifact NAMES are listed.
     """
     j_good = _make_fake_job(name="run_good", address="0xaaa")
     j_bad = _make_fake_job(name="run_bad", address="0xbbb")
@@ -657,8 +641,6 @@ def test_analyses_listing_does_not_touch_object_storage(mock_session_cls) -> Non
     contracts_result = MagicMock()
     contracts_result.scalars.return_value = iter([contract_good, contract_bad])
     artifact_names_result = MagicMock()
-    # Two artifact NAMES per job — proves the row goes through without
-    # any storage fetch happening.
     artifact_names_result.all.return_value = [
         (j_good.id, "contract_analysis"),
         (j_good.id, "contract_flags"),
@@ -671,7 +653,6 @@ def test_analyses_listing_does_not_touch_object_storage(mock_session_cls) -> Non
     mock_session_cls.return_value.__enter__ = MagicMock(return_value=sess)
     mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
-    # Patch get_storage_client so we can assert it was never called.
     with patch("routers.deps.get_storage_client") as mock_get_client:
         resp = make_client().get("/api/analyses")
         assert resp.status_code == 200, resp.text
@@ -681,8 +662,6 @@ def test_analyses_listing_does_not_touch_object_storage(mock_session_cls) -> Non
     assert by_run["run_good"].get("contract_name") == "Good"
     # No summary anywhere — that field is no longer emitted by the listing.
     assert "summary" not in by_run["run_good"]
-    # The unnamed row still appears, just without contract_name.
     assert "run_bad" in by_run
     assert "contract_name" not in by_run["run_bad"]
-    # Artifact names are still listed (no body fetch needed).
     assert sorted(by_run["run_good"]["available_artifacts"]) == ["contract_analysis", "contract_flags"]

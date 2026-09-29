@@ -1,23 +1,15 @@
 """The determinism gate, offline half.
 
-Two defect classes wear the same word and a test covering one silently passes
-the other:
+Two defect classes wear the same word: **string-hash** (``set[str]`` iteration,
+pinnable by ``PYTHONHASHSEED``; covered by
+``test_effects_selection.py::test_reachable_value_is_identical_across_processes``
+and ``scripts/determinism_gate.sh``) and **allocation-order** (``object.__hash__``
+on Slither variables, iteration follows ``id()``; no seed pins it).
 
-* **string-hash** — ``set[str]`` iteration, pinnable by ``PYTHONHASHSEED``.
-  Covered by ``test_effects_selection.py::test_reachable_value_is_identical_across_processes``
-  (real child processes, four seeds) plus the seed sweep in
-  ``scripts/determinism_gate.sh``.
-* **allocation-order** — ``object.__hash__`` on Slither variables, so iteration
-  follows ``id()``. **No seed pins it**, and before this file the offline suite
-  had no test of the shape at all: nothing in the suite varied
-  ``PYTHONHASHSEED``, and no test re-ran an aggregate in a fresh interpreter.
-
-The tests below own the second class. They run the real static pipeline in
-child processes under different allocation environments, because that is the
-only place the class is expressible — a same-process assertion sees one heap,
-and eight fresh processes under pymalloc see the same heap eight times
-(measured: the pre-fix implementation was byte-identical across 20 of 20 such
-runs while publishing a wrong destination on two functions).
+These tests own the second class. They run the real pipeline in child processes
+under different allocators because a same-process assertion sees one heap, and
+fresh pymalloc processes see the same heap every time (the pre-fix implementation
+was byte-identical across 20 of 20 such runs while publishing a wrong destination).
 """
 
 from __future__ import annotations
@@ -37,14 +29,10 @@ REPO = Path(__file__).resolve().parents[2]
 PROBE = REPO / "scripts" / "determinism_probe_taint.py"
 GATE = REPO / "scripts" / "determinism_gate.sh"
 
-# Enough malloc runs that agreement by chance is negligible without making the
-# suite slow. Measured at a fixed seed: pymalloc yields ONE control payload in 30
-# consecutive runs, malloc two to four depending on the session, and in one
-# session malloc's most common value coincided with pymalloc's on 7 runs of 20.
-# Three malloc runs therefore agree with pymalloc by chance with p ≈ 0.04 —
-# which is why the DISCRIMINATION check lives in the gate script (twelve runs)
-# and this test asserts only the non-flaky half: that the published binding does
-# not move. Binding stability itself was 1 distinct payload across 60 runs.
+# Three malloc runs agree with pymalloc by chance with p ~ 0.04 (pymalloc yields
+# ONE control payload in 30 runs, malloc two to four), so the DISCRIMINATION check
+# lives in the gate script (twelve runs); this test asserts only the non-flaky
+# half: that the published binding does not move (1 distinct payload in 60 runs).
 _MATRIX = [("pymalloc", ""), ("pymalloc", "boring,safe"), ("malloc", ""), ("malloc", ""), ("malloc", "safe")]
 
 
@@ -82,17 +70,15 @@ def test_exec_arbitrary_binding_is_identical_across_allocation_environments(matr
 def test_the_proved_binding_is_present_and_not_hedged(matrix):
     """A gate that can be satisfied by emitting nothing is not a gate.
 
-    ``singlyAssignedLocal`` has exactly one definition of its destination, so the
-    honest answer is the parameter name — not ``not_determined``. Without this
-    assertion every test in this file would stay green against an implementation
-    that resolved everything to ``not_determined`` — which is how a positive
-    control was nearly suppressed once before, by a proposal that passed its tests.
+    ``singlyAssignedLocal`` has one definition of its destination, so the honest
+    answer is the parameter name, not ``not_determined``. Without this every other
+    test stays green against an implementation that resolves everything to
+    ``not_determined``.
     """
     witness = matrix[0]["binding"]["singlyAssignedLocal(address,bytes)"]
     assert witness["destination_kind"] == "param"
     assert witness["destination_param"] == "a"
     assert witness["destination_basis"] == "call_destination"
-    # And the hedge is still reachable on the function that earns it.
     branched = matrix[0]["binding"]["branchedParams(address,address,bytes,bool)"]
     assert branched["destination_kind"] == "not_determined"
     assert branched["destination_param"] is None
@@ -101,30 +87,23 @@ def test_the_proved_binding_is_present_and_not_hedged(matrix):
 def test_the_control_instrument_is_wired_and_disagrees_with_the_binding(matrix):
     """The control instrument has to keep discriminating, or it is not evidence.
 
-    The probe recomputes the *removed* ``next(iter(<set intersection>))`` idiom
-    beside the real answer, and the gate requires that recomputation to vary. An
-    instrument that silently stopped running would make the gate green forever.
-    Here we pin the two facts a dead instrument would break: it produces picks at
-    all, and on the functions where a choice exists it does not agree with the
-    binding — so a run in which it varies is a run in which the old code would
-    have published a different witness.
+    The probe recomputes the removed ``next(iter(<set intersection>))`` idiom
+    beside the real answer and the gate requires it to vary; a silently dead
+    instrument would keep the gate green forever. Pin that it produces picks and,
+    where a choice exists, disagrees with the binding.
     """
     control = matrix[0]["unordered_control"]
     assert control, "the pre-fix idiom recomputation produced nothing; the gate's instrument is dead"
 
-    # `compose(address from, address to, ...)` puts BOTH address parameters in the
-    # call's read set and the destination is the second. The read-set pick names a
-    # source; the operand-position binding names the destination.
+    # `compose` has BOTH address params in the read set; the read-set pick names a
+    # source, the operand-position binding names the destination (the second).
     assert control["compose(address,address,bytes,bytes)"]["destination_param"] == "from"
     assert matrix[0]["binding"]["compose(address,address,bytes,bytes)"]["destination_param"] == "to"
 
-    # `rebalance` has no parameter destination at all — the call goes to a storage
-    # variable — so any read-set pick is wrong by construction. The pre-fix idiom
-    # still names one of the two argument parameters; the current pipeline mints
-    # NO claim here at all, because a proven state-variable destination is the
-    # proof that the claim's sentence ("forwards a caller-supplied target") is
-    # false. The proven-absent fact moved out of `binding` and into
-    # `suppressed_state_var`, which is where the gate now watches it.
+    # `rebalance` calls a storage-variable destination, so any read-set pick is
+    # wrong by construction. The pipeline mints NO claim (a proven state-var
+    # destination falsifies "forwards a caller-supplied target"); that fact lives in
+    # `suppressed_state_var`, which is where the gate watches it.
     assert control["rebalance(address,address,bytes)"]["destination_param"] in {"fromAsset", "toAsset"}
     assert "rebalance(address,address,bytes)" not in matrix[0]["binding"]
     suppressed = matrix[0]["suppressed_state_var"]

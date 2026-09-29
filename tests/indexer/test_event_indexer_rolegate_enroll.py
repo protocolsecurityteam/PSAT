@@ -129,12 +129,9 @@ def test_topic0s_cache_dedups_detection(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_creation_witness(monkeypatch):
-    """Enrollment grades its seed with three pinned chain reads before writing
-    the cursor. Nothing here asserts that grade — the subject is WHICH topics get
-    enrolled — so the wire is stubbed to the unreachable-RPC failure, whose
-    documented outcome is ``(None, not_determined)``. ``eli.rpc_request`` is the
-    witness's only user; the role-store probe's own wire is ``rss.rpc_request``,
-    stubbed separately by the tests that care."""
+    """Stub the seed-grading wire to the unreachable-RPC outcome ``(None, not_determined)``; this module asserts
+    WHICH topics get enrolled, not the grade. ``eli.rpc_request`` is the witness's only user; the role-store
+    probe's wire is ``rss.rpc_request``, stubbed by the tests that care."""
 
     def _no_wire(*_a, **_kw):
         raise RuntimeError("no rpc")
@@ -200,9 +197,8 @@ def _seed_creation_block(monkeypatch, deploy: int):
 
 
 def _stub_probe_code(monkeypatch, code_for_impl: str, impl: str = _IMPL):
-    """Route resolve_probe_code's wire through a stub: get_code returns the given
-    code for the impl address, and the EIP-1967 slot read is disabled (the DB
-    Contract row supplies the proxy→impl hop)."""
+    """Stub ``resolve_probe_code``'s wire: get_code returns the given code for the impl; the EIP-1967 slot read is
+    disabled (the DB Contract row supplies the proxy→impl hop)."""
 
     def _fake_get_code(rpc_url, address, *, chain_id=None):
         return code_for_impl if address.lower() == impl.lower() else "0x00"

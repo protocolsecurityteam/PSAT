@@ -87,35 +87,27 @@ def test_mb_format():
 def test_cache_pressure_fires_once_per_threshold():
     reset_cache_pressure_state("test_cache")
 
-    # 40% — under the lowest threshold, no message.
     assert cache_pressure_message("test_cache", 40, 100) is None
 
-    # 50% — first crossing.
     msg = cache_pressure_message("test_cache", 50, 100)
     assert msg is not None and "test_cache" in msg and "50/100" in msg
 
-    # Repeat 50% — already logged, no message.
     assert cache_pressure_message("test_cache", 55, 100) is None
 
-    # 76% — next threshold (75%).
     msg = cache_pressure_message("test_cache", 76, 100)
     assert msg is not None and "76/100" in msg
 
-    # 95% — top threshold.
     msg = cache_pressure_message("test_cache", 95, 100)
     assert msg is not None and "95/100" in msg
 
-    # Already at 95%, growing further is silent.
     assert cache_pressure_message("test_cache", 99, 100) is None
 
 
 def test_cache_pressure_skips_to_top_threshold():
-    """Going from 0 to ≥95% in one jump should fire once and stay there."""
     reset_cache_pressure_state("jumpy")
 
     msg = cache_pressure_message("jumpy", 96, 100)
     assert msg is not None and "96/100" in msg
-    # No going back to lower thresholds.
     assert cache_pressure_message("jumpy", 50, 100) is None
 
 

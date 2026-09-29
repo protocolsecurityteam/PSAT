@@ -338,10 +338,9 @@ def _golden_produced_claim_ids() -> set[str]:
 
 
 def test_every_registry_id_is_produced_by_the_corpus_or_exempt():
-    """Produced-side coverage invariant: every registered claim can be minted —
-    it appears in the frozen-corpus golden or carries a documented exemption
-    pointing at the fixture that produces it. This is what makes a dead claim a
-    build failure rather than silent rot."""
+    """Produced-side coverage invariant: every registered claim appears in the frozen-corpus
+    golden or carries a documented exemption, so a dead claim is a build failure rather
+    than silent rot."""
     build_claims(None, _facts(with_creation=False), {})  # ensure discovery ran
     registry_ids = set(registry())
     produced = _golden_produced_claim_ids()

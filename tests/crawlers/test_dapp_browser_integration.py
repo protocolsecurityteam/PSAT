@@ -1,8 +1,4 @@
-"""Browser integration test for the DApp crawler against a local fake DApp.
-
-This test exercises the real browser crawler when Playwright and a Chromium
-browser are installed. It is skipped automatically otherwise.
-"""
+"""Browser integration test for the DApp crawler against a local fake DApp; skipped without Playwright + Chromium."""
 
 from __future__ import annotations
 

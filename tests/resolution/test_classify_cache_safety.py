@@ -1,9 +1,8 @@
 """Regression tests for the classify_resolved_address process-wide cache.
 
-Codex's review of the etherfi LP cascade speedup work flagged two correctness
-risks: transient RPC errors getting cached as 'contract' fallbacks, and
-those leaking through the per-job classify_cache into the persisted
-classified_addresses artifact. Both safety checks are tested here.
+Codex review of the etherfi LP cascade speedup flagged two risks: transient RPC errors
+cached as 'contract' fallbacks, and those leaking via the per-job classify_cache into the
+persisted classified_addresses artifact.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ from services.resolution.tracking import (
 
 @pytest.fixture(autouse=True)
 def _isolated_cache():
-    """Each test starts with an empty cache and leaves nothing behind."""
     clear_classify_cache()
     yield
     clear_classify_cache()
@@ -103,7 +101,6 @@ def test_cached_details_are_isolated_from_caller_mutation(monkeypatch):
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
 
-    # Simulate a Safe: owners + threshold both succeed.
     def fake_call(_rpc, _addr, signature, _abi, *_a, **_k):
         if signature == "getOwners()":
             return ["0x" + "1" * 40, "0x" + "2" * 40]
@@ -115,11 +112,9 @@ def test_cached_details_are_isolated_from_caller_mutation(monkeypatch):
 
     _kind, details = classify_resolved_address("https://rpc", "0x" + "e" * 40)
     assert details["owners"] == ["0x" + "1" * 40, "0x" + "2" * 40]
-    # Caller mutates returned details + nested list:
     cast(list, details["owners"]).append("0xpoisoned")
     details["address"] = "0xchanged"
 
-    # Next call returns a clean copy.
     _kind2, details2 = classify_resolved_address("https://rpc", "0x" + "e" * 40)
     assert details2["owners"] == ["0x" + "1" * 40, "0x" + "2" * 40]
     assert details2["address"] == "0x" + "e" * 40
@@ -150,7 +145,7 @@ def test_immutable_classification_keeps_long_ttl(monkeypatch):
     kind, details, ts = _CLASSIFY_CACHE[key]
     _CLASSIFY_CACHE[key] = (kind, details, ts - (tracking._CLASSIFY_CACHE_MUTABLE_TTL_S + 5))
 
-    # If the entry re-probed it would now look like a Safe; it must NOT — long TTL holds.
+    # If the entry re-probed it would now look like a Safe; long TTL must hold.
     def fake_safe(_rpc, _addr, signature, _abi, *_a, **_k):
         if signature == "getOwners()":
             return ["0x" + "9" * 40]
@@ -245,10 +240,8 @@ def test_concurrent_classify_consistent_under_8_threads(monkeypatch):
     monkeypatch.setattr(tracking, "_get_code", lambda *a, **k: "0x60")
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *a, **k: {})
 
-    # Per-address signature: a few addresses look like Safes, the rest fall
-    # through to "contract". The fake call records every probe so we can
-    # assert the cache collapses concurrent misses rather than re-probing
-    # the same address from every thread.
+    # A few addresses look like Safes, the rest are "contract". The fake call records
+    # every probe so we can assert the cache collapses concurrent misses.
     probe_calls: dict[str, int] = {}
     probe_lock = threading.Lock()
 
@@ -285,7 +278,6 @@ def test_concurrent_classify_consistent_under_8_threads(monkeypatch):
         futures = [pool.submit(_classify_round) for _ in range(8)]
         results = [f.result() for f in as_completed(futures)]
 
-    # Every concurrent reader sees the same value for a given address.
     by_addr: dict[str, set] = {}
     for thread_results in results:
         for addr, kind, details in thread_results:
@@ -302,8 +294,7 @@ def test_concurrent_classify_consistent_under_8_threads(monkeypatch):
             f"address {addr} re-probed {count} times — cache lock not collapsing concurrent misses"
         )
 
-    # And in aggregate the cache must avoid linear blow-up: 8 threads × 10
-    # addresses = 80 lookups; cached path means total probes ≪ 80 × 5.
+    # In aggregate: 8 threads x 10 addresses = 80 lookups, cached total must be << 80 x 5.
     total_probes = sum(probe_calls.values())
     assert total_probes < 8 * len(addresses) * len(tracking._CLASSIFY_PROBE_SIGS), (
         f"total probes {total_probes} suggests no caching"

@@ -1,20 +1,12 @@
 """Regression tests for the audit-timeline live-keccak helper in
 ``services.aggregations.contract_audit_timeline``.
 
-The live ``bytecode_keccak_now`` is read from the durable ``bytecode_cache``
-layer (services.clients.rpc PG cache — the system of record for deployed bytecode); only
-addresses absent from that layer are fetched live (which itself populates it).
-There is no timeline-local process-global cache. What we pin:
+``bytecode_keccak_now`` reads the durable ``bytecode_cache`` (PG, system of record for deployed
+bytecode) and fetches live only for addresses absent from it. No timeline-local process-global
+cache may exist, so nothing accumulates in the long-lived web process.
 
-1. A ``bytecode_cache`` hit supplies its stored ``code_keccak`` directly and
-   never fires a live RPC.
-2. A ``bytecode_cache`` miss falls back to the live ``_fetch_bytecode_keccak``.
-3. Empty / falsy addresses are skipped.
-4. The unbounded ``_BYTECODE_KECCAK_CACHE`` is eliminated (not merely bounded),
-   so nothing can accumulate in the long-lived web process.
-
-The two collaborators are imported lazily inside the helper, so the patches
-target their source modules (``services.clients.rpc`` / ``services.audits.coverage``).
+Collaborators are imported lazily inside the helper, so patches target their source modules
+(``services.clients.rpc`` / ``services.audits.coverage``).
 """
 
 from __future__ import annotations
@@ -27,7 +19,6 @@ from tests.support.overview_builders import _add_contract, _add_job, _add_protoc
 
 
 def test_reads_keccak_from_pg_bytecode_cache(monkeypatch):
-    """A bytecode_cache hit supplies code_keccak directly — no live RPC."""
     addr = "0x" + "ab" * 20
     monkeypatch.setattr("services.clients.rpc._pg_bytecode_get", lambda _c, _a: ("0x6080", "0x" + "11" * 32))
 
@@ -56,7 +47,6 @@ def test_reads_pg_on_mainnet_chain_id(monkeypatch):
 
 
 def test_falls_back_to_live_on_pg_miss(monkeypatch):
-    """A bytecode_cache miss falls back to the live fetch path."""
     addr = "0x" + "cd" * 20
     monkeypatch.setattr("services.clients.rpc._pg_bytecode_get", lambda _c, _a: None)
     monkeypatch.setattr("services.audits.coverage._fetch_bytecode_keccak", lambda _a, _chain: "0x" + "22" * 32)
@@ -66,7 +56,6 @@ def test_falls_back_to_live_on_pg_miss(monkeypatch):
 
 
 def test_skips_empty_addresses(monkeypatch):
-    """Falsy entries (``""`` / ``None``) are skipped, never queried."""
 
     def _no_pg(_c, _a):
         raise AssertionError("empty address must not be queried")
@@ -79,24 +68,21 @@ def test_skips_empty_addresses(monkeypatch):
 
 
 def test_no_process_global_keccak_cache():
-    """The third keccak cache is eliminated, not merely bounded — no
-    process-global dict can accumulate in the web process."""
+    """The third keccak cache is eliminated, not merely bounded."""
     assert not hasattr(cat, "_BYTECODE_KECCAK_CACHE")
     assert not hasattr(cat, "_BYTECODE_KECCAK_TTL_SECONDS")
 
 
 @requires_postgres
 def test_current_status_needs_a_determined_lower_bound_for_open_ended(db_session):
-    """``covered_to_block is None`` alone is not "this row covers the
-    currently-open impl window" — it is also what a row whose upper bound was never
-    determined looks like, and this module's own ImplWindow docstring calls that
-    inference invalid. ``AuditContractCoverage`` carries no ``successor`` column, so
-    the lower bound is the only evidence available here.
+    """``covered_to_block is None`` alone is not "this row covers the currently-open impl window":
+    it is also what a row whose upper bound was never determined looks like, and this module's
+    ImplWindow docstring calls that inference invalid. ``AuditContractCoverage`` has no
+    ``successor`` column, so the lower bound is the only evidence here.
 
-    Armed population 15 (``match_confidence='high'`` with BOTH bounds NULL);
-    realised badge changes today 0 — the 2 high-confidence rows that do land on a
-    current impl are ``covered_from_block`` set / ``covered_to_block`` NULL and keep
-    the badge (the positive control below).
+    Armed population 15 (``match_confidence='high'``, BOTH bounds NULL); realised badge changes
+    today 0 (the 2 high-confidence rows on a current impl have ``covered_from_block`` set and
+    keep the badge, per the positive control below).
     """
     from types import SimpleNamespace
 
@@ -118,10 +104,8 @@ def test_current_status_needs_a_determined_lower_bound_for_open_ended(db_session
         contract_name="Proxy",
     )
 
-    # ``_current_status`` reads the coverage rows it is handed and only queries for
-    # the impl Contract, so the rows are built in memory — the table's
-    # (report, contract) unique key would otherwise force one AuditReport per shape
-    # for no gain in what is being tested.
+    # Rows are built in memory: ``_current_status`` only queries for the impl Contract, and the
+    # table's (report, contract) unique key would force one AuditReport per shape.
     def _cov(**kwargs):
         base = {
             "contract_id": impl.id,

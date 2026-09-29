@@ -1,29 +1,23 @@
 """The amount-record producer (W1): which storage cell a payout is read out of.
 
-``amount_kind: bounded_by_storage`` says the quantity came out of storage and
-nothing more — the variable, the struct member and the key that selected the
-cell were all discarded at ``_origin_to_amount_kind``. This unit recovers them
-as a separate, additive fact: ``amount_record_variable`` (canonical, so two
-contracts each declaring ``bids`` cannot be read as one), the member path, and
-the origin + entry slot of every key level.
+``amount_kind: bounded_by_storage`` discarded the variable, struct member and key
+that selected the cell; this unit recovers them as an additive fact
+(``amount_record_variable`` canonical so two contracts declaring ``bids`` are not
+one, the member path, and origin + entry slot per key level). It names a cell and
+resolves nothing: whether the caller OWNS it is a join on the guard side.
 
-It names a cell. It resolves nothing: whether the caller OWNS that cell is a
-join against the guard side, and it is not made here.
-
-The discipline the fixtures pin, each against a sibling differing in exactly one
-construct:
+Fixtures pin the discipline, each against a sibling differing in one construct:
 
 * a record is published only when every contributing site named the SAME
   declaration — otherwise the honest plural and no scalar;
-* one site that named no record at all suppresses the whole fact (a record
-  assembled from the sites that happened to have one is not this flow's record);
-* a merged key, a merged base, a memory/call-result root and depths past the
-  v1 bounds all REFUSE, and a refusal is an absent key — never an empty path,
-  which is a real value here (``simple[id]`` has one);
-* a key the caller only DERIVED — narrowed by a cast, or arithmetic on two
-  arguments — names no slot and is not called ``param``, because the guard side
-  reads slots through this same helper and two different cells that agree on a
-  slot are how a guard gets read as gating a record it never gated.
+* one site with no record suppresses the whole fact;
+* a merged key/base, a memory/call-result root or depth past the v1 bounds all
+  REFUSE, and a refusal is an absent key — never an empty path (a real value:
+  ``simple[id]``);
+* a key the caller only DERIVED (cast-narrowed, arithmetic on two arguments) names
+  no slot and is not ``param``: the guard side reads slots through this helper, and
+  two cells agreeing on a slot is how a guard gets read as gating a record it never
+  gated.
 """
 
 from __future__ import annotations

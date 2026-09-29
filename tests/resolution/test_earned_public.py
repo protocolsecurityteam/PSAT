@@ -1,15 +1,11 @@
 """The caller-taint earned-public default (PSAT_AUTHORITY_EARNED_PUBLIC).
 
-End-to-end conformance for the structural rule that replaces positive
-authority recognition: a caller-tainted gate that matches no known
-permissionless shape fails CLOSED (external_check_only), and "public" is
-earned by either no caller gate at all or a permissionless shape. Every
-exclusion shape is tested in BOTH polarities (the authority variant gates,
-the permissionless variant stays open), with the canary shapes pinned.
-
-Real compiled contracts (the `_compile` + `_build_pipeline` pattern) —
-dict-leaf fakes hide provenance bugs; they are used only for the pure
-shape-classifier unit tests at the bottom.
+Conformance for the structural rule replacing positive authority recognition: a
+caller-tainted gate matching no known permissionless shape fails CLOSED
+(external_check_only); "public" is earned by no caller gate or a permissionless shape.
+Every exclusion shape is tested in BOTH polarities, with the canary shapes pinned. Real
+compiled contracts (`_compile` + `_build_pipeline`), since dict-leaf fakes hide provenance
+bugs; fakes only for the pure shape-classifier unit tests at the bottom.
 """
 
 from __future__ import annotations
@@ -51,8 +47,7 @@ def earned_public(monkeypatch):
 
 @pytest.fixture
 def legacy_path(monkeypatch):
-    """The kill-switch side: the flag defaults ON, so the legacy E3/E4
-    behavior must be requested explicitly."""
+    """The kill-switch side: the flag defaults ON, so legacy E3/E4 must be requested."""
     monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", "0")
 
 
@@ -142,15 +137,11 @@ def test_value_movement_transfer_from_stays_open(tmp_path, earned_public):
 
 
 def test_state_var_target_transfer_from_opens_under_flag(tmp_path):
-    """A state-var/immutable-target ``require(token.transferFrom(msg.sender,
-    …))`` is a value-movement call, not a gate (the corpus labels every such
-    row public: EarlyAdopterPool claim/withdraw token transfers). It used to
-    classify delegated_authority and resolve GATED on the legacy path — a
-    measured false-gate the earned-public flag opened. Since the classifier
-    itself applies the gate-shape discriminator (Wave 5 B2: an effectful
-    callee with a msg.sender funds-subject argument never earns
-    delegated_authority), the row is open on BOTH paths — the flag no longer
-    changes this class."""
+    """A state-var/immutable-target ``require(token.transferFrom(msg.sender, ...))`` is a
+    value-movement call, not a gate (the corpus labels every such row public:
+    EarlyAdopterPool claim/withdraw). It used to resolve GATED on the legacy path; since
+    the classifier now applies the gate-shape discriminator (Wave 5 B2), the row is open on
+    BOTH paths and the flag no longer changes this class."""
     src = """
         pragma solidity ^0.8.19;
         interface IERC20 { function transferFrom(address f, address t, uint256 a) external returns (bool); }
@@ -182,15 +173,13 @@ def test_state_var_target_transfer_from_opens_under_flag(tmp_path):
 
 
 def test_effectful_library_membership_consume_stays_gated(tmp_path, earned_public):
-    """``require(pendingAdmins.remove(msg.sender))`` — an effectful LIBRARY
-    call that manipulates the contract's OWN storage (no external calls in
-    its body): only existing members of a contract-curated set pass
-    (PermissionController.acceptAdmin). The value-movement exclusion must
-    not open it. The fixture mirrors OZ EnumerableSet's two-level
-    ``remove → _remove`` shape, which lifts as an ``external_bool`` leaf
-    with ``nonview_library`` mutability — exactly the corpus shape. (A
-    single-level library body inlines fully into a folded ``ne`` value
-    comparison instead — a separate, documented extraction ceiling.)"""
+    """``require(pendingAdmins.remove(msg.sender))``: an effectful LIBRARY call on the
+    contract's OWN storage, so only existing members of a curated set pass
+    (PermissionController.acceptAdmin). The value-movement exclusion must not open it.
+    The fixture mirrors OZ EnumerableSet's two-level ``remove -> _remove`` shape (an
+    ``external_bool`` leaf with ``nonview_library`` mutability, the corpus shape). A
+    single-level library body inlines into a folded ``ne`` comparison instead, a separate
+    documented extraction ceiling."""
     sl = _compile(
         tmp_path,
         """
@@ -229,11 +218,10 @@ def test_effectful_library_membership_consume_stays_gated(tmp_path, earned_publi
 
 
 def test_wrapper_library_value_movement_stays_open(tmp_path, earned_public):
-    """The other library polarity: a WRAPPER library whose body reaches an
-    external call (OZ SafeERC20's library → internal → low-level call) moves
-    another contract's assets exactly like a direct ``transferFrom`` —
-    ``nonview``, permissionless, open. This is the shape behind the
-    LiquidityPool/Liquifier/RewardsCoordinator corpus rows."""
+    """The other library polarity: a WRAPPER library whose body reaches an external call
+    (OZ SafeERC20 -> internal -> low-level call) moves another contract's assets like a
+    direct ``transferFrom``: ``nonview``, permissionless, open (LiquidityPool/Liquifier/
+    RewardsCoordinator rows)."""
     sl = _compile(
         tmp_path,
         """
@@ -266,10 +254,9 @@ def test_wrapper_library_value_movement_stays_open(tmp_path, earned_public):
 
 
 def test_assembly_wrapper_library_value_movement_stays_open(tmp_path, earned_public):
-    """Solmate's SafeTransferLib makes the external call in inline assembly —
-    Slither lifts the Yul ``call`` as a SolidityCall builtin, with no
-    LowLevelCall IR at all. The external-reach walk must still see it
-    (the BoringVault canary)."""
+    """Solmate's SafeTransferLib calls in inline assembly, which Slither lifts as a
+    SolidityCall builtin with no LowLevelCall IR. The external-reach walk must still see
+    it (the BoringVault canary)."""
     sl = _compile(
         tmp_path,
         """
@@ -305,11 +292,10 @@ def test_assembly_wrapper_library_value_movement_stays_open(tmp_path, earned_pub
 
 
 def test_void_call_with_merkle_witness_gates_under_flag(tmp_path, earned_public):
-    """MembershipManager.wrapEthForEap: a VOID statement call (the gate is
-    the callee's entire revert surface) consuming the caller plus a
-    bytes32[] hash-path witness — merkle membership against a
-    contract-committed snapshot root. An allowlist the caller cannot
-    self-admit into; the value-movement exclusion must not open it."""
+    """MembershipManager.wrapEthForEap: a VOID statement call consuming the caller plus a
+    bytes32[] hash-path witness, i.e. merkle membership against a committed root. An
+    allowlist the caller cannot self-admit into; the value-movement exclusion must not
+    open it."""
     sl = _compile(
         tmp_path,
         """
@@ -333,10 +319,9 @@ def test_void_call_with_merkle_witness_gates_under_flag(tmp_path, earned_public)
 
 
 def test_void_self_keyed_registration_stays_open_under_flag(tmp_path, earned_public):
-    """DelegationManager.registerAsOperator: a VOID external call passing
-    the caller and scalars — the callee records state for the caller's own
-    key. Witness-free void calls stay permissionless (gating this would
-    also re-gate the beforeTransfer denylist hook shape)."""
+    """DelegationManager.registerAsOperator: a VOID external call passing the caller and
+    scalars; the callee records state for the caller's own key. Witness-free void calls
+    stay permissionless (gating would also re-gate the beforeTransfer denylist hook)."""
     sl = _compile(
         tmp_path,
         """
@@ -428,13 +413,10 @@ def test_balance_threshold_stays_open_under_flag(tmp_path, earned_public):
 
 
 def test_caller_equals_untyped_computed_stays_open(tmp_path, earned_public):
-    """``msg.sender == <untyped computed value>`` stays open: cross-contract
-    inlining folds caller-keyed mapping reads to ``msg.sender == <scalar>``
-    (``!hasPod(msg.sender)`` → ``msg.sender == 0``), so a caller equality
-    whose other side is not plausibly address-typed is a folded value
-    comparison on the caller's own data, not an identity authorization.
-    Gating these manufactured false-gates on createPod/delegateTo/
-    deregisterOperatorFromAVS (measured on the corpus)."""
+    """``msg.sender == <untyped computed value>`` stays open: cross-contract inlining folds
+    caller-keyed mapping reads to ``msg.sender == <scalar>`` (``!hasPod(msg.sender)`` ->
+    ``msg.sender == 0``), a folded value comparison on the caller's own data. Gating these
+    manufactured false-gates on createPod/delegateTo/deregisterOperatorFromAVS."""
     sl = _compile(
         tmp_path,
         """
@@ -509,8 +491,7 @@ def test_exclusion_polarity_is_permissionless():
 
 
 def test_self_comparison_and_signature_self_auth_are_permissionless():
-    # msg.sender == tx.origin / msg.sender == ecrecover(...): every operand
-    # caller-derived — uniform self-auth, not a curated set.
+    # msg.sender == tx.origin / ecrecover(...): every operand caller-derived, uniform self-auth.
     assert is_permissionless_caller_shape(_leaf(operands=[{"source": "msg_sender"}, {"source": "tx_origin"}]))
     assert is_permissionless_caller_shape(_leaf(operands=[{"source": "msg_sender"}, {"source": "signature_recovery"}]))
 
@@ -525,9 +506,8 @@ def test_caller_vs_parameter_is_permissionless_but_state_var_is_not():
 
 
 def test_caller_vs_non_address_scalar_is_permissionless():
-    # The inlining fold: ``!hasPod(msg.sender)`` / ``!isDelegated(msg.sender)``
-    # collapse to ``msg.sender == 0 (uint256)`` — a folded claim-once, not an
-    # identity test. An explicit address literal stays an authority.
+    # The inlining fold: ``!hasPod(msg.sender)`` collapses to ``msg.sender == 0 (uint256)``,
+    # a folded claim-once, not an identity test. An explicit address literal stays an authority.
     assert is_permissionless_caller_shape(
         _leaf(
             operands=[{"source": "msg_sender"}, {"source": "constant", "constant_value": "0", "value_type": "uint256"}]
@@ -565,8 +545,7 @@ def test_external_bool_mutability_discriminates():
     assert not is_permissionless_caller_shape(view_acl)
     effectful = _leaf(kind="external_bool", operator="truthy", callee_state_mutability="nonview")
     assert is_permissionless_caller_shape(effectful)
-    # Absent mutability (pre-flag trees): must not manufacture a false-gate
-    # on the value-movement canary.
+    # Absent mutability (pre-flag trees) must not manufacture a false-gate on the canary.
     legacy = _leaf(kind="external_bool", operator="truthy")
     assert is_permissionless_caller_shape(legacy)
 
@@ -644,27 +623,23 @@ def test_root_check_folds_as_side_condition_without_flag(legacy_path):
 
 
 def test_bound_check_never_blocks_public_path(earned_public):
-    """The Veda contract: an inlined downstream call's auth is a runtime
-    side-condition, not an end-user restriction (and the cofinite/denylist
-    public path must survive it)."""
+    """The Veda contract: an inlined downstream call's auth is a runtime side-condition, not
+    an end-user restriction (the cofinite/denylist public path must survive it)."""
     surface = project_capability_surface(_and_dict(_PUBLIC, _BOUND_CHECK))
     assert surface.authority_public
 
 
 def test_untagged_probe_check_never_blocks_public_path(earned_public):
-    """A targeted probe without a caller-gate basis tag (the UN-inlined
-    teller→vault ``requiresAuth``, root subject by default) keeps the legacy
-    side-condition fold: an adapter-earned public capability
-    (PublicCapabilityUpdated) AND-ed with it must surface public
-    (test_veda_principal_dimension pins the end-to-end shape)."""
+    """A targeted probe without a caller-gate basis tag (the UN-inlined teller->vault
+    ``requiresAuth``) keeps the legacy side-condition fold: an adapter-earned public
+    capability AND-ed with it must surface public (test_veda_principal_dimension pins it)."""
     surface = project_capability_surface(_and_dict(_PUBLIC, _PROBE_CHECK))
     assert surface.authority_public
 
 
 def test_unread_owner_equality_blocks_public_path_under_flag(earned_public):
-    """``msg.sender == owner`` whose value wasn't read used to vanish in
-    projection, letting a sibling public path open the function
-    (WithdrawRequestNFT.seizeInvalidRequest)."""
+    """``msg.sender == owner`` whose value wasn't read used to vanish in projection, letting
+    a sibling public path open the function (WithdrawRequestNFT.seizeInvalidRequest)."""
     surface = project_capability_surface(_and_dict(_PUBLIC, _EMPTY_LOWER))
     assert not surface.authority_public
 
@@ -675,8 +650,7 @@ def test_resolved_empty_is_not_a_blocker(earned_public):
 
 
 def test_principal_rows_survive_root_check_under_flag(earned_public):
-    """Rows are already gated — the blocker folds onto them as a condition,
-    exactly the legacy behavior (no caller-drop regression)."""
+    """Rows already gated: the blocker folds onto them as a condition (legacy behavior)."""
     surface = project_capability_surface(_and_dict(_OWNER_SET, _ROOT_CHECK))
     assert not surface.authority_public
     assert [r["address"] for r in surface.principal_rows] == ["0x" + "ab" * 20]
@@ -690,10 +664,9 @@ def test_or_blocks_only_when_every_disjunct_blocks(earned_public):
 
 
 def test_eth_send_success_check_stays_open(tmp_path, earned_public):
-    """``(bool sent,) = msg.sender.call{value: amt}(""); require(sent)`` —
-    the bool folds to a caller-sourced operand but is an effectful-call
-    result: refunding the caller is value movement, not an allowlist
-    (AuctionManager.cancelBid / UnwrapTokenV1ETH.claimWithdraw)."""
+    """``(bool sent,) = msg.sender.call{value: amt}(""); require(sent)``: the bool folds to a
+    caller-sourced operand but is an effectful-call result; refunding the caller is value
+    movement, not an allowlist (AuctionManager.cancelBid / UnwrapTokenV1ETH.claimWithdraw)."""
     sl = _compile(
         tmp_path,
         """
@@ -714,9 +687,9 @@ def test_eth_send_success_check_stays_open(tmp_path, earned_public):
 
 
 def test_caller_equals_param_keyed_view_lookup_stays_open(tmp_path, earned_public):
-    """``msg.sender == ownerOf(tokenId)`` — the caller matches a value keyed
-    by its own argument: self-service-or-appointed (the ERC721
-    transfer/claim family), not a fixed authority."""
+    """``msg.sender == ownerOf(tokenId)``: the caller matches a value keyed by its own
+    argument (self-service-or-appointed, the ERC721 transfer/claim family), not a fixed
+    authority."""
     sl = _compile(
         tmp_path,
         """
@@ -739,8 +712,7 @@ def test_caller_equals_param_keyed_view_lookup_stays_open(tmp_path, earned_publi
 
 
 def test_caller_equals_nullary_getter_stays_gated(tmp_path, earned_public):
-    """The fixed-authority sibling: ``msg.sender == owner()`` (nullary getter)
-    keeps the gated resolution path."""
+    """The fixed-authority sibling: ``msg.sender == owner()`` keeps the gated path."""
     sl = _compile(
         tmp_path,
         """
@@ -761,22 +733,18 @@ def test_caller_equals_nullary_getter_stays_gated(tmp_path, earned_public):
 
 
 # ---------------------------------------------------------------------------
-# #111 / #112 — admin-curated caller-keyed THRESHOLD: promote + fail-closed.
+# #111 / #112 - admin-curated caller-keyed THRESHOLD: promote + fail-closed.
 #
-# ``tier[msg.sender] >= K`` written only by an ``onlyOwner`` setter is an
-# admin-curated authority — a caller cannot self-acquire the level — so the
-# writer-gate promotes it from ``business`` to ``caller_authority`` (Part A),
-# and the comparison branch enumerates it instead of re-opening to public via
-# the role-blind permissionless-shape rule (Part B). A populated holder set
-# (warm) or an authoritative empty (``exact`` = provably nobody now, #112) is
-# honored; any cold / unsupported / no-adapter result fails CLOSED to an
-# ``external_check_only`` carrying a ``CALLER_GATE_BASIS_TAGS`` tag (#111),
-# never ``conditional_universal`` public.
+# ``tier[msg.sender] >= K`` written only by an ``onlyOwner`` setter is an admin-curated
+# authority, so the writer-gate promotes it from ``business`` to ``caller_authority``
+# (Part A) and the comparison branch enumerates it instead of re-opening to public via the
+# role-blind permissionless-shape rule (Part B). A warm holder set or authoritative empty
+# (``exact``, #112) is honored; cold / unsupported / no-adapter fails CLOSED to
+# ``external_check_only`` with a ``CALLER_GATE_BASIS_TAGS`` tag (#111).
 #
-# The discriminator's safe side: a self-acquirable ``points[msg.sender] >= K``
-# written only by a self-keyed ``+=`` stays ``business`` and keeps opening to
-# public when cold — the blanket "empty caller-keyed comparison => closed"
-# alternative would wrongly gate this self-service threshold.
+# Safe side: a self-acquirable ``points[msg.sender] >= K`` written only by a self-keyed
+# ``+=`` stays ``business`` and opens when cold; blanket "empty caller-keyed comparison =>
+# closed" would wrongly gate it.
 # ---------------------------------------------------------------------------
 
 _ADMIN_CURATED_THRESHOLD = """
@@ -812,11 +780,9 @@ _SELF_SERVICE_THRESHOLD = """
 
 
 class _StubAdapter:
-    """Returns its configured capability for any descriptor — models the
-    production adapter outcomes (warm holders / authoritative-empty) without
-    smuggling in the routing decision the evaluator under test must make. A
-    ``None`` adapter falls back to ``_NullAdapter`` (the cold / no-adapter
-    state)."""
+    """Returns its configured capability for any descriptor, modelling production adapter
+    outcomes without smuggling in the routing decision under test. A ``None`` adapter falls
+    back to ``_NullAdapter`` (cold / no-adapter)."""
 
     def __init__(self, cap: Any) -> None:
         self._cap = cap
@@ -835,10 +801,9 @@ def _gate_comparison_subtree(tree: dict) -> Any:
 
 def _threshold_caps(sl, full_name: str, adapter: Any = None):
     """REAL pipeline: build_predicate_tree + writer_gate + evaluate. Returns
-    (gate_leaf_role, gate_leaf_cap, end_to_end_surface). The gate-leaf cap is
-    the comparison subtree alone; the surface is the whole ``gated()`` tree
-    (the caller gate AND-ed with the public ``require(open)`` sibling — the
-    end-to-end path the projection blocker must suppress)."""
+    (gate_leaf_role, gate_leaf_cap, end_to_end_surface); the surface is the whole ``gated()``
+    tree (caller gate AND-ed with the public ``require(open)`` sibling the projection
+    blocker must suppress)."""
     contract = next(c for c in sl.contracts if c.name == "C")
     trees = _build_pipeline(contract)
     tree = trees[full_name]
@@ -851,32 +816,27 @@ def _threshold_caps(sl, full_name: str, adapter: Any = None):
 
 
 def test_admin_curated_threshold_promotes_to_caller_authority(tmp_path, earned_public):
-    """Part A (writer-gate discriminator): an ``onlyOwner``-curated
-    ``tier[msg.sender] >= K`` is not self-acquirable, so it promotes from
-    ``business`` to ``caller_authority``."""
+    """Part A: an ``onlyOwner``-curated ``tier[msg.sender] >= K`` is not self-acquirable,
+    so it promotes from ``business`` to ``caller_authority``."""
     role, _cap, _surface = _threshold_caps(_compile(tmp_path, _ADMIN_CURATED_THRESHOLD), "gated()")
     assert role == "caller_authority"
 
 
 def test_admin_curated_threshold_cold_fails_closed(tmp_path, earned_public):
-    """#111: a promoted authority threshold whose enumeration is cold /
-    no-adapter must GATE — ``external_check_only`` carrying a caller-gate basis
-    tag — never the ``conditional_universal`` public default. Revert-proof for
-    BOTH the static promotion (Part A) and the comparison-branch re-open drop
-    (Part B): reverting either re-opens the gate and fails this assertion."""
+    """#111: a promoted threshold whose enumeration is cold / no-adapter must GATE
+    (``external_check_only`` + caller-gate basis tag), never the ``conditional_universal``
+    default. Revert-proof for both Part A and Part B."""
     sl = _compile(tmp_path, _ADMIN_CURATED_THRESHOLD)
     role, gate_cap, surface = _threshold_caps(sl, "gated()", adapter=None)
     assert role == "caller_authority"
     assert gate_cap.kind == "external_check_only", f"cold admin threshold must gate, got {gate_cap.kind}"
     basis = capability_to_dict(gate_cap)["check"]["extra"]["basis"]
     assert basis == ["caller_tainted_authority_unresolved"]
-    # end-to-end: the sibling ``require(open)`` public path is suppressed.
     assert not surface.authority_public
 
 
 def test_admin_curated_threshold_exact_empty_is_resolved_not_public(tmp_path, earned_public):
-    """#112: an authoritative ``finite_set([], exact)`` (provably nobody now)
-    is honored as resolved-empty, never coerced to public."""
+    """#112: an authoritative ``finite_set([], exact)`` is resolved-empty, never public."""
     sl = _compile(tmp_path, _ADMIN_CURATED_THRESHOLD)
     empty_exact = CapabilityExpr.finite_set([], quality="exact", confidence="enumerable")
     role, gate_cap, surface = _threshold_caps(sl, "gated()", adapter=_StubAdapter(empty_exact))
@@ -888,8 +848,7 @@ def test_admin_curated_threshold_exact_empty_is_resolved_not_public(tmp_path, ea
 
 
 def test_admin_curated_threshold_warm_enumerates_restricted_holders(tmp_path, earned_public):
-    """Warm: the populated holder set is honored (restricted callers), gated —
-    the polarity the cold/empty cells must agree with, not invert from."""
+    """Warm: the populated holder set is honored and gated; cold/empty cells must agree."""
     sl = _compile(tmp_path, _ADMIN_CURATED_THRESHOLD)
     holders = ["0x" + "aa" * 20, "0x" + "bb" * 20]
     warm = CapabilityExpr.finite_set(holders, quality="lower_bound", confidence="partial")
@@ -900,11 +859,8 @@ def test_admin_curated_threshold_warm_enumerates_restricted_holders(tmp_path, ea
 
 
 def test_self_service_threshold_stays_public_when_cold(tmp_path, earned_public):
-    """The discriminator's safe side (no over-gate): a self-acquirable
-    ``points[msg.sender] >= K`` written only by a self-keyed ``+=`` stays
-    ``business`` and keeps opening to public when cold. The blanket
-    "empty caller-keyed comparison => closed" alternative would wrongly gate
-    this — guards against that over-gate regression."""
+    """No over-gate: a self-acquirable ``points[msg.sender] >= K`` written only by a
+    self-keyed ``+=`` stays ``business`` and opens to public when cold."""
     sl = _compile(tmp_path, _SELF_SERVICE_THRESHOLD)
     role, gate_cap, surface = _threshold_caps(sl, "gated()", adapter=None)
     assert role == "business"
@@ -913,12 +869,10 @@ def test_self_service_threshold_stays_public_when_cold(tmp_path, earned_public):
 
 
 # ---------------------------------------------------------------------------
-# The Solady EnumerableRoles shape: an assembly-backed,
-# named-return role read the static lifter cannot lower, after which the
-# caller taint was hashed into ``callee_args_digest`` and a hardcoded
-# ``authority_role="business"`` default published the gate as PUBLIC.
-# (The "callee parameter binding" hypothesis is REFUTED — the binding
-# works; the loss is downstream of it.)
+# The Solady EnumerableRoles shape: an assembly-backed, named-return role read the static
+# lifter cannot lower; the caller taint was hashed into ``callee_args_digest`` and a
+# hardcoded ``authority_role="business"`` default published the gate as PUBLIC. (The
+# "callee parameter binding" hypothesis is REFUTED; the loss is downstream of it.)
 # ---------------------------------------------------------------------------
 
 _SOLADY_SELF_GATE = """
@@ -979,11 +933,10 @@ def _leaves(tree):
 
 
 def test_solady_self_gate_emits_probeable_descriptor_and_gates(tmp_path, earned_public):
-    """Part A: the un-lowerable gate lives in a public single-address-param view
-    ON the analyzed contract, so it is emitted as the same ``external_set``
-    shape the identical gate takes when it is an EXTERNAL call (weETH's
-    modifier) — handing it to the role-store adapter that already answers it
-    correctly for every other contract. It must NOT read as public."""
+    """Part A: the un-lowerable gate lives in a public single-address-param view ON the
+    analyzed contract, so it is emitted as the same ``external_set`` shape as an EXTERNAL
+    call (weETH's modifier) and reaches the role-store adapter. It must NOT read as
+    public."""
     sl = _compile(tmp_path, _SOLADY_SELF_GATE)
     contract = next(c for c in sl.contracts if c.name == "C")
     trees = _build_pipeline(contract)
@@ -992,8 +945,6 @@ def test_solady_self_gate_emits_probeable_descriptor_and_gates(tmp_path, earned_
     descriptor = gate["set_descriptor"]
     assert descriptor["kind"] == "external_set"
     assert descriptor["callee_signature"] == "onlyUpgradeTimelock(address)"
-    # The authority is the analyzed deployment itself (the self-gate case), and
-    # the caller is the descriptor's key so the adapter probes the real gate.
     assert descriptor["authority_contract"]["address_source"] == {"source": "self_address"}
     assert descriptor["key_sources"] == [{"source": "msg_sender"}]
     assert gate["authority_role"] == "delegated_authority"
@@ -1011,16 +962,11 @@ def _tree_verdict(tree):
 
 
 def test_self_gate_checker_own_entry_point_stays_public(tmp_path, earned_public):
-    """The un-hedged direction of Part A: the CHECKER's own entry point
-    constrains its ARGUMENT, not its caller — anyone may call
-    ``onlyUpgradeTimelock(anyAddress)``. Its own tree must stay
-    ``conditional_universal`` (public) with no fabricated caller witness: no
-    self-gate descriptor keyed on ``msg_sender``, no ``msg_sender`` in any
-    operand's ``derived_from``, even though ``_authorizeUpgrade`` elsewhere in
-    the contract calls it with ``msg.sender``. (The round-1 regression: the
-    entry-parameter Phi unioned the call-site argument into the checker's own
-    frame, so the verdict for a function was decided by what an unrelated
-    function does.)"""
+    """The un-hedged direction of Part A: the CHECKER's own entry point constrains its
+    ARGUMENT, not its caller, so its own tree must stay ``conditional_universal`` with no
+    fabricated caller witness, even though ``_authorizeUpgrade`` elsewhere calls it with
+    ``msg.sender``. (Round-1 regression: the entry-parameter Phi unioned the call-site
+    argument into the checker's frame, so one function's verdict depended on another.)"""
     sl = _compile(tmp_path, _SOLADY_SELF_GATE)
     contract = next(c for c in sl.contracts if c.name == "C")
     trees = _build_pipeline(contract)
@@ -1033,8 +979,7 @@ def test_self_gate_checker_own_entry_point_stays_public(tmp_path, earned_public)
         for op in leaf.get("operands") or []:
             origins = [o.get("source") for o in (op.get("derived_from") or [])]
             assert "msg_sender" not in origins
-    # The hedged direction is unchanged: reached THROUGH a call that binds the
-    # parameter to msg.sender, the same gate still gates.
+    # Reached THROUGH a call that binds the parameter to msg.sender, the gate still gates.
     assert _tree_verdict(trees["f()"]) != "conditional_universal"
 
 
@@ -1058,21 +1003,17 @@ _SIBLING_CHECKERS = """
 
 
 def test_sibling_checkers_get_the_same_verdict_regardless_of_callers(tmp_path, earned_public):
-    """Byte-identical checkers must not diverge because only one of them is
-    ever called with ``msg.sender`` — the cid-568 falsification
-    (onlyUpgradeTimelock flipped while its eight identical siblings stayed
-    public). Frame purity: each checker's own frame sees its parameter as a
-    parameter, and each ``hasRole`` sub-frame sees only ITS call site's role
-    constant, not the union of every sibling's."""
+    """Byte-identical checkers must not diverge because only one is called with
+    ``msg.sender`` (cid-568: onlyUpgradeTimelock flipped while eight identical siblings
+    stayed public). Each checker's frame sees its parameter as a parameter, and each
+    ``hasRole`` sub-frame sees only ITS call site's role constant."""
     sl = _compile(tmp_path, _SIBLING_CHECKERS)
     contract = next(c for c in sl.contracts if c.name == "C")
     trees = _build_pipeline(contract)
     assert _tree_verdict(trees["onlyA(address)"]) == "conditional_universal"
     assert _tree_verdict(trees["onlyB(address)"]) == "conditional_universal"
-    # The caller that binds msg.sender still gates.
     assert _tree_verdict(trees["guarded()"]) != "conditional_universal"
-    # Frame purity of the sub-frame: onlyA's leaf never carries onlyB's role
-    # constant (the cross-call-site union listed every sibling's constant).
+    # Frame purity: onlyA's leaf never carries onlyB's role constant.
     for leaf in _leaves(trees["onlyA(address)"]):
         for op in leaf.get("operands") or []:
             names = {o.get("state_variable_name") for o in (op.get("derived_from") or [])}
@@ -1080,11 +1021,9 @@ def test_sibling_checkers_get_the_same_verdict_regardless_of_callers(tmp_path, e
 
 
 def test_solady_modifier_gate_caller_taint_survives_the_digest(tmp_path, earned_public):
-    """Part B: the gate is in a MODIFIER (not a probe-able view), so no
-    descriptor is possible — but the caller was passed as an ARGUMENT of the
-    un-lowerable read, and ``derived_from`` now carries that. The bare-bool
-    leaf is therefore caller-tainted and, because the comparison it performs
-    was never lowered, is never classified permissionless."""
+    """Part B: the gate is in a MODIFIER (no probe-able view, so no descriptor), but the
+    caller was an ARGUMENT of the un-lowerable read and ``derived_from`` carries that, so
+    the bare-bool leaf is caller-tainted and never classified permissionless."""
     sl = _compile(tmp_path, _SOLADY_MODIFIER_GATE)
     contract = next(c for c in sl.contracts if c.name == "C")
     trees = _build_pipeline(contract)
@@ -1097,12 +1036,9 @@ def test_solady_modifier_gate_caller_taint_survives_the_digest(tmp_path, earned_
 
 
 def test_collapsed_caller_taint_does_not_fire_on_value_bounds_or_signature_checks():
-    """The over-fire guard, and the reason the rule is shape-narrow.
-    ``derived_from`` is TRANSITIVE, so any value computed from a
-    caller-parameterized call carries the caller's origin. Measured on the
-    88-contract corpus, the broad form tainted 25 leaves of which 23 were
-    false. Each shape below is one of those false positives and must stay
-    untainted by the collapsed rule."""
+    """The over-fire guard, and why the rule is shape-narrow. ``derived_from`` is
+    TRANSITIVE; on the 88-contract corpus the broad form tainted 25 leaves, 23 false. Each
+    shape below is one of those false positives and must stay untainted."""
     from typing import cast
 
     from services.resolution.permissionless_shapes import leaf_caller_taint_is_collapsed as _collapsed
@@ -1123,11 +1059,9 @@ def test_collapsed_caller_taint_does_not_fire_on_value_bounds_or_signature_check
     # The Veda ``enter(...)`` vault call — external_bool carries its own
     # mutability, which the value-movement canary rule governs.
     assert not leaf_caller_taint_is_collapsed({"kind": "external_bool", "operator": "truthy", "operands": [computed]})
-    # A two-operand comparison is a readable shape, classified on that shape.
     assert not leaf_caller_taint_is_collapsed(
         {"kind": "equality", "operator": "truthy", "operands": [computed, {"source": "state_variable"}]}
     )
-    # An external_call operand: mutability unknown at operand level.
     assert not leaf_caller_taint_is_collapsed(
         {
             "kind": "equality",
@@ -1144,10 +1078,9 @@ def test_collapsed_caller_taint_does_not_fire_on_value_bounds_or_signature_check
 
 
 def test_self_gate_never_replaces_a_named_state_variable_attribution(tmp_path, earned_public):
-    """Part A is subordinate to the operand resolution it would overwrite: a
-    fallback leaf that recovered the underlying state VARIABLE keeps it (that
-    name is what controller enrollment and the pause/reentrancy passes key on).
-    Trading a named authority variable for a selector would be strictly less."""
+    """Part A is subordinate to operand resolution: a fallback leaf that recovered the
+    underlying state VARIABLE keeps it (controller enrollment and the pause/reentrancy
+    passes key on that name)."""
     sl = _compile(
         tmp_path,
         """

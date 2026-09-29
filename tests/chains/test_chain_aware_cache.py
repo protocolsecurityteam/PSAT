@@ -1,8 +1,4 @@
-"""Tests proving chain-awareness bugs in the caching layer.
-
-Each test demonstrates a real cross-chain contamination or data-loss
-scenario. They should FAIL against the old code and PASS after fixes.
-"""
+"""Chain-awareness of the caching layer: same address on different chains must not cross-contaminate."""
 
 from __future__ import annotations
 
@@ -23,7 +19,6 @@ pytestmark = requires_postgres
 
 
 def _create_completed_job_with_chain(session, address, chain, name="TestContract"):
-    """Create a completed job with all static data, on a specific chain."""
     from db.models import (
         Contract,
         ContractSummary,
@@ -95,7 +90,6 @@ def _create_completed_job_with_chain(session, address, chain, name="TestContract
 
 
 def _create_completed_company_job_with_inventory(session, company, chain, inventory_data):
-    """Create a completed company job with a contract_inventory artifact."""
     from db.models import JobStage, JobStatus
     from db.queue import create_job
 
@@ -117,7 +111,6 @@ def _create_completed_company_job_with_inventory(session, company, chain, invent
 
 class TestStaticCacheChainFiltering:
     def test_cache_hit_same_chain(self, db_session):
-        """Cache hit when address AND chain match."""
         from db.queue import find_completed_static_cache
 
         job_eth = _create_completed_job_with_chain(db_session, ADDR_A, "ethereum")
@@ -126,7 +119,6 @@ class TestStaticCacheChainFiltering:
         assert found.id == job_eth.id
 
     def test_cache_miss_different_chain(self, db_session):
-        """Same address on Ethereum must NOT be returned for a Base lookup."""
         from db.queue import find_completed_static_cache
 
         _create_completed_job_with_chain(db_session, ADDR_A, "ethereum")
@@ -142,7 +134,6 @@ class TestStaticCacheChainFiltering:
 
 class TestCompanyInventoryChainFiltering:
     def test_previous_inventory_same_chain(self, db_session):
-        """Previous inventory on the same chain is returned."""
         from db.queue import find_previous_company_inventory
 
         inv = {"contracts": [{"address": ADDR_A, "chain": "ethereum"}]}
@@ -164,7 +155,6 @@ class TestCompanyInventoryChainFiltering:
         assert found.id == job.id
 
     def test_previous_inventory_different_chain_excluded(self, db_session):
-        """Ethereum inventory must NOT be returned for a Base lookup."""
         from db.queue import find_previous_company_inventory
 
         inv = {"contracts": [{"address": ADDR_A, "chain": "ethereum"}]}
@@ -193,7 +183,6 @@ class TestDedupChainFiltering:
         assert found is None, "Ethereum job suppressed Base job creation — cross-chain dedup error"
 
     def test_is_known_proxy_same_chain(self, db_session):
-        """Proxy on Ethereum is detected for Ethereum queries."""
         from db.models import Contract
         from db.queue import create_job, is_known_proxy
 
@@ -213,7 +202,6 @@ class TestDedupChainFiltering:
         assert is_known_proxy(db_session, ADDR_A, chain="ethereum") is True
 
     def test_is_known_proxy_different_chain_not_found(self, db_session):
-        """A proxy on Ethereum must NOT be treated as proxy on Base."""
         from db.models import Contract
         from db.queue import create_job, is_known_proxy
 
@@ -242,8 +230,6 @@ class TestDedupChainFiltering:
 
 class TestCopyCachePreservesSource:
     def test_source_job_still_valid_cache_after_copy(self, db_session):
-        """After one cache copy, the source job must still be usable as a
-        cache source for subsequent copies."""
         from db.queue import (
             copy_static_cache,
             create_job,
@@ -252,12 +238,10 @@ class TestCopyCachePreservesSource:
 
         source = _create_completed_job_with_chain(db_session, ADDR_A, "ethereum")
 
-        # First cache copy
         target1 = create_job(db_session, {"address": ADDR_A, "chain": "ethereum"})
         result1 = copy_static_cache(db_session, source.id, target1.id)
         assert result1 is not None
 
-        # Source must still be a valid cache hit
         found = find_completed_static_cache(db_session, ADDR_A, chain="ethereum")
         assert found is not None, (
             "Source job is no longer a valid cache after first copy — contract row was moved instead of cloned"
@@ -265,7 +249,6 @@ class TestCopyCachePreservesSource:
         assert found.id == source.id
 
     def test_second_cache_copy_succeeds(self, db_session):
-        """A second cache copy from the same source must succeed."""
         from db.queue import copy_static_cache, create_job
 
         source = _create_completed_job_with_chain(db_session, ADDR_A, "ethereum")

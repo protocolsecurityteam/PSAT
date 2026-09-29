@@ -1,22 +1,10 @@
-"""Regression tests for cross-cascade materialization dedup via
-``contract_materializations`` in ``services/resolution/recursive.py``.
+"""Regression tests for cross-cascade materialization dedup via ``contract_materializations``.
 
-Within a single cascade the BFS already dedupes by address (``processed``
-set). The persistent cache exists for *cross-cascade* reuse: when a
-sibling job walks the same OZ library / common implementation, we skip
-the scaffold + ``collect_contract_analysis`` + ``build_control_tracking_plan``
-trio.
-
-What we pin here:
-1. Static artifacts (analysis + plan) are looked up by
-   ``(chain, bytecode_keccak)`` and reused on the second call → only one
-   scaffold run.
-2. Snapshot + permissions are rebuilt fresh on every call (they depend
-   on RPC state via build_control_snapshot) → never served stale.
-3. Returns deepcopies — mutating the returned dict must NOT poison the
-   next call.
-4. Concurrent requests serialize on a Postgres advisory lock so the
-   loser of the race reads the winner's result instead of rebuilding.
+Within a cascade the BFS dedupes by address; the persistent cache reuses work across sibling
+jobs walking the same library/implementation. Pinned: static artifacts are keyed by
+``(chain, bytecode_keccak)``; snapshot + permissions are rebuilt fresh every call (RPC-state
+dependent, never stale); returns are deepcopies; concurrent requests serialize on a Postgres
+advisory lock so the loser reads the winner's result.
 """
 
 from __future__ import annotations
@@ -32,16 +20,11 @@ from services.resolution.recursive import _materialize_contract_artifacts
 
 @pytest.fixture(autouse=True)
 def _isolated_contract_materializations(monkeypatch):
-    """Point ``db.contract_materializations`` at the test DB and wipe the
-    canonical stub keccak row around every test.
+    """Point ``db.contract_materializations`` at the test DB and wipe the stub keccak row per test.
 
-    Without this, the new cross-process cache layer integrated into
-    ``_materialize_contract_artifacts`` writes to whatever ``DATABASE_URL``
-    points to (typically the dev DB on a contributor laptop) and a single
-    leftover row keyed on the stub keccak ``0xab*32`` makes every later
-    test's stubbed pipeline never execute. Routing the layer through the
-    test DB AND clearing the table around each test keeps the
-    scaffold/collect counters deterministic.
+    Otherwise the cache writes to whatever ``DATABASE_URL`` points to (often a dev DB) and a
+    leftover row keyed on the stub keccak ``0xab*32`` stops every later stubbed pipeline
+    from executing, breaking the scaffold/collect counters.
     """
     import os
 
@@ -73,8 +56,6 @@ def _isolated_contract_materializations(monkeypatch):
 
 
 def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_calls):
-    """Wire up the dependency chain with counters so we can assert which
-    layers got skipped on cache hit."""
 
     def _classify(_addr, _rpc, **_kw):
         return {"type": "contract"}
@@ -113,10 +94,7 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
     monkeypatch.setattr(recursive, "build_control_tracking_plan", _build_plan)
     monkeypatch.setattr(recursive, "build_control_snapshot", _build_snapshot)
     monkeypatch.setattr(recursive, "_build_effective_permissions", _build_perms)
-    # _materialize_contract_artifacts now calls services.clients.rpc.get_code_with_keccak
-    # to populate the bytecode-keccak secondary cache index. Stub it so
-    # tests don't make real eth_getCode RPCs (was making each test ~20s
-    # before this stub).
+    # Stub get_code_with_keccak (bytecode-keccak index) so tests make no real eth_getCode RPCs (~20s each).
     monkeypatch.setattr(
         "services.clients.rpc.get_code_with_keccak",
         lambda _rpc, _addr, chain_id=None: ("0x60", "0x" + "ab" * 32),
@@ -124,7 +102,6 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
 
 
 def test_second_call_serves_static_artifacts_from_cache(monkeypatch):
-    """The whole point: scaffold + collect run once; second call hits cache."""
     scaffold_calls: list[Any] = []
     collect_calls: list[Any] = []
     snapshot_calls: list[Any] = []
@@ -143,8 +120,7 @@ def test_second_call_serves_static_artifacts_from_cache(monkeypatch):
 
 
 def test_snapshot_always_rebuilt(monkeypatch):
-    """Snapshot reads on-chain state — must not be cached. If a future
-    refactor extends the cache to cover snapshot, this test catches it."""
+    """Snapshot reads on-chain state; must not be cached."""
     scaffold_calls: list[Any] = []
     collect_calls: list[Any] = []
     snapshot_calls: list[Any] = []
@@ -163,8 +139,6 @@ def test_snapshot_always_rebuilt(monkeypatch):
 
 
 def test_cached_artifacts_are_deep_copied(monkeypatch):
-    """Mutating returned dicts (callers add fields, e.g. contract_address
-    override for proxies) must not poison the next cache lookup."""
     scaffold_calls: list[Any] = []
     collect_calls: list[Any] = []
     snapshot_calls: list[Any] = []
@@ -185,9 +159,7 @@ def test_cached_artifacts_are_deep_copied(monkeypatch):
 
 
 def test_cache_keyed_by_effective_address_not_input(monkeypatch):
-    """When two different proxies point to the same impl, the cache key
-    is the impl address — both proxies share the cached static artifacts.
-    This is the cross-cascade reuse we want."""
+    """Two proxies pointing at the same impl share cached artifacts (key is the impl address)."""
     scaffold_calls: list[Any] = []
     collect_calls: list[Any] = []
     snapshot_calls: list[Any] = []
@@ -215,23 +187,14 @@ def test_cache_keyed_by_effective_address_not_input(monkeypatch):
     assert len(scaffold_calls) == 1, "same impl must be scaffolded once even for different proxies"
 
 
-# ---------------------------------------------------------------------------
 # bytecode-keccak hit must retarget plan to the new address
-# ---------------------------------------------------------------------------
 
 
 def test_bytecode_keccak_hit_retargets_plan_to_new_address(monkeypatch):
-    """Codex iter-4 P1: when a keccak-index hit returns analysis+plan
-    cached for a DIFFERENT address with the same bytecode (e.g., two
-    UUPSProxy instances pointing to different impls), the cached
-    plan["contract_address"] points at the FIRST address. Without
-    retargeting, build_control_snapshot reads controller state from
-    the wrong contract storage.
-
-    Fix: on cache hit, deepcopy the analysis+plan and overwrite
-    contract_address with the address THIS call is materializing.
-    Verify that two materializations of the same-bytecode-different-
-    address pair both end up reading from the right contract."""
+    """Codex iter-4 P1: a keccak-index hit returns a plan cached for a DIFFERENT address with
+    the same bytecode (e.g. two UUPSProxy instances), so plan["contract_address"] points at the
+    FIRST address and build_control_snapshot would read the wrong contract's storage. On a hit
+    the cache must deepcopy and retarget to the address THIS call is materializing."""
     snapshot_calls: list[Any] = []
     scaffold_calls: list[Any] = []
     collect_calls: list[Any] = []
@@ -255,37 +218,20 @@ def test_bytecode_keccak_hit_retargets_plan_to_new_address(monkeypatch):
     _materialize_contract_artifacts(addr_b, "http://rpc", workspace_prefix="test", chain="ethereum")
 
     assert len(snapshot_calls) == 2
-    # First call is a cache MISS — uses the test fixture's _build_plan
-    # output (hardcoded "0xabc"). Not under test here; the retarget
-    # only fires on cache HIT.
-    # Second call is a cache HIT via the keccak index — must retarget
-    # plan["contract_address"] from "0xabc" to addr_b. Without the fix,
-    # build_control_snapshot would read controller state from the
-    # cache-populating contract instead of addr_b.
+    # First call is a cache MISS (fixture's hardcoded "0xabc" plan; not under test). The second
+    # is a keccak-index HIT and must retarget plan["contract_address"] from "0xabc" to addr_b.
     assert snapshot_calls[1]["contract_address"] == addr_b.lower()
 
 
 # ---------------------------------------------------------------------------
-# Cross-process / cross-job materialization dedup
+# Cross-process / cross-job materialization dedup: ``contract_materializations`` is keyed by
+# (chain, bytecode_keccak) with pg_advisory_xact_lock request-coalescing. Tests rely on the
+# autouse ``_isolated_contract_materializations`` fixture.
 # ---------------------------------------------------------------------------
-#
-# ``contract_materializations`` is the persistent layer that dedupes
-# scaffold + Slither work across worker processes and across jobs. Keyed
-# by (chain, bytecode_keccak), with request-coalescing via
-# pg_advisory_xact_lock so concurrent jobs requesting the same address
-# only run the expensive build once.
-#
-# Tests below lean on the autouse ``_isolated_contract_materializations``
-# fixture to point ``db.contract_materializations.SessionLocal`` at the
-# test DB and to wipe the canonical stub keccak row before/after every test.
 
 
 def test_two_processes_materializing_same_bytecode_compile_once(monkeypatch):
-    """Worker process A materializes contract X. Process B then
-    materializes a *different* address with the *same* bytecode_keccak.
-    The persistent cross-process cache means the second call skips the
-    expensive scaffold + Slither work entirely.
-    """
+    """A second address with the same bytecode_keccak skips the expensive scaffold + Slither work."""
     scaffold_calls: list[Any] = []
     collect_calls: list[Any] = []
     snapshot_calls: list[Any] = []
@@ -307,20 +253,12 @@ def test_two_processes_materializing_same_bytecode_compile_once(monkeypatch):
 
 
 def test_two_concurrent_requests_dedup_via_advisory_lock(monkeypatch):
-    """Two concurrent materialization requests for the same
-    ``(chain, bytecode_keccak)`` must collapse to **one stored row** — the
-    second caller serves the first caller's bundle.
+    """Two concurrent requests for the same ``(chain, bytecode_keccak)`` collapse to **one stored row**.
 
-    Note: the cache layer no longer holds the advisory lock across
-    ``builder()`` (that caused Neon SSL idle drops mid-forge-build). The
-    new shape is short-lock → unlocked build → short-lock recheck-and-
-    upsert. Under tight contention two callers can both enter ``builder()``;
-    the phase-3 recheck collapses the race to one stored row, not one
-    build. That's the intentional trade — guaranteed cache write
-    correctness, occasional duplicate build under contention.
-
-    The build-count therefore can be 1 or 2 here; what's invariant is
-    that only one row is materialized as ``status='ready'``.
+    The cache layer no longer holds the advisory lock across ``builder()`` (that caused Neon SSL
+    idle drops mid-forge-build): short-lock -> unlocked build -> short-lock recheck-and-upsert.
+    Under contention both callers can build, so the build count is 1 or 2; the invariant is a
+    single ``status='ready'`` row.
     """
     import threading
 
@@ -361,9 +299,8 @@ def test_two_concurrent_requests_dedup_via_advisory_lock(monkeypatch):
 
 
 def test_materialization_persists_a_row_keyed_by_chain_and_keccak(monkeypatch):
-    """A row per (chain, bytecode_keccak) — operators answer "have we
-    ever materialized this?" without resolving artifacts; next-day
-    re-runs become pure DB lookups."""
+    """A row per (chain, bytecode_keccak) lets operators answer "have we ever materialized this?" without resolving
+    artifacts."""
     from db import contract_materializations as cm  # provided by the fix
 
     scaffold_calls: list[Any] = []
@@ -379,8 +316,6 @@ def test_materialization_persists_a_row_keyed_by_chain_and_keccak(monkeypatch):
     addr = "0x" + "33" * 20
     _materialize_contract_artifacts(addr, "http://rpc", workspace_prefix="row-test", chain="ethereum")
 
-    # Open a fresh session against the test DB — the autouse fixture
-    # already routed ``cm.SessionLocal`` here, so reuse it for the read.
     with cm.SessionLocal() as session:
         row = cm.find_by_keccak(session, chain="ethereum", bytecode_keccak="0x" + "ab" * 32)
     assert row is not None
@@ -389,11 +324,8 @@ def test_materialization_persists_a_row_keyed_by_chain_and_keccak(monkeypatch):
 
 
 def test_materialize_records_build_then_cache_hit_metrics(monkeypatch):
-    """Build-vs-cache-hit fold: the first materialize runs the builder
-    (forge/Slither), the second is served from the cm cache. Drives the real
-    ``materialize_or_wait`` against the test DB; only the build wire is stubbed.
-    A cache-hit-rate collapse here is the redundant-rebuild signal this fold
-    exists to surface."""
+    """Build-vs-cache-hit fold against the real ``materialize_or_wait``; only the build wire is stubbed.
+    A cache-hit-rate collapse is the redundant-rebuild signal this fold surfaces."""
     from utils.logging import stage_metrics_var
 
     scaffold_calls: list[Any] = []
@@ -414,7 +346,6 @@ def test_materialize_records_build_then_cache_hit_metrics(monkeypatch):
     finally:
         stage_metrics_var.reset(token)
 
-    # Sanity: the cache actually engaged (scaffold ran once across two calls).
     assert len(scaffold_calls) == 1
     assert metrics.get("materialize_builds") == 1
     assert metrics.get("materialize_cache_hits") == 1

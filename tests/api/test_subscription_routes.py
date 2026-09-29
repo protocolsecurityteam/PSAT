@@ -1,10 +1,6 @@
-"""Integration tests for the protocol-subscription and monitored-contract routes.
+"""Protocol-subscription event_filter validation and monitored-contract PATCH / re-enroll routes.
 
-Covers protocol subscription event_filter validation and the monitored-contract
-PATCH / re-enroll endpoints.
-
-All tests run without live services — PostgreSQL for the DB, the enrollment call
-patched.
+No live services: PostgreSQL for the DB, enrollment call patched.
 """
 
 from __future__ import annotations
@@ -27,7 +23,6 @@ pytestmark = requires_postgres
 
 @pytest.fixture()
 def api_client(db_session):
-    """FastAPI test client wired to the in-memory SQLite session."""
 
     @contextmanager
     def fake_session_local():
@@ -52,7 +47,6 @@ def _create_protocol(session, name="__test_proto__"):
 
 
 def test_subscribe_valid_event_filter(api_client, db_session):
-    """A well-formed event_filter is accepted."""
     proto = _create_protocol(db_session)
     resp = api_client.post(
         f"/api/protocols/{proto.id}/subscribe",
@@ -66,7 +60,6 @@ def test_subscribe_valid_event_filter(api_client, db_session):
 
 
 def test_subscribe_no_event_filter(api_client, db_session):
-    """Omitting event_filter is valid (subscribe to everything)."""
     proto = _create_protocol(db_session, name="__test_no_filter__")
     resp = api_client.post(
         f"/api/protocols/{proto.id}/subscribe",
@@ -77,7 +70,6 @@ def test_subscribe_no_event_filter(api_client, db_session):
 
 
 def test_subscribe_string_event_types_rejected(api_client, db_session):
-    """event_types as string instead of list is rejected."""
     proto = _create_protocol(db_session, name="__test_str_filter__")
     resp = api_client.post(
         f"/api/protocols/{proto.id}/subscribe",
@@ -90,7 +82,6 @@ def test_subscribe_string_event_types_rejected(api_client, db_session):
 
 
 def test_subscribe_typo_field_rejected(api_client, db_session):
-    """event_filter with wrong key (no 'event_types') is rejected."""
     proto = _create_protocol(db_session, name="__test_typo_filter__")
     resp = api_client.post(
         f"/api/protocols/{proto.id}/subscribe",
@@ -103,7 +94,6 @@ def test_subscribe_typo_field_rejected(api_client, db_session):
 
 
 def test_subscribe_unknown_event_type_rejected(api_client, db_session):
-    """An unrecognized event type in the list is rejected."""
     proto = _create_protocol(db_session, name="__test_bad_type__")
     resp = api_client.post(
         f"/api/protocols/{proto.id}/subscribe",
@@ -156,7 +146,6 @@ def _create_monitored_contract(session, address="0x" + "a1" * 20, protocol_id=No
 
 
 def test_patch_monitoring_config(api_client, db_session):
-    """PATCH updates monitoring_config while leaving other fields untouched."""
     mc = _create_monitored_contract(db_session)
     new_config = {"watch_upgrades": False, "watch_ownership": True, "watch_pause": True}
     resp = api_client.patch(
@@ -176,7 +165,6 @@ def test_patch_monitoring_config(api_client, db_session):
 
 
 def test_patch_is_active(api_client, db_session):
-    """PATCH can deactivate monitoring."""
     mc = _create_monitored_contract(db_session, address="0x" + "b2" * 20)
     resp = api_client.patch(
         f"/api/monitored-contracts/{mc.id}",
@@ -187,7 +175,6 @@ def test_patch_is_active(api_client, db_session):
 
 
 def test_patch_needs_polling(api_client, db_session):
-    """PATCH can enable polling."""
     mc = _create_monitored_contract(db_session, address="0x" + "c3" * 20)
     resp = api_client.patch(
         f"/api/monitored-contracts/{mc.id}",
@@ -198,7 +185,6 @@ def test_patch_needs_polling(api_client, db_session):
 
 
 def test_patch_404_for_missing_contract(api_client):
-    """PATCH returns 404 for nonexistent contract."""
     resp = api_client.patch(
         f"/api/monitored-contracts/{uuid.uuid4()}",
         json={"is_active": False},
@@ -212,14 +198,12 @@ def test_patch_404_for_missing_contract(api_client):
 
 
 def test_re_enroll_404_for_missing_protocol(api_client):
-    """Re-enroll on nonexistent protocol returns 404."""
     resp = api_client.post("/api/protocols/999999/re-enroll")
     assert resp.status_code == 404
 
 
 @patch("services.monitoring.enrollment.enroll_protocol_contracts")
 def test_re_enroll_calls_enrollment(mock_enroll, api_client, db_session):
-    """Re-enroll calls enroll_protocol_contracts and returns result."""
     proto = _create_protocol(db_session, name="__test_reenroll__")
 
     mc = _create_monitored_contract(

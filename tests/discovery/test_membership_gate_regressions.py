@@ -1,32 +1,12 @@
 """Regression pins for the membership gate's historic leak shapes, plus the
 frozen legacy orphan-adoption migrations.
 
-Two leak paths motivated gating membership, and both are exercised here:
-
-  1. ``dapp_crawl`` scrapes every ``0x...`` on a DApp page — including
-     widely-held tokens (WETH, stETH) and shared infrastructure
-     (OptimismPortal, EigenLayer cores) that the protocol *integrates
-     with* but does not *own*. Pre-fix, those landed in the protocol's
-     ``Contract`` rows tagged with its ``protocol_id``, polluting the
-     surface page.
-
-  2. ``upgrade_history`` materializes every historical implementation
-     of every proxy a protocol's job analyzes. When the analyzed proxy
-     is itself foreign (snuck in via path 1), the backfill multiplied
-     the leak — one EigenPodManager proxy → 7 EigenPodManager impls all
-     tagged etherfi.
-
-Under the membership gate (DISCOVERY_MEMBERSHIP_GATE_SPEC.md) no source
-tag stamps ``protocol_id`` at all: every discovery write is a nomination,
-and promotion requires a recorded witness. These tests:
-
-  * verify the writer path nominates without stamping,
-  * verify the historical-impl backfill promotes only on a verified
-    member-proxy edge (W2) plus a persisted code fact (W1),
-  * pin the EigenLayer leak shape end-to-end,
-  * pin the applied legacy adoption migrations (``3a8f4d1c9b07``,
-    ``4d72e9b1f035``), whose inlined source lists are frozen deploy-time
-    snapshots of the retired source-confidence tiers.
+Leak paths: ``dapp_crawl`` scraping widely-held/shared contracts (WETH, stETH,
+EigenLayer cores) into a protocol's rows, and ``upgrade_history`` multiplying a
+foreign proxy's impls (one EigenPodManager proxy -> 7 impls tagged etherfi).
+Under DISCOVERY_MEMBERSHIP_GATE_SPEC.md every write is a nomination and
+promotion needs a recorded witness. The migrations ``3a8f4d1c9b07`` and
+``4d72e9b1f035`` inline frozen deploy-time snapshots of the retired tiers.
 """
 
 from __future__ import annotations
@@ -63,16 +43,13 @@ def seed_protocol(db_session):
 
 @requires_postgres
 class TestBulkUpsertOwnershipGate:
-    """Membership-gate model (DISCOVERY_MEMBERSHIP_GATE_SPEC.md): NO source
-    tag stamps ``protocol_id`` at the persistence boundary — every write is a
-    nomination (``nominated_protocol_id``) and promotion is the gate's job.
-    The full writer matrix (tag tiers, re-nominations, the single-row helper)
-    is pinned in test_discovery_nomination_writers.py; kept here is the named
-    path-1 leak shape."""
+    """Membership-gate model (DISCOVERY_MEMBERSHIP_GATE_SPEC.md): no source tag
+    stamps ``protocol_id``; every write is a nomination. The full writer matrix
+    is in test_discovery_nomination_writers.py."""
 
     def test_dapp_crawl_only_entry_stays_orphan(self, db_session, seed_protocol):
-        """Pre-fix: this row landed with ``protocol_id=etherfi`` — that's
-        how WETH and Lido ended up "owned by" ether.fi."""
+        """Pre-fix this row landed with ``protocol_id=etherfi`` — how WETH and
+        Lido ended up "owned by" ether.fi."""
         from db.models import Contract
         from db.queue import bulk_upsert_discovered_contracts
 
@@ -95,8 +72,7 @@ class TestBulkUpsertOwnershipGate:
             "low-confidence-only entry was stamped with protocol_id — "
             "this is the dapp_crawl leak that pulled WETH/Lido into etherfi"
         )
-        # Discovery trail is still preserved — the row exists, just not
-        # attributed to the protocol; the nominator is recorded.
+        # Discovery trail preserved: row exists, nominator recorded, not attributed.
         assert row.nominated_protocol_id == seed_protocol
         assert "dapp_crawl" in (row.discovery_sources or [])
         assert row.discovery_url == "https://example.com/cash"
@@ -109,12 +85,10 @@ class TestBulkUpsertOwnershipGate:
 
 @pytest.fixture()
 def stub_etherscan(monkeypatch):
-    """Stub etherscan name lookup AND the backfill's near-line §3.5 probe so
-    the tests stay offline + hermetic (stub-the-wire rule).
+    """Stub etherscan name lookup AND the §3.5 near-line probe so tests stay
+    offline (stub-the-wire rule).
 
-    Matches the helpers in ``test_upgrade_history_backfill.py`` —
-    duplicated here to keep this file self-contained and runnable in
-    isolation.
+    Duplicated from ``test_upgrade_history_backfill.py`` to stay self-contained.
     """
     import services.clients.etherscan as etherscan_mod
 
@@ -127,10 +101,9 @@ def stub_etherscan(monkeypatch):
 
 @requires_postgres
 class TestBackfillMembershipGate:
-    """Backfilled historical impls route through the membership gate: always
-    NOMINATED; MEMBER only via a member-proxy UpgradeEvent edge (W2
-    ``historical_implementation``) plus a persisted code fact (W1). The old
-    source-tag ownership gate this class used to pin is retired."""
+    """Backfilled impls route through the gate: always NOMINATED; MEMBER only
+    via a member-proxy UpgradeEvent edge (W2 ``historical_implementation``) plus
+    a persisted code fact (W1)."""
 
     @staticmethod
     def _seed_code_fact(session, addr, block=90):
@@ -237,7 +210,6 @@ class TestEigenLayerLeakShape:
         from db.queue import bulk_upsert_discovered_contracts
         from services.discovery.upgrade_history import backfill_historical_impl_contracts
 
-        # Step 1: dapp_crawl pulls in an EigenLayer-shaped proxy address.
         proxy_addr = _addr(0xEEEE)
         bulk_upsert_discovered_contracts(
             db_session,
@@ -281,8 +253,6 @@ class TestEigenLayerLeakShape:
         )
         db_session.commit()
 
-        # The whole point: a company-page query keyed on ``protocol_id``
-        # returns ZERO of these rows.
         owned = db_session.query(Contract).filter_by(protocol_id=seed_protocol).all()
         leaked = [c for c in owned if c.address == proxy_addr or c.address in impl_addrs]
         assert leaked == [], (
@@ -291,8 +261,6 @@ class TestEigenLayerLeakShape:
             "its historical impls all attributed to the protocol"
         )
 
-        # Discovery records still exist — the data is preserved, just
-        # not attributed. (Future corroboration can promote them.)
         assert db_session.query(Contract).filter_by(address=proxy_addr).count() == 1
         assert db_session.query(Contract).filter(Contract.address.in_(impl_addrs)).count() == 3
 
@@ -457,11 +425,9 @@ class TestCallTargetOverreachShape:
 
 @requires_postgres
 class TestProxyMembershipOnClassification:
-    """Membership-gate event 2a at ``static_worker._resolve_proxy``: the
-    freshly stored proxy pointers are a fact delta; the gate promotes the
-    proxy only on a verified W2 proxy edge (its resolved impl IS a member of
-    its NOMINATED protocol) plus W1. This replaces the ad-hoc
-    proxy-of-HIGH-impl runtime adoption."""
+    """Membership-gate event 2a at ``static_worker._resolve_proxy``: a proxy is
+    promoted only on a verified W2 edge (its resolved impl IS a member of its
+    NOMINATED protocol) plus W1."""
 
     @staticmethod
     def _seed_proxy_job(db_session, proxy_addr, *, nominated_protocol_id=None):
@@ -539,8 +505,8 @@ class TestProxyMembershipOnClassification:
         assert witness_rules == {"w1_code", "w2_structural"}
 
     def test_unnominated_proxy_never_promotes(self, db_session, seed_protocol, monkeypatch):
-        """No nomination → no membership, whatever the impl points at.
-        The stranger-fork / ERC-6551 TBA shape stays out."""
+        """No nomination -> no membership, whatever the impl points at
+        (stranger-fork / ERC-6551 TBA shape)."""
         from types import SimpleNamespace
 
         from db.models import Contract
@@ -597,9 +563,8 @@ class TestProxyMembershipOnClassification:
 
 @requires_postgres
 class TestStructuralOrphanMigration:
-    """The migration walks every orphan, checks for structural edges from
-    HIGH-owned contracts, and adopts when there's exactly one matching
-    protocol. Cross-protocol collisions skip + log."""
+    """Migration adopts an orphan only when exactly one protocol matches;
+    cross-protocol collisions skip + log."""
 
     def _seed_high_owner_with_edge(
         self,
@@ -612,15 +577,10 @@ class TestStructuralOrphanMigration:
         chain="ethereum",
         structurally_linked=True,
     ):
-        """Helper: create a HIGH-owned Contract row and a dep edge from it
-        to ``child_addr`` with the given structural relationship type.
-
-        When ``structurally_linked`` is True (the default) the parent's
-        proxy/beacon fields are set so the corrected migration SELECT
-        recognises the structural link. Setting it False seeds the
-        Lido-stETH-style false-positive shape: the edge exists with a
-        structural ``relationship_type`` but neither side's recorded
-        proxy/beacon fields link the two contracts."""
+        """Helper: HIGH-owned Contract row plus a dep edge to ``child_addr``.
+        ``structurally_linked=False`` seeds the Lido-stETH false-positive shape:
+        structural ``relationship_type`` but no proxy/beacon field linking the
+        contracts."""
         from db.models import Contract, ContractDependency
 
         parent_kwargs: dict = {
@@ -643,8 +603,7 @@ class TestStructuralOrphanMigration:
         db_session.flush()
 
         if structurally_linked and relationship == "proxy":
-            # ``proxy`` edge: the dep itself is the proxy whose impl is
-            # the parent. Mirror that on the (pre-existing) child row.
+            # ``proxy`` edge: the dep is the proxy whose impl is the parent.
             child_row = db_session.query(Contract).filter_by(address=child_addr).one_or_none()
             if child_row is not None:
                 child_row.is_proxy = True
@@ -663,10 +622,7 @@ class TestStructuralOrphanMigration:
 
     @pytest.fixture(scope="class")
     def migration_module(self):
-        """Load the migration file directly. Migration filenames start
-        with the revision id (digits) which isn't a valid Python module
-        name, so importlib.util by path is the way in.
-        """
+        """Load by path: revision-id filenames aren't valid module names."""
         import importlib.util
 
         path = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "3a8f4d1c9b07_adopt_structural_orphans.py"
@@ -677,8 +633,6 @@ class TestStructuralOrphanMigration:
         return module
 
     def test_migration_adopts_structural_orphan(self, db_session, seed_protocol, migration_module):
-        """Seed (orphan child, HIGH parent with implementation edge) →
-        migration adopts the orphan and tags ``structural_adoption``."""
         from db.models import Contract
 
         parent_addr = _addr(0xAA01)
@@ -693,8 +647,7 @@ class TestStructuralOrphanMigration:
             relationship="implementation",
         )
 
-        # Run the same SQL the migration uses. Direct bind execution
-        # exercises the actual statements without alembic's stamping.
+        # Executes the migration's SQL directly, skipping alembic stamping.
         rows = db_session.execute(migration_module._SELECT_STRUCTURAL_ORPHANS).fetchall()
         adopted = 0
         for orphan_id, parent_protocols in rows:
@@ -710,8 +663,8 @@ class TestStructuralOrphanMigration:
         assert "structural_adoption" in (row.discovery_sources or [])
 
     def test_migration_skips_non_structural_edges(self, db_session, seed_protocol, migration_module):
-        """A regular CALL edge from a HIGH parent must NOT cause
-        adoption — that's the WETH leak the original gate closed."""
+        """A regular CALL edge from a HIGH parent must NOT cause adoption (the
+        WETH leak)."""
         from db.models import Contract
 
         parent_addr = _addr(0xAA02)
@@ -729,9 +682,6 @@ class TestStructuralOrphanMigration:
         )
 
         rows = db_session.execute(migration_module._SELECT_STRUCTURAL_ORPHANS).fetchall()
-        # The child should not appear in the result set at all — the
-        # SQL's WHERE clause filters relationship_type to the
-        # structural set.
         child_ids_in_result = {
             r[0]
             for r in rows
@@ -745,20 +695,15 @@ class TestStructuralOrphanMigration:
         )
 
     def test_migration_skips_falsely_classified_dep(self, db_session, seed_protocol, migration_module):
-        """Regression: a HIGH parent calling a third-party proxy (e.g.
-        ether.fi → Lido stETH) produces a ``relationship_type='proxy'``
-        edge in ``contract_dependencies`` because the dep IS classified
-        as a proxy in its own right. The earlier migration version
-        adopted these by trusting ``relationship_type`` alone, which
-        re-opened the WETH/stETH leak. The corrected SELECT requires
-        the parent.implementation / parent.beacon / dep.implementation
-        fields to actually link the two contracts."""
+        """Regression: a HIGH parent calling a third-party proxy (ether.fi ->
+        Lido stETH) yields a ``relationship_type='proxy'`` edge; trusting that
+        alone re-opened the WETH/stETH leak. The SELECT must require the
+        implementation/beacon fields to link the contracts."""
         from db.models import Contract
 
         parent_addr = _addr(0xAA05)
         child_addr = _addr(0xBB05)  # the falsely-claimed "proxy" of parent
-        # Child IS a proxy, but its impl points to some THIRD address
-        # (not parent_addr) — the shape of Lido stETH in the leak case.
+        # Child's impl is a THIRD address — the Lido stETH shape.
         third_impl = _addr(0xCC05)
         db_session.add(
             Contract(
@@ -781,8 +726,6 @@ class TestStructuralOrphanMigration:
         )
 
         rows = db_session.execute(migration_module._SELECT_STRUCTURAL_ORPHANS).fetchall()
-        # Neither this orphan nor any other seeded in this test should
-        # surface for adoption — the structural-link check must fail.
         offending = [
             r[0]
             for r in rows
@@ -795,16 +738,12 @@ class TestStructuralOrphanMigration:
         )
 
     def test_migration_adopts_proxy_of_high_impl_when_referenced(self, db_session, seed_protocol, migration_module):
-        """The fourth SQL branch: an orphan that's a proxy whose
-        ``.implementation`` points to a HIGH-owned contract, AND is
-        referenced by some HIGH-owned-by-same-protocol contract via
-        any dep edge. Closes the case where the impl doesn't carry a
-        back-edge to its proxy in ``contract_dependencies`` (impls
-        typically don't reference their own proxy)."""
+        """Fourth SQL branch: an orphan proxy whose ``.implementation`` is
+        HIGH-owned AND is referenced by a same-protocol HIGH contract via any
+        dep edge (impls don't back-reference their proxy)."""
         from db.models import Contract, ContractDependency
 
-        # The HIGH impl (e.g., etherfi's LRTSquaredCore — discovered via
-        # deployer_expansion).
+        # The HIGH impl (e.g. etherfi's LRTSquaredCore, via deployer_expansion).
         impl_addr = _addr(0xAA10)
         db_session.add(
             Contract(
@@ -815,9 +754,6 @@ class TestStructuralOrphanMigration:
                 discovery_sources=["deployer_expansion"],
             )
         )
-        # An orphan proxy whose .implementation is the HIGH impl. Its
-        # impl is not in any dep edge from a HIGH parent — impls
-        # normally don't record their proxy as a dep.
         proxy_addr = _addr(0xBB10)
         db_session.add(
             Contract(
@@ -829,10 +765,8 @@ class TestStructuralOrphanMigration:
                 implementation=impl_addr,
             )
         )
-        # Another HIGH-owned contract in the same protocol that
-        # references the proxy — this is the "protocol actually
-        # integrates with the proxy" signal that distinguishes a real
-        # protocol-internal proxy from a per-user clone / fork.
+        # Same-protocol reference separates a real internal proxy from a
+        # per-user clone / fork.
         referencing_addr = _addr(0xCC10)
         ref_contract = Contract(
             address=referencing_addr,
@@ -870,12 +804,9 @@ class TestStructuralOrphanMigration:
     def test_migration_skips_proxy_of_high_impl_without_protocol_reference(
         self, db_session, seed_protocol, migration_module
     ):
-        """Safety filter for the fourth branch: a proxy whose ``.implementation``
-        is HIGH-owned BUT which no HIGH-owned-by-same-protocol contract
-        references must NOT be adopted. This is the ERC-6551 token-bound-
-        account / fork-of-protocol shape: someone else's proxy that
-        happens to share code with a protocol's impl, but isn't actually
-        part of the protocol's contract surface."""
+        """Safety filter for the fourth branch: a proxy on a HIGH impl that no
+        same-protocol HIGH contract references stays orphan (ERC-6551 TBA /
+        fork-of-protocol shape)."""
         from db.models import Contract
 
         impl_addr = _addr(0xAA11)
@@ -888,8 +819,6 @@ class TestStructuralOrphanMigration:
                 discovery_sources=["deployer_expansion"],
             )
         )
-        # Orphan proxy points to HIGH impl, but NO contract in the same
-        # protocol references this proxy → must stay orphan.
         stranger_proxy = _addr(0xBB11)
         db_session.add(
             Contract(
@@ -912,13 +841,9 @@ class TestStructuralOrphanMigration:
         )
 
     def test_migration_skips_low_source_parents(self, db_session, seed_protocol, migration_module):
-        """Tightening regression: a parent with ``protocol_id`` set but
-        only LOW-confidence sources (``upgrade_history``,
-        ``structural_adoption``) must NOT contribute adoption evidence.
-        Otherwise the migration extends the cascade past the one-hop
-        limit the runtime gate enforces. Shape: orphan would be adopted
-        by branch 1 IF parent's sources counted, but parent's only
-        source is ``upgrade_history``."""
+        """Tightening: a parent whose only sources are LOW (``upgrade_history``,
+        ``structural_adoption``) contributes no evidence, else the cascade
+        extends past the runtime gate's one-hop limit."""
         from db.models import Contract, ContractDependency
 
         parent_addr = _addr(0xAA20)
@@ -931,10 +856,8 @@ class TestStructuralOrphanMigration:
                 discovery_sources=None,
             )
         )
-        # Parent has protocol_id (transitively, via upgrade_history
-        # backfill from a HIGH proxy) but its own sources are LOW. The
-        # structural field link is real — what the test pins is that the
-        # parent's source tier matters even when the link is valid.
+        # Parent has protocol_id but LOW sources; the structural link is real,
+        # so the source tier is what's pinned.
         parent = Contract(
             address=parent_addr,
             chain="ethereum",
@@ -966,12 +889,10 @@ class TestStructuralOrphanMigration:
         )
 
     def test_migration_skips_cross_protocol_collisions(self, db_session, seed_protocol, migration_module):
-        """An orphan referenced by HIGH-owned contracts of two different
-        protocols stays orphan + a warning is logged. Avoids silently
-        assigning truly-shared infrastructure to one protocol."""
+        """An orphan referenced by HIGH-owned contracts of two protocols stays
+        orphan + a warning (no assigning shared infra to one protocol)."""
         from db.models import Contract, Protocol
 
-        # Second protocol so we can simulate a cross-protocol structural edge.
         second_proto = Protocol(name=f"gate-reg-second-{uuid.uuid4().hex[:8]}")
         db_session.add(second_proto)
         db_session.commit()
@@ -979,7 +900,6 @@ class TestStructuralOrphanMigration:
         child_addr = _addr(0xBB03)
         db_session.add(Contract(address=child_addr, chain="ethereum", protocol_id=None, discovery_sources=None))
         db_session.commit()
-        # Edges from two different HIGH-owned parents → collision.
         self._seed_high_owner_with_edge(
             db_session,
             parent_addr=_addr(0xAA03),
@@ -1012,49 +932,30 @@ class TestStructuralOrphanMigration:
 # ---------------------------------------------------------------------------
 # 7. Remaining-orphan adoption — the fifth and sixth ownership branches.
 #
-# Branch A — deployer-cascade. An orphan whose ``deployer`` is also the
-# deployer of some HIGH-sourced contract attributed to a protocol
-# inherits that protocol regardless of its own ``discovery_sources``.
-# Catches the etherfi orphan class surfaced by PR-87 investigation:
-# contracts that landed in the DB via the resolution-cascade spawn at
-# ``workers/resolution_worker.py:499-513`` (which only propagates
-# ``discovery_relationship`` for impl / beacon edges) — non-impl/beacon
-# dependencies arrive with NULL ``discovery_sources`` and no structural
-# signal, even when their deployer is one of the protocol's qualified
-# deployer EOAs. The HIGH-sourced-sibling requirement keeps WETH / USDC
-# / OZ libs out: their deployers never wrote a HIGH-source contract
-# attributed to the calling protocol.
+# Branch A — deployer-cascade: an orphan whose deployer also deployed a
+# HIGH-sourced contract attributed to a protocol inherits it. The
+# HIGH-sourced-sibling requirement keeps WETH / USDC / OZ libs out. Motivated
+# by PR-87 orphans spawned at ``workers/resolution_worker.py:499-513`` with
+# NULL ``discovery_sources``.
 #
-# Branch B — historical-impl behind a HIGH-impl proxy. The proxy's
-# CURRENT implementation is the HIGH anchor (mirrors 3a8f4d1c9b07's
-# fourth branch, proxy-of-HIGH-impl). Walking the proxy's full upgrade
-# history then sweeps the prior impl rows into the same protocol. The
-# proxy itself can be LOW-only — ``structural_adoption`` is the typical
-# tag, post-3a8f4d1c9b07 — because anchoring on the impl avoids
-# extending the cascade through LOW intermediaries. Empirical scope:
-# the 5 LRTSquare* historical impls behind the LRTSquaredCore-impl +
-# UUPSProxy chain on PR-87.
+# Branch B — historical impls behind a HIGH-impl proxy, anchored on the
+# proxy's CURRENT impl so the proxy itself may be LOW-only
+# (``structural_adoption``). Scope: the 5 LRTSquare* impls behind
+# LRTSquaredCore + UUPSProxy on PR-87.
 # ---------------------------------------------------------------------------
 
 
 @requires_postgres
 class TestRemainingOrphanAdoption:
-    """Both branches of ``4d72e9b1f035_adopt_remaining_orphan_classes``:
+    """Both branches of ``4d72e9b1f035_adopt_remaining_orphan_classes``.
 
-    Branch A (deployer-cascade) — migration-only sweep of the historical
-    orphan set. The runtime helper it mirrored
-    (``workers.discovery._deployer_cascade_protocol_id``) is replaced by the
-    membership gate's deployer trust ladder (spec §3.3).
-
-    Branch B (historical-impl behind HIGH-impl proxy) — migration-only.
-    Anchors on the proxy's current implementation's HIGH source, not
-    the proxy's own sources. Mirrors ``3a8f4d1c9b07``'s fourth branch.
+    Migration-only sweeps; the runtime helper they mirrored is replaced by the
+    gate's deployer trust ladder (spec §3.3). Branch B mirrors
+    ``3a8f4d1c9b07``'s fourth branch.
     """
 
     @staticmethod
     def _seed_high_sibling(db_session, *, protocol_id, deployer, sibling_addr, sibling_sources):
-        """Create a Contract row that will serve as the HIGH-source sibling
-        for deployer-cascade adoption tests."""
         from db.models import Contract
 
         db_session.add(
@@ -1072,9 +973,7 @@ class TestRemainingOrphanAdoption:
 
     @pytest.fixture(scope="class")
     def remaining_orphans_migration(self):
-        """Load the deployer-cascade migration by file path. Migration
-        filenames lead with the revision id, which isn't a valid Python
-        module name, so importlib.util by path is the way in."""
+        """Load by path: revision-id filenames aren't valid module names."""
         import importlib.util
 
         path = (
@@ -1097,7 +996,6 @@ class TestRemainingOrphanAdoption:
         deployer = _addr(0xCA01)
         orphan_addr = _addr(0xCB01)
 
-        # Seed the orphan first.
         db_session.add(
             Contract(
                 address=orphan_addr,
@@ -1107,7 +1005,6 @@ class TestRemainingOrphanAdoption:
                 discovery_sources=None,
             )
         )
-        # And a HIGH-sourced sibling sharing the deployer.
         self._seed_high_sibling(
             db_session,
             protocol_id=seed_protocol,
@@ -1134,10 +1031,8 @@ class TestRemainingOrphanAdoption:
         assert "structural_adoption" in (row.discovery_sources or [])
 
     def test_migration_skips_low_only_siblings(self, db_session, seed_protocol, remaining_orphans_migration):
-        """A deployer whose siblings are all LOW (dapp_crawl,
-        upgrade_history) does NOT count — this keeps Lido / EigenLayer /
-        WETH orphans from being adopted just because some etherfi pipeline
-        also saw them."""
+        """A deployer whose siblings are all LOW (dapp_crawl, upgrade_history)
+        does not count — keeps Lido / EigenLayer / WETH orphans out."""
         from db.models import Contract
 
         deployer = _addr(0xCA02)
@@ -1169,10 +1064,8 @@ class TestRemainingOrphanAdoption:
         )
 
     def test_migration_skips_cross_protocol_collision(self, db_session, seed_protocol, remaining_orphans_migration):
-        """If a single deployer wrote HIGH-source contracts for two
-        different protocols and we'd be choosing one over the other,
-        skip the orphan and leave it for manual review. Mirrors the
-        existing structural-orphan migration convention."""
+        """A deployer with HIGH siblings on two protocols is ambiguous: skip and
+        leave for manual review."""
         from db.models import Contract, Protocol
 
         other = Protocol(name=f"dep-cascade-collide-{uuid.uuid4().hex[:10]}")
@@ -1190,7 +1083,6 @@ class TestRemainingOrphanAdoption:
                 discovery_sources=None,
             )
         )
-        # One HIGH sibling on each of two protocols → ambiguous.
         self._seed_high_sibling(
             db_session,
             protocol_id=seed_protocol,
@@ -1236,17 +1128,10 @@ class TestRemainingOrphanAdoption:
         current_impl_protocol_id=None,
         current_impl_sources=None,
     ):
-        """Seed the LRTSquare* chain shape: a current impl (the HIGH
-        anchor), a proxy whose ``.implementation`` points at it, and
-        UpgradeEvent rows for each address in *historical_impls*.
-
-        Branch B's CTE reads ``impl.discovery_sources`` (the proxy's
-        CURRENT impl) for the HIGH gate. Override
-        ``current_impl_sources`` with LOW tags to exercise the negative
-        path, or override ``current_impl_protocol_id`` to exercise the
-        proxy/impl protocol mismatch guard. Defaults reproduce the
-        positive case: HIGH ``deployer_expansion`` source, impl shares
-        the proxy's protocol_id."""
+        """Seed the LRTSquare* chain: HIGH current impl, a proxy pointing at it,
+        and UpgradeEvent rows for *historical_impls*. Branch B reads the CURRENT
+        impl's ``discovery_sources``; override ``current_impl_sources`` (LOW) or
+        ``current_impl_protocol_id`` for the negative paths."""
         from db.models import Contract, UpgradeEvent
 
         impl_pid = protocol_id if current_impl_protocol_id is None else current_impl_protocol_id
@@ -1287,19 +1172,15 @@ class TestRemainingOrphanAdoption:
     def test_historical_impl_adopted_via_high_current_impl(
         self, db_session, seed_protocol, remaining_orphans_migration
     ):
-        """LRTSquare-shape: an orphan historical impl whose only source
-        is ``upgrade_history`` (or NULL) is adopted into the protocol
-        when the proxy's CURRENT implementation is HIGH-sourced — even
-        when the proxy itself carries only LOW tags (the typical post-
-        3a8f4d1c9b07 shape: a UUPSProxy adopted via ``structural_adoption``
-        from its HIGH impl)."""
+        """LRTSquare shape: an orphan historical impl (only ``upgrade_history``
+        or NULL source) is adopted when the proxy's CURRENT impl is HIGH-sourced,
+        even if the proxy itself is LOW-only."""
         from db.models import Contract
 
         old_impl_addr = _addr(0xD001)
         proxy_addr = _addr(0xE001)
         current_impl_addr = _addr(0xF001)
 
-        # Orphan historical impl with only LOW source — the prod shape.
         db_session.add(
             Contract(
                 address=old_impl_addr,
@@ -1308,7 +1189,6 @@ class TestRemainingOrphanAdoption:
                 discovery_sources=["upgrade_history"],
             )
         )
-        # LOW-adopted proxy whose current impl is HIGH-sourced.
         self._seed_proxy_with_upgrade_history(
             db_session,
             protocol_id=seed_protocol,
@@ -1338,26 +1218,15 @@ class TestRemainingOrphanAdoption:
     def test_historical_impl_lrtsquare_shape_adopts_all_five(
         self, db_session, seed_protocol, remaining_orphans_migration
     ):
-        """Regression pin for the exact PR-87 LRTSquare* shape: HIGH
-        LRTSquaredCore impl + LOW-adopted UUPSProxy +
-        5 orphan historical impls (LRTSquare ×2, LRTSquared ×2,
-        LRTSquaredDummy ×1) → all 5 get adopted into the protocol.
-
-        Before this fix, the migration's branch B required the proxy
-        itself to be HIGH-sourced. UUPSProxy carried only
-        ``structural_adoption`` (granted by 3a8f4d1c9b07's branch 4 via
-        its HIGH impl), so the historical impls stayed orphan."""
+        """Regression pin for the PR-87 LRTSquare* shape: HIGH LRTSquaredCore
+        impl + LOW-adopted UUPSProxy + 5 orphan historical impls -> all 5
+        adopted. Branch B originally required the proxy itself to be HIGH."""
         from db.models import Contract
 
-        # The HIGH anchor — LRTSquaredCore — carries deployer_expansion.
-        # In prod its sources are {deployer_expansion, upgrade_history};
-        # the HIGH tag alone is what the gate reads.
+        # In prod its sources are {deployer_expansion, upgrade_history}; the
+        # HIGH tag alone is what the gate reads.
         lrt_squared_core_addr = _addr(0xC0E0)
-        # UUPSProxy — protocol_id set (via 3a8f4d1c9b07 branch 4) but
-        # only LOW source.
         uups_proxy_addr = _addr(0xC0E1)
-        # The five orphan historical impls — protocol_id NULL, sources
-        # {upgrade_history} only.
         orphan_impls = [_addr(0xC0E2 + i) for i in range(5)]
         for addr in orphan_impls:
             db_session.add(
@@ -1402,15 +1271,10 @@ class TestRemainingOrphanAdoption:
     def test_historical_impl_skipped_when_current_impl_is_low(
         self, db_session, seed_protocol, remaining_orphans_migration
     ):
-        """EigenLayer-leak shape: a foreign proxy imported via
-        ``dapp_crawl`` whose current impl is ALSO LOW-sourced has no
-        HIGH evidence anywhere in the chain. Historical impls must NOT
-        be adopted — anchoring on the impl's HIGH tag must keep this
-        gate shut just like the old proxy-HIGH gate did.
-
-        ``current_impl_protocol_id=None`` reproduces the realistic prod
-        shape: the impl row exists (the EigenLayer leak puts every
-        impl in ``contracts``) but is itself orphan."""
+        """EigenLayer-leak shape: a foreign ``dapp_crawl`` proxy whose current
+        impl is also LOW-sourced has no HIGH evidence, so historical impls are
+        NOT adopted. ``current_impl_protocol_id=None`` is the realistic shape:
+        the impl row exists but is orphan."""
         from db.models import Contract
 
         old_impl_addr = _addr(0xD003)
@@ -1425,7 +1289,6 @@ class TestRemainingOrphanAdoption:
                 discovery_sources=["upgrade_history"],
             )
         )
-        # LOW-only proxy AND orphan/LOW current impl → no HIGH anchor.
         self._seed_proxy_with_upgrade_history(
             db_session,
             protocol_id=None,
@@ -1448,12 +1311,9 @@ class TestRemainingOrphanAdoption:
     def test_historical_impl_skipped_when_proxy_and_impl_protocols_disagree(
         self, db_session, seed_protocol, remaining_orphans_migration
     ):
-        """Protocol-mismatch guard: if the proxy carries protocol_id A
-        (e.g., inherited via structural_adoption from a different chain
-        of evidence) but its current implementation belongs to protocol
-        B, the historical impls must NOT be adopted. Otherwise a fork
-        whose impl coincidentally points at someone else's HIGH-owned
-        contract would leak across protocols."""
+        """Protocol-mismatch guard: proxy carries protocol A but its current impl
+        belongs to B -> historical impls NOT adopted, else a fork pointing at
+        someone else's HIGH contract leaks across protocols."""
         from db.models import Contract, Protocol
 
         other = Protocol(name=f"hist-impl-mismatch-{uuid.uuid4().hex[:10]}")
@@ -1472,8 +1332,6 @@ class TestRemainingOrphanAdoption:
                 discovery_sources=["upgrade_history"],
             )
         )
-        # Proxy attributed to ``seed_protocol`` but its current impl is
-        # HIGH-sourced in ``other`` protocol.
         self._seed_proxy_with_upgrade_history(
             db_session,
             protocol_id=seed_protocol,
@@ -1494,20 +1352,17 @@ class TestRemainingOrphanAdoption:
         )
 
     def test_historical_impl_zero_address_filtered(self, db_session, seed_protocol, remaining_orphans_migration):
-        """Some backfill paths emit synthetic UpgradeEvent rows with
-        ``new_impl = 0x0…0`` for the pre-init state. The SELECT must
-        filter those out — otherwise we'd be "adopting" the zero
-        address as a contract, which doesn't exist."""
+        """Synthetic UpgradeEvent rows have ``new_impl = 0x0…0`` for the
+        pre-init state; the SELECT must filter them or it would "adopt" the zero
+        address."""
         from db.models import Contract
 
         zero_addr = "0x" + "0" * 40
         proxy_addr = _addr(0xE003)
         current_impl_addr = _addr(0xF003)
 
-        # An orphan row keyed at the zero address would never exist in
-        # practice (no contract there), but seed it to verify the
-        # filter explicitly — if anyone ever does materialize a row
-        # there, this test pins that the migration won't grant ownership.
+        # Seeded to pin that a zero-address row never gets ownership if one is
+        # ever materialized.
         db_session.add(
             Contract(
                 address=zero_addr,
@@ -1536,11 +1391,8 @@ class TestRemainingOrphanAdoption:
     def test_historical_impl_cross_protocol_collision_skipped(
         self, db_session, seed_protocol, remaining_orphans_migration
     ):
-        """Two proxies from different protocols, each with a HIGH
-        current impl in its own protocol, both used the same historical
-        impl at some point (rare — shared init impl across deployments).
-        The orphan impl is skipped + logged rather than adopted into
-        one arbitrary protocol."""
+        """Two proxies on different protocols share a historical impl (shared
+        init impl): skipped + logged, not adopted into one arbitrarily."""
         from db.models import Contract, Protocol
 
         other = Protocol(name=f"hist-impl-collide-{uuid.uuid4().hex[:10]}")
@@ -1556,8 +1408,6 @@ class TestRemainingOrphanAdoption:
                 discovery_sources=["upgrade_history"],
             )
         )
-        # Two proxies on two different protocols, each with its own
-        # HIGH current impl and the shared impl in upgrade history.
         self._seed_proxy_with_upgrade_history(
             db_session,
             protocol_id=seed_protocol,
@@ -1597,16 +1447,13 @@ class TestRemainingOrphanAdoption:
     def test_orphan_with_both_branches_matching_same_protocol_adopts(
         self, db_session, seed_protocol, remaining_orphans_migration
     ):
-        """Belt-and-suspenders: if the orphan matches via BOTH the
-        deployer-cascade and historical-impl branches for the SAME
-        protocol, that's not a collision — it's stronger evidence.
-        Adopt cleanly."""
+        """Matching via BOTH branches for the SAME protocol is stronger
+        evidence, not a collision: adopt cleanly."""
         from db.models import Contract
 
         orphan_addr = _addr(0xD006)
         deployer = _addr(0xCA10)
 
-        # Orphan with a deployer set; will match Branch A via deployer.
         db_session.add(
             Contract(
                 address=orphan_addr,
@@ -1616,7 +1463,6 @@ class TestRemainingOrphanAdoption:
                 discovery_sources=["upgrade_history"],
             )
         )
-        # HIGH sibling sharing the deployer (Branch A evidence).
         self._seed_high_sibling(
             db_session,
             protocol_id=seed_protocol,
@@ -1624,9 +1470,6 @@ class TestRemainingOrphanAdoption:
             sibling_addr=_addr(0xCC10),
             sibling_sources=["deployer_expansion"],
         )
-        # Proxy with HIGH current impl + this orphan in upgrade history
-        # (Branch B evidence) — same protocol, so the two evidence
-        # streams reinforce.
         self._seed_proxy_with_upgrade_history(
             db_session,
             protocol_id=seed_protocol,

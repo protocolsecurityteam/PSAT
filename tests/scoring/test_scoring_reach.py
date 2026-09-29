@@ -45,7 +45,6 @@ def edge(principal: str, anchor: str, *, relation: str | None = "controller_valu
 
 
 def pinned_conditions(destination: str) -> P.ConditionPlane:
-    """Every analysed function of ``destination`` pins its caller to itself."""
     plane = P.ConditionPlane()
     plane.by_entity = {
         destination: (P.DestinationFunction(1, "guarded", ("msg.sender == address(this)",), analysed=True),)

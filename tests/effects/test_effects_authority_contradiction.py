@@ -1,12 +1,9 @@
 """§7 (G7) — the authority-plane §9 direction.
 
-Effects is the only stage that executes a call AS a resolved principal, so it is
-uniquely able to falsify authority resolution. When the resolver marks a
-function's caller set an EXACT ``finite_set`` and the probe — run as that member —
-is rejected by a CANONICAL, published gate-rejection selector, the enumeration
-named the wrong holder. The detector must key on selectors ONLY: the negative
-below (a state-precondition revert-string) is the case that matters, because the
-first pass of this investigation false-positived by substring-matching "not ".
+Effects is the only stage that executes a call AS a resolved principal, so it can
+falsify authority resolution: an EXACT ``finite_set`` whose member is rejected by
+a CANONICAL gate-rejection selector named the wrong holder. The detector must key
+on selectors ONLY (the first pass false-positived by substring-matching "not ").
 """
 
 from __future__ import annotations

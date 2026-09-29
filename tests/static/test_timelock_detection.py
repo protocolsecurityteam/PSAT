@@ -1,21 +1,15 @@
 """``_detect_timelock`` -- the STATIC half.
 
-It was a stub: it ``del``ed all three arguments and returned
-``has_timelock: False``, so the column was false on 92/92 local rows including
-``EtherFiTimelock`` itself, whose ``getMinDelay()`` is 864000 (10 days) and
-which is the sole holder of ``UPGRADE_TIMELOCK_ROLE``. That delay is a
-credit-bearing scoring input.
+It was a stub returning ``has_timelock: False``, so the column was false on 92/92 local rows
+including ``EtherFiTimelock`` (``getMinDelay()`` 864000, sole holder of ``UPGRADE_TIMELOCK_ROLE``),
+a credit-bearing scoring input. The proven property is structural and chain-free: a state
+variable is written with a clock-derived value (queue half) and another entry point reverts
+unless it has matured (execute half). ``pattern`` is ``oz_timelock`` when the claims plane also
+recognises the ``TimelockController`` ABI.
 
-The proven property is structural and chain-free: some state variable is
-written with a value the clock flows into (the queue half), and some other
-entry point reverts unless that variable has matured against the clock (the
-execute half). ``pattern`` is ``oz_timelock`` when the claims plane also
-recognises the published ``TimelockController`` ABI.
-
-**The delay VALUE is not read here.** It needs ``getMinDelay()`` on chain and
-this module has no chain, no ``chain_id`` and no RPC handle. ``delay`` is
-``None`` with ``delay_source: "not_read"``; ``delay_variables`` names where the
-value lives. A defaulted delay would fabricate a protective credit.
+**The delay VALUE is not read here** (no chain / RPC handle): ``delay`` is ``None`` with
+``delay_source: "not_read"`` and ``delay_variables`` names where it lives. A defaulted delay
+would fabricate a protective credit.
 """
 
 from __future__ import annotations
@@ -154,8 +148,7 @@ def _timelock(tmp_path: Path, source: str, name: str = "C"):
 
 
 def test_custom_queue_execute_timelock_is_detected(tmp_path):
-    """POSITIVE CONTROL for the structural half: no OZ ABI anywhere, only the
-    invariant."""
+    """POSITIVE CONTROL for the structural half: no OZ ABI anywhere, only the invariant."""
     result = _timelock(tmp_path, CUSTOM_TIMELOCK)
     assert result["has_timelock"] is True, result
     assert result["pattern"] == "custom"
@@ -169,33 +162,25 @@ def test_custom_queue_execute_timelock_is_detected(tmp_path):
 
 
 def test_share_lock_cooldown_is_not_a_timelock(tmp_path):
-    """THE discriminating negative. Clock-derived write plus a
-    revert-until-matured gate -- the bare structural pair -- and it is a
-    per-user cooldown on one hard-coded operation. Without the
-    arbitrary-execution requirement this fires, and it fired on 16 of the 19
-    local hits, including 6 Tellers, an EigenLayer withdrawal delay and a
-    blacklist expiry, each of which would have been published as
-    ``control_model: governance``."""
+    """THE discriminating negative: the bare structural pair (clock-derived write + revert-until-matured
+    gate) is a per-user cooldown on one hard-coded operation. Without the arbitrary-execution
+    requirement it fired on 16 of 19 local hits (6 Tellers, an EigenLayer withdrawal delay, a
+    blacklist expiry), each published as ``control_model: governance``."""
     result = _timelock(tmp_path, SHARE_LOCK_COOLDOWN)
     assert result["has_timelock"] is False, result
     assert result["pattern"] == "none"
     assert result["delay_variables"] == []
-    # EVERY output field, not only the verdict. The bare structural pair DOES
-    # fire on this shape -- that is the whole reason the negative exists -- so
-    # an ungated evidence list republishes the excluded claim as a quotable
-    # list next to ``has_timelock: false``. Measured on the real corpus this
-    # shipped ``deposit(ERC20,uint256,uint256)`` / ``beforeTransfer(...)`` on
-    # TellerWithMultiAssetSupport and the ``getQueuedWithdrawal`` VIEW getters
-    # on DelegationManager.
+    # EVERY output field, not only the verdict: the bare pair DOES fire on this shape, so an
+    # ungated evidence list would republish the excluded claim next to ``has_timelock: false``
+    # (measured: Teller ``deposit(...)`` / DelegationManager ``getQueuedWithdrawal`` views).
     assert result["queue_execute_functions"] == [], result["queue_execute_functions"]
     assert result["authorized_roles"] == []
     assert result["evidence"] == []
 
 
 def test_immediate_executor_is_not_a_timelock(tmp_path):
-    """NEGATIVE CONTROL. Queue + execute + an admin gate, and no clock: the
-    thing that makes a timelock a timelock is the maturity check, and asserting
-    otherwise would credit every two-step admin flow with a delay."""
+    """NEGATIVE CONTROL. Queue + execute + admin gate, no clock: the maturity check is what makes
+    a timelock, else every two-step admin flow would be credited with a delay."""
     result = _timelock(tmp_path, IMMEDIATE_EXECUTOR)
     assert result["has_timelock"] is False, result
     assert result["pattern"] == "none"
@@ -212,17 +197,15 @@ def test_timestamp_write_without_a_maturity_gate_is_not_a_timelock(tmp_path):
 
 @pytest.mark.parametrize("source", [CUSTOM_TIMELOCK, SHARE_LOCK_COOLDOWN, IMMEDIATE_EXECUTOR, TIMESTAMP_LOG_ONLY])
 def test_delay_value_is_never_published_from_source(tmp_path, source):
-    """The whole point of splitting the deliverable: the static half proves
-    "this is a timelock" and says nothing about HOW LONG. A defaulted delay
-    would be a fabricated protective credit."""
+    """The static half proves "this is a timelock", not HOW LONG; a defaulted delay would be a fabricated credit."""
     result = _timelock(tmp_path, source)
     assert result["delay"] is None
     assert result["delay_source"] == "not_read"
 
 
 def test_has_timelock_is_not_determined_without_ir(tmp_path):
-    """R1/R2 sentinel: no functions to walk means neither half could be
-    evaluated, and ``False`` would assert an absence nothing looked for."""
+    """R1/R2 sentinel: with no functions to walk neither half could run, and ``False`` would assert an
+    unlooked-for absence."""
 
     class _NoIR:
         name = "C"
@@ -236,20 +219,15 @@ def test_has_timelock_is_not_determined_without_ir(tmp_path):
 
 @pytest.mark.parametrize("degradation", ["claims_stage_raised", "effects_stage_raised", "no_effects_artifact"])
 def test_has_timelock_is_not_determined_without_the_claims_plane(tmp_path, degradation):
-    """R1 on the POSITIVE control — a contract that IS a timelock.
+    """R1 on the POSITIVE control (a contract that IS a timelock).
 
-    BOTH determinants of the verdict live on the claims plane: ``structural``
-    requires ``exec.arbitrary`` and ``standard`` requires
-    ``timelock.schedule`` + ``timelock.execute``. So every degradation that
-    costs the claims plane makes both empty for a reason that has nothing to
-    do with the contract, and ``False`` there is a proven absence of a timelock
-    that exists.
+    BOTH verdict determinants live on the claims plane (``structural`` needs ``exec.arbitrary``,
+    ``standard`` needs ``timelock.schedule`` + ``timelock.execute``), so any claims-plane
+    degradation makes ``False`` a proven absence of a timelock that exists.
 
-    ``claims_stage_raised`` is the arm a no-IR test cannot reach: ``core`` runs
-    ``build_effects`` (``core.py:225-235``) and the claims block (``:243-253``)
-    under separate ``try``/``except``, so the effects map can be complete and
-    claim-free. Downstream, ``_determine_control_model`` reads a ``False`` here
-    as "not governance"."""
+    ``claims_stage_raised`` is unreachable by a no-IR test: ``core`` runs ``build_effects`` and
+    the claims block under separate ``try``/``except`` (``core.py:225-253``), so effects can be
+    complete and claim-free; ``_determine_control_model`` reads that ``False`` as "not governance"."""
     path = tmp_path / "C.sol"
     path.write_text(textwrap.dedent(CUSTOM_TIMELOCK).strip() + "\n")
     contract = next(c for c in Slither(str(path)).contracts if c.name == "C")
@@ -268,7 +246,6 @@ def test_has_timelock_is_not_determined_without_the_claims_plane(tmp_path, degra
     assert result["pattern"] == "unknown"
     assert result["delay"] is None
     assert result["delay_source"] == "not_read"
-    # Nothing is asserted about a contract nothing looked at.
     assert result["queue_execute_functions"] == []
     assert result["delay_variables"] == []
     assert result["authorized_roles"] == []
@@ -276,9 +253,8 @@ def test_has_timelock_is_not_determined_without_the_claims_plane(tmp_path, degra
 
 
 def test_control_model_does_not_read_not_determined_as_governance(tmp_path):
-    """``has_timelock is True``, not truthiness: a not-determined timelock must
-    not silently promote the contract to ``governance``, and must not silently
-    demote it either -- it falls through to the semantic pattern."""
+    """``has_timelock is True``, not truthiness: not-determined must neither promote to ``governance``
+    nor demote; it falls through to the semantic pattern."""
     semantic = cast("SemanticControlAnalysis", {"pattern": "role_control"})
 
     def timelock(has: bool | None) -> TimelockAnalysis:

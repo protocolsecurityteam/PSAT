@@ -88,7 +88,6 @@ def test_wrong_length_response_raises(monkeypatch):
     a = "0x" + "11" * 20
 
     def bad(_rpc_url, _method, _params, **_kw):
-        # One result for two requested calls.
         return "0x" + encode(["(bool,bytes)[]"], [[(True, b"")]]).hex()
 
     monkeypatch.setattr(rpc_mod, "rpc_request", bad)

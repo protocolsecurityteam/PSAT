@@ -427,11 +427,8 @@ def test_indexer_dirty_work_does_not_wake_analysis(lifecycle):
 
 @pytest.mark.parametrize("managed", [False, True])
 def test_pipeline_queue_state_and_artifacts_equivalent(lifecycle, monkeypatch, managed):
-    """Run real transitions/lease checks/artifact writes with fixed stage outputs.
-
-    External analyses remain covered by their existing deterministic suites.
-    This verifies the lifecycle wrapper doesn't alter their persisted payloads.
-    """
+    """Verifies the lifecycle wrapper doesn't alter persisted payloads; external analyses
+    are covered by their own suites."""
     from db.queue import get_artifact, store_artifact
 
     if not managed:

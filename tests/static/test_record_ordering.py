@@ -1,12 +1,9 @@
 """W2 — the ordering prover (``record_ordering.py``).
 
-The unit that can over-claim, so every refusal path carries its own fixture and
-every ``not_determined`` has a positive sibling differing in exactly ONE
-construct: if a refusal could pass merely because the walk never reached the
-code, the sibling proves it did.
-
-Assertions are on the WHOLE verdict dict — ``{"state": "not_determined", ...}``
-and a proof are both truthy, so ``is not None`` would assert nothing.
+The unit that can over-claim: every refusal path has its own fixture, and every
+``not_determined`` has a positive sibling differing in ONE construct, proving the walk
+reached the code. Assertions are on the WHOLE verdict dict, since ``{"state":
+"not_determined", ...}`` and a proof are both truthy.
 """
 
 from __future__ import annotations
@@ -1034,7 +1031,6 @@ def test_pipeline_orders_against_the_record_the_amount_producer_names(_effects):
             if "record_ordering" in flow:
                 assert flow.get("amount_record_variable") is not None
                 assert flow["direction"] == "out"
-    # Spot the two poles of the composition through the whole pipeline.
     assert keyed["goodClearThenPay(uint256)"]["state"] == "proven_ordering"
     assert keyed["daoClearAfterPay()"]["state"] == "not_determined"
     assert keyed["daoClearAfterPay()"]["reason"] == ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS

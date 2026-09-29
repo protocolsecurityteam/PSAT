@@ -1,17 +1,12 @@
 """Regression tests for the current-impl anchor bug (1B).
 
-The upgrade-history backfill used to stamp ``upgrade_history`` on *every* impl in
-a proxy's ``Upgraded`` events — including the proxy's CURRENT live impl (it
-appears in the last event). The anchor predicate then excluded that live impl
-(where the proxy's real functions + principals live) from analysis, requeue, and
-coverage metrics.
+The upgrade-history backfill used to stamp ``upgrade_history`` on every impl in a proxy's ``Upgraded`` events,
+including the CURRENT live impl (in the last event), so the anchor predicate excluded it (where the real
+functions + principals live) from analysis, requeue and coverage metrics.
 
-Pins:
-  * ``is_superseded_impl`` / ``not_superseded_impl_clause`` treat a row tagged
-    ``current_implementation`` as live, not a superseded anchor;
-  * ``backfill_historical_impl_contracts`` tags the *current* impl
-    ``current_implementation`` (not ``upgrade_history``) on both the create and
-    adopt paths, while genuinely-superseded impls stay anchored.
+Pins: ``is_superseded_impl`` / ``not_superseded_impl_clause`` treat ``current_implementation`` as live;
+``backfill_historical_impl_contracts`` tags the current impl ``current_implementation`` on both create and
+adopt paths while genuinely-superseded impls stay anchored.
 """
 
 from __future__ import annotations
@@ -78,9 +73,7 @@ def test_not_superseded_impl_clause_filters(db_session):
 
 
 def _stub_backfill_io(monkeypatch):
-    """Backfill resolves impl names via Etherscan, runs the near-line §3.5
-    probe, and refreshes audit coverage. Stub all three so the test stays
-    offline + hermetic."""
+    """Stub Etherscan name lookup, the near-line §3.5 probe and audit-coverage refresh to stay offline + hermetic."""
     monkeypatch.setattr("services.clients.etherscan.parallel_get", lambda calls: {k: fn() for k, fn in calls.items()})
     monkeypatch.setattr("services.clients.etherscan.get_contract_info", lambda addr, **_kw: (f"Impl_{addr[-4:]}", True))
     monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
@@ -89,8 +82,6 @@ def _stub_backfill_io(monkeypatch):
 
 @requires_postgres
 def test_backfill_tags_current_impl_live_create(db_session, monkeypatch):
-    """Create path: the current impl is created tagged ``current_implementation``
-    (not the superseded anchor), while other impls are anchored."""
     from db.models import Contract, Protocol
     from services.discovery.upgrade_history import backfill_historical_impl_contracts
 
@@ -125,9 +116,8 @@ def test_backfill_tags_current_impl_live_create(db_session, monkeypatch):
 
 @requires_postgres
 def test_backfill_tags_current_impl_live_adopt(db_session, monkeypatch):
-    """Adopt path: a pre-existing live impl row (as analysis writes it) gets the
-    ``current_implementation`` marker appended — NOT ``upgrade_history`` — so it
-    stops being hidden from anchor-excluding metrics/requeue."""
+    """Adopt path: a pre-existing live impl row gets ``current_implementation`` appended (NOT ``upgrade_history``)
+    so it stops being hidden from anchor-excluding metrics/requeue."""
     from db.models import Contract, Protocol
     from services.discovery.upgrade_history import backfill_historical_impl_contracts
 

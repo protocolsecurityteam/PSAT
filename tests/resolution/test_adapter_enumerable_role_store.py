@@ -1,13 +1,10 @@
-"""EnumerableRoleStoreAdapter — resolves a delegated ``registry.onlyX(msg.sender)``
-gate to its real controllers by folding the role-store standard's indexed events
-and confirming each candidate against the live gate (pinned-block probe).
+"""EnumerableRoleStoreAdapter — resolves a delegated ``registry.onlyX(msg.sender)`` gate
+to its real controllers by folding the role-store standard's indexed events and
+confirming each candidate against the live gate (pinned-block probe).
 
-Wire-stubbed the way the offline suite requires: ``rpc_request`` is stubbed (the
-Multicall3 gate-probe rides it), NOT the adapter or repo classes; indexed events +
-cursors are seeded into the real Postgres via the real ``PostgresEventLogRepo``.
-Standard detection's ``get_code`` is stubbed in ``role_store_standards`` and the
-proxy→impl hop comes from a seeded ``Contract`` row (mirrors the Stage-1 enroll
-tests).
+Wire-stubbed: ``rpc_request`` (the Multicall3 gate-probe), not the adapter/repo classes;
+events + cursors are seeded into real Postgres via ``PostgresEventLogRepo``; the
+proxy→impl hop comes from a seeded ``Contract`` row.
 """
 
 from __future__ import annotations
@@ -55,8 +52,7 @@ _CALLEE_SIG = "onlyOperatingMultisig(address)"
 _CALLEE_SELECTOR = "0x" + keccak(text=_CALLEE_SIG).hex()[:8]
 
 
-# The adapter itself does not branch on earned-public, but every behavior-bearing
-# test runs under both flag states; this makes that explicit.
+# Behavior-bearing tests run under both earned-public flag states (the adapter doesn't branch on it).
 @pytest.fixture(params=["1", "0"], ids=["earned_on", "earned_off"])
 def both_flags(request, monkeypatch):
     monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", request.param)
@@ -162,15 +158,14 @@ def _code_with(*selectors: str) -> str:
 
 
 def _stub_probe_code(monkeypatch, code_for_impl: str) -> None:
-    """resolve_probe_code's ``get_code`` returns ``code_for_impl`` at the impl; the
-    DB Contract row supplies the proxy→impl hop so no slot read fires."""
+    """``get_code`` returns ``code_for_impl`` at the impl; the DB Contract row supplies
+    the proxy→impl hop so no slot read fires."""
 
     def _fake_get_code(rpc_url, address, *, chain_id=None):
         return code_for_impl if address.lower() == _IMPL.lower() else "0x00"
 
     monkeypatch.setattr(rss, "get_code", _fake_get_code)
-    # Disable the EIP-1967 slot fallback hop (the DB Contract row is the proxy→impl
-    # linkage) so detection never reaches for the wire.
+    # Disable the EIP-1967 slot fallback (the DB row is the linkage) so detection never hits the wire.
     monkeypatch.setattr(rss, "rpc_request", lambda *a, **k: None)
 
 
@@ -235,9 +230,8 @@ def _install_probe_stub(
         encoded = abi_encode(["(bool,bytes)[]"], [results])
         return "0x" + encoded.hex()
 
-    # Patch the wire only: the real ``multicall3_aggregate3`` (its aggregate3
-    # encode/decode) runs against this stubbed ``rpc_request``. Patch the adapter's
-    # imported reference too so the pin-once eth_blockNumber read is stubbed.
+    # Patch the wire only (the real ``multicall3_aggregate3`` encode/decode runs); patch
+    # the adapter's imported reference too so the pin-once eth_blockNumber read is stubbed.
     import services.clients.rpc as _rpc
     import services.resolution.adapters.enumerable_role_store as _ers
 
@@ -293,8 +287,7 @@ def test_matches_recognized_standard_scores_90(session, monkeypatch):
 
 @requires_postgres
 def test_matches_markerless_authority_scores_0(session, monkeypatch):
-    # The guard's no-adapter anchor: no recognized store behind the proxy → the
-    # adapter declines to match, so the :1976 guard remains the backstop.
+    # No recognized store behind the proxy → decline, so the :1976 guard remains the backstop.
     _stub_probe_code(monkeypatch, "0x00")
     _seed_proxy_impl(session)
     session.commit()
@@ -303,8 +296,7 @@ def test_matches_markerless_authority_scores_0(session, monkeypatch):
 
 @requires_postgres
 def test_matches_non_caller_arg_scores_0(session, monkeypatch):
-    # onlyX(owner) — the arg is a state var, not the caller → not this adapter's
-    # gate (short-circuits before any wire touch).
+    # onlyX(owner): the arg is a state var, not the caller → not this adapter's gate.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     session.commit()
@@ -354,8 +346,7 @@ def test_warm_fold_probe_returns_finite_set(session, monkeypatch, both_flags):
 
 @requires_postgres
 def test_pin_once_block_none_resolves_via_blocknumber(session, monkeypatch, both_flags):
-    # Unpinned pass (ctx.block None): the adapter reads ONE eth_blockNumber height
-    # and uses it for the fold read + probe + trace, so the enumeration still lands.
+    # Unpinned pass: ONE eth_blockNumber height serves the fold read + probe + trace.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -372,8 +363,8 @@ def test_pin_once_block_none_resolves_via_blocknumber(session, monkeypatch, both
 
 @requires_postgres
 def test_pin_once_blocknumber_failure_settles_probe_unavailable(session, monkeypatch, both_flags):
-    # Unpinned pass AND the height read fails → probe_unavailable (fail-closed),
-    # never a fold/probe/trace read at three different (or unpinned) heights.
+    # Unpinned AND the height read fails → probe_unavailable (fail-closed), never
+    # fold/probe/trace reads at different heights.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -404,8 +395,7 @@ def test_trace_carries_fold_frontier(session, monkeypatch, both_flags):
 
 @requires_postgres
 def test_finite_set_projects_principal_type_controller(session, monkeypatch, both_flags):
-    # Acceptance: the enumerated controllers render principal_type="controller"
-    # THROUGH project_capability_surface, carrying the trace for auditability.
+    # Controllers render principal_type="controller" THROUGH project_capability_surface, with the trace.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -421,8 +411,8 @@ def test_finite_set_projects_principal_type_controller(session, monkeypatch, bot
 
 @requires_postgres
 def test_settled_decline_records_metric(session, monkeypatch, both_flags):
-    # Adapter-site decline counter: a settled probe_unavailable is observable at the
-    # adapter (its persisted basis is superseded by the :1976 guard downstream).
+    # A settled probe_unavailable is observable at the adapter (its persisted basis is
+    # superseded by the :1976 guard downstream).
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -446,9 +436,8 @@ def test_settled_decline_records_metric(session, monkeypatch, both_flags):
 
 @requires_postgres
 def test_probe_transport_failure_not_memoized_cross_capability(session, monkeypatch, both_flags):
-    # F3: a transport blip must NOT poison the shared pass memo — a second enumerate
-    # for the same (authority, selector, block) re-probes and can succeed. (Pre-fix
-    # the failure was cached and settled the whole family to probe_unavailable.)
+    # F3: a transport blip must NOT poison the shared pass memo — a second enumerate for
+    # the same (authority, selector, block) re-probes and can succeed (it used to be cached).
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -491,7 +480,7 @@ def test_probe_transport_failure_not_memoized_cross_capability(session, monkeypa
 
 @requires_postgres
 def test_cold_index_defers_pending_index(session, monkeypatch, both_flags):
-    # Events present but NO warm cursor → cold. Defer for self-heal, never probe.
+    # Events but NO warm cursor → cold. Defer for self-heal, never probe.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_log(session, topics=_roleset_topics(_MULTISIG, _ROLE_1, True), block=100, log_index=0)
@@ -505,8 +494,8 @@ def test_cold_index_defers_pending_index(session, monkeypatch, both_flags):
 
 @requires_postgres
 def test_warm_zero_events_settles_unconfirmed(session, monkeypatch, both_flags):
-    # Warm cursor, but the store emitted no role events → cannot confirm it speaks
-    # the standard we'd fold; settle to a probe (NOT an exact-empty false nobody).
+    # Warm cursor but no role events → can't confirm the store speaks the folded standard;
+    # settle to a probe (NOT an exact-empty false nobody).
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -535,8 +524,7 @@ def test_negative_control_passes_declines(session, monkeypatch, both_flags):
 
 @requires_postgres
 def test_probe_transport_failure_is_indeterminate(session, monkeypatch, both_flags):
-    # A wire failure is NOT a membership failure: settle to probe_unavailable and
-    # classify nobody (no finite_set, no exact-empty).
+    # A wire failure is NOT a membership failure: probe_unavailable, classify nobody.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -552,8 +540,7 @@ def test_probe_transport_failure_is_indeterminate(session, monkeypatch, both_fla
 
 @requires_postgres
 def test_probe_filters_non_members(session, monkeypatch, both_flags):
-    # Two active holders in the events, but the gate only passes one — the probe is
-    # the ground truth, so the non-passing candidate is dropped.
+    # The probe is ground truth: a non-passing candidate is dropped.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -569,8 +556,7 @@ def test_probe_filters_non_members(session, monkeypatch, both_flags):
 
 @requires_postgres
 def test_oz_polarity_grant_then_revoke_not_member(session, monkeypatch, both_flags):
-    # OZ AccessControlEnumerable fold: RoleGranted then RoleRevoked for the same
-    # (holder, role) folds to not-a-member; a distinct still-granted holder stays.
+    # OZ AccessControlEnumerable: RoleGranted then RoleRevoked folds to not-a-member.
     _stub_probe_code(monkeypatch, _code_with(*OZ_ACCESS_CONTROL_ENUMERABLE.marker_selectors))
     _seed_proxy_impl(session)
     for topic0 in OZ_ACCESS_CONTROL_ENUMERABLE.topic0s():
@@ -589,8 +575,8 @@ def test_oz_polarity_grant_then_revoke_not_member(session, monkeypatch, both_fla
 
 @requires_postgres
 def test_all_revoked_provably_nobody_empty_exact(session, monkeypatch, both_flags):
-    # Warm, events present, but every holder revoked and the negative control
-    # reverts → provably nobody: exact-empty finite_set (blocks OR'd public siblings).
+    # Warm, all holders revoked, negative control reverts → provably nobody: exact-empty
+    # (blocks OR'd public siblings).
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -607,8 +593,7 @@ def test_all_revoked_provably_nobody_empty_exact(session, monkeypatch, both_flag
 
 @requires_postgres
 def test_getter_crosscheck_mismatch_declines(session, monkeypatch, both_flags):
-    # With the getter cross-check on, a getter holder set that disagrees with the
-    # event fold declines LOUD rather than emitting a contradicted set.
+    # With the getter cross-check on, a getter set that disagrees with the fold declines LOUD.
     monkeypatch.setenv("PSAT_ROLE_STORE_GETTER_CROSSCHECK", "1")
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
@@ -666,18 +651,15 @@ def test_dispatch_order_adapter_preempts_generic(session, monkeypatch, both_flag
     assert any(step.get("step") == "enumerable_role_store" for step in cap.trace)
 
 
-# ---------------------------------------------------------------------------
-# Unwitnessed empties decline; registry context is chain-scoped
-# and an error there is never "no candidates".
-# ---------------------------------------------------------------------------
+# Unwitnessed empties decline; registry context is chain-scoped and an error there
+# is never "no candidates".
 
 
 @requires_postgres
 def test_zero_survivors_over_nonempty_candidates_declines_not_exact_empty(session, monkeypatch, both_flags):
-    # A live holder exists (candidate universe non-empty) but the real gate
-    # rejects every candidate: either the gate's one role is unheld or the gate
-    # admits callers outside the role model (hybrid msg.sender== gate). The two
-    # are indistinguishable, so an exact-empty "provably nobody" is unwitnessed.
+    # A live holder exists but the gate rejects every candidate: either the role is
+    # unheld or the gate admits callers outside the role model (hybrid msg.sender==
+    # gate). Indistinguishable, so an exact-empty "provably nobody" is unwitnessed.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -693,8 +675,8 @@ def test_zero_survivors_over_nonempty_candidates_declines_not_exact_empty(sessio
 
 @requires_postgres
 def test_registry_context_db_error_declines_not_empty_candidates(session, monkeypatch, both_flags):
-    # A DB error while reading the registry's own controllers must never
-    # shrink the candidate universe into a (possibly empty) member set.
+    # A DB error reading the registry's controllers must never shrink the candidate
+    # universe into a (possibly empty) member set.
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     _seed_cursor(session, _ROLE_SET)
@@ -712,9 +694,8 @@ def test_registry_context_db_error_declines_not_empty_candidates(session, monkey
 
 @requires_postgres
 def test_registry_controller_context_is_chain_scoped(session, monkeypatch, both_flags):
-    # A same-address twin registry on another chain carries a controller value
-    # that must NOT leak into this chain's candidate universe (cross-chain twin
-    # aliasing inside the caller-set computation).
+    # A same-address twin registry on another chain must NOT leak its controller value
+    # into this chain's candidate universe.
     from db.models import Contract, ControllerValue
     from services.resolution.adapters.enumerable_role_store import _registry_controller_context
 

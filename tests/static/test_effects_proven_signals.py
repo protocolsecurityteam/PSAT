@@ -1,12 +1,9 @@
 """The Plane-0 hygiene lattice must rest on the lowered IR, not on identifiers.
 
-Every fixture here is named ADVERSARIALLY: the slot constants carry no
-``slot``/``storage`` token and the reentrancy guard carries no ``reentran``/
-``locked``/``_status`` token, so a test only passes if the classification came
-from the IR shape (an assembly storage-pointer bind, an ``sstore`` to a
-constant, a set/restore pair around a modifier's placeholder). The negative
-controls are the mirror image: identifiers that LOOK like slots or guards but
-whose IR proves they are neither.
+Fixtures are named ADVERSARIALLY (slot constants without ``slot``/``storage``, guards
+without ``reentran``/``locked``/``_status``), so a test passes only if the
+classification came from IR shape. Negative controls are the mirror image:
+identifiers that LOOK like slots or guards but whose IR proves they are neither.
 """
 
 from __future__ import annotations
@@ -64,9 +61,8 @@ contract Vault {
 
 
 def test_namespaced_slot_constant_is_pseudo_without_a_slot_name(tmp_path):
-    """``ACME_MAIN`` is bound to a storage-location local in assembly, so it is a
-    slot pseudo-var — proven by the ``Assignment`` to an ``is_storage`` lvalue,
-    not by its name (which the old suffix test would have missed entirely)."""
+    """``ACME_MAIN`` is bound to a storage-location local in assembly: proven by
+    the ``Assignment`` to an ``is_storage`` lvalue, not by its name."""
     effects = build_effects(_compile(tmp_path, _NAMESPACED_SRC, "Vault"))
     assert _hygiene(effects, "setHalted(bool)")["ACME_MAIN"] == "storage_location_pseudo"
 
@@ -345,11 +341,9 @@ contract Payer {
 
 
 def test_value_flows_survive_an_unreadable_ir_repr(tmp_path, monkeypatch):
-    """``_extract_value_flows`` used to parse ``str(ir)`` for the destination and
-    for the presence of a call value — a debug rendering that can be reformatted
-    upstream with no signal that the extraction has gone silent. Blanking every
-    IR's ``__str__`` leaves the attributes intact, so the flows must be
-    unchanged; under the repr parse this returned nothing at all."""
+    """``_extract_value_flows`` used to parse ``str(ir)``, a debug rendering that
+    can be reformatted upstream with no signal. Blanking every IR's ``__str__``
+    must leave the flows unchanged; under the repr parse this returned nothing."""
     from slither.slithir.operations.high_level_call import HighLevelCall
     from slither.slithir.operations.low_level_call import LowLevelCall
 

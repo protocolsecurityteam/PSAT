@@ -1,11 +1,8 @@
-"""Tests for DAppCrawlWorker — process() code paths.
+"""Tests for DAppCrawlWorker.process() code paths.
 
-Child-job creation and ``analyze_limit`` enforcement moved to the
-``SelectionWorker``; end-to-end child queueing is covered there and in
-``test_dapp_crawl_worker_integration``. This file keeps the
-worker-local responsibilities: request validation, crawler parameter
-plumbing, protocol derivation, artifact storage, and interaction
-persistence.
+Child-job creation and ``analyze_limit`` moved to ``SelectionWorker`` (covered there and in
+``test_dapp_crawl_worker_integration``); this file keeps worker-local concerns: validation, crawler params,
+protocol derivation, artifact storage, interaction persistence.
 """
 
 from __future__ import annotations
@@ -21,22 +18,14 @@ import pytest
 
 from workers.base import JobHandledDirectly
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 ADDR_A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ADDR_B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
 @pytest.fixture
 def dapp_worker_module(monkeypatch: pytest.MonkeyPatch):
-    """Import the worker with a scoped Playwright stub.
-
-    The crawler stack imports Playwright at module import time.  Load the worker
-    under a temporary stub so the test stays isolated and does not leave fake
-    modules behind for the rest of the suite.
-    """
+    """Import the worker under a temporary Playwright stub (the crawler imports it at module load) so no fake
+    modules leak into the rest of the suite."""
     pw = ModuleType("playwright")
     pw_async = ModuleType("playwright.async_api")
     pw_async.async_playwright = MagicMock()  # pyright: ignore[reportAttributeAccessIssue]
@@ -64,7 +53,6 @@ def dapp_worker_module(monkeypatch: pytest.MonkeyPatch):
 
 
 def _job(**overrides: Any) -> SimpleNamespace:
-    """Create a minimal fake job with sensible defaults."""
     payload: dict[str, Any] = {
         "id": uuid.uuid4(),
         "name": None,
@@ -84,10 +72,6 @@ def _patch_worker_deps(
     *,
     crawl_result=None,
 ):
-    """Patch all external deps of DAppCrawlWorker.process().
-
-    Returns a dict of spy lists so tests can inspect calls.
-    """
     if crawl_result is None:
         crawl_result = {"addresses": [], "interaction_count": 0}
 
@@ -133,20 +117,12 @@ def _patch_worker_deps(
 
 
 def _session_no_existing_contracts() -> MagicMock:
-    """A MagicMock session whose Contract lookups always return None."""
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
     return session
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
 class TestMissingDappUrls:
-    """process() raises ValueError when dapp_urls is absent or empty."""
-
     def test_missing_key(self, dapp_worker_module):
         worker = dapp_worker_module.DAppCrawlWorker()
         session = MagicMock()
@@ -173,8 +149,6 @@ class TestMissingDappUrls:
 
 
 class TestHappyPath:
-    """Crawl finds addresses, stores artifacts, completes. No child jobs here."""
-
     def test_stores_artifacts_and_completes(self, monkeypatch, dapp_worker_module):
         crawl_result = {
             "addresses": [ADDR_A, ADDR_B],
@@ -205,8 +179,6 @@ class TestHappyPath:
 
 
 class TestJobName:
-    """Job name is set when missing, but not overwritten when already present."""
-
     def test_name_set_when_missing(self, monkeypatch, dapp_worker_module):
         crawl_result = {"addresses": [], "interaction_count": 0}
         _patch_worker_deps(monkeypatch, dapp_worker_module, crawl_result=crawl_result)
@@ -234,8 +206,6 @@ class TestJobName:
 
 
 class TestCrawlParameters:
-    """chain_id and wait are read from request and passed to crawl_dapp."""
-
     def test_custom_chain_id_and_wait(self, monkeypatch, dapp_worker_module):
         captured: dict[str, Any] = {}
 
@@ -279,8 +249,6 @@ class TestCrawlParameters:
 
 
 class TestProtocolCreation:
-    """Protocol row is created / looked up from URL hostname when company is absent."""
-
     def test_hostname_derived_when_no_company(self, monkeypatch, dapp_worker_module):
         crawl_result = {"addresses": [], "interaction_count": 0}
         spies = _patch_worker_deps(monkeypatch, dapp_worker_module, crawl_result=crawl_result)

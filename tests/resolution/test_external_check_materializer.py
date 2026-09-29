@@ -70,7 +70,6 @@ def test_materialize_external_check_multicall_parity(monkeypatch):
     monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: [member, non_member])
     monkeypatch.setattr(mod, "_candidate_addresses_from_hypersync", lambda **_k: [])
 
-    # JSON-RPC-batch wire (OFF path): canCall(member) true, canCall(non_member) false, in order.
     def fake_batch(_rpc_url, calls):
         assert len(calls) == 2
         return [(TRUE, False), (FALSE, False)]

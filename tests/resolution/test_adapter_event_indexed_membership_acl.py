@@ -1,15 +1,10 @@
 """Caller-keyed boolean mapping-ACL recovery from events (FA-R2).
 
-A leaf like ``allowedForwardedEigenpodCalls[msg.sender][selector]`` read for
-truthiness is emitted as a ``mapping_membership`` descriptor with a
-``set``-direction enumeration_hint carrying a ``value_position`` but no
-``value_predicate``. The adapter treats the truthy read as an implicit
-``{value != 0}`` predicate and folds latest-value-per-CALLER, keeping callers
-whose latest stored value is nonzero.
-
-These drive the production adapter through the real value-aware fold
-(``enumerate_mapping_values``); only the HyperSync wire (``client.get``) is
-stubbed, matching the on-chain log shapes of the audited run.
+A truthiness read like ``allowedForwardedEigenpodCalls[msg.sender][selector]`` is a
+``mapping_membership`` descriptor with a ``set``-direction hint carrying
+``value_position`` but no ``value_predicate``; the adapter treats it as an implicit
+``{value != 0}`` and folds latest-value-per-CALLER. Drives the real fold
+(``enumerate_mapping_values``); only the HyperSync wire is stubbed.
 """
 
 from __future__ import annotations
@@ -72,11 +67,9 @@ def _client(logs: list[Any]):
 
 
 def _patched_value_fold(monkeypatch, logs: list[Any]) -> None:
-    """Route the adapter's value fold through ``enumerate_mapping_values`` with
-    a stubbed HyperSync client, so the real latest-value-per-key fold runs over
-    ``logs``. Only the wire is replaced; the scan-floor lookup is stubbed to a
-    known floor so the live fold runs (rather than deferring) without reaching
-    Etherscan or the cursor table offline."""
+    """Route the value fold through ``enumerate_mapping_values`` with a stubbed HyperSync
+    client so the real fold runs over ``logs``; the scan floor is stubbed to a known
+    block so the live fold runs (not defers) without Etherscan or the cursor table."""
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
@@ -146,8 +139,7 @@ def test_implicit_predicate_fires_for_caller_keyed_membership_with_value_set_hin
 
 
 def test_implicit_predicate_excluded_when_value_position_absent():
-    # LayerZero composeQueue (sendCompose): a caller-keyed data-map with no
-    # value slot must stay unsupported here.
+    # LayerZero composeQueue: a caller-keyed data-map with no value slot stays unsupported.
     desc = {
         "kind": "mapping_membership",
         "storage_var": "composeQueue",
@@ -202,8 +194,8 @@ def test_caller_event_arg_position_resolves_caller_over_inner_key():
 
 
 def test_caller_event_arg_position_from_non_indexed_data_arg():
-    # Caller key carried in event data (not a topic): caller key index 0 maps
-    # to data slot 0, event arg position 1 (arg 0 is the indexed selector).
+    # Caller key in event data (not a topic): key index 0 → data slot 0, event arg 1
+    # (arg 0 is the indexed selector).
     desc = {
         "kind": "mapping_membership",
         "storage_var": "consumers",
@@ -268,8 +260,7 @@ def test_enumerate_recovers_truthy_caller(monkeypatch):
 
 
 def test_enumerate_folds_multiple_selectors_to_single_caller(monkeypatch):
-    # Same caller, three selectors, all true (the audited forwardEigenPodCall
-    # shape) → exactly one principal.
+    # Same caller, three selectors, all true (audited forwardEigenPodCall) → one principal.
     logs = [
         _eigenpod_log(CALLER_A, "0x88676cad", True, block=100, log_index=0),
         _eigenpod_log(CALLER_A, "0xf074ba62", True, block=100, log_index=1),
@@ -295,8 +286,7 @@ def test_enumerate_recovers_two_distinct_callers(monkeypatch):
 
 
 def test_enumerate_drops_caller_whose_latest_value_is_false(monkeypatch):
-    # Added then removed (latest value=false) → not a member. Mirrors the
-    # AvsOperatorManager admin whose latest AdminUpdated value is 0.
+    # Added then removed (latest false) → not a member (AvsOperatorManager admin, latest AdminUpdated 0).
     logs = [
         _eigenpod_log(CALLER_A, "0x88676cad", True, block=100, log_index=0),
         _eigenpod_log(CALLER_A, "0x88676cad", False, block=200, log_index=0),
@@ -309,10 +299,9 @@ def test_enumerate_drops_caller_whose_latest_value_is_false(monkeypatch):
 
 
 def test_end_to_end_and_tree_recovers_membership_and_keeps_hasrole_external(monkeypatch):
-    # AND[ membership(allowedForwardedEigenpodCalls), hasRole(...) ] — the
-    # membership leaf resolves to the caller set and the roleRegistry.hasRole
-    # sibling stays external_check_only (it is NOT the broken leaf). Pre-fix the
-    # membership leaf is no_adapter and absorbs the whole AND.
+    # AND[membership, hasRole(...)]: the membership leaf resolves to the caller set and
+    # the hasRole sibling stays external_check_only. Pre-fix the membership leaf was
+    # no_adapter and absorbed the whole AND.
     from services.resolution.predicate_evaluator import evaluate_tree_with_registry
 
     tree = {
@@ -373,8 +362,7 @@ def test_end_to_end_and_tree_recovers_membership_and_keeps_hasrole_external(monk
 
 
 def test_pre_fix_membership_leaf_absorbs_and(monkeypatch):
-    # With the implicit predicate neutralized the membership leaf declines as
-    # no_adapter and absorbs the AND (the bug this fix removes).
+    # With the implicit predicate neutralized the leaf declines as no_adapter and absorbs the AND.
     import services.resolution.adapters.event_indexed as ei
     from services.resolution.predicate_evaluator import evaluate_tree_with_registry
 
@@ -420,8 +408,7 @@ def _run(coro):
 
 
 def test_value_fold_keys_on_caller_not_inner_selector(monkeypatch):
-    # Direct fold check: with the caller-arg key override, two selectors for one
-    # caller collapse to a single caller key (not two selector keys).
+    # With the caller-arg key override, two selectors for one caller collapse to one caller key.
     desc = _eigenpod_descriptor()
     hint = desc["enumeration_hint"][0]
     spec = {

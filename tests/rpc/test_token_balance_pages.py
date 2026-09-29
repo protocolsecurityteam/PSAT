@@ -1,15 +1,12 @@
 """The Etherscan asset-list read: the empty answer, and where the list ends.
 
-Two states used to be one. ``status=0 / 'No token found' / []`` is the endpoint
-ANSWERING that its index holds no tokens for an address; every other ``status=0``
-is a failure. Filing both as ``fetch_failed`` threw away the only cheap trigger
-this pipeline has for looking at the chain — and 1,027 attempts over 142
-contracts had been throwing it away for days.
+``status=0 / 'No token found' / []`` is the endpoint ANSWERING that its index holds no tokens
+for an address; every other ``status=0`` is a failure. Filing both as ``fetch_failed`` threw
+away the pipeline's only cheap trigger for looking at the chain (1,027 attempts over 142
+contracts, for days).
 
-The second state is the end of the list. One page proves nothing about a holder
-with more assets than fit in it; only a SHORT page does. Anything else — the page
-budget, a mid-paging failure, an endpoint that re-serves page 1 — leaves a prefix,
-which is a lower bound and must never read as an at-most.
+The end of the list is only proven by a SHORT page. The page budget, a mid-paging failure, or
+an endpoint re-serving page 1 leave a prefix: a lower bound that must never read as an at-most.
 """
 
 from __future__ import annotations
@@ -40,13 +37,10 @@ def _entry(index: int) -> dict:
 
 @pytest.fixture(autouse=True)
 def _no_throttle(monkeypatch):
-    """The endpoint's 1 req/s limiter is real; these arms replay the wire."""
     monkeypatch.setattr(etherscan, "_throttle_token_balance_call", lambda: None)
 
 
 class _Wire:
-    """``get``, scripted per page."""
-
     def __init__(self, pages):
         self.pages = list(pages)
         self.requested: list[str] = []
@@ -65,8 +59,7 @@ class TestTheEmptyAnswerIsNotAFailure:
         ["No token found", "No transactions found"],
     )
     def test_exactly_the_empty_triple_comes_back_as_data(self, monkeypatch, message):
-        # Both empty-list answers: an address holding no tokens, and an
-        # address/tx with no transactions (the deployer-enumeration shapes).
+        # Both empty-list answers: no tokens for an address, and no transactions (deployer-enumeration shapes).
         payload = {"status": "0", "message": message, "result": []}
         monkeypatch.setattr(etherscan.requests, "get", lambda *a, **kw: _Response(payload))
         monkeypatch.setattr(etherscan, "_get_api_key", lambda: "k")
@@ -177,9 +170,6 @@ class _Response:
 
 
 class TestGetNativePrice:
-    """``get_native_price`` picks the per-chain stats action and reads the price
-    from the ``*usd`` field, never inferring the asset from the response key."""
-
     def test_eth_native_uses_ethprice_action(self, monkeypatch):
         import services.clients.etherscan as es
 
@@ -187,8 +177,7 @@ class TestGetNativePrice:
 
         def _fake_get(module, action, chain_id, **params):
             captured.update(module=module, action=action, chain_id=chain_id)
-            # ethprice carries ethbtc + ethusd + *_timestamp siblings; only the
-            # bare ``*usd`` field is the price.
+            # ethprice carries ethbtc + ethusd + *_timestamp siblings; only bare ``*usd`` is the price.
             return {
                 "result": {
                     "ethbtc": "0.05",

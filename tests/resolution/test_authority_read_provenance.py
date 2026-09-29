@@ -1,15 +1,11 @@
 """A2/A3 — a published authority read carries the read that produced it.
 
-Two defects, one shape. An exact-EMPTY caller set is the strongest earned
-negative the resolver publishes ("nobody can call this"), and it was published
-bare: no step, no selector, no block, no reason. Four such rows exist on the
-corpus and none can be reconstructed — one of them (EACAggregatorProxy) cannot
-even have come from the zero branch, because its ``pendingOwner()`` reverts on
-mainnet. Separately, the accessor BASIS a principal rests on was recorded only
-inside ``details->'trace'``, beside strength fields that read as maximal.
-
-Every read here is stubbed at the wire (``services.clients.rpc.rpc_request``) and pinned to
-block 25643300 — the height every investigation read reproduces at.
+An exact-EMPTY caller set (the strongest earned negative: "nobody can call this") was
+published bare: no step, selector, block or reason. Four such rows exist and none can be
+reconstructed (EACAggregatorProxy's ``pendingOwner()`` reverts on mainnet, so it can't
+have come from the zero branch). Separately, the accessor BASIS was recorded only inside
+``details->'trace'``. Reads are stubbed at ``services.clients.rpc.rpc_request`` and
+pinned to block 25643300.
 """
 
 from __future__ import annotations
@@ -80,8 +76,7 @@ def _stub_getter(monkeypatch: pytest.MonkeyPatch, *, returns: str, only: str | N
 
 
 def test_zero_read_publishes_the_whole_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The byte-exact payload. Before this, the same verdict shipped as
-    ``{finite_set, [], exact, enumerable}`` with nothing else at all."""
+    """The byte-exact payload; the same verdict used to ship as ``{finite_set, [], exact, enumerable}`` alone."""
     _stub_getter(monkeypatch, returns=_word("0x" + "00" * 20), only=OWNER_SELECTOR)
     cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "owner()"}), _ctx())
 
@@ -104,9 +99,9 @@ def test_zero_read_publishes_the_whole_read(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_latest_path_publishes_no_observation_block(monkeypatch: pytest.MonkeyPatch) -> None:
-    """THE fail-closed arm for the block. With no pinned height the eth_call
-    goes to ``"latest"``; stamping a height there would put a bounded-in-time
-    claim on an unbounded read, so the key is simply absent."""
+    """THE fail-closed arm for the block: with no pinned height the eth_call goes to
+    ``"latest"``, and stamping a height would put a bounded-in-time claim on an
+    unbounded read, so the key is absent."""
     calls = _stub_getter(monkeypatch, returns=_word("0x" + "00" * 20), only=OWNER_SELECTOR)
     cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "owner()"}), _ctx(block=None))
 
@@ -130,11 +125,9 @@ def test_non_empty_read_also_carries_its_block(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_burn_address_is_not_an_exact_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``0x0`` can never be ``msg.sender`` on mainnet, which is what makes a zero
-    read a real "nobody". ``0x…dEaD`` is an ordinary address merely BELIEVED
-    keyless — a convention, not a proof — so it may not share the zero shape and
-    may not be published as a member either. The raw address is recorded so the
-    characterization is checkable downstream."""
+    """``0x0`` can never be ``msg.sender``, which makes a zero read a real "nobody".
+    ``0x…dEaD`` is only BELIEVED keyless — a convention, not a proof — so it may not
+    share the zero shape or be published as a member. The raw address is recorded."""
     _stub_getter(monkeypatch, returns=_word(BURN), only=OWNER_SELECTOR)
     cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "owner()"}), _ctx())
 
@@ -146,8 +139,7 @@ def test_burn_address_is_not_an_exact_empty(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_revert_stays_an_honest_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A revert is not an answer. It must never become a read-confirmed zero —
-    that is the exact fail-open this whole unit exists to prevent."""
+    """A revert is not an answer; it must never become a read-confirmed zero (the fail-open this unit prevents)."""
     _stub_getter(monkeypatch, returns="revert")
     cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "owner()"}), _ctx())
 
@@ -157,11 +149,9 @@ def test_revert_stays_an_honest_lower_bound(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_pending_ceiling_shape_is_byte_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Regression guard on a real mainnet shape: EACAggregatorProxy's
-    ``pendingOwner()`` genuinely reverts. That reaches the accept-side ceiling,
-    which is UNCHANGED by this unit — including its ``empty_by_design`` and the
-    ``basis: "accessor_name"`` disclosure that keeps it out of the earned-negative
-    gate."""
+    """Regression guard on a real mainnet shape: EACAggregatorProxy's ``pendingOwner()``
+    reverts, reaching the UNCHANGED accept-side ceiling, including ``empty_by_design`` and
+    the ``basis: "accessor_name"`` disclosure that keeps it out of the earned-negative gate."""
     _stub_getter(monkeypatch, returns="revert")
     cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "pendingOwner()"}), _ctx())
 
@@ -187,10 +177,8 @@ def test_no_rpc_leaves_the_placeholder_not_read() -> None:
 
 
 def test_memo_hit_is_byte_identical_to_the_fresh_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The pass memo dedups reads across functions gating on the same getter, and
-    its contract is a byte-identical result. The block is threaded onto BOTH
-    paths, so a memo hit cannot serve an otherwise-identical payload that has
-    quietly lost its observation block."""
+    """The pass memo's contract is a byte-identical result; the block is threaded onto
+    BOTH paths so a memo hit can't serve a payload that lost its observation block."""
     calls = _stub_getter(monkeypatch, returns=_word("0x" + "00" * 20), only=OWNER_SELECTOR)
     ctx = _ctx()
     tree = _eq_tree({"source": "view_call", "callee_signature": "owner()"})
@@ -205,8 +193,7 @@ def test_memo_hit_is_byte_identical_to_the_fresh_read(monkeypatch: pytest.Monkey
 
 
 def test_memo_does_not_merge_zero_and_burn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The memo used to store a collapsed ``""`` for both, making the two
-    answers indistinguishable in-process as well as on the wire."""
+    """The memo used to store a collapsed ``""`` for both, making the answers indistinguishable in-process."""
     ctx = _ctx()
     tree = _eq_tree({"source": "view_call", "callee_signature": "owner()"})
 
@@ -239,10 +226,9 @@ def _stub_slot(monkeypatch: pytest.MonkeyPatch, word: str) -> list[list[Any]]:
 
 
 def test_zero_slot_publishes_the_read_not_a_classification(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``empty_by_design`` used to arrive here from a DEFAULT ARGUMENT — a label
-    asserting the gate is an intentional accept-side ceiling, applied to any
-    caller that did not opt out, on a set with no trace and no block to check it
-    against. It is now the read that is published."""
+    """``empty_by_design`` used to arrive from a DEFAULT ARGUMENT — a label asserting an
+    intentional accept-side ceiling, applied with no trace or block to check it. The read
+    is now what is published."""
     calls = _stub_slot(monkeypatch, "0x" + "00" * 32)
     cap = evaluate_tree(
         _eq_tree({"source": "view_call", "callee_signature": "_pendingGovernor()", "storage_slot": SLOT}),
@@ -297,10 +283,9 @@ def _authority_details(cap: CapabilityExpr) -> dict[str, Any]:
 
 
 def test_deunderscore_convention_is_labelled_and_hoisted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``onlyGovernor`` lowers to ``msg.sender == _governor()``; the internal
-    accessor has no selector so reading it reverts, and the resolver falls back
-    to the de-underscored public getter. Real address, name-chosen getter — and
-    the row now says so BESIDE its strength fields, not only inside the trace."""
+    """``onlyGovernor`` lowers to ``msg.sender == _governor()``; the accessor has no
+    selector so it reverts and the resolver falls back to the de-underscored public
+    getter. The row says so BESIDE its strength fields, not only inside the trace."""
     _stub_getter(monkeypatch, returns=_word(GOVERNOR), only=GOVERNOR_SELECTOR)
     cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "_governor()"}), _ctx())
 
@@ -315,23 +300,21 @@ def test_deunderscore_convention_is_labelled_and_hoisted(monkeypatch: pytest.Mon
 
 
 def test_public_getter_is_abi_forced(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The control. ``auto_getter`` was renamed ``abi_auto_getter`` so the one
-    arm the compiler forces cannot be confused with the name-matched ones."""
+    """The control: ``abi_auto_getter`` (renamed from ``auto_getter``) is the one arm the compiler forces."""
     _stub_getter(monkeypatch, returns=_word(GOVERNOR), only=GOVERNOR_SELECTOR)
     cap = evaluate_tree(_eq_tree({"source": "state_variable", "state_variable_name": "governor"}), _ctx())
 
     details = _authority_details(cap)
     assert details["authority_basis"] == "abi_auto_getter"
-    # No accessor name was matched, so there is no slot-agreement residual to state.
+    # No accessor name was matched, so no slot-agreement residual to state.
     assert "accessor_slot_agreement" not in details
 
 
 def test_oz_v5_namespaced_accessor_gets_its_own_label(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The 6 CumulativeMerkleDrop rows. OZ-v5 keeps ownership in an ERC-7201
-    namespace, so an ``owner()`` gate inlines to a ``view_call`` of the private
-    accessor. It was published under the SAME label as the de-underscore
-    convention, so a consumer reading the basis still could not tell a
-    standard-anchored match from a 3-name guess."""
+    """The 6 CumulativeMerkleDrop rows. OZ-v5 keeps ownership in an ERC-7201 namespace, so
+    an ``owner()`` gate inlines to a ``view_call`` of the private accessor. It shared the
+    de-underscore convention's label, so a consumer couldn't tell a standard-anchored match
+    from a 3-name guess."""
     _stub_getter(monkeypatch, returns=_word(GOVERNOR), only=OWNER_SELECTOR)
     cap = evaluate_tree(
         _eq_tree({"source": "view_call", "callee_signature": "_getAccessControlDefaultAdminRulesStorage()"}),
@@ -341,19 +324,17 @@ def test_oz_v5_namespaced_accessor_gets_its_own_label(monkeypatch: pytest.Monkey
     assert cap.members == [GOVERNOR]
     details = _authority_details(cap)
     assert details["authority_basis"] == "standard_namespaced_accessor"
-    # Seated in the SAME tier as the convention arm: an exact-name match against
-    # the standard's table is still a name match, and the same residual is open.
+    # Same tier as the convention arm: an exact-name match against the standard's table is
+    # still a name match, with the same residual open.
     assert details["accessor_slot_agreement"] == "not_determined"
 
 
 def test_the_namespaced_arms_erc7201_slot_is_the_accesscontrol_one() -> None:
-    """The anchor the arm is named for, recomputed rather than quoted. Lane A's
-    spec pinned the *Initializable* namespace, a different slot entirely — this
-    test is what would have caught that.
+    """The arm's ERC-7201 anchor, recomputed rather than quoted (Lane A's spec pinned the
+    *Initializable* namespace, a different slot — this would have caught that).
 
-    Note what is NOT published: the resolver reads ``owner()``, never this slot,
-    so publishing it as a witness of the resolution would be a computed constant
-    dressed as evidence. It anchors the arm here and nowhere else."""
+    Not published: the resolver reads ``owner()``, never this slot, so publishing it as
+    a witness would be a computed constant dressed as evidence."""
 
     def erc7201(namespace: str) -> str:
         inner = int.from_bytes(keccak(text=namespace), "big") - 1
@@ -369,9 +350,8 @@ def test_the_namespaced_arms_erc7201_slot_is_the_accesscontrol_one() -> None:
 
 
 def test_unknown_internal_accessor_resolves_to_no_principal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail-closed: ``_frobnicate()`` is not in the authority basenames, so no
-    getter is substituted, no principal is published, and the basis key is
-    ABSENT — not ``"unknown"``, not null."""
+    """Fail-closed: ``_frobnicate()`` isn't in the authority basenames, so no getter is
+    substituted, no principal published, and the basis key is ABSENT (not ``"unknown"``, not null)."""
     _stub_getter(monkeypatch, returns="revert")
     cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "_frobnicate()"}), _ctx())
 
@@ -380,8 +360,7 @@ def test_unknown_internal_accessor_resolves_to_no_principal(monkeypatch: pytest.
 
 
 def test_a_lower_bound_read_never_stamps_a_basis(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pinned so a later refactor cannot stamp a basis onto an unresolved read:
-    the basis is stamped only on a short-circuit at ``exact``."""
+    """A refactor must not stamp a basis onto an unresolved read: only on a short-circuit at ``exact``."""
     _stub_getter(monkeypatch, returns="revert")
     cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "_governor()"}), _ctx())
 
@@ -390,18 +369,14 @@ def test_a_lower_bound_read_never_stamps_a_basis(monkeypatch: pytest.MonkeyPatch
 
 
 def test_the_convention_is_disclosed_not_validated(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Anti-name-inference control. A contract carrying a reverting internal
-    ``_governor()`` AND an unrelated public ``governor()`` that returns a
-    DIFFERENT address still resolves to the public getter's value — because that
-    is what the convention does — but it must publish
-    ``deunderscore_convention``, i.e. the row discloses that the binding is a
-    name match rather than claiming it was checked.
+    """Anti-name-inference control. A reverting internal ``_governor()`` AND an unrelated
+    public ``governor()`` returning a DIFFERENT address still resolves to the public
+    getter (that is the convention), but must publish ``deunderscore_convention`` — the
+    row discloses a name match rather than claiming it was checked.
 
-    This is the test a genuine slot differential would have to invert: it would
-    have to prove ``_governor()`` and ``governor()`` read the same storage, and
-    refuse the principal when they do not. On this corpus that differential is
-    unrunnable on 2 of 3 runtime addresses and non-identifying on the third, so
-    ``accessor_slot_agreement`` stays ``not_determined``."""
+    A genuine slot differential would invert this, but it is unrunnable on 2 of 3 runtime
+    addresses and non-identifying on the third, so ``accessor_slot_agreement`` stays
+    ``not_determined``."""
     unrelated = "0x" + "77" * 20
     _stub_getter(monkeypatch, returns=_word(unrelated), only=GOVERNOR_SELECTOR)
     cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "_governor()"}), _ctx())

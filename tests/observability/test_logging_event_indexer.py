@@ -1,9 +1,8 @@
-"""Logging/observability locks for the event_log_indexer daemon + repos.
+"""Logging locks for the event_log_indexer daemon + repos. Offline.
 
-Offline: no DB, no network. The scan path is driven with a fake session whose
-only DB interaction is the initial cursor listing, and a head fetcher that
-raises — so the per-group swallow, the ``failed_groups`` tally, and the
-degraded-heartbeat decision are exercised without Postgres or an RPC.
+The scan path runs against a fake session (only the cursor listing) and a head fetcher that
+raises, exercising the per-group swallow, the ``failed_groups`` tally and the degraded-heartbeat
+decision without Postgres or RPC.
 """
 
 from __future__ import annotations
@@ -62,9 +61,8 @@ class _BoomHead:
 
 
 def test_group_scan_failure_is_swallowed_warning_not_exception(caplog):
-    """A group whose head fetch raises is counted in ``failed_groups`` and logged
-    as a WARNING carrying ``exc_type`` — never a ``logger.exception`` traceback
-    storm (the prod outage once emitted 2,172 ERROR tracebacks here)."""
+    """A group whose head fetch raises is counted in ``failed_groups`` and logged as a WARNING
+    with ``exc_type``, never a traceback storm (a prod outage emitted 2,172 ERROR tracebacks)."""
     session = _FakeSession([(1, _ADDR, _TOPIC, None, 0, False)])
     sentinel = object()
     with caplog.at_level(logging.WARNING, logger="workers.event_log_indexer"):
@@ -107,8 +105,8 @@ def test_warm_head_failure_is_reported_without_crashing(caplog):
 
 
 def test_total_outage_pass_degrades_the_heartbeat():
-    """Every attempted group failed (0 windows) → degraded; a partial failure
-    (some windows scanned) stays running; an errored pass stays error."""
+    """Every attempted group failed (0 windows) -> degraded; partial failure stays running;
+    an errored pass stays error."""
     all_failed = ScanSummary(windows_scanned=0, failed_groups=2, total_cursors=2)
     assert _heartbeat_status_for_pass("running", all_failed) == "degraded"
 
@@ -123,9 +121,8 @@ def test_total_outage_pass_degrades_the_heartbeat():
 
 
 def test_main_installs_json_logging(monkeypatch):
-    """main() routes the daemon through configure_logging() (JsonFormatter on the
-    root logger) instead of logging.basicConfig — so its ``extra={}`` fields ship
-    as queryable JSON rather than plaintext."""
+    """main() routes through configure_logging() (JsonFormatter) instead of basicConfig, so
+    ``extra={}`` fields ship as queryable JSON."""
     import signal as signal_mod
 
     import workers.event_log_indexer as indexer
@@ -151,9 +148,8 @@ def test_main_installs_json_logging(monkeypatch):
 
 
 def test_note_partial_reason_counts_and_levels(caplog):
-    """The repo partial-reason counter tallies per reason, folds the running
-    count into a stage metric under a worker job, and WARNs only on a genuine
-    upstream degradation (timeout/max_pages); benign defers log at DEBUG."""
+    """The counter tallies per reason, folds the running count into a stage metric under a worker
+    job, and WARNs only on genuine upstream degradation (timeout/max_pages); benign defers are DEBUG."""
     event_logs_pg._PARTIAL_REASON_COUNTS.clear()
 
     metrics: dict = {}
@@ -182,17 +178,15 @@ def test_note_partial_reason_counts_and_levels(caplog):
 
 @pytest.mark.parametrize("reason", ["no_index_cursor", "hypersync_max_pages"])
 def test_note_partial_reason_noop_without_job_context(reason):
-    """Outside a worker job (no stage-metrics accumulator) the metric write is a
-    no-op and must not raise — repos call this unconditionally."""
+    """Outside a worker job the metric write is a no-op and must not raise (repos call it unconditionally)."""
     event_logs_pg._PARTIAL_REASON_COUNTS.clear()
     assert event_logs_pg._note_partial_reason(reason, event_address=_ADDR, repo="postgres") == 1
 
 
 def test_indexer_loop_binds_worker_id_on_both_threads(monkeypatch):
-    """The daemon is not a BaseWorker, so nothing binds ``worker_id`` for it —
-    its whole stream was the one worker output in the fleet with no identity to
-    filter by. Both the reconcile loop AND the backfill thread must carry it
-    (a new thread starts with an empty context, so one bind is not enough)."""
+    """The daemon is not a BaseWorker, so nothing binds ``worker_id``; its stream was the one
+    fleet worker output with no identity to filter by. Both the reconcile loop AND the backfill
+    thread must carry it (a new thread starts with an empty context)."""
     import time
     from threading import Event
 
@@ -207,8 +201,7 @@ def test_indexer_loop_binds_worker_id_on_both_threads(monkeypatch):
 
     def _fake_heartbeat(*_a, **_k):
         seen.setdefault("reconcile", worker_id_var.get())
-        # Stop only once the backfill thread has been observed too — it is the
-        # thread whose bind is easiest to lose.
+        # Stop only once the backfill thread has been observed too; its bind is easiest to lose.
         deadline = time.monotonic() + 5
         while "backfill" not in seen and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -234,9 +227,8 @@ def test_indexer_loop_binds_worker_id_on_both_threads(monkeypatch):
 
 
 def test_shutdown_line_names_the_process(monkeypatch, caplog):
-    """Every daemon logs shutdown within the same second when the fleet stops;
-    byte-identical lines make it impossible to tell which process got the
-    signal."""
+    """Every daemon logs shutdown within the same second when the fleet stops; identical lines
+    make it impossible to tell which process got the signal."""
     import signal as signal_mod
 
     import workers.event_log_indexer as indexer
@@ -245,11 +237,9 @@ def test_shutdown_line_names_the_process(monkeypatch, caplog):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
     monkeypatch.setattr(signal_mod, "signal", lambda num, fn: handlers.setdefault(num, fn))
     monkeypatch.setattr(indexer, "run_event_log_indexer_loop", lambda **_k: None)
-    # ``main()`` calls ``configure_logging()``, whose first-call path clears every
-    # root handler — including caplog's. Left in, this test passes only when some
-    # earlier test already configured logging, so it fails whenever xdist gives it
-    # a fresh process. ``test_main_installs_json_logging`` is what covers the real
-    # ``configure_logging`` call.
+    # ``main()`` calls ``configure_logging()``, whose first call clears every root handler,
+    # including caplog's. Left in, this passes only if an earlier test configured logging, so
+    # it fails under xdist's fresh processes. ``test_main_installs_json_logging`` covers the real call.
     monkeypatch.setattr(indexer, "configure_logging", lambda *_a, **_k: None)
 
     indexer.main()
@@ -263,9 +253,8 @@ def test_shutdown_line_names_the_process(monkeypatch, caplog):
 
 
 def test_probe_code_failure_is_visible_and_still_over_enrolls(monkeypatch, caplog):
-    """An unreadable probe keeps the fail-safe direction (enroll the union of
-    every standard's topic0s) — but it used to read exactly like a contract that
-    declares no known standard."""
+    """An unreadable probe keeps the fail-safe direction (enroll the union of every standard's
+    topic0s) but used to read like a contract declaring no known standard."""
     import workers.event_log_indexer as indexer
 
     def _boom(*_a, **_k):

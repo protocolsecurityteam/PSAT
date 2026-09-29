@@ -1,20 +1,14 @@
 """The sheet ceiling resolver: what a node's own balance sheet bounds.
 
-``planes.ceiling_for`` answers the value-side half of the code-control ceiling
-rule — is this node's sheet determined, is its asset list whole, and is its key
-one two proxies share — and the corpus cannot exercise it. Protocol 1 carries no
-ambiguous alias and no airdrop-determined sheet (nothing has yet measured a
-delivery), so two of the eight reasons have zero carriers there and the
-unregistered-sheet-state guard has none anywhere. Every reason is therefore
-pinned here over hand-built planes instead.
+``planes.ceiling_for`` is the value-side half of the code-control ceiling rule, and
+the corpus cannot exercise all of it (no ambiguous alias, no airdrop-determined
+sheet), so every reason is pinned over hand-built planes.
 
-The one that matters most is ``proven_empty``. A sheet whose every quantity is
-witnessed zero is an EARNED NEGATIVE — the ceiling is provably $0 — and both of
-the obvious admission tests get it wrong in opposite directions: ``total() is
-not None`` admits it without recording that the $0 was proven, and
-``sheet_state() == SHEET_PRICED`` refuses it and publishes not_determined where
-a proven zero exists. The resolver has to admit it under its own token, and the
-tests below fail if either shortcut is ever substituted.
+The one that matters most is ``proven_empty``: a sheet whose every quantity is
+witnessed zero is an EARNED NEGATIVE ($0 provably), and both obvious admission
+tests get it wrong — ``total() is not None`` admits it without recording that the
+$0 was proven, ``sheet_state() == SHEET_PRICED`` refuses it. It must be admitted
+under its own token.
 """
 
 from __future__ import annotations
@@ -116,9 +110,7 @@ def _ambiguous() -> P.ValuePlane:
 def _truncated() -> P.ValuePlane:
     """A PRICED sheet whose asset list was read at the endpoint's page cap.
 
-    Priced on purpose, for the reason ``_ambiguous`` is: the truncation must
-    refuse a sheet that would otherwise have admitted, or the conjunct is only
-    ever exercised where it changes nothing.
+    Priced on purpose, for the reason ``_ambiguous`` is.
     """
     return _plane(
         per_asset={KEY: {"weth": 3_000_000.0}},
@@ -181,10 +173,8 @@ def test_the_eight_shapes_cover_the_whole_vocabulary():
 def test_a_number_is_returned_on_exactly_the_admitting_reasons(shape: str):
     """``usd is not None`` and the reason token must never disagree.
 
-    The caller is allowed to branch on either. If a refusal ever carried a
-    figure, a not_determined magnitude would be published as a bound; if an
-    admit ever carried ``None``, a proven $0 ceiling would vanish into the
-    fallthrough.
+    A refusal carrying a figure would publish a not_determined magnitude as a bound;
+    an admit carrying ``None`` would make a proven $0 ceiling vanish.
     """
     build, _, _ = ALL_SHAPES[shape]
     usd, reason = P.ceiling_for(build(), KEY)
@@ -247,9 +237,8 @@ def test_the_ceiling_is_read_at_the_canonical_key():
 def test_a_truncated_asset_list_refuses_the_sheet_that_would_otherwise_admit():
     """A page-capped list is a FLOOR over the holdings, never an at-most.
 
-    The state cannot carry this: the same rows read whole and read cut off both
-    answer ``priced``, so the truncation has to refuse ahead of the state or a
-    prefix of an asset list gets published as a bound on the whole of it.
+    Read whole and read cut off both answer ``priced``, so truncation has to refuse
+    ahead of the state or a prefix gets published as a bound on the whole list.
     """
     plane = _truncated()
     assert plane.sheet_state(KEY) == P.SHEET_PRICED
@@ -263,9 +252,8 @@ def test_a_truncated_asset_list_refuses_the_sheet_that_would_otherwise_admit():
 def test_a_truncated_list_refuses_a_proven_empty_sheet_too():
     """The earned negative is earned over the list that was READ.
 
-    "Every asset on this sheet is witnessed zero" is not "this entity holds
-    nothing" when the sheet stops at entry 100 — so the $0 admit is refused for
-    the same reason the priced one is, and under the same token.
+    "Every asset witnessed zero" is not "holds nothing" when the sheet stops at
+    entry 100, so the $0 admit is refused under the same token as the priced one.
     """
     plane = _plane(
         per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},
@@ -277,12 +265,7 @@ def test_a_truncated_list_refuses_a_proven_empty_sheet_too():
 
 
 def test_truncation_is_read_at_the_canonical_key_in_both_directions():
-    """One sheet, so one truncation: it cannot be laundered by which key is asked.
-
-    The proxy and its implementation are the one entity whose rows are folded
-    together, and a capped read of that entity truncates the list whichever key
-    the caller arrives with.
-    """
+    """One sheet, so one truncation: it cannot be laundered by which key is asked."""
     plane = _plane(
         per_asset={OTHER: {"weth": 12.0}},
         per_asset_state={OTHER: {"weth": P.ASSET_PRICED}},
@@ -297,10 +280,8 @@ def test_truncation_is_read_at_the_canonical_key_in_both_directions():
 def test_an_untruncated_sheet_is_not_thereby_claimed_complete():
     """Absence from the set is the absence of a witness, in one direction only.
 
-    A page shorter than the cap proves this read was not cut off and never that
-    the index behind it is whole, so the plane carries the truncated case alone
-    and the ceiling that admits beside it rests on the sheet's own state — the
-    same admission it rested on before this conjunct existed.
+    A page shorter than the cap proves this read was not cut off, not that the index
+    behind it is whole, so the ceiling rests on the sheet's own state as before.
     """
     plane = _priced()
     assert plane.asset_set_truncated == set()
@@ -331,11 +312,8 @@ def test_an_unregistered_sheet_state_raises_instead_of_refusing_under_a_borrowed
 def test_the_quantities_alone_do_not_publish_an_empty_sheet():
     """Zeros over a list nobody established say nothing about the entity.
 
-    The reading is unchanged — the quantity IS witnessed zero — and the sheet
-    still refuses, because "every asset is zero" is a claim about a set, and the
-    set is what the scan supplies. The refusal publishes ``unpriced``: something
-    was observed here and no number covers it, which is the fail-closed
-    direction and never a $0.
+    "Every asset is zero" is a claim about a set, and the scan supplies the set. The
+    refusal publishes ``unpriced`` (fail-closed), never a $0.
     """
     plane = _plane(per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}})
     assert plane.per_asset_state[KEY]["weth"] == P.ASSET_PROVEN_ZERO
@@ -438,11 +416,10 @@ def test_completeness_is_read_at_the_canonical_key_like_every_other_sheet_questi
 def test_only_a_readable_zero_resolves_a_typed_receipt(entry, resolved: bool):
     """An ERC-721/1155 arrival is immutable; whether it is still HELD is not.
 
-    Exactly one shape closes it — the holding read back and read back zero. An
-    unreadable ``balanceOf`` (ERC-1155 has none taking an address alone) is
-    not_determined, a readable non-zero count is a held item, and a malformed
-    record is evidence nobody can read. None of the three may stand behind
-    "holds nothing", and a truthy-but-not-``True`` flag is not a witness either.
+    Only a holding read back as zero closes it. An unreadable ``balanceOf``
+    (ERC-1155 has none taking an address alone) is not_determined, a non-zero count
+    is a held item, a malformed record is unreadable evidence, and a
+    truthy-but-not-``True`` flag is not a witness either.
     """
     assert P.typed_receipt_is_resolved(entry) is resolved
 
@@ -568,10 +545,9 @@ def test_the_native_fact_consumer_reads_the_same_answer_from_either_witness():
 def test_an_account_of_the_sheet_nobody_scanned_refuses_it_under_its_own_token():
     """A scan that covered one of two addresses did not cover the sheet.
 
-    The two refusals are different work: "nobody has scanned this entity" waits
-    on the escalation reaching it at all, while "one folded account was never
-    read at its own address" is closed by one producer cycle over a named list —
-    so the addresses are published and the token is its own.
+    "Nobody has scanned this entity" waits on the escalation reaching it;
+    "one folded account was never read" is closed by one producer cycle over a named
+    list — so the addresses are published and the token is its own.
     """
     plane = _plane(
         per_asset_state={KEY: {"weth": P.ASSET_PROVEN_ZERO}},

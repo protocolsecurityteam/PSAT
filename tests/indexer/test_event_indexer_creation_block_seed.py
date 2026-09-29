@@ -1,15 +1,8 @@
-"""Regression: event-log cursors are seeded from the event address's *creation
-block*, not block 0 — the slowness half of the block-0 cursor bug.
+"""Regression: event-log cursors are seeded from the event address's *creation block*, not block 0.
 
-A freshly-enrolled RolesAuthority cursor used to start at block 0 and rescan the
-~20M empty pre-deployment blocks (hundreds of empty ``eth_getLogs`` per topic)
-before reaching its first real event. These tests pin that:
-
-  * the backfill's first window starts AT the seed and never scans below it, and
-    a cold cursor that reaches head flips ``backfill_complete``;
-  * ``enroll_from_completed_jobs`` seeds a Solmate authority's role cursors at
-    ``creation_block - 1`` (resolved via Etherscan ``getcontractcreation``);
-  * the companion pins the old behavior — seeding at 0 fetches from block 1.
+A fresh RolesAuthority cursor used to start at block 0 and rescan ~20M empty pre-deployment blocks.
+Pins that backfill starts AT the seed, ``enroll_from_completed_jobs`` seeds Solmate role cursors at
+``creation_block - 1`` (Etherscan ``getcontractcreation``), and the companion pins the old seed-0 behavior.
 """
 
 from __future__ import annotations
@@ -34,10 +27,8 @@ from workers.event_log_indexer import (
 
 @pytest.fixture(autouse=True)
 def _no_creation_witness(monkeypatch):
-    """Enrollment grades its seed with three pinned chain reads before writing
-    the cursor. Nothing in this module asserts that grade — the subject is the
-    seed itself — so the wire is stubbed to the unreachable-RPC failure, whose
-    documented outcome is ``(None, not_determined)``."""
+    """Enrollment grades its seed with three chain reads; this module asserts the seed, not the grade,
+    so the wire is stubbed to the unreachable-RPC outcome ``(None, not_determined)``."""
     import workers.event_log_indexer as eli
 
     def _no_wire(*_a, **_kw):
@@ -56,9 +47,7 @@ _TOPIC = "0x" + "ab" * 32
 
 
 class _SeedAwareFetcher:
-    """Records every ``from_block`` and refuses to scan below the deploy block —
-    the empty pre-deployment range the creation-block seed must skip. Emits one
-    synthetic event at the deploy block so the backfill has something to index."""
+    """Records every ``from_block`` and refuses to scan below the deploy block; emits one event at it."""
 
     def __init__(self, deploy: int) -> None:
         self.deploy = deploy
@@ -85,8 +74,7 @@ class _SeedAwareFetcher:
 
 
 class _RecordingFetcher:
-    """Records ``from_block`` only — never raises — so the companion test can
-    observe the wasteful low scan a block-0 seed produces."""
+    """Records ``from_block`` only, so the companion test can observe the block-0 seed's wasteful low scan."""
 
     def __init__(self) -> None:
         self.from_blocks: list[int] = []
@@ -409,11 +397,8 @@ def test_index_step_marks_backfill_complete_when_already_at_head(session):
 
 @requires_postgres
 def test_pg_repo_not_backfill_complete_is_not_trusted(session):
-    # The durable read gating that makes creation-block seeding safe: a cursor
-    # seeded at the deploy block (positive) but not yet backfilled must NOT be
-    # trusted — min_indexed_block returns None and the folds report
-    # no_index_cursor (so the read fails closed) rather than folding a partial
-    # history as if it were exact. Once the backfill completes, it's trusted.
+    # Seeded at the deploy block but not yet backfilled must NOT be trusted: no_index_cursor (fail closed),
+    # not a partial history folded as exact.
     from db.models import IndexedEventCursor, IndexedEventLog
     from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
 
@@ -466,10 +451,7 @@ def test_pg_repo_not_backfill_complete_is_not_trusted(session):
     cursor.backfill_complete = True
     session.commit()
     assert repo.min_indexed_block(chain_id=1, event_address=addr, topic0s=[topic]) == 19_000_000
-    # Evaluate at a height the (now backfilled) cursor covers — the resolver pins a
-    # finalized height for this purpose (#119). A bare ``block=None`` would mean
-    # "evaluate at live head", which the durable cursor structurally lags, so the
-    # coverage gate correctly demotes that to lower_bound.
+    # Evaluate at a height the backfilled cursor covers (#119); block=None would demote to lower_bound.
     hist2 = repo.fold_event_history(
         chain_id=1,
         event_address=addr,

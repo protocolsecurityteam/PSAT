@@ -1,17 +1,13 @@
 """Upgrade / exec-family claim matchers, proven on real corpus sources.
 
-Two layers, both driving the production stack (registry, gates, taint helper,
-``build_claims``) — nothing under test is faked:
+Two layers, both on the production stack (nothing under test is faked):
 
-* Slither-driven: each fixture under ``fixtures/contracts/claims_upgrade_exec``
-  is compiled by the real static pipeline (``collect_contract_analysis_with_artifacts``
-  → Slither → effects → the claims phase) and the minted claims are asserted.
-  Every registry entry gets a positive fixture, and the corpus carries the
-  mandated counterexample + adversarial near-miss (non-proxy ``upgradeTo``; plain
-  ``transfer`` value send).
-* Pure-facts: ``build_claims`` over synthetic ``effects``-shaped dicts locks the
-  contract-level gate discrimination without a compiler, so the selector/gate
-  logic is covered deterministically in every offline run.
+* Slither-driven: each fixture under ``fixtures/contracts/claims_upgrade_exec`` is
+  compiled by the real static pipeline and the minted claims asserted. Every registry
+  entry gets a positive fixture, plus the mandated counterexample and adversarial
+  near-miss (non-proxy ``upgradeTo``; plain ``transfer`` value send).
+* Pure-facts: ``build_claims`` over synthetic ``effects``-shaped dicts locks contract-
+  level gate discrimination without a compiler, so it runs in every offline run.
 """
 
 from __future__ import annotations
@@ -225,12 +221,10 @@ def test_the_manage_positive_still_names_its_two_parameters(tmp_path):
 
 def test_batch_manage_idiom_positive(tmp_path):
     """The batch overload is the same executor with one array level added, and it
-    minted nothing: the declared types are ``address[]``/``bytes[]`` rather than
-    ``address``/``bytes``, and inside the loop the call op reads an element
-    reference rather than the parameter. Both had to give for the claim to land.
-
-    Under-claiming here is safe but not harmless — an arbitrary-call executor
-    that publishes no exec.arbitrary claim reads as an ordinary function."""
+    minted nothing: declared types are ``address[]``/``bytes[]``, and inside the loop
+    the call op reads an element reference. Both had to give for the claim to land.
+    Under-claiming is safe but not harmless — an executor with no exec.arbitrary claim
+    reads as an ordinary function."""
     claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
     idiom = ("exec.arbitrary", "idiom_structural")
     assert _find(claims, "manageBatch") == {idiom}
@@ -239,19 +233,15 @@ def test_batch_manage_idiom_positive(tmp_path):
 def test_library_mediated_batch_executor_is_a_deliberate_under_claim(tmp_path):
     """A real arbitrary-call executor that this matcher knowingly stays silent on.
 
-    ``using Address for address`` puts the LIBRARY in the destination and the
-    target in argument position, so the only handle the MINTING gate has left is
-    "an address parameter appears in the call's read set" — which is exactly what
-    a fixed destination forwarder also looks like. For a scalar parameter that
-    ambiguity is tolerated (the shape is common and the sibling positive covers
-    it); for an array it is not, because the same allowance put a false
-    arbitrary-call badge on published output.
+    ``using Address for address`` puts the LIBRARY in the destination, so the only handle
+    the MINTING gate has is "an address parameter appears in the read set" — which a
+    fixed-destination forwarder also looks like. Tolerated for a scalar parameter (common
+    shape, sibling positive covers it); not for an array, where the same allowance put a
+    false arbitrary-call badge on published output.
 
-    The library body is now read to BIND the published parameter names (see the
-    binding tests below), but the minting gate deliberately still is not: the
-    claim population is not this fix's to change. So this stays an under-claim,
-    which is the safe direction — and a proven effects verdict still catches this
-    function if it moves value."""
+    The library body now BINDS published parameter names (binding tests below) but
+    deliberately does not gate minting. An under-claim is the safe direction, and a
+    proven effects verdict still catches this function if it moves value."""
     claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
     assert _find(claims, "manageBatchViaLibrary") == set()
 
@@ -283,10 +273,9 @@ def _binding_witnesses(tmp_path: Path) -> dict[str, dict]:
 def test_the_destination_is_read_off_the_operand_not_the_read_set(tmp_path):
     """Two address parameters, and the destination is the second one.
 
-    A pick taken from the read-set intersection lands on either — and on the two
-    production functions where a choice existed it landed on the wrong one both
-    times (``lzCompose`` published ``_from``, a SOURCE). The operand position is
-    the only thing that separates them, and it is what is published now."""
+    A read-set intersection pick lands on either, and on the two production functions
+    where a choice existed it landed on the wrong one (``lzCompose`` published ``_from``,
+    a SOURCE). Only the operand position separates them."""
     witness = _binding_witnesses(tmp_path)["compose"]
     assert (witness["destination_param"], witness["destination_kind"]) == ("to", "param")
     assert witness["destination_basis"] == "call_destination"
@@ -294,11 +283,10 @@ def test_the_destination_is_read_off_the_operand_not_the_read_set(tmp_path):
 
 
 def test_a_typed_call_carries_no_caller_chosen_calldata_blob(tmp_path):
-    """``IComposer(to).compose(from, message, extra)`` fixes the selector, so no
-    argument of it is an arbitrary calldata blob. Naming one — as the read-set
-    pick did on three production rows — asserts caller-chosen calldata that the
-    op does not carry. ``call_argument`` is the proven absence; it is not the
-    same fact as ``not_determined``."""
+    """``IComposer(to).compose(from, message, extra)`` fixes the selector, so no argument
+    is an arbitrary calldata blob. Naming one (as the read-set pick did on three production
+    rows) asserts calldata the op does not carry. ``call_argument`` is the proven absence,
+    not ``not_determined``."""
     witness = _binding_witnesses(tmp_path)["compose"]
     assert witness["calldata_kind"] == "call_argument"
     assert witness["calldata_param"] is None
@@ -306,32 +294,27 @@ def test_a_typed_call_carries_no_caller_chosen_calldata_blob(tmp_path):
 
 
 def test_a_state_variable_destination_mints_no_claim_at_all(tmp_path):
-    """INVERTED. This test previously asserted that the ``rebalance`` shape
-    carries an ``exec.arbitrary`` claim whose witness says ``state_var`` — i.e.
-    that the claim is minted beside the proof of its own negation. It is a pure
-    false positive on the real row it was modelled on (LRTSquaredAdmin.rebalance:
-    the call goes to the storage-held ``swapper``, the two address parameters
-    ride along as ARGUMENTS of a fixed-selector ``ISwapper.swap``, and no
-    arbitrary call exists anywhere in the function).
+    """INVERTED. This test used to assert the ``rebalance`` shape carries an
+    ``exec.arbitrary`` claim whose witness says ``state_var`` — the claim minted beside
+    the proof of its own negation. It is a false positive on the real row it modelled
+    (LRTSquaredAdmin.rebalance: the call goes to the storage-held ``swapper``; the two
+    address parameters are ARGUMENTS of a fixed-selector ``ISwapper.swap``).
 
-    The claim's sentence is "forwards a caller-supplied target". ``state_var``
-    is the proof that the caller does not supply it, so the honest output is no
-    claim — and, through the legacy projection, no ``arbitrary_external_call``
-    label and no "Executes arbitrary external calldata" prose either.
+    The claim says "forwards a caller-supplied target"; ``state_var`` proves the caller
+    does not supply it, so the honest output is no claim — and, via the legacy
+    projection, no ``arbitrary_external_call`` label or "Executes arbitrary external
+    calldata" prose.
 
-    The proven-absent DESTINATION classification is still exercised, and still
-    matters: it is what this suppression keys on. See
-    ``test_the_state_var_destination_state_is_still_produced`` below."""
+    The proven-absent DESTINATION classification still matters: the suppression keys on
+    it (see ``test_the_state_var_destination_state_is_still_produced``)."""
     assert "rebalance" not in _binding_witnesses(tmp_path)
 
 
 def test_the_state_var_destination_state_is_still_produced(tmp_path):
-    """R2 for the suppression above: the branch it fires on is reachable, and it
-    is reached by real compiler output rather than by construction — on a
-    single-op body AND on a multi-op body whose every candidate op resolves to
-    storage. The fragment's ``state_var`` is a function-wide quantifier now, so
-    the multi-op arm is what proves the suppression still has something real to
-    fire on after the quantifier change."""
+    """R2 for the suppression above: the branch it fires on is reached by real compiler
+    output, on a single-op body AND a multi-op body whose every candidate op resolves to
+    storage. ``state_var`` is a function-wide quantifier now, so the multi-op arm proves
+    the suppression still has something real to fire on."""
     from slither import Slither
 
     from services.static.claims.context import ClaimContext
@@ -353,12 +336,10 @@ def test_the_state_var_destination_state_is_still_produced(tmp_path):
 
 def test_a_genuine_arbitrary_call_survives_a_preceding_state_var_op(tmp_path):
     """R4 — the un-hedged positive the suppression must not eat. The Safe/Zodiac
-    transaction-guard idiom calls a FIXED guard with ``(target, data)`` and then
-    calls the caller-supplied target with the caller-supplied data. The first op
-    resolves ``state_var``; the second IS the arbitrary call. A fragment that
-    answered with the first op suppressed the whole claim — silently, and only
-    in this statement order — so both orders are pinned to the same param
-    binding here."""
+    transaction-guard idiom calls a FIXED guard with ``(target, data)`` and then the
+    caller-supplied target with caller-supplied data. The first op resolves ``state_var``;
+    the second IS the arbitrary call. A fragment answering with the first op suppressed
+    the whole claim, silently and only in this statement order, so both orders are pinned."""
     witnesses = _binding_witnesses(tmp_path)
     fragment_fields = (
         "destination_param",
@@ -380,13 +361,11 @@ def test_a_genuine_arbitrary_call_survives_a_preceding_state_var_op(tmp_path):
 
 
 def test_a_transaction_guard_blocks_the_negative_proof_the_open_control_keeps(tmp_path):
-    """Round-5 R1, on real compiler output: a mandatory NONVIEW guard call
-    vetting the caller-supplied ``(target, data)`` — the Safe/Zodiac
-    transaction-guard idiom — must leave the destination-constraint answer
-    OPEN, while the guardless control alone earns the negative proof. Before
-    the per-op transparency proof, both published ``unconstrained_proven``:
-    the guard's leaf was swallowed because its callee was a body call, and the
-    consumer could not tell the vetted function from the open one."""
+    """Round-5 R1, on real compiler output: a mandatory NONVIEW guard call vetting the
+    caller-supplied ``(target, data)`` (Safe/Zodiac transaction-guard idiom) must leave
+    the destination-constraint answer OPEN, while the guardless control alone earns the
+    negative proof. Before the per-op transparency proof both published
+    ``unconstrained_proven``: the guard's leaf was swallowed as a body call."""
     records = _pipeline_claim_records(tmp_path, "transaction_guard.sol", "GuardedExec")
     guarded = _claim_witness(records, "execGuarded", "exec.arbitrary")
     open_control = _claim_witness(records, "execOpen", "exec.arbitrary")
@@ -399,13 +378,11 @@ def test_a_transaction_guard_blocks_the_negative_proof_the_open_control_keeps(tm
 
 def test_a_shared_callee_identity_is_withheld_from_the_transparency_set(tmp_path):
     """R2 firing proof for the withheld-subtraction branch, on compiled source.
-    ``execSharedIdentity`` calls ``exec`` on a FIXED receiver and on the
-    caller-chosen one: a tree leaf carries the callee identity but not the
-    receiver, so the shared identity proves vacuousness for neither op and the
-    answer stays open. ``execTyped`` — the same caller-chosen op with no fixed
-    sibling — is the discriminating control that keeps this from being an
-    always-hedge: its identity survives the subtraction and the negative proof
-    stays reachable."""
+    ``execSharedIdentity`` calls ``exec`` on a FIXED receiver and the caller-chosen one:
+    a tree leaf carries the callee identity but not the receiver, so the shared identity
+    proves vacuousness for neither op and the answer stays open. ``execTyped`` (the same
+    caller-chosen op, no fixed sibling) is the control that keeps this from being an
+    always-hedge."""
     records = _pipeline_claim_records(tmp_path, "transaction_guard.sol", "GuardedExec")
     shared = _claim_witness(records, "execSharedIdentity", "exec.arbitrary")
     typed = _claim_witness(records, "execTyped", "exec.arbitrary")
@@ -416,16 +393,13 @@ def test_a_shared_callee_identity_is_withheld_from_the_transparency_set(tmp_path
 
 
 def test_the_arbitrary_calls_own_revert_surface_is_still_transparent(tmp_path):
-    """R4 — the un-hedged sibling of the guard test above: transparency is
-    earned, not abolished. An op whose destination the IR proves parameter-
-    rooted keeps its own revert surface out of the walk — through a singly
-    assigned local (``t.exec``), through a typed call on the parameter itself
-    (``compose``), and through a resolved library forwarder
-    (``manageViaLibrary``) — so the negative proof stays reachable on compiled
-    source. The two guard-shaped bodies stay open in BOTH statement orders:
-    their ``exec`` leaf belongs to the fixed-destination sibling op — not to
-    the arbitrary ``target.call`` — so its identity is withheld and the leaf
-    blocks."""
+    """R4 — the un-hedged sibling of the guard test above: transparency is earned, not
+    abolished. An op whose destination the IR proves parameter-rooted keeps its own revert
+    surface out of the walk — via a singly assigned local (``t.exec``), a typed call on
+    the parameter (``compose``), and a resolved library forwarder (``manageViaLibrary``) —
+    so the negative proof stays reachable. The two guard-shaped bodies stay open in BOTH
+    statement orders: their ``exec`` leaf belongs to the fixed-destination sibling op, so
+    its identity is withheld and the leaf blocks."""
     witnesses = _binding_witnesses(tmp_path)
     for name in ("singlyAssignedLocal", "compose", "manageViaLibrary"):
         assert witnesses[name]["destination_constraint"] == {"state": "unconstrained_proven"}, name
@@ -459,38 +433,32 @@ def test_a_library_forwarder_binds_through_its_own_body(tmp_path):
 
 
 def test_an_unresolved_forwarder_publishes_not_determined_not_the_only_candidate(tmp_path):
-    """The third state, reached on a real library shape: OpenZeppelin's own
-    ``functionCall`` forwards to a sibling rather than calling, so one level of
-    resolution never reaches a call op.
+    """The third state, on a real library shape: OpenZeppelin's ``functionCall`` forwards
+    to a sibling rather than calling, so one level of resolution never reaches a call op.
 
-    ``target`` is the only address parameter here, so a read-set pick would name
-    it and be right by luck. This is the case that distinguishes "we proved the
-    binding" from "there was only one thing to say", and the witness must not
-    collapse them — the hedge and the un-hedged value are both reachable, which
-    is what keeps this from being a sentinel that never fires."""
+    ``target`` is the only address parameter, so a read-set pick would name it and be
+    right by luck. This distinguishes "we proved the binding" from "there was only one
+    thing to say"; the witness must not collapse them."""
     witness = _binding_witnesses(tmp_path)["manageViaTwoStepLibrary"]
     assert witness["destination_kind"] == witness["calldata_kind"] == "not_determined"
     assert witness["destination_param"] is None and witness["calldata_param"] is None
 
 
 def test_a_destination_defined_twice_is_not_determined_not_either_proof(tmp_path):
-    """A name the body defines more than once carries several candidate values
-    under ONE Slither variable object — the IR is not in SSA form — so which one
-    the call sees is a control-flow question. Both published proof states are
-    wrong answers to it, in both directions:
+    """A name the body defines more than once carries several candidate values under ONE
+    Slither variable object (the IR is not SSA), so which one the call sees is a
+    control-flow question. Both published proof states are wrong answers:
 
-    * ``branchedStateOrParam`` reaches the call from storage on one path and from
-      a parameter on the other. ``state_var`` there is a proven ABSENCE of a
-      caller-chosen destination over a function that has one, and the consumer
-      acts on it (``_named_executor_slots`` reads any non-``param`` kind as "no
-      binding"), so the false absence suppresses a real one.
-    * ``branchedParams`` / ``reassignedLocal`` / ``paramWrittenAfterCall`` publish
-      a parameter NAME — a proof of presence on the wrong parameter, which is the
-      defect class this binding work exists to remove.
+    * ``branchedStateOrParam`` reaches the call from storage on one path and a parameter
+      on the other. ``state_var`` there is a false proven ABSENCE of a caller-chosen
+      destination, which the consumer acts on (``_named_executor_slots`` reads any
+      non-``param`` kind as "no binding").
+    * ``branchedParams`` / ``reassignedLocal`` / ``paramWrittenAfterCall`` publish a
+      parameter NAME — a proof of presence on the wrong parameter.
 
-    ``stateWrittenAfterCall`` is the same shape on a state variable, and it is not
-    hypothetical: Solmate's ``Auth.setAuthority``, deployed inside BoringVault,
-    calls ``authority.canCall(...)`` and assigns ``authority`` afterwards."""
+    ``stateWrittenAfterCall`` is the same shape on a state variable, and not
+    hypothetical: Solmate's ``Auth.setAuthority``, deployed inside BoringVault, calls
+    ``authority.canCall(...)`` and assigns ``authority`` afterwards."""
     witnesses = _binding_witnesses(tmp_path)
     for name in (
         "branchedStateOrParam",
@@ -506,13 +474,12 @@ def test_a_destination_defined_twice_is_not_determined_not_either_proof(tmp_path
 
 
 def test_a_singly_assigned_local_still_binds_to_its_parameter(tmp_path):
-    """R4 — the un-hedged sibling of the test above, and the whole difference
-    between a resolver and a resolver-shaped hedge.
+    """R4 — the un-hedged sibling of the test above, the difference between a resolver and
+    a resolver-shaped hedge.
 
-    ``address t = a; IExec(t).exec(a, d)`` defines ``t`` exactly once, so the
-    local IS the parameter and the name is published. A guard that hedged on
-    "the destination came through a local" would pass the not-determined test
-    above and fail here — and would take ``BoringVault.manage`` with it."""
+    ``address t = a; IExec(t).exec(a, d)`` defines ``t`` once, so the local IS the
+    parameter and the name is published. A guard hedging on "came through a local" would
+    fail here — and take ``BoringVault.manage`` with it."""
     witness = _binding_witnesses(tmp_path)["singlyAssignedLocal"]
     assert (witness["destination_param"], witness["destination_kind"]) == ("a", "param")
     assert witness["destination_basis"] == "call_destination"
@@ -617,14 +584,12 @@ def test_facts_all_new_claim_ids_are_registered():
 
 
 def test_fixed_destination_batch_forwarder_is_a_near_miss_negative(tmp_path):
-    """The address array is an ARGUMENT to a fixed sink, not the thing being
-    called: no caller chooses a destination here, so this is not arbitrary
-    execution. It minted anyway because the array sits in the call's read set,
-    and the claim reaches published output ungated as an "arbitrary-call"
-    capability chip and a "manager" principal tag.
+    """The address array is an ARGUMENT to a fixed sink, not the thing being called, so
+    this is not arbitrary execution. It minted anyway because the array sits in the call's
+    read set, reaching published output as an "arbitrary-call" chip and a "manager"
+    principal tag.
 
-    The direct test is what proves a real batch executor — its destination
-    resolves to the array itself — so argument position buys nothing for an
-    array and costs a false badge on every forwarder of this shape."""
+    The direct test proves a real batch executor (its destination resolves to the array
+    itself), so argument position buys nothing for an array and costs a false badge."""
     claims = _pipeline_claims(tmp_path, "boring_vault_manage.sol", "BoringVault")
     assert _find(claims, "notifyBatch") == set()

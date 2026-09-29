@@ -74,7 +74,6 @@ def test_endpoint_includes_semantic_keys_when_artifact_present(api_client, db_se
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    # Both semantic enrichment keys present.
     assert "predicate_trees" in body
     assert body["predicate_trees"]["schema_version"] == "semantic"
     assert "semantic_capabilities" in body
@@ -82,13 +81,11 @@ def test_endpoint_includes_semantic_keys_when_artifact_present(api_client, db_se
     cap = body["semantic_capabilities"]["f()"]
     assert "kind" in cap
     assert "confidence" in cap
-    # available_artifacts surface lists the artifact name too.
     assert "predicate_trees" in body["available_artifacts"]
 
 
 @requires_postgres
 def test_endpoint_omits_semantic_keys_when_artifact_missing(api_client, db_session):
-    """No predicate_trees stored means no semantic enrichment keys appear."""
     address = "0x" + uuid.uuid4().hex[:8] + "22" * 16
     _seed_completed_job(db_session, address=address)
     db_session.commit()
@@ -98,15 +95,11 @@ def test_endpoint_omits_semantic_keys_when_artifact_missing(api_client, db_sessi
     body = resp.json()
     assert "predicate_trees" not in body
     assert "semantic_capabilities" not in body
-    # available_artifacts doesn't list it either.
     assert "predicate_trees" not in body["available_artifacts"]
 
 
 @requires_postgres
 def test_endpoint_includes_predicate_trees_even_when_resolver_fails(api_client, db_session, monkeypatch):
-    """A semantic resolution failure must not break the endpoint. The
-    raw ``predicate_trees`` artifact stays inlined; only the
-    resolved ``semantic_capabilities`` is dropped."""
     from db.queue import store_artifact
 
     address = "0x" + uuid.uuid4().hex[:8] + "33" * 16
@@ -114,7 +107,6 @@ def test_endpoint_includes_predicate_trees_even_when_resolver_fails(api_client, 
     store_artifact(db_session, job.id, "predicate_trees", data=_semantic_artifact())
     db_session.commit()
 
-    # Force the resolver import to raise.
     def _boom(*a, **kw):
         raise RuntimeError("simulated resolver failure")
 
@@ -125,9 +117,7 @@ def test_endpoint_includes_predicate_trees_even_when_resolver_fails(api_client, 
     resp = api_client.get(f"/api/analyses/{address}")
     assert resp.status_code == 200
     body = resp.json()
-    # Raw trees still present.
     assert "predicate_trees" in body
-    # Resolved capabilities dropped because resolution exploded.
     assert "semantic_capabilities" not in body
 
 
@@ -250,7 +240,6 @@ def test_principal_label_payload_narrows_confidence_and_the_duplicate_label():
     out = _principal_label_payload(identical)
     assert out["naming_rule"] == "high"
     assert "confidence" not in out
-    # One fact, published once.
     assert "label" not in out
     assert out["display_name"] == "EtherFi admin Safe"
 

@@ -1,14 +1,6 @@
-"""Step 4 parity tests for ``_apply_equivalence_http`` parallelization.
-
-The HTTP phase fans out across ``max_workers=4`` — these tests assert the
-parallel path produces the same per-match stamps as the sequential one,
-that the per-address Etherscan cache still collapses repeats safely under
-concurrent access, and that a per-match crash inside the inner thunk is
-mapped to ``github_fetch_failed`` rather than aborting siblings.
-
-DB-free: ``_apply_equivalence_http`` accepts plain dataclasses, so we
-construct them directly and stub the two HTTP calls
-(``fetch_etherscan_source_files`` and ``verify_audit_covers_impl``).
+"""Parity tests for ``_apply_equivalence_http`` (max_workers=4): the parallel path stamps like the sequential one,
+the per-address Etherscan cache collapses repeats under concurrency, and a per-match crash maps to
+``github_fetch_failed`` without aborting siblings. DB-free: plain dataclasses, both HTTP calls stubbed.
 """
 
 from __future__ import annotations
@@ -57,10 +49,8 @@ def _make_inputs(audit_id: int, contract_id: int, address: str) -> _EquivalenceI
 
 
 def _stub_etherscan_and_github(monkeypatch, *, etherscan_calls=None, github_calls=None):
-    """Patch the two HTTP-dependent imports inside _apply_equivalence_http.
-
-    Both calls happen inside the function body via ``from services.audits.source_equivalence
-    import ...``, so the monkeypatch must target that module.
+    """Patch the two HTTP imports inside _apply_equivalence_http; they happen in the function body via
+    ``from services.audits.source_equivalence import ...``, so the monkeypatch must target that module.
     """
     from services.audits import source_equivalence
 
@@ -128,7 +118,6 @@ def _canonical(stamped):
 def test_apply_equivalence_http_parity_parallel_vs_sequential(monkeypatch):
     seq = _run(monkeypatch, "1", n_matches=12)
     par = _run(monkeypatch, "8", n_matches=12)
-    # Stamps must come back in input order regardless of fanout.
     assert _canonical(seq) == _canonical(par)
 
 
@@ -147,8 +136,7 @@ def test_apply_equivalence_http_caches_etherscan_per_address(monkeypatch):
 
     stamped = _apply_equivalence_http(matches, inputs)
 
-    # Strict bound: one address -> one Etherscan call regardless of fan-out.
-    # The lock + setdefault discards the loser of any first-write race.
+    # Strict bound: one address -> one Etherscan call; the lock + setdefault discards a first-write race loser.
     assert len(etherscan_calls) <= 2, (
         f"expected ≤2 Etherscan calls for one shared address, got {len(etherscan_calls)}: {etherscan_calls}"
     )
@@ -189,8 +177,6 @@ def test_apply_equivalence_http_per_match_crash_does_not_abort_siblings(monkeypa
     bad_audit_id = matches[2].audit_report_id
 
     def fake_verify(**kwargs):
-        # Use the row's audit_id (encoded in scope_name? no — pass via reviewed_commits[0])
-        # Differentiate via a side effect on the bad row by name:
         commits = kwargs.get("reviewed_commits") or []
         if commits and commits[0] == "boom":
             raise RuntimeError("github fetch crashed")
@@ -198,7 +184,6 @@ def test_apply_equivalence_http_per_match_crash_does_not_abort_siblings(monkeypa
 
     monkeypatch.setattr(source_equivalence, "verify_audit_covers_impl", fake_verify)
 
-    # Inject the boom marker into one match's input commits.
     inputs[(bad_audit_id, matches[2].contract_id)] = _EquivalenceInputs(
         audit_report_id=bad_audit_id,
         contract_id=matches[2].contract_id,

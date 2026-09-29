@@ -1,21 +1,18 @@
 """The scorer's pipeline seams: the effects hook, the dirty marks, the loop, the API.
 
-The core (distillation + fold) is pinned elsewhere. What is pinned here is
-everything between it and the run:
+The core (distillation + fold) is pinned elsewhere. Pinned here:
 
-  * a job's effects completion persists signals and enqueues a re-fold, and a
-    distillation that raises does NOT fail the job — effects never emits
-    ``failed_terminal``, so a scoring bug must not become a pipeline outage;
-  * a persist that fails on contract N leaves contracts 1..N-1 standing, and
-    leaves no half-replaced contract behind;
-  * every write site that changes a scored input marks, and a mark that cannot
-    be written never fails its host;
-  * the loop folds dirty protocols before stale ones, stamps the perimeter it
-    was handed rather than a polarity of its own, accumulates history instead of
-    overwriting it, clears only the exact mark it consumed, and backs off a
+  * effects completion persists signals and enqueues a re-fold, and a raising
+    distillation does NOT fail the job (effects never emits ``failed_terminal``,
+    so a scoring bug must not become a pipeline outage);
+  * a persist failing on contract N leaves contracts 1..N-1 standing, no
+    half-replaced contract;
+  * every write site changing a scored input marks, and an unwritable mark never
+    fails its host;
+  * the loop folds dirty before stale, stamps the perimeter it was handed,
+    accumulates history, clears only the exact mark it consumed, and backs off a
     protocol whose fold keeps raising;
-  * the double-replace guard stays armed across the savepoints the hook is made
-    of, which is the only shape it ever actually sees;
+  * the double-replace guard stays armed across the hook's savepoints;
   * the endpoint serves the ledger payload verbatim, distinguishes "no score"
     from "unreadable document", and reassembles a spilled one.
 """
@@ -85,8 +82,6 @@ PAUSE_CLAIM = {
 
 
 class _Fixture:
-    """One protocol, one job, and whatever contracts a test asks for."""
-
     def __init__(self, session, protocol, job):
         self.session = session
         self.protocol = protocol
@@ -139,9 +134,8 @@ class _Fixture:
 def fx(db_session):
     """A protocol scoped to one test, torn down whole.
 
-    Its own ``Protocol`` row rather than a shared one: the fold, the queue and
-    the score history are all protocol-keyed, so a test that leaked rows into a
-    neighbour's protocol would change that neighbour's grade.
+    Its own ``Protocol`` row: the fold, queue and score history are protocol-keyed,
+    so leaked rows would change a neighbour's grade.
     """
     protocol = Protocol(name=f"scoreint-{uuid.uuid4().hex[:8]}")
     db_session.add(protocol)
@@ -174,12 +168,11 @@ def fx(db_session):
 
 @pytest.fixture()
 def other_session():
-    """A SECOND connection, for the interleavings a single session cannot express.
+    """A SECOND connection, for interleavings a single session cannot express.
 
-    The mark's ``dirty_at`` is ``transaction_timestamp()`` and the defect it
-    guards against is a mark stamped in one transaction becoming visible only
-    after another transaction has already read the population. One session
-    cannot hold two transactions, so the test needs a real second one.
+    The mark's ``dirty_at`` is ``transaction_timestamp()`` and the defect is a
+    mark stamped in one transaction becoming visible only after another has read
+    the population; that needs two real transactions.
     """
     engine = create_engine(DATABASE_URL)
     session = Session(engine, expire_on_commit=False)
@@ -220,10 +213,9 @@ def _document(protocol_id: int, **overrides: Any) -> ScoreDocument:
 def _effects_worker(monkeypatch):
     """An ``EffectsWorker`` whose selection is empty, so no wire is ever touched.
 
-    Selection is not what this file tests; the hook after it is. Forcing the
-    zero-candidate branch keeps the test offline AND exercises the inert path,
-    which distils too — a contract whose job planned nothing still owns the
-    claims the policy stage wrote for it.
+    The zero-candidate branch keeps the test offline AND exercises the inert
+    path, which distils too (a contract whose job planned nothing still owns the
+    claims the policy stage wrote for it).
     """
     from workers.effects_worker import EffectsWorker
 
@@ -248,7 +240,6 @@ def test_effects_completion_persists_signals_and_marks_dirty(fx, monkeypatch):
 
 
 def test_effects_replaces_rather_than_accumulates(fx, monkeypatch):
-    """A second pass over the same contract must not double the population."""
     contract = fx.contract()
     fx.function(contract)
     worker = _effects_worker(monkeypatch)
@@ -264,7 +255,6 @@ def test_effects_replaces_rather_than_accumulates(fx, monkeypatch):
 
 
 def test_poisoned_distillation_does_not_fail_the_job(fx, monkeypatch, caplog):
-    """Effects never emits ``failed_terminal``; a scoring bug must not change that."""
     contract = fx.contract()
     fx.function(contract)
     worker = _effects_worker(monkeypatch)
@@ -290,9 +280,8 @@ def test_poisoned_distillation_does_not_fail_the_job(fx, monkeypatch, caplog):
 def test_claims_bridge_survives_a_distillation_failure(fx, monkeypatch):
     """The hook runs inside the job's transaction, so its failure must be contained.
 
-    A raise outside a SAVEPOINT would abort the transaction the effects stage's
-    own writes are sitting in, and the job would die at commit — fail-forward
-    defeated by the transaction rather than by an exception.
+    A raise outside a SAVEPOINT would abort the transaction holding the effects
+    stage's own writes, and the job would die at commit.
     """
     contract = fx.contract()
     function = fx.function(contract)
@@ -315,7 +304,6 @@ def test_claims_bridge_survives_a_distillation_failure(fx, monkeypatch):
 
 
 def test_partial_persist_keeps_the_contracts_that_succeeded(fx, monkeypatch, caplog):
-    """Contract N failing does not discard contracts 1..N-1 — each was a whole replace."""
     first = fx.contract()
     second = fx.contract()
     fx.function(first)
@@ -346,9 +334,9 @@ def test_partial_persist_keeps_the_contracts_that_succeeded(fx, monkeypatch, cap
 def test_retracting_every_signal_for_a_contract_is_logged(fx, monkeypatch, caplog):
     """A wholesale replace by an EMPTY set is fail-open by construction.
 
-    It is correct when the functions genuinely went away and wrong when anything
-    upstream merely failed to produce them, and the row count cannot tell the
-    two apart — so the retraction is named rather than left silent.
+    Correct when the functions genuinely went away, wrong when upstream merely
+    failed to produce them, and the row count cannot tell which; so the
+    retraction is named rather than silent.
     """
     contract = fx.contract()
     fx.function(contract)
@@ -391,10 +379,9 @@ def _signal_for(fx, contract: Contract, selector: str) -> FunctionSignal:
 def _replace_in_savepoint(fx, contract: Contract, selector: str = "0x00000001") -> None:
     """Exactly the effects hook's shape: one savepoint per contract, no commit.
 
-    Carries a real signal so the replace actually INSERTS. That matters: an
-    empty replace never flushes pending objects, and it is the flush that opens
-    the internal SUBTRANSACTION whose end is the second way this guard can be
-    disarmed.
+    Carries a real signal so the replace INSERTS: an empty replace never flushes,
+    and the flush opens the internal SUBTRANSACTION whose end is the second way
+    this guard can be disarmed.
     """
     with fx.session.begin_nested():
         replace_contract_signals(
@@ -407,9 +394,9 @@ def test_the_double_replace_guard_survives_savepoints(fx):
 
     ``after_commit``/``after_rollback`` also fire on SAVEPOINT release, and a
     plain ``flush`` ends an internal SUBTRANSACTION that reports itself as
-    un-nested — either one disarms the guard after every contract, and a caller
-    that regrouped its signals finer than ``contract_id`` would then silently
-    truncate the contract instead of raising.
+    un-nested; either disarms the guard after every contract, so a caller that
+    regrouped signals finer than ``contract_id`` would silently truncate the
+    contract instead of raising.
     """
     contract = fx.contract()
     _replace_in_savepoint(fx, contract)
@@ -419,7 +406,6 @@ def test_the_double_replace_guard_survives_savepoints(fx):
 
 
 def test_a_failed_contract_does_not_disarm_the_guard(fx):
-    """The savepoint rollback path — the other half of the same wiring."""
     contract = fx.contract()
     sibling = fx.contract()
     _replace_in_savepoint(fx, contract)
@@ -436,7 +422,6 @@ def test_a_failed_contract_does_not_disarm_the_guard(fx):
 
 
 def test_committing_the_pass_disarms_the_guard(fx):
-    """Per-pass, not forever: the next job's distillation must be able to replace."""
     contract = fx.contract()
     _replace_in_savepoint(fx, contract)
     fx.session.commit()
@@ -465,7 +450,6 @@ def test_mark_is_one_row_per_protocol_and_bumps_dirty_at(fx):
 
 
 def test_a_failed_mark_never_breaks_its_host_transaction(fx, caplog):
-    """An unmarkable protocol costs latency, not the caller's work."""
     with caplog.at_level(logging.WARNING, logger="services.scoring.dirty"):
         assert mark_protocol_score_dirty(fx.session, 2_000_000_001, SCORE_DIRTY_MANUAL) is False
     assert any("dirty-mark failed" in r.getMessage() for r in caplog.records)
@@ -536,7 +520,6 @@ def test_coverage_verify_flip_marks_dirty(fx):
 
 
 def test_coverage_verify_restamp_of_the_same_status_marks_nothing(fx):
-    """A re-stamp changed no scored input, so it enqueues no fold."""
     from services.audits.coverage import _stamp_coverage_row
 
     row = _coverage_row(fx, "proven")
@@ -592,11 +575,10 @@ def test_dirty_protocol_is_scored_and_its_mark_cleared(fx):
 def test_a_mark_committed_after_selection_is_not_cleared(fx, other_session):
     """The real interleaving, not a hand-fed instant.
 
-    Reproduces the shape the effects stage actually has: ONE long transaction
-    whose mark carries ``transaction_timestamp()`` — a stamp from BEFORE the
-    loop ran — but whose data only becomes visible when it commits, after the
-    loop already selected. A clear keyed on any instant the loop captured would
-    delete this mark, and the change it describes would never be folded.
+    ONE long transaction whose mark carries ``transaction_timestamp()`` (from
+    BEFORE the loop ran) but whose data is visible only at commit, after the loop
+    selected. A clear keyed on any instant the loop captured would delete this
+    mark and the change would never be folded.
     """
     mark_protocol_score_dirty(other_session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
     other_session.flush()  # stamped, still invisible to the loop
@@ -631,7 +613,6 @@ def test_a_mark_that_lands_during_the_fold_survives(fx, other_session):
 
 
 def test_scores_accumulate_rather_than_overwrite(fx):
-    """Insert-only: a re-fold never destroys the row a consumer already read."""
     for _ in range(2):
         mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
         fx.session.commit()
@@ -641,7 +622,6 @@ def test_scores_accumulate_rather_than_overwrite(fx):
 
 
 def test_dirty_protocols_are_selected_before_stale_ones(fx, db_session):
-    """A witnessed change outranks the mere possibility of one."""
     other = Protocol(name=f"scoreint-stale-{uuid.uuid4().hex[:8]}")
     db_session.add(other)
     db_session.commit()
@@ -662,7 +642,6 @@ def test_dirty_protocols_are_selected_before_stale_ones(fx, db_session):
 
 
 def test_a_dirty_protocol_takes_one_slot_not_two(fx):
-    """Selected as dirty, it must not also arrive through the staleness arm."""
     mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
     fx.session.commit()
 
@@ -713,9 +692,9 @@ def _poison(monkeypatch):
 def test_a_failing_protocol_backs_off_and_frees_its_pass_slot(fx, monkeypatch):
     """Marks survive a failure and dirty rows sort first, so poison must back off.
 
-    Without this a pass-budget of permanently-failing protocols holds the loop
-    forever, and the staleness sweep — the only cover for the invalidation
-    events that carry no mark — never runs again.
+    Otherwise permanently-failing protocols hold the pass budget forever and the
+    staleness sweep (the only cover for invalidation events carrying no mark)
+    never runs again.
     """
     mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
     fx.session.commit()
@@ -735,11 +714,11 @@ def test_a_failing_protocol_backs_off_and_frees_its_pass_slot(fx, monkeypatch):
 
 
 def test_a_staleness_failure_arms_the_backoff_too(fx, monkeypatch):
-    """A protocol with no queue row would otherwise re-enter through that door.
+    """A protocol with no queue row would otherwise re-enter through this door.
 
     A failed fold leaves no score row, so the protocol is permanently stale; if
     only the dirty arm honoured the backoff it would be re-selected every pass
-    forever through the sweep.
+    through the sweep.
     """
     _poison(monkeypatch)
     assert fx.queued_row() is None
@@ -767,7 +746,6 @@ def test_repeated_failures_compound_the_backoff_and_are_called_out(fx, monkeypat
 
 
 def test_a_successful_fold_clears_a_surviving_mark_backoff(fx, monkeypatch):
-    """A mark that outlives a SUCCESSFUL fold must not inherit old failures."""
     mark_protocol_score_dirty(fx.session, fx.protocol.id, SCORE_DIRTY_EFFECTS)
     fx.session.commit()
     _poison(monkeypatch)
@@ -823,7 +801,6 @@ def test_perimeter_is_settled_when_the_queue_is_empty(fx):
 
 
 def test_perimeter_is_unsettled_while_jobs_are_in_flight(fx):
-    """Ruled: compute anyway and label it. A partial perimeter is a real fact."""
     fx.session.add(Job(id=uuid.uuid4(), protocol_id=fx.protocol.id, status=JobStatus.processing))
     fx.session.commit()
 
@@ -838,7 +815,6 @@ def test_perimeter_is_unsettled_while_jobs_are_in_flight(fx):
 
 
 def test_an_unreadable_queue_lands_on_neither_polarity(fx):
-    """Stamping "unsettled" on a failed read would be a claim with no witness."""
     from services.scoring.planes import perimeter_state
 
     class _BrokenSession:
@@ -908,7 +884,6 @@ def test_a_large_document_spills_and_reassembles(fx, monkeypatch):
 
 
 def test_a_large_document_stays_inline_when_storage_is_unconfigured(fx, monkeypatch):
-    """A deployment detail must not discard a computed verdict."""
     monkeypatch.setattr("db.storage.get_storage_client", lambda: None)
 
     row = persist_score_document(fx.session, _big_document(fx.protocol.id))
@@ -921,10 +896,9 @@ def test_a_large_document_stays_inline_when_storage_is_unconfigured(fx, monkeypa
 def test_inline_and_spilled_are_the_same_bytes(fx, monkeypatch):
     """One document, one encoding, whichever side of the threshold it lands on.
 
-    Two encoders would make the same document two different documents — the
-    spilled path's ``default=str`` silently stringifies what the inline path's
-    JSONB serializer rejects, so the same fold would publish different values
-    depending only on its size.
+    The spilled path's ``default=str`` silently stringifies what the inline
+    path's JSONB serializer rejects, so the same fold would publish different
+    values depending only on size.
     """
     storage = _FakeStorage()
     monkeypatch.setattr("db.storage.get_storage_client", lambda: storage)
@@ -941,10 +915,10 @@ def test_inline_and_spilled_are_the_same_bytes(fx, monkeypatch):
 
 
 def test_a_value_json_cannot_encode_raises_on_both_paths(fx, monkeypatch):
-    """A producer bug fails at persist, with the document in hand — never silently.
+    """A producer bug fails at persist, with the document in hand, never silently.
 
-    The stringifying fallback made a Decimal a number on one path and a string
-    on the other; raising is the only answer that is the same on both.
+    The stringifying fallback made a Decimal a number on one path and a string on
+    the other; raising is the only answer the same on both.
     """
     from decimal import Decimal
 
@@ -1048,11 +1022,11 @@ def test_a_not_determined_grade_is_served_as_such_not_as_zero(fx, api_client):
 
 
 def test_score_endpoint_404s_when_no_score_exists(fx, api_client):
-    """One of two 404s, and the detail is the only thing telling them apart.
+    """One of two 404s; the detail is the only thing telling them apart.
 
-    Pinned because the live suite branches on it: a client that reads both the
-    same way reports a typo'd protocol as "not scored yet", and the live skip
-    would turn a missing test company into a green run.
+    The live suite branches on it: a client reading both alike reports a typo'd
+    protocol as "not scored yet", and the live skip would turn a missing test
+    company into a green run.
     """
     response = api_client.get(f"/api/company/{fx.protocol.name}/score")
     assert response.status_code == 404
@@ -1096,9 +1070,9 @@ def test_the_role_selector_join_names_functions_and_drops_unnameable_selectors(f
 
     ``function_principals.details.trace[]`` says role N at target T licenses
     selector S; ``effective_functions.selector`` says which function of T that
-    is. A step whose selector names no analysed function of the target licenses
-    something this document cannot name, so it is counted and credited nowhere —
-    otherwise a magnitude would later be attributed to four bytes.
+    is. A step whose selector names no analysed function licenses something this
+    document cannot name, so it is counted and credited nowhere (else a magnitude
+    would be attributed to four bytes).
     """
     from db.models import FunctionPrincipal
     from services.scoring import planes as P
@@ -1155,8 +1129,8 @@ def test_a_gates_rewrites_come_from_its_own_witness_not_its_class(fx):
     """Two functions of one capability confer differently, and the plane says so.
 
     ``grant_for`` reads the SPECIFIC function's ``state_writes``; the class-wide
-    union is published beside it and used only by the census. Asking the class
-    for a walk would let one row's reach ride on another row's witness.
+    union is published beside it, used only by the census. Asking the class for a
+    walk would let one row's reach ride on another row's witness.
     """
     from services.scoring import planes as P
 
@@ -1192,12 +1166,11 @@ def test_the_act_as_plane_indexes_the_destinations_own_acceptance_rows(fx):
     """W1a: the second act-as witness shape, read from where it actually lives.
 
     The accepting role is at ``function_principals.details.trace[].roles``; a row
-    whose roles sit anywhere else names no role that admits a caller. Such a row
-    is still INDEXED, with empty roles, so the refusal can say "the list names
-    this caller and no role that admits it" rather than "the list does not name
-    this caller" — two different findings. ``membership_quality`` is carried
-    through so the plane can refuse a membership that was never enumerated, and
-    where one triple carries several rows the strongest is the one published.
+    with roles elsewhere names no admitting role. Such a row is still INDEXED,
+    with empty roles, so the refusal can say "the list names this caller and no
+    role that admits it" rather than "the list does not name this caller".
+    ``membership_quality`` is carried so the plane can refuse an unenumerated
+    membership; where one triple has several rows the strongest is published.
     """
     from db.models import FunctionPrincipal
     from services.scoring import planes as P
@@ -1291,12 +1264,11 @@ def test_the_act_as_plane_indexes_every_read_and_keeps_the_failures_apart(fx):
     """U1/B1: the loader is where the witness is kept or discarded.
 
     Admission is the address comparison, so every ``controller_values`` row whose
-    read RETURNED an address is indexed whatever ``resolved_type`` calls that
-    address — dropping the non-``contract`` ones discarded stored reads on the
-    strength of a label, and published a coverage gap where the row holds an
-    answer. ``eth_call_error`` is the opposite case: a read the pipeline ISSUED
-    that reverted, carrying no address, indexed in its own map so it can satisfy
-    no receiver test and can never be published as a read that never happened.
+    read RETURNED an address is indexed whatever ``resolved_type`` calls it
+    (dropping non-``contract`` ones discarded stored reads on the strength of a
+    label). ``eth_call_error`` is the opposite: a read the pipeline ISSUED that
+    reverted, carrying no address, indexed in its own map so it satisfies no
+    receiver test and is never published as a read that never happened.
     """
     from db.models import ControllerValue
     from services.scoring import planes as P
@@ -1412,10 +1384,9 @@ def test_the_act_as_plane_indexes_every_read_and_keeps_the_failures_apart(fx):
 def test_two_disagreeing_reads_never_become_a_reverted_read(fx):
     """The disagreement defeats the failure record, not the other way round.
 
-    A variable read twice to two different addresses resolves to nothing — and if
-    a failed read of the same variable were left indexed, the refusal would
-    become "the read reverted on chain", a sharper claim than the evidence
-    supports when reads that DID return are what defeated it.
+    A variable read twice to two addresses resolves to nothing; if a failed read
+    of it stayed indexed, the refusal would become "the read reverted on chain",
+    sharper than the evidence supports when reads that DID return defeated it.
     """
     from db.models import ControllerValue
     from services.scoring import planes as P

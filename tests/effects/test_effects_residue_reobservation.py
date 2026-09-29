@@ -1,20 +1,12 @@
 """Effects worker: state-plane residue on cache HITS + the empty-planning marker.
 
-Two residual gaps in the effects stage, both about a write that leaves no trace:
-
-1. A verdict row whose FIRST write is a cache hit never gets state-plane residue.
-   The hit is the right answer for the code plane (the behavioral cache holds no
-   concrete values), but ``concrete_destination`` /
-   ``current_check_passed`` describe THIS deployment and a hit carries neither,
-   so the row is blank and every later hit keeps it blank.
-
-2. A contract that is swept and yields no plans writes no verdict and, when it
-   has no job of its own, no stage artifact either — so effects selection
-   re-sweeps it from every subsequent job.
-
-The bar for (1) is that the CACHE still decides the verdict: every test here
-asserts the persisted verdict/tier/witness match the cached row, and that
-nothing an observation saw is written back into ``effect_behavior_cache``.
+1. A verdict row whose FIRST write is a cache hit never gets state-plane residue: the hit is right
+   for the code plane, but ``concrete_destination`` / ``current_check_passed`` describe THIS
+   deployment and a hit carries neither, so the row stays blank on every later hit.
+2. A swept contract that yields no plans writes no verdict and (with no job of its own) no stage
+   artifact, so selection re-sweeps it from every later job.
+For (1) the CACHE still decides the verdict; nothing an observation saw is written back to
+``effect_behavior_cache``.
 """
 
 from __future__ import annotations
@@ -370,10 +362,9 @@ def test_class_without_storable_residue_is_not_re_observed(clean_effects, monkey
 
 
 def test_code_upgrade_residue_branch_is_unreachable_and_gone():
-    """``_residue_observable``'s ``code_upgrade`` arm required ``TIER_HISTORICAL``,
-    but ``_is_cacheable`` refuses to cache Tier-0 verdicts at all — so no
-    cached row could ever satisfy it. The arm was dead code and was REMOVED; this
-    pins the premise so a change to either side is caught."""
+    """``_residue_observable``'s ``code_upgrade`` arm required ``TIER_HISTORICAL``, but
+    ``_is_cacheable`` never caches Tier-0 verdicts, so it was dead code and was REMOVED; this pins
+    the premise so a change to either side is caught."""
     historical = proven(
         EFFECT_CLASS_CODE_UPGRADE,
         tier=TIER_HISTORICAL,
@@ -395,14 +386,10 @@ def test_code_upgrade_residue_branch_is_unreachable_and_gone():
 
 
 def test_a_caller_arbitrary_hit_is_never_re_probed_for_a_destination(clean_effects):
-    """Consumer half of the withheld-destination rule. The recipe WITHHOLDS ``concrete_destination`` on a
-    ``caller_arbitrary`` shape — whatever a probe sees there is the recipient
-    argument the prober supplied. A NULL that is deliberate must not read as "no
-    residue yet": otherwise every such deployment spends its whole re-probe budget
-    (2 Tier-1 ``eth_simulateV1`` probes) chasing a value this stage refuses to
-    store, and each one looks like a gap that never closes.
-
-    The two other shapes stay observable, so this narrows nothing else."""
+    """Consumer half of the withheld-destination rule. The recipe WITHHOLDS ``concrete_destination``
+    on a ``caller_arbitrary`` shape (a probe only sees its own supplied recipient). That deliberate
+    NULL must not read as "no residue yet", or every such deployment burns its re-probe budget
+    (2 Tier-1 probes) chasing a value this stage refuses to store. Other shapes stay observable."""
     session = clean_effects
     arbitrary = _seed_cache(
         session,

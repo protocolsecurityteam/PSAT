@@ -1,12 +1,10 @@
-"""The name-independent mint/burn idiom: a zero-address-endpoint ERC-20
-``Transfer`` corroborated by a monotone state-var write.
+"""The name-independent mint/burn idiom: a zero-address-endpoint ERC-20 ``Transfer``
+corroborated by a monotone state-var write.
 
-A rebasing token (etherfi ``EETH``) tracks supply in a differently-named var
-(``totalShares``) and computes ``totalSupply()`` externally, so the
-``total_supply_sign`` name set never resolves its ``mintShares`` / ``burnShares``
-and they carried no supply claim at all. This drives the real static stack —
-Slither compile -> ``build_effects`` -> ``build_claims`` — on a synthetic
-rebasing share token that reproduces exactly that shape.
+A rebasing token (etherfi ``EETH``) tracks supply in ``totalShares`` and computes
+``totalSupply()`` externally, so the ``total_supply_sign`` name set never resolved its
+``mintShares`` / ``burnShares`` and they carried no supply claim. Drives Slither ->
+``build_effects`` -> ``build_claims`` on a synthetic token of that shape.
 """
 
 from __future__ import annotations

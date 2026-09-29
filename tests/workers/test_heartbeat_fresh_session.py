@@ -1,31 +1,13 @@
 """Architectural invariant: ``BaseWorker._heartbeat`` must open a fresh
-``SessionLocal()`` rather than reuse the long-lived worker session that
-parallel sections leave idle for minutes.
+``SessionLocal()`` rather than reuse the long-lived worker session.
 
-The worker's main ORM session sits idle through ``resolve_control_graph``
-— the worker thread blocks in ``parallel_map`` (semaphore + ``as_completed``)
-while forge builds run in the executor pool, doing zero SQL on its own
-session for 2-10 minutes. Neon's pooler-side SSL idle timeout closes
-that connection during the wait. When ``_heartbeat`` finally fires per
-parallel_map completion, ``session.execute(UPDATE jobs ...)`` raises
-``OperationalError``; the except-clause swallows, ``updated_at`` never
-refreshes, and the stale-job sweep requeues live work to a sibling
-worker that redoes the whole recursion chain.
-
-Confirmed in ``psat-pr-73`` logs (2026-05-08 06:43-06:55):
-``ResolutionWorker-657-2655967e`` claimed LiquidityPool: (impl) at
-06:43:52, ran four parallel forge builds (heartbeat opportunities at
-~06:46:22, 06:46:23, ~06:50, ~06:54), and was requeued by
-``ResolutionWorker-657-8778bce0`` at 06:54:46 with
-``stuck since 2026-05-08T06:43:58.048516+00:00`` — i.e. ``updated_at``
-hadn't moved off the value set by the initial ``update_detail`` commit
-despite four heartbeat callbacks firing.
-
-Fix: open a fresh session inside ``_heartbeat``. Pool's
-``pool_pre_ping=True`` validates the new connection on checkout, so any
-stale connection in the pool is replaced transparently — the heartbeat
-write doesn't share a session lifecycle with the long-running worker
-flow.
+During ``parallel_map`` the main session does no SQL for 2-10 minutes and Neon's
+pooler closes the idle SSL connection. The heartbeat's UPDATE then raises
+``OperationalError``, is swallowed, ``updated_at`` never refreshes, and the
+stale-job sweep requeues live work to a sibling. Seen in ``psat-pr-73``
+(2026-05-08 06:43-06:55): ``ResolutionWorker-657-2655967e`` was requeued despite
+four heartbeat callbacks. ``pool_pre_ping=True`` replaces stale pooled connections
+on the fresh session's checkout.
 """
 
 from __future__ import annotations
@@ -79,13 +61,8 @@ def test_heartbeat_does_not_reuse_passed_session_on_lease_path(
     mock_heartbeat_job: MagicMock,
     _mock_signal: MagicMock,
 ) -> None:
-    """The lease path must invoke ``heartbeat_job`` with a session opened
-    *inside* ``_heartbeat`` — not the worker's main session passed in.
-
-    Justification: the worker's main session can be silently dead (Neon
-    SSL idle close) by the time the heartbeat fires. Heartbeat writes
-    must not share its lifecycle.
-    """
+    """``heartbeat_job`` must get a session opened *inside* ``_heartbeat``, since the
+    main session can be silently dead (Neon SSL idle close)."""
     w = _TestWorker()
     job = _make_job()  # has lease_id by default
 
@@ -117,10 +94,7 @@ def test_heartbeat_does_not_reuse_passed_session_on_lease_path(
 def test_heartbeat_does_not_reuse_passed_session_on_legacy_path(
     _mock_signal: MagicMock,
 ) -> None:
-    """Same invariant for the legacy (``lease_id is None``) path: the
-    fallback ``UPDATE jobs SET updated_at=...`` must run on a fresh
-    session, not the worker's main session.
-    """
+    """Same invariant for the legacy (``lease_id is None``) fallback UPDATE."""
     w = _TestWorker()
     job = _make_job(lease_id=None)
 

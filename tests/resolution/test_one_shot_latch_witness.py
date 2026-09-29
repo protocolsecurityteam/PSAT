@@ -1,37 +1,21 @@
-"""The published one-shot latch witness — what a ``latch_state`` is evidence of.
+"""The published one-shot latch witness: what a ``latch_state`` is evidence of.
 
-Before this, a consumed one-shot published four keys (``latch_state``,
-``latch_value``, ``latch_target``, ``description``) and nothing about WHICH
-oracle produced the verdict, WHERE it was read, or WHEN. Three rows carrying
-identical published triples were decided by three different guards, and one
-carried an Aragon initialization-block number under the same ``latch_value``
-key that elsewhere holds an OZ version. This module pins the witness that closes
-that: what is published, and — the harder half — what is NOT published when the
-producer had nothing.
+Previously a consumed one-shot published ``latch_state``/``latch_value``/``latch_target``/
+``description`` and nothing about WHICH oracle decided, WHERE it was read, or WHEN: three
+rows with identical triples were decided by three different guards, and one carried an
+Aragon initialization-block number under the ``latch_value`` key that elsewhere holds an OZ
+version. This pins what is published and, harder, what is NOT when the producer had nothing.
 
-The three replayed shapes are the realized ones, with descriptors taken from the
-persisted ``predicate_trees`` artifacts and storage words re-read on chain at
-block **25643300** (pinned; never ``latest``). The Lido and FiatTokenV2_2
-descriptors are verbatim; the ERC-7201 one adds ``expected_version_basis``, the
-key this change introduces — the persisted shape, which carries the version with
-no basis, is the ``basis=None`` arm below:
+Three replayed shapes come from persisted ``predicate_trees`` descriptors with storage words
+re-read at block **25643300** (pinned; never ``latest``): Lido ``0xae7ab965...``
+(``unstructured_slot_latch``, guard ``eq 0``), FiatTokenV2_2 ``0xa0b86991...``
+(``structural_scalar_latch``, three functions on ONE slot behind ``eq 0``/``eq 1``/``eq 2``),
+and EtherfiL1SyncPoolETH ``0xd789870b...`` (``oz_v5_namespaced`` version member). The
+ERC-7201 descriptor adds ``expected_version_basis``; the persisted shape without it is the
+``basis=None`` arm. Fail-closed arms have zero realized rows, so each is constructed.
 
-  * Lido ``0xae7ab965…`` — ``unstructured_slot_latch``, guard ``eq 0``, no byte
-    range, slot ``keccak("aragonOS.initializable.initializationBlock")``,
-    word ``0x…af1140`` (11473216);
-  * FiatTokenV2_2 ``0xa0b86991…`` — ``structural_scalar_latch``, a packed byte,
-    three sibling functions reading ONE slot behind guards ``eq 0`` / ``eq 1`` /
-    ``eq 2``;
-  * EtherfiL1SyncPoolETH ``0xd789870b…`` — ``oz_v5_namespaced`` version member,
-    the ERC-7201 slot, word ``0x…01``.
-
-Fail-closed arms carry zero realized rows today, so each is constructed: an
-unevaluable guard, an unread latch, a 255 that is not a sentinel, an unpinned
-read height, a legacy descriptor with no ``expected_version`` provenance, and
-two decisive latches that must not blur into one witness.
-
-Hermetic: the wire is the ``FakeRpc`` stub from ``tests.support.rpc_stubs``; the AST
-controls compile through the production Slither toolchain. No live marker.
+Hermetic: the wire is ``FakeRpc`` from ``tests.support.rpc_stubs``; AST controls compile
+through the production Slither toolchain.
 """
 
 from __future__ import annotations
@@ -49,9 +33,8 @@ from services.resolution.one_shot_probe import (
 )
 from tests.support.rpc_stubs import FakeRpc, _word
 
-# Pinned probe height. Every on-chain value below was re-read here; the
-# resolver's own runtime height is head-12 and is not persisted, so this pins
-# stability at 25643300, not that the observed run read there.
+# Pinned probe height. The resolver's own runtime height is head-12 and not persisted, so
+# this pins stability at 25643300, not that the observed run read there.
 BLOCK = 25643300
 
 LIDO = "0xae7ab96520de3a18e5e111b5eaab095312d7fe84"
@@ -146,10 +129,9 @@ def _probe(address: str, storage: dict, latches: list[dict[str, Any]], **kwargs)
 
 
 def test_lido_unstructured_slot_guard_witness_is_byte_exact():
-    """Lido's latch is an Aragon initialization BLOCK NUMBER decided by a guard,
-    not an OZ version reached by a version compare. The witness must say so:
-    ``guard`` basis, the guard's own operator/constant, and no
-    ``expected_version`` at all."""
+    """Lido's latch is an Aragon initialization BLOCK NUMBER decided by a guard, not an OZ
+    version compare: ``guard`` basis, the guard's own operator/constant, no
+    ``expected_version``."""
     result = _probe(LIDO, {(LIDO, LIDO_SLOT): LIDO_WORD}, [_lido_descriptor()])
     assert result.state == "consumed"
     assert result.value == 11473216
@@ -164,17 +146,16 @@ def test_lido_unstructured_slot_guard_witness_is_byte_exact():
         "read_kind": "storage",
         "raw_word": hex(int(LIDO_WORD, 16)),
     }
-    # No byte range existed, so no byte range is published — and the absence of
-    # size_bytes is exactly why 0xff could never have been read as a sentinel.
+    # No byte range, so none is published; without size_bytes 0xff could never be a
+    # sentinel.
     for absent in ("byte_offset", "size_bytes", "value_type", "expected_version", "role"):
         assert absent not in result.witness
 
 
 def test_fiat_token_siblings_publish_their_own_deciding_guard():
-    """FiatTokenV2_2's initializeV2 / V2_1 / V2_2 read ONE slot behind guards
-    ``eq 0`` / ``eq 1`` / ``eq 2``. All three are consumed at the same value, so
-    the published triple is identical on all three rows — the witness is the
-    only thing that separates them, and it must carry each row's own constant."""
+    """initializeV2 / V2_1 / V2_2 read ONE slot behind guards ``eq 0`` / ``eq 1`` / ``eq 2``
+    and are consumed at the same value, so the witness is the only thing separating the
+    identical published triples; it must carry each row's own constant."""
     storage = {(USDC, USDC_SLOT_VERSION): USDC_WORD_VERSION}
     seen = []
     for constant in ("0", "1", "2"):
@@ -188,9 +169,8 @@ def test_fiat_token_siblings_publish_their_own_deciding_guard():
 
 
 def test_fiat_token_packed_bool_byte_witness_is_byte_exact():
-    """The packed byte: the descriptor's byte range is what turns a 32-byte word
-    holding an address into the value 1, so both the raw word and the range are
-    published — the decode is replayable, not asserted."""
+    """The descriptor's byte range turns a 32-byte word holding an address into the value 1,
+    so both the raw word and the range are published (replayable, not asserted)."""
     result = _probe(USDC, {(USDC, USDC_SLOT_INITIALIZED): USDC_WORD_INITIALIZED}, [_usdc_bool_descriptor()])
     assert result.state == "consumed"
     assert result.value == 1
@@ -211,9 +191,8 @@ def test_fiat_token_packed_bool_byte_witness_is_byte_exact():
 
 
 def test_erc7201_version_ge_witness_is_byte_exact():
-    """The OZ v5 namespaced version member: ``version_ge`` basis, and
-    ``expected_version`` published only next to the basis that says the integer
-    came from a modifier NAME match rather than from the compiler."""
+    """The OZ v5 namespaced version member: ``version_ge`` basis, with ``expected_version``
+    published only next to the basis saying it came from a modifier NAME match."""
     result = _probe(SYNC_POOL, {(SYNC_POOL, ERC7201_SLOT): SYNC_POOL_WORD}, [_sync_pool_descriptor()])
     assert result.state == "consumed"
     assert result.value == 1
@@ -262,22 +241,19 @@ def test_version_ge_witness_key_set_is_locked():
 
 
 def test_unevaluable_guard_publishes_not_determined_never_a_branch():
-    """An operator the evaluator cannot fold decides nothing. The row lands on
-    ``latch_basis: not_determined`` and an indeterminate state — never on a
-    branch label, and never on a verdict."""
+    """An operator the evaluator cannot fold decides nothing: ``latch_basis: not_determined``
+    and an indeterminate state, never a branch label or verdict."""
     descriptor = dict(_lido_descriptor(), guard={"operator": "weird", "constant": "0"})
     result = _probe(LIDO, {(LIDO, LIDO_SLOT): LIDO_WORD}, [descriptor])
     assert result.state == "indeterminate"
     assert result.witness["latch_basis"] == "not_determined"
-    # The read still happened and is still published — an honest
-    # not_determined cites what it read.
     assert result.witness["raw_word"] == hex(int(LIDO_WORD, 16))
     assert result.witness["probe_block"] == BLOCK
 
 
 def test_unread_latch_publishes_no_witness_at_all():
-    """A latch whose slot cannot be read yields no witness object. Absence is
-    the third state: there is nothing to replay, so nothing is claimed."""
+    """A latch whose slot cannot be read yields no witness object: nothing to replay,
+    nothing claimed."""
 
     class _DeadRpc:
         def __call__(self, rpc_url, method, params, retries=1):
@@ -303,10 +279,9 @@ def test_no_decisive_latch_publishes_no_witness():
 
 
 def test_255_without_a_byte_width_is_not_a_sentinel():
-    """The sentinel test is ``_DISABLED_SENTINELS[size_bytes]``, so 255 is a
-    sentinel only for a one-byte latch. A descriptor with no width must never
-    reach the sentinel basis — that is the shape the register's
-    'sentinel is recoverable from latch_value' claim got wrong."""
+    """The sentinel test is ``_DISABLED_SENTINELS[size_bytes]``, so 255 is a sentinel only
+    for a one-byte latch. A descriptor with no width must never reach the sentinel basis
+    (the register's 'sentinel is recoverable from latch_value' claim got this wrong)."""
     descriptor = dict(_sync_pool_descriptor(), size_bytes=None, byte_offset=None)
     word = _word(0xFF)
     result = _probe(SYNC_POOL, {(SYNC_POOL, ERC7201_SLOT): word}, [descriptor])
@@ -316,8 +291,8 @@ def test_255_without_a_byte_width_is_not_a_sentinel():
 
 
 def test_unpinned_height_publishes_no_probe_block():
-    """A ``latest`` read has no reproducible height. Publishing one would make an
-    unreplayable observation look replayable, so the key is simply absent."""
+    """A ``latest`` read has no reproducible height; publishing one would make an
+    unreplayable observation look replayable, so the key is absent."""
     result = _probe(LIDO, {(LIDO, LIDO_SLOT): LIDO_WORD}, [_lido_descriptor()], block=None)
     assert result.state == "consumed"
     assert "probe_block" not in result.witness
@@ -325,10 +300,9 @@ def test_unpinned_height_publishes_no_probe_block():
 
 
 def test_legacy_descriptor_publishes_no_bare_expected_version():
-    """Descriptors persisted before basis stamping carry ``expected_version``
-    with no record of where it came from. The integer is still what the verdict
-    was computed from — but it is published only WITH its provenance, so a
-    legacy row publishes neither key rather than an unattributed number."""
+    """Descriptors persisted before basis stamping carry ``expected_version`` with no
+    provenance. It is published only WITH provenance, so a legacy row publishes neither key
+    rather than an unattributed number."""
     result = _probe(
         SYNC_POOL,
         {(SYNC_POOL, ERC7201_SLOT): SYNC_POOL_WORD},
@@ -341,8 +315,8 @@ def test_legacy_descriptor_publishes_no_bare_expected_version():
 
 
 def test_witness_names_which_of_two_decisive_latches_decided():
-    """Two decisive latches with different guards: the witness must name the one
-    that actually produced the value, not blur both into one payload."""
+    """Two decisive latches with different guards: the witness must name the one that
+    produced the value."""
     first = _usdc_version_descriptor("0")
     second = dict(_usdc_bool_descriptor(), guard={"operator": "eq", "constant": "9"})
     storage = {
@@ -356,10 +330,9 @@ def test_witness_names_which_of_two_decisive_latches_decided():
 
 
 def test_getter_read_is_not_attributed_to_the_descriptor_slot():
-    """When the value came back from an ``eth_call``, the witness says so. The
-    descriptor's slot is still published as the descriptor's location, but
-    ``read_kind``/``getter_selector`` keep ``raw_word`` from being read as the
-    content of that slot."""
+    """When the value came from an ``eth_call``, the witness says so:
+    ``read_kind``/``getter_selector`` keep ``raw_word`` from being read as the content of
+    the descriptor's slot."""
     selector = "0x0d8e6e2c"  # getContractVersion()
     descriptor = dict(_lido_descriptor(), getter_selector=selector)
     rpc = FakeRpc(
@@ -382,9 +355,9 @@ def test_getter_read_is_not_attributed_to_the_descriptor_slot():
 
 
 def test_annotate_lands_witness_on_every_one_shot_condition_unaliased():
-    """A function carrying two one_shot conditions is decided by ONE read, so
-    both carry that witness — as independent objects, since a shared nested
-    guard dict would let one row's edit rewrite another's."""
+    """A function with two one_shot conditions is decided by ONE read, so both carry that
+    witness as independent objects (a shared nested dict would let one edit rewrite
+    another)."""
     result = _probe(LIDO, {(LIDO, LIDO_SLOT): LIDO_WORD}, [_lido_descriptor()])
     cap_dict = {
         "kind": "conditional_universal",
@@ -401,8 +374,8 @@ def test_annotate_lands_witness_on_every_one_shot_condition_unaliased():
 
 
 def test_annotate_omits_witness_when_none_was_earned():
-    """No witness ⇒ no key. Never null, never an empty object that a consumer
-    could read as 'measured, and empty'."""
+    """No witness => no key. Never null, never an empty object a consumer could read as
+    'measured, and empty'."""
     cap_dict = {"kind": "conditional_universal", "conditions": [{"kind": "one_shot"}]}
     annotate_capability_one_shot(
         cap_dict,
@@ -416,8 +389,8 @@ def test_annotate_omits_witness_when_none_was_earned():
 
 
 def test_appended_candidate_condition_carries_the_witness():
-    """The structural-candidate promotion path builds its condition from
-    scratch; it must not be the one place the witness goes missing."""
+    """The structural-candidate promotion path builds its condition from scratch; it must
+    not lose the witness."""
     result = _probe(LIDO, {(LIDO, LIDO_SLOT): LIDO_WORD}, [_lido_descriptor()])
     cap_dict = {"kind": "conditional_universal", "conditions": [{"kind": "business", "description": "x"}]}
     annotate_capability_one_shot(cap_dict, result, confirmed_candidate=True)
@@ -443,8 +416,8 @@ def test_appended_condition_omits_null_latch_value():
 
 
 def test_descriptor_digest_separates_same_slot_different_guards():
-    """The realized FiatTokenV2_2 collision: three functions, one slot, three
-    guards. A slot-keyed cache would serve one witness to all three."""
+    """The realized FiatTokenV2_2 collision: three functions, one slot, three guards; a
+    slot-keyed cache would serve one witness to all three."""
     digests = {latch_descriptor_digest([_usdc_version_descriptor(c)]) for c in ("0", "1", "2")}
     assert len(digests) == 3
 
@@ -610,8 +583,8 @@ def test_reinitializer_non_literal_publishes_no_version(ast_artifacts):
     result = _probe(SYNC_POOL, {(SYNC_POOL, latch["slot"]): _word(1)}, [latch])
     assert "expected_version" not in result.witness
     assert "expected_version_basis" not in result.witness
-    # Nothing said the version — so the compare that decided is the bare
-    # non-zero one, and the witness names that, not version_ge.
+    # Nothing said the version, so the deciding compare is the bare non-zero one and the
+    # witness names that, not version_ge.
     assert result.witness["latch_basis"] == "value_gt_zero"
 
 
@@ -625,7 +598,6 @@ def test_plain_initializer_version_is_the_standard_constant_not_a_literal(ast_ar
 
 
 def test_only_initializing_helper_stamps_no_latch_location(ast_artifacts):
-    """An ``onlyInitializing``-only helper reads the transient flag and nothing
-    else, so it names no version AND earns no latch location — there is no
-    descriptor to publish a witness from at all."""
+    """An ``onlyInitializing``-only helper reads the transient flag only: no version AND no
+    latch location, so there is no descriptor to publish a witness from."""
     assert _standard_latch(ast_artifacts["OnlyInitializingHelper"], "helper") is None

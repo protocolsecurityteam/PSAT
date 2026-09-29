@@ -1,16 +1,10 @@
-"""``source_verified`` is the FETCH's answer, carried — never inferred from the tree.
+"""``source_verified`` is the FETCH's answer, carried, never inferred from the tree.
 
-``contract_summaries.source_verified`` used to be
-``bool(project_dir.rglob("src/**/*.sol"))``: whether the scaffolder happened to write a
-Foundry ``src/`` layout, which is decided by the paths inside Etherscan's own
-verification bundle. On the 2026-07-28 run that published FALSE for 9 of 90 contracts
-(UpgradeableBeacon, EndpointV2, OneSig, 2x TimelockController, FiatTokenV2_2,
-EtherfiL1SyncPoolETH, WithdrawalQueueERC721, Lido) — all nine Etherscan-verified, all
-nine analysed from that verified source in the same job, ``contracts.source_verified``
-TRUE on all nine, and zero of their source files under ``src/`` (their bundles use
-``contracts/``, ``@openzeppelin/``, ``@aragon/`` and ``lib/``). The field is a direct
-input to the frontend data-confidence score and names the contract as an example of
-unverified source.
+``contract_summaries.source_verified`` used to be ``bool(project_dir.rglob("src/**/*.sol"))``,
+which depends on Etherscan's bundle paths, not on verification. The 2026-07-28 run published
+FALSE for 9 of 90 contracts (Lido, FiatTokenV2_2, EndpointV2, ...) that were all verified and
+analysed from that source (bundles use ``contracts/``, ``@openzeppelin/``, ``lib/``). The field
+feeds the frontend data-confidence score and names the contract as unverified.
 """
 
 from __future__ import annotations
@@ -55,10 +49,8 @@ def test_the_fetch_fact_is_carried_verbatim_in_all_three_states():
 
 
 def test_the_project_layout_cannot_decide_the_field(tmp_path: Path):
-    """The 9-row reproduction, at the publisher. A verified contract whose Etherscan
-    bundle uses ``contracts/`` (no ``src/`` tree at all) must publish True, and a
-    contract the fetch says is unverified must publish False however Foundry-shaped its
-    scaffold is."""
+    """The 9-row reproduction at the publisher: a verified ``contracts/``-layout bundle must
+    publish True, and an unverified fetch False however Foundry-shaped its scaffold."""
     lido_shaped = tmp_path / "lido"
     (lido_shaped / "contracts").mkdir(parents=True)
     (lido_shaped / "contracts" / "Lido.sol").write_text("contract Lido {}")
@@ -69,7 +61,6 @@ def test_the_project_layout_cannot_decide_the_field(tmp_path: Path):
     (foundry_shaped / "src" / "Vault.sol").write_text("contract Vault {}")
     assert list(foundry_shaped.rglob("src/**/*.sol")), "fixture must have a src/ tree"
 
-    # The layout the old expression read is now irrelevant in BOTH directions.
     assert _source_verified({"source_verified": True}) is True
     assert _source_verified({"source_verified": False}) is False
 
@@ -103,10 +94,8 @@ def test_the_discovery_scaffolder_records_the_payloads_verification_fact(tmp_pat
 
 @requires_postgres
 def test_the_static_worker_hands_the_pipeline_the_contract_rows_fact(db_session, monkeypatch):
-    """``contracts.source_verified`` is written by discovery when Etherscan served the
-    source. It keeps all three values on the corpus (TRUE 230 / FALSE 1 / NULL 410 at
-    the time of writing) and all three must survive into ``contract_meta.json`` —
-    especially NULL, which is the row that never learned the fact."""
+    """``contracts.source_verified`` keeps all three values on the corpus (TRUE 230 / FALSE 1 /
+    NULL 410 at writing) and all three must survive into ``contract_meta.json``, especially NULL."""
     from db.models import Contract
     from db.queue import create_job, store_source_files
     from workers.static_worker import StaticWorker
@@ -172,10 +161,8 @@ def _project(tmp_path: Path, src_dir: str, meta_extra: dict) -> Path:
 
 
 def test_a_verified_contract_with_no_src_tree_publishes_verified(tmp_path: Path):
-    """The 9 rows, end to end. Etherscan's bundle for Lido / WithdrawalQueueERC721 /
-    TimelockController puts everything under ``contracts/``, ``@openzeppelin/`` or
-    ``lib/``, so the scaffolded project has NO ``src/`` tree — which is what the old
-    expression measured, and why it published FALSE for nine verified contracts."""
+    """The 9 rows end to end: bundles under ``contracts/`` / ``@openzeppelin/`` / ``lib/``
+    leave NO ``src/`` tree, which is what the old expression measured."""
     project_dir = _project(tmp_path, "contracts", {"source_verified": True})
     assert not list(project_dir.rglob("src/**/*.sol")), "the old expression's input must be empty here"
 
@@ -183,9 +170,7 @@ def test_a_verified_contract_with_no_src_tree_publishes_verified(tmp_path: Path)
 
 
 def test_an_unverified_fetch_still_publishes_false_from_a_foundry_layout(tmp_path: Path):
-    """NEGATIVE CONTROL — the adverse arm still fires, and the layout does not rescue
-    it: a ``src/`` tree full of Solidity is exactly what the old expression called
-    verified."""
+    """NEGATIVE CONTROL: the adverse arm still fires; a ``src/`` tree full of Solidity does not rescue it."""
     project_dir = _project(tmp_path, "src", {"source_verified": False})
     assert list(project_dir.rglob("src/**/*.sol")), "the old expression's input must be non-empty here"
 
@@ -193,11 +178,8 @@ def test_an_unverified_fetch_still_publishes_false_from_a_foundry_layout(tmp_pat
 
 
 def test_a_project_with_no_recorded_fact_publishes_not_determined(tmp_path: Path):
-    """The third state, end to end: a workspace scaffolded before the fact was carried
-    publishes ``None`` — which the nullable column and the API payload both keep, and
-    which the frontend now names as "not recorded" rather than as unverified. The old
-    expression answered this input with a confident ``True``/``False`` read off the
-    directory listing."""
+    """The third state end to end: a workspace scaffolded before the fact was carried publishes
+    ``None`` (frontend: "not recorded"), where the old expression gave a confident True/False."""
     project_dir = _project(tmp_path, "src", {})
 
     assert collect_contract_analysis(project_dir)["subject"]["source_verified"] is None

@@ -1,16 +1,11 @@
 """Regression tests for the two lattice kinds added by SDG §3 A1-recall:
 ``token_owner`` destinations and ``balance_delta`` amounts.
 
-Same harness as ``tests/static/test_flow_lattice.py`` — a real solc compile driving the
-production ``build_effects``. Every fixture here is SYNTHETIC and minimal so the
-rules are exercised on their shape alone, never on a corpus-specific pattern.
-
-Two of these guard a pre-existing FALSE POSITIVE rather than a missing kind: a
-destination read back from ``ownerOf(id)`` used to classify as ``param`` (the
-caller-supplied, theft-shaped kind) because the provenance of an internal call's
-return value unions the call tag with the callee's own body sources — the
-mapping KEY is a forwarded parameter, and the drop-the-rest shortcut in
-``_forwarded_param_sources`` picked it out of that union.
+Same harness as ``test_flow_lattice.py`` (real solc compile driving production
+``build_effects``); fixtures are SYNTHETIC and minimal. Two guard a pre-existing
+FALSE POSITIVE: a destination read back from ``ownerOf(id)`` classified as ``param``
+because an internal call's return provenance unions the call tag with the callee's
+body sources and ``_forwarded_param_sources`` picked the mapping KEY out of it.
 """
 
 from __future__ import annotations
@@ -41,9 +36,7 @@ def _out_flow(info) -> Any:
     return flows[0]
 
 
-# ---------------------------------------------------------------------------
 # ``token_owner``: the destination is the CURRENT owner of a caller-named token.
-# ---------------------------------------------------------------------------
 
 TOKEN_OWNER_SRC = """
 pragma solidity ^0.8.20;
@@ -198,9 +191,7 @@ def test_token_owner_reaches_the_claims_witness(tmp_path):
     assert {"kind": "token_owner", "tier": "static_trace"} in kinds, kinds
 
 
-# ---------------------------------------------------------------------------
 # Struct-member destinations: caller-supplied struct vs. stored request row.
-# ---------------------------------------------------------------------------
 
 STRUCT_DEST_SRC = """
 pragma solidity ^0.8.20;
@@ -255,9 +246,7 @@ def test_stored_request_row_destination_is_not_param(tmp_path):
     assert target["kind"] in ("storage_no_setter", "storage_setter", "indeterminate"), target
 
 
-# ---------------------------------------------------------------------------
 # ``balance_delta`` amounts.
-# ---------------------------------------------------------------------------
 
 BALANCE_DELTA_SRC = """
 pragma solidity ^0.8.20;
@@ -359,8 +348,7 @@ def test_balance_delta_reaches_the_claims_witness(tmp_path):
 
 
 def test_param_index_reaches_the_claims_witness(tmp_path):
-    # A caller-supplied destination address resolves to calldata slot 0; that index
-    # is now projected into the flow.out witness alongside its ``target_kind``.
+    # A caller-supplied destination resolves to calldata slot 0, projected into flow.out.
     contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
     effects = build_effects(contract)
     claims = build_claims(contract, effects, {})["functions"]
@@ -370,11 +358,8 @@ def test_param_index_reaches_the_claims_witness(tmp_path):
     assert 0 in indexes, out[0]["witness"]["flows"]
 
 
-# ---------------------------------------------------------------------------
-# Helper RETURN values: the lattice threads arguments INTO a helper, so this is
-# the way back out. A getter-read destination and a computed amount are facts the
-# contract states plainly, and both used to publish "we traced nothing".
-# ---------------------------------------------------------------------------
+# Helper RETURN values: the way back out of a helper. Getter-read destinations and
+# computed amounts used to publish "we traced nothing".
 
 HELPER_RETURN_SRC = """
 pragma solidity ^0.8.20;
@@ -432,7 +417,6 @@ def test_a_getter_helper_return_resolves_to_the_variables_mutability(_returns):
 
 
 def test_an_immutable_helper_return_resolves_to_immutable(_returns):
-    """The benign end of the same axis, through the same edge."""
     assert _out_flow(_returns["payTreasury(uint256)"])["target_kind"]["kind"] == "immutable"
 
 
@@ -459,19 +443,15 @@ def test_a_helper_whose_returns_disagree_stays_indeterminate(_returns):
 def test_a_keyed_lookup_return_is_never_published_as_fixed(_returns):
     """The safety case, and the reason element reads are refused outright.
 
-    ``_owners`` has no setter function, so the element rule would classify the
-    BASE as ``storage_no_setter`` — i.e. provably FIXED, the benign end of the
-    axis, which §4.2 promotes to ``immutable_fixed`` on the verdict. The caller
-    picks the key, and a different key is a different address. Resolving this at
-    all is the worst over-claim available here."""
+    ``_owners`` has no setter, so the element rule would call the BASE
+    ``storage_no_setter``, provably FIXED, which §4.2 promotes to ``immutable_fixed``.
+    The caller picks the key, so resolving this at all is the worst over-claim."""
     target = _out_flow(_returns["payBeneficiary(uint256,uint256)"])["target_kind"]
     assert target["kind"] == "indeterminate", target
 
 
-# ---------------------------------------------------------------------------
-# `caller_supplied`: a merge is only caller-chosen if EVERY branch is, and a
-# nested formal is only caller-chosen if the caller bound it to something that is.
-# ---------------------------------------------------------------------------
+# `caller_supplied`: a merge is only caller-chosen if EVERY branch is, and a nested
+# formal only if the caller bound it to something that is.
 
 MERGE_SRC = """
 pragma solidity ^0.8.20;
@@ -528,11 +508,8 @@ def test_a_merge_reached_through_a_forwarded_state_variable_is_not(_merge):
     assert flow["amount_kind"]["kind"] == "indeterminate", flow
 
 
-# ---------------------------------------------------------------------------
 # The token-first recognizer's limits. It reads `to`/`amount` off the CALL SITE
-# without proving the callee forwards them, so where it may fire is the whole of
-# its soundness argument.
-# ---------------------------------------------------------------------------
+# without proving the callee forwards them, so where it may fire is its soundness.
 
 RECOGNIZER_SRC = """
 pragma solidity ^0.8.20;
@@ -672,17 +649,11 @@ def test_a_zero_amount_on_an_unambiguous_erc20_send_still_moves_nothing(_zero_id
     assert not _zero_id["sendNothing(address)"]["value_flows"]
 
 
-# ---------------------------------------------------------------------------
-# A zero-value ``.call{value:}`` must not read as an ETH payout.
-#
-# Plane 0 mints ``asset_send`` from any ``.call{value: v}`` it can reach through
-# an internal call, without looking at ``v``. OZ's ``Address`` helper chain — the
-# bottom of every ``SafeERC20`` call — is such a site, and its ``value`` is a
-# PARAMETER whose zero literal lives one frame up, so only an interprocedural
-# read can settle it. Four real etherfi entry points ("record a withdrawal
-# intent", which approve and then call) published "sends assets out of the
-# contract" from nothing but this.
-# ---------------------------------------------------------------------------
+# A zero-value ``.call{value:}`` must not read as an ETH payout. Plane 0 mints
+# ``asset_send`` from any reachable ``.call{value: v}`` without looking at ``v``;
+# OZ's ``Address`` helper (bottom of every ``SafeERC20`` call) is such a site and
+# its zero literal lives one frame up. Four etherfi entry points published "sends
+# assets out of the contract" from nothing but this.
 
 ZERO_VALUE_CALL_SRC = """
 pragma solidity ^0.8.20;

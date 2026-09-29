@@ -1,10 +1,7 @@
-"""Tests for ``RevertDetector``.
+"""Tests for ``RevertDetector`` across the 8 revert-pattern cases.
 
-Covers each of the 8 revert-pattern cases.
-For each, we compile a tiny Solidity contract and assert RevertDetector
-finds exactly the expected RevertGate(s) with the correct kind +
-polarity. The condition_value identity isn't pinned (Slither-version
-dependent SSA renaming); we focus on count + kind + polarity.
+Each case compiles a tiny contract and asserts the expected RevertGate(s) by count + kind +
+polarity (condition_value identity is Slither-version dependent, so not pinned).
 """
 
 from __future__ import annotations
@@ -36,9 +33,7 @@ pytestmark = pytest.mark.compile
 
 
 def _cap_for(sl: Slither, full_name: str, cname: str = "C"):
-    """Drive the static→evaluator pipeline (same shape as test_earned_public's
-    ``_build_pipeline``/``_cap_for``) and return the CapabilityExpr for one
-    function, so a recovered revert gate can be pinned by its final verdict."""
+    """Drive static→evaluator (as test_earned_public's ``_cap_for``) and return one function's CapabilityExpr."""
     contract = next(c for c in sl.contracts if c.name == cname)
     trees = {}
     for fn in contract.functions:
@@ -142,8 +137,6 @@ def test_assert(tmp_path):
 
 
 def test_if_revert_inverts_polarity(tmp_path):
-    """``if (bad) revert`` means allowed when bad is false. Polarity
-    must be ``allowed_when_false``."""
     sl = _compile(
         tmp_path,
         """
@@ -188,11 +181,8 @@ def test_if_revert_custom_error(tmp_path):
 
 
 def test_inline_asm_conditional_revert_structurally_parsed(tmp_path):
-    """``assembly { if iszero(x) { revert(0,0) } }`` is parsed by
-    Slither into structured IF + SolidityCall(revert(uint256,uint256)).
-    The detector captures this via the standard if-revert path, so
-    the gate kind is ``if_revert`` (not ``inline_asm``) — high-fidelity
-    classification."""
+    """``assembly { if iszero(x) { revert(0,0) } }`` is parsed by Slither as structured IF +
+    revert, so the gate kind is ``if_revert`` (not ``inline_asm``)."""
     sl = _compile(
         tmp_path,
         """
@@ -212,10 +202,8 @@ def test_inline_asm_conditional_revert_structurally_parsed(tmp_path):
 
 
 def test_pure_compute_assembly_yields_no_gates(tmp_path):
-    """An assembly block doing memory ops with no revert is genuinely
-    ungated — RevertDetector returns ``[]``. The opaque marker is
-    reserved for assembly that has a textual `revert` we couldn't
-    structurally extract; pure compute is fine."""
+    """Pure-compute assembly is genuinely ungated (``[]``); the opaque marker is reserved for
+    assembly with a textual `revert` we couldn't structurally extract."""
     sl = _compile(
         tmp_path,
         """
@@ -290,12 +278,9 @@ def test_two_requires_yields_two_gates(tmp_path):
 
 
 def test_try_catch_with_revert_in_catch_emits_opaque_gate(tmp_path):
-    """``try x.foo() {} catch { revert(); }`` reverts iff the
-    external call reverts. We can't classify the gate structurally
-    without recursing into the called contract, so we emit an
-    opaque gate flagged ``opaque_try_catch``. Without this the
-    function looks unguarded — strictly worse than reporting
-    'we know there's a gate but can't characterize it.'"""
+    """``try x.foo() {} catch { revert(); }`` reverts iff the external call does. We can't
+    classify it structurally, so we emit an opaque ``opaque_try_catch`` gate; otherwise the
+    function looks unguarded."""
     sl = _compile(
         tmp_path,
         """
@@ -321,9 +306,6 @@ def test_try_catch_with_revert_in_catch_emits_opaque_gate(tmp_path):
 
 
 def test_try_catch_without_revert_in_catch_emits_no_gate(tmp_path):
-    """``try x.foo() {} catch {}`` swallows any revert — the
-    function is unguarded by the try/catch. Verifies we don't
-    over-emit gates when the catch is empty."""
     sl = _compile(
         tmp_path,
         """
@@ -344,8 +326,6 @@ def test_try_catch_without_revert_in_catch_emits_no_gate(tmp_path):
 
 
 def test_try_catch_with_require_in_catch_also_emits_gate(tmp_path):
-    """``catch { require(false); }`` is the same shape as a bare
-    revert — also emits an opaque gate."""
     sl = _compile(
         tmp_path,
         """
@@ -391,24 +371,17 @@ def test_bare_void_state_var_call_is_semantic_precondition(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Bug 1: try/catch wrapping a single external authority-check call should not
-# collapse to opaque(opaque_try_catch). Recognising the shape (one
-# HighLevelCall whose return drives the body's require/revert) lets the
-# downstream pipeline preserve the call selector + target contract, which the
-# capability resolver then uses to expand into actual member addresses.
-# Currently the analyzer paints any try-with-revert-in-catch as opaque, which
-# cascades through `intersect()` as `unsupported`, and EtherFi's
-# UUPSUpgradeable.upgradeTo ends up unresolvable on the surface page.
+# Bug 1: try/catch around a single external authority-check call must not collapse to
+# opaque(opaque_try_catch). Keeping the call selector + target lets the capability resolver
+# expand it to member addresses; opaque cascades as `unsupported` and left EtherFi's
+# UUPSUpgradeable.upgradeTo unresolvable.
 # ---------------------------------------------------------------------------
 
 
 def test_try_catch_around_external_authority_call_is_not_opaque(tmp_path):
-    """``try authority.canCall(...) returns (bool ok) { require(ok); }
-    catch { revert; }`` is the OZ AccessManaged / EtherFi RoleRegistry
-    upgrade pattern. The body has a single HighLevelCall whose return
-    value gates a require — the gate is not opaque, it's an external
-    authority check on ``authority.canCall``. Downstream should be able
-    to identify the target call and resolve it to the role's holders."""
+    """``try authority.canCall(...) returns (bool ok) { require(ok); } catch { revert; }`` is
+    the OZ AccessManaged / EtherFi RoleRegistry upgrade pattern: an external authority check
+    on ``authority.canCall``, not an opaque gate."""
     sl = _compile(
         tmp_path,
         """
@@ -431,7 +404,6 @@ def test_try_catch_around_external_authority_call_is_not_opaque(tmp_path):
     )
     fn = _function(sl, "upgradeTo")
     gates = RevertDetector(fn).run()
-    # We expect at least one gate that is NOT the catch-all opaque marker.
     assert gates, "expected at least one revert gate"
     opaque_only = all(g.kind == "opaque" and g.unsupported_reason == "opaque_try_catch" for g in gates)
     assert not opaque_only, (
@@ -439,7 +411,6 @@ def test_try_catch_around_external_authority_call_is_not_opaque(tmp_path):
         "expected kind='try_catch_revert' (or similar non-opaque kind) so the call selector + "
         "target are recoverable downstream"
     )
-    # And specifically: at least one gate carries the recognised try-catch shape.
     assert any(g.kind == "try_catch_revert" for g in gates), (
         f"no gate with kind='try_catch_revert' found; got kinds={_gate_kinds(gates)}"
     )
@@ -482,8 +453,6 @@ def _compile_086(tmp_path: Path, source: str) -> Slither:
 
 
 def test_require_custom_error_is_lifted(tmp_path):
-    """``require(msg.sender == owner, NotOwner())`` must yield a ``require`` gate
-    with the caller-equality condition — not an empty gate list."""
     sl = _compile_086(
         tmp_path,
         """
@@ -508,8 +477,6 @@ def test_require_custom_error_is_lifted(tmp_path):
 
 
 def test_require_custom_error_with_args_is_lifted(tmp_path):
-    """The error constructor taking arguments (``MyError(x)``) is the same
-    ``require(bool,error)`` SolidityCall shape — also lifted."""
     sl = _compile_086(
         tmp_path,
         """
@@ -536,10 +503,8 @@ def test_require_custom_error_with_args_is_lifted(tmp_path):
 
 
 def test_unmodeled_require_fails_closed(tmp_path, monkeypatch):
-    """If the structural lifter rejects a require form, the coverage invariant
-    emits an ``opaque``/``unsupported`` gate so the tree is non-empty and the
-    function resolves gated. Simulated here by forcing ``_ir_is_require`` to
-    reject every require — a stand-in for any future unmodeled form."""
+    """A require form the lifter rejects must surface as an ``opaque``/``unsupported`` gate so
+    the function resolves gated. Simulated by forcing ``_ir_is_require`` to reject every require."""
     import services.static.contract_analysis_pipeline.revert_detect as rd
 
     sl = _compile(
@@ -556,12 +521,10 @@ def test_unmodeled_require_fails_closed(tmp_path, monkeypatch):
     )
     fn = _function(sl, "f")
 
-    # Baseline: with the require recognised, there is no unmodeled-gate marker.
     baseline = RevertDetector(fn).run()
     assert not any(g.unsupported_reason == "unmodeled_require_gate" for g in baseline)
     assert any(g.kind == "require" for g in baseline)
 
-    # Reject every require → the walked-but-unlifted require must be caught.
     monkeypatch.setattr(rd, "_ir_is_require", lambda ir: False)
     gates = RevertDetector(fn).run()
     assert any(g.kind == "opaque" and g.unsupported_reason == "unmodeled_require_gate" for g in gates), (
@@ -571,9 +534,8 @@ def test_unmodeled_require_fails_closed(tmp_path, monkeypatch):
 
 
 def test_genuinely_ungated_function_stays_gateless(tmp_path):
-    """The coverage invariant must NOT fire on a function with no require/assert
-    at all — a genuinely permissionless function still yields zero gates (→ the
-    deliberate public default), not a spurious unsupported gate."""
+    """The coverage invariant must NOT fire on a function with no require/assert: a genuinely
+    permissionless function keeps zero gates (the deliberate public default)."""
     sl = _compile(
         tmp_path,
         """
@@ -596,9 +558,8 @@ def test_genuinely_ungated_function_stays_gateless(tmp_path):
 
 
 def test_discarded_bool_guard_helper_gate_is_found(tmp_path):
-    """``modifier hasRole(r) { _hasRole(r, msg.sender); _; }`` calls a
-    bool-returning guard and ignores the bool — the require lives in the
-    callee. The lvalue-skip used to drop this gate entirely (every
+    """``modifier hasRole(r) { _hasRole(r, msg.sender); _; }`` ignores a bool-returning guard, so
+    the require lives in the callee. The lvalue-skip used to drop it (every
     EtherFiRedemptionManager admin function defaulted to public)."""
     sl = _compile(
         tmp_path,
@@ -626,9 +587,8 @@ def test_discarded_bool_guard_helper_gate_is_found(tmp_path):
 
 
 def test_consumed_bool_helper_result_is_not_double_walked(tmp_path):
-    """``require(_check(msg.sender))`` — the result feeds the caller's own
-    require, which the predicate builder lifts; the recursion must not also
-    walk the callee and emit a duplicate gate for the same condition."""
+    """``require(_check(msg.sender))``: the caller's own require is lifted, so the recursion must
+    not also walk the callee and emit a duplicate gate."""
     sl = _compile(
         tmp_path,
         """
@@ -656,9 +616,8 @@ def test_consumed_bool_helper_result_is_not_double_walked(tmp_path):
 
 
 def test_returned_helper_result_still_recurses_for_the_gate(tmp_path):
-    """``return gatedCallee(...)`` — the RETURN reads the result, so the
-    read-anywhere test suppressed the recursion, and the callee's require was
-    never walked: the forwarder resolved unguarded."""
+    """``return gatedCallee(...)``: the RETURN reads the result, which used to suppress the
+    recursion, so the callee's require was never walked and the forwarder resolved unguarded."""
     sl = _compile(
         tmp_path,
         """
@@ -684,8 +643,7 @@ def test_returned_helper_result_still_recurses_for_the_gate(tmp_path):
 
 
 def test_returned_helper_result_yields_a_caller_authority_leaf(tmp_path):
-    """R4 positive case: the recovered gate must reach the evaluator as an
-    authority constraint, not merely exist as a ``RevertGate``."""
+    """R4 positive case: the recovered gate must reach the evaluator as an authority constraint."""
     sl = _compile(
         tmp_path,
         """
@@ -714,9 +672,6 @@ def test_returned_helper_result_yields_a_caller_authority_leaf(tmp_path):
 
 
 def test_result_reaching_a_condition_transitively_is_not_double_walked(tmp_path):
-    """``bool ok = _check(); bool z = ok && other; require(z);`` — the result
-    reaches the require only through an intermediate, so the already-lifted
-    test has to be a transitive closure, not a one-hop check."""
     sl = _compile(
         tmp_path,
         """
@@ -748,12 +703,8 @@ def test_result_reaching_a_condition_transitively_is_not_double_walked(tmp_path)
 
 
 def test_expression_text_cache_is_instance_scoped(tmp_path):
-    """The ``str(expr)`` memo lives on the ``RevertDetector`` instance, not at
-    module scope — so two detectors don't share an ``id(expr)`` keyspace and
-    the cache can't accrete across a long-lived process."""
     import services.static.contract_analysis_pipeline.revert_detect as rd
 
-    # No process-global memo survives between runs.
     assert not hasattr(rd, "_EXPRESSION_TEXT_CACHE")
 
     sl = _compile(
@@ -775,8 +726,7 @@ def test_expression_text_cache_is_instance_scoped(tmp_path):
     d1.run()
     assert d1._expression_text_cache, "str(expr) memo should populate during run()"
 
-    # A fresh detector starts with its own empty memo — no cross-instance reuse
-    # of id() keys (the hazard a module-level dict would carry).
+    # A fresh detector starts with its own empty memo (no cross-instance id() keys).
     d2 = RevertDetector(fn)
     assert d2._expression_text_cache == {}
     assert d2._expression_text_cache is not d1._expression_text_cache
@@ -792,10 +742,8 @@ def test_expression_text_cache_is_instance_scoped(tmp_path):
 
 
 def test_multi_statement_emit_then_revert_is_recovered(tmp_path):
-    """``if (msg.sender != owner) { emit Denied(...); revert(); }`` — the
-    revert is two hops below the IF (after the emit). HEAD returned ``[]`` and
-    the function defaulted to public; the walk must recover one if-revert gate
-    with allowed_when_false (the guarded branch is the condition-true side)."""
+    """``if (msg.sender != owner) { emit Denied(...); revert(); }``: the revert is two hops below
+    the IF. HEAD returned ``[]`` (public); the walk must recover one allowed_when_false if-revert gate."""
     sl = _compile(
         tmp_path,
         """
@@ -821,8 +769,6 @@ def test_multi_statement_emit_then_revert_is_recovered(tmp_path):
 
 
 def test_multi_statement_assign_then_revert_is_recovered(tmp_path):
-    """Same shape with an assignment (not an emit) between the IF and a bare
-    ``revert()`` — still recovered as exactly one gate."""
     sl = _compile(
         tmp_path,
         """
@@ -846,12 +792,9 @@ def test_multi_statement_assign_then_revert_is_recovered(tmp_path):
 
 
 def test_revert_after_nested_if_emits_one_outer_gate(tmp_path):
-    """Shape A (the prior approach's live fail-open): ``if(outer){ if(flag){
-    emit;} revert(); }``. Both inner arms reconverge into the trailing revert,
-    so EVERY path leaving the outer-true branch reverts -> the OUTER guard
-    always reverts -> exactly one gate. The inner IF reverts on both arms
-    (not exactly one) -> no spurious inner gate. (BFS-to-ENDIF would have
-    dropped the outer guard = fail-open.)"""
+    """Shape A (prior approach's live fail-open): ``if(outer){ if(flag){ emit;} revert(); }``.
+    Every path leaving the outer-true branch reverts, so exactly one (outer) gate; the inner IF
+    reverts on both arms, so no spurious inner gate. (BFS-to-ENDIF dropped the outer guard.)"""
     sl = _compile(
         tmp_path,
         """
@@ -876,11 +819,8 @@ def test_revert_after_nested_if_emits_one_outer_gate(tmp_path):
 
 
 def test_revert_inside_nested_if_attributes_to_inner_only(tmp_path):
-    """Shape B: ``if(outer){ if(flag){ revert(); } }``. The outer-true branch
-    can ESCAPE (the inner false arm falls through without reverting), so the
-    outer IF does NOT always revert -> no outer gate. Only the inner flag-IF
-    always reverts on exactly one arm -> exactly one gate. Guards against
-    BFS over-attribution that would emit two gates (outer AND inner)."""
+    """Shape B: ``if(outer){ if(flag){ revert(); } }``. The outer branch can ESCAPE via the inner
+    false arm, so no outer gate; only the inner IF gives exactly one gate (guards BFS over-attribution)."""
     sl = _compile(
         tmp_path,
         """
@@ -903,10 +843,8 @@ def test_revert_inside_nested_if_attributes_to_inner_only(tmp_path):
 
 
 def test_both_branches_revert_emits_no_if_gate(tmp_path):
-    """``if(c){ revert A(); } else { revert B(); }`` — BOTH arms always revert
-    (the function reverts unconditionally), which is not a conditional access
-    fork, so no if-revert gate is fabricated (matches the real ENS both-arms
-    case the always-reverts model correctly drops)."""
+    """``if(c){ revert A(); } else { revert B(); }``: BOTH arms revert (not a conditional access
+    fork), so no if-revert gate is fabricated (matches the real ENS both-arms case)."""
     sl = _compile(
         tmp_path,
         """
@@ -926,11 +864,9 @@ def test_both_branches_revert_emits_no_if_gate(tmp_path):
 
 
 def test_branch_always_reverts_unbounded_cycle_escapes_not_guard():
-    """White-box hardening for ``_branch_always_reverts``: a branch whose only
-    exit is an unbounded cycle (no revert, no return — e.g. ``while(true){…}``)
-    must report ESCAPE ``(False, None)``, never a fabricated always-reverts
-    gate. Built on minimal fake CFG nodes so it pins the drain-with-no-revert
-    branch independent of Slither's loop lowering."""
+    """White-box: a branch whose only exit is an unbounded cycle (no revert, no return) must
+    report ESCAPE ``(False, None)``, never a fabricated always-reverts gate. Uses minimal fake
+    CFG nodes to pin the drain-with-no-revert branch independent of Slither's loop lowering."""
     from types import SimpleNamespace
 
     # Two nodes forming a cycle; neither reverts nor returns.
@@ -952,24 +888,17 @@ def test_branch_always_reverts_unbounded_cycle_escapes_not_guard():
 
 
 # ---------------------------------------------------------------------------
-# Calls to an ALWAYS-reverting callee as a branch sink. Solady EnumerableRoles
-# writes its authorization as ``if (!isOwner()) _revertUnauthorized();`` where
-# ``_revertUnauthorized`` is a helper that unconditionally reverts in assembly.
-# Before the fix the branch walk only accepted a literal revert IR as a sink,
-# so the guard branch "escaped" (the helper call looked like ordinary code),
-# no gate was lifted, and RoleRegistry setRole/grantRole/revokeRole defaulted
-# public. Treating an always-reverting CALLEE as a sink recovers the caller
-# gate, which the earned-public rail then fails CLOSED to external_check_only.
-# The conservative twin pins the load-bearing condition: a helper that reverts
-# only *conditionally* (a require that can pass) must NOT manufacture a gate.
+# Calls to an ALWAYS-reverting callee as a branch sink. Solady EnumerableRoles writes
+# ``if (!isOwner()) _revertUnauthorized();`` where the helper reverts in assembly. The branch
+# walk used to accept only a literal revert IR, so no gate was lifted and RoleRegistry
+# setRole/grantRole/revokeRole defaulted public. The conservative twin pins the load-bearing
+# condition: a helper that reverts only *conditionally* must NOT manufacture a gate.
 # ---------------------------------------------------------------------------
 
 
 def test_call_to_always_reverting_helper_recovers_gate(tmp_path):
-    """``if (!_isOwner()) _revertUnauthorized();`` with an assembly-``revert``
-    helper and a ``caller()``-reading check → the guard is recovered as one
-    if_revert gate and the function resolves external_check_only (fail-closed),
-    not public. Pre-fix this yielded zero gates → conditional_universal."""
+    """``if (!_isOwner()) _revertUnauthorized();`` with an assembly-revert helper: recovered as one
+    if_revert gate, function resolves external_check_only (fail-closed), not public (was zero gates)."""
     sl = _compile(
         tmp_path,
         """
@@ -1002,13 +931,9 @@ def test_call_to_always_reverting_helper_recovers_gate(tmp_path):
 
 
 def test_call_to_conditionally_reverting_helper_manufactures_no_gate(tmp_path):
-    """Conservative twin (load-bearing): the same ``if (!check()) helper();``
-    shape where ``helper`` reverts only *conditionally* (a require that can
-    pass, then a normal return) must NOT be treated as an always-reverting sink
-    — no if_revert/custom_revert gate is fabricated and the function stays
-    public (conditional_universal), never external_check_only. Over-closing
-    here is the failure mode that manufactured false positives in the inverse
-    direction."""
+    """Conservative twin (load-bearing): a helper that reverts only *conditionally* must NOT be an
+    always-reverting sink: no gate is fabricated and the function stays public
+    (conditional_universal). Over-closing manufactured false positives in the inverse direction."""
     sl = _compile(
         tmp_path,
         """
@@ -1034,13 +959,10 @@ def test_call_to_conditionally_reverting_helper_manufactures_no_gate(tmp_path):
 
 
 def test_solady_enumerable_roles_setrole_shape_gates_closed(tmp_path):
-    """Revert-proof pinning the RoleRegistry shape verbatim: Solady
-    EnumerableRoles' ``_enumerableRolesSenderIsContractOwner`` (assembly
-    reading ``caller()`` and ``staticcall``-ing ``owner()``) guarding
-    ``setRole`` through ``_authorizeSetRole``'s
-    ``if (!isOwner()) _revertEnumerableRolesUnauthorized();``. The public
-    entrypoint routes through two internal hops and an always-reverting
-    assembly helper; the recovered gate must resolve external_check_only."""
+    """Revert-proof pin of the RoleRegistry shape: Solady EnumerableRoles'
+    ``_enumerableRolesSenderIsContractOwner`` (assembly ``caller()`` + ``staticcall`` ``owner()``)
+    guarding ``setRole`` via two internal hops and an always-reverting assembly helper; the
+    recovered gate must resolve external_check_only."""
     sl = _compile(
         tmp_path,
         """
@@ -1080,15 +1002,11 @@ def test_solady_enumerable_roles_setrole_shape_gates_closed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# A modifier on an INTERNAL callee is a real gate of the entry function.
-# EigenLayer StrategyManager routes both deposit entries through
-# ``_depositIntoStrategy(...) internal onlyStrategiesWhitelistedForDeposit(strategy)``
-# whose body is a mapping-allowlist require on parameter 0; the entry's result
-# is assigned/returned, never branched on, so the cross-function recursion is
-# the ONLY path to the gate. Commit a96b2ca3 restored that recursion; these
-# arms pin the class so it cannot silently regress (the published verdict was a
-# false ``unconstrained_proven`` — a positive proof of absence over a gate that
-# exists).
+# A modifier on an INTERNAL callee is a real gate of the entry function. EigenLayer
+# StrategyManager routes deposits through ``_depositIntoStrategy(...) internal
+# onlyStrategiesWhitelistedForDeposit(strategy)``; the result is never branched on, so the
+# cross-function recursion (restored in a96b2ca3) is the ONLY path to the gate. Losing it
+# published a false ``unconstrained_proven`` over a gate that exists.
 # ---------------------------------------------------------------------------
 
 _L38_SOURCE = """
@@ -1123,8 +1041,6 @@ _L38_SOURCE = """
 
 
 def test_internal_callee_modifier_gate_is_lifted(tmp_path):
-    """Detector arm: the whitelist require inside the internal callee's
-    modifier is found from the entry function."""
     sl = _compile(tmp_path, _L38_SOURCE)
     gates = RevertDetector(_function(sl, "deposit")).run()
     requires = [g for g in gates if g.kind == "require" and "strategyWhitelist" in (g.expression_text or "")]
@@ -1136,11 +1052,9 @@ def test_internal_callee_modifier_gate_is_lifted(tmp_path):
 
 
 def test_internal_callee_modifier_gate_reaches_param_constraints(tmp_path):
-    """Claims arm: the published verdict for the gated entry's parameter 0 is
-    ``constrained``/``mapping_allowlist`` (this exact row published
-    ``{'state': 'unconstrained_proven'}`` on the two StrategyManager deposit
-    entries in the local DB — the false adverse), while the ungated
-    sibling KEEPS its honest ``unconstrained_proven``."""
+    """Claims arm: gated param 0 is ``constrained``/``mapping_allowlist`` (this row published the
+    false adverse ``unconstrained_proven`` on the two StrategyManager deposit entries), while the
+    ungated sibling KEEPS its honest ``unconstrained_proven``."""
     from services.static.claims.context import ClaimContext
     from services.static.claims.matchers import _facts
 

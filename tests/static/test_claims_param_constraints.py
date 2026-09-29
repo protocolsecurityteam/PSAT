@@ -1,20 +1,16 @@
 """``_facts.param_constraints`` — the mandatory-gate analysis.
 
-The question is *"does a mandatory revert gate reference this parameter between
-entry and sink?"*, and the answer has three states that a consumer must be able
-to tell apart. These tests drive the analysis on hand-built predicate trees
-so every branch — including the ones no corpus contract reaches — is exercised
-against a stated input, and on the compiled corpus so the states are reachable
-from real compiler output rather than only from a fixture.
+Does a mandatory revert gate reference this parameter between entry and sink? The
+three answer states must stay distinguishable. Driven on hand-built predicate trees
+(so branches no corpus contract reaches are exercised) and on the compiled corpus.
 
-The controls this module keeps honest:
+Controls:
 
-* POSITIVE (must stay unconstrained, i.e. keep its caller-chosen flag):
-  ``sweepDust``'s shape — a zero-address check plus the value call's own revert
-  surface. A prior fix proposal classified it ``constrained``; that is the
-  overshoot the tightened rule exists to prevent.
-* NEGATIVE (must stay clean): ``payAnyone`` in the corpus — same body, same
-  claim, same lattice kind as three constrained siblings, and no guard.
+* POSITIVE (must stay unconstrained): ``sweepDust``'s shape — a zero-address check
+  plus the value call's own revert surface. A prior fix classified it
+  ``constrained``, the overshoot the tightened rule prevents.
+* NEGATIVE (must stay clean): ``payAnyone`` — same body, claim and lattice kind as
+  three constrained siblings, and no guard.
 """
 
 from __future__ import annotations
@@ -287,13 +283,10 @@ _ROUTER_LEAF = dict(
 
 
 def test_a_routed_flows_recorded_router_op_is_transparent():
-    """A ``value_router`` flow records the CALLEE's inner transfer selector, so
-    the router call this function makes joins only through the flow's
-    ``router_ops`` — the identity the producer recorded at the crossing site.
-    Joined here by the callee's bare name, because the declared signature
-    (``exit(address,IERC20,…)``) does not hash to the selector the sink
-    recorded. The router's revert surface is exactly the effect's, so it must
-    not block the negative proof."""
+    """A ``value_router`` flow records the CALLEE's inner transfer selector, so the
+    router call joins only through the flow's ``router_ops``, here by the callee's
+    bare name (the declared signature does not hash to the recorded selector). The
+    router's revert surface is the effect's own, so it must not block the negative proof."""
     ctx = _ctx(
         _leaf(**_ROUTER_LEAF),
         sinks=[{"kind": "external_call", "target": "vault.exit", "selector": "0x18457e61", "origin": "body"}],
@@ -311,13 +304,11 @@ def test_a_routed_flows_recorded_router_op_is_transparent():
 
 
 def test_a_non_router_leaf_on_a_routed_function_blocks():
-    """The sibling of the transparency positive above: a nonview body-call
-    leaf that is NOT the recorded router op (``guard.checkDestination(to)``
-    beside ``vault.exit(to, …)``) is unevaluable, and the function must fall to
-    ``not_determined`` — not fall THROUGH to the ``unconstrained_proven``
-    default. Before router_ops, every body call on a routed function was
-    transparent and this guard's leaf was swallowed: the guarded function and
-    its guard-free twin published byte-identical negative proofs."""
+    """The sibling of the transparency positive: a nonview body-call leaf that is NOT
+    the recorded router op (``guard.checkDestination(to)`` beside ``vault.exit(to, …)``)
+    must fall to ``not_determined``, not THROUGH to ``unconstrained_proven``. Before
+    router_ops the guard's leaf was swallowed and guarded and guard-free twins
+    published byte-identical negative proofs."""
     ctx = _ctx(
         {
             "op": "AND",
@@ -352,13 +343,9 @@ def test_a_non_router_leaf_on_a_routed_function_blocks():
 
 
 def test_a_routed_flow_without_recorded_router_ops_makes_nothing_transparent():
-    """An artifact produced before ``router_ops`` existed carries a routed flow
-    with no router identity. Absence of the record is not a licence to widen:
-    the router's own leaf then blocks and the answer stays ``not_determined`` —
-    an under-claim, never a minted proof. (Realised on the local DB: both
-    persisted ``bulkWithdraw`` param destinations fall from the pre-fix
-    ``unconstrained_proven`` to ``not_determined`` until re-analysis records
-    the op.)"""
+    """An artifact from before ``router_ops`` carries a routed flow with no router
+    identity. Absence is not a licence to widen: the router's own leaf blocks and the
+    answer stays ``not_determined`` — an under-claim, never a minted proof."""
     ctx = _ctx(
         _leaf(**_ROUTER_LEAF),
         sinks=[{"kind": "external_call", "target": "vault.exit", "selector": "0x18457e61", "origin": "body"}],
@@ -386,16 +373,14 @@ def _routed_flow(**extra: Any) -> dict[str, Any]:
 
 
 def test_the_recorded_router_op_is_projected_into_the_published_witness():
-    """The transparency join above runs on the producer dict in process; a
-    consumer holding only the persisted claim saw none of it. The projection
-    carries the op identity through verbatim — ``selector`` is the keccak4 of
-    the signature the AST records (ABI-canonical only where the parameter types
-    lower) and ``callee`` its bare AST name, an intra-unit call identity and
-    never a resolved on-chain target.
+    """The transparency join runs on the producer dict in process; a consumer holding
+    only the persisted claim saw none of it. The projection carries the op verbatim
+    (``selector`` = keccak4 of the AST signature, ``callee`` its bare AST name — an
+    intra-unit identity, never a resolved on-chain target).
 
-    The sink cross-reference joins on that SAME identity: the routed flow's own
-    selector belongs to the callee's inner transfer, so ``vault.exit`` is
-    reachable only through the recorded op."""
+    The sink cross-reference joins on that SAME identity: the routed flow's own selector
+    belongs to the callee's inner transfer, so ``vault.exit`` is reachable only through
+    the recorded op."""
     ctx = _ctx(
         _leaf(**_ROUTER_LEAF),
         sinks=[
@@ -427,10 +412,9 @@ def test_the_recorded_router_op_is_projected_into_the_published_witness():
 
 
 def test_every_recorded_op_is_projected_in_the_producers_order():
-    """A crossing that carries the move through two calls records both. The
-    projection is a passthrough, so the consumer sees the same ops in the same
-    order the producer sorted them into — dropping or reordering one would
-    silently narrow the transparency set."""
+    """A crossing that carries the move through two calls records both; the
+    projection is a passthrough, so dropping or reordering one would silently narrow
+    the transparency set."""
     ops = [{"selector": "0x39d6ba32", "callee": "enter"}, {"selector": "0x9729bb1e", "callee": "safeTransferFrom"}]
     ctx = _ctx(_leaf(**_ROUTER_LEAF), flows=[_routed_flow(router_ops=list(ops))])
     evidence = flows.value_router(ctx, "f(address,uint256)")
@@ -440,12 +424,9 @@ def test_every_recorded_op_is_projected_in_the_producers_order():
 
 @pytest.mark.parametrize("recorded", [None, []], ids=["absent", "empty"])
 def test_an_unrecorded_router_op_leaves_the_key_absent_and_the_gate_undetermined(recorded):
-    """Both failure shapes — the field never written, and a written empty list —
-    publish the SAME thing: no key. ``[]`` must never reach a consumer, because
-    an empty set of ops reads as "this routed flow has no router" and would
-    license the transparency the absence is supposed to deny. The paired gate
-    assertion pins that denial: the router's own leaf blocks and the parameter
-    stays ``not_determined``."""
+    """A never-written field and a written empty list publish the SAME thing: no key.
+    ``[]`` must never reach a consumer — an empty op set reads as "no router" and would
+    license the transparency the absence denies. The gate assertion pins that denial."""
     flow = _routed_flow() if recorded is None else _routed_flow(router_ops=recorded)
     ctx = _ctx(
         _leaf(**_ROUTER_LEAF),
@@ -512,13 +493,11 @@ def test_a_computed_operand_with_UNDETERMINED_provenance_blocks_the_unconstraine
 
 
 def test_a_computed_operand_blocks_the_unconstrained_proof_even_with_resolved_provenance():
-    """INVERTED from ``…proven_to_hold_only_constants_blocks_nothing``: the old
-    arm read a fully-resolved ``derived_from`` as a COMPLETE account and let the
-    leaf support ``unconstrained_proven`` for every unlisted parameter. That is
-    the misbind consumed as ground truth in exactly the forbidden direction —
-    the flow-insensitive union can OMIT an origin that genuinely feeds
-    the value, so a resolved-looking list still proves nothing negatively. Every
-    ``computed`` operand blocks; the positive ``derived`` bindings survive."""
+    """INVERTED from ``…proven_to_hold_only_constants_blocks_nothing``: the old arm read a
+    resolved ``derived_from`` as COMPLETE and let the leaf support ``unconstrained_proven``
+    for unlisted parameters — the misbind consumed as ground truth, since the
+    flow-insensitive union can OMIT a genuine origin. Every ``computed`` operand blocks;
+    positive ``derived`` bindings survive."""
     for provenance in ([], [_param(1, "receiver")], [STATE_VAR]):
         ctx = _ctx(
             _leaf(
@@ -626,16 +605,12 @@ def test_an_unrecognised_unsupported_reason_still_blocks():
 
 
 def test_without_ir_no_effectful_callee_is_transparent_in_exec_mode():
-    """INVERTED: the old arm pinned exec-mode transparency for ANY
-    body call, which is exactly the swallowing that let a mandatory Safe/Zodiac
-    transaction-guard leaf publish ``unconstrained_proven`` on a vetted
-    destination — byte-identical to a function with no guard at all, a proof of
-    absence minted from a leaf the walk chose not to evaluate. Transparency is
-    now earned per call op, from an IR proof that the op's own destination is
-    parameter-rooted; a context with no Slither subject can prove that for no
-    op, so the effectful-callee leaf blocks the negative proof in BOTH modes.
-    The transparent positive is pinned where the proof is reachable — on the
-    compiled corpus (``test_claims_upgrade_exec_matchers.
+    """INVERTED: the old arm pinned exec-mode transparency for ANY body call, which let a
+    mandatory Safe/Zodiac transaction-guard leaf publish ``unconstrained_proven`` —
+    byte-identical to a function with no guard. Transparency is now earned per call op
+    from an IR proof that its destination is parameter-rooted; with no Slither subject
+    that holds for no op, so the effectful-callee leaf blocks in BOTH modes. The
+    transparent positive lives on the compiled corpus (``test_claims_upgrade_exec_matchers.
     test_the_arbitrary_calls_own_revert_surface_is_still_transparent``)."""
     leaf = _leaf(
         kind="external_bool",
@@ -817,12 +792,10 @@ def test_an_array_length_read_is_not_an_element_read():
 
 
 def test_a_record_without_parameter_names_can_never_mint_the_proof_state():
-    """A pre-enrichment artifact carries no ``parameter_names``, so the
-    expression cross-check cannot run and no leaf's silence is verifiable.
-    Positives still mint; the proof of absence does not. Reachable by
-    construction only — the local corpus carries the list on 2,415/2,415
-    functions, so this branch has zero realised rows today (a lower bound, not
-    a population claim)."""
+    """A pre-enrichment artifact carries no ``parameter_names``, so the expression
+    cross-check cannot run and no leaf's silence is verifiable. Positives still mint;
+    the proof of absence does not. Reachable by construction only (the local corpus
+    has the list on 2,415/2,415 functions)."""
     tree = {
         "op": "AND",
         "children": [
@@ -1018,13 +991,11 @@ def _safe_ctx() -> ClaimContext:
 
 
 def test_the_safe_standard_gate_commits_only_the_signed_exec_entry():
-    """``execTransaction`` is the entry whose parameters ride under
-    the owners' threshold signatures — every one of its ten indices carries the
-    standard commitment. The module-exec entries share ``SAFE_EXEC_SELECTORS``
-    and the contract gate, but their guard is ``modules[msg.sender]`` — an
-    allowlist on the CALLER that commits nothing about any parameter — so the
-    standard helper answers ``None`` for them, never a fabricated
-    ``signature_witness``."""
+    """``execTransaction`` is the entry whose parameters ride under the owners'
+    threshold signatures — all ten indices carry the standard commitment. Module-exec
+    entries share ``SAFE_EXEC_SELECTORS`` but are guarded by ``modules[msg.sender]``, an
+    allowlist on the CALLER that commits no parameter, so the helper answers ``None`` for
+    them, never a fabricated ``signature_witness``."""
     ctx = _safe_ctx()
     exec_tx = "execTransaction(address,uint256,bytes,uint8,uint256,uint256,uint256,address,address,bytes)"
     for index in range(10):

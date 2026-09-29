@@ -1,25 +1,11 @@
 """Base (chain 8453) second-chain live analogs — MULTICHAIN_INVARIANTS.md inv. 2/4/14.
 
-These are the Phase-2 gate's L2 evidence: second-chain analogs of the
-monitored-contract / enrollment / per-chain-observability live tests. They run
-ONLY in the CI preview environment (never from a dev box, per the Phase-2
-execution-environment rule) and are gated on the deployed server actually
-supporting Base. On a mainnet-only deployment the whole module skips cleanly —
-prod stays mainnet-only; only the Base-enabled preview sets
-``PSAT_SUPPORTED_CHAIN_IDS=1,8453`` (see .github/workflows/pr.yml deploy step).
-
-The deployed server exposes no allowlist read endpoint. The enrollment/analyze
-edges now DO consult the allowlist (they reject an unsupported chain with HTTP
-400), but that rejection can't be the primary gate: the module skip must fire
-before the expensive company fixtures run, and it can't distinguish a real
-"Base unsupported" 400 from an unrelated request error. The gate is therefore
-explicit and up-front: the live-tests runner declares the deployed allowlist via
-``PSAT_LIVE_SUPPORTED_CHAIN_IDS`` (mirror of the deploy's
-``PSAT_SUPPORTED_CHAIN_IDS``). When that is unset we fall back to a positive
-server probe — Base showing up in ``/api/health/monitoring`` chains means the
-deployment is already exercising Base — and otherwise skip. The Base enrollment
-fixture then treats a server-side unsupported-chain 400 as a clean skip too, a
-defense-in-depth layer for a mainnet-only preview that slips past both.
+Phase-2 gate L2 evidence; runs ONLY in the CI preview (never a dev box) and skips the whole module on a
+mainnet-only deployment (prod stays mainnet-only; only the preview sets ``PSAT_SUPPORTED_CHAIN_IDS=1,8453``, see
+pr.yml).
+The server exposes no allowlist endpoint and a 400 can't be told from an unrelated error, so the gate is up-front:
+``PSAT_LIVE_SUPPORTED_CHAIN_IDS`` (mirror of the deploy's), else a positive probe for Base in ``/api/health/monitoring``
+chains. The enrollment fixture also skips on an unsupported-chain 400 as defense in depth.
 """
 
 from __future__ import annotations
@@ -45,11 +31,8 @@ _BASE_CONFIG = {"watch_upgrades": True, "watch_ownership": True}
 
 
 def _declared_supported_chain_ids() -> set[int] | None:
-    """Runner-side mirror of the deployed ``PSAT_SUPPORTED_CHAIN_IDS`` allowlist.
-
-    Returns None when unset/blank so the caller can fall back to a server probe;
-    otherwise the parsed decimal id set (non-integers ignored, like the backend's
-    own parser in ``utils/chains.supported_chain_ids``)."""
+    """Runner-side mirror of ``PSAT_SUPPORTED_CHAIN_IDS``; None when unset/blank so the caller can probe the server.
+    Non-integers are ignored, like ``utils/chains.supported_chain_ids``."""
     raw = os.environ.get("PSAT_LIVE_SUPPORTED_CHAIN_IDS")
     if raw is None or not raw.strip():
         return None
@@ -62,9 +45,8 @@ def _declared_supported_chain_ids() -> set[int] | None:
 
 
 def _base_present_in_health_chains(live_client: LiveClient) -> bool:
-    """Positive-only probe: does the deployed server already report Base under
-    ``/api/health/monitoring`` chains? 503 is a valid body here (an unrelated
-    daemon may be stale) — the per-chain ``chains`` list is present either way."""
+    """Positive-only probe for Base in ``/api/health/monitoring`` chains; 503 is a valid body (an unrelated daemon may
+    be stale)."""
     try:
         r = live_client._session.get(live_client._url("/api/health/monitoring"), timeout=15)
     except Exception:
@@ -77,11 +59,9 @@ def _base_present_in_health_chains(live_client: LiveClient) -> bool:
 
 @pytest.fixture(scope="module", autouse=True)
 def _require_base_enabled(live_client: LiveClient):
-    """Skip the whole module unless the deployment supports Base.
+    """Skip the module unless the deployment supports Base.
 
-    Autouse + module-scoped and dependent only on the session ``live_client`` so
-    it fires before the expensive company fixtures — a mainnet-only preview skips
-    without ever triggering an analysis run.
+    Autouse, module-scoped, depends only on ``live_client`` so it fires before the expensive company fixtures.
     """
     declared = _declared_supported_chain_ids()
     if declared is not None:
@@ -104,12 +84,8 @@ def base_monitored_contract(
     company_protocol_id: int,
     live_client: LiveClient,
 ) -> dict[str, Any]:
-    """Upsert a Base-chain MonitoredContract for weETH under the test protocol.
-
-    Mirrors ``test_monitored_contract_patch.monitored_contract`` but on
-    ``chain='base'``; the (address, chain) uniqueness constraint makes re-runs
-    idempotent since no admin DELETE exists.
-    """
+    """Upsert a Base ``MonitoredContract`` for weETH; the (address, chain) unique key makes re-runs idempotent (no admin
+    DELETE)."""
     payload = {
         "address": WEETH_BASE_ADDRESS.lower(),
         "chain": BASE_CHAIN,
@@ -121,11 +97,7 @@ def base_monitored_contract(
     try:
         return live_client.upsert_protocol_monitoring(company_protocol_id, payload)
     except requests.HTTPError as exc:
-        # Defense in depth: a mainnet-only deployment now rejects a Base
-        # enrollment with HTTP 400 (allowlist enforcement). If the up-front
-        # module gate somehow passed on a Base-less deployment, skip cleanly
-        # rather than fail — this module never asserts against a chain the
-        # server has not enabled.
+        # Defense in depth: a mainnet-only deployment rejects Base enrollment with 400; skip, never fail.
         resp = exc.response
         if resp is not None and resp.status_code == 400:
             pytest.skip(f"deployment rejected Base enrollment (allowlist): {resp.text[:200]}")
@@ -170,12 +142,8 @@ def test_same_address_distinct_across_chains(
     company_protocol_id: int,
     live_client: LiveClient,
 ):
-    """Cross-chain identity: the SAME address on 'ethereum' vs 'base' is two rows.
-
-    A data-model assertion of the ``(address, chain)`` unique key — it does not
-    claim weETH-on-Base exists at this address on mainnet; the ethereum row is a
-    deliberate collision probe on a stable (address, chain) singleton.
-    """
+    """The SAME address on 'ethereum' vs 'base' is two rows (``(address, chain)`` unique key); the ethereum row is a
+    deliberate collision probe."""
     eth_payload = {
         "address": WEETH_BASE_ADDRESS.lower(),
         "chain": ETHEREUM_CHAIN,
@@ -199,12 +167,8 @@ def test_fleet_exposes_base_by_chain(
     base_monitored_contract,
     live_client: LiveClient,
 ):
-    """`/api/fleet` carries a per-chain breakdown (inv. 4, WI-D).
-
-    Base was just enrolled active, so it must appear in the monitoring
-    ``by_chain`` rollup; the indexer's ``by_chain`` is shape-checked tolerantly
-    because Base may be indexer-idle in a fresh preview.
-    """
+    """`/api/fleet` carries a per-chain breakdown (inv. 4, WI-D); the indexer ``by_chain`` is checked tolerantly (Base
+    may be idle)."""
     r = live_client._session.get(live_client._url("/api/fleet"), timeout=30)
     r.raise_for_status()
     body = r.json()
@@ -233,12 +197,10 @@ def test_monitoring_health_exposes_chains(
     base_monitored_contract,
     live_client: LiveClient,
 ):
-    """`/api/health/monitoring` carries a per-chain staleness breakdown (inv. 4, WI-D).
+    """`/api/health/monitoring` carries per-chain staleness (inv. 4, WI-D).
 
-    Shape-tolerant: an idle chain must not fail the test, so Base is allowed to be
-    absent or present-and-idle. When present, the documented per-chain shape must
-    hold. 503 is an accepted status — the endpoint 503s when any daemon is stale
-    while still returning the ``chains`` list.
+    Shape-tolerant: Base may be absent or idle; 503 is accepted (returned when any daemon is stale, still with
+    ``chains``).
     """
     r = live_client._session.get(live_client._url("/api/health/monitoring"), timeout=15)
     assert r.status_code in (200, 503), f"unexpected /api/health/monitoring status {r.status_code}: {r.text[:200]}"

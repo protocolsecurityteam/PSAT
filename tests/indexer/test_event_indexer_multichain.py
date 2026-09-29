@@ -1,16 +1,9 @@
-"""M1.1 item 3 — the indexer threads a per-job / per-cursor chain_id instead of
-stamping everything chain 1.
+"""M1.1 item 3 — the indexer threads a per-job / per-cursor chain_id instead of stamping everything chain 1.
 
-These tests prove a second-chain (Base, 8453) input reaches every threaded path:
-
-  * ``_build_indexer_fetchers`` builds one fetcher per registry chain that
-    declares HyperSync coverage — every chain, mainnet included, reads its own
-    eRPC route (``{ERPC_BASE_URL}/main/evm/{chain_id}``); a ``hypersync_url is
-    None`` chain gets no fetcher at all;
-  * ``enroll_from_completed_jobs`` stamps each cursor with the enrolled job's own
-    ``chain_id`` (a Base job → chain 8453 cursors, not chain 1);
-  * ``scan_enrolled_events`` derives its confirmation depth per chain from the
-    registry, and logs loudly (once) when a cursor's chain has no fetcher.
+A second-chain (Base, 8453) input must reach every threaded path: ``_build_indexer_fetchers`` (one eRPC-route
+fetcher per HyperSync-covered chain, none for ``hypersync_url is None``), ``enroll_from_completed_jobs`` (cursor
+stamped with the job's ``chain_id``) and ``scan_enrolled_events`` (per-chain confirmation depth, one loud log per
+fetcher-less chain).
 """
 
 from __future__ import annotations
@@ -45,26 +38,21 @@ _BASE_HYPERSYNC = "https://base.hypersync.xyz"
 _ERPC_BASE = "https://erpc.example"
 _MAINNET_ERPC = f"{_ERPC_BASE}/main/evm/1"
 _BASE_ERPC = f"{_ERPC_BASE}/main/evm/{_BASE}"
-# A registry chain still marked indexer-disabled (hypersync_url=None). Base used
-# to play the "uncovered chain" role here, but Phase 2 enabled it — so the
-# placeholder moves to arbitrum, which stays disabled until it earns its slot.
+# A registry chain still marked indexer-disabled (hypersync_url=None); arbitrum stays disabled until it earns its slot.
 _UNCOVERED = 42161  # arbitrum
 _AUTHORITY = "0x" + "5c" * 20
 _TOPIC = "0x" + "ab" * 32
 
 
 def _url(fetcher: object) -> str:
-    """rpc_url of a concrete Rpc*Fetcher; the fetcher maps are typed by Protocol,
-    which deliberately doesn't carry the attribute."""
+    """rpc_url of a concrete Rpc*Fetcher; the Protocol-typed fetcher maps deliberately omit the attribute."""
     return cast(Any, fetcher).rpc_url
 
 
 @pytest.fixture(autouse=True)
 def _no_creation_witness(monkeypatch):
-    """Enrollment grades its seed with three pinned chain reads before writing
-    the cursor. Nothing here asserts that grade — the subject is the cursor's
-    ``chain_id`` — so the wire is stubbed to the unreachable-RPC failure, whose
-    documented outcome is ``(None, not_determined)``."""
+    """Stub the seed-grading wire to the unreachable-RPC outcome ``(None, not_determined)``; this module asserts the
+    cursor's ``chain_id``, not the grade."""
     import workers.event_log_indexer as eli
 
     def _no_wire(*_a, **_kw):
@@ -74,22 +62,16 @@ def _no_creation_witness(monkeypatch):
 
 
 def _base_chaininfo(**overrides) -> ChainInfo:
-    """A Base ChainInfo with its HyperSync URL pinned, for tests that need a
-    covered second chain independent of registry state."""
     base = chain_by_id(_BASE)
     return dataclasses.replace(base, hypersync_url=_BASE_HYPERSYNC, **overrides)
 
 
-# --------------------------------------------------------------------------- #
 # Fetcher map — per-chain eRPC routes, gated by registry hypersync_url coverage
-# --------------------------------------------------------------------------- #
 
 
 def test_build_fetchers_mainnet_uses_erpc(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", _ERPC_BASE)
     fetchers, head_fetchers, block_hash_fetchers = _build_indexer_fetchers()
-    # Covered chains today are mainnet + Base (Phase 2). Both read their own eRPC
-    # route — mainnet is not special, there is no dedicated indexer lane.
     assert set(fetchers) == {1, _BASE}
     assert _url(fetchers[1]) == _MAINNET_ERPC
     assert _url(head_fetchers[1]) == _MAINNET_ERPC
@@ -117,9 +99,7 @@ def test_build_fetchers_skips_chains_without_hypersync_url(monkeypatch):
     assert set(fetchers) == {1}
 
 
-# --------------------------------------------------------------------------- #
 # Enrollment — cursor chain_id comes from the job's chain
-# --------------------------------------------------------------------------- #
 
 
 @pytest.fixture()
@@ -200,9 +180,7 @@ def test_enroll_stamps_cursor_with_jobs_chain(session, monkeypatch):
     assert all(r[1] == deploy - 1 for r in rows)
 
 
-# --------------------------------------------------------------------------- #
 # Scan — per-chain confirmation depth + loud skip on a fetcher-less chain
-# --------------------------------------------------------------------------- #
 
 
 class _EmptyFetcher:
