@@ -463,13 +463,12 @@ class TestSearchCacheBehavior:
         monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
         monkeypatch.setenv("PSAT_EXA_CACHE", "1")
 
-        storage_client = MagicMock() if has_client else None
-        if has_client:
-            storage_client.get.side_effect = get_exc
-            storage_client.put.side_effect = put_exc
+        storage_client = MagicMock()
+        storage_client.get.side_effect = get_exc
+        storage_client.put.side_effect = put_exc
         post_mock = MagicMock(return_value=_FakeResp(payload={"results": [{"url": "https://x"}]}))
 
-        with patch("db.storage.get_storage_client", return_value=storage_client):
+        with patch("db.storage.get_storage_client", return_value=storage_client if has_client else None):
             monkeypatch.setattr(exa.requests, "post", post_mock)
             # Bucket flake on read or write must not surface to the caller.
             result = exa.search("q", max_results=3)

@@ -106,7 +106,7 @@ def test_emit_claim_valid_copies_witness():
 )
 def test_emit_claim_rejects_invalid_input(claim_id, tier, match):
     with pytest.raises(ValueError, match=match):
-        emit_claim(claim_id, tier, {})  # pyright: ignore[reportArgumentType]
+        emit_claim(claim_id, tier, {})
 
 
 @pytest.mark.parametrize(

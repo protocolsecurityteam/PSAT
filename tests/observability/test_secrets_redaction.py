@@ -165,7 +165,7 @@ class TestSanitizeUrl:
         ],
     )
     def test_non_url_input_passes_through(self, value):
-        assert sanitize_url(value) == value  # pyright: ignore[reportArgumentType]
+        assert sanitize_url(value) == value
 
     def test_public_rpc_pass_through(self):
         assert sanitize_url(_PUBLIC_RPC) == _PUBLIC_RPC
