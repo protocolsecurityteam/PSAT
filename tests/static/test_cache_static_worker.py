@@ -374,130 +374,47 @@ def test_apply_proxy_cache_proxy(db_session):
 # ---------------------------------------------------------------------------
 
 
-def test_check_proxy_cache_no_source_job_id(db_session):
+@pytest.mark.parametrize(
+    ("source_contracts", "request_keys"),
+    [
+        pytest.param([], ("rpc_url",), id="no-source-job-id"),
+        pytest.param([], ("rpc_url", "cache_source_job_id"), id="source-contract-missing"),
+        pytest.param(
+            [{"contract_name": "Proxy", "is_proxy": True, "proxy_type": "eip1967", "implementation": None}],
+            ("rpc_url", "cache_source_job_id"),
+            id="proxy-no-cached-impl",
+        ),
+        pytest.param(
+            [{"contract_name": "Proxy", "is_proxy": True, "proxy_type": "eip1967", "implementation": IMPL_ADDR}],
+            ("cache_source_job_id",),
+            id="no-rpc-url",
+        ),
+    ],
+)
+def test_check_proxy_cache_returns_none_on_missing_input(db_session, monkeypatch, source_contracts, request_keys):
     from db.models import Contract
     from db.queue import create_job
     from workers.static_worker import _check_proxy_cache
 
-    job = create_job(
-        db_session,
-        {
-            "address": ADDR_A,
-            "rpc_url": "https://rpc.example",
-            "static_cached": True,
-            # cache_source_job_id intentionally omitted
-        },
-    )
-    contract = Contract(job_id=job.id, address=ADDR_A, contract_name="T")
-    db_session.add(contract)
-    db_session.flush()
-
-    result = _check_proxy_cache(db_session, job, contract)
-    assert result is None
-
-
-def test_check_proxy_cache_source_contract_missing(db_session):
-    from db.models import Contract
-    from db.queue import create_job
-    from workers.static_worker import _check_proxy_cache
+    # Clear the RPC env (eRPC route) so the no-rpc case has no fallback to resolve.
+    monkeypatch.delenv("ETH_RPC", raising=False)
+    monkeypatch.delenv("ERPC_BASE_URL", raising=False)
 
     source_job = create_job(db_session, {"address": ADDR_A})
-    # No contract row added for source_job
-
-    job = create_job(
-        db_session,
-        {
-            "address": ADDR_A,
-            "rpc_url": "https://rpc.example",
-            "static_cached": True,
-            "cache_source_job_id": str(source_job.id),
-        },
-    )
-    contract = Contract(job_id=job.id, address=ADDR_A, contract_name="T")
-    db_session.add(contract)
+    for fields in source_contracts:
+        db_session.add(Contract(job_id=source_job.id, address=ADDR_A, **fields))
     db_session.flush()
 
-    result = _check_proxy_cache(db_session, job, contract)
-    assert result is None
-
-
-def test_check_proxy_cache_proxy_no_cached_impl(db_session):
-    from db.models import Contract
-    from db.queue import create_job
-    from workers.static_worker import _check_proxy_cache
-
-    source_job = create_job(db_session, {"address": ADDR_A})
-    src_contract = Contract(
-        job_id=source_job.id,
-        address=ADDR_A,
-        contract_name="Proxy",
-        is_proxy=True,
-        proxy_type="eip1967",
-        implementation=None,
-    )
-    db_session.add(src_contract)
-    db_session.flush()
-
+    available = {"rpc_url": "https://rpc.example", "cache_source_job_id": str(source_job.id)}
     job = create_job(
         db_session,
-        {
-            "address": ADDR_A,
-            "rpc_url": "https://rpc.example",
-            "static_cached": True,
-            "cache_source_job_id": str(source_job.id),
-        },
+        {"address": ADDR_A, "static_cached": True, **{key: available[key] for key in request_keys}},
     )
     contract = Contract(job_id=job.id, address=ADDR_A, contract_name="Proxy")
     db_session.add(contract)
     db_session.flush()
 
-    result = _check_proxy_cache(db_session, job, contract)
-    assert result is None
-
-
-def test_check_proxy_cache_no_rpc_url(db_session):
-    from db.models import Contract
-    from db.queue import create_job
-    from workers.static_worker import _check_proxy_cache
-
-    source_job = create_job(db_session, {"address": ADDR_A})
-    src_contract = Contract(
-        job_id=source_job.id,
-        address=ADDR_A,
-        contract_name="Proxy",
-        is_proxy=True,
-        proxy_type="eip1967",
-        implementation=IMPL_ADDR,
-    )
-    db_session.add(src_contract)
-    db_session.flush()
-
-    job = create_job(
-        db_session,
-        {
-            "address": ADDR_A,
-            # No rpc_url
-            "static_cached": True,
-            "cache_source_job_id": str(source_job.id),
-        },
-    )
-    contract = Contract(job_id=job.id, address=ADDR_A, contract_name="Proxy")
-    db_session.add(contract)
-    db_session.flush()
-
-    # Clear the RPC env (eRPC route) to ensure no fallback resolves
-    import os
-
-    old_rpc = os.environ.pop("ETH_RPC", None)
-    old_erpc = os.environ.pop("ERPC_BASE_URL", None)
-    try:
-        result = _check_proxy_cache(db_session, job, contract)
-        assert result is None
-    finally:
-        if old_rpc is not None:
-            os.environ["ETH_RPC"] = old_rpc
-        if old_erpc is not None:
-            os.environ["ERPC_BASE_URL"] = old_erpc
+    assert _check_proxy_cache(db_session, job, contract) is None
 
 
 # ---------------------------------------------------------------------------

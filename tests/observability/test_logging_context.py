@@ -151,8 +151,3 @@ def test_parallel_map_sequential_path_propagates_trace_id():
         results = parallel_map(read_trace, [1, 2, 3], max_workers=1)
 
     assert [r for _, r in results] == ["serial", "serial", "serial"]
-
-
-# ---------------------------------------------------------------------------
-# Cross-thread isolation
-# ---------------------------------------------------------------------------

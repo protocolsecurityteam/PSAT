@@ -108,19 +108,19 @@ def _semantic_signatures(analysis: Any) -> set[str]:
 # (1) Admission stage — passes for both naming conventions.
 
 
-def test_oz_style_grant_role_admits(tmp_path: Path):
-    project = _write_project(tmp_path, "OZStyle", OZ_SOURCE)
+@pytest.mark.parametrize(
+    ("contract_name", "source", "signature"),
+    [
+        pytest.param("OZStyle", OZ_SOURCE, "grantRole(bytes32,address)", id="oz_style_grant_role"),
+        # The gate is name-neutral: the helper rename doesn't change the IR shape and ``caller_reach_analysis``
+        # recurses into it to find the ``caller_in_mapping`` revert-gate.
+        pytest.param("Renamed", RENAMED_SOURCE, "dispenseRole(bytes32,address)", id="renamed_helpers_dispense_role"),
+    ],
+)
+def test_guarded_role_function_admits(tmp_path: Path, contract_name, source, signature):
+    project = _write_project(tmp_path, contract_name, source)
     analysis = collect_contract_analysis(project)
-    assert "grantRole(bytes32,address)" in _semantic_signatures(analysis)
-
-
-def test_renamed_helpers_dispense_role_admits(tmp_path: Path):
-    """The admission gate is name-neutral: the helper rename doesn't change the IR
-    shape and ``caller_reach_analysis`` recurses into it to find the
-    ``caller_in_mapping`` revert-gate."""
-    project = _write_project(tmp_path, "Renamed", RENAMED_SOURCE)
-    analysis = collect_contract_analysis(project)
-    assert "dispenseRole(bytes32,address)" in _semantic_signatures(analysis)
+    assert signature in _semantic_signatures(analysis)
 
 
 def test_unguarded_grant_role_does_not_admit(tmp_path: Path):

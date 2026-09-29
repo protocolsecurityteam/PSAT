@@ -105,36 +105,29 @@ def test_filter_by_address_returns_all_chains(api_client, seeded_events):
     assert block_numbers == [100, 101, 200]
 
 
-def test_filter_by_address_and_chain(api_client, seeded_events):
-    resp = api_client.get(
-        "/api/monitored-events",
-        params={"address": seeded_events["addr"], "chain": "ethereum"},
-    )
+@pytest.mark.parametrize(
+    ("make_params", "expected_blocks"),
+    [
+        pytest.param(lambda s: {"address": s["addr"], "chain": "ethereum"}, [100, 101], id="address_and_chain"),
+        pytest.param(
+            lambda s: {"address": s["addr"], "event_type": "safe_tx_executed"}, [100, 200], id="address_and_event_type"
+        ),
+        # Address with no MonitoredContract row -> empty list, not 404.
+        pytest.param(lambda s: {"address": "0x" + "00" * 20}, [], id="unknown_address"),
+        # Regression: ``chain`` alone was silently ignored and returned global recent events (codex flagged on
+        # review). Ethereum events: mc_eth (100, 101) + mc_other (300).
+        pytest.param(lambda s: {"chain": "ethereum"}, [100, 101, 300], id="chain_only"),
+        pytest.param(lambda s: {"chain": "moonbeam"}, [], id="chain_only_unknown"),
+        # ethereum + safe_tx_executed: mc_eth (100), mc_other (300)
+        pytest.param(
+            lambda s: {"chain": "ethereum", "event_type": "safe_tx_executed"}, [100, 300], id="chain_and_event_type"
+        ),
+    ],
+)
+def test_filter_modes(api_client, seeded_events, make_params, expected_blocks):
+    resp = api_client.get("/api/monitored-events", params=make_params(seeded_events))
     assert resp.status_code == 200
-    body = resp.json()
-    block_numbers = sorted(e["block_number"] for e in body)
-    assert block_numbers == [100, 101]
-
-
-def test_filter_by_address_and_event_type(api_client, seeded_events):
-    resp = api_client.get(
-        "/api/monitored-events",
-        params={"address": seeded_events["addr"], "event_type": "safe_tx_executed"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    block_numbers = sorted(e["block_number"] for e in body)
-    assert block_numbers == [100, 200]
-
-
-def test_unknown_address_returns_empty(api_client):
-    """Address that has no MonitoredContract row → empty list, not 404."""
-    resp = api_client.get(
-        "/api/monitored-events",
-        params={"address": "0x" + "00" * 20},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == []
+    assert sorted(e["block_number"] for e in resp.json()) == expected_blocks
 
 
 def test_address_lookup_lowercases(api_client, seeded_events):
@@ -143,34 +136,6 @@ def test_address_lookup_lowercases(api_client, seeded_events):
     assert resp.status_code == 200
     block_numbers = sorted(e["block_number"] for e in resp.json())
     assert block_numbers == [100, 101, 200]
-
-
-def test_filter_by_chain_only(api_client, seeded_events):
-    """``chain`` alone narrows to all MonitoredContracts on that chain; ``?chain=base`` used to be
-    silently ignored and return global recent events (codex flagged on review).
-    """
-    resp = api_client.get("/api/monitored-events", params={"chain": "ethereum"})
-    assert resp.status_code == 200
-    block_numbers = sorted(e["block_number"] for e in resp.json())
-    # ethereum events: mc_eth (100, 101) + mc_other (300)
-    assert block_numbers == [100, 101, 300]
-
-
-def test_filter_by_chain_only_unknown(api_client):
-    resp = api_client.get("/api/monitored-events", params={"chain": "moonbeam"})
-    assert resp.status_code == 200
-    assert resp.json() == []
-
-
-def test_filter_by_chain_and_event_type(api_client, seeded_events):
-    resp = api_client.get(
-        "/api/monitored-events",
-        params={"chain": "ethereum", "event_type": "safe_tx_executed"},
-    )
-    assert resp.status_code == 200
-    block_numbers = sorted(e["block_number"] for e in resp.json())
-    # ethereum + safe_tx_executed: mc_eth (100), mc_other (300)
-    assert block_numbers == [100, 300]
 
 
 def test_same_detected_at_orders_stably_by_block_then_id(api_client, db_session):

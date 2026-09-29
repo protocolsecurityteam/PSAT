@@ -7,6 +7,8 @@ mainnet fallback.
 
 from __future__ import annotations
 
+import pytest
+
 from services.discovery import inventory
 
 
@@ -33,19 +35,17 @@ def _stub_inventory_flow(monkeypatch, captured):
     monkeypatch.setattr(inventory, "expand_from_deployers", fake_expand)
 
 
-def test_deployer_expansion_uses_requested_chain(monkeypatch):
+@pytest.mark.parametrize(
+    ("chain", "expected_chain_id"),
+    [
+        pytest.param("base", 8453, id="uses_requested_chain"),
+        pytest.param(None, 1, id="defaults_to_mainnet_when_chainless"),
+    ],
+)
+def test_deployer_expansion_chain_id(monkeypatch, chain, expected_chain_id):
     captured: dict[str, int] = {}
     _stub_inventory_flow(monkeypatch, captured)
 
-    inventory.search_protocol_inventory("someco", chain="base", run_deployer=True)
+    inventory.search_protocol_inventory("someco", chain=chain, run_deployer=True)
 
-    assert captured.get("chain_id") == 8453
-
-
-def test_deployer_expansion_defaults_to_mainnet_when_chainless(monkeypatch):
-    captured: dict[str, int] = {}
-    _stub_inventory_flow(monkeypatch, captured)
-
-    inventory.search_protocol_inventory("someco", chain=None, run_deployer=True)
-
-    assert captured.get("chain_id") == 1
+    assert captured.get("chain_id") == expected_chain_id

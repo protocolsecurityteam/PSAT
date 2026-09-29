@@ -53,59 +53,67 @@ def _impl_job_with_proxy() -> Any:
 # --- unit: _job_runtime_address mirrors capability_resolver's runtime_addr ---
 
 
-def test_runtime_address_is_proxy_when_proxy_linked():
-    assert _job_runtime_address(_impl_job_with_proxy()) == _PROXY
-
-
-def test_runtime_address_is_job_address_when_standalone():
-    job = cast(Any, SimpleNamespace(address=_IMPL, request={"address": _IMPL}))
-    assert _job_runtime_address(job) == _IMPL
-
-
-def test_runtime_address_tolerates_missing_request():
-    assert _job_runtime_address(cast(Any, SimpleNamespace(address=_IMPL))) == _IMPL
+@pytest.mark.parametrize(
+    "job, expected",
+    [
+        pytest.param(_impl_job_with_proxy(), _PROXY, id="proxy-linked"),
+        pytest.param(cast(Any, SimpleNamespace(address=_IMPL, request={"address": _IMPL})), _IMPL, id="standalone"),
+        pytest.param(cast(Any, SimpleNamespace(address=_IMPL)), _IMPL, id="missing-request"),
+    ],
+)
+def test_job_runtime_address(job, expected):
+    assert _job_runtime_address(job) == expected
 
 
 # --- unit: _event_address_for_descriptor picks the proxy for self-admin events ---
 
-
-def test_self_administered_role_enrolls_at_proxy_not_impl():
-    # THE BUG: this returned _IMPL (job.address) before the fix, leaving the
-    # proxy's event index cold ⇒ per-function HyperSync fallback.
-    addr = _event_address_for_descriptor(
-        _self_admin_descriptor(), {"topic0": _ROLE_GRANTED, "direction": "add"}, _impl_job_with_proxy(), {}
-    )
-    assert addr == _PROXY
+_EXTERNAL_AUTHORITY_DESCRIPTOR = {
+    "kind": "external_set",
+    "authority_contract": {"address": _EXTERNAL},
+    "enumeration_hint": [{"topic0": _ROLE_GRANTED, "direction": "add"}],
+}
 
 
-def test_standalone_contract_still_enrolls_at_job_address():
-    job = cast(Any, SimpleNamespace(address=_IMPL, request={}))
-    addr = _event_address_for_descriptor(_self_admin_descriptor(), {"topic0": _ROLE_GRANTED}, job, {})
-    assert addr == _IMPL
-
-
-def test_explicit_hint_event_address_wins_over_proxy():
-    # An emitter named on the hint is authoritative; the proxy fallback only
-    # fills the self-administered gap.
-    addr = _event_address_for_descriptor(
-        _self_admin_descriptor(),
-        {"topic0": _ROLE_GRANTED, "event_address": _EXTERNAL},
-        _impl_job_with_proxy(),
-        {},
-    )
-    assert addr == _EXTERNAL
-
-
-def test_external_authority_address_wins_over_proxy():
-    # An external authority (e.g. a shared RolesAuthority) emits its own events;
-    # the proxy fallback must not override an explicit authority address.
-    desc = {
-        "kind": "external_set",
-        "authority_contract": {"address": _EXTERNAL},
-        "enumeration_hint": [{"topic0": _ROLE_GRANTED, "direction": "add"}],
-    }
-    addr = _event_address_for_descriptor(desc, {"topic0": _ROLE_GRANTED}, _impl_job_with_proxy(), {})
-    assert addr == _EXTERNAL
+@pytest.mark.parametrize(
+    "descriptor, hint, job, expected",
+    [
+        # THE BUG: returned _IMPL (job.address) before the fix, leaving the proxy's event index cold, so each
+        # function fell back to a HyperSync scan.
+        pytest.param(
+            _self_admin_descriptor(),
+            {"topic0": _ROLE_GRANTED, "direction": "add"},
+            _impl_job_with_proxy(),
+            _PROXY,
+            id="self-administered-role-enrolls-at-proxy-not-impl",
+        ),
+        pytest.param(
+            _self_admin_descriptor(),
+            {"topic0": _ROLE_GRANTED},
+            cast(Any, SimpleNamespace(address=_IMPL, request={})),
+            _IMPL,
+            id="standalone-contract-enrolls-at-job-address",
+        ),
+        # An emitter named on the hint is authoritative; the proxy fallback only fills the self-administered gap.
+        pytest.param(
+            _self_admin_descriptor(),
+            {"topic0": _ROLE_GRANTED, "event_address": _EXTERNAL},
+            _impl_job_with_proxy(),
+            _EXTERNAL,
+            id="explicit-hint-event-address-wins-over-proxy",
+        ),
+        # An external authority (e.g. a shared RolesAuthority) emits its own events; the proxy fallback must not
+        # override an explicit authority address.
+        pytest.param(
+            _EXTERNAL_AUTHORITY_DESCRIPTOR,
+            {"topic0": _ROLE_GRANTED},
+            _impl_job_with_proxy(),
+            _EXTERNAL,
+            id="external-authority-address-wins-over-proxy",
+        ),
+    ],
+)
+def test_event_address_for_descriptor(descriptor, hint, job, expected):
+    assert _event_address_for_descriptor(descriptor, hint, job, {}) == expected
 
 
 # --- integration: enroll_from_completed_jobs seeds the cursor at the proxy ---

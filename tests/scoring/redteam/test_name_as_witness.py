@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from services.scoring import distill as D
 from services.scoring.constants import WEAKNESS_SAFE_SINGLE_SIGNER
 from services.scoring.schema import PrincipalRef, Tri, entity_key
@@ -60,15 +62,26 @@ def test_f6_the_registry_escalation_needs_mutator_selectors():
     assert "registry_owner_self_grant_escalation" in basis
 
 
-def test_b5_the_self_gated_delay_credit_is_retired():
-    """ "Every resolved principal is the contract" is a lower bound, not closure.
-
-    The enumeration is a proven LOWER BOUND on the caller set, so "no other
-    caller resolved" cannot drive a capability-class base to zero. The
-    observation is published; the severity does not move on it.
-    """
+# "Every resolved principal is the contract" is a lower bound, not closure. The enumeration is a proven
+# LOWER BOUND on the caller set, so "no other caller resolved" cannot drive a capability-class base to
+# zero: the observation is published, the severity does not move on it. Both arms stay at 0.3 and each
+# names which arm it took.
+@pytest.mark.parametrize(
+    ("self_gated", "expected_notes", "expected_basis", "absent_basis"),
+    [
+        pytest.param(
+            True,
+            ("delay_gate_self_gated_lower_bound",),
+            ("capability_class_base",),
+            ("delay_change_path_self_gated",),
+            id="self_gated_credit_is_retired",
+        ),
+        pytest.param(False, ("delay_change_gate_not_self_gated",), (), (), id="not_self_gated"),
+    ],
+)
+def test_the_delay_gate_observation_names_which_arm_it_took(self_gated, expected_notes, expected_basis, absent_basis):
     entries: list[dict[str, Any]] = [{"claim_id": "timelock.set_delay"}]
-    self_gated, basis, notes = D._severity(
+    severity, basis, notes = D._severity(
         _contract_facts(),
         None,
         claim_id="timelock.set_delay",
@@ -76,39 +89,15 @@ def test_b5_the_self_gated_delay_credit_is_retired():
         destination=D._UNDETERMINED_DESTINATION,
         openness="restricted",
         deployment_address=C,
-        self_gated=True,
+        self_gated=self_gated,
     )
-    assert self_gated.value == 0.3
-    assert "delay_gate_self_gated_lower_bound" in notes
-    assert "delay_change_path_self_gated" not in basis
-
-
-def test_f6_the_delay_gate_observation_names_which_arm_it_took():
-    entries: list[dict[str, Any]] = [{"claim_id": "timelock.set_delay"}]
-    ungated, _, notes = D._severity(
-        _contract_facts(),
-        None,
-        claim_id="timelock.set_delay",
-        entries=entries,
-        destination=D._UNDETERMINED_DESTINATION,
-        openness="restricted",
-        deployment_address=C,
-        self_gated=False,
-    )
-    gated, basis, _ = D._severity(
-        _contract_facts(),
-        None,
-        claim_id="timelock.set_delay",
-        entries=entries,
-        destination=D._UNDETERMINED_DESTINATION,
-        openness="restricted",
-        deployment_address=C,
-        self_gated=True,
-    )
-    assert ungated.value == 0.3
-    assert "delay_change_gate_not_self_gated" in notes
-    assert gated.value == 0.3
-    assert "capability_class_base" in basis
+    assert severity.value == 0.3
+    for note in expected_notes:
+        assert note in notes
+    for item in expected_basis:
+        assert item in basis
+    for item in absent_basis:
+        assert item not in basis
 
 
 def test_g3_contradictory_destination_witnesses_fail_closed():

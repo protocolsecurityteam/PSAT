@@ -12,6 +12,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+
 from tests.conftest import requires_postgres
 
 
@@ -84,19 +86,6 @@ def _cleanup_jobs(session, addrs):
 
 
 @requires_postgres
-def test_reconcile_skip_same_proxy(db_session):
-    from db.models import JobStage, JobStatus
-    from db.queue import reconcile_impl_job_for_proxy
-
-    impl, proxy = _addr(), _addr()
-    _mk_job(db_session, impl, proxy=proxy, status=JobStatus.completed, stage=JobStage.done)
-    try:
-        assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=proxy) == "skip"
-    finally:
-        _cleanup_jobs(db_session, [impl])
-
-
-@requires_postgres
 def test_reconcile_backpatches_completed_standalone_and_reenqueues(db_session):
     """The LRTSquared bug: a standalone impl that already resolved against its own empty
     storage is converted to proxy context AND re-enqueued from static."""
@@ -140,44 +129,47 @@ def test_reconcile_backpatches_queued_standalone_without_reenqueue(db_session):
         _cleanup_jobs(db_session, [impl])
 
 
+# (existing job's proxy / cascade root, caller's proxy / cascade root, decision). Keys are resolved to fresh
+# addresses / root ids per run; ``None`` existing_job means no job for the impl exists.
 @requires_postgres
-def test_reconcile_spawn_when_no_existing_job(db_session):
-    from db.queue import reconcile_impl_job_for_proxy
-
-    assert reconcile_impl_job_for_proxy(db_session, impl_addr=_addr(), proxy_addr=_addr()) == "spawn"
-
-
-@requires_postgres
-def test_reconcile_spawn_for_different_proxy_shared_impl(db_session):
-    """A job already bound to proxy P1 means a genuine shared impl when P2 links
-    the same bytecode — spawn a separate per-deployment job (the N>1 case)."""
+@pytest.mark.parametrize(
+    ("existing_job", "call_proxy", "call_root", "expected"),
+    [
+        pytest.param(("p1", None), "p1", None, "skip", id="skip_same_proxy"),
+        pytest.param(None, "p1", None, "spawn", id="spawn_when_no_existing_job"),
+        # A job already bound to proxy P1 means a genuine shared impl when P2 links the same bytecode: spawn a
+        # separate per-deployment job (the N>1 case).
+        pytest.param(("p1", None), "p2", None, "spawn", id="spawn_for_different_proxy_shared_impl"),
+        # In --force mode the lookup is cascade-scoped: a same-proxy job from a *different* cascade does not
+        # count as a duplicate.
+        pytest.param(("p1", "r1"), "p1", "r2", "spawn", id="force_scopes_by_root_job"),
+    ],
+)
+def test_reconcile_decision_table(db_session, existing_job, call_proxy, call_root, expected):
     from db.models import JobStage, JobStatus
     from db.queue import reconcile_impl_job_for_proxy
 
-    impl, p1, p2 = _addr(), _addr(), _addr()
-    _mk_job(db_session, impl, proxy=p1, status=JobStatus.completed, stage=JobStage.done)
-    try:
-        assert reconcile_impl_job_for_proxy(db_session, impl_addr=impl, proxy_addr=p2) == "spawn"
-    finally:
-        _cleanup_jobs(db_session, [impl])
-
-
-@requires_postgres
-def test_reconcile_force_scopes_by_root_job(db_session):
-    """In --force mode the lookup is cascade-scoped: a same-proxy job from a
-    *different* cascade does not count as a duplicate."""
-    from db.models import JobStage, JobStatus
-    from db.queue import reconcile_impl_job_for_proxy
-
-    impl, proxy = _addr(), _addr()
-    other_root = str(uuid.uuid4())
-    _mk_job(db_session, impl, proxy=proxy, status=JobStatus.completed, stage=JobStage.done, root=other_root)
-    try:
-        # Same proxy, but a different cascade root → not a dup in this cascade.
-        decision = reconcile_impl_job_for_proxy(
-            db_session, impl_addr=impl, proxy_addr=proxy, root_job_id=str(uuid.uuid4())
+    impl = _addr()
+    proxies = {"p1": _addr(), "p2": _addr()}
+    roots = {"r1": str(uuid.uuid4()), "r2": str(uuid.uuid4())}
+    if existing_job:
+        job_proxy, job_root = existing_job
+        _mk_job(
+            db_session,
+            impl,
+            proxy=proxies[job_proxy],
+            status=JobStatus.completed,
+            stage=JobStage.done,
+            root=roots[job_root] if job_root else None,
         )
-        assert decision == "spawn"
+    try:
+        decision = reconcile_impl_job_for_proxy(
+            db_session,
+            impl_addr=impl,
+            proxy_addr=proxies[call_proxy],
+            **({"root_job_id": roots[call_root]} if call_root else {}),
+        )
+        assert decision == expected
     finally:
         _cleanup_jobs(db_session, [impl])
 

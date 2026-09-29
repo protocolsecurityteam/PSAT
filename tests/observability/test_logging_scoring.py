@@ -103,20 +103,33 @@ def test_the_summary_reads_every_field_off_the_finished_document():
     assert summary["execution_records_faulted"] == 0
 
 
-def test_a_document_with_no_provenance_blocks_omits_rather_than_guesses():
-    summary = loop.document_summary(_document(provenance={}, model_parameters={}))
-    assert summary["population_disposition"] is None
-    assert summary["signals"] is None
-    assert summary["tracked_total_usd"] is None
-    assert summary["confidence_reachability_pct"] is None
-    assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
-
-
-def test_an_empty_pricing_census_is_a_real_zero():
-    """Present and empty is the fold saying no flow claim was scored: the one case where 0 is
-    the answer rather than a stand-in for an unasked question."""
-    summary = loop.document_summary(_document(model_parameters={"confidence_detail": {"flow_pricing_decidable": {}}}))
-    assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (0, 0)
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        pytest.param(
+            {"provenance": {}, "model_parameters": {}},
+            {
+                "population_disposition": None,
+                "signals": None,
+                "tracked_total_usd": None,
+                "confidence_reachability_pct": None,
+                "flow_pricing_decidable": None,
+                "flow_pricing_seen": None,
+            },
+            id="no-provenance-blocks-omits-rather-than-guesses",
+        ),
+        # Present and empty is the fold saying no flow claim was scored: the one case where 0 is the
+        # answer rather than a stand-in for an unasked question.
+        pytest.param(
+            {"model_parameters": {"confidence_detail": {"flow_pricing_decidable": {}}}},
+            {"flow_pricing_decidable": 0, "flow_pricing_seen": 0},
+            id="empty-pricing-census-is-a-real-zero",
+        ),
+    ],
+)
+def test_summary_null_versus_real_zero(overrides, expected):
+    summary = loop.document_summary(_document(**overrides))
+    assert {key: summary[key] for key in expected} == expected
 
 
 @pytest.mark.parametrize(
@@ -138,21 +151,19 @@ def test_an_unaddable_pricing_pair_publishes_null_rather_than_a_short_sum(census
     assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
 
 
-def test_a_kindless_warning_is_bucketed_as_unknown_not_as_the_string_none():
-    summary = loop.document_summary(_document(warnings=[{"note": "no kind here"}, {"kind": ""}, "not a dict"]))
-    assert summary["warnings_by_kind"] == {"unknown": 3}
-
-
-def test_the_execution_fault_census_is_counted_into_the_summary():
-    summary = loop.document_summary(
-        _document(execution_evidence_faults={"records_faulted": 3, "faulted_by_reason": {"fetch_failed": 3}}),
-    )
-    assert summary["execution_records_faulted"] == 3
-
-
-def test_an_unreadable_fault_count_is_null_and_never_the_earned_zero():
-    summary = loop.document_summary(_document(execution_evidence_faults={"records_faulted": None}))
-    assert summary["execution_records_faulted"] is None
+@pytest.mark.parametrize(
+    "faults, expected",
+    [
+        pytest.param(
+            {"records_faulted": 3, "faulted_by_reason": {"fetch_failed": 3}}, 3, id="fault-census-counted-into-summary"
+        ),
+        # An unreadable count is null, never the earned zero.
+        pytest.param({"records_faulted": None}, None, id="unreadable-fault-count-is-null"),
+    ],
+)
+def test_execution_fault_count_in_summary(faults, expected):
+    summary = loop.document_summary(_document(execution_evidence_faults=faults))
+    assert summary["execution_records_faulted"] == expected
 
 
 def test_the_summary_is_total_over_a_malformed_document():
@@ -160,13 +171,15 @@ def test_the_summary_is_total_over_a_malformed_document():
     summary = loop.document_summary(
         _document(
             findings=["not a dict", {"undetermined_instances": "not a list"}],
-            warnings=["not a dict"],
+            # Kindless warnings are bucketed as "unknown", not as the string "None".
+            warnings=[{"note": "no kind here"}, {"kind": ""}, "not a dict"],
             provenance={"population": "not a dict", "exposure_coverage": 7},
             model_parameters={"confidence_detail": "not a dict"},
             execution_evidence_faults={"records_faulted": "three"},
         ),
     )
     assert summary["undetermined_instances"] == 0
+    assert summary["warnings_by_kind"] == {"unknown": 3}
     assert summary["signals"] is None
     assert summary["tracked_total_usd"] is None
     assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
@@ -406,9 +419,22 @@ class _Job:
     id = "job-1"
 
 
-def test_contracts_with_no_protocol_are_counted_not_silently_skipped(monkeypatch, caplog):
+@pytest.mark.parametrize(
+    "contracts, expected_skipped, expected_warnings",
+    [
+        pytest.param(
+            [(1, 7), (2, None), (3, None)],
+            2,
+            [(logging.WARNING, 2, [2, 3])],
+            id="null-protocol-contracts-counted-not-silently-skipped",
+        ),
+        # Negative control: no orphans, no warning.
+        pytest.param([(1, 7)], 0, [], id="no-orphans-means-no-warning"),
+    ],
+)
+def test_contracts_with_no_protocol_are_counted(monkeypatch, caplog, contracts, expected_skipped, expected_warnings):
     monkeypatch.setattr(distill.facts, "distill_contract_signals", lambda session, contract, job_id: [])
-    session = _ContractSession([_Contract(1, 7), _Contract(2, None), _Contract(3, None)])
+    session = _ContractSession([_Contract(*c) for c in contracts])
     metrics: dict[str, object] = {}
     token = stage_metrics_var.set(metrics)
     try:
@@ -418,23 +444,7 @@ def test_contracts_with_no_protocol_are_counted_not_silently_skipped(monkeypatch
         stage_metrics_var.reset(token)
 
     assert set(out) == {1}
-    assert metrics["score_signal_contracts_skipped_null_protocol"] == 2
-    record = next(r for r in caplog.records if "no protocol_id" in r.message)
-    assert record.levelno == logging.WARNING
-    assert record.contracts_skipped == 2
-    assert record.contract_ids == [2, 3]
-
-
-def test_no_orphans_means_no_warning(monkeypatch, caplog):
-    monkeypatch.setattr(distill.facts, "distill_contract_signals", lambda session, contract, job_id: [])
-    session = _ContractSession([_Contract(1, 7)])
-    metrics: dict[str, object] = {}
-    token = stage_metrics_var.set(metrics)
-    try:
-        with caplog.at_level(logging.WARNING, logger="services.scoring.distill"):
-            distill.distill_job_signals(session, _Job())  # pyright: ignore[reportArgumentType]
-    finally:
-        stage_metrics_var.reset(token)
-
-    assert metrics["score_signal_contracts_skipped_null_protocol"] == 0
-    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert metrics["score_signal_contracts_skipped_null_protocol"] == expected_skipped
+    warned = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [(r.levelno, r.contracts_skipped, r.contract_ids) for r in warned] == expected_warnings
+    assert all("no protocol_id" in r.message for r in warned)

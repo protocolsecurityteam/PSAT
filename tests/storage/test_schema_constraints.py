@@ -112,7 +112,7 @@ def test_coverage_trigger_allows_non_proxy_insert(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Required indexes (merged from tests/test_schema_indexes.py)
+# Required indexes
 #
 # Postgres does NOT auto-create an index on a foreign-key column, and several
 # hot paths scan those columns.

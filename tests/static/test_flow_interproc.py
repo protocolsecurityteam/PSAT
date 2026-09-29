@@ -160,21 +160,6 @@ contract Caller {
 """
 
 
-def test_msg_sender_forwarded_into_helper(tmp_path):
-    contract = _compile(tmp_path, _CALLER_FORWARD_SRC, "Caller")
-    effects = build_effects(contract)
-    flow = _out_flow(effects["functions"]["withdraw(uint256)"])
-    assert flow["target_kind"] == {"kind": "msg_sender", "tier": "static_trace"}
-    assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
-
-
-def test_tx_origin_forwarded_into_helper(tmp_path):
-    contract = _compile(tmp_path, _CALLER_FORWARD_SRC, "Caller")
-    effects = build_effects(contract)
-    flow = _out_flow(effects["functions"]["withdrawToOrigin(uint256)"])
-    assert flow["target_kind"] == {"kind": "caller_controlled", "tier": "static_trace"}
-
-
 # --- immutable / state-var forwarded destination + amount ------------------
 
 _STATEVAR_FORWARD_SRC = """
@@ -200,21 +185,55 @@ contract Routed {
 """
 
 
-def test_immutable_destination_and_storage_amount_forwarded(tmp_path):
-    contract = _compile(tmp_path, _STATEVAR_FORWARD_SRC, "Routed")
-    effects = build_effects(contract)
-    flow = _out_flow(effects["functions"]["drainToSink()"])
-    assert flow["target_kind"]["kind"] == "immutable"
-    # ``cap`` (a state var) forwarded as the amount -> bounded_by_storage.
-    assert flow["amount_kind"]["kind"] == "bounded_by_storage"
+_STATIC_TRACE = "static_trace"
 
 
-def test_storage_setter_destination_forwarded(tmp_path):
-    contract = _compile(tmp_path, _STATEVAR_FORWARD_SRC, "Routed")
-    effects = build_effects(contract)
-    flow = _out_flow(effects["functions"]["drainToTreasury(uint256)"])
-    assert flow["target_kind"]["kind"] == "storage_setter"
-    assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
+# Each ``expected`` entry is a subset match on the flow's ``target_kind`` / ``amount_kind`` dicts.
+@pytest.mark.parametrize(
+    ("src", "contract_name", "signature", "expected"),
+    [
+        pytest.param(
+            _CALLER_FORWARD_SRC,
+            "Caller",
+            "withdraw(uint256)",
+            {
+                "target_kind": {"kind": "msg_sender", "tier": _STATIC_TRACE},
+                "amount_kind": {"kind": "param", "tier": _STATIC_TRACE},
+            },
+            id="msg_sender",
+        ),
+        pytest.param(
+            _CALLER_FORWARD_SRC,
+            "Caller",
+            "withdrawToOrigin(uint256)",
+            {"target_kind": {"kind": "caller_controlled", "tier": _STATIC_TRACE}},
+            id="tx_origin",
+        ),
+        # ``cap`` (a state var) forwarded as the amount -> bounded_by_storage.
+        pytest.param(
+            _STATEVAR_FORWARD_SRC,
+            "Routed",
+            "drainToSink()",
+            {"target_kind": {"kind": "immutable"}, "amount_kind": {"kind": "bounded_by_storage"}},
+            id="immutable_destination_and_storage_amount",
+        ),
+        pytest.param(
+            _STATEVAR_FORWARD_SRC,
+            "Routed",
+            "drainToTreasury(uint256)",
+            {
+                "target_kind": {"kind": "storage_setter"},
+                "amount_kind": {"kind": "param", "tier": _STATIC_TRACE},
+            },
+            id="storage_setter_destination",
+        ),
+    ],
+)
+def test_forwarded_helper_origin_kinds(tmp_path, src, contract_name, signature, expected):
+    effects = build_effects(_compile(tmp_path, src, contract_name))
+    flow = _out_flow(effects["functions"][signature])
+    for key, want in expected.items():
+        assert {field: flow[key][field] for field in want} == want
 
 
 # --- Mapping-element / storage-struct destination (fix #3) -----------------

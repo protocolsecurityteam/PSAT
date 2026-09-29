@@ -1,8 +1,4 @@
-"""Signal, plane and case builders for the scoring fold.
-
-Extracted verbatim from ``test_scoring_redteam``, which eight other test
-modules imported these from.
-"""
+"""Signal, plane and case builders for the scoring fold."""
 
 from __future__ import annotations
 

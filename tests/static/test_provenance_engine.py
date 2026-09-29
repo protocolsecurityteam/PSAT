@@ -57,27 +57,24 @@ def _find_source_with_kind(sources, kind: str) -> Source | None:
 # Pure lattice tests (no Slither needed).
 
 
-def test_lattice_union_basic():
-    a = frozenset({Source(kind="msg_sender")})
-    b = frozenset({Source(kind="parameter", parameter_index=0)})
-    out = union(a, b)
-    assert _has_source_kind(out, "msg_sender")
-    assert _has_source_kind(out, "parameter")
-    assert not is_top(out)
+_SENDER = frozenset({Source(kind="msg_sender")})
+_PARAM0 = frozenset({Source(kind="parameter", parameter_index=0)})
 
 
-def test_lattice_top_absorbs():
-    a = frozenset({Source(kind="msg_sender")})
-    out = union(a, TOP)
-    assert is_top(out)
-    out2 = union(TOP, a)
-    assert is_top(out2)
-
-
-def test_lattice_empty_identity():
-    a = frozenset({Source(kind="parameter", parameter_index=0)})
-    assert union(a, EMPTY) == a
-    assert union(EMPTY, a) == a
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        pytest.param(_SENDER, _PARAM0, _SENDER | _PARAM0, id="union_basic"),
+        pytest.param(_SENDER, TOP, TOP, id="top_absorbs_right"),
+        pytest.param(TOP, _SENDER, TOP, id="top_absorbs_left"),
+        pytest.param(_PARAM0, EMPTY, _PARAM0, id="empty_identity_right"),
+        pytest.param(EMPTY, _PARAM0, _PARAM0, id="empty_identity_left"),
+    ],
+)
+def test_lattice_union(left, right, expected):
+    out = union(left, right)
+    assert out == expected
+    assert is_top(out) == is_top(expected)
 
 
 def test_is_top_singleton_invariant():
@@ -481,91 +478,64 @@ def test_block_timestamp_classified(tmp_path):
     )
 
 
-def test_low_level_call_classified(tmp_path):
-    """``target.call(data)`` produces a tuple lvalue. The tuple's
-    provenance must include ``external_call`` AND the destination/args
-    taint (both parameters here)."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
+@pytest.mark.parametrize(
+    ("body", "callee", "extra_kinds"),
+    [
+        # ``target.call(data)`` produces a tuple lvalue whose provenance must include external_call AND the
+        # destination/args taint (both parameters here).
+        pytest.param(
+            """
             function f(address target, bytes calldata data) external returns (bool, bytes memory) {
                 (bool ok, bytes memory r) = target.call(data);
                 return (ok, r);
             }
-        }
-    """,
-    )
-    fn = _function(sl, "f")
-    eng = ProvenanceEngine(fn)
-    eng.run()
-    # Find a value with external_call source AND parameter taint.
-    found = False
-    for srcs in eng.provenance.sources.values():
-        if _has_source_kind(srcs, "external_call") and _has_source_kind(srcs, "parameter"):
-            external = _find_source_with_kind(srcs, "external_call")
-            assert external is not None
-            assert external.callee == "call", f"expected callee='call', got {external.callee!r}"
-            found = True
-            break
-    assert found, f"low_level_call didn't produce external_call+parameter taint. map={dict(eng.provenance.sources)}"
-
-
-def test_staticcall_classified(tmp_path):
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
+            """,
+            "call",
+            ("parameter",),
+            id="call",
+        ),
+        pytest.param(
+            """
             function f(address target, bytes calldata data) external view returns (bool, bytes memory) {
                 return target.staticcall(data);
             }
-        }
-    """,
-    )
-    fn = _function(sl, "f")
-    eng = ProvenanceEngine(fn)
-    eng.run()
-    found_staticcall = False
-    for srcs in eng.provenance.sources.values():
-        ext = _find_source_with_kind(srcs, "external_call")
-        if ext and ext.callee == "staticcall":
-            found_staticcall = True
-            break
-    assert found_staticcall, f"staticcall not classified with callee='staticcall'. map={dict(eng.provenance.sources)}"
-
-
-def test_delegatecall_preserves_destination_taint(tmp_path):
-    """delegatecall is structurally distinguished by ``callee==
-    'delegatecall'``. The destination's provenance must travel
-    through into the result so a downstream analyzer can see if the
-    target was caller-controlled."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
+            """,
+            "staticcall",
+            (),
+            id="staticcall",
+        ),
+        # delegatecall is structurally distinguished by callee=='delegatecall'; the destination's provenance
+        # (msg.sender) must travel into the result so a downstream analyzer sees a caller-controlled target.
+        pytest.param(
+            """
             function f(bytes calldata data) external returns (bool) {
                 (bool ok, ) = msg.sender.delegatecall(data);
                 return ok;
             }
-        }
-    """,
+            """,
+            "delegatecall",
+            ("msg_sender",),
+            id="delegatecall_preserves_destination_taint",
+        ),
+    ],
+)
+def test_low_level_call_classified(tmp_path, body, callee, extra_kinds):
+    sl = _compile(
+        tmp_path,
+        "pragma solidity ^0.8.19;\ncontract C {\n" + textwrap.dedent(body) + "\n}\n",
     )
     fn = _function(sl, "f")
     eng = ProvenanceEngine(fn)
     eng.run()
-    # The result must carry both external_call(callee=delegatecall)
-    # AND msg_sender (because the destination was msg.sender).
     found = False
     for srcs in eng.provenance.sources.values():
         ext = _find_source_with_kind(srcs, "external_call")
-        if ext and ext.callee == "delegatecall" and _has_source_kind(srcs, "msg_sender"):
+        if ext and ext.callee == callee and all(_has_source_kind(srcs, k) for k in extra_kinds):
             found = True
             break
     assert found, (
-        f"delegatecall with msg.sender destination didn't preserve msg_sender taint. map={dict(eng.provenance.sources)}"
+        f"{callee} not classified as external_call(callee={callee!r}) with {extra_kinds} taint. "
+        f"map={dict(eng.provenance.sources)}"
     )
 
 

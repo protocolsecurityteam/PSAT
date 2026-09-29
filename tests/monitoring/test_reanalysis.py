@@ -32,8 +32,6 @@ from db.models import (
 )
 from schemas.control_tracking import MonitoredContractType
 from services.monitoring.reanalysis import (
-    _REANALYSIS_WRITE_TARGETS,
-    REANALYSIS_POLL_FIELDS_VENDORED,
     maybe_queue_reanalysis,
     should_trigger_reanalysis,
 )
@@ -49,10 +47,6 @@ from tests.support.anvil import (
     _compile_and_deploy,
     anvil_env,  # noqa: F401
 )
-
-# Poll fields that trigger reanalysis: vendored triggers (``implementation``) plus the
-# analyzer's control-relevant write targets; the poll and event paths share this vocabulary.
-_REANALYSIS_POLL_FIELDS = REANALYSIS_POLL_FIELDS_VENDORED | _REANALYSIS_WRITE_TARGETS
 
 # Event types that trigger a full re-analysis; ``should_trigger_reanalysis`` derives the same
 # verdict from ``_HANDROLLED_EVENT_TYPE_TO_TAGS``. ``upgraded_revision`` is included because
@@ -298,44 +292,33 @@ class TestShouldTriggerReanalysis:
     def test_non_triggering_event_types(self, event_type):
         assert should_trigger_reanalysis(event_type) is False
 
-    @pytest.mark.parametrize("field", ["paused", "threshold", "min_delay", "owners"])
-    def test_poll_non_triggering_fields(self, field):
-        assert should_trigger_reanalysis("state_changed_poll", {"field": field}) is False
+    @pytest.mark.parametrize(
+        "args",
+        [
+            pytest.param(({"field": "paused"},), id="field_paused"),
+            pytest.param(({"field": "threshold"},), id="field_threshold"),
+            pytest.param(({"field": "min_delay"},), id="field_min_delay"),
+            pytest.param(({"field": "owners"},), id="field_owners"),
+            pytest.param((), id="no_data"),
+            pytest.param(({},), id="empty_data"),
+        ],
+    )
+    def test_poll_non_triggering_data(self, args):
+        assert should_trigger_reanalysis("state_changed_poll", *args) is False
 
-    def test_poll_no_data(self):
-        assert should_trigger_reanalysis("state_changed_poll") is False
-        assert should_trigger_reanalysis("state_changed_poll", {}) is False
-
-    def test_effect_tags_writes_owner_triggers(self):
-        """An unrecognized event_type whose effect_tags say the emitter writes ``owner`` still
-        triggers (renamed admin slots, e.g. fork ``protocolOwner``)."""
-        assert (
-            should_trigger_reanalysis(
-                "controller_changed:state_variable:owner",
-                {"effect_tags": {"writes": ["owner"]}},
-            )
-            is True
-        )
-
-    def test_effect_tags_delegates_triggers(self):
-        """A DELEGATECALL in the emitter body is unconditionally upgrade-equivalent."""
-        assert (
-            should_trigger_reanalysis(
-                "controller_changed:custom",
-                {"effect_tags": {"delegates": True}},
-            )
-            is True
-        )
-
-    def test_effect_tags_is_initializer_triggers(self):
-        """Re-init detected by modifier, not slot name, so OZ forks renaming ``_initialized`` are caught."""
-        assert (
-            should_trigger_reanalysis(
-                "controller_changed:custom",
-                {"effect_tags": {"is_initializer": True}},
-            )
-            is True
-        )
+    @pytest.mark.parametrize(
+        ("event_type", "effect_tags"),
+        [
+            # Renamed admin slots (e.g. fork ``protocolOwner``) still trigger via effect_tags.
+            pytest.param("controller_changed:state_variable:owner", {"writes": ["owner"]}, id="writes_owner"),
+            # A DELEGATECALL in the emitter body is unconditionally upgrade-equivalent.
+            pytest.param("controller_changed:custom", {"delegates": True}, id="delegates"),
+            # Re-init detected by modifier, not slot name, so OZ forks renaming ``_initialized`` are caught.
+            pytest.param("controller_changed:custom", {"is_initializer": True}, id="is_initializer"),
+        ],
+    )
+    def test_effect_tags_trigger(self, event_type, effect_tags):
+        assert should_trigger_reanalysis(event_type, {"effect_tags": effect_tags}) is True
 
 
 # ---------------------------------------------------------------------------
@@ -438,21 +421,20 @@ class TestMaybeQueueReanalysis:
         assert job.request is not None
         assert job.request.get("protocol_id") == proto.id
 
-    def test_poll_implementation_triggers_job(self, db_session):
-        mc = _make_monitored_contract(db_session, "0x" + "22" * 20, "proxy")
-        data = {"field": "implementation", "old_value": "0xold", "new_value": "0xnew"}
+    @pytest.mark.parametrize(
+        ("field", "addr_byte", "contract_type"),
+        [
+            pytest.param("implementation", "22", "proxy", id="implementation"),
+            pytest.param("owner", "33", "regular", id="owner"),
+        ],
+    )
+    def test_poll_field_triggers_job(self, db_session, field, addr_byte, contract_type):
+        mc = _make_monitored_contract(db_session, "0x" + addr_byte * 20, contract_type)
+        data = {"field": field, "old_value": "0xold", "new_value": "0xnew"}
         job = maybe_queue_reanalysis(db_session, mc, "state_changed_poll", data)
         assert job is not None
         assert job.request is not None
-        assert job.request.get("reanalysis_trigger") == "poll:implementation"
-
-    def test_poll_owner_triggers_job(self, db_session):
-        mc = _make_monitored_contract(db_session, "0x" + "33" * 20)
-        data = {"field": "owner", "old_value": "0xold", "new_value": "0xnew"}
-        job = maybe_queue_reanalysis(db_session, mc, "state_changed_poll", data)
-        assert job is not None
-        assert job.request is not None
-        assert job.request.get("reanalysis_trigger") == "poll:owner"
+        assert job.request.get("reanalysis_trigger") == f"poll:{field}"
 
     def test_different_event_types_dedup_each_other(self, db_session):
         """An upgrade and an ownership_transferred for the same address produce one job."""
@@ -1112,40 +1094,21 @@ class TestCompletionWebhook:
             assert str(job.id)[:8] in field_map["Job"]
             assert "Implementation" in field_map["Changes detected"]
 
-    def test_completion_no_webhook_without_protocol(self, db_session):
-        """Job without protocol_id → no webhook sent."""
+    @pytest.mark.parametrize("with_protocol", [False, True], ids=["without_protocol", "without_subscriptions"])
+    def test_completion_no_webhook(self, db_session, with_protocol):
+        """No protocol_id, or a protocol with no subscriptions → no webhook sent."""
         from unittest.mock import patch
 
         from services.monitoring.notifier import notify_reanalysis_complete
 
+        protocol_id = _make_protocol(db_session, "NoSubTest").id if with_protocol else None
+        address = "0x" + "f1" * 20
         job = Job(
-            address="0x" + "e0" * 20,
+            address=address,
             status=JobStatus.completed,
             stage=JobStage.done,
-            protocol_id=None,
-            request={"reanalysis_trigger": "upgraded", "address": "0x" + "e0" * 20, "chain": "ethereum"},
-        )
-        db_session.add(job)
-        db_session.commit()
-        db_session.refresh(job)
-
-        with patch("services.monitoring.notifier.requests.post") as mock_post:
-            notify_reanalysis_complete(db_session, job)
-            mock_post.assert_not_called()
-
-    def test_completion_no_webhook_without_subscriptions(self, db_session):
-        """Protocol with no subscriptions → no webhook sent."""
-        from unittest.mock import patch
-
-        from services.monitoring.notifier import notify_reanalysis_complete
-
-        proto = _make_protocol(db_session, "NoSubTest")
-        job = Job(
-            address="0x" + "f1" * 20,
-            status=JobStatus.completed,
-            stage=JobStage.done,
-            protocol_id=proto.id,
-            request={"reanalysis_trigger": "upgraded", "address": "0x" + "f1" * 20, "chain": "ethereum"},
+            protocol_id=protocol_id,
+            request={"reanalysis_trigger": "upgraded", "address": address, "chain": "ethereum"},
         )
         db_session.add(job)
         db_session.commit()

@@ -205,24 +205,21 @@ class TestGovernableClaimGovernanceSlot:
         assert view_op["callee_signature"] == "_pendingGovernor()"
         assert view_op.get("storage_slot") == PENDING_GOVERNOR_SLOT
 
-    def test_resolves_live_pending_governor(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """End-to-end: getter reverts, the carried slot is read, claimGovernance is NOT resolved_empty."""
-        _stub(monkeypatch, slot=_word(PENDING_GOVERNOR))
+    @pytest.mark.parametrize(
+        ("slot", "expected_rows", "resolved_empty"),
+        [
+            # End-to-end: getter reverts, the carried slot is read, claimGovernance is NOT resolved_empty.
+            pytest.param(_word(PENDING_GOVERNOR), [PENDING_GOVERNOR], False, id="live_pending_governor"),
+            pytest.param("0x" + "00" * 32, [], True, id="confirmed_zero_slot"),
+            pytest.param("revert", [], False, id="unreadable_slot"),
+        ],
+    )
+    def test_slot_states_resolve_claim_governance(
+        self, monkeypatch: pytest.MonkeyPatch, slot: str, expected_rows: list[str], resolved_empty: bool
+    ) -> None:
+        _stub(monkeypatch, slot=slot)
         cap = evaluate_tree(_claim_governance_tree(), _ctx_with_rpc())
         surface = project_capability_surface(capability_to_dict(cap))
 
-        assert [r["address"] for r in surface.principal_rows] == [PENDING_GOVERNOR]
-        assert _status(cap) != "resolved_empty"
-
-    def test_confirmed_zero_slot_is_resolved_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _stub(monkeypatch, slot="0x" + "00" * 32)
-        cap = evaluate_tree(_claim_governance_tree(), _ctx_with_rpc())
-
-        assert project_capability_surface(capability_to_dict(cap)).principal_rows == []
-        assert _status(cap) == "resolved_empty"
-
-    def test_unreadable_slot_is_not_resolved_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _stub(monkeypatch, slot="revert")
-        cap = evaluate_tree(_claim_governance_tree(), _ctx_with_rpc())
-
-        assert _status(cap) != "resolved_empty"
+        assert [r["address"] for r in surface.principal_rows] == expected_rows
+        assert (_status(cap) == "resolved_empty") is resolved_empty

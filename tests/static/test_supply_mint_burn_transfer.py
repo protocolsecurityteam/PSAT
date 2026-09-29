@@ -125,19 +125,19 @@ def rebasing_claims() -> dict[str, list[Any]]:
         pytest.skip(str(exc))
 
 
-def test_mint_shares_carries_supply_mint(rebasing_claims):
-    claim = _one(rebasing_claims["mintShares(address,uint256)"], "supply.mint")
+@pytest.mark.parametrize(
+    ("signature", "direction", "opposite"),
+    [
+        pytest.param("mintShares(address,uint256)", "mint", "burn", id="mint"),
+        pytest.param("burnShares(address,uint256)", "burn", "mint", id="burn"),
+    ],
+)
+def test_share_fn_carries_supply_claim(rebasing_claims, signature, direction, opposite):
+    claim = _one(rebasing_claims[signature], f"supply.{direction}")
     assert claim["tier"] == "idiom_structural"
-    assert claim["witness"] == {"kind": "mint_burn_transfer", "supply": "mint"}
+    assert claim["witness"] == {"kind": "mint_burn_transfer", "supply": direction}
     # Direction is not crossed and the name-set path did not resolve it.
-    assert "supply.burn" not in _ids(rebasing_claims["mintShares(address,uint256)"])
-
-
-def test_burn_shares_carries_supply_burn(rebasing_claims):
-    claim = _one(rebasing_claims["burnShares(address,uint256)"], "supply.burn")
-    assert claim["tier"] == "idiom_structural"
-    assert claim["witness"] == {"kind": "mint_burn_transfer", "supply": "burn"}
-    assert "supply.mint" not in _ids(rebasing_claims["burnShares(address,uint256)"])
+    assert f"supply.{opposite}" not in _ids(rebasing_claims[signature])
 
 
 def test_plain_transfer_is_not_a_supply_change(rebasing_claims):

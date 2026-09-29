@@ -18,27 +18,9 @@ from schemas.api_requests import (
 _VALID_ADDR = "0x" + "ab" * 20
 
 
-def test_analyze_request_rejects_non_hex_address():
-    bad = "0x" + "zz" * 20  # 42 chars, not hex
-    assert len(bad) == 42
-    with pytest.raises(ValidationError):
-        AnalyzeRequest(address=bad)
-
-
 def test_analyze_request_accepts_valid_address():
     req = AnalyzeRequest(address="0x" + "AB" * 20)
     assert req.address == _VALID_ADDR  # lowercase-normalized
-
-
-def test_analyze_request_rejects_address_with_trailing_newline():
-    # fullmatch anchoring: a trailing newline must not sneak past the hex check.
-    with pytest.raises(ValidationError):
-        AnalyzeRequest(address="0x" + "ab" * 20 + "\n")
-
-
-def test_analyze_request_dapp_urls_rejects_non_http():
-    with pytest.raises(ValidationError):
-        AnalyzeRequest(dapp_urls=["javascript:alert(1)"])
 
 
 def test_analyze_request_dapp_urls_rejects_over_length():
@@ -62,19 +44,35 @@ def test_add_audit_request_rejects_dangerous_scheme(bad_url):
         AddAuditRequest(url=bad_url, auditor="a", title="t")
 
 
-def test_add_audit_request_rejects_dangerous_pdf_url():
+@pytest.mark.parametrize(
+    ("model", "kwargs"),
+    [
+        pytest.param(AnalyzeRequest, {"address": "0x" + "zz" * 20}, id="address-non-hex"),
+        # fullmatch anchoring: a trailing newline must not sneak past the hex check.
+        pytest.param(AnalyzeRequest, {"address": "0x" + "ab" * 20 + "\n"}, id="address-trailing-newline"),
+        # CRITICAL: a javascript: scheme must never reach the crawler or rendered links.
+        pytest.param(AnalyzeRequest, {"dapp_urls": ["javascript:alert(1)"]}, id="dapp-urls-non-http"),
+        pytest.param(
+            AddAuditRequest,
+            {"url": "https://ok.test", "pdf_url": "javascript:alert(1)", "auditor": "a", "title": "t"},
+            id="audit-dangerous-pdf-url",
+        ),
+        # CRITICAL: SSRF guard on the webhook URL; only https discord.com is allowed.
+        pytest.param(
+            ProtocolSubscribeRequest,
+            {"discord_webhook_url": "https://evil.example/webhook"},
+            id="webhook-non-discord",
+        ),
+        pytest.param(
+            ProtocolSubscribeRequest,
+            {"discord_webhook_url": "http://discord.com/api/webhooks/1/abc"},
+            id="webhook-http-discord",
+        ),
+    ],
+)
+def test_request_models_reject_invalid_input(model, kwargs):
     with pytest.raises(ValidationError):
-        AddAuditRequest(url="https://ok.test", pdf_url="javascript:alert(1)", auditor="a", title="t")
-
-
-def test_protocol_subscribe_rejects_non_discord_webhook():
-    with pytest.raises(ValidationError):
-        ProtocolSubscribeRequest(discord_webhook_url="https://evil.example/webhook")
-
-
-def test_protocol_subscribe_rejects_http_discord():
-    with pytest.raises(ValidationError):
-        ProtocolSubscribeRequest(discord_webhook_url="http://discord.com/api/webhooks/1/abc")
+        model(**kwargs)
 
 
 @pytest.mark.parametrize(

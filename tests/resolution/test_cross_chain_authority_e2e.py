@@ -159,7 +159,7 @@ def _scope_graph() -> dict:
 # --- build_principal_labels, real classify wire ------------------------------
 
 
-def test_base_positive_arm_and_native_true_negative_through_real_classify(wire):
+def test_base_positive_arm_native_true_negative_and_no_wire_for_recognized(wire):
     ep = _base_effective_permissions()
     graph = _scope_graph()
     recognizer = make_cross_chain_recognizer(BASE_CHAIN_ID, _known_addresses_for_scope(graph, TARGET))
@@ -194,23 +194,9 @@ def test_base_positive_arm_and_native_true_negative_through_real_classify(wire):
     # it is classified natively — the hint is a hint, not a control edge.
     assert principals[L1_PROXY_ADMIN_OWNER]["resolved_type"] != CROSS_CHAIN_AUTHORITY_TYPE
 
-
-def test_recognized_principals_never_touch_the_wire(wire):
-    """The recognizer runs before classification, so an aliased/bridge principal
-    issues zero RPCs; only the native owners (and the L1 reference) do."""
-    ep = _base_effective_permissions()
-    graph = _scope_graph()
-    recognizer = make_cross_chain_recognizer(BASE_CHAIN_ID, _known_addresses_for_scope(graph, TARGET))
-
-    build_principal_labels(
-        ep,
-        resolved_control_graph=graph,
-        rpc_url="http://base.rpc.example",
-        classify_cache={},
-        cross_chain_recognizer=recognizer,
-    )
+    # The recognizer runs before classification, so an aliased/bridge principal issues zero RPCs;
+    # only the native owners (and the L1 reference) do.
     probed = set(wire)
-
     assert ALIASED_L1_OWNER not in probed
     assert BASE_MESSENGER not in probed
     assert BASE_BRIDGE not in probed

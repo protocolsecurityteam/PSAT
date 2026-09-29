@@ -11,13 +11,17 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
+
 from services.monitoring.event_topics import (
     ALL_EVENT_TOPICS,
     CHANGED_GUARD_TOPIC0,
     DISABLED_MODULE_TOPIC0,
     ENABLED_MODULE_TOPIC0,
+    EXECUTION_FAILURE_TOPIC0,
     EXECUTION_FROM_MODULE_FAILURE_TOPIC0,
     EXECUTION_FROM_MODULE_SUCCESS_TOPIC0,
+    EXECUTION_SUCCESS_TOPIC0,
     GOVERNANCE_EVENT_TOPICS,
     parse_any_log,
     parse_governance_log,
@@ -92,21 +96,6 @@ def test_disabled_module_and_changed_guard_decode():
     assert parsed["effect_tags"]["writes"] == ["_safe_guard"]
 
 
-def test_empty_data_and_no_topic_yields_no_address():
-    """No address anywhere ⇒ the key is absent, not the zero address."""
-    log = {
-        "address": SAFE,
-        "topics": [ENABLED_MODULE_TOPIC0],
-        "data": "0x",
-        "blockNumber": hex(1),
-        "transactionHash": "0x" + "ab" * 32,
-        "logIndex": "0x0",
-    }
-    parsed = _parsed(log)
-    assert parsed["event_type"] == "safe_module_enabled"
-    assert "module" not in parsed
-
-
 # --- strict topic/data decoding --------------------------------------------
 #
 # The address published here IS the fact — "module X was enabled on this Safe",
@@ -127,52 +116,84 @@ def _log_with(topic0: str, *, topics_tail: list[str], data: str) -> dict:
     }
 
 
-def test_empty_indexed_topic_publishes_no_address():
-    """``"0x"`` in the indexed slot padded to width is ``0x0000…0000`` — a real
-    address, and on ChangedGuard the one that reads as "guard removed"."""
-    for topic0, key in (
-        (ENABLED_MODULE_TOPIC0, "module"),
-        (DISABLED_MODULE_TOPIC0, "module"),
-        (CHANGED_GUARD_TOPIC0, "guard"),
-    ):
-        parsed = _parsed(_log_with(topic0, topics_tail=["0x"], data="0x"))
-        assert key not in parsed, f"{topic0} minted {parsed.get(key)!r} from an empty topic"
+_WORD = "0" * 24 + MODULE[2:]
 
 
-def test_empty_indexed_topic_on_module_execution_publishes_no_module():
-    for topic0 in (EXECUTION_FROM_MODULE_SUCCESS_TOPIC0, EXECUTION_FROM_MODULE_FAILURE_TOPIC0):
-        parsed = _parsed(_log_with(topic0, topics_tail=["0x"], data="0x"))
-        assert "module" not in parsed
-
-
-def test_uppercase_0x_prefixed_data_body_is_rejected_not_missliced():
-    """``"0X"…`` is not stripped by a ``"0x"`` prefix strip, so the slice lands
-    two characters late and yields a DIFFERENT, well-formed-looking address."""
-    body = "0X" + "0" * 24 + MODULE[2:]
-    parsed = _parsed(_log_with(ENABLED_MODULE_TOPIC0, topics_tail=[], data=body))
-    assert "module" not in parsed
-
-
-def test_whitespace_data_body_is_rejected():
-    """Right length, no hex. ``bytes.fromhex`` ignores ASCII whitespace, so the
-    byte-length check after it is what rejects this."""
-    for body in ("0x" + " " * 64, "0x" + "0" * 62 + "  ", "0x" + "1_" + "0" * 62):
-        parsed = _parsed(_log_with(ENABLED_MODULE_TOPIC0, topics_tail=[], data=body))
-        assert "module" not in parsed, f"{body!r} decoded to {parsed.get('module')!r}"
-
-
-def test_partial_word_data_body_is_rejected():
-    """A body that is not a whole number of words is not an ABI encoding."""
-    for body in ("0x", "0x00", "0x" + "0" * 63, "0x" + "0" * 65):
-        parsed = _parsed(_log_with(ENABLED_MODULE_TOPIC0, topics_tail=[], data=body))
-        assert "module" not in parsed
-
-
-def test_word_whose_top_twelve_bytes_are_set_is_not_an_address():
-    """An ABI-encoded address is left-padded with zeros; a word that is not one
-    is not an address, and its low 20 bytes are not "the address it holds"."""
-    parsed = _parsed(_log_with(ENABLED_MODULE_TOPIC0, topics_tail=["0x" + "ff" * 32], data="0x"))
-    assert "module" not in parsed
+@pytest.mark.parametrize(
+    ("topic0", "topics_tail", "data", "event_type", "key"),
+    [
+        # No address anywhere => the key is absent, not the zero address.
+        pytest.param(ENABLED_MODULE_TOPIC0, [], "0x", "safe_module_enabled", "module", id="empty-data-and-no-topic"),
+        # ``"0x"`` in the indexed slot padded to width is ``0x0000...0000`` -- a real address, and on
+        # ChangedGuard the one that reads as "guard removed".
+        pytest.param(ENABLED_MODULE_TOPIC0, ["0x"], "0x", "safe_module_enabled", "module", id="empty-topic-enabled"),
+        pytest.param(DISABLED_MODULE_TOPIC0, ["0x"], "0x", "safe_module_disabled", "module", id="empty-topic-disabled"),
+        pytest.param(CHANGED_GUARD_TOPIC0, ["0x"], "0x", "safe_guard_changed", "guard", id="empty-topic-guard"),
+        pytest.param(
+            EXECUTION_FROM_MODULE_SUCCESS_TOPIC0,
+            ["0x"],
+            "0x",
+            "safe_module_executed",
+            "module",
+            id="empty-topic-module-execution-success",
+        ),
+        pytest.param(
+            EXECUTION_FROM_MODULE_FAILURE_TOPIC0,
+            ["0x"],
+            "0x",
+            "safe_module_failed",
+            "module",
+            id="empty-topic-module-execution-failure",
+        ),
+        # ``"0X"...`` is not stripped by a ``"0x"`` prefix strip, so the slice lands two characters
+        # late and yields a DIFFERENT, well-formed-looking address.
+        pytest.param(
+            ENABLED_MODULE_TOPIC0, [], "0X" + _WORD, "safe_module_enabled", "module", id="uppercase-0x-data-body"
+        ),
+        # Right length, no hex. ``bytes.fromhex`` ignores ASCII whitespace, so the byte-length check
+        # after it is what rejects these.
+        pytest.param(ENABLED_MODULE_TOPIC0, [], "0x" + " " * 64, "safe_module_enabled", "module", id="whitespace-body"),
+        pytest.param(
+            ENABLED_MODULE_TOPIC0,
+            [],
+            "0x" + "0" * 62 + "  ",
+            "safe_module_enabled",
+            "module",
+            id="trailing-whitespace-body",
+        ),
+        pytest.param(
+            ENABLED_MODULE_TOPIC0,
+            [],
+            "0x" + "1_" + "0" * 62,
+            "safe_module_enabled",
+            "module",
+            id="underscore-body",
+        ),
+        # A body that is not a whole number of words is not an ABI encoding.
+        pytest.param(ENABLED_MODULE_TOPIC0, [], "0x", "safe_module_enabled", "module", id="partial-word-empty-body"),
+        pytest.param(ENABLED_MODULE_TOPIC0, [], "0x00", "safe_module_enabled", "module", id="partial-word-one-byte"),
+        pytest.param(
+            ENABLED_MODULE_TOPIC0, [], "0x" + "0" * 63, "safe_module_enabled", "module", id="partial-word-63-nibbles"
+        ),
+        pytest.param(
+            ENABLED_MODULE_TOPIC0, [], "0x" + "0" * 65, "safe_module_enabled", "module", id="partial-word-65-nibbles"
+        ),
+        # An ABI-encoded address is left-padded with zeros; a word that is not one is not an address,
+        # and its low 20 bytes are not "the address it holds".
+        pytest.param(
+            ENABLED_MODULE_TOPIC0,
+            ["0x" + "ff" * 32],
+            "0x",
+            "safe_module_enabled",
+            "module",
+            id="dirty-top-twelve-bytes",
+        ),
+    ],
+)
+def test_malformed_topic_or_data_publishes_no_address(topic0, topics_tail, data, event_type, key):
+    parsed = _parsed(_log_with(topic0, topics_tail=topics_tail, data=data))
+    assert parsed["event_type"] == event_type
+    assert key not in parsed
 
 
 def test_well_formed_logs_decode_byte_identically():
@@ -230,47 +251,30 @@ class TestSafeExecutionEvents:
     """ExecutionSuccess / ExecutionFailure are emitted for EVERY executed Safe tx (the
     'recent activity' breadcrumb). Pin the topic→type mapping and field decode."""
 
-    def test_execution_success_decodes(self):
-        from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
-
-        safe_tx_hash = "0x" + "ab" * 32
-        payment = format(123456, "x").zfill(64)
+    @pytest.mark.parametrize(
+        ("topic0", "hash_byte", "payment", "tx", "log_index", "event_type"),
+        [
+            pytest.param(EXECUTION_SUCCESS_TOPIC0, "ab", 123456, "0xfeed", 3, "safe_tx_executed", id="success"),
+            pytest.param(EXECUTION_FAILURE_TOPIC0, "cd", 0, "0xbabe", 0, "safe_tx_failed", id="failure"),
+        ],
+    )
+    def test_execution_decodes(self, topic0, hash_byte, payment, tx, log_index, event_type):
         log = {
-            "topics": [EXECUTION_SUCCESS_TOPIC0],
-            "data": safe_tx_hash + payment[2:] if False else "0x" + "ab" * 32 + payment,
+            "topics": [topic0],
+            "data": "0x" + hash_byte * 32 + format(payment, "x").zfill(64),
             "blockNumber": "0x100",
-            "transactionHash": "0xfeed",
-            "logIndex": "0x3",
+            "transactionHash": tx,
+            "logIndex": hex(log_index),
         }
         ev = parse_governance_log(log)
         assert ev is not None
-        assert ev["event_type"] == "safe_tx_executed"
-        assert ev["safe_tx_hash"] == safe_tx_hash
-        assert ev["payment"] == 123456
-        assert ev["log_index"] == 3
-
-    def test_execution_failure_decodes(self):
-        from services.monitoring.event_topics import EXECUTION_FAILURE_TOPIC0, parse_governance_log
-
-        safe_tx_hash = "0x" + "cd" * 32
-        payment = format(0, "x").zfill(64)
-        log = {
-            "topics": [EXECUTION_FAILURE_TOPIC0],
-            "data": "0x" + "cd" * 32 + payment,
-            "blockNumber": "0x100",
-            "transactionHash": "0xbabe",
-            "logIndex": "0x0",
-        }
-        ev = parse_governance_log(log)
-        assert ev is not None
-        assert ev["event_type"] == "safe_tx_failed"
-        assert ev["safe_tx_hash"] == safe_tx_hash
-        assert ev["payment"] == 0
+        assert ev["event_type"] == event_type
+        assert ev["safe_tx_hash"] == "0x" + hash_byte * 32
+        assert ev["payment"] == payment
+        assert ev["log_index"] == log_index
 
     def test_short_data_does_not_crash(self):
         """Defensive: short/malformed data field should not raise."""
-        from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
-
         log = {
             "topics": [EXECUTION_SUCCESS_TOPIC0],
             "data": "0x" + "ab" * 8,  # well under the 64+64 hex chars expected
@@ -283,71 +287,71 @@ class TestSafeExecutionEvents:
         assert "safe_tx_hash" not in ev
         assert "payment" not in ev
 
-    def test_indexed_txhash_variant_decodes(self):
-        """The 1.4.1 singleton indexes txHash: topics[1] carries the hash, the body is payment
-        alone. Byte-for-byte log 414 of mainnet tx
-        ``0xf047c068b4d7311344adfb02fc56310d7200d12799a9894675b3b66ff5f2b431`` (Safe
-        ``0x607d0c7e3578802eb46d388cb86cfba8ff657306``), one of four executions that decoded to
-        neither field before this arm (topic0 matches the non-indexed form)."""
-        from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
-
-        log = {
-            "address": "0x607d0c7e3578802eb46d388cb86cfba8ff657306",
-            "topics": [
+    @pytest.mark.parametrize(
+        ("topic0", "address", "safe_tx_hash", "data", "block", "tx", "log_index", "event_type", "payment"),
+        [
+            # The 1.4.1 singleton indexes txHash: topics[1] carries the hash, the body is payment
+            # alone. Byte-for-byte log 414 of mainnet tx
+            # ``0xf047c068b4d7311344adfb02fc56310d7200d12799a9894675b3b66ff5f2b431`` (Safe
+            # ``0x607d0c7e3578802eb46d388cb86cfba8ff657306``), one of four executions that decoded to
+            # neither field before this arm (topic0 matches the non-indexed form).
+            pytest.param(
                 EXECUTION_SUCCESS_TOPIC0,
+                "0x607d0c7e3578802eb46d388cb86cfba8ff657306",
                 "0x557306e1acffe8fbc5eeed5d3c7f67aae3713431d50c9224fec4ec51efc2a7b2",
-            ],
-            "data": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "blockNumber": hex(25683190),
-            "transactionHash": "0xf047c068b4d7311344adfb02fc56310d7200d12799a9894675b3b66ff5f2b431",
-            "logIndex": hex(414),
-        }
-        ev = parse_governance_log(log)
-        assert ev is not None
-        assert ev["event_type"] == "safe_tx_executed"
-        assert ev["safe_tx_hash"] == "0x557306e1acffe8fbc5eeed5d3c7f67aae3713431d50c9224fec4ec51efc2a7b2"
-        assert ev["payment"] == 0
-
-    def test_indexed_failure_variant_decodes(self):
-        from services.monitoring.event_topics import EXECUTION_FAILURE_TOPIC0, parse_governance_log
-
+                "0x" + "0" * 64,
+                hex(25683190),
+                "0xf047c068b4d7311344adfb02fc56310d7200d12799a9894675b3b66ff5f2b431",
+                hex(414),
+                "safe_tx_executed",
+                0,
+                id="success-mainnet",
+            ),
+            pytest.param(
+                EXECUTION_FAILURE_TOPIC0,
+                SAFE,
+                "0x" + "cd" * 32,
+                "0x" + format(4200, "x").zfill(64),
+                "0x100",
+                "0xbabe",
+                "0x0",
+                "safe_tx_failed",
+                4200,
+                id="failure",
+            ),
+        ],
+    )
+    def test_indexed_txhash_variant_decodes(
+        self, topic0, address, safe_tx_hash, data, block, tx, log_index, event_type, payment
+    ):
         log = {
-            "topics": [EXECUTION_FAILURE_TOPIC0, "0x" + "cd" * 32],
-            "data": "0x" + format(4200, "x").zfill(64),
-            "blockNumber": "0x100",
-            "transactionHash": "0xbabe",
-            "logIndex": "0x0",
+            "address": address,
+            "topics": [topic0, safe_tx_hash],
+            "data": data,
+            "blockNumber": block,
+            "transactionHash": tx,
+            "logIndex": log_index,
         }
         ev = parse_governance_log(log)
         assert ev is not None
-        assert ev["event_type"] == "safe_tx_failed"
-        assert ev["safe_tx_hash"] == "0x" + "cd" * 32
-        assert ev["payment"] == 4200
+        assert ev["event_type"] == event_type
+        assert ev["safe_tx_hash"] == safe_tx_hash
+        assert ev["payment"] == payment
 
-    def test_indexed_variant_with_two_word_body_publishes_no_payment(self):
-        """A second topic proves txHash is indexed, so the body should be payment
-        alone. A body that is not says the layout is not the one we can read —
-        the hash still decodes from its own topic, and no payment is invented
-        from a word we cannot place."""
-        from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
-
+    # A second topic proves txHash is indexed, so the body should be payment alone. A body that is
+    # not says the layout is not the one we can read: the hash still decodes from its own topic, and
+    # no payment is invented from a word we cannot place.
+    @pytest.mark.parametrize(
+        "data",
+        [
+            pytest.param("0x" + "11" * 32 + "22" * 32, id="two-word-body"),
+            pytest.param("0x", id="empty-body"),
+        ],
+    )
+    def test_indexed_variant_with_unreadable_body_publishes_no_payment(self, data):
         log = {
             "topics": [EXECUTION_SUCCESS_TOPIC0, "0x" + "ab" * 32],
-            "data": "0x" + "11" * 32 + "22" * 32,
-            "blockNumber": "0x1",
-            "transactionHash": "0xa",
-        }
-        ev = parse_governance_log(log)
-        assert ev is not None
-        assert ev["safe_tx_hash"] == "0x" + "ab" * 32
-        assert "payment" not in ev
-
-    def test_indexed_variant_with_empty_body_publishes_no_payment(self):
-        from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
-
-        log = {
-            "topics": [EXECUTION_SUCCESS_TOPIC0, "0x" + "ab" * 32],
-            "data": "0x",
+            "data": data,
             "blockNumber": "0x1",
             "transactionHash": "0xa",
         }
@@ -359,8 +363,6 @@ class TestSafeExecutionEvents:
     def test_indexed_variant_with_malformed_topic_publishes_no_hash(self):
         """The payment word is still witnessed; the hash is not, and a truncated
         topic is never left-padded into one."""
-        from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
-
         log = {
             "topics": [EXECUTION_SUCCESS_TOPIC0, "0xabcd"],
             "data": "0x" + format(7, "x").zfill(64),
@@ -372,40 +374,23 @@ class TestSafeExecutionEvents:
         assert "safe_tx_hash" not in ev
         assert ev["payment"] == 7
 
-    def test_execution_from_module_success_decodes(self):
-        """Module-triggered execution: address indexed in topics[1], no SafeTx hash or payment
-        (pre-authorised modules such as recovery or a batch executor)."""
-        from services.monitoring.event_topics import EXECUTION_FROM_MODULE_SUCCESS_TOPIC0, parse_governance_log
-
-        module_addr = "0x" + "ee" * 20
+    # Module-triggered execution: address indexed in topics[1], no SafeTx hash or payment
+    # (pre-authorised modules such as recovery or a batch executor).
+    @pytest.mark.parametrize(
+        ("topic0", "module_byte", "tx", "event_type"),
+        [
+            pytest.param(EXECUTION_FROM_MODULE_SUCCESS_TOPIC0, "ee", "0xfeed", "safe_module_executed", id="success"),
+            pytest.param(EXECUTION_FROM_MODULE_FAILURE_TOPIC0, "ff", "0xbeef", "safe_module_failed", id="failure"),
+        ],
+    )
+    def test_execution_from_module_decodes(self, topic0, module_byte, tx, event_type):
         log = {
-            "topics": [
-                EXECUTION_FROM_MODULE_SUCCESS_TOPIC0,
-                "0x" + "0" * 24 + "ee" * 20,  # padded module address in topic
-            ],
+            "topics": [topic0, "0x" + "0" * 24 + module_byte * 20],  # padded module address in topic
             "data": "0x",
             "blockNumber": "0x10",
-            "transactionHash": "0xfeed",
+            "transactionHash": tx,
         }
         ev = parse_governance_log(log)
         assert ev is not None
-        assert ev["event_type"] == "safe_module_executed"
-        assert ev["module"] == module_addr
-
-    def test_execution_from_module_failure_decodes(self):
-        from services.monitoring.event_topics import EXECUTION_FROM_MODULE_FAILURE_TOPIC0, parse_governance_log
-
-        module_addr = "0x" + "ff" * 20
-        log = {
-            "topics": [
-                EXECUTION_FROM_MODULE_FAILURE_TOPIC0,
-                "0x" + "0" * 24 + "ff" * 20,
-            ],
-            "data": "0x",
-            "blockNumber": "0x10",
-            "transactionHash": "0xbeef",
-        }
-        ev = parse_governance_log(log)
-        assert ev is not None
-        assert ev["event_type"] == "safe_module_failed"
-        assert ev["module"] == module_addr
+        assert ev["event_type"] == event_type
+        assert ev["module"] == "0x" + module_byte * 20

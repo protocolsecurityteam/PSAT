@@ -27,29 +27,30 @@ def _isolated_caches():
 # Disabled flag and graceful fallback
 
 
-def test_pg_disabled_skips_db(monkeypatch):
-    monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", False)
+def _raise_db_down(*_a, **_kw):
+    raise RuntimeError("DB connection refused")
 
-    def _no_db(*_a, **_kw):
-        raise AssertionError("disabled flag must short-circuit before DB import")
 
-    with patch.dict("sys.modules", {"db.models": MagicMock(SessionLocal=_no_db)}):
+def _fail_if_db_touched(*_a, **_kw):
+    raise AssertionError("disabled flag must short-circuit before DB import")
+
+
+@pytest.mark.parametrize(
+    ("enabled", "session_local"),
+    [
+        pytest.param(False, _fail_if_db_touched, id="disabled_skips_db"),
+        # A DB connection failure must return None, not crash (CLI-without-DB relies on this).
+        pytest.param(True, _raise_db_down, id="db_unavailable"),
+    ],
+)
+def test_pg_layer_degrades_without_db(monkeypatch, enabled, session_local):
+    monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", enabled)
+
+    with patch.dict("sys.modules", {"db.models": MagicMock(SessionLocal=session_local)}):
         assert rpc._pg_bytecode_get(1, "0xabc") is None
         rpc._pg_bytecode_put(1, "0xabc", "0x60", "0x" + "0" * 64)
         assert rpc._pg_bytecode_get_many(1, ["0xabc"]) == {}
         rpc._pg_bytecode_put_many(1, [("0xabc", "0x60", "0x" + "0" * 64)])
-
-
-def test_pg_get_returns_none_on_db_unavailable(monkeypatch):
-    """A DB connection failure must return None, not crash (CLI-without-DB relies on this)."""
-    monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", True)
-
-    def _raise(*_a, **_kw):
-        raise RuntimeError("DB connection refused")
-
-    with patch.dict("sys.modules", {"db.models": MagicMock(SessionLocal=_raise)}):
-        assert rpc._pg_bytecode_get(1, "0xabc") is None
-        rpc._pg_bytecode_put(1, "0xabc", "0x60", "0x" + "0" * 64)
 
 
 # Single-address path: get_code_with_keccak
@@ -275,9 +276,32 @@ def test_pg_address_case_normalized(monkeypatch):
 # In-memory getcode key re-keyed on (chain_id, address) — P2.4
 
 
-def test_getcode_inmem_key_dedups_url_aliases(monkeypatch):
-    monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", True)
-    monkeypatch.setattr(rpc, "_resolve_chain_id", lambda *_a, **_kw: 1)
+@pytest.mark.parametrize(
+    ("pg_enabled", "chain_id", "urls", "addr", "expected_wire_calls", "expected_keys"),
+    [
+        pytest.param(
+            True,
+            1,
+            ["https://erpc-a/main/evm/1", "https://erpc-b/main/evm/1"],
+            "0x" + "ab" * 20,
+            1,
+            {(1, "0x" + "ab" * 20)},
+            id="dedups_url_aliases_by_chain_id",
+        ),
+        pytest.param(
+            False,
+            None,
+            ["https://node-a", "https://node-b"],
+            "0x" + "cd" * 20,
+            2,
+            {("https://node-a", "0x" + "cd" * 20), ("https://node-b", "0x" + "cd" * 20)},
+            id="falls_back_to_url_when_no_chain_id",
+        ),
+    ],
+)
+def test_getcode_inmem_key(monkeypatch, pg_enabled, chain_id, urls, addr, expected_wire_calls, expected_keys):
+    monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", pg_enabled)
+    monkeypatch.setattr(rpc, "_resolve_chain_id", lambda *_a, **_kw: chain_id)
     monkeypatch.setattr(rpc, "_pg_bytecode_get", lambda *_a, **_kw: None)
     monkeypatch.setattr(rpc, "_pg_bytecode_put", lambda *_a, **_kw: None)
 
@@ -289,48 +313,28 @@ def test_getcode_inmem_key_dedups_url_aliases(monkeypatch):
 
     monkeypatch.setattr(rpc, "rpc_request", _wire)
 
-    addr = "0x" + "ab" * 20
-    rpc.get_code_with_keccak("https://erpc-a/main/evm/1", addr)
-    rpc.get_code_with_keccak("https://erpc-b/main/evm/1", addr)
-    assert wire["n"] == 1, "same chain id → distinct URLs must share one cache slot"
-    assert list(rpc._GETCODE_CACHE.keys()) == [(1, addr)]
-
-
-def test_getcode_inmem_key_falls_back_to_url_when_no_chain_id(monkeypatch):
-    monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", False)
-
-    wire = {"n": 0}
-
-    def _wire(_url, _method, _params, retries=1, *, chain_id=None):
-        wire["n"] += 1
-        return "0x6080"
-
-    monkeypatch.setattr(rpc, "rpc_request", _wire)
-
-    addr = "0x" + "cd" * 20
-    rpc.get_code_with_keccak("https://node-a", addr)
-    rpc.get_code_with_keccak("https://node-b", addr)
-    assert wire["n"] == 2
-    assert set(rpc._GETCODE_CACHE.keys()) == {("https://node-a", addr), ("https://node-b", addr)}
+    for url in urls:
+        rpc.get_code_with_keccak(url, addr)
+    assert wire["n"] == expected_wire_calls
+    assert set(rpc._GETCODE_CACHE.keys()) == expected_keys
 
 
 # _chain_id_cache is size-capped — P2.3
 
 
-def test_chain_id_cache_bounded(monkeypatch):
+@pytest.mark.parametrize(
+    ("cap", "inserted"),
+    [
+        pytest.param(4, 20, id="bounded_under_churn"),
+        pytest.param(3, 3, id="evicts_oldest_at_cap"),
+    ],
+)
+def test_chain_id_cache_is_bounded_and_evicts_oldest(monkeypatch, cap, inserted):
     rpc._chain_id_cache.clear()
-    monkeypatch.setattr(rpc, "_CHAIN_ID_CACHE_MAX", 4)
-    for i in range(20):
-        rpc._remember_chain_id(f"https://rpc-{i}", 1)
-    assert len(rpc._chain_id_cache) <= rpc._CHAIN_ID_CACHE_MAX
-
-
-def test_remember_chain_id_evicts_oldest(monkeypatch):
-    rpc._chain_id_cache.clear()
-    monkeypatch.setattr(rpc, "_CHAIN_ID_CACHE_MAX", 3)
-    for i in range(3):
+    monkeypatch.setattr(rpc, "_CHAIN_ID_CACHE_MAX", cap)
+    for i in range(inserted):
         rpc._remember_chain_id(f"https://rpc-{i}", i)
     rpc._remember_chain_id("https://rpc-new", 99)
     assert "https://rpc-0" not in rpc._chain_id_cache
     assert rpc._chain_id_cache["https://rpc-new"] == 99
-    assert len(rpc._chain_id_cache) == 3
+    assert len(rpc._chain_id_cache) == cap

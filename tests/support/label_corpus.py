@@ -541,27 +541,6 @@ def _apply_policy_derivations(
         record["claims"] = resolve_claim_precedence(list(record.get("claims") or []) + list(new_claims))
 
 
-def extract_contract(
-    entry: dict[str, Any],
-    workdir: Path,
-    *,
-    effects_by_address: Mapping[str, Mapping[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Compile one corpus contract and return its golden record.
-
-    Copies the project into ``workdir`` (fresh, no cached build output),
-    compiles it with Slither pinned to the manifest solc version, runs the
-    production sequence, and flattens the effects artifact into sorted function
-    tuples. ``effects_by_address`` carries the already-compiled siblings a
-    cross-contract derivation may read; without it the policy pass is skipped
-    (``build_golden`` supplies it).
-    """
-    subject, effects, predicate_trees = _compile_and_attach(entry, workdir)
-    if effects_by_address:
-        _apply_policy_derivations(entry, effects, effects_by_address)
-    return _flatten_record(entry, subject, effects, predicate_trees)
-
-
 def _compile_and_attach(entry: dict[str, Any], workdir: Path):
     """Compile one corpus contract and run the static plane's attach/project
     steps, returning ``(subject, effects, predicate_trees)``."""

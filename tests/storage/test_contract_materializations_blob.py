@@ -69,13 +69,23 @@ def _row(**kwargs: Any) -> Any:
     return SimpleNamespace(**defaults)
 
 
-def test_hydrate_inline_when_no_blob_key():
-    row = _row(analysis={"controllers": ["a", "b"]})
-    assert cm.hydrate_analysis(row) == {"controllers": ["a", "b"]}
-
-
-def test_hydrate_returns_none_when_neither_set():
-    assert cm.hydrate_analysis(_row()) is None
+@pytest.mark.parametrize(
+    ("row_fields", "expected"),
+    [
+        pytest.param({"analysis": {"controllers": ["a", "b"]}}, {"controllers": ["a", "b"]}, id="inline-no-blob-key"),
+        pytest.param({}, None, id="neither-set-is-none"),
+        # A row with a blob_key written before ARTIFACT_STORAGE_* was turned off still serves inline
+        # JSONB if present.
+        pytest.param(
+            {"analysis_blob_key": "contract_materializations/x/y/analysis.json", "analysis": {"v": 1}},
+            {"v": 1},
+            id="inline-when-blob-key-set-but-storage-unconfigured",
+        ),
+    ],
+)
+def test_hydrate_analysis_without_readable_blob(row_fields, expected):
+    with patch("db.contract_materializations.get_storage_client", return_value=None):
+        assert cm.hydrate_analysis(_row(**row_fields)) == expected
 
 
 def test_hydrate_reads_blob_when_blob_key_set():
@@ -126,13 +136,6 @@ def test_hydrate_raises_on_blob_fetch_error_with_no_inline():
 
     # Control: nothing recorded at all is still a proven absence, not a raise.
     assert cm.hydrate_analysis(_row(analysis_blob_key=None, analysis=None)) is None
-
-
-def test_hydrate_returns_inline_when_blob_key_set_but_storage_unconfigured():
-    """A row with a blob_key written before ARTIFACT_STORAGE_* was turned off still serves inline JSONB if present."""
-    row = _row(analysis_blob_key="contract_materializations/x/y/analysis.json", analysis={"v": 1})
-    with patch("db.contract_materializations.get_storage_client", return_value=None):
-        assert cm.hydrate_analysis(row) == {"v": 1}
 
 
 def test_hydrate_tracking_plan_uses_tracking_plan_columns():

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from utils.logging import (
     bind_trace_context,
     degraded_errors_var,
@@ -47,42 +49,31 @@ def _bound_accumulators():
 # --------------------------------------------------------------------------- #
 
 
-def test_defillama_not_found_records_degraded_and_metric(tmp_path):
-    from services.crawlers.defillama.scan import scan_protocol
-
-    # Empty projects/ dir so no protocol matches; no coreAssets.json (load_core_assets returns {}).
-    (tmp_path / "projects").mkdir()
-
-    errors, metrics, reset = _bound_accumulators()
-    try:
-        result = scan_protocol(
-            protocol_name="totally-nonexistent-protocol",
-            repo_path=tmp_path,
-            no_clone=True,
-        )
-    finally:
-        reset()
-
-    assert result["addresses"] == []
-    assert metrics.get("protocol_matched") is False
-    assert any(e.phase == "defillama_match" for e in errors)
-
-
-def test_defillama_match_records_protocol_matched_true(tmp_path):
+@pytest.mark.parametrize(
+    "protocol_name,project_file,matched",
+    [
+        # Empty projects/ dir so no protocol matches; no coreAssets.json (load_core_assets returns {}).
+        pytest.param("totally-nonexistent-protocol", None, False, id="not_found"),
+        pytest.param("myproto", "myproto.js", True, id="match"),
+    ],
+)
+def test_defillama_match_records_degraded_and_metric(tmp_path, protocol_name, project_file, matched):
     from services.crawlers.defillama.scan import scan_protocol
 
     projects = tmp_path / "projects"
     projects.mkdir()
-    (projects / "myproto.js").write_text("module.exports = {};\n")
+    if project_file:
+        (projects / project_file).write_text("module.exports = {};\n")
 
     errors, metrics, reset = _bound_accumulators()
     try:
-        scan_protocol(protocol_name="myproto", repo_path=tmp_path, no_clone=True)
+        result = scan_protocol(protocol_name=protocol_name, repo_path=tmp_path, no_clone=True)
     finally:
         reset()
 
-    assert metrics.get("protocol_matched") is True
-    assert not any(e.phase == "defillama_match" for e in errors)
+    assert result["addresses"] == []
+    assert metrics.get("protocol_matched") is matched
+    assert any(e.phase == "defillama_match" for e in errors) is not matched
 
 
 # --------------------------------------------------------------------------- #

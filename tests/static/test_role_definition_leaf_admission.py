@@ -180,47 +180,6 @@ def test_real_role_leaves_are_admitted():
     assert _role_names_from_predicate_trees(trees, _vars("FINALIZE_ROLE")) == {"FINALIZE_ROLE"}
 
 
-# A cross-contract ``registry.hasRole(ROLE, msg.sender)`` gate, as the lowering
-# emits it. The constant IS a real role here — and it is still not admitted; see
-# ``test_external_registry_role_leaf_is_not_admitted``.
-REAL_EXTERNAL_REGISTRY_ROLE_LEAF = {
-    "kind": "external_bool",
-    "operator": "truthy",
-    "authority_role": "delegated_authority",
-    "operands": [
-        {
-            "source": "state_variable",
-            "state_variable_name": "MINTER_ROLE",
-            "constant_value": "0xf0887ba65ee2024ea881d91b74c2450ef19e1557f03bed3ea9f16b037cbe2dc9",
-        },
-        {"source": "msg_sender"},
-    ],
-    "references_msg_sender": True,
-    "parameter_indices": [],
-    "expression": "hasRole(...)",
-    "basis": ["require(TMP_0)"],
-    "callee_state_mutability": "view",
-    "gate_kind": "require",
-    "callee_signature": "hasRole(bytes32,address)",
-    "set_descriptor": {
-        "kind": "external_set",
-        "key_sources": [
-            {
-                "source": "state_variable",
-                "state_variable_name": "MINTER_ROLE",
-                "constant_value": "0xf0887ba65ee2024ea881d91b74c2450ef19e1557f03bed3ea9f16b037cbe2dc9",
-            },
-            {"source": "msg_sender"},
-        ],
-        "authority_contract": {"address_source": {"source": "state_variable", "state_variable_name": "roleRegistry"}},
-        "callee_function": "hasRole",
-        "callee_signature": "hasRole(bytes32,address)",
-        "callee_selector": "0x91d14854",
-    },
-    "confidence": "medium",
-}
-
-
 def test_real_slot_constant_leaves_are_rejected():
     """The two REAL measured slot-constant leaves — role_definitions ids 19 and
     1 — mint nothing."""
@@ -315,50 +274,55 @@ def test_hostile_slot_with_innocent_name_is_dropped():
 # --- fail-closed arms ------------------------------------------------------
 
 
-def test_membership_leaf_without_set_descriptor_is_rejected():
-    """No descriptor ⇒ the mapping was not witnessed ⇒ not a role key."""
-    leaf = {k: v for k, v in REAL_PAUSER_ROLE_LEAF.items() if k != "set_descriptor"}
-    assert _role_names_from_tree(_leaf(leaf), _vars("PAUSER_ROLE")) == set()
+class _AddressVar:
+    type = "address"
+    is_constant = False
 
 
-def test_membership_leaf_with_unmeasured_descriptor_kind_is_rejected():
-    """``array_contains`` / ``bitwise_role_flag`` / ``diamond_facet_acl``: an unmeasured shape is not evidence."""
-    for kind in ("array_contains", "bitwise_role_flag", "diamond_facet_acl"):
-        leaf = {**REAL_PAUSER_ROLE_LEAF, "set_descriptor": {"kind": kind}}
-        assert _role_names_from_tree(_leaf(leaf), _vars("PAUSER_ROLE")) == set()
+def _pauser_leaf_with(**overrides) -> dict:
+    return {**REAL_PAUSER_ROLE_LEAF, **overrides}
 
 
-def test_mapping_membership_operand_with_member_path_is_rejected():
-    """A dereferenced constant is a struct base, not a key — even inside a
-    mapping_membership leaf."""
-    leaf = {
-        **REAL_PAUSER_ROLE_LEAF,
-        "operands": [
-            {
-                "source": "state_variable",
-                "state_variable_name": "PAUSER_ROLE",
-                "member_path": ["_slotField"],
-            },
-            {"source": "msg_sender"},
-        ],
-    }
-    assert _role_names_from_tree(_leaf(leaf), _vars("PAUSER_ROLE")) == set()
+_PAUSER_VARS = _vars("PAUSER_ROLE")
+
+# Fail-closed: each of these leaves must mint no role name.
+_REJECTED_LEAVES = [
+    # No descriptor => the mapping was not witnessed => not a role key.
+    pytest.param(
+        {k: v for k, v in REAL_PAUSER_ROLE_LEAF.items() if k != "set_descriptor"},
+        _PAUSER_VARS,
+        id="membership-leaf-without-set-descriptor",
+    ),
+    # An unmeasured descriptor shape is not evidence.
+    *[
+        pytest.param(
+            _pauser_leaf_with(set_descriptor={"kind": kind}), _PAUSER_VARS, id=f"unmeasured-descriptor-kind-{kind}"
+        )
+        for kind in ("array_contains", "bitwise_role_flag", "diamond_facet_acl")
+    ],
+    # A dereferenced constant is a struct base, not a key, even inside a mapping_membership leaf.
+    pytest.param(
+        _pauser_leaf_with(
+            operands=[
+                {"source": "state_variable", "state_variable_name": "PAUSER_ROLE", "member_path": ["_slotField"]},
+                {"source": "msg_sender"},
+            ]
+        ),
+        _PAUSER_VARS,
+        id="mapping-membership-operand-with-member-path",
+    ),
+    # The compiler type gate survives the structural one.
+    pytest.param(REAL_PAUSER_ROLE_LEAF, {"PAUSER_ROLE": _AddressVar()}, id="non-bytes32-constant-operand"),
+    # No state var in scope means the ``bytes32 constant`` fact was never established.
+    pytest.param(REAL_PAUSER_ROLE_LEAF, {}, id="unknown-state-var-empty-scope"),
+    pytest.param(REAL_PAUSER_ROLE_LEAF, None, id="unknown-state-var-no-scope"),
+    pytest.param(_pauser_leaf_with(authority_role="business"), _PAUSER_VARS, id="non-authority-membership-leaf"),
+]
 
 
-def test_non_bytes32_constant_operand_is_rejected():
-    """The compiler type gate survives the structural one."""
-
-    class _AddressVar:
-        type = "address"
-        is_constant = False
-
-    assert _role_names_from_tree(_leaf(REAL_PAUSER_ROLE_LEAF), {"PAUSER_ROLE": _AddressVar()}) == set()
-
-
-def test_unknown_state_var_is_rejected():
-    """No state var in scope means the ``bytes32 constant`` fact was never established."""
-    assert _role_names_from_tree(_leaf(REAL_PAUSER_ROLE_LEAF), {}) == set()
-    assert _role_names_from_tree(_leaf(REAL_PAUSER_ROLE_LEAF), None) == set()
+@pytest.mark.parametrize("leaf, state_vars", _REJECTED_LEAVES)
+def test_leaf_is_rejected(leaf, state_vars):
+    assert _role_names_from_tree(_leaf(leaf), state_vars) == set()
 
 
 def test_role_leaf_without_enumeration_hint_is_still_admitted():
@@ -366,11 +330,6 @@ def test_role_leaf_without_enumeration_hint_is_still_admitted():
     descriptor = {k: v for k, v in REAL_FINALIZE_ROLE_LEAF["set_descriptor"].items() if k != "storage_var"}
     leaf = {**REAL_FINALIZE_ROLE_LEAF, "set_descriptor": descriptor}
     assert _role_names_from_tree(_leaf(leaf), _vars("FINALIZE_ROLE")) == {"FINALIZE_ROLE"}
-
-
-def test_non_authority_membership_leaf_is_rejected():
-    leaf = {**REAL_PAUSER_ROLE_LEAF, "authority_role": "business"}
-    assert _role_names_from_tree(_leaf(leaf), _vars("PAUSER_ROLE")) == set()
 
 
 # --- second use-site: the resolution plane's slot-locator route -------------

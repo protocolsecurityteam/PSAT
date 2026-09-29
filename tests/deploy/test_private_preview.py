@@ -228,14 +228,9 @@ def test_private_proxy_starts_and_stops_expected_process(tmp_path: Path) -> None
     assert (state / "fly-proxy.pid").is_file()
     subprocess.run([PREVIEW / "private_proxy.sh", "stop", *args], env=env, check=True, timeout=10)
     assert not (state / "fly-proxy.pid").exists()
-
-
-def test_private_proxy_cleanup_is_idempotent(tmp_path: Path) -> None:
-    for _ in range(2):
-        subprocess.run(
-            [PREVIEW / "private_proxy.sh", "stop", "psat-stage-pr-42", "psat-staging", "18080", str(tmp_path)],
-            check=True,
-        )
+    # Stopping again is a no-op that still succeeds.
+    subprocess.run([PREVIEW / "private_proxy.sh", "stop", *args], env=env, check=True, timeout=10)
+    assert not (state / "fly-proxy.pid").exists()
 
 
 def test_cross_preview_requires_explicit_private_route(monkeypatch: pytest.MonkeyPatch) -> None:

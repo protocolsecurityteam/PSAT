@@ -5,8 +5,6 @@ not_determined and the largest capabilities in a protocol ranked below a ninety-
 withdrawal. The fix is one branch, over one entity, under one argument: replacing what a node
 DOES removes its own code from between the principal and what it holds, so the node's own
 priced sheet bounds the move from ABOVE. Each case pins a boundary of that argument.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
 """
 
 from __future__ import annotations

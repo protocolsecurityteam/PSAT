@@ -185,19 +185,20 @@ def test_callee_pointer_rotate_vault_hook():
     assert any(link["pointer"] == "hook" and link["invoked_by"].startswith("transfer") for link in links)
 
 
-def test_callee_pointer_counterexample_erc20_approve():
-    """``approve`` writes a mapping, not a callable scalar pointer a sibling
-    invokes — no callee_pointer claim."""
-    fns = _load(VAULT_HOOK)
-    assert "callee_pointer.rotate" not in _ids(fns["approve(address,uint256)"])
-
-
-def test_callee_pointer_near_miss_ozv5_pseudo_slot_setter():
-    """``setLockBox`` writes an OZ-v5 namespaced pseudo-slot member (hygiene
-    ``storage_location_pseudo``), not a hygiene-normal scalar pointer — no
-    callee_pointer claim even though ``lockBox`` is address-typed."""
-    fns = _load(LZ_OAPP)
-    assert "callee_pointer.rotate" not in _ids(fns["setLockBox(address)"])
+@pytest.mark.parametrize(
+    ("address", "signature"),
+    [
+        # ``approve`` writes a mapping, not a callable scalar pointer a sibling invokes.
+        pytest.param(VAULT_HOOK, "approve(address,uint256)", id="counterexample-erc20-approve"),
+        # ``setLockBox`` writes an OZ-v5 namespaced pseudo-slot member (hygiene
+        # ``storage_location_pseudo``), not a hygiene-normal scalar pointer, so no claim even
+        # though ``lockBox`` is address-typed.
+        pytest.param(LZ_OAPP, "setLockBox(address)", id="near-miss-ozv5-pseudo-slot-setter"),
+    ],
+)
+def test_callee_pointer_negatives(address, signature):
+    fns = _load(address)
+    assert "callee_pointer.rotate" not in _ids(fns[signature])
 
 
 # ---------------------------------------------------------------------------
@@ -205,17 +206,19 @@ def test_callee_pointer_near_miss_ozv5_pseudo_slot_setter():
 # ---------------------------------------------------------------------------
 
 
-def test_erc20_user_plane_claims():
+@pytest.mark.parametrize(
+    ("signature", "expected_claim"),
+    [
+        pytest.param("approve(address,uint256)", "erc20.approve", id="erc20-approve"),
+        pytest.param("transfer(address,uint256)", "erc20.transfer", id="erc20-transfer"),
+        pytest.param("transferFrom(address,address,uint256)", "erc20.transfer_from", id="erc20-transfer-from"),
+        pytest.param("deposit()", "weth.deposit", id="weth-deposit"),
+        pytest.param("withdraw(uint256)", "weth.withdraw", id="weth-withdraw"),
+    ],
+)
+def test_wrapped_native_user_plane_claims(signature, expected_claim):
     fns = _load(WRAPPED_NATIVE)
-    assert "erc20.approve" in _ids(fns["approve(address,uint256)"])
-    assert "erc20.transfer" in _ids(fns["transfer(address,uint256)"])
-    assert "erc20.transfer_from" in _ids(fns["transferFrom(address,address,uint256)"])
-
-
-def test_weth_wrap_unwrap_idiom():
-    fns = _load(WRAPPED_NATIVE)
-    assert "weth.deposit" in _ids(fns["deposit()"])
-    assert "weth.withdraw" in _ids(fns["withdraw(uint256)"])
+    assert expected_claim in _ids(fns[signature])
 
 
 def test_gov_delegate_positive_writes_delegates_and_checkpoints():

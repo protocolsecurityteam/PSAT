@@ -80,34 +80,44 @@ def _status(tmp_path: Path, signature: str) -> str | None:
     return _column_values_for_capability(capability_to_dict(cap))["status"]
 
 
-def test_truthy_caller_allowlist_stays_gated(tmp_path):
-    assert _status(tmp_path, "boolAllowlistGate()") != "public", (
-        "require(adminAllowlist[msg.sender]) is a positive caller gate — must NOT open to public"
-    )
-
-
-def test_caller_keyed_time_allowlist_stays_gated(tmp_path):
-    assert _status(tmp_path, "timeAllowlistGate()") != "public", (
-        "a caller-keyed deny-by-default time allowlist must NOT silently grant public access"
-    )
-
-
-def test_caller_keyed_time_allowlist_gated_regardless_of_operand_order(tmp_path):
-    # Operand order varies; the discriminator keys on the proceed-relation, so the
-    # reversed form (``block.timestamp > allowedUntil[msg.sender]``) gates too.
-    assert _status(tmp_path, "timeAllowlistReversed()") != "public", (
-        "the time-allowlist must gate regardless of which side the caller value is written on"
-    )
-
-
-def test_caller_keyed_share_lock_opens(tmp_path):
-    # If the discriminator ever caught this, every share-lock would be wrongly gated.
-    assert _status(tmp_path, "shareLockKeyedOnCaller()") == "public", (
-        "a caller-keyed share-lock (allow-by-default) must open, not gate"
-    )
-
-
-def test_param_keyed_share_lock_opens_modulo_condition(tmp_path):
-    assert _status(tmp_path, "shareLockKeyedOnParam(address)") == "public", (
-        "a param-keyed share-lock should open with the time-lock as a side-condition"
-    )
+@pytest.mark.parametrize(
+    ("signature", "opens_public", "reason"),
+    [
+        pytest.param(
+            "boolAllowlistGate()",
+            False,
+            "require(adminAllowlist[msg.sender]) is a positive caller gate — must NOT open to public",
+            id="truthy_caller_allowlist_stays_gated",
+        ),
+        # CRITICAL: a deny-by-default time allowlist must never silently open to public.
+        pytest.param(
+            "timeAllowlistGate()",
+            False,
+            "a caller-keyed deny-by-default time allowlist must NOT silently grant public access",
+            id="caller_keyed_time_allowlist_stays_gated",
+        ),
+        # Operand order varies; the discriminator keys on the proceed-relation, so the reversed form
+        # (``block.timestamp > allowedUntil[msg.sender]``) gates too.
+        pytest.param(
+            "timeAllowlistReversed()",
+            False,
+            "the time-allowlist must gate regardless of which side the caller value is written on",
+            id="time_allowlist_gated_regardless_of_operand_order",
+        ),
+        # If the discriminator ever caught this, every share-lock would be wrongly gated.
+        pytest.param(
+            "shareLockKeyedOnCaller()",
+            True,
+            "a caller-keyed share-lock (allow-by-default) must open, not gate",
+            id="caller_keyed_share_lock_opens",
+        ),
+        pytest.param(
+            "shareLockKeyedOnParam(address)",
+            True,
+            "a param-keyed share-lock should open with the time-lock as a side-condition",
+            id="param_keyed_share_lock_opens_modulo_condition",
+        ),
+    ],
+)
+def test_time_allowlist_and_share_lock_openness(tmp_path, signature, opens_public, reason):
+    assert (_status(tmp_path, signature) == "public") is opens_public, reason

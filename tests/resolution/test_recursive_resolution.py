@@ -68,38 +68,50 @@ def _bundle(address: str, contract_name: str, *, snapshot: dict, effective_permi
     return bundle
 
 
-def test_mapping_writer_specs_come_from_predicate_tree_hints():
-    artifact = {
+def _writer_spec_artifact(
+    tree_key: str,
+    function: str,
+    *,
+    authority_role: str,
+    storage_var: str,
+    expression: str,
+    key_sources: list,
+    topic0: str,
+    event_signature: str,
+    event_name: str,
+    writer_function: str,
+) -> dict:
+    return {
         "schema_version": "semantic",
-        "trees": {
-            "f()": {
+        tree_key: {
+            function: {
                 "op": "LEAF",
                 "leaf": {
                     "kind": "membership",
                     "operator": "truthy",
-                    "authority_role": "caller_authority",
+                    "authority_role": authority_role,
                     "operands": [{"source": "msg_sender"}],
                     "references_msg_sender": True,
                     "parameter_indices": [],
-                    "expression": "wards[msg.sender]",
+                    "expression": expression,
                     "basis": [],
                     "set_descriptor": {
                         "kind": "mapping_membership",
-                        "storage_var": "wards",
-                        "key_sources": [{"source": "msg_sender"}],
+                        "storage_var": storage_var,
+                        "key_sources": key_sources,
                         "enumeration_hint": [
                             {
-                                "topic0": "0xaaa",
+                                "topic0": topic0,
                                 "topics_to_keys": {1: 0},
                                 "data_to_keys": {},
                                 "direction": "add",
-                                "event_signature": "Rely(address)",
-                                "event_name": "Rely",
-                                "mapping_name": "wards",
+                                "event_signature": event_signature,
+                                "event_name": event_name,
+                                "mapping_name": storage_var,
                                 "key_position": 0,
                                 "indexed_positions": [0],
                                 "value_position": None,
-                                "writer_function": "rely(address)",
+                                "writer_function": writer_function,
                             }
                         ],
                     },
@@ -108,69 +120,61 @@ def test_mapping_writer_specs_come_from_predicate_tree_hints():
         },
     }
 
+
+@pytest.mark.parametrize(
+    "artifact, expected",
+    [
+        pytest.param(
+            _writer_spec_artifact(
+                "trees",
+                "f()",
+                authority_role="caller_authority",
+                storage_var="wards",
+                expression="wards[msg.sender]",
+                key_sources=[{"source": "msg_sender"}],
+                topic0="0xaaa",
+                event_signature="Rely(address)",
+                event_name="Rely",
+                writer_function="rely(address)",
+            ),
+            {
+                "mapping_name": "wards",
+                "event_signature": "Rely(address)",
+                "event_name": "Rely",
+                "writer_function": "rely(address)",
+            },
+            id="from-predicate-tree-hints",
+        ),
+        pytest.param(
+            _writer_spec_artifact(
+                "check_trees",
+                "allowed(address,address,bytes4)",
+                authority_role="delegated_authority",
+                storage_var="users",
+                expression="users[user]",
+                key_sources=[{"source": "parameter", "parameter_index": 0}],
+                topic0="0xbbb",
+                event_signature="UserAllowed(address)",
+                event_name="UserAllowed",
+                writer_function="allow(address)",
+            ),
+            {
+                "mapping_name": "users",
+                "event_signature": "UserAllowed(address)",
+                "event_name": "UserAllowed",
+                "writer_function": "allow(address)",
+            },
+            id="include-check-trees",
+        ),
+    ],
+)
+def test_mapping_writer_specs_from_predicate_trees(artifact, expected):
     assert _mapping_writer_specs_from_predicate_trees(artifact) == [
         {
-            "mapping_name": "wards",
-            "event_signature": "Rely(address)",
-            "event_name": "Rely",
+            **expected,
             "key_position": 0,
             "indexed_positions": [0],
             "direction": "add",
-            "writer_function": "rely(address)",
-            "value_position": None,
-        }
-    ]
-
-
-def test_mapping_writer_specs_include_check_trees():
-    artifact = {
-        "schema_version": "semantic",
-        "check_trees": {
-            "allowed(address,address,bytes4)": {
-                "op": "LEAF",
-                "leaf": {
-                    "kind": "membership",
-                    "operator": "truthy",
-                    "authority_role": "delegated_authority",
-                    "operands": [{"source": "msg_sender"}],
-                    "references_msg_sender": True,
-                    "parameter_indices": [],
-                    "expression": "users[user]",
-                    "basis": [],
-                    "set_descriptor": {
-                        "kind": "mapping_membership",
-                        "storage_var": "users",
-                        "key_sources": [{"source": "parameter", "parameter_index": 0}],
-                        "enumeration_hint": [
-                            {
-                                "topic0": "0xbbb",
-                                "topics_to_keys": {1: 0},
-                                "data_to_keys": {},
-                                "direction": "add",
-                                "event_signature": "UserAllowed(address)",
-                                "event_name": "UserAllowed",
-                                "mapping_name": "users",
-                                "key_position": 0,
-                                "indexed_positions": [0],
-                                "value_position": None,
-                                "writer_function": "allow(address)",
-                            }
-                        ],
-                    },
-                },
-            }
-        },
-    }
-
-    assert _mapping_writer_specs_from_predicate_trees(artifact) == [
-        {
-            "mapping_name": "users",
-            "event_signature": "UserAllowed(address)",
-            "event_name": "UserAllowed",
-            "key_position": 0,
-            "indexed_positions": [0],
-            "direction": "add",
-            "writer_function": "allow(address)",
             "value_position": None,
         }
     ]
@@ -600,10 +604,6 @@ def test_resolve_control_graph_recurses_into_role_holder_contracts(monkeypatch):
     )
 
     assert materialize_calls == [role_holder_address]
-
-
-# test_materialize_contract_artifacts_tolerates_slither_cli_failure was deleted in
-# commit 438a11c (Slither CLI subprocess rip-out): no code path left to exercise.
 
 
 def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch):
@@ -1529,6 +1529,10 @@ def test_analysis_state_splits_the_analyzed_bool():
     assert recursive._analysis_state(node(depth=7), max_depth) == "beyond_depth_horizon"
     # Not determined: no classification, so none of the four can be asserted.
     assert recursive._analysis_state(node(resolved_type="unknown"), max_depth) is None
+    # Defence in depth: a graph stored before the producer fix may carry the literal ``"None"``;
+    # it must read as undetermined while a genuine non-analyzable type still fires.
+    assert recursive._analysis_state(node(resolved_type="None"), max_depth) is None
+    assert recursive._analysis_state(node(resolved_type=""), max_depth) is None
     # Analyzable, inside the horizon, unanalysed, no recorded failure: also not determined (never invent a value).
     assert recursive._analysis_state(node(depth=2), max_depth) is None
 
@@ -1695,17 +1699,6 @@ def test_null_resolved_type_role_principal_recovers_via_classification(monkeypat
     principal_node = nodes[principal_address]
     assert principal_node["resolved_type"] == "eoa"
     assert principal_node.get("analysis_state") == "not_analyzable"
-
-
-def test_analysis_state_treats_fabricated_none_token_as_undetermined():
-    """Defence in depth: a graph stored before the producer fix may carry the literal ``"None"``;
-    ``_analysis_state`` must read it as undetermined while a genuine non-analyzable type still fires."""
-    node_none = {"analyzed": False, "details": {}, "resolved_type": "None", "depth": 1}
-    node_eoa = {"analyzed": False, "details": {}, "resolved_type": "eoa", "depth": 1}
-    node_empty = {"analyzed": False, "details": {}, "resolved_type": "", "depth": 1}
-    assert recursive._analysis_state(cast(ResolvedGraphNode, node_none), 6) is None
-    assert recursive._analysis_state(cast(ResolvedGraphNode, node_empty), 6) is None
-    assert recursive._analysis_state(cast(ResolvedGraphNode, node_eoa), 6) == "not_analyzable"
 
 
 def test_initial_graph_preseed_sanitizes_fabricated_none_type(monkeypatch):

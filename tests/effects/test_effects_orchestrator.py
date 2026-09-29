@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from db.models import Contract
 from services.effects.config import (
     EFFECT_CLASS_CODE_UPGRADE,
@@ -92,19 +94,18 @@ def test_impl_nonzero_with_resolved_principal_is_proven_now():
     assert eff.concrete["current_check_passed"] is True
 
 
-def test_impl_nonzero_without_principals_is_unknown_not_proven():
-    """The bug being fixed: a historically-upgraded proxy with NO resolved
-    upgrade authority (renounced/frozen) must WITHHOLD — unknown, never proven."""
-    eff = _run_plan(())
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.reason == "historical_only_current_check_failed"
-    assert eff.concrete["current_check_passed"] is False
-
-
-def test_impl_nonzero_with_zero_address_principal_is_unknown():
-    """A renounced authority resolves to the zero address — treated as no
-    authority, so the current-state check fails ⇒ unknown, not proven."""
-    eff = _run_plan((ZERO,))
+# A historically-upgraded proxy with NO resolved upgrade authority (renounced/frozen) must
+# WITHHOLD: unknown, never proven. A renounced authority resolves to the zero address, which
+# counts as no authority.
+@pytest.mark.parametrize(
+    "principals",
+    [
+        pytest.param((), id="without-principals"),
+        pytest.param((ZERO,), id="zero-address-principal"),
+    ],
+)
+def test_impl_nonzero_without_a_live_authority_is_unknown_not_proven(principals):
+    eff = _run_plan(principals)
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "historical_only_current_check_failed"
     assert eff.concrete["current_check_passed"] is False

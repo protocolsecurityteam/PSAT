@@ -196,11 +196,6 @@ def test_worker_records_http_failure_without_touching_storage(
 
 
 # ---------------------------------------------------------------------------
-# 3. Worker skip path — image-only PDFs (short extracted text)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # 4. Claim atomicity — claimed rows transition status and won't re-appear
 # ---------------------------------------------------------------------------
 
@@ -219,11 +214,6 @@ def test_claim_batch_flips_status_to_processing(db_session, storage_bucket, seed
 
     second = worker._claim_batch(db_session)
     assert second == []
-
-
-# ---------------------------------------------------------------------------
-# 5. Stale-row recovery resets abandoned 'processing' rows
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

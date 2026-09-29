@@ -700,40 +700,28 @@ def _verified_fixture(value: str):
     )
 
 
-def test_verified_fixture_kept_when_getter_echoes():
+@pytest.mark.parametrize(
+    "stub_kwargs, kept, readback, has_error",
+    [
+        pytest.param({"echo": "0x" + "00" * 31 + "07"}, True, "ok", False, id="kept-when-getter-echoes"),
+        # CRITICAL: an unverified seed is reverted with its own inner snapshot id, never trusted.
+        pytest.param(
+            {"echo": "0x" + "00" * 31 + "01"}, False, "failed", False, id="dropped-when-getter-returns-wrong-word"
+        ),
+        pytest.param({"raise_on_call": True}, False, "failed", True, id="dropped-when-readback-call-raises"),
+    ],
+)
+def test_verified_fixture_readback(stub_kwargs, kept, readback, has_error):
     from services.effects.anvil import _apply_fixtures
 
     word = "0x" + "00" * 31 + "07"
-    transport = VerifyStub(echo=word)
+    transport = VerifyStub(**stub_kwargs)
     tr: dict = {}
     _apply_fixtures(transport, [_verified_fixture(word)], tr)
-    assert transport.storage[(CONTRACT, "0x5")] == word  # write kept
-    assert transport.reverted == []  # inner snapshot NOT reverted
-    assert tr["fixtures"][0]["readback"] == "ok"
-
-
-def test_verified_fixture_dropped_when_getter_returns_wrong_word():
-    from services.effects.anvil import _apply_fixtures
-
-    seed = "0x" + "00" * 31 + "07"
-    transport = VerifyStub(echo="0x" + "00" * 31 + "01")  # wrong word
-    tr: dict = {}
-    _apply_fixtures(transport, [_verified_fixture(seed)], tr)
-    # The inner snapshot is reverted with its own id, undoing the write.
-    assert transport.reverted == transport.snaps
-    assert tr["fixtures"][0]["readback"] == "failed"
-
-
-def test_verified_fixture_dropped_when_readback_call_raises():
-    from services.effects.anvil import _apply_fixtures
-
-    seed = "0x" + "00" * 31 + "07"
-    transport = VerifyStub(raise_on_call=True)
-    tr: dict = {}
-    _apply_fixtures(transport, [_verified_fixture(seed)], tr)
-    assert transport.reverted == transport.snaps
-    assert tr["fixtures"][0]["readback"] == "failed"
-    assert "error" in tr["fixtures"][0]
+    assert not kept or transport.storage[(CONTRACT, "0x5")] == word  # a verified write is kept
+    assert transport.reverted == ([] if kept else transport.snaps)
+    assert tr["fixtures"][0]["readback"] == readback
+    assert ("error" in tr["fixtures"][0]) is has_error
 
 
 def test_verified_fixtures_are_applied_after_plain_ones():

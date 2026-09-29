@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from db.models import JobStage, JobStatus
 from workers.base import BaseWorker, JobHandledDirectly, _resolve_job_concurrency
 
@@ -59,28 +61,29 @@ def _make_job(**overrides):
 # ---------------------------------------------------------------------------
 
 
-def test_per_stage_env_var_wins_over_global(monkeypatch):
-    monkeypatch.setenv("PSAT_JOB_CONCURRENCY", "2")
-    monkeypatch.setenv("PSAT_RESOLUTION_JOB_CONCURRENCY", "5")
-    assert _resolve_job_concurrency("resolution") == 5
-    assert _resolve_job_concurrency("policy") == 2
-
-
-def test_global_env_falls_back_to_one(monkeypatch):
-    monkeypatch.delenv("PSAT_JOB_CONCURRENCY", raising=False)
-    monkeypatch.delenv("PSAT_DISCOVERY_JOB_CONCURRENCY", raising=False)
-    assert _resolve_job_concurrency("discovery") == 1
-
-
-def test_env_var_invalid_value_falls_back_to_one(monkeypatch):
-    monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "garbage")
-    monkeypatch.delenv("PSAT_JOB_CONCURRENCY", raising=False)
-    assert _resolve_job_concurrency("discovery") == 1
-
-
-def test_env_var_zero_clamped_to_one(monkeypatch):
-    monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "0")
-    assert _resolve_job_concurrency("discovery") == 1
+@pytest.mark.parametrize(
+    "env, stage, expected",
+    [
+        pytest.param(
+            {"PSAT_JOB_CONCURRENCY": "2", "PSAT_RESOLUTION_JOB_CONCURRENCY": "5"}, "resolution", 5, id="per-stage-wins"
+        ),
+        pytest.param(
+            {"PSAT_JOB_CONCURRENCY": "2", "PSAT_RESOLUTION_JOB_CONCURRENCY": "5"},
+            "policy",
+            2,
+            id="global-for-other-stage",
+        ),
+        pytest.param({}, "discovery", 1, id="unset-falls-back-to-one"),
+        pytest.param({"PSAT_DISCOVERY_JOB_CONCURRENCY": "garbage"}, "discovery", 1, id="invalid-falls-back-to-one"),
+        pytest.param({"PSAT_DISCOVERY_JOB_CONCURRENCY": "0"}, "discovery", 1, id="zero-clamped-to-one"),
+    ],
+)
+def test_resolve_job_concurrency(monkeypatch, env, stage, expected):
+    for key in ("PSAT_JOB_CONCURRENCY", "PSAT_DISCOVERY_JOB_CONCURRENCY", "PSAT_RESOLUTION_JOB_CONCURRENCY"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert _resolve_job_concurrency(stage) == expected
 
 
 @patch("workers.base.signal.signal")
@@ -535,11 +538,6 @@ def test_concurrent_job_handled_directly_skips_advance(
     finally:
         if w._job_pool:
             w._job_pool.shutdown(wait=False)
-
-
-# ---------------------------------------------------------------------------
-# Parity: K=1 path is byte-identical to the legacy loop
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

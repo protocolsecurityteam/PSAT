@@ -127,16 +127,18 @@ class TestFetchDefillamaTvl:
         assert "Arbitrum" in result["chain_breakdown"]
         assert "borrowed-Ethereum" not in result["chain_breakdown"]
 
-    @patch("services.discovery.protocol_resolver.resolve_protocol")
-    def test_no_slug(self, mock_resolve):
-        mock_resolve.return_value = {"slug": None}
-        assert fetch_defillama_tvl("UnknownProtocol") is None
-
+    @pytest.mark.parametrize(
+        ("resolved", "get_error"),
+        [
+            pytest.param({"slug": None}, None, id="no_slug"),
+            pytest.param({"slug": "aave-v3"}, Exception("timeout"), id="http_failure"),
+        ],
+    )
     @patch("services.monitoring.tvl.requests.get")
     @patch("services.discovery.protocol_resolver.resolve_protocol")
-    def test_http_failure(self, mock_resolve, mock_get):
-        mock_resolve.return_value = {"slug": "aave-v3"}
-        mock_get.side_effect = Exception("timeout")
+    def test_failure_returns_none(self, mock_resolve, mock_get, resolved, get_error):
+        mock_resolve.return_value = resolved
+        mock_get.side_effect = get_error
         assert fetch_defillama_tvl("Aave") is None
 
 
@@ -604,43 +606,50 @@ class TestNativeAssetPricingDispatch:
         monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
-    def test_base_contract_priced_at_eth_quote(self, db_session, monkeypatch, _cleanup, _no_escalation):
-        # Base is ETH-native → byte-identical to mainnet pricing.
-        protocol = Protocol(name="BaseNativeProto")
+    @pytest.mark.parametrize(
+        ("name", "chain", "tag", "contract_name", "wei", "expected_total", "expected_price"),
+        [
+            # Base is ETH-native, so byte-identical to mainnet pricing.
+            pytest.param(
+                "BaseNativeProto", "base", "b1", "BaseVault", 2_000_000_000_000_000_000, 4000.0, 2000.0, id="base"
+            ),
+            # Legacy NULL chain coalesces to mainnet, so ETH pricing is preserved.
+            pytest.param(
+                "NullChainProto", None, "n1", "LegacyVault", 1_000_000_000_000_000_000, 2000.0, 2000.0, id="null_chain"
+            ),
+        ],
+    )
+    def test_eth_native_contract_priced_at_eth_quote(
+        self,
+        db_session,
+        monkeypatch,
+        _cleanup,
+        _no_escalation,
+        name,
+        chain,
+        tag,
+        contract_name,
+        wei,
+        expected_total,
+        expected_price,
+    ):
+        protocol = Protocol(name=name)
         db_session.add(protocol)
         db_session.flush()
 
-        addr = _addr("native", "b1")
-        db_session.add(Contract(address=addr, chain="base", protocol_id=protocol.id, contract_name="BaseVault"))
+        addr = _addr("native", tag)
+        db_session.add(Contract(address=addr, chain=chain, protocol_id=protocol.id, contract_name=contract_name))
         db_session.commit()
 
-        self._mock_eth_native(monkeypatch, wei=2_000_000_000_000_000_000)  # 2 ETH
+        self._mock_eth_native(monkeypatch, wei=wei)
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
         assert partial is False
-        assert breakdown[_entity_key("base", addr)]["total_usd"] == 4000.0
+        assert breakdown[_entity_key(chain, addr)]["total_usd"] == expected_total
         rows = db_session.query(ContractBalance).all()
         assert len(rows) == 1
         assert rows[0].token_symbol == "ETH"
-        assert float(rows[0].price_usd) == 2000.0
-
-    def test_null_chain_contract_priced_as_eth(self, db_session, monkeypatch, _cleanup, _no_escalation):
-        # Legacy NULL chain coalesces to mainnet → ETH pricing preserved.
-        protocol = Protocol(name="NullChainProto")
-        db_session.add(protocol)
-        db_session.flush()
-
-        addr = _addr("native", "n1")
-        db_session.add(Contract(address=addr, chain=None, protocol_id=protocol.id, contract_name="LegacyVault"))
-        db_session.commit()
-
-        self._mock_eth_native(monkeypatch, wei=1_000_000_000_000_000_000)  # 1 ETH
-        breakdown, partial = refresh_contract_balances(db_session, protocol.id)
-
-        assert partial is False
-        assert breakdown[_entity_key(None, addr)]["total_usd"] == 2000.0
-        rows = db_session.query(ContractBalance).all()
-        assert len(rows) == 1 and rows[0].token_symbol == "ETH"
+        assert float(rows[0].price_usd) == expected_price
 
     def test_polygon_contract_priced_at_pol_quote(self, db_session, monkeypatch, _cleanup, _no_escalation):
         # Regression: polygon (native POL) is priced at POL's own quote, never ETH-quoted.

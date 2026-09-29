@@ -118,25 +118,25 @@ def test_check_constraint_rejects_address_without_chain_id(session):
 
 
 @requires_postgres
-def test_check_constraint_allows_addressless_null_chain_id(session):
-    session.execute(
-        text(
+@pytest.mark.parametrize(
+    "insert_sql,params",
+    [
+        pytest.param(
             "INSERT INTO jobs (id, address, chain_id, status, stage) "
-            "VALUES (gen_random_uuid(), NULL, NULL, 'queued', 'discovery')"
-        )
-    )
-    session.commit()  # must not raise
-
-
-@requires_postgres
-def test_check_constraint_allows_address_with_chain_id(session):
-    session.execute(
-        text(
-            "INSERT INTO jobs (id, address, chain_id, status, stage) "
-            "VALUES (gen_random_uuid(), :addr, 8453, 'queued', 'discovery')"
+            "VALUES (gen_random_uuid(), NULL, NULL, 'queued', 'discovery')",
+            {},
+            id="addressless_null_chain_id",
         ),
-        {"addr": ADDR},
-    )
+        pytest.param(
+            "INSERT INTO jobs (id, address, chain_id, status, stage) "
+            "VALUES (gen_random_uuid(), :addr, 8453, 'queued', 'discovery')",
+            {"addr": ADDR},
+            id="address_with_chain_id",
+        ),
+    ],
+)
+def test_check_constraint_allows(session, insert_sql, params):
+    session.execute(text(insert_sql), params)
     session.commit()  # must not raise
 
 

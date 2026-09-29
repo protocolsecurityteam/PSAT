@@ -294,46 +294,45 @@ def test_the_proven_indefinite_state_is_still_reachable_from_compiled_source(com
     assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "no_time_reference")
 
 
-def test_a_block_number_clock_denies_the_proven_indefinite_state(compiled):
-    """``require(!frozen || block.number > unpauseAtBlock)`` must not read as PROVEN
-    indefinite: the chain reaching the block lifts the freeze with no transaction.
-    ``block_context_kind == "number"`` is a clock spelling the demotion must count
-    (its ``block.timestamp`` twin lands here via the same rule)."""
-    facts = compiled["NumberTwin"]
+@pytest.mark.parametrize(
+    ("contract_name", "latch"),
+    [
+        # ``require(!frozen || block.number > unpauseAtBlock)`` must not read as PROVEN indefinite:
+        # the chain reaching the block lifts the freeze with no transaction.
+        # ``block_context_kind == "number"`` is a clock spelling the demotion must count (its
+        # ``block.timestamp`` twin lands here via the same rule).
+        pytest.param("NumberTwin", "frozen", id="block-number-clock-denies-proven-indefinite"),
+        # The units trap: ``require(block.number - pausedUntilBlock < 216000)`` carries latch + clock +
+        # constant, but the constant is a block count while ``duration_bound_seconds`` is a severity
+        # reducer in seconds; publishing 216000 would understate a ~30-day gate as 2.5 days. The
+        # block clock only demotes the proven state.
+        pytest.param("BlockWindow", "pausedUntilBlock", id="block-count-window-never-published-as-seconds"),
+    ],
+)
+def test_a_block_clock_demotes_to_not_determined(compiled, contract_name, latch):
+    facts = compiled[contract_name]
     assert facts.trees
     assert all(cd._absorption_recorded(tree) for tree in facts.trees.values())
-    assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "not_determined")
+    assert cd.read_max_pause_duration(facts, {latch}) == (None, "not_determined")
 
 
-def test_a_block_count_window_is_never_published_as_seconds(compiled):
-    """The units trap: ``require(block.number - pausedUntilBlock < 216000)`` carries
-    latch + clock + constant, but the constant is a block count while
-    ``duration_bound_seconds`` is a severity reducer in seconds; publishing 216000
-    would understate a ~30-day gate as 2.5 days. The block clock only demotes the
-    proven state."""
-    facts = compiled["BlockWindow"]
-    assert facts.trees
-    assert cd.read_max_pause_duration(facts, {"pausedUntilBlock"}) == (None, "not_determined")
-
-
-def test_a_window_the_recorder_did_read_is_unaffected_by_either_precondition(compiled):
-    """``guard_constant`` returns before both checks, so widening them cannot cost a
-    resolved window.
-
-    ``require(block.timestamp - pausedUntil < 2592000)`` puts clock, latch and offset
-    in one leaf's ``operands ∪ absorbed_operands``, which no lossy list or unentered
-    callee can fake; this keeps the conservative rules from eating the only positive
-    answer."""
-    facts = compiled["AbsorbedWindow"]
-    assert cd.read_max_pause_duration(facts, {"pausedUntil"}) == (2592000, "guard_constant")
-
-
-@pytest.mark.parametrize("contract_name", ["WindowLeft", "RemainingWindow"])
-def test_both_spellings_of_the_gap_ceiling_still_resolve(compiled, contract_name):
-    """POSITIVE CONTROLS for the side/operator awareness of the harvest: narrowed to a
-    shape, not one spelling. ``2592000 > block.timestamp - pausedUntil`` (constant on
-    the LEFT under ``gt``) and ``pausedUntil - block.timestamp < 2592000`` (reversed
-    subtraction) bound the gap by the same magnitude and must keep resolving."""
+@pytest.mark.parametrize(
+    "contract_name",
+    [
+        # ``guard_constant`` returns before both checks, so widening them cannot cost a resolved
+        # window: ``require(block.timestamp - pausedUntil < 2592000)`` puts clock, latch and offset
+        # in one leaf's ``operands | absorbed_operands``, which no lossy list or unentered callee
+        # can fake; this keeps the conservative rules from eating the only positive answer.
+        pytest.param("AbsorbedWindow", id="window-the-recorder-did-read"),
+        # POSITIVE CONTROLS for the side/operator awareness of the harvest: narrowed to a shape,
+        # not one spelling. ``2592000 > block.timestamp - pausedUntil`` (constant on the LEFT under
+        # ``gt``) and ``pausedUntil - block.timestamp < 2592000`` (reversed subtraction) bound the
+        # gap by the same magnitude and must keep resolving.
+        pytest.param("WindowLeft", id="gap-ceiling-constant-on-left"),
+        pytest.param("RemainingWindow", id="gap-ceiling-reversed-subtraction"),
+    ],
+)
+def test_resolving_windows_still_resolve(compiled, contract_name):
     assert cd.read_max_pause_duration(compiled[contract_name], {"pausedUntil"}) == (2592000, "guard_constant")
 
 

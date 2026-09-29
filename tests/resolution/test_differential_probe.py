@@ -9,6 +9,7 @@ a stubbed ``call_batch`` — no live RPC. Soundness invariants asserted:
 
 from __future__ import annotations
 
+import pytest
 from eth_abi.abi import encode as abi_encode
 from eth_utils.crypto import keccak
 
@@ -66,54 +67,58 @@ class StubWire:
 # ---------------------------------------------------------------------------
 
 
-def test_attr_two_sided_random_revert_principal_success_is_discriminating():
-    # row 1: revert(A) / success → caller-discriminating (confirmed gated)
-    assert dp.attribute([revert(OWNABLE), revert(OWNABLE)], ok()) == "caller_discriminating"
-
-
-def test_attr_two_sided_different_gates_is_discriminating():
-    # row 2: random revert(A), principal revert(B), A≠B → caller-discriminating
-    assert dp.attribute([revert(OWNABLE), revert(OWNABLE)], revert(ZERO_ADDR)) == "caller_discriminating"
-
-
-def test_attr_two_sided_all_success_is_candidate_public():
-    # row 3: success / success → not caller-discriminating (candidate public)
-    assert dp.attribute([ok(), ok()], ok()) == "not_caller_discriminating"
-
-
-def test_attr_two_sided_same_gate_everywhere_is_inconclusive():
-    # row 4: revert(A) / revert(A) same error → inconclusive (shared earlier gate)
-    assert dp.attribute([revert(OWNABLE), revert(OWNABLE)], revert(OWNABLE)) == "inconclusive"
-
-
-def test_attr_node_error_is_indeterminate():
-    # row 5: a node error (no revert data) anywhere among randoms → indeterminate
-    assert dp.attribute([revert(OWNABLE), node_error()], ok()) == "indeterminate"
-    assert dp.attribute([node_error()], None) == "indeterminate"
-
-
-def test_attr_one_sided_all_success_is_candidate_public():
-    assert dp.attribute([ok(), ok()], None) == "not_caller_discriminating"
-
-
-def test_attr_one_sided_all_revert_same_is_consistent_rejection():
-    assert dp.attribute([revert(OWNABLE), revert(OWNABLE)], None) == "caller_rejected_consistent"
-    assert dp.attribute([revert(UNAUTHORIZED), revert(UNAUTHORIZED)], None) == "caller_rejected_consistent"
-
-
-def test_attr_randoms_disagree_is_indeterminate():
-    # a random/random split (one success, one revert) is state/arg-specific, not
-    # curated-set caller discrimination → withhold.
-    assert dp.attribute([ok(), revert(OWNABLE)], None) == "indeterminate"
-
-
-def test_attr_one_sided_randoms_revert_different_data_is_indeterminate():
-    assert dp.attribute([revert(OWNABLE), revert(UNAUTHORIZED)], None) == "indeterminate"
-
-
-def test_attr_principal_node_error_falls_back_to_one_sided():
-    # principal unusable → reason on randoms alone (both succeed → candidate public)
-    assert dp.attribute([ok(), ok()], node_error()) == "not_caller_discriminating"
+@pytest.mark.parametrize(
+    ("randoms", "principal", "expected"),
+    [
+        # row 1: revert(A) / success → caller-discriminating (confirmed gated)
+        pytest.param(
+            [revert(OWNABLE), revert(OWNABLE)],
+            ok(),
+            "caller_discriminating",
+            id="two_sided_random_revert_principal_success",
+        ),
+        # row 2: random revert(A), principal revert(B), A≠B → caller-discriminating
+        pytest.param(
+            [revert(OWNABLE), revert(OWNABLE)],
+            revert(ZERO_ADDR),
+            "caller_discriminating",
+            id="two_sided_different_gates",
+        ),
+        # row 3 (CRITICAL): success / success → candidate public; the only path toward a public verdict
+        pytest.param([ok(), ok()], ok(), "not_caller_discriminating", id="two_sided_all_success"),
+        # row 4 (CRITICAL): same gate everywhere → inconclusive; a shared earlier gate must not upgrade or confirm
+        pytest.param(
+            [revert(OWNABLE), revert(OWNABLE)], revert(OWNABLE), "inconclusive", id="two_sided_same_gate_everywhere"
+        ),
+        # row 5 (CRITICAL): a node error (no revert data) among randoms → indeterminate, fails closed
+        pytest.param([revert(OWNABLE), node_error()], ok(), "indeterminate", id="node_error_with_principal"),
+        pytest.param([node_error()], None, "indeterminate", id="node_error_one_sided"),
+        pytest.param([ok(), ok()], None, "not_caller_discriminating", id="one_sided_all_success"),
+        pytest.param(
+            [revert(OWNABLE), revert(OWNABLE)],
+            None,
+            "caller_rejected_consistent",
+            id="one_sided_all_revert_same_ownable",
+        ),
+        pytest.param(
+            [revert(UNAUTHORIZED), revert(UNAUTHORIZED)],
+            None,
+            "caller_rejected_consistent",
+            id="one_sided_all_revert_same_custom",
+        ),
+        # (CRITICAL) random/random split is state/arg-specific, not curated-set caller discrimination → withhold
+        pytest.param([ok(), revert(OWNABLE)], None, "indeterminate", id="randoms_disagree"),
+        pytest.param(
+            [revert(OWNABLE), revert(UNAUTHORIZED)], None, "indeterminate", id="one_sided_randoms_revert_different_data"
+        ),
+        # principal unusable → reason on randoms alone (both succeed → candidate public)
+        pytest.param(
+            [ok(), ok()], node_error(), "not_caller_discriminating", id="principal_node_error_falls_back_one_sided"
+        ),
+    ],
+)
+def test_attribute_table(randoms, principal, expected):
+    assert dp.attribute(randoms, principal) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -121,26 +126,29 @@ def test_attr_principal_node_error_falls_back_to_one_sided():
 # ---------------------------------------------------------------------------
 
 
-def test_synth_single_uint_zero_encodes():
-    assert dp.synthesize_calldata("0x9a1e97d1", "setClaimingOpen(uint256)") == "0x9a1e97d1" + "00" * 32
+@pytest.mark.parametrize(
+    ("selector", "signature", "expected"),
+    [
+        pytest.param("0x9a1e97d1", "setClaimingOpen(uint256)", "0x9a1e97d1" + "00" * 32, id="single_uint_zero"),
+        pytest.param("0x715018a6", "renounceOwnership()", "0x715018a6", id="no_args_bare_selector"),
+        pytest.param(
+            "0xa9059cbb", "transfer(address,uint256)", "0xa9059cbb" + "00" * 32 + "00" * 32, id="address_and_uint"
+        ),
+    ],
+)
+def test_synth_exact_encoding(selector, signature, expected):
+    assert dp.synthesize_calldata(selector, signature) == expected
 
 
-def test_synth_no_args_is_bare_selector():
-    assert dp.synthesize_calldata("0x715018a6", "renounceOwnership()") == "0x715018a6"
-
-
-def test_synth_address_and_uint():
-    data = dp.synthesize_calldata("0xa9059cbb", "transfer(address,uint256)")
-    assert data == "0xa9059cbb" + "00" * 32 + "00" * 32
-
-
-def test_synth_dynamic_types_do_not_crash():
-    data = dp.synthesize_calldata("0x12345678", "foo(bytes,uint256[],string)")
-    assert data is not None and data.startswith("0x12345678")
-
-
-def test_synth_tuple_and_fixed_array():
-    data = dp.synthesize_calldata("0x12345678", "bar((uint256,address),bool,uint8[2])")
+@pytest.mark.parametrize(
+    "signature",
+    [
+        pytest.param("foo(bytes,uint256[],string)", id="dynamic_types"),
+        pytest.param("bar((uint256,address),bool,uint8[2])", id="tuple_and_fixed_array"),
+    ],
+)
+def test_synth_complex_types_do_not_crash(signature):
+    data = dp.synthesize_calldata("0x12345678", signature)
     assert data is not None and data.startswith("0x12345678")
 
 
@@ -152,19 +160,19 @@ def test_synth_caller_correlated_substitution_sets_identity():
     assert first_word == encode_address_word(identity)
 
 
-def test_synth_miss_on_user_defined_type_returns_none():
-    # A residual user-defined type (ERC20) is not ABI-encodable → synthesis MISS.
-    assert dp.synthesize_calldata("0x18457e61", "exit(address,ERC20,uint256,address,uint256)") is None
-
-
-def test_synth_miss_on_malformed_signature():
-    assert dp.synthesize_calldata("0x12345678", "notasignature") is None
-    assert dp.synthesize_calldata("0x12345678", None) is None
-
-
-def test_synth_miss_on_bad_selector():
-    assert dp.synthesize_calldata("0xZZ", "f()") is None
-    assert dp.synthesize_calldata("deadbeef", "f()") is None
+@pytest.mark.parametrize(
+    ("selector", "signature"),
+    [
+        # A residual user-defined type (ERC20) is not ABI-encodable → synthesis MISS.
+        pytest.param("0x18457e61", "exit(address,ERC20,uint256,address,uint256)", id="user_defined_type"),
+        pytest.param("0x12345678", "notasignature", id="malformed_signature"),
+        pytest.param("0x12345678", None, id="no_signature"),
+        pytest.param("0xZZ", "f()", id="selector_not_hex"),
+        pytest.param("deadbeef", "f()", id="selector_missing_0x"),
+    ],
+)
+def test_synth_miss_returns_none(selector, signature):
+    assert dp.synthesize_calldata(selector, signature) is None
 
 
 # ---------------------------------------------------------------------------
@@ -276,12 +284,6 @@ def test_run_indeterminate_keeps_static():
 # pattern). Grounds the attribution in genuine node responses, not hand-encoded
 # bytes. See scripts/authority_audit/PHASE0_HANDPROBE.md.
 # ---------------------------------------------------------------------------
-
-_REAL_OWNABLE_REVERT = (
-    "0x08c379a000000000000000000000000000000000000000000000000000000000"
-    "00000020000000000000000000000000000000000000000000000000000000000"
-    "00000204f776e61626c653a2063616c6c6572206973206e6f7420746865206f776e6572"
-).replace(" ", "")
 
 
 def test_run_synthesis_miss_never_probes_and_keeps_static():

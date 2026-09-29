@@ -714,16 +714,10 @@ def test_call_before_write_within_one_node_refuses(_unit, _effects):
 # ---------------------------------------------------------------------------
 
 
-def test_native_transfer_before_clear_refuses(_unit, _effects):
+@pytest.mark.parametrize("function", ["transferBeforeClear", "sendBeforeClear"])
+def test_native_call_before_clear_refuses(_unit, _effects, function):
     _assert_refused(
-        _verdict(_unit, _effects, "transferBeforeClear", _bid_amount()),
-        ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
-    )
-
-
-def test_native_send_before_clear_refuses(_unit, _effects):
-    _assert_refused(
-        _verdict(_unit, _effects, "sendBeforeClear", _bid_amount()),
+        _verdict(_unit, _effects, function, _bid_amount()),
         ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
     )
 

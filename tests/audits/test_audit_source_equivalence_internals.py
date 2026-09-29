@@ -41,16 +41,24 @@ def _clear_lru_cache():
 
 
 class TestExtractReviewedCommitsFilters:
-    def test_rejects_token_with_fewer_than_three_unique_chars(self):
-        """Alternations like ``ababab`` pass the hex-letter check but are noise; covers the ``len(set(token)) < 3``
-        guard.
-        """
-        assert extract_reviewed_commits("noise abababab more") == []
-        assert extract_reviewed_commits("noise abababab real 1a2b3c4d") == ["1a2b3c4d"]
-
-    def test_dedupes_repeat_occurrences(self):
-        text = "commit 1a2b3c4d\nseen again 1a2b3c4d\nalso deadbeefcafe01"
-        assert extract_reviewed_commits(text) == ["1a2b3c4d", "deadbeefcafe01"]
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            # Alternations like ``ababab`` pass the hex-letter check but are noise; covers the
+            # ``len(set(token)) < 3`` guard.
+            pytest.param("noise abababab more", [], id="rejects-token-with-fewer-than-three-unique-chars"),
+            pytest.param(
+                "noise abababab real 1a2b3c4d", ["1a2b3c4d"], id="rejects-low-entropy-token-but-keeps-real-sha"
+            ),
+            pytest.param(
+                "commit 1a2b3c4d\nseen again 1a2b3c4d\nalso deadbeefcafe01",
+                ["1a2b3c4d", "deadbeefcafe01"],
+                id="dedupes-repeat-occurrences",
+            ),
+        ],
+    )
+    def test_filters(self, text, expected):
+        assert extract_reviewed_commits(text) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -126,51 +134,31 @@ class TestFetchEtherscanSourceFiles:
 # ---------------------------------------------------------------------------
 
 
+def _raises_db_gone(*_a, **_k):
+    raise RuntimeError("DB gone")
+
+
 class TestFetchDbSourceFilesShortCircuits:
-    def test_returns_none_when_contract_missing(self):
-        """Session.get returning None means the contract doesn't exist —
-        the resolver must return None without attempting a source lookup."""
-        session = MagicMock()
-        session.get.return_value = None
-        assert fetch_db_source_files(session, 999) is None
-
-    def test_returns_none_when_contract_has_no_job_id(self):
-        """Contract exists but was never analyzed (job_id is NULL) — no
-        SourceFile rows to read, so the caller falls back to Etherscan."""
-        session = MagicMock()
-        contract = MagicMock()
-        contract.job_id = None
-        session.get.return_value = contract
-        assert fetch_db_source_files(session, 1) is None
-
-    def test_returns_none_when_get_source_files_raises(self, monkeypatch):
-        """DB errors during source-file fetch must not bubble — the matcher
-        should degrade gracefully to the Etherscan fallback."""
+    @pytest.mark.parametrize(
+        "contract_exists, job_id, get_source_files",
+        [
+            # Session.get returning None: the contract doesn't exist, so no source lookup is attempted.
+            pytest.param(False, None, None, id="contract-missing"),
+            # Contract exists but was never analyzed (job_id NULL): caller falls back to Etherscan.
+            pytest.param(True, None, None, id="contract-has-no-job-id"),
+            # DB errors during source-file fetch must not bubble; degrade to the Etherscan fallback.
+            pytest.param(True, "job-id", _raises_db_gone, id="get-source-files-raises"),
+            # Job completed but no SourceFile rows: same as job_id=None.
+            pytest.param(True, "job-id", lambda *_a, **_k: {}, id="no-source-files-rows"),
+        ],
+    )
+    def test_returns_none(self, monkeypatch, contract_exists, job_id, get_source_files):
         import importlib
 
         session = MagicMock()
-        contract = MagicMock()
-        contract.job_id = "job-id"
-        session.get.return_value = contract
-
-        def boom(*_a, **_k):
-            raise RuntimeError("DB gone")
-
-        queue_module = importlib.import_module("db.queue")
-        monkeypatch.setattr(queue_module, "get_source_files", boom)
-        assert fetch_db_source_files(session, 1) is None
-
-    def test_returns_none_when_no_source_files_rows(self, monkeypatch):
-        """Job completed but somehow no SourceFile rows exist — same result
-        as ``job_id=None``: punt to Etherscan."""
-        import importlib
-
-        session = MagicMock()
-        contract = MagicMock()
-        contract.job_id = "job-id"
-        session.get.return_value = contract
-        queue_module = importlib.import_module("db.queue")
-        monkeypatch.setattr(queue_module, "get_source_files", lambda *_a, **_k: {})
+        session.get.return_value = MagicMock(job_id=job_id) if contract_exists else None
+        if get_source_files is not None:
+            monkeypatch.setattr(importlib.import_module("db.queue"), "get_source_files", get_source_files)
         assert fetch_db_source_files(session, 1) is None
 
 
@@ -195,70 +183,51 @@ def _resp(
     return r
 
 
+def _raising_get(exc):
+    def raising(*_a, **_kw):
+        raise exc
+
+    return raising
+
+
 class TestFetchGithubRaw:
-    def test_404_returns_http_404_status(self, monkeypatch):
-        monkeypatch.setattr(
-            "services.audits.source_equivalence.requests.get",
-            lambda *_a, **_k: _resp(status_code=404, text="Not Found"),
-        )
+    @pytest.mark.parametrize(
+        "fake_get, expected_content, expected_status",
+        [
+            pytest.param(lambda *_a, **_k: _resp(status_code=404, text="Not Found"), None, "http_404", id="404"),
+            # Distinguishes transient server errors from permanent 404s so the retry sweep retries it.
+            pytest.param(lambda *_a, **_k: _resp(status_code=503, text="Unavailable"), None, "http_5xx", id="5xx"),
+            pytest.param(_raising_get(requests.ConnectionError("timeout")), None, "transport_error", id="network"),
+            # An image/pdf at the conventional path would poison hashes; rejected without parsing the body.
+            pytest.param(
+                lambda *_a, **_k: _resp(content_type="image/png", text="binary"),
+                None,
+                "content_type_rejected",
+                id="binary-content-type-rejected",
+            ),
+            # Some raw-content CDNs serve source as octet-stream; the guard explicitly allows it.
+            pytest.param(
+                lambda *_a, **_k: _resp(content_type="application/octet-stream", text="contract X {}"),
+                "contract X {}",
+                "ok",
+                id="octet-stream-accepted",
+            ),
+            # A 6MB response almost certainly isn't a single Solidity file.
+            pytest.param(
+                lambda *_a, **_k: _resp(
+                    content_type="text/plain", content_bytes=b"x" * (6 * 1024 * 1024), text="x" * 10
+                ),
+                None,
+                "size_cap_exceeded",
+                id="oversized-body-rejected",
+            ),
+        ],
+    )
+    def test_response_handling(self, monkeypatch, fake_get, expected_content, expected_status):
+        monkeypatch.setattr("services.audits.source_equivalence.requests.get", fake_get)
         got = _fetch_github_raw("https://raw.githubusercontent.com/x/y/abc/file.sol", None)
-        assert got.content is None
-        assert got.status == "http_404"
-
-    def test_5xx_returns_http_5xx_status(self, monkeypatch):
-        """Distinguishes transient server errors from permanent 404s — lets
-        the retry sweep know this one is worth retrying."""
-        monkeypatch.setattr(
-            "services.audits.source_equivalence.requests.get",
-            lambda *_a, **_k: _resp(status_code=503, text="Unavailable"),
-        )
-        got = _fetch_github_raw("https://raw.githubusercontent.com/x/y/abc/file.sol", None)
-        assert got.content is None
-        assert got.status == "http_5xx"
-
-    def test_network_exception_returns_transport_error(self, monkeypatch):
-        def raising(*_a, **_kw):
-            raise requests.ConnectionError("timeout")
-
-        monkeypatch.setattr("services.audits.source_equivalence.requests.get", raising)
-        got = _fetch_github_raw("https://raw.githubusercontent.com/x/y/abc/file.sol", None)
-        assert got.content is None
-        assert got.status == "transport_error"
-
-    def test_binary_content_type_rejected(self, monkeypatch):
-        """A repo that returned an image/pdf at the conventional path would
-        poison hashes if we accepted it — the content-type check catches
-        that without parsing the body."""
-        monkeypatch.setattr(
-            "services.audits.source_equivalence.requests.get",
-            lambda *_a, **_k: _resp(content_type="image/png", text="binary"),
-        )
-        got = _fetch_github_raw("https://raw.githubusercontent.com/x/y/abc/file.sol", None)
-        assert got.content is None
-        assert got.status == "content_type_rejected"
-
-    def test_octet_stream_content_type_accepted(self, monkeypatch):
-        """Some raw-content CDNs serve source as ``application/octet-stream``;
-        the guard explicitly allows it so we don't false-negative on them."""
-        monkeypatch.setattr(
-            "services.audits.source_equivalence.requests.get",
-            lambda *_a, **_k: _resp(content_type="application/octet-stream", text="contract X {}"),
-        )
-        got = _fetch_github_raw("https://raw.githubusercontent.com/x/y/abc/file.sol", None)
-        assert got.content == "contract X {}"
-        assert got.status == "ok"
-
-    def test_oversized_body_rejected(self, monkeypatch):
-        """A 6MB response almost certainly isn't a single Solidity file —
-        reject to keep the hot path from spending memory on junk."""
-        big = b"x" * (6 * 1024 * 1024)
-        monkeypatch.setattr(
-            "services.audits.source_equivalence.requests.get",
-            lambda *_a, **_k: _resp(content_type="text/plain", content_bytes=big, text="x" * 10),
-        )
-        got = _fetch_github_raw("https://raw.githubusercontent.com/x/y/abc/file.sol", None)
-        assert got.content is None
-        assert got.status == "size_cap_exceeded"
+        assert got.content == expected_content
+        assert got.status == expected_status
 
     def test_authorization_header_set_when_token_provided(self, monkeypatch):
         """Private repos require ``token ghp_...``. Verify the header
@@ -286,9 +255,24 @@ class TestFetchGithubRaw:
 
 
 class TestFetchGithubRawRetry:
-    def test_transient_connection_error_is_retried_to_success(self, monkeypatch):
-        """First call RSTs (the prod failure mode), second succeeds — the
-        cached outcome should be the success, not the flake."""
+    @pytest.mark.parametrize(
+        "first_failure, body",
+        [
+            # First call RSTs (the prod failure mode), second succeeds: cache the success, not the flake.
+            pytest.param(
+                lambda: requests.exceptions.ConnectionError(
+                    "Connection aborted.", ConnectionResetError(104, "Connection reset by peer")
+                ),
+                "contract X { function f() public {} }",
+                id="connection-error",
+            ),
+            # 503 is transient: retry rather than memoize as ``http_5xx``.
+            pytest.param(lambda: _resp(status_code=503, text="Unavailable"), "contract Y {}", id="5xx"),
+            # Slow CDNs surface as ReadTimeout rather than ConnectionError; same treatment.
+            pytest.param(lambda: requests.exceptions.ReadTimeout("read timed out"), "contract Z {}", id="read-timeout"),
+        ],
+    )
+    def test_transient_failure_is_retried_to_success(self, monkeypatch, first_failure, body):
         monkeypatch.setattr("services.audits.source_equivalence._retry_sleep", lambda _s: None, raising=False)
 
         calls = {"n": 0}
@@ -296,17 +280,17 @@ class TestFetchGithubRawRetry:
         def flaky(*_a, **_kw):
             calls["n"] += 1
             if calls["n"] == 1:
-                raise requests.exceptions.ConnectionError(
-                    "Connection aborted.",
-                    ConnectionResetError(104, "Connection reset by peer"),
-                )
-            return _resp(text="contract X { function f() public {} }", content_type="text/plain")
+                failure = first_failure()
+                if isinstance(failure, Exception):
+                    raise failure
+                return failure
+            return _resp(text=body, content_type="text/plain")
 
         monkeypatch.setattr("services.audits.source_equivalence.requests.get", flaky)
 
         got = _fetch_github_raw("https://raw.githubusercontent.com/x/y/abc/Retry1.sol", None)
         assert got.status == "ok"
-        assert got.content == "contract X { function f() public {} }"
+        assert got.content == body
         assert calls["n"] == 2
 
     def test_retries_exhausted_returns_transport_error(self, monkeypatch):
@@ -327,45 +311,6 @@ class TestFetchGithubRawRetry:
         assert got.content is None
         assert got.status == "transport_error"
         assert calls["n"] == 3
-
-    def test_transient_5xx_is_retried_to_success(self, monkeypatch):
-        """503 from raw.githubusercontent.com is transient — retry rather
-        than memoize as ``http_5xx`` and starve the rest of the run."""
-        monkeypatch.setattr("services.audits.source_equivalence._retry_sleep", lambda _s: None, raising=False)
-
-        calls = {"n": 0}
-
-        def maybe_5xx(*_a, **_kw):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                return _resp(status_code=503, text="Unavailable")
-            return _resp(text="contract Y {}", content_type="text/plain")
-
-        monkeypatch.setattr("services.audits.source_equivalence.requests.get", maybe_5xx)
-
-        got = _fetch_github_raw("https://raw.githubusercontent.com/x/y/abc/Retry3.sol", None)
-        assert got.status == "ok"
-        assert got.content == "contract Y {}"
-        assert calls["n"] == 2
-
-    def test_read_timeout_is_retried_to_success(self, monkeypatch):
-        """Slow CDNs surface as ReadTimeout rather than ConnectionError —
-        same retry treatment."""
-        monkeypatch.setattr("services.audits.source_equivalence._retry_sleep", lambda _s: None, raising=False)
-
-        calls = {"n": 0}
-
-        def maybe_timeout(*_a, **_kw):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise requests.exceptions.ReadTimeout("read timed out")
-            return _resp(text="contract Z {}", content_type="text/plain")
-
-        monkeypatch.setattr("services.audits.source_equivalence.requests.get", maybe_timeout)
-
-        got = _fetch_github_raw("https://raw.githubusercontent.com/x/y/abc/Retry4.sol", None)
-        assert got.status == "ok"
-        assert calls["n"] == 2
 
     def test_404_does_not_retry(self, monkeypatch):
         """404 means the path is genuinely missing — retrying just wastes
@@ -441,22 +386,26 @@ class TestFetchGithubRawHashCaching:
 
 
 class TestFetchGithubSourceHash:
-    def test_returns_invalid_input_on_missing_inputs(self):
-        """Missing repo, commit or path short-circuits with status='invalid_input' and no HTTP call."""
-        for args in [("", "abc", "file.sol"), ("r/n", "", "file.sol"), ("r/n", "abc", "")]:
-            got = fetch_github_source_hash(*args)
-            assert got.sha256 is None
-            assert got.status == "invalid_input"
+    _CONTENT = "contract Pool { function f() {} }"
 
-    def test_returns_sha256_when_content_fetched(self, monkeypatch):
-        content = "contract Pool { function f() {} }"
+    @pytest.mark.parametrize(
+        "args, expected_sha, expected_status",
+        [
+            # Missing repo, commit or path short-circuits with invalid_input and no HTTP fetch.
+            pytest.param(("", "abc", "file.sol"), None, "invalid_input", id="missing-repo"),
+            pytest.param(("r/n", "", "file.sol"), None, "invalid_input", id="missing-commit"),
+            pytest.param(("r/n", "abc", ""), None, "invalid_input", id="missing-path"),
+            pytest.param(("r/n", "abc1234", "src/Pool.sol"), _hash_source_text(_CONTENT), "ok", id="content-fetched"),
+        ],
+    )
+    def test_fetch_github_source_hash(self, monkeypatch, args, expected_sha, expected_status):
         monkeypatch.setattr(
             "services.audits.source_equivalence.requests.get",
-            lambda *_a, **_k: _resp(text=content, content_type="text/plain"),
+            lambda *_a, **_k: _resp(text=self._CONTENT, content_type="text/plain"),
         )
-        got = fetch_github_source_hash("r/n", "abc1234", "src/Pool.sol")
-        assert got.sha256 == _hash_source_text(content)
-        assert got.status == "ok"
+        got = fetch_github_source_hash(*args)
+        assert got.sha256 == expected_sha
+        assert got.status == expected_status
 
 
 # ---------------------------------------------------------------------------
@@ -465,29 +414,24 @@ class TestFetchGithubSourceHash:
 
 
 class TestCandidatePathsForName:
-    def test_prefers_matching_etherscan_paths(self):
-        """When the bundle contains the basename verbatim, return THOSE
-        paths — they reflect the project's actual layout and the GitHub
-        fetch will succeed against them."""
-        paths = ["contracts/pool/MyPool.sol", "contracts/utils/Other.sol"]
-        assert _candidate_paths_for_name("MyPool", paths) == ["contracts/pool/MyPool.sol"]
-
-    def test_falls_back_to_conventional_paths_when_no_etherscan_match(self):
-        """Flattened verifications (Etherscan collapses everything into one
-        ``Contract.sol`` file) don't carry the real tree — try ``src/``
-        and ``contracts/`` which cover the vast majority of projects."""
-        assert _candidate_paths_for_name("Vault", []) == ["src/Vault.sol", "contracts/Vault.sol"]
-
-    def test_matches_vyper_files(self):
-        """``.vy`` is the other accepted extension — covered so Curve-style
-        repos don't false-negative."""
-        paths = ["src/pool.vy"]
-        assert _candidate_paths_for_name("pool", paths) == ["src/pool.vy"]
-
-
-# ---------------------------------------------------------------------------
-# _hash_source_text — sanity: same text → same hash
-# ---------------------------------------------------------------------------
+    @pytest.mark.parametrize(
+        "name, paths, expected",
+        [
+            # A bundle containing the basename verbatim returns THOSE paths: they reflect the real layout.
+            pytest.param(
+                "MyPool",
+                ["contracts/pool/MyPool.sol", "contracts/utils/Other.sol"],
+                ["contracts/pool/MyPool.sol"],
+                id="prefers-matching-etherscan-paths",
+            ),
+            # Flattened verifications don't carry the real tree; try ``src/`` and ``contracts/``.
+            pytest.param("Vault", [], ["src/Vault.sol", "contracts/Vault.sol"], id="conventional-fallback"),
+            # ``.vy`` is the other accepted extension (Curve-style repos).
+            pytest.param("pool", ["src/pool.vy"], ["src/pool.vy"], id="matches-vyper-files"),
+        ],
+    )
+    def test_candidate_paths(self, name, paths, expected):
+        assert _candidate_paths_for_name(name, paths) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -592,32 +536,22 @@ class TestVerifyAuditCoversImplStatuses:
         )
         assert out.status == "candidate_path_missing"
 
-    def test_no_reviewed_commit(self):
+    @pytest.mark.parametrize(
+        "reviewed_commits, source_repo, files, expected_status",
+        [
+            pytest.param([], "r/n", {"src/Pool.sol": "hash"}, "no_reviewed_commit", id="no-reviewed-commit"),
+            pytest.param(["abc1234"], None, {"src/Pool.sol": "hash"}, "no_source_repo", id="no-source-repo"),
+            pytest.param(["abc1234"], "r/n", {}, "etherscan_unverified", id="etherscan-unverified-via-empty-files"),
+        ],
+    )
+    def test_short_circuit_statuses(self, reviewed_commits, source_repo, files, expected_status):
         out = source_equivalence.verify_audit_covers_impl(
-            reviewed_commits=[],
+            reviewed_commits=reviewed_commits,
             scope_name="Pool",
-            impl_source=self._src({"src/Pool.sol": "hash"}),
-            source_repo="r/n",
+            impl_source=self._src(files),
+            source_repo=source_repo,
         )
-        assert out.status == "no_reviewed_commit"
-
-    def test_no_source_repo(self):
-        out = source_equivalence.verify_audit_covers_impl(
-            reviewed_commits=["abc1234"],
-            scope_name="Pool",
-            impl_source=self._src({"src/Pool.sol": "hash"}),
-            source_repo=None,
-        )
-        assert out.status == "no_source_repo"
-
-    def test_etherscan_unverified_via_empty_files(self):
-        out = source_equivalence.verify_audit_covers_impl(
-            reviewed_commits=["abc1234"],
-            scope_name="Pool",
-            impl_source=self._src({}),
-            source_repo="r/n",
-        )
-        assert out.status == "etherscan_unverified"
+        assert out.status == expected_status
 
     def test_github_fetch_failed_on_transient_errors(self, monkeypatch):
         """Every attempt returns 5xx / transport error → classify as
@@ -642,52 +576,56 @@ class TestVerifyAuditCoversImplStatuses:
 
 
 class TestExtractReferencedRepos:
-    def test_extracts_multiple_repos_dedupes(self):
-        text = """
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            pytest.param(
+                """
         The audit reviewed code at https://github.com/etherfi-protocol/smart-contracts
         with fixes applied at github.com/etherfi-protocol/smart-contracts/pull/42
         and also looked at https://github.com/etherfi-protocol/cash-v3
-        """
-        got = source_equivalence.extract_referenced_repos(text)
-        assert got == ["etherfi-protocol/smart-contracts", "etherfi-protocol/cash-v3"]
-
-    def test_skips_github_system_paths(self):
-        text = """
+        """,
+                ["etherfi-protocol/smart-contracts", "etherfi-protocol/cash-v3"],
+                id="extracts-multiple-repos-dedupes",
+            ),
+            pytest.param(
+                """
         See https://github.com/issues/42 and https://github.com/orgs/etherfi-protocol
         Real repo: github.com/etherfi-protocol/beHYPE
-        """
-        got = source_equivalence.extract_referenced_repos(text)
-        assert got == ["etherfi-protocol/behype"]
-
-    def test_strips_trailing_git_suffix(self):
-        text = "Clone: https://github.com/owner/myrepo.git"
-        got = source_equivalence.extract_referenced_repos(text)
-        assert got == ["owner/myrepo"]
-
-    def test_handles_tree_blob_paths(self):
-        text = """
+        """,
+                ["etherfi-protocol/behype"],
+                id="skips-github-system-paths",
+            ),
+            pytest.param(
+                "Clone: https://github.com/owner/myrepo.git", ["owner/myrepo"], id="strips-trailing-git-suffix"
+            ),
+            pytest.param(
+                """
         https://github.com/etherfi-protocol/smart-contracts/blob/master/src/WeETH.sol
         https://github.com/etherfi-protocol/smart-contracts/tree/abc1234/audits
-        """
-        got = source_equivalence.extract_referenced_repos(text)
-        assert got == ["etherfi-protocol/smart-contracts"]
-
-    def test_skips_github_system_repo_names_in_repo_slot(self):
-        text = """
+        """,
+                ["etherfi-protocol/smart-contracts"],
+                id="handles-tree-blob-paths",
+            ),
+            pytest.param(
+                """
         Bad: github.com/etherfi-protocol/issues/42
         Good: github.com/etherfi-protocol/smart-contracts/issues/42
-        """
-        got = source_equivalence.extract_referenced_repos(text)
-        assert got == ["etherfi-protocol/smart-contracts"]
-
-    def test_empty_and_none_text(self):
-        assert source_equivalence.extract_referenced_repos("") == []
-        assert source_equivalence.extract_referenced_repos(None) == []  # pyright: ignore[reportArgumentType]
-
-    def test_lowercases_owner_and_repo(self):
-        text = "Audited at https://github.com/EtherFi-Protocol/Smart-Contracts"
-        got = source_equivalence.extract_referenced_repos(text)
-        assert got == ["etherfi-protocol/smart-contracts"]
+        """,
+                ["etherfi-protocol/smart-contracts"],
+                id="skips-github-system-repo-names-in-repo-slot",
+            ),
+            pytest.param("", [], id="empty-text"),
+            pytest.param(None, [], id="none-text"),
+            pytest.param(
+                "Audited at https://github.com/EtherFi-Protocol/Smart-Contracts",
+                ["etherfi-protocol/smart-contracts"],
+                id="lowercases-owner-and-repo",
+            ),
+        ],
+    )
+    def test_extract_referenced_repos(self, text, expected):
+        assert source_equivalence.extract_referenced_repos(text) == expected
 
 
 # ---------------------------------------------------------------------------

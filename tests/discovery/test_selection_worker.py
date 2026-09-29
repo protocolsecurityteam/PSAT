@@ -351,11 +351,6 @@ def test_null_confidence_dapp_and_defillama_rows_participate(db_session, worker,
 
 
 # ---------------------------------------------------------------------------
-# 4. upgrade_history rows are excluded from selection
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # 5. Dedup: address with an existing non-proxy job is skipped
 # ---------------------------------------------------------------------------
 

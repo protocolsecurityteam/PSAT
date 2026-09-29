@@ -11,7 +11,9 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
+from services.clients.tavily import TavilyError
 from services.discovery.inventory_domain import (
     ADDRESS_RE,
     DOMAIN_RE,
@@ -43,22 +45,18 @@ from services.discovery.inventory_domain import (
 
 
 class TestAddressRE:
-    def test_matches_mixed_case(self):
-        assert ADDRESS_RE.search("0xAaBbCcDdEeFf0011223344556677889900112233") is not None
-
-    def test_no_match_too_short(self):
-        assert ADDRESS_RE.search("0x" + "a" * 39) is None
-
-    def test_no_match_too_long_boundary(self):
-        # 41 hex chars — the regex should only grab 40, but the \b boundary
-        # means it still finds the first 40 if followed by a non-word char.
-        # With 41 hex chars the last char is still word, so it shouldn't match.
-        result = ADDRESS_RE.search("0x" + "a" * 41)
-        # The 41-char string has no word boundary after 40, so full match fails
-        assert result is None
-
-    def test_no_match_without_0x(self):
-        assert ADDRESS_RE.search("a" * 40) is None
+    @pytest.mark.parametrize(
+        ("text", "matches"),
+        [
+            pytest.param("0xAaBbCcDdEeFf0011223344556677889900112233", True, id="mixed_case"),
+            pytest.param("0x" + "a" * 39, False, id="too_short"),
+            # 41 hex chars: no word boundary after 40, so the full match fails.
+            pytest.param("0x" + "a" * 41, False, id="too_long_boundary"),
+            pytest.param("a" * 40, False, id="without_0x"),
+        ],
+    )
+    def test_search(self, text, matches):
+        assert (ADDRESS_RE.search(text) is not None) is matches
 
 
 class TestURLRE:
@@ -70,16 +68,9 @@ class TestURLRE:
 
 
 class TestDomainRE:
-    def test_subdomain(self):
-        assert DOMAIN_RE.match("docs.example.com") is not None
-
-    def test_hyphenated(self):
-        assert DOMAIN_RE.match("my-app.example.com") is not None
-
-
-# ---------------------------------------------------------------------------
-# Constants sanity checks
-# ---------------------------------------------------------------------------
+    @pytest.mark.parametrize("value", ["docs.example.com", "my-app.example.com"], ids=["subdomain", "hyphenated"])
+    def test_matches(self, value):
+        assert DOMAIN_RE.match(value) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -120,25 +111,20 @@ class TestDebugLog:
 
 
 class TestGetDomain:
-    def test_simple_url(self):
-        assert _get_domain("https://example.com/path") == "example.com"
-
-    def test_strips_www(self):
-        assert _get_domain("https://www.example.com") == "example.com"
-
-    def test_preserves_subdomain(self):
-        assert _get_domain("https://docs.example.com") == "docs.example.com"
-
-    def test_lowercases(self):
-        assert _get_domain("https://Example.COM/Page") == "example.com"
-
-    def test_invalid_url_returns_empty(self):
-        # urlparse is lenient, but completely broken strings may return empty netloc
-        assert _get_domain("") == ""
-
-    def test_port_included_in_netloc(self):
-        result = _get_domain("https://example.com:8080/path")
-        assert result == "example.com:8080"
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            pytest.param("https://example.com/path", "example.com", id="simple_url"),
+            pytest.param("https://www.example.com", "example.com", id="strips_www"),
+            pytest.param("https://docs.example.com", "docs.example.com", id="preserves_subdomain"),
+            pytest.param("https://Example.COM/Page", "example.com", id="lowercases"),
+            # urlparse is lenient, but completely broken strings may return empty netloc
+            pytest.param("", "", id="invalid_url_returns_empty"),
+            pytest.param("https://example.com:8080/path", "example.com:8080", id="port_included_in_netloc"),
+        ],
+    )
+    def test_get_domain(self, url, expected):
+        assert _get_domain(url) == expected
 
     def test_valueerror_returns_empty(self, monkeypatch):
         """Trigger the defensive ValueError branch in _get_domain."""
@@ -154,78 +140,78 @@ class TestGetDomain:
 
 
 class TestDomainMatches:
-    def test_subdomain_match(self):
-        assert _domain_matches("docs.example.com", "example.com") is True
-
-    def test_no_match_partial(self):
-        # Suffix-confusion guard: `known in domain` would admit this.
-        assert _domain_matches("notexample.com", "example.com") is False
-
-
-class TestIsExplorerDomain:
-    def test_blockscout_subdomain(self):
-        assert _is_explorer_domain("eth.blockscout.com") is True
-
-    def test_non_explorer(self):
-        assert _is_explorer_domain("example.com") is False
+    @pytest.mark.parametrize(
+        ("domain", "known", "expected"),
+        [
+            pytest.param("docs.example.com", "example.com", True, id="subdomain_match"),
+            # Suffix-confusion guard: `known in domain` would admit this.
+            pytest.param("notexample.com", "example.com", False, id="no_match_partial"),
+        ],
+    )
+    def test_domain_matches(self, domain, known, expected):
+        assert _domain_matches(domain, known) is expected
 
 
-class TestIsLowTrustDomain:
-    def test_subdomain_of_low_trust(self):
-        assert _is_low_trust_domain("www.reddit.com") is True
-
-    def test_normal_domain(self):
-        assert _is_low_trust_domain("uniswap.org") is False
+class TestDomainClassifiers:
+    @pytest.mark.parametrize(
+        ("fn", "domain", "expected"),
+        [
+            pytest.param(_is_explorer_domain, "eth.blockscout.com", True, id="explorer_blockscout_subdomain"),
+            pytest.param(_is_explorer_domain, "example.com", False, id="explorer_non_explorer"),
+            pytest.param(_is_low_trust_domain, "www.reddit.com", True, id="low_trust_subdomain"),
+            pytest.param(_is_low_trust_domain, "uniswap.org", False, id="low_trust_normal_domain"),
+        ],
+    )
+    def test_classifier(self, fn, domain, expected):
+        assert fn(domain) is expected
 
 
 class TestIsAllowedDomain:
-    def test_not_in_list(self):
-        assert _is_allowed_domain("other.com", ["example.com"]) is False
-
-    def test_empty_list(self):
-        # Fail-closed: an empty allowlist admits nothing.
-        assert _is_allowed_domain("example.com", []) is False
+    @pytest.mark.parametrize(
+        ("allowed", "domain"),
+        [
+            pytest.param(["example.com"], "other.com", id="not_in_list"),
+            # Fail-closed: an empty allowlist admits nothing.
+            pytest.param([], "example.com", id="empty_list"),
+        ],
+    )
+    def test_rejected(self, domain, allowed):
+        assert _is_allowed_domain(domain, allowed) is False
 
 
 class TestExtractAddresses:
-    def test_single_value(self):
+    @pytest.mark.parametrize(
+        ("values", "expected_count"),
+        [
+            pytest.param((f"contract at 0x{'ab' * 20}",), 1, id="single_value"),
+            pytest.param((f"a=0x{'aa' * 20}", f"b=0x{'bb' * 20}"), 2, id="multiple_values"),
+            pytest.param(("",), 0, id="empty_string"),
+            pytest.param(("", None), 0, id="none_values_skipped"),
+            pytest.param((f"0x{'cc' * 20} and 0x{'cc' * 20}",), 1, id="deduplication"),
+        ],
+    )
+    def test_extract(self, values, expected_count):
+        assert len(_extract_addresses(*cast(Any, values))) == expected_count
+
+    def test_single_value_is_the_address(self):
         addr = "0x" + "ab" * 20
         result = _extract_addresses(f"contract at {addr}")
         assert addr.lower().replace("0x", "", 1) in list(result)[0]
 
-    def test_multiple_values(self):
-        addr1 = "0x" + "aa" * 20
-        addr2 = "0x" + "bb" * 20
-        result = _extract_addresses(f"a={addr1}", f"b={addr2}")
-        assert len(result) == 2
-
-    def test_empty_string(self):
-        assert _extract_addresses("") == set()
-
-    def test_none_values_skipped(self):
-        assert _extract_addresses("", cast(Any, None)) == set()
-
-    def test_deduplication(self):
-        addr = "0x" + "cc" * 20
-        result = _extract_addresses(f"{addr} and {addr}")
-        assert len(result) == 1
-
 
 class TestInferChain:
-    def test_etherscan_url(self):
-        assert _infer_chain("https://etherscan.io/address/0x1234", "") == "ethereum"
-
-    def test_arbiscan_url(self):
-        assert _infer_chain("https://arbiscan.io/address/0x1234", "") == "arbitrum"
-
-    def test_polygonscan_url(self):
-        assert _infer_chain("https://polygonscan.com/address/0x1234", "") == "polygon"
-
-    def test_basescan_url(self):
-        assert _infer_chain("https://basescan.org/address/0x1234", "") == "base"
-
-    def test_blockscout_base(self):
-        assert _infer_chain("https://base.blockscout.com/address/0x1234", "") == "base"
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            pytest.param("https://etherscan.io/address/0x1234", "ethereum", id="etherscan_url"),
+            pytest.param("https://arbiscan.io/address/0x1234", "arbitrum", id="arbiscan_url"),
+            pytest.param("https://polygonscan.com/address/0x1234", "polygon", id="polygonscan_url"),
+            pytest.param("https://basescan.org/address/0x1234", "base", id="basescan_url"),
+            pytest.param("https://base.blockscout.com/address/0x1234", "base", id="blockscout_base"),
+        ],
+    )
+    def test_explorer_url(self, url, expected):
+        assert _infer_chain(url, "") == expected
 
     @pytest.mark.parametrize(
         ("text", "expected"),
@@ -258,30 +244,18 @@ class TestInferChain:
 
 
 class TestResolveChain:
-    def test_no_requested_returns_inferred(self):
-        chain, forced = _resolve_chain("ethereum", None)
-        assert chain == "ethereum"
-        assert forced is False
-
-    def test_empty_requested_returns_inferred(self):
-        chain, forced = _resolve_chain("arbitrum", "")
-        assert chain == "arbitrum"
-        assert forced is False
-
-    def test_matching_inferred_and_requested(self):
-        chain, forced = _resolve_chain("ethereum", "ethereum")
-        assert chain == "ethereum"
-        assert forced is False
-
-    def test_inferred_unknown_with_requested(self):
-        chain, forced = _resolve_chain("unknown", "polygon")
-        assert chain == "polygon"
-        assert forced is True
-
-    def test_conflicting_chains_returns_none(self):
-        chain, forced = _resolve_chain("arbitrum", "ethereum")
-        assert chain is None
-        assert forced is False
+    @pytest.mark.parametrize(
+        ("inferred", "requested", "expected"),
+        [
+            pytest.param("ethereum", None, ("ethereum", False), id="no_requested_returns_inferred"),
+            pytest.param("arbitrum", "", ("arbitrum", False), id="empty_requested_returns_inferred"),
+            pytest.param("ethereum", "ethereum", ("ethereum", False), id="matching_inferred_and_requested"),
+            pytest.param("unknown", "polygon", ("polygon", True), id="inferred_unknown_with_requested"),
+            pytest.param("arbitrum", "ethereum", (None, False), id="conflicting_chains_returns_none"),
+        ],
+    )
+    def test_resolve_chain(self, inferred, requested, expected):
+        assert _resolve_chain(inferred, requested) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -290,35 +264,23 @@ class TestResolveChain:
 
 
 class TestMaybeDomain:
-    def test_valid_domain(self):
-        assert _maybe_domain("uniswap.org") == "uniswap.org"
-
-    def test_strips_protocol(self):
-        assert _maybe_domain("https://uniswap.org") == "uniswap.org"
-
-    def test_strips_http(self):
-        assert _maybe_domain("http://uniswap.org/path") == "uniswap.org"
-
-    def test_strips_www(self):
-        assert _maybe_domain("www.uniswap.org") == "uniswap.org"
-
-    def test_lowercases(self):
-        assert _maybe_domain("Uniswap.ORG") == "uniswap.org"
-
-    def test_strips_whitespace(self):
-        assert _maybe_domain("  uniswap.org  ") == "uniswap.org"
-
-    def test_rejects_explorer(self):
-        assert _maybe_domain("etherscan.io") is None
-
-    def test_rejects_space_in_value(self):
-        assert _maybe_domain("not a domain") is None
-
-    def test_rejects_single_label(self):
-        assert _maybe_domain("localhost") is None
-
-    def test_rejects_invalid_domain_chars(self):
-        assert _maybe_domain("-invalid.com") is None
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            pytest.param("uniswap.org", "uniswap.org", id="valid_domain"),
+            pytest.param("https://uniswap.org", "uniswap.org", id="strips_protocol"),
+            pytest.param("http://uniswap.org/path", "uniswap.org", id="strips_http"),
+            pytest.param("www.uniswap.org", "uniswap.org", id="strips_www"),
+            pytest.param("Uniswap.ORG", "uniswap.org", id="lowercases"),
+            pytest.param("  uniswap.org  ", "uniswap.org", id="strips_whitespace"),
+            pytest.param("etherscan.io", None, id="rejects_explorer"),
+            pytest.param("not a domain", None, id="rejects_space_in_value"),
+            pytest.param("localhost", None, id="rejects_single_label"),
+            pytest.param("-invalid.com", None, id="rejects_invalid_domain_chars"),
+        ],
+    )
+    def test_maybe_domain(self, value, expected):
+        assert _maybe_domain(value) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -329,31 +291,24 @@ class TestMaybeDomain:
 class TestFetchPage:
     # ``_fetch_page`` fetches through the SSRF guard (``utils.egress.safe_get``),
     # so these stub that rather than the raw ``requests`` call.
-    def test_success(self, monkeypatch):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.text = "<html>hello</html>"
-        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: mock_resp)
+    @pytest.mark.parametrize(
+        ("stub", "expected"),
+        [
+            pytest.param(
+                MagicMock(return_value=MagicMock(status_code=200, text="<html>hello</html>")),
+                "<html>hello</html>",
+                id="success",
+            ),
+            pytest.param(MagicMock(return_value=MagicMock(status_code=404)), None, id="non_200_returns_none"),
+            pytest.param(
+                MagicMock(side_effect=requests.RequestException("network error")), None, id="exception_returns_none"
+            ),
+        ],
+    )
+    def test_fetch_outcome(self, monkeypatch, stub, expected):
+        monkeypatch.setattr("utils.egress.safe_get", stub)
 
-        result = _fetch_page("https://example.com")
-        assert result == "<html>hello</html>"
-
-    def test_non_200_returns_none(self, monkeypatch):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: mock_resp)
-
-        assert _fetch_page("https://example.com") is None
-
-    def test_exception_returns_none(self, monkeypatch):
-        import requests
-
-        def raise_exc(*a, **kw):
-            raise requests.RequestException("network error")
-
-        monkeypatch.setattr("utils.egress.safe_get", raise_exc)
-
-        assert _fetch_page("https://example.com") is None
+        assert _fetch_page("https://example.com") == expected
 
     def test_unsafe_url_returns_none(self, monkeypatch):
         from utils.egress import UnsafeUrlError
@@ -414,13 +369,15 @@ class TestTavilySearch:
         assert results == []
         assert queries_used[0] == 5  # not incremented
 
-    def test_tavily_error_appended(self, monkeypatch):
-        from services.clients.tavily import TavilyError
-
-        def raise_tavily(*a, **kw):
-            raise TavilyError({"error": "rate limit"})
-
-        monkeypatch.setattr("services.discovery.inventory_domain.tavily.search", raise_tavily)
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            pytest.param(TavilyError({"error": "rate limit"}), id="tavily_error"),
+            pytest.param(requests.RequestException("network error"), id="request_exception"),
+        ],
+    )
+    def test_error_appended(self, monkeypatch, exc):
+        monkeypatch.setattr("services.discovery.inventory_domain.tavily.search", MagicMock(side_effect=exc))
         monkeypatch.setattr(
             "services.discovery.inventory_domain.tavily.error_from_exception",
             lambda exc: {"error": str(exc)},
@@ -433,25 +390,6 @@ class TestTavilySearch:
         assert results == []
         assert len(errors) == 1
         assert queries_used[0] == 1
-
-    def test_request_exception_appended(self, monkeypatch):
-        import requests
-
-        def raise_req(*a, **kw):
-            raise requests.RequestException("network error")
-
-        monkeypatch.setattr("services.discovery.inventory_domain.tavily.search", raise_req)
-        monkeypatch.setattr(
-            "services.discovery.inventory_domain.tavily.error_from_exception",
-            lambda exc: {"error": str(exc)},
-        )
-
-        queries_used = [0]
-        errors: list[dict] = []
-        results = _tavily_search("query", 5, queries_used, 10, errors)
-
-        assert results == []
-        assert len(errors) == 1
 
     def test_budget_counter_increments(self, monkeypatch):
         monkeypatch.setattr(
@@ -472,107 +410,95 @@ class TestTavilySearch:
 
 
 class TestLlmSelectDomain:
-    def test_empty_results_returns_none(self):
-        domain, extras = _llm_select_domain([], "TestCo")
-        assert domain is None
-        assert extras == []
+    @pytest.mark.parametrize(
+        ("results", "chat"),
+        [
+            pytest.param([], MagicMock(return_value="1"), id="empty_results"),
+            pytest.param(
+                [{"url": "https://etherscan.io/address/0x123", "title": "Etherscan"}],
+                MagicMock(return_value="1"),
+                id="all_explorer_results",
+            ),
+            pytest.param(
+                [{"url": "https://coingecko.com/en/coins/test", "title": "CoinGecko"}],
+                MagicMock(return_value="1"),
+                id="all_low_trust",
+            ),
+            pytest.param(
+                [{"url": "https://example.com", "title": "Example"}],
+                MagicMock(side_effect=RuntimeError("LLM unavailable")),
+                id="llm_exception",
+            ),
+            pytest.param(
+                [{"url": "https://example.com", "title": "Example"}],
+                MagicMock(return_value="I don't know"),
+                id="unparseable_llm_response",
+            ),
+        ],
+    )
+    def test_returns_none(self, monkeypatch, results, chat):
+        monkeypatch.setattr("services.discovery.inventory_domain.llm.chat", chat)
 
-    def test_all_explorer_results_returns_none(self):
-        results = [{"url": "https://etherscan.io/address/0x123", "title": "Etherscan"}]
         domain, extras = _llm_select_domain(results, "TestCo")
         assert domain is None
         assert extras == []
 
-    def test_all_low_trust_returns_none(self):
-        results = [{"url": "https://coingecko.com/en/coins/test", "title": "CoinGecko"}]
-        domain, extras = _llm_select_domain(results, "TestCo")
-        assert domain is None
-        assert extras == []
-
-    def test_single_domain_selected(self, monkeypatch):
-        results = [
-            {"url": "https://docs.uniswap.org/contracts", "title": "Uniswap Docs"},
-            {"url": "https://docs.uniswap.org/guides", "title": "Guides"},
-        ]
-        monkeypatch.setattr(
-            "services.discovery.inventory_domain.llm.chat",
-            lambda *a, **kw: "1",
-        )
+    @pytest.mark.parametrize(
+        ("results", "reply", "expected_domain", "expected_extras"),
+        [
+            pytest.param(
+                [
+                    {"url": "https://docs.uniswap.org/contracts", "title": "Uniswap Docs"},
+                    {"url": "https://docs.uniswap.org/guides", "title": "Guides"},
+                ],
+                "1",
+                "docs.uniswap.org",
+                [],
+                id="single_domain",
+            ),
+            # Candidates sort by frequency, ties in insertion order:
+            # [docs.uniswap.org (2), uniswap.org, gitbook.uniswap.org]; "1, 3" -> indices 0 and 2.
+            pytest.param(
+                [
+                    {"url": "https://uniswap.org/blog", "title": "Uniswap"},
+                    {"url": "https://docs.uniswap.org/contracts", "title": "Docs"},
+                    {"url": "https://docs.uniswap.org/guides", "title": "More Docs"},
+                    {"url": "https://gitbook.uniswap.org/deploy", "title": "Gitbook"},
+                ],
+                "1, 3",
+                "docs.uniswap.org",
+                ["gitbook.uniswap.org"],
+                id="multiple_domains",
+            ),
+            pytest.param(
+                [
+                    {"url": "https://a.example.com/p1", "title": "A1"},
+                    {"url": "https://a.example.com/p2", "title": "A2"},
+                    {"url": "https://b.example.com/p1", "title": "B1"},
+                ],
+                "1, 1, 2",
+                "a.example.com",
+                ["b.example.com"],
+                id="multiple_domains_deduplication",
+            ),
+            pytest.param(
+                [
+                    {"url": "", "title": "Empty URL"},
+                    {"url": "https://example.com/page", "title": "Good"},
+                ],
+                "1",
+                "example.com",
+                [],
+                id="no_url_in_result_skipped",
+            ),
+        ],
+    )
+    def test_selects_domains(self, monkeypatch, results, reply, expected_domain, expected_extras):
+        monkeypatch.setattr("services.discovery.inventory_domain.llm.chat", lambda *a, **kw: reply)
 
         domain, extras = _llm_select_domain(results, "Uniswap")
-        assert domain == "docs.uniswap.org"
-        assert extras == []
-
-    def test_multiple_domains_selected(self, monkeypatch):
-        results = [
-            {"url": "https://uniswap.org/blog", "title": "Uniswap"},
-            {"url": "https://docs.uniswap.org/contracts", "title": "Docs"},
-            {"url": "https://docs.uniswap.org/guides", "title": "More Docs"},
-            {"url": "https://gitbook.uniswap.org/deploy", "title": "Gitbook"},
-        ]
-        # Sorted by frequency: docs.uniswap.org (2 pages), then uniswap.org (1),
-        # then gitbook.uniswap.org (1). Ties preserve insertion order from dict keys.
-        # So sorted order is: [docs.uniswap.org, uniswap.org, gitbook.uniswap.org]
-        # LLM returns "1, 3" -> 1-indexed -> 0-based indices 0 and 2
-        # Index 0 = docs.uniswap.org, index 2 = gitbook.uniswap.org
-        monkeypatch.setattr(
-            "services.discovery.inventory_domain.llm.chat",
-            lambda *a, **kw: "1, 3",
-        )
-
-        domain, extras = _llm_select_domain(results, "Uniswap")
-        assert domain == "docs.uniswap.org"
-        assert len(extras) == 1
-        assert extras[0] == "gitbook.uniswap.org"
-
-    def test_multiple_domains_deduplication(self, monkeypatch):
-        results = [
-            {"url": "https://a.example.com/p1", "title": "A1"},
-            {"url": "https://a.example.com/p2", "title": "A2"},
-            {"url": "https://b.example.com/p1", "title": "B1"},
-        ]
-        monkeypatch.setattr(
-            "services.discovery.inventory_domain.llm.chat",
-            lambda *a, **kw: "1, 1, 2",
-        )
-        domain, extras = _llm_select_domain(results, "TestCo")
-        assert domain == "a.example.com"
-        assert extras == ["b.example.com"]
-
-    def test_llm_exception_returns_none(self, monkeypatch):
-        results = [{"url": "https://example.com", "title": "Example"}]
-
-        def raise_error(*a, **kw):
-            raise RuntimeError("LLM unavailable")
-
-        monkeypatch.setattr("services.discovery.inventory_domain.llm.chat", raise_error)
-
-        domain, extras = _llm_select_domain(results, "TestCo")
-        assert domain is None
-        assert extras == []
-
-    def test_unparseable_llm_response(self, monkeypatch):
-        results = [{"url": "https://example.com", "title": "Example"}]
-        monkeypatch.setattr(
-            "services.discovery.inventory_domain.llm.chat",
-            lambda *a, **kw: "I don't know",
-        )
-
-        domain, extras = _llm_select_domain(results, "TestCo")
-        assert domain is None
-        assert extras == []
-
-    def test_no_url_in_result_skipped(self, monkeypatch):
-        results = [
-            {"url": "", "title": "Empty URL"},
-            {"url": "https://example.com/page", "title": "Good"},
-        ]
-        monkeypatch.setattr(
-            "services.discovery.inventory_domain.llm.chat",
-            lambda *a, **kw: "1",
-        )
-        domain, extras = _llm_select_domain(results, "TestCo")
-        assert domain == "example.com"
+        assert domain == expected_domain
+        assert extras == expected_extras
 
 
 # ---------------------------------------------------------------------------
@@ -621,20 +547,26 @@ class TestCollectInDomainPages:
         assert len(pages) == 1
         assert pages[0]["url"] == "https://docs.uniswap.org/contracts"
 
-    def test_deduplicates_urls(self):
-        results = [
-            {"url": "https://a.com/page", "title": "A", "content": "x"},
-            {"url": "https://a.com/page", "title": "A2", "content": "y"},
-        ]
-        pages = _collect_in_domain_pages(results, "a.com")
-        assert len(pages) == 1
-
-    def test_subdomain_match(self):
-        results = [
-            {"url": "https://sub.example.com/page", "title": "Sub", "content": "c"},
-        ]
-        pages = _collect_in_domain_pages(results, "example.com")
-        assert len(pages) == 1
+    @pytest.mark.parametrize(
+        ("results", "domain"),
+        [
+            pytest.param(
+                [
+                    {"url": "https://a.com/page", "title": "A", "content": "x"},
+                    {"url": "https://a.com/page", "title": "A2", "content": "y"},
+                ],
+                "a.com",
+                id="deduplicates_urls",
+            ),
+            pytest.param(
+                [{"url": "https://sub.example.com/page", "title": "Sub", "content": "c"}],
+                "example.com",
+                id="subdomain_match",
+            ),
+        ],
+    )
+    def test_collects_exactly_one_page(self, results, domain):
+        assert len(_collect_in_domain_pages(results, domain)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -691,24 +623,18 @@ class TestLlmSelectPages:
         result = _llm_select_pages(pages, "TestCo", "example.com", "{page_list}", ["example.com"])
         assert result == []
 
-    def test_deduplicates_urls_in_response(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            pytest.param("https://example.com/a\nhttps://example.com/a", id="deduplicates_urls_in_response"),
+            pytest.param("https://example.com/a.", id="strips_trailing_punctuation"),
+        ],
+    )
+    def test_cleans_response_urls(self, monkeypatch, reply):
         pages = [{"url": "https://example.com/a", "title": "A", "snippet": "s"}]
-        monkeypatch.setattr(
-            "services.discovery.inventory_domain.llm.chat",
-            lambda *a, **kw: "https://example.com/a\nhttps://example.com/a",
-        )
+        monkeypatch.setattr("services.discovery.inventory_domain.llm.chat", lambda *a, **kw: reply)
         result = _llm_select_pages(pages, "TestCo", "example.com", "{page_list}", ["example.com"])
-        assert len(result) == 1
-
-    def test_strips_trailing_punctuation(self, monkeypatch):
-        pages = [{"url": "https://example.com/a", "title": "A", "snippet": "s"}]
-        monkeypatch.setattr(
-            "services.discovery.inventory_domain.llm.chat",
-            lambda *a, **kw: "https://example.com/a.",
-        )
-        result = _llm_select_pages(pages, "TestCo", "example.com", "{page_list}", ["example.com"])
-        assert len(result) == 1
-        assert result[0] == "https://example.com/a"
+        assert result == ["https://example.com/a"]
 
 
 # ---------------------------------------------------------------------------
@@ -717,40 +643,40 @@ class TestLlmSelectPages:
 
 
 class TestDedupeResultsByUrl:
-    def test_no_duplicates(self):
-        results = [
-            {"url": "https://a.com/1", "content": "short"},
-            {"url": "https://a.com/2", "content": "another"},
-        ]
+    @pytest.mark.parametrize(
+        ("results", "expected"),
+        [
+            pytest.param(
+                [{"url": "https://a.com/1", "content": "short"}, {"url": "https://a.com/2", "content": "another"}],
+                [("https://a.com/1", "short"), ("https://a.com/2", "another")],
+                id="no_duplicates",
+            ),
+            pytest.param(
+                [
+                    {"url": "https://a.com/page", "content": "short", "title": "T1"},
+                    {"url": "https://a.com/page", "content": "this is a much longer content string", "title": "T2"},
+                ],
+                [("https://a.com/page", "this is a much longer content string")],
+                id="duplicate_keeps_richer_content",
+            ),
+            pytest.param(
+                [
+                    {"url": "https://a.com/page", "content": "this is the longer original content"},
+                    {"url": "https://a.com/page", "content": "short"},
+                ],
+                [("https://a.com/page", "this is the longer original content")],
+                id="duplicate_shorter_content_keeps_original",
+            ),
+            pytest.param(
+                [{"url": "", "content": "no url"}, {"url": "https://a.com/page", "content": "valid"}],
+                [("https://a.com/page", "valid")],
+                id="empty_url_skipped",
+            ),
+        ],
+    )
+    def test_dedupe(self, results, expected):
         deduped = _dedupe_results_by_url(results)
-        assert len(deduped) == 2
-
-    def test_duplicate_keeps_richer_content(self):
-        results = [
-            {"url": "https://a.com/page", "content": "short", "title": "T1"},
-            {"url": "https://a.com/page", "content": "this is a much longer content string", "title": "T2"},
-        ]
-        deduped = _dedupe_results_by_url(results)
-        assert len(deduped) == 1
-        assert deduped[0]["content"] == "this is a much longer content string"
-
-    def test_duplicate_shorter_content_keeps_original(self):
-        results = [
-            {"url": "https://a.com/page", "content": "this is the longer original content"},
-            {"url": "https://a.com/page", "content": "short"},
-        ]
-        deduped = _dedupe_results_by_url(results)
-        assert len(deduped) == 1
-        assert deduped[0]["content"] == "this is the longer original content"
-
-    def test_empty_url_skipped(self):
-        results = [
-            {"url": "", "content": "no url"},
-            {"url": "https://a.com/page", "content": "valid"},
-        ]
-        deduped = _dedupe_results_by_url(results)
-        assert len(deduped) == 1
-        assert deduped[0]["url"] == "https://a.com/page"
+        assert [(r["url"], r["content"]) for r in deduped] == expected
 
     def test_merged_result_preserves_extra_fields(self):
         results = [

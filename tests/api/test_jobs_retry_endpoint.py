@@ -73,56 +73,30 @@ def test_retry_endpoint_resets_failed_terminal_to_queued(api_client, clean_jobs)
 # ---------------------------------------------------------------------------
 
 
+# done: a real outcome must not be clobbered. queued: already eligible, so a retry would only reset
+# retry_count and mask earlier failures. processing: in flight, clobbering could double-execute work.
+# legacy failed: pre-migration rows must be promoted to failed_terminal first, not retried blindly.
 @requires_postgres
-def test_retry_endpoint_rejects_done_job(api_client, clean_jobs):
-    """A done/completed job must not be retried — that would clobber a real outcome."""
+@pytest.mark.parametrize(
+    ("status", "detail_fragment"),
+    [
+        pytest.param(JobStatus.completed, "completed", id="done"),
+        pytest.param(None, "queued", id="queued"),
+        pytest.param(JobStatus.processing, None, id="processing"),
+        pytest.param(JobStatus.failed, None, id="legacy_failed"),
+    ],
+)
+def test_retry_endpoint_rejects_non_retryable_status(api_client, clean_jobs, status, detail_fragment):
     db_session = clean_jobs
-    job = create_job(db_session, {"address": "0xabc", "name": "completed"})
-    job.status = JobStatus.completed
-    db_session.commit()
+    job = create_job(db_session, {"address": "0xabc", "name": "non-retryable"})
+    if status is not None:
+        job.status = status
+        db_session.commit()
 
     response = api_client.post(f"/api/jobs/{job.id}/retry")
     assert response.status_code == 409
-    assert "completed" in response.json()["detail"]
-
-
-@requires_postgres
-def test_retry_endpoint_rejects_queued_job(api_client, clean_jobs):
-    """A queued job is already eligible to run — retrying it would be a no-op
-    that resets its retry_count, masking earlier failures."""
-    db_session = clean_jobs
-    job = create_job(db_session, {"address": "0xabc", "name": "queued"})
-
-    response = api_client.post(f"/api/jobs/{job.id}/retry")
-    assert response.status_code == 409
-    assert "queued" in response.json()["detail"]
-
-
-@requires_postgres
-def test_retry_endpoint_rejects_processing_job(api_client, clean_jobs):
-    """A processing job is in flight — clobbering it could double-execute work."""
-    db_session = clean_jobs
-    job = create_job(db_session, {"address": "0xabc", "name": "processing"})
-    job.status = JobStatus.processing
-    db_session.commit()
-
-    response = api_client.post(f"/api/jobs/{job.id}/retry")
-    assert response.status_code == 409
-
-
-@requires_postgres
-def test_retry_endpoint_rejects_legacy_failed_job(api_client, clean_jobs):
-    """``status='failed'`` (the legacy state) is not retryable via this
-    endpoint — the operator must promote to ``failed_terminal`` first or
-    use a different mechanism. Avoids accidental retries of pre-migration
-    rows that may have been transient and stayed flapping."""
-    db_session = clean_jobs
-    job = create_job(db_session, {"address": "0xabc", "name": "legacy-failed"})
-    job.status = JobStatus.failed
-    db_session.commit()
-
-    response = api_client.post(f"/api/jobs/{job.id}/retry")
-    assert response.status_code == 409
+    if detail_fragment is not None:
+        assert detail_fragment in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -131,14 +105,15 @@ def test_retry_endpoint_rejects_legacy_failed_job(api_client, clean_jobs):
 
 
 @requires_postgres
-def test_retry_endpoint_returns_404_for_missing_job(api_client, clean_jobs):
-    response = api_client.post("/api/jobs/00000000-0000-0000-0000-000000000000/retry")
-    assert response.status_code == 404
-
-
-@requires_postgres
-def test_retry_endpoint_returns_404_for_malformed_uuid(api_client, clean_jobs):
-    response = api_client.post("/api/jobs/not-a-uuid/retry")
+@pytest.mark.parametrize(
+    "job_id",
+    [
+        pytest.param("00000000-0000-0000-0000-000000000000", id="missing_job"),
+        pytest.param("not-a-uuid", id="malformed_uuid"),
+    ],
+)
+def test_retry_endpoint_returns_404(api_client, clean_jobs, job_id):
+    response = api_client.post(f"/api/jobs/{job_id}/retry")
     assert response.status_code == 404
 
 

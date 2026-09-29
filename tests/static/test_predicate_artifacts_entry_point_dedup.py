@@ -93,33 +93,6 @@ contract AccessControlDerived is AccessControlBase {
 }
 """
 
-# WETH9-shape flat contract — no inheritance, no overrides. The fix must
-# be a no-op here: same iteration count, same output keys.
-FLAT_SRC = """
-pragma solidity ^0.8.20;
-
-contract WETH9Like {
-    mapping(address => uint256) public balanceOf;
-
-    function deposit() public payable {
-        balanceOf[msg.sender] += msg.value;
-    }
-
-    function withdraw(uint256 wad) public {
-        require(balanceOf[msg.sender] >= wad, "insufficient");
-        balanceOf[msg.sender] -= wad;
-        payable(msg.sender).transfer(wad);
-    }
-
-    function transfer(address dst, uint256 wad) public returns (bool) {
-        require(balanceOf[msg.sender] >= wad, "insufficient");
-        balanceOf[msg.sender] -= wad;
-        balanceOf[dst] += wad;
-        return true;
-    }
-}
-"""
-
 
 def _no_op_pause_info() -> dict[str, list]:
     return {

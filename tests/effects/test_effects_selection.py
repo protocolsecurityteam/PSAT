@@ -7,6 +7,7 @@ funnel against the dev ``psat`` DB and skips when absent, so CI (fresh empty DB)
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -1029,6 +1030,40 @@ def test_equal_reach_orders_by_function_id_not_by_rounding(db_session):
     assert ordered.index(f_right.id) < ordered.index(f_left.id)
 
 
+def test_reachable_value_is_identical_across_processes():
+    """The one shape a same-process test cannot express: DIFFERENT seeds.
+
+    Runs the real `AuthorityGraph` in child processes under four
+    PYTHONHASHSEED values and compares `repr()` of the result. Under the float
+    fold this returned up to three distinct values for one graph."""
+    import subprocess
+    import sys
+
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    prog = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from services.effects.selection import AuthorityGraph\n"
+        "from decimal import Decimal\n"
+        "usd = %r\n"
+        # Many nodes so the closure `set` is large enough for seed-dependent
+        # iteration order to be expressed.
+        "addrs = ['0x%%040x' %% (i + 1) for i in range(len(usd) * 40)]\n"
+        "g = AuthorityGraph()\n"
+        "g.balance = {a: Decimal(usd[i %% len(usd)]) for i, a in enumerate(addrs)}\n"
+        "g.controls = {'0x%%040x' %% 0xF00D: set(addrs)}\n"
+        "print(repr(g.reachable_value({'0x%%040x' %% 0xF00D})))\n"
+    ) % (repo, _ORDER_SENSITIVE_USD)
+
+    seen = set()
+    for seed in ("0", "1", "2", "3"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        out = subprocess.run(
+            [sys.executable, "-c", prog], capture_output=True, text=True, env=env, timeout=120, check=True
+        )
+        seen.add(out.stdout.strip())
+    assert len(seen) == 1, f"reachable_value varies with PYTHONHASHSEED: {sorted(seen)}"
+
+
 def test_token_holdings_order_is_total_under_a_value_tie(db_session):
     """`usd_value DESC` alone leaves tied holdings to the query plan, and which
     ones survive the limit is then not a function of the data."""
@@ -1447,26 +1482,33 @@ def test_shape1_empty_planning_marker_stops_the_re_sweep(db_session):
     assert orphan_fn not in _scoped_since(db_session, proto.id, owner_addr, reading_job_created)
 
 
-def test_marker_older_than_the_reading_job_does_not_own(db_session):
-    """The expiry that keeps the marker safe: planning inputs are not immutable
-    (an upgrade_events row lands, a re-analysis rewrites the functions), so a
-    marker from a previous run must NOT suppress this run's sweep."""
-    proto = _protocol(db_session, "scope-marker-stale")
+@pytest.mark.parametrize(
+    ("marker_offset", "read"),
+    [
+        # The expiry that keeps the marker safe: planning inputs are not immutable (an upgrade_events
+        # row lands, a re-analysis rewrites the functions), so a marker from a previous run must NOT
+        # suppress this run's sweep.
+        pytest.param(
+            -timedelta(hours=6),
+            lambda session, proto_id, owner_addr, created: _scoped_since(session, proto_id, owner_addr, created),
+            id="marker-older-than-the-reading-job",
+        ),
+        # No timestamp => rule 4 off. Costs a sweep, never coverage.
+        pytest.param(
+            timedelta(hours=1),
+            lambda session, proto_id, owner_addr, created: _scoped(session, proto_id, owner_addr),
+            id="marker-ignored-without-a-planned-since",
+        ),
+    ],
+)
+def test_marker_does_not_own_the_orphan(db_session, marker_offset, read):
+    proto = _protocol(db_session, "scope-marker-not-owning")
     owner_addr, orphan_fn, orphan = _swept_only(db_session, proto)
     reading_job_created = datetime.now(timezone.utc)
 
-    _mark_planned_empty(db_session, orphan.id, None, at=reading_job_created - timedelta(hours=6))
+    _mark_planned_empty(db_session, orphan.id, None, at=reading_job_created + marker_offset)
     db_session.commit()
-    assert orphan_fn in _scoped_since(db_session, proto.id, owner_addr, reading_job_created)
-
-
-def test_marker_is_ignored_without_a_planned_since(db_session):
-    """No timestamp ⇒ rule 4 off. Costs a sweep, never coverage."""
-    proto = _protocol(db_session, "scope-marker-nosince")
-    owner_addr, orphan_fn, orphan = _swept_only(db_session, proto)
-    _mark_planned_empty(db_session, orphan.id, None, at=datetime.now(timezone.utc) + timedelta(hours=1))
-    db_session.commit()
-    assert orphan_fn in _scoped(db_session, proto.id, owner_addr)
+    assert orphan_fn in read(db_session, proto.id, owner_addr, reading_job_created)
 
 
 def test_marker_does_not_shadow_a_contract_that_yields_plans(db_session):

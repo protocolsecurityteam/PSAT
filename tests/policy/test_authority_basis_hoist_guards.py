@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from services.policy.capability_surface import project_capability_surface
 
 ADDR_A = "0x" + "aa" * 20
@@ -56,54 +58,54 @@ def test_a_merged_multi_member_set_publishes_no_basis():
         assert "accessor_slot_agreement" not in row
 
 
-def test_a_second_resolution_step_suppresses_the_hoist():
-    """A fold contributed members beside the getter read, so the basis no longer describes the set."""
-    details = _details(_cap([ADDR_A], [BASIS_STEP, {"step": "enumerable_role_store"}]))
-    assert "authority_basis" not in details[0]
+_ABI_STEP = {"step": "authority_getter_basis", "basis": "abi_auto_getter", "selector": "0x8da5cb5b"}
 
 
-def test_two_basis_steps_that_disagree_publish_nothing():
-    merged = [BASIS_STEP, {"step": "authority_getter_basis", "basis": "abi_auto_getter", "selector": "0x8da5cb5b"}]
-    assert "authority_basis" not in _details(_cap([ADDR_A], merged))[0]
+@pytest.mark.parametrize(
+    "trace",
+    [
+        # CRITICAL, fail-closed hoist guards. A fold contributed members beside the getter read,
+        # so the basis no longer describes the set.
+        pytest.param([BASIS_STEP, {"step": "enumerable_role_store"}], id="second-resolution-step-suppresses"),
+        pytest.param([BASIS_STEP, _ABI_STEP], id="two-basis-steps-that-disagree"),
+        # Fail-closed on the count, not the values: two steps mean two reads contributed and
+        # which bound the member isn't recorded.
+        pytest.param([BASIS_STEP, dict(BASIS_STEP)], id="two-identical-basis-steps"),
+        # The 33 persisted rows carry ``internal_accessor_convention``, which conflated the ERC-7201
+        # accessor match with the de-underscore convention. It is deliberately NOT mapped forward
+        # (which helper fired isn't in the stored row): key absent = not_determined = weakest, the
+        # honest reading of a pre-split row.
+        pytest.param(
+            [CO_WITNESS, {"step": "authority_getter_basis", "basis": "internal_accessor_convention"}],
+            id="legacy-label-not-passed-through",
+        ),
+        pytest.param(
+            [{"step": "authority_getter_basis", "basis": "some_future_arm"}], id="unknown-label-not-passed-through"
+        ),
+        pytest.param([{"step": "authority_getter_basis", "basis": 7}], id="non-string-basis"),
+    ],
+)
+def test_hoist_is_suppressed_when_the_basis_is_not_attributable(trace):
+    assert "authority_basis" not in _details(_cap([ADDR_A], trace))[0]
 
 
-def test_two_identical_basis_steps_also_publish_nothing():
-    """Fail-closed on the count, not the values: two steps mean two reads contributed and which
-    bound the member isn't recorded."""
-    assert "authority_basis" not in _details(_cap([ADDR_A], [BASIS_STEP, dict(BASIS_STEP)]))[0]
-
-
-def test_the_legacy_label_is_not_passed_through():
-    """The 33 persisted rows carry ``internal_accessor_convention``, which conflated the ERC-7201
-    accessor match with the de-underscore convention. It is deliberately NOT mapped forward (which
-    helper fired isn't in the stored row): key absent = not_determined = weakest, the honest
-    reading of a pre-split row."""
-    legacy = [CO_WITNESS, {"step": "authority_getter_basis", "basis": "internal_accessor_convention"}]
-    assert "authority_basis" not in _details(_cap([ADDR_A], legacy))[0]
-
-
-def test_an_unknown_label_is_not_passed_through():
-    unknown = [{"step": "authority_getter_basis", "basis": "some_future_arm"}]
-    assert "authority_basis" not in _details(_cap([ADDR_A], unknown))[0]
-
-
-def test_a_non_string_basis_publishes_nothing():
-    assert "authority_basis" not in _details(_cap([ADDR_A], [{"step": "authority_getter_basis", "basis": 7}]))[0]
-
-
-def test_the_abi_forced_arm_states_no_slot_residual():
-    """``accessor_slot_agreement`` asks whether the matched ACCESSOR reads the same storage as the
-    canonical getter; with no accessor matched the question doesn't arise, so the key is absent
-    rather than a stated ``not_determined``."""
-    step = {"step": "authority_getter_basis", "basis": "abi_auto_getter", "selector": "0x8da5cb5b"}
+@pytest.mark.parametrize(
+    "basis, step_extra, expected_residual",
+    [
+        # ``accessor_slot_agreement`` asks whether the matched ACCESSOR reads the same storage as
+        # the canonical getter; with no accessor matched the question doesn't arise, so the key is
+        # absent rather than a stated ``not_determined``.
+        pytest.param("abi_auto_getter", {"selector": "0x8da5cb5b"}, {}, id="abi-forced-arm-states-no-slot-residual"),
+        *[
+            pytest.param(
+                basis, {}, {"accessor_slot_agreement": "not_determined"}, id=f"name-matched-arm-{basis}-states-residual"
+            )
+            for basis in ("standard_namespaced_accessor", "deunderscore_convention", "slot_name_keyword")
+        ],
+    ],
+)
+def test_basis_arm_residual(basis, step_extra, expected_residual):
+    step = {"step": "authority_getter_basis", "basis": basis, **step_extra}
     details = _details(_cap([ADDR_A], [step]))[0]
-    assert details["authority_basis"] == "abi_auto_getter"
-    assert "accessor_slot_agreement" not in details
-
-
-def test_every_name_matched_arm_states_the_residual():
-    for basis in ("standard_namespaced_accessor", "deunderscore_convention", "slot_name_keyword"):
-        step = {"step": "authority_getter_basis", "basis": basis}
-        details = _details(_cap([ADDR_A], [step]))[0]
-        assert details["authority_basis"] == basis
-        assert details["accessor_slot_agreement"] == "not_determined", basis
+    assert details["authority_basis"] == basis
+    assert {k: v for k, v in details.items() if k == "accessor_slot_agreement"} == expected_residual

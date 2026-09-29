@@ -5,6 +5,8 @@ lattice propagation, address canonicalization, and identities
 
 from __future__ import annotations
 
+import pytest
+
 from services.resolution.capabilities import (
     CapabilityExpr,
     Condition,
@@ -25,16 +27,14 @@ ADDR_C = "0xcccccccccccccccccccccccccccccccccccccccc"
 # ---------------------------------------------------------------------------
 
 
-def test_finite_set_lowercases_and_sorts():
+def test_finite_set_and_threshold_group_canonicalize():
     cap = CapabilityExpr.finite_set([ADDR_B.upper(), ADDR_A, ADDR_A])
     assert cap.members == [ADDR_A.lower(), ADDR_B.lower()]
     assert cap.membership_quality == "exact"
     assert cap.confidence == "enumerable"
 
-
-def test_threshold_group_canonicalizes():
-    cap = CapabilityExpr.threshold_group(2, [ADDR_B, ADDR_A])
-    assert cap.threshold == (2, [ADDR_A.lower(), ADDR_B.lower()])
+    tg = CapabilityExpr.threshold_group(2, [ADDR_B, ADDR_A])
+    assert tg.threshold == (2, [ADDR_A.lower(), ADDR_B.lower()])
 
 
 # ---------------------------------------------------------------------------
@@ -49,13 +49,6 @@ def test_intersect_finite_exact_exact():
     assert out.kind == "finite_set"
     assert out.members == [ADDR_B.lower()]
     assert out.membership_quality == "exact"
-
-
-def test_intersect_finite_exact_with_lower_yields_lower():
-    a = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
-    b = CapabilityExpr.finite_set([ADDR_B, ADDR_C], quality="lower_bound")
-    out = intersect(a, b)
-    assert out.membership_quality == "lower_bound"
 
 
 def test_intersect_finite_disjoint_yields_structural_and_not_empty():
@@ -84,14 +77,6 @@ def test_intersect_inherited_empty_stays_exact_empty():
         assert out.membership_quality == "exact"
 
 
-def test_intersect_idempotent():
-    """``intersect(A, A) ≡ A`` for canonical finite sets."""
-    a = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
-    out = intersect(a, a)
-    assert out.kind == "finite_set"
-    assert out.members == a.members
-
-
 # ---------------------------------------------------------------------------
 # Intersect — finite × cofinite_blacklist
 # ---------------------------------------------------------------------------
@@ -104,14 +89,8 @@ def test_intersect_finite_with_blacklist():
     out = intersect(fin, bl)
     assert out.kind == "finite_set"
     assert out.members == [ADDR_A.lower(), ADDR_C.lower()]
-
-
-def test_intersect_blacklist_with_finite_commutes():
-    fin = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
-    bl = CapabilityExpr.cofinite_blacklist([ADDR_B])
-    a = intersect(fin, bl)
-    b = intersect(bl, fin)
-    assert a.members == b.members
+    # Commutes: argument order does not change the result.
+    assert intersect(bl, fin).members == out.members
 
 
 # ---------------------------------------------------------------------------
@@ -161,19 +140,6 @@ def test_intersect_unsupported_absorbs():
 
 
 # ---------------------------------------------------------------------------
-# Intersect — threshold × finite stays structural
-# ---------------------------------------------------------------------------
-
-
-def test_intersect_threshold_with_finite_stays_structural():
-    tg = CapabilityExpr.threshold_group(2, [ADDR_A, ADDR_B, ADDR_C])
-    fin = CapabilityExpr.finite_set([ADDR_A])
-    out = intersect(tg, fin)
-    assert out.kind == "AND"
-    assert len(out.children) == 2
-
-
-# ---------------------------------------------------------------------------
 # Union — finite × finite
 # ---------------------------------------------------------------------------
 
@@ -187,16 +153,24 @@ def test_union_finite_exact_exact():
     assert out.membership_quality == "exact"
 
 
-def test_union_finite_exact_with_lower_yields_lower():
-    a = CapabilityExpr.finite_set([ADDR_A])
-    b = CapabilityExpr.finite_set([ADDR_B], quality="lower_bound")
-    out = union(a, b)
-    assert out.membership_quality == "lower_bound"
+@pytest.mark.parametrize(
+    "op, a_members, b_members",
+    [
+        pytest.param(intersect, [ADDR_A, ADDR_B], [ADDR_B, ADDR_C], id="intersect"),
+        pytest.param(union, [ADDR_A], [ADDR_B], id="union"),
+    ],
+)
+def test_finite_exact_with_lower_bound_yields_lower_bound(op, a_members, b_members):
+    a = CapabilityExpr.finite_set(a_members)
+    b = CapabilityExpr.finite_set(b_members, quality="lower_bound")
+    assert op(a, b).membership_quality == "lower_bound"
 
 
-def test_union_idempotent():
+@pytest.mark.parametrize("op", [intersect, union])
+def test_idempotent(op):
+    """``intersect(A, A) ≡ A`` and ``union(A, A) ≡ A`` for canonical finite sets."""
     a = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
-    out = union(a, a)
+    out = op(a, a)
     assert out.kind == "finite_set"
     assert out.members == a.members
 
@@ -240,15 +214,22 @@ def test_union_finite_with_blacklist_yields_blacklist_minus_finite():
 
 
 # ---------------------------------------------------------------------------
-# Union — structural OR for incompatible kinds
+# Intersect/Union — threshold × finite stays structural
 # ---------------------------------------------------------------------------
 
 
-def test_union_threshold_with_finite_stays_structural():
-    tg = CapabilityExpr.threshold_group(2, [ADDR_A, ADDR_B])
-    fin = CapabilityExpr.finite_set([ADDR_C])
-    out = union(tg, fin)
-    assert out.kind == "OR"
+@pytest.mark.parametrize(
+    "op, tg_members, fin_members, expected_kind",
+    [
+        pytest.param(intersect, [ADDR_A, ADDR_B, ADDR_C], [ADDR_A], "AND", id="intersect"),
+        pytest.param(union, [ADDR_A, ADDR_B], [ADDR_C], "OR", id="union"),
+    ],
+)
+def test_threshold_with_finite_stays_structural(op, tg_members, fin_members, expected_kind):
+    tg = CapabilityExpr.threshold_group(2, tg_members)
+    fin = CapabilityExpr.finite_set(fin_members)
+    out = op(tg, fin)
+    assert out.kind == expected_kind
     assert len(out.children) == 2
 
 
@@ -262,6 +243,10 @@ def test_negate_finite_exact_yields_blacklist():
     out = negate(fin)
     assert out.kind == "cofinite_blacklist"
     assert out.blacklist == [ADDR_A.lower(), ADDR_B.lower()]
+    # Double negation: negate(negate(finite_exact)) == finite_exact (canonical).
+    twice = negate(out)
+    assert twice.kind == "finite_set"
+    assert twice.members == fin.members
 
 
 def test_negate_finite_lower_bound_yields_lower_bound_blacklist():
@@ -291,14 +276,6 @@ def test_negate_lower_bound_blacklist_yields_lower_bound_finite():
     assert out.membership_quality == "lower_bound"
 
 
-def test_negate_finite_then_negate_returns_finite():
-    """Double negation: negate(negate(finite_exact)) == finite_exact (canonical)."""
-    fin = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
-    twice = negate(negate(fin))
-    assert twice.kind == "finite_set"
-    assert twice.members == fin.members
-
-
 def test_negate_de_morgan_and():
     a = CapabilityExpr.finite_set([ADDR_A])
     b = CapabilityExpr.finite_set([ADDR_B])
@@ -315,20 +292,19 @@ def test_negate_de_morgan_and():
 # combinator and inert today (every cofinite is exact).
 
 
-def test_intersect_blacklists_threads_quality():
-    a = CapabilityExpr.cofinite_blacklist([ADDR_A])
-    b = CapabilityExpr.cofinite_blacklist([ADDR_B])
-    assert intersect(a, b).blacklist_quality == "exact"  # exact ∩ exact stays exact (no-op today)
-    c = CapabilityExpr.cofinite_blacklist([ADDR_B], blacklist_quality="lower_bound")
-    assert intersect(a, c).blacklist_quality == "lower_bound"  # carried, not dropped
-
-
-def test_union_blacklists_threads_quality():
-    a = CapabilityExpr.cofinite_blacklist([ADDR_A, ADDR_B])
-    b = CapabilityExpr.cofinite_blacklist([ADDR_B, ADDR_C])
-    assert union(a, b).blacklist_quality == "exact"
-    c = CapabilityExpr.cofinite_blacklist([ADDR_B, ADDR_C], blacklist_quality="lower_bound")
-    assert union(a, c).blacklist_quality == "lower_bound"
+@pytest.mark.parametrize(
+    "op, a_members, b_members, c_members",
+    [
+        pytest.param(intersect, [ADDR_A], [ADDR_B], [ADDR_B], id="intersect"),
+        pytest.param(union, [ADDR_A, ADDR_B], [ADDR_B, ADDR_C], [ADDR_B, ADDR_C], id="union"),
+    ],
+)
+def test_blacklists_thread_quality(op, a_members, b_members, c_members):
+    a = CapabilityExpr.cofinite_blacklist(a_members)
+    b = CapabilityExpr.cofinite_blacklist(b_members)
+    assert op(a, b).blacklist_quality == "exact"  # exact op exact stays exact (no-op today)
+    c = CapabilityExpr.cofinite_blacklist(c_members, blacklist_quality="lower_bound")
+    assert op(a, c).blacklist_quality == "lower_bound"  # carried, not dropped
 
 
 def test_attach_conditions_preserves_blacklist_quality():
@@ -390,14 +366,6 @@ def test_negate_unsupported_no_adapter_stays_unsupported():
     assert out.unsupported_reason == "negate_of_no_adapter"
 
 
-def test_negate_external_check_preserves_subject():
-    # A bound (inlined-hook) denylist must stay ``bound`` through the new arm so the
-    # cross-subject intersect keeps it a side-condition (see the security invariants below).
-    bound = CapabilityExpr.external_check_only(ExternalCheck(target_address=ADDR_A, target_call_selector="0x01"))
-    bound.subject = "bound"
-    assert negate(bound).subject == "bound"
-
-
 def test_negate_threshold_and_signature_stay_gated():
     # Only external_check_only joined finite_set/cofinite as a negate-opens arm; an M-of-N or
     # signature gate has no faithful open complement.
@@ -451,46 +419,27 @@ def _all_kinds() -> list[CapabilityExpr]:
     ]
 
 
-def test_intersect_total_over_all_kinds():
-    """No combination raises; every result is a typed CapabilityExpr."""
+_ALL_RESULT_KINDS = (
+    "finite_set",
+    "threshold_group",
+    "cofinite_blacklist",
+    "signature_witness",
+    "external_check_only",
+    "conditional_universal",
+    "unsupported",
+    "AND",
+    "OR",
+)
+
+
+def test_combinators_total_over_all_kinds():
+    """No intersect/union/negate combination raises; every result is a typed CapabilityExpr."""
     for a in _all_kinds():
         for b in _all_kinds():
-            out = intersect(a, b)
-            assert out.kind in (
-                "finite_set",
-                "threshold_group",
-                "cofinite_blacklist",
-                "signature_witness",
-                "external_check_only",
-                "conditional_universal",
-                "unsupported",
-                "AND",
-                "OR",
-            )
-
-
-def test_union_total_over_all_kinds():
-    for a in _all_kinds():
-        for b in _all_kinds():
-            out = union(a, b)
-            assert out.kind in (
-                "finite_set",
-                "threshold_group",
-                "cofinite_blacklist",
-                "signature_witness",
-                "external_check_only",
-                "conditional_universal",
-                "unsupported",
-                "AND",
-                "OR",
-            )
-
-
-def test_negate_total_over_all_kinds():
-    for a in _all_kinds():
-        out = negate(a)
-        # Only constraint: never raises, returns a CapabilityExpr.
-        assert isinstance(out, CapabilityExpr)
+            assert intersect(a, b).kind in _ALL_RESULT_KINDS
+            assert union(a, b).kind in _ALL_RESULT_KINDS
+        # negate's only constraint: never raises, returns a CapabilityExpr.
+        assert isinstance(negate(a), CapabilityExpr)
 
 
 # ---------------------------------------------------------------------------
@@ -563,10 +512,29 @@ def test_negate_preserves_subject():
     assert negate(out).subject == "bound"
 
 
-def test_attach_conditions_preserves_subject():
-    bound = CapabilityExpr.finite_set([ADDR_A], subject="bound")
-    cu = CapabilityExpr.conditional_universal(Condition(kind="time", description="t"))
-    assert intersect(bound, cu).subject == "bound"
+@pytest.mark.parametrize(
+    "build, apply",
+    [
+        # A bound (inlined-hook) denylist must stay ``bound`` through the negate external_check arm so the
+        # cross-subject intersect keeps it a side-condition (see the security invariants above).
+        pytest.param(
+            lambda: CapabilityExpr.external_check_only(
+                ExternalCheck(target_address=ADDR_A, target_call_selector="0x01")
+            ),
+            negate,
+            id="negate-external-check",
+        ),
+        pytest.param(
+            lambda: CapabilityExpr.finite_set([ADDR_A]),
+            lambda e: intersect(e, CapabilityExpr.conditional_universal(Condition(kind="time", description="t"))),
+            id="attach-conditions",
+        ),
+    ],
+)
+def test_bound_subject_is_preserved(build, apply):
+    bound = build()
+    bound.subject = "bound"
+    assert apply(bound).subject == "bound"
 
 
 def test_bound_condition_description_variants():

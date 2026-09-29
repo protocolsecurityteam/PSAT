@@ -14,6 +14,8 @@ with byte-exact dicts, including arms that must publish NOTHING. Rules:
 
 from __future__ import annotations
 
+import pytest
+
 from services.resolution.capabilities import (
     CapabilityExpr,
     Condition,
@@ -73,39 +75,11 @@ def test_leaf_height_is_preserved_on_the_wire():
 # ---------------------------------------------------------------------------
 
 
-def test_intersect_two_folds_takes_the_min_and_refuses_an_as_of():
-    out = capability_to_dict(intersect(_fold([ADDR_A, ADDR_B], block=B1), _fold([ADDR_A], block=B2)))
-    assert out["members"] == [ADDR_A]
-    assert out["last_indexed_block"] == B1
-    # Heights present but heterogeneous: an EARNED refusal, not an omission.
-    assert out["exact_as_of"] == "not_determined"
-
-
-def test_union_two_folds_takes_the_min_and_refuses_an_as_of():
-    out = capability_to_dict(union(_fold([ADDR_A], block=B1), _fold([ADDR_B], block=B2)))
-    assert out["members"] == [ADDR_A, ADDR_B]
-    assert out["last_indexed_block"] == B1
-    assert out["exact_as_of"] == "not_determined"
-
-
 def test_equal_heights_license_an_exact_as_of():
     for combine in (intersect, union):
         out = capability_to_dict(combine(_fold([ADDR_A], block=B1), _fold([ADDR_A], block=B1)))
         assert out["last_indexed_block"] == B1
         assert out["exact_as_of"] == B1
-
-
-def test_intersect_with_blockless_operand_publishes_no_height():
-    """THE fail-closed arm — the shape of all 261 solmate rows, ``OR(fold, live owner() read)``."""
-    out = capability_to_dict(intersect(_fold([ADDR_A], block=B1), _blockless_live_getter([ADDR_A])))
-    assert "last_indexed_block" not in out
-    assert "exact_as_of" not in out
-
-
-def test_union_with_blockless_operand_publishes_no_height():
-    out = capability_to_dict(union(_fold([ADDR_A], block=B1), _blockless_live_getter([ADDR_B])))
-    assert "last_indexed_block" not in out
-    assert "exact_as_of" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -117,19 +91,6 @@ def _blacklist(members: list[str], *, block: int | None, quality: str = "exact")
     cap = CapabilityExpr.cofinite_blacklist(members, confidence="enumerable", blacklist_quality=quality)  # pyright: ignore[reportArgumentType]
     cap.last_indexed_block = block
     return cap
-
-
-def test_intersect_finite_blacklist_propagates_min():
-    out = capability_to_dict(intersect(_fold([ADDR_A, ADDR_B], block=B1), _blacklist([ADDR_B], block=B2)))
-    assert out["members"] == [ADDR_A]
-    assert out["last_indexed_block"] == B1
-    assert out["exact_as_of"] == "not_determined"
-
-
-def test_intersect_finite_blacklist_fails_closed_on_blockless():
-    out = capability_to_dict(intersect(_fold([ADDR_A, ADDR_B], block=B1), _blacklist([ADDR_B], block=None)))
-    assert "last_indexed_block" not in out
-    assert "exact_as_of" not in out
 
 
 def test_subtraction_that_creates_emptiness_publishes_no_as_of_and_no_reason():
@@ -185,17 +146,6 @@ def test_negate_cofinite_carries_the_height_but_never_an_empty_reason():
     assert "empty_reason" not in out
 
 
-def test_negate_fails_closed_on_a_blockless_operand():
-    for cap in (
-        CapabilityExpr.finite_set([ADDR_A], quality="exact"),
-        CapabilityExpr.finite_set([ADDR_A], quality="lower_bound"),
-        CapabilityExpr.cofinite_blacklist([ADDR_A]),
-    ):
-        out = capability_to_dict(negate(cap))
-        assert "last_indexed_block" not in out
-        assert "exact_as_of" not in out
-
-
 def test_negate_external_check_only_is_a_stated_non_site():
     """The tenth mint site, deliberately excluded: an ``external_check_only`` operand is a
     probe interface, never an enumeration, so it carries no height. Pinned so the omission
@@ -213,28 +163,92 @@ def test_negate_external_check_only_is_a_stated_non_site():
 # ---------------------------------------------------------------------------
 
 
-def test_cofinite_pairs_and_union_finite_blacklist_propagate_min():
-    both_ways = [
-        intersect(_blacklist([ADDR_A], block=B1), _blacklist([ADDR_B], block=B2)),
-        union(_blacklist([ADDR_A], block=B1), _blacklist([ADDR_B], block=B2)),
-        union(_fold([ADDR_A], block=B1), _blacklist([ADDR_A, ADDR_B], block=B2)),
-    ]
-    for cap in both_ways:
-        out = capability_to_dict(cap)
-        assert out["last_indexed_block"] == B1, out
-        assert out["exact_as_of"] == "not_determined", out
+# Heights present but heterogeneous: an EARNED refusal of the as-of, not an omission; the
+# published height is the MIN (a staleness floor).
+@pytest.mark.parametrize(
+    ("make", "expected"),
+    [
+        pytest.param(
+            lambda: intersect(_fold([ADDR_A, ADDR_B], block=B1), _fold([ADDR_A], block=B2)),
+            {"members": [ADDR_A]},
+            id="intersect-two-folds",
+        ),
+        pytest.param(
+            lambda: union(_fold([ADDR_A], block=B1), _fold([ADDR_B], block=B2)),
+            {"members": [ADDR_A, ADDR_B]},
+            id="union-two-folds",
+        ),
+        pytest.param(
+            lambda: intersect(_fold([ADDR_A, ADDR_B], block=B1), _blacklist([ADDR_B], block=B2)),
+            {"members": [ADDR_A]},
+            id="intersect-finite-blacklist",
+        ),
+        pytest.param(
+            lambda: intersect(_blacklist([ADDR_A], block=B1), _blacklist([ADDR_B], block=B2)),
+            {},
+            id="intersect-cofinite-pair",
+        ),
+        pytest.param(
+            lambda: union(_blacklist([ADDR_A], block=B1), _blacklist([ADDR_B], block=B2)),
+            {},
+            id="union-cofinite-pair",
+        ),
+        pytest.param(
+            lambda: union(_fold([ADDR_A], block=B1), _blacklist([ADDR_A, ADDR_B], block=B2)),
+            {},
+            id="union-finite-blacklist",
+        ),
+    ],
+)
+def test_combinators_propagate_min_height_and_refuse_as_of(make, expected):
+    out = capability_to_dict(make())
+    for key, value in expected.items():
+        assert out[key] == value, out
+    assert out["last_indexed_block"] == B1, out
+    assert out["exact_as_of"] == "not_determined", out
 
 
-def test_cofinite_pairs_fail_closed_on_a_blockless_operand():
-    both_ways = [
-        intersect(_blacklist([ADDR_A], block=B1), _blacklist([ADDR_B], block=None)),
-        union(_blacklist([ADDR_A], block=B1), _blacklist([ADDR_B], block=None)),
-        union(_fold([ADDR_A], block=B1), _blacklist([ADDR_B], block=None)),
-    ]
-    for cap in both_ways:
-        out = capability_to_dict(cap)
-        assert "last_indexed_block" not in out, out
-        assert "exact_as_of" not in out, out
+# A height propagates only when EVERY operand carries one, so any blockless operand publishes nothing.
+@pytest.mark.parametrize(
+    "make",
+    [
+        # THE fail-closed arm: the shape of all 261 solmate rows, ``OR(fold, live owner() read)``.
+        pytest.param(
+            lambda: intersect(_fold([ADDR_A], block=B1), _blockless_live_getter([ADDR_A])),
+            id="intersect-with-live-getter",
+        ),
+        pytest.param(
+            lambda: union(_fold([ADDR_A], block=B1), _blockless_live_getter([ADDR_B])),
+            id="union-with-live-getter",
+        ),
+        pytest.param(
+            lambda: intersect(_fold([ADDR_A, ADDR_B], block=B1), _blacklist([ADDR_B], block=None)),
+            id="intersect-finite-blacklist",
+        ),
+        pytest.param(lambda: negate(CapabilityExpr.finite_set([ADDR_A], quality="exact")), id="negate-exact-finite"),
+        pytest.param(
+            lambda: negate(CapabilityExpr.finite_set([ADDR_A], quality="lower_bound")),
+            id="negate-lower-bound-finite",
+        ),
+        pytest.param(lambda: negate(CapabilityExpr.cofinite_blacklist([ADDR_A])), id="negate-cofinite"),
+        pytest.param(
+            lambda: intersect(_blacklist([ADDR_A], block=B1), _blacklist([ADDR_B], block=None)),
+            id="intersect-cofinite-pair",
+        ),
+        pytest.param(
+            lambda: union(_blacklist([ADDR_A], block=B1), _blacklist([ADDR_B], block=None)),
+            id="union-cofinite-pair",
+        ),
+        pytest.param(
+            lambda: union(_fold([ADDR_A], block=B1), _blacklist([ADDR_B], block=None)),
+            id="union-finite-blacklist",
+        ),
+    ],
+)
+def test_blockless_operand_publishes_no_height(make):
+    out = capability_to_dict(make())
+    assert "last_indexed_block" not in out, out
+    assert "exact_as_of" not in out, out
 
 
 # ---------------------------------------------------------------------------

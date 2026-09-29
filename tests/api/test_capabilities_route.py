@@ -237,9 +237,16 @@ def test_capabilities_response_freshness_null_when_no_cursor(api_client, db_sess
 
 
 @requires_postgres
-def test_capabilities_response_is_cached(api_client, db_session, monkeypatch):
-    """Repeat hits within the TTL short-circuit the resolver (counted via
-    resolve_contract_capabilities calls)."""
+@pytest.mark.parametrize(
+    "ttl_s, expected_resolver_calls",
+    [
+        # Repeat hits within the TTL short-circuit the resolver.
+        pytest.param(60.0, 1, id="cached-within-ttl"),
+        # PSAT_CAPABILITIES_CACHE_TTL_S=0 disables caching: every request runs the resolver.
+        pytest.param(0.0, 2, id="ttl-disabled-when-zero"),
+    ],
+)
+def test_capabilities_response_caching(api_client, db_session, monkeypatch, ttl_s, expected_resolver_calls):
     from services.resolution import capability_resolver as resolver_mod
 
     address = "0x" + uuid.uuid4().hex[:8] + "ca" * 16
@@ -248,7 +255,7 @@ def test_capabilities_response_is_cached(api_client, db_session, monkeypatch):
     from routers import predicate_capabilities
 
     predicate_capabilities._capabilities_cache.clear()
-    monkeypatch.setattr(predicate_capabilities, "_CAPABILITIES_CACHE_TTL_S", 60.0)
+    monkeypatch.setattr(predicate_capabilities, "_CAPABILITIES_CACHE_TTL_S", ttl_s)
 
     calls = {"n": 0}
     original = resolver_mod.resolve_contract_capabilities
@@ -264,34 +271,7 @@ def test_capabilities_response_is_cached(api_client, db_session, monkeypatch):
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert r1.json() == r2.json()
-    assert calls["n"] == 1
-
-
-@requires_postgres
-def test_capabilities_cache_ttl_disabled_when_zero(api_client, db_session, monkeypatch):
-    """``PSAT_CAPABILITIES_CACHE_TTL_S=0`` disables caching: every request runs the resolver."""
-    from services.resolution import capability_resolver as resolver_mod
-
-    address = "0x" + uuid.uuid4().hex[:8] + "cb" * 16
-    _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=_equality_leaf_artifact())
-
-    from routers import predicate_capabilities
-
-    predicate_capabilities._capabilities_cache.clear()
-    monkeypatch.setattr(predicate_capabilities, "_CAPABILITIES_CACHE_TTL_S", 0.0)
-
-    calls = {"n": 0}
-    original = resolver_mod.resolve_contract_capabilities
-
-    def _counting(*args, **kwargs):
-        calls["n"] += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(resolver_mod, "resolve_contract_capabilities", _counting)
-
-    api_client.get(f"/api/contract/{address}/capabilities")
-    api_client.get(f"/api/contract/{address}/capabilities")
-    assert calls["n"] == 2  # both requests hit the resolver
+    assert calls["n"] == expected_resolver_calls
 
 
 @requires_postgres

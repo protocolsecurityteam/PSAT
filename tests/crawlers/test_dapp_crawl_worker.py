@@ -123,26 +123,18 @@ def _session_no_existing_contracts() -> MagicMock:
 
 
 class TestMissingDappUrls:
-    def test_missing_key(self, dapp_worker_module):
+    @pytest.mark.parametrize(
+        "request_payload",
+        [
+            pytest.param({}, id="missing-key"),
+            pytest.param({"dapp_urls": []}, id="empty-list"),
+            pytest.param(None, id="request-is-none"),
+        ],
+    )
+    def test_missing_dapp_urls_raises(self, dapp_worker_module, request_payload):
         worker = dapp_worker_module.DAppCrawlWorker()
         session = MagicMock()
-        job = _job(request={})
-
-        with pytest.raises(ValueError, match="missing dapp_urls"):
-            worker.process(session, cast(Any, job))
-
-    def test_empty_list(self, dapp_worker_module):
-        worker = dapp_worker_module.DAppCrawlWorker()
-        session = MagicMock()
-        job = _job(request={"dapp_urls": []})
-
-        with pytest.raises(ValueError, match="missing dapp_urls"):
-            worker.process(session, cast(Any, job))
-
-    def test_request_is_none(self, dapp_worker_module):
-        worker = dapp_worker_module.DAppCrawlWorker()
-        session = MagicMock()
-        job = _job(request=None)
+        job = _job(request=request_payload)
 
         with pytest.raises(ValueError, match="missing dapp_urls"):
             worker.process(session, cast(Any, job))
@@ -163,41 +155,41 @@ class TestJobName:
 
 
 class TestProtocolCreation:
-    def test_hostname_derived_when_no_company(self, monkeypatch, dapp_worker_module):
+    @pytest.mark.parametrize(
+        "job_overrides, expected_call, expected_company",
+        [
+            pytest.param(
+                {"request": {"dapp_urls": ["https://ether.fi/stake"]}},
+                ("ether.fi", "ether.fi"),
+                "ether.fi",
+                id="hostname-derived-when-no-company",
+            ),
+            pytest.param(
+                {"request": {"dapp_urls": ["https://www.uniswap.org"]}},
+                ("uniswap.org", "uniswap.org"),
+                "uniswap.org",
+                id="www-stripped-from-hostname",
+            ),
+            pytest.param(
+                {"company": "Ether.fi", "request": {"dapp_urls": ["https://stake.ether.fi"]}},
+                ("Ether.fi", "stake.ether.fi"),
+                "Ether.fi",
+                id="company-preferred-over-hostname",
+            ),
+        ],
+    )
+    def test_protocol_name_derivation(
+        self, monkeypatch, dapp_worker_module, job_overrides, expected_call, expected_company
+    ):
         crawl_result = {"addresses": [], "interaction_count": 0}
         spies = _patch_worker_deps(monkeypatch, dapp_worker_module, crawl_result=crawl_result)
         session = _session_no_existing_contracts()
-        job = _job(request={"dapp_urls": ["https://ether.fi/stake"]})
+        job = _job(**job_overrides)
 
         worker = dapp_worker_module.DAppCrawlWorker()
         with pytest.raises(JobHandledDirectly):
             worker.process(session, cast(Any, job))
 
-        assert spies["protocol_calls"] == [("ether.fi", "ether.fi")]
+        assert spies["protocol_calls"] == [expected_call]
         assert job.protocol_id == 1
-        assert job.company == "ether.fi"
-
-    def test_www_stripped_from_hostname(self, monkeypatch, dapp_worker_module):
-        crawl_result = {"addresses": [], "interaction_count": 0}
-        spies = _patch_worker_deps(monkeypatch, dapp_worker_module, crawl_result=crawl_result)
-        session = _session_no_existing_contracts()
-        job = _job(request={"dapp_urls": ["https://www.uniswap.org"]})
-
-        worker = dapp_worker_module.DAppCrawlWorker()
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        assert spies["protocol_calls"] == [("uniswap.org", "uniswap.org")]
-
-    def test_company_prefers_over_hostname(self, monkeypatch, dapp_worker_module):
-        crawl_result = {"addresses": [], "interaction_count": 0}
-        spies = _patch_worker_deps(monkeypatch, dapp_worker_module, crawl_result=crawl_result)
-        session = _session_no_existing_contracts()
-        job = _job(company="Ether.fi", request={"dapp_urls": ["https://stake.ether.fi"]})
-
-        worker = dapp_worker_module.DAppCrawlWorker()
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        assert spies["protocol_calls"] == [("Ether.fi", "stake.ether.fi")]
-        assert job.company == "Ether.fi"
+        assert job.company == expected_company

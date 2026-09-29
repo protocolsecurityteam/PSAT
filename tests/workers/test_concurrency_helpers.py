@@ -72,33 +72,35 @@ def test_parallel_map_heartbeat_exception_is_swallowed():
     assert [r for _, r in results] == [2, 4, 6]
 
 
-def test_parallel_map_propagates_lease_lost_from_heartbeat_parallel_path():
-    """LeaseLost must propagate so ``BaseWorker._execute_job`` can bail.
-
-    psat-pr-73 hit duplicate builds because ``parallel_map`` caught it as a generic
-    Exception, so the abandoned worker kept running forge builds on a job a sibling
-    had claimed (signal #4, 2026-05-08 08:17-21).
-    """
+@pytest.mark.parametrize(
+    ("items", "max_workers"),
+    [
+        # LeaseLost must propagate so ``BaseWorker._execute_job`` can bail.
+        # psat-pr-73 hit duplicate builds because ``parallel_map`` caught it as a generic
+        # Exception, so the abandoned worker kept running forge builds on a job a sibling
+        # had claimed (signal #4, 2026-05-08 08:17-21).
+        pytest.param([1, 2, 3], 2, id="parallel_path"),
+        pytest.param([1, 2, 3], 1, id="single_worker_path"),
+    ],
+)
+def test_parallel_map_propagates_lease_lost_from_heartbeat(items, max_workers):
     from db.queue import LeaseLost
 
     def lease_lost_heartbeat():
         raise LeaseLost("sibling owns the row now")
 
     with pytest.raises(LeaseLost):
-        parallel_map(lambda x: x * 2, [1, 2, 3], max_workers=2, heartbeat=lease_lost_heartbeat)
+        parallel_map(lambda x: x * 2, items, max_workers=max_workers, heartbeat=lease_lost_heartbeat)
 
 
-def test_parallel_map_propagates_lease_lost_from_heartbeat_single_worker_path():
-    from db.queue import LeaseLost
-
-    def lease_lost_heartbeat():
-        raise LeaseLost("sibling owns the row now")
-
-    with pytest.raises(LeaseLost):
-        parallel_map(lambda x: x, [1, 2, 3], max_workers=1, heartbeat=lease_lost_heartbeat)
-
-
-def test_parallel_map_heartbeats_single_item_while_waiting(monkeypatch):
+@pytest.mark.parametrize(
+    ("items", "max_workers"),
+    [
+        pytest.param([1], 8, id="single_item"),
+        pytest.param([1, 2], 2, id="two_items"),
+    ],
+)
+def test_parallel_map_heartbeats_while_waiting(monkeypatch, items, max_workers):
     monkeypatch.setenv("PSAT_PARALLEL_HEARTBEAT_INTERVAL_S", "0.01")
     release = threading.Event()
     counter = {"n": 0}
@@ -111,28 +113,9 @@ def test_parallel_map_heartbeats_single_item_while_waiting(monkeypatch):
         counter["n"] += 1
         release.set()
 
-    results = parallel_map(wait_for_release, [1], max_workers=8, heartbeat=heartbeat)
+    results = parallel_map(wait_for_release, items, max_workers=max_workers, heartbeat=heartbeat)
 
-    assert results == [(1, 1)]
-    assert counter["n"] >= 1
-
-
-def test_parallel_map_heartbeats_while_waiting(monkeypatch):
-    monkeypatch.setenv("PSAT_PARALLEL_HEARTBEAT_INTERVAL_S", "0.01")
-    release = threading.Event()
-    counter = {"n": 0}
-
-    def wait_for_release(x):
-        assert release.wait(timeout=2)
-        return x
-
-    def heartbeat():
-        counter["n"] += 1
-        release.set()
-
-    results = parallel_map(wait_for_release, [1, 2], max_workers=2, heartbeat=heartbeat)
-
-    assert [r for _, r in results] == [1, 2]
+    assert results == [(i, i) for i in items]
     assert counter["n"] >= 1
 
 

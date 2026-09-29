@@ -17,6 +17,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from services.resolution.adapters import AdapterRegistry, CallFrame, EvaluationContext
 from services.resolution.adapters.event_indexed import EventIndexedAdapter
 from services.resolution.adapters.solmate_roles import (
@@ -94,19 +96,19 @@ def _descriptor() -> dict:
     }
 
 
-def test_solmate_pause_resolves_to_governing_safe():
+@pytest.mark.parametrize(
+    "selector",
+    [
+        pytest.param(PAUSE, id="pause_role_9"),
+        pytest.param(ADD_ASSET, id="add_asset_role_8"),
+    ],
+)
+def test_solmate_selector_resolves_to_governing_safe(selector):
     fixture = _load()
-    cap = SolmateRolesAuthorityAdapter().enumerate(_descriptor(), _ctx(fixture, FixtureRepo(_rows(fixture)), PAUSE))
+    cap = SolmateRolesAuthorityAdapter().enumerate(_descriptor(), _ctx(fixture, FixtureRepo(_rows(fixture)), selector))
     assert cap.kind == "finite_set"
     assert cap.members == [SAFE_4_6]
     assert cap.membership_quality == "exact"
-
-
-def test_solmate_add_asset_resolves_to_governing_safe():
-    fixture = _load()
-    cap = SolmateRolesAuthorityAdapter().enumerate(_descriptor(), _ctx(fixture, FixtureRepo(_rows(fixture)), ADD_ASSET))
-    assert cap.kind == "finite_set"
-    assert cap.members == [SAFE_4_6]
 
 
 def test_solmate_unroled_function_is_exact_empty_not_unknown():
@@ -198,20 +200,18 @@ def _ctx_for_matches(bytecode=None) -> EvaluationContext:
     return EvaluationContext(chain_id=1, state_var_values={"authority": _AUTHORITY}, bytecode=bytecode)
 
 
-def test_matches_scores_high_only_for_a_confirmed_rolesauthority():
-    bc = _FakeBytecode(selectors=_ROLES_AUTHORITY_MARKER_SELECTORS)
-    assert SolmateRolesAuthorityAdapter.matches(_descriptor_with_authority(), _ctx_for_matches(bc)) == 90
-
-
-def test_matches_declines_a_different_cancall_standard():
-    # OZ AccessManager shares canCall's selector; Solmate must DECLINE (0) so that adapter can win the tie.
-    bc = _FakeBytecode(selectors=_OTHER_CANCALL_STANDARD_SELECTORS)
-    assert SolmateRolesAuthorityAdapter.matches(_descriptor_with_authority(), _ctx_for_matches(bc)) == 0
-
-
-def test_matches_provisional_when_authority_cannot_be_probed():
-    # No bytecode repo → can't confirm → provisional (< a confirmed adapter's 90) but > 0.
-    assert SolmateRolesAuthorityAdapter.matches(_descriptor_with_authority(), _ctx_for_matches(None)) == 40
+@pytest.mark.parametrize(
+    "bytecode,score",
+    [
+        pytest.param(_FakeBytecode(selectors=_ROLES_AUTHORITY_MARKER_SELECTORS), 90, id="confirmed_rolesauthority"),
+        # OZ AccessManager shares canCall's selector; Solmate must DECLINE (0) so that adapter can win the tie.
+        pytest.param(_FakeBytecode(selectors=_OTHER_CANCALL_STANDARD_SELECTORS), 0, id="different_cancall_standard"),
+        # No bytecode repo → can't confirm → provisional (< a confirmed adapter's 90) but > 0.
+        pytest.param(None, 40, id="provisional_when_unprobeable"),
+    ],
+)
+def test_matches_score(bytecode, score):
+    assert SolmateRolesAuthorityAdapter.matches(_descriptor_with_authority(), _ctx_for_matches(bytecode)) == score
 
 
 def test_registry_prefers_confirmed_solmate_over_generic_event_adapter():

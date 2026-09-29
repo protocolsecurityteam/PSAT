@@ -22,13 +22,15 @@ def _stub_storage(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     monkeypatch.setattr(tracking, "_get_storage_at", lambda *a, **kw: raw)
 
 
-def test_full_word_with_implementation_decodes_identically(monkeypatch):
-    _stub_storage(monkeypatch, FULL_IMPL_WORD)
-    assert _read_erc1967_implementation("rpc", "0x" + "ab" * 20, "0x1") == "0x" + IMPL_ADDR
-
-
-def test_uppercase_full_word_decodes_lowercased(monkeypatch):
-    _stub_storage(monkeypatch, ("0x" + "00" * 12 + IMPL_ADDR).upper().replace("0X", "0x"))
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(FULL_IMPL_WORD, id="full_word"),
+        pytest.param(FULL_IMPL_WORD.upper().replace("0X", "0x"), id="uppercase_lowercased"),
+    ],
+)
+def test_full_word_with_implementation_decodes_identically(monkeypatch, raw):
+    _stub_storage(monkeypatch, raw)
     assert _read_erc1967_implementation("rpc", "0x" + "ab" * 20, "0x1") == "0x" + IMPL_ADDR
 
 

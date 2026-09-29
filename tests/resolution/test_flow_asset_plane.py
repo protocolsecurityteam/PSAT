@@ -74,6 +74,19 @@ def _state_var_receiver(selector: str, variable: str, *, mutability: str = "immu
     }
 
 
+# A receiver named by the caller: no declaration licenses a read.
+_CALLER_NAMED_RECEIVER = {
+    "binding": "parameter",
+    "param_scope": "entry_point",
+    "param_index": 0,
+    "mutability": None,
+    "visibility": None,
+    "auto_getter_selector": None,
+    "variable": "token",
+    "receiver_provenance": "caller_named",
+}
+
+
 def _effects(*sinks: dict, function: str = "recoverERC20()") -> dict:
     return {
         "schema_version": "semantic-3",
@@ -130,52 +143,47 @@ def _run(
 # ---------------------------------------------------------------------------
 
 
-def test_resolved_payload_is_byte_exact(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("host", "selector", "variable", "word", "address"),
+    [
+        pytest.param(REWARDS_ROUTER, SEL_REWARD_TOKEN, "rewardTokenAddress", WORD_EIGEN, ADDR_EIGEN, id="reward_token"),
+        # The measured words for ``token()`` and ``eEth()`` decode to the addresses the investigation pinned at
+        # 25643300.
+        pytest.param(MERKLE_DROP, SEL_TOKEN, "token", WORD_KING, ADDR_KING, id="pinned_token"),
+        pytest.param(REDEMPTION_MGR, SEL_EETH, "eEth", WORD_EETH, ADDR_EETH, id="pinned_eeth"),
+    ],
+)
+def test_resolved_payload_is_byte_exact(
+    monkeypatch: pytest.MonkeyPatch, host: str, selector: str, variable: str, word: str, address: str
+) -> None:
     """A full-word answer publishes the address, its block, and the invariant —
     and nothing else. Asserted as whole-dict equality so a silently added key
     (a name, a confidence, a defaulted null) fails the test."""
-    effects = _effects(_sink("s0", _state_var_receiver(SEL_REWARD_TOKEN, "rewardTokenAddress")))
-    payload, seen = _run(monkeypatch, effects, [EthCallResult(True, WORD_EIGEN, None, None)])
+    effects = _effects(_sink("s0", _state_var_receiver(selector, variable)))
+    payload, seen = _run(monkeypatch, effects, [EthCallResult(True, word, None, None)], deployment_address=host)
 
     assert payload == {
         "schema_version": "flow-asset-1",
         "chain_id": 1,
-        "deployment_address": REWARDS_ROUTER,
+        "deployment_address": host,
         "deployment_proven_proxied": True,
         "probe_block": BLOCK,
         "probe_block_hash": BLOCK_HASH.hex(),
         "receivers": [
             {
-                "asset_getter_selector": SEL_REWARD_TOKEN,
+                "asset_getter_selector": selector,
                 "sink_ids": ["s0"],
-                "receiver_variables": ["rewardTokenAddress"],
+                "receiver_variables": [variable],
                 "declared_mutability": "immutable_in_implementation",
                 "observed_at_block": BLOCK,
                 "observed_block_hash": BLOCK_HASH.hex(),
                 "asset_address_status": "resolved",
-                "asset_address": ADDR_EIGEN,
+                "asset_address": address,
                 "asset_identity_invariant": "redirectable_by_upgrade_authority",
             }
         ],
     }
-    assert seen == [("http://stub", [{"to": REWARDS_ROUTER, "data": SEL_REWARD_TOKEN}], hex(BLOCK), 1)]
-
-
-def test_the_three_pinned_corpus_reads_reproduce(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The measured words for ``token()``, ``eEth()`` and ``rewardTokenAddress()``
-    decode to the addresses the investigation pinned at 25643300."""
-    cases = [
-        (MERKLE_DROP, SEL_TOKEN, "token", WORD_KING, ADDR_KING),
-        (REDEMPTION_MGR, SEL_EETH, "eEth", WORD_EETH, ADDR_EETH),
-        (REWARDS_ROUTER, SEL_REWARD_TOKEN, "rewardTokenAddress", WORD_EIGEN, ADDR_EIGEN),
-    ]
-    for host, selector, variable, word, expected in cases:
-        effects = _effects(_sink("s0", _state_var_receiver(selector, variable)))
-        payload, _ = _run(monkeypatch, effects, [EthCallResult(True, word, None, None)], deployment_address=host)
-        row = payload["receivers"][0]
-        assert row["asset_address"] == expected
-        assert row["observed_at_block"] == BLOCK
-        assert row["asset_getter_selector"] == selector
+    assert seen == [("http://stub", [{"to": host, "data": selector}], hex(BLOCK), 1)]
 
 
 # ---------------------------------------------------------------------------
@@ -195,25 +203,20 @@ def test_invariant_tracks_proven_proxiedness(
     assert payload["receivers"][0]["asset_identity_invariant"] == expected
 
 
-def test_immutable_declaration_never_becomes_a_runtime_invariant(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("mutability", ["immutable_in_implementation", "constant"])
+def test_declaration_class_never_becomes_a_runtime_invariant(monkeypatch: pytest.MonkeyPatch, mutability: str) -> None:
     """The declaration class is carried verbatim and is NOT promoted: an
-    ``immutable`` behind a proxy still publishes ``redirectable_by_upgrade_authority``,
+    ``immutable`` (or ``constant``) behind a proxy still publishes ``redirectable_by_upgrade_authority``,
     and no value in the enum means closed."""
-    effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token", mutability="immutable_in_implementation")))
+    effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token", mutability=mutability)))
     payload, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_KING, None, None)])
     row = payload["receivers"][0]
-    assert row["declared_mutability"] == "immutable_in_implementation"
+    assert row["declared_mutability"] == mutability
     assert row["asset_identity_invariant"] == "redirectable_by_upgrade_authority"
     assert "immutable" not in {
         fap.INVARIANT_REDIRECTABLE,
         fap.INVARIANT_NOT_DETERMINED,
     }
-
-
-def test_constant_declaration_is_not_a_closed_invariant_either(monkeypatch: pytest.MonkeyPatch) -> None:
-    effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token", mutability="constant")))
-    payload, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_KING, None, None)])
-    assert payload["receivers"][0]["asset_identity_invariant"] == "redirectable_by_upgrade_authority"
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +244,9 @@ def test_constant_declaration_is_not_a_closed_invariant_either(monkeypatch: pyte
         # ``bytes.fromhex`` ignores ASCII whitespace: 62 nibbles + two spaces is
         # 64 characters that decode to 31 bytes.
         (EthCallResult(True, "0x" + "0" * 62 + "  ", None, None), "malformed_return_word"),
+        # One nibble short of a word still decodes under ``int(x, 16)``; the length check is what makes it a
+        # non-answer.
+        (EthCallResult(True, WORD_KING[:-1], None, None), "malformed_return_word"),
     ],
 )
 def test_a_failed_read_publishes_no_address_and_no_block(
@@ -255,15 +261,6 @@ def test_a_failed_read_publishes_no_address_and_no_block(
     assert "observed_at_block" not in row
     assert "observed_block_hash" not in row
     assert "asset_identity_invariant" not in row
-
-
-def test_short_word_is_rejected_at_63_nibbles(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One nibble short of a word still decodes under ``int(x, 16)``; the length
-    check is what makes it a non-answer."""
-    effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token")))
-    payload, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_KING[:-1], None, None)])
-    assert payload["receivers"][0]["asset_address_status"] == "not_determined"
-    assert "asset_address" not in payload["receivers"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -346,47 +343,44 @@ def test_the_view_getter_local_mints_no_row_and_no_call(monkeypatch: pytest.Monk
     assert seen == []  # no call was placed at all
 
 
-def test_a_local_carrying_a_selector_is_still_refused() -> None:
-    """Defence in depth: even if a descriptor arrived with a non-null selector on
-    a non-state-variable binding, the binding gate refuses it. The selector's
-    licence comes from the DECLARATION, not from the field being populated."""
-    poisoned = {
-        "binding": "local",
-        "param_scope": None,
-        "param_index": None,
-        "mutability": None,
-        "visibility": "public",
-        "auto_getter_selector": "0xd0202d3b",  # tokenOut()
-        "variable": "tokenOut",
-        "receiver_provenance": "not_determined",
-    }
-    assert fap.collect_asset_receivers(_effects(_sink("s0", poisoned))) == []
+def _token_receiver(**overrides: Any) -> dict:
+    return {**_state_var_receiver(SEL_TOKEN, "token"), **overrides}
 
 
-def test_a_parameter_receiver_mints_no_row() -> None:
-    caller_named = {
-        "binding": "parameter",
-        "param_scope": "entry_point",
-        "param_index": 0,
-        "mutability": None,
-        "visibility": None,
-        "auto_getter_selector": None,
-        "variable": "token",
-        "receiver_provenance": "caller_named",
-    }
-    assert fap.collect_asset_receivers(_effects(_sink("s0", caller_named))) == []
-
-
-def test_a_non_public_declaration_with_a_selector_is_refused() -> None:
-    incoherent = _state_var_receiver(SEL_TOKEN, "token")
-    incoherent["visibility"] = "internal"
-    assert fap.collect_asset_receivers(_effects(_sink("s0", incoherent))) == []
-
-
-@pytest.mark.parametrize("bad", ["0xfc0c546", "0xfc0c546aa", "fc0c546a", "0xfc0c546g", "", "0x"])
-def test_a_malformed_selector_is_never_called(bad: str) -> None:
-    receiver = _state_var_receiver(SEL_TOKEN, "token")
-    receiver["auto_getter_selector"] = bad
+@pytest.mark.parametrize(
+    "receiver",
+    [
+        # Defence in depth: even if a descriptor arrived with a non-null selector on a non-state-variable binding,
+        # the binding gate refuses it. The selector's licence comes from the DECLARATION, not from the field being
+        # populated.
+        pytest.param(
+            {
+                "binding": "local",
+                "param_scope": None,
+                "param_index": None,
+                "mutability": None,
+                "visibility": "public",
+                "auto_getter_selector": "0xd0202d3b",  # tokenOut()
+                "variable": "tokenOut",
+                "receiver_provenance": "not_determined",
+            },
+            id="local_carrying_a_selector",
+        ),
+        pytest.param(_CALLER_NAMED_RECEIVER, id="parameter_receiver"),
+        pytest.param(_token_receiver(visibility="internal"), id="non_public_declaration_with_a_selector"),
+        pytest.param(_token_receiver(auto_getter_selector=None), id="no_minted_selector"),
+        pytest.param(None, id="sink_with_no_receiver_key"),
+        *[
+            pytest.param(_token_receiver(auto_getter_selector=bad), id=f"malformed_selector_{bad or 'empty'}")
+            for bad in ["0xfc0c546", "0xfc0c546aa", "fc0c546a", "0xfc0c546g", "", "0x"]
+        ],
+        *[
+            pytest.param(_token_receiver(auto_getter_selector=value), id=f"non_string_selector_{i}")
+            for i, value in enumerate([None, 4207540330, b"0xfc0c546a", ["0xfc0c546a"]])
+        ],
+    ],
+)
+def test_an_unlicensed_receiver_mints_no_row_and_is_never_called(receiver: dict | None) -> None:
     assert fap.collect_asset_receivers(_effects(_sink("s0", receiver))) == []
 
 
@@ -395,24 +389,19 @@ def test_a_malformed_selector_is_never_called(bad: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_sink_with_no_receiver_key_is_untouched() -> None:
-    assert fap.collect_asset_receivers(_effects(_sink("s0", None))) == []
-
-
 def test_a_state_variable_without_a_minted_selector_is_untouched() -> None:
     receiver = _state_var_receiver(SEL_TOKEN, "token")
     receiver["auto_getter_selector"] = None
     assert fap.collect_asset_receivers(_effects(_sink("s0", receiver))) == []
 
 
-@pytest.mark.parametrize("effects", [{}, {"functions": None}, {"functions": []}, {"functions": {}}])
-def test_an_effects_artifact_with_nothing_to_read_yields_nothing(effects: dict) -> None:
-    assert fap.collect_asset_receivers(effects) == []
-
-
 @pytest.mark.parametrize(
     "effects",
     [
+        {},
+        {"functions": None},
+        {"functions": []},
+        {"functions": {}},
         {"functions": ["not a record"]},
         {"functions": {"f()": "not a record"}},
         {"functions": {"f()": {"sinks": None}}},
@@ -421,7 +410,7 @@ def test_an_effects_artifact_with_nothing_to_read_yields_nothing(effects: dict) 
         {"functions": {"f()": {"sinks": [{"id": "s0", "receiver": "not a descriptor"}]}}},
     ],
 )
-def test_a_malformed_artifact_yields_nothing_rather_than_raising(effects: dict) -> None:
+def test_an_artifact_with_nothing_readable_yields_nothing_rather_than_raising(effects: dict) -> None:
     """The step is error-isolated, but a shape it cannot read must produce an
     empty plane, not an exception that costs the stage its degradation budget."""
     assert fap.collect_asset_receivers(effects) == []
@@ -432,13 +421,6 @@ def test_a_functions_list_is_read_the_same_as_a_functions_map(monkeypatch: pytes
     as_list = {"functions": [{"function": "f()", "sinks": [sink]}]}
     as_map = {"functions": {"f()": {"function": "f()", "sinks": [sink]}}}
     assert fap.collect_asset_receivers(as_list) == fap.collect_asset_receivers(as_map)
-
-
-@pytest.mark.parametrize("value", [None, 4207540330, b"0xfc0c546a", ["0xfc0c546a"]])
-def test_a_non_string_selector_is_never_called(value: Any) -> None:
-    receiver = _state_var_receiver(SEL_TOKEN, "token")
-    receiver["auto_getter_selector"] = value
-    assert fap.collect_asset_receivers(_effects(_sink("s0", receiver))) == []
 
 
 @pytest.mark.parametrize("payload", [{}, {"receivers": None}, {"receivers": "x"}, {"receivers": ["x"]}])
@@ -559,57 +541,30 @@ def test_an_unpinnable_height_writes_nothing(monkeypatch: pytest.MonkeyPatch) ->
     assert ctx["store_calls"] == []
 
 
-def test_no_effects_artifact_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    ctx = _stage_ctx(monkeypatch, None, [])
-    written = ctx["worker"]._resolve_flow_asset_addresses(
-        ctx["session"],
-        ctx["job"],
-        chain_id=1,
-        rpc_url="http://stub",
-        deployment_address=MERKLE_DROP,
-        proven_proxied=True,
-    )
-    assert written == 0
-    assert ctx["store_calls"] == []
-
-
-def test_an_effects_artifact_with_no_licensed_receiver_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A contract whose every sink receiver is caller-named leaves no trace here —
-    an empty plane is not published as a proven-empty one."""
-    caller_named = {
-        "binding": "parameter",
-        "param_scope": "entry_point",
-        "param_index": 0,
-        "mutability": None,
-        "visibility": None,
-        "auto_getter_selector": None,
-        "variable": "token",
-        "receiver_provenance": "caller_named",
-    }
-    ctx = _stage_ctx(monkeypatch, _effects(_sink("s0", caller_named)), [])
+@pytest.mark.parametrize(
+    ("effects", "probe_block", "deployment_address"),
+    [
+        pytest.param(None, PROBE, MERKLE_DROP, id="no_effects_artifact"),
+        # A contract whose every sink receiver is caller-named leaves no trace here: an empty plane is not
+        # published as a proven-empty one.
+        pytest.param(_effects(_sink("s0", _CALLER_NAMED_RECEIVER)), PROBE, MERKLE_DROP, id="no_licensed_receiver"),
+        pytest.param(
+            _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token"))), PROBE, None, id="no_deployment_address"
+        ),
+    ],
+)
+def test_a_stage_with_nothing_to_resolve_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, effects: Any, probe_block: ProbeBlock, deployment_address: str | None
+) -> None:
+    ctx = _stage_ctx(monkeypatch, effects, [], probe_block=probe_block)
     monkeypatch.setattr(fap, "eth_call_batch", lambda *a, **k: pytest.fail("must not read"))
     written = ctx["worker"]._resolve_flow_asset_addresses(
         ctx["session"],
         ctx["job"],
         chain_id=1,
         rpc_url="http://stub",
-        deployment_address=MERKLE_DROP,
-        proven_proxied=True,
-    )
-    assert written == 0
-    assert ctx["store_calls"] == []
-
-
-def test_no_deployment_address_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token")))
-    ctx = _stage_ctx(monkeypatch, effects, [EthCallResult(True, WORD_KING, None, None)])
-    written = ctx["worker"]._resolve_flow_asset_addresses(
-        ctx["session"],
-        ctx["job"],
-        chain_id=1,
-        rpc_url="http://stub",
-        deployment_address=None,
-        proven_proxied=False,
+        deployment_address=deployment_address,
+        proven_proxied=deployment_address is not None,
     )
     assert written == 0
     assert ctx["store_calls"] == []

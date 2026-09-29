@@ -674,91 +674,62 @@ def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_openness_open_on_conditional_universal(db_session) -> None:
-    cap = CapabilityExpr.conditional_universal(Condition(kind="time", description="after cooldown"))
+@pytest.mark.parametrize(
+    ("cap", "expected"),
+    [
+        pytest.param(
+            CapabilityExpr.conditional_universal(Condition(kind="time", description="after cooldown")),
+            {"authority_public": True, "authority_openness": "open"},
+            id="open_on_conditional_universal",
+        ),
+        pytest.param(
+            CapabilityExpr.finite_set(["0x" + "a" * 40]),
+            # authority_roles == [] here: proven not role-gated
+            {"authority_public": False, "authority_openness": "restricted", "authority_roles": []},
+            id="restricted_on_resolved_finite_set",
+        ),
+        # ``resolved_empty`` is a WITNESSED restriction (a complete enumeration that admits nobody), the same
+        # bucket as a populated set, not not-determined.
+        pytest.param(
+            CapabilityExpr.finite_set([], quality="exact"),
+            {"status": "resolved_empty", "authority_openness": "restricted"},
+            id="restricted_on_witnessed_empty_set",
+        ),
+        # CRITICAL (fail-open polarity): an unsupported gate must not read as restricted.
+        pytest.param(
+            CapabilityExpr.unsupported("guard_extraction_uncertain"),
+            {"authority_public": False, "status": "unsupported", "authority_openness": "not_determined"},
+            id="not_determined_on_unsupported",
+        ),
+        # CRITICAL: the exact collapse the bool caused: a probe interface with no enumeration got the same
+        # ``False`` a fully-resolved gated function gets.
+        pytest.param(
+            CapabilityExpr.external_check_only(
+                ExternalCheck(target_address="0x" + "b" * 40, target_call_selector="0xdeadbeef")
+            ),
+            {"authority_public": False, "authority_openness": "not_determined"},
+            id="not_determined_on_external_check_only",
+        ),
+        # A record from a caller that does not carry the key leaves the column NULL: "this producer could not
+        # say" is a FOURTH state and must not be folded into the resolver's own 'not_determined'. With no
+        # capability resolved, authority_roles is NULL too.
+        pytest.param(
+            None,
+            {"authority_openness": None, "authority_roles": None},
+            id="null_when_no_producer_said",
+        ),
+    ],
+)
+def test_authority_openness_and_roles(db_session, cap, expected) -> None:
     write_effective_function_rows(
         db_session,
         contract_id=1,
         function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
+        capability_by_function=None if cap is None else {"f()": cap},
     )
     row = _ef_row(db_session)
-    assert row.authority_public is True
-    assert row.authority_openness == "open"
-
-
-def test_openness_restricted_on_resolved_finite_set(db_session) -> None:
-    cap = CapabilityExpr.finite_set(["0x" + "a" * 40])
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
-    )
-    row = _ef_row(db_session)
-    assert row.authority_public is False
-    assert row.authority_openness == "restricted"
-
-
-def test_openness_restricted_on_witnessed_empty_set(db_session) -> None:
-    # ``resolved_empty`` is a WITNESSED restriction (a complete enumeration that
-    # admits nobody) — the same bucket as a populated set, not not-determined.
-    cap = CapabilityExpr.finite_set([], quality="exact")
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
-    )
-    row = _ef_row(db_session)
-    assert row.status == "resolved_empty"
-    assert row.authority_openness == "restricted"
-
-
-def test_openness_not_determined_on_unsupported(db_session) -> None:
-    cap = CapabilityExpr.unsupported("guard_extraction_uncertain")
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
-    )
-    row = _ef_row(db_session)
-    assert row.authority_public is False
-    assert row.status == "unsupported"
-    assert row.authority_openness == "not_determined"
-
-
-def test_openness_not_determined_on_external_check_only(db_session) -> None:
-    # The exact collapse the bool caused: a probe interface with no enumeration
-    # got the same ``False`` a fully-resolved gated function gets.
-    from services.resolution.capabilities import ExternalCheck
-
-    cap = CapabilityExpr.external_check_only(
-        ExternalCheck(target_address="0x" + "b" * 40, target_call_selector="0xdeadbeef")
-    )
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
-    )
-    row = _ef_row(db_session)
-    assert row.authority_public is False
-    assert row.authority_openness == "not_determined"
-
-
-def test_openness_null_when_no_producer_said(db_session) -> None:
-    # A record from a caller that does not carry the key leaves the column NULL:
-    # "this producer could not say" is a FOURTH state and must not be folded
-    # into the resolver's own 'not_determined'.
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function=None,
-    )
-    assert _ef_row(db_session).authority_openness is None
+    for attr, value in expected.items():
+        assert getattr(row, attr) == value
 
 
 def test_authority_roles_persists_witnessed_role_grant(db_session) -> None:
@@ -796,27 +767,6 @@ def test_authority_roles_null_when_role_identity_dissolved(db_session) -> None:
         contract_id=1,
         function_records=[_fn_record("f()")],
         capability_by_function={"f()": cap},
-    )
-    assert _ef_row(db_session).authority_roles is None
-
-
-def test_authority_roles_empty_when_proven_not_role_gated(db_session) -> None:
-    cap = CapabilityExpr.finite_set(["0x" + "a" * 40])
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function={"f()": cap},
-    )
-    assert _ef_row(db_session).authority_roles == []
-
-
-def test_authority_roles_null_when_no_capability_resolved(db_session) -> None:
-    write_effective_function_rows(
-        db_session,
-        contract_id=1,
-        function_records=[_fn_record("f()")],
-        capability_by_function=None,
     )
     assert _ef_row(db_session).authority_roles is None
 

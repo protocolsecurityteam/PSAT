@@ -41,10 +41,6 @@ _CONSTRAINS_THE_TARGET_AT_C = ((KEY_C, CALLING_SELECTOR, COMPOSED_SELECTOR, "par
 _GATING_AUTHORITY = "0x" + "9" * 40
 _VAULT_CONSULTS_AN_AUTHORITY = {("ethereum", KEY_V.partition("::")[2], COMPOSED_SELECTOR): (_GATING_AUTHORITY,)}
 
-# The token §7.2 named and CAP-A §R2 retired. Kept as a literal here on purpose:
-# it is the one string this module asserts the ABSENCE of, and a symbol would
-# make the assertion vacuous the day the symbol is deleted.
-RETIRED_CALLEE_TOKEN = "destination_callee_is_restricted_by_the_intermediate"
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 

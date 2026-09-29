@@ -126,29 +126,25 @@ def test_handle_signal_flips_running_false(caplog):
 
 
 class TestLogOutcomeDefault:
-    def test_success_outcome_logs_status_only(self, caplog):
+    @pytest.mark.parametrize(
+        ("audit_id", "outcome", "expected", "has_parens"),
+        [
+            pytest.param(42, _Outcome(status="success"), "Audit 42 → success", False, id="success-status-only"),
+            pytest.param(
+                7, _Outcome(status="failed", error="boom"), "Audit 7 → failed (boom)", True, id="failed-error-in-parens"
+            ),
+            # A subclass handing back something without ``status`` must not crash; log ``?``
+            # so the operator can still see the row moved.
+            pytest.param(9, object(), "Audit 9 → ?", False, id="non-outcome-question-mark"),
+        ],
+    )
+    def test_log_outcome_format(self, caplog, audit_id, outcome, expected, has_parens):
         worker = _TestWorker()
         with caplog.at_level(logging.INFO, logger=worker.log.name):
-            worker._log_outcome(42, _Outcome(status="success"))
+            worker._log_outcome(audit_id, outcome)
         messages = [r.getMessage() for r in caplog.records]
-        assert any("Audit 42 → success" in m for m in messages)
-        assert not any("(" in m and ")" in m for m in messages)
-
-    def test_failed_outcome_logs_error_in_parens(self, caplog):
-        worker = _TestWorker()
-        with caplog.at_level(logging.INFO, logger=worker.log.name):
-            worker._log_outcome(7, _Outcome(status="failed", error="boom"))
-        messages = [r.getMessage() for r in caplog.records]
-        assert any("Audit 7 → failed (boom)" in m for m in messages)
-
-    def test_non_outcome_uses_question_mark(self, caplog):
-        """If a subclass hands back something without ``status``, don't
-        crash — log a ``?`` so the operator can still see the row moved."""
-        worker = _TestWorker()
-        with caplog.at_level(logging.INFO, logger=worker.log.name):
-            worker._log_outcome(9, object())
-        messages = [r.getMessage() for r in caplog.records]
-        assert any("Audit 9 → ?" in m for m in messages)
+        assert any(expected in m for m in messages)
+        assert any("(" in m and ")" in m for m in messages) is has_parens
 
 
 # _recover_stale_rows — no-stale-rows path (rollback, not commit); MagicMock session reports an empty result.

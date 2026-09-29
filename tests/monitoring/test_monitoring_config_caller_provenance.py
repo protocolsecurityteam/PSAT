@@ -113,19 +113,28 @@ def test_a_forged_reason_token_cannot_survive_the_route(api_client, protocol_id,
     assert resp.json()["monitoring_config"]["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
 
 
-def test_caller_supplied_tracked_topics_are_rejected(api_client, protocol_id, admin_headers):
-    """``tracked_topics`` feeds the live scan filter. 422, not a silent drop, which would
-    tell the caller those topics are being scanned."""
-    resp = _post(api_client, protocol_id, admin_headers, {"tracked_topics": [{"topic0": TOPIC0}]})
+# Rejected with 422, not silently dropped: a drop would tell the caller the value is being acted on.
+# CRITICAL invariants:
+# - ``tracked_topics`` feeds the live scan filter.
+# - ``polling_plan`` is the more consequential key: the poller ACTS on it.
+# - ``scan_gaps`` is the scanner's own record of uncovered ranges, preserved across config rebuilds,
+#   so a forged entry would outlive every enrollment as a coverage hole nobody observed.
+@pytest.mark.parametrize(
+    ("key", "payload"),
+    [
+        pytest.param("tracked_topics", [{"topic0": TOPIC0}], id="tracked_topics"),
+        pytest.param("polling_plan", [_PLAN_ENTRY], id="polling_plan"),
+        pytest.param(
+            "scan_gaps",
+            [{"from_block": 9_400_001, "to_block": 25_662_000, "reason": "unfloored_runaway"}],
+            id="scan_gaps",
+        ),
+    ],
+)
+def test_caller_supplied_analyzer_owned_keys_are_rejected(api_client, protocol_id, admin_headers, key, payload):
+    resp = _post(api_client, protocol_id, admin_headers, {key: payload})
     assert resp.status_code == 422, resp.text
-    assert "tracked_topics" in resp.text
-
-
-def test_caller_supplied_polling_plan_is_rejected(api_client, protocol_id, admin_headers):
-    """``polling_plan`` is the more consequential analyzer-owned key: the poller ACTS on it."""
-    resp = _post(api_client, protocol_id, admin_headers, {"polling_plan": [_PLAN_ENTRY]})
-    assert resp.status_code == 422, resp.text
-    assert "polling_plan" in resp.text
+    assert key in resp.text
 
 
 def test_rejected_polling_plan_never_reaches_the_wire_or_the_event_stream(
@@ -191,16 +200,6 @@ def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers
         )
         assert resp.status_code == 422, resp.text
         assert key in resp.text
-
-
-def test_caller_supplied_scan_gaps_are_rejected(api_client, protocol_id, admin_headers):
-    """``scan_gaps`` is the scanner's own record of uncovered ranges, preserved across config
-    rebuilds, so a forged entry would outlive every enrollment as a coverage hole nobody
-    observed. Rejected, not dropped, like the analyzer-owned keys."""
-    gap = [{"from_block": 9_400_001, "to_block": 25_662_000, "reason": "unfloored_runaway"}]
-    resp = _post(api_client, protocol_id, admin_headers, {"scan_gaps": gap})
-    assert resp.status_code == 422, resp.text
-    assert "scan_gaps" in resp.text
 
 
 def test_rejected_topics_never_reach_the_live_scan_filter(api_client, db_session, protocol_id, admin_headers):

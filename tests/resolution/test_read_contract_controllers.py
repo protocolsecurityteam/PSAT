@@ -5,6 +5,8 @@ walk can fail closed on parallel control planes. Stubs the eth_call layer, never
 
 from __future__ import annotations
 
+import pytest
+
 from services.clients.rpc import EthCallResult, selector
 from services.resolution import tracking
 from services.resolution.tracking import read_contract_controllers
@@ -45,50 +47,51 @@ def _stub(monkeypatch, answers):
     monkeypatch.setattr(tracking, "_eth_call_batch", _fake)
 
 
-def test_reads_owner_getter(monkeypatch):
-    _stub(monkeypatch, {"owner()": OWNER})
-    assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER]
-
-
-def test_reads_authority_when_owner_absent(monkeypatch):
-    _stub(monkeypatch, {"authority()": AUTHORITY})
-    assert read_contract_controllers("http://rpc", CONTRACT) == [AUTHORITY]
-
-
-def test_both_owner_and_authority_distinct_returns_both_in_order(monkeypatch):
-    # Parallel control planes (Solmate/Solady Auth): both witnessed, owner/authority order.
-    _stub(monkeypatch, {"owner()": OWNER, "authority()": AUTHORITY})
-    assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER, AUTHORITY]
-
-
-def test_same_address_from_two_getters_deduped(monkeypatch):
-    # owner() == authority() (case-insensitively) is ONE controller, not two.
-    _stub(monkeypatch, {"owner()": OWNER, "authority()": OWNER.upper()})
-    assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER]
-
-
-def test_clean_zero_is_not_an_error_proceeds_single_plane(monkeypatch):
-    # authority() cleanly returns zero -> genuinely not a plane; owner() stands.
-    _stub(monkeypatch, {"owner()": OWNER, "authority()": ZERO})
-    assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER]
-
-
-def test_no_getter_present_is_empty(monkeypatch):
-    _stub(monkeypatch, {})
-    assert read_contract_controllers("http://rpc", CONTRACT) == []
-
-
-def test_any_getter_transport_error_makes_set_incomplete_returns_none(monkeypatch):
-    # owner() answers but authority() fails to be READ -> the plane set is not
-    # dispositively complete (a real second plane could hide behind the failure),
-    # so return None (retryable) rather than a possibly-false single plane.
-    _stub(monkeypatch, {"owner()": OWNER, "authority()": "transport"})
-    assert read_contract_controllers("http://rpc", CONTRACT) is None
-
-
-def test_all_getters_transport_error_returns_none(monkeypatch):
-    _stub(monkeypatch, {"owner()": "transport", "authority()": "transport", "admin()": "transport"})
-    assert read_contract_controllers("http://rpc", CONTRACT) is None
+@pytest.mark.parametrize(
+    ("answers", "expected"),
+    [
+        pytest.param({"owner()": OWNER}, [OWNER], id="owner-getter"),
+        pytest.param({"authority()": AUTHORITY}, [AUTHORITY], id="authority-when-owner-absent"),
+        # Parallel control planes (Solmate/Solady Auth): both witnessed, owner/authority order.
+        pytest.param({"owner()": OWNER, "authority()": AUTHORITY}, [OWNER, AUTHORITY], id="distinct-both-in-order"),
+        # owner() == authority() (case-insensitively) is ONE controller, not two.
+        pytest.param({"owner()": OWNER, "authority()": OWNER.upper()}, [OWNER], id="same-address-deduped"),
+        # authority() cleanly returns zero -> genuinely not a plane; owner() stands.
+        pytest.param({"owner()": OWNER, "authority()": ZERO}, [OWNER], id="clean-zero-single-plane"),
+        # An empty stub reverts every getter, the same probe-set silence as all three reverting.
+        pytest.param({}, [], id="no-getter-present"),
+        # owner() answers but authority() fails to be READ -> the plane set is not dispositively
+        # complete (a real second plane could hide behind the failure), so None (retryable) rather
+        # than a possibly-false single plane.
+        pytest.param({"owner()": OWNER, "authority()": "transport"}, None, id="any-getter-transport-error"),
+        pytest.param(
+            {"owner()": "transport", "authority()": "transport", "admin()": "transport"},
+            None,
+            id="all-getters-transport-error",
+        ),
+        # A REVERT is the EVM answering ("not a control plane"); a TRANSPORT failure is the read not
+        # happening. Every failure used to be one ``_PROBE_ERROR``, so a contract with no
+        # ``authority()`` (most of them) tripped the incomplete-witness guard and the WHOLE plane set
+        # came back None: terminal_principal.status was ``unknown_unfetched`` on 180/180 armed rows.
+        # The common real shape: owner() answers; authority()/admin() revert (undeclared).
+        pytest.param(
+            {"owner()": OWNER, "authority()": "revert", "admin()": "revert"},
+            [OWNER],
+            id="reverting-getters-are-not-an-error",
+        ),
+        # All three reverting is probe-set SILENCE, NOT proof of no controller: an ownerless
+        # DepositContract and a kernel()/unpauser()-governed contract give the identical [].
+        # The walk publishes it as ``controllers_not_determined`` with this basis.
+        pytest.param(
+            {"owner()": "revert", "authority()": "revert", "admin()": "revert"},
+            [],
+            id="all-getters-reverting-is-silence",
+        ),
+    ],
+)
+def test_reads_controllers_from_getter_answers(monkeypatch, answers, expected):
+    _stub(monkeypatch, answers)
+    assert read_contract_controllers("http://rpc", CONTRACT) == expected
 
 
 def test_whole_batch_failure_returns_none(monkeypatch):
@@ -106,20 +109,6 @@ def test_whole_batch_failure_returns_none(monkeypatch):
 # set came back None: terminal_principal.status was ``unknown_unfetched`` on 180/180 armed
 # rows and 5 of the 6 statuses had never fired.
 # ---------------------------------------------------------------------------
-
-
-def test_reverting_getter_is_not_a_control_plane_not_an_error(monkeypatch):
-    # The common real shape: owner() answers; authority()/admin() revert (undeclared).
-    _stub(monkeypatch, {"owner()": OWNER, "authority()": "revert", "admin()": "revert"})
-    assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER]
-
-
-def test_all_getters_reverting_is_canonical_getter_silence(monkeypatch):
-    # All three reverting is probe-set SILENCE, NOT proof of no controller: an ownerless
-    # DepositContract and a kernel()/unpauser()-governed contract give the identical [].
-    # The walk publishes it as ``controllers_not_determined`` with this basis.
-    _stub(monkeypatch, {"owner()": "revert", "authority()": "revert", "admin()": "revert"})
-    assert read_contract_controllers("http://rpc", CONTRACT) == []
 
 
 def test_revert_with_data_is_also_definitive(monkeypatch):

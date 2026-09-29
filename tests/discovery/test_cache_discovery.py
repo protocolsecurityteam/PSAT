@@ -69,16 +69,6 @@ def test_discovery_worker_cache_hit_skips_fetch(db_session, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Discovery worker cache miss
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Company-mode jobs are unaffected
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # _merge_inventory unit tests
 # ---------------------------------------------------------------------------
 
@@ -298,7 +288,20 @@ def test_rerun_merges_with_previous_inventory(db_session, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_is_known_proxy_false(db_session):
+@pytest.mark.parametrize(
+    ("name", "proxy_fields", "lookups", "expected"),
+    [
+        pytest.param("Regular", {"is_proxy": False}, (ADDR_A,), False, id="non_proxy"),
+        pytest.param(
+            "Proxy",
+            {"is_proxy": True, "proxy_type": "eip1967"},
+            (ADDR_A.lower(), ADDR_A.upper()),
+            True,
+            id="proxy_case_insensitive",
+        ),
+    ],
+)
+def test_is_known_proxy(db_session, name, proxy_fields, lookups, expected):
     from db.models import Contract
     from db.queue import create_job, is_known_proxy
 
@@ -309,7 +312,7 @@ def test_is_known_proxy_false(db_session):
         Contract(
             job_id=job.id,
             address=ADDR_A,
-            contract_name="Regular",
+            contract_name=name,
             compiler_version="v0.8.24",
             language="solidity",
             evm_version="shanghai",
@@ -318,40 +321,13 @@ def test_is_known_proxy_false(db_session):
             source_format="flat",
             source_file_count=1,
             remappings=[],
-            is_proxy=False,
+            **proxy_fields,
         )
     )
     db_session.commit()
 
-    assert is_known_proxy(db_session, ADDR_A) is False
-
-
-def test_is_known_proxy_case_insensitive(db_session):
-    from db.models import Contract
-    from db.queue import create_job, is_known_proxy
-
-    job = create_job(db_session, {"address": ADDR_A})
-    db_session.add(
-        Contract(
-            job_id=job.id,
-            address=ADDR_A,
-            contract_name="Proxy",
-            compiler_version="v0.8.24",
-            language="solidity",
-            evm_version="shanghai",
-            optimization=True,
-            optimization_runs=200,
-            source_format="flat",
-            source_file_count=1,
-            remappings=[],
-            is_proxy=True,
-            proxy_type="eip1967",
-        )
-    )
-    db_session.commit()
-
-    assert is_known_proxy(db_session, ADDR_A.lower()) is True
-    assert is_known_proxy(db_session, ADDR_A.upper()) is True
+    for lookup in lookups:
+        assert is_known_proxy(db_session, lookup) is expected
 
 
 # ---------------------------------------------------------------------------

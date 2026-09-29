@@ -201,7 +201,8 @@ def test_coverage_worker_claims_and_writes_when_ready(db_session, seed_protocol,
 
 def test_coverage_worker_writes_pending_when_audit_is_verifiable(db_session, seed_protocol, worker, monkeypatch):
     """A scope-completed audit with reviewed_commits + source_repo yields ``equivalence_status='pending'`` and the
-    coverage worker makes NO GitHub/Etherscan calls; that's the point of the deferred-verify split (#82).
+    coverage worker makes NO GitHub/Etherscan calls; that's the point of the deferred-verify split (#82). It also
+    avoids the 4-way Etherscan burst that used to cascade-block other workers behind the shared backoff.
     """
     from db.models import AuditContractCoverage, JobStage, JobStatus
     from services.audits import source_equivalence
@@ -459,61 +460,3 @@ def test_coverage_worker_handles_job_without_contract(db_session, seed_protocol,
 
     worker.process(db_session, claimed)
     db_session.commit()
-
-
-# ---------------------------------------------------------------------------
-# 5. Perf: HTTP calls must not run inside an open DB transaction
-# ---------------------------------------------------------------------------
-
-
-def test_coverage_worker_makes_zero_http_calls_on_deferred_path(db_session, seed_protocol, worker, monkeypatch):
-    """Even when an audit looks ripe for verification, the coverage worker makes zero GitHub/Etherscan calls; this
-    avoids the 4-way Etherscan burst that used to cascade-block other workers behind the shared backoff (#82).
-    """
-    from db.models import JobStage, JobStatus
-    from services.audits import source_equivalence
-
-    protocol_id, _ = seed_protocol
-    job = _add_job(
-        db_session,
-        protocol_id=protocol_id,
-        stage=JobStage.coverage,
-        status=JobStatus.queued,
-    )
-    _add_contract(
-        db_session,
-        protocol_id=protocol_id,
-        name="Pool",
-        address="0x" + "a" * 40,
-        job_id=job.id,
-    )
-    audit = _add_audit(
-        db_session,
-        protocol_id=protocol_id,
-        text_status="success",
-        scope_status="success",
-        scope=["Pool"],
-    )
-    audit.reviewed_commits = ["abc1234"]
-    audit.source_repo = "some/repo"
-    db_session.commit()
-
-    calls = {"github": 0, "etherscan": 0}
-
-    def record_github(*_a, **_k):
-        calls["github"] += 1
-        raise AssertionError("github fetch reached on deferred path")
-
-    def record_etherscan(_addr, **_kw):
-        calls["etherscan"] += 1
-        raise AssertionError("etherscan fetch reached on deferred path")
-
-    monkeypatch.setattr(source_equivalence, "fetch_github_source_hash", record_github)
-    monkeypatch.setattr(source_equivalence, "fetch_etherscan_source_files", record_etherscan)
-
-    claimed = worker._claim_next_job(db_session)
-    assert claimed is not None
-    worker.process(db_session, claimed)
-    db_session.commit()
-
-    assert calls == {"github": 0, "etherscan": 0}

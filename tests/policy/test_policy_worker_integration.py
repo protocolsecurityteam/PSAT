@@ -28,82 +28,62 @@ from workers.policy_worker import PolicyWorker
 # ---------------------------------------------------------------------------
 
 
-class TestResolveAuthorityNoAuthority:
-    """controller_values has keys but none resolve to a nested snapshot bundle."""
-
-    def test_returns_no_authority(self) -> None:
-        worker = PolicyWorker()
-        session = MagicMock()
-        job = _job()
-
-        snapshot = _minimal_snapshot({"owner_slot:admin": {"value": "0xbbb"}})
-        graph = _graph_with_nodes([])
-
-        result = worker._resolve_authority(session, cast(Any, job), graph, snapshot, {})
-
-        assert result["principal_resolution"]["status"] == "no_authority"
+_AUTH_BUNDLE = _authority_bundle()
 
 
-class TestResolveAuthorityZeroAddress:
-    """Authority exists but is the zero address."""
+@pytest.mark.parametrize(
+    ("controller_values", "graph_nodes", "nested", "status", "reason_fragment", "authority_snapshot"),
+    [
+        # controller_values has keys but none resolve to a nested snapshot bundle.
+        pytest.param({"owner_slot:admin": {"value": "0xbbb"}}, [], {}, "no_authority", "", None, id="no-authority"),
+        # Authority exists but is the zero address.
+        pytest.param(
+            {"state_variable:authority": {"value": ZERO_ADDRESS}},
+            [],
+            {},
+            "no_authority",
+            "non-zero",
+            None,
+            id="zero-address",
+        ),
+        # A nested controller address is known but its snapshot is missing.
+        pytest.param(
+            {"external_contract:policy": {"value": AUTH_ADDRESS}},
+            [{"address": AUTH_ADDRESS, "artifacts": {}}],
+            {AUTH_ADDRESS: {"analysis": {"subject": {"address": AUTH_ADDRESS, "name": "Policy"}}}},
+            "no_authority_snapshot",
+            "",
+            None,
+            id="no-snapshot",
+        ),
+        # A nested controller snapshot is joined without any policy-state backfill.
+        pytest.param(
+            {"external_contract:policy": {"value": AUTH_ADDRESS}},
+            [{"address": AUTH_ADDRESS, "artifacts": {"data_key": f"recursive:{AUTH_ADDRESS}"}}],
+            {AUTH_ADDRESS: _AUTH_BUNDLE},
+            "complete",
+            "semantic",
+            _AUTH_BUNDLE["snapshot"],
+            id="with-snapshot",
+        ),
+    ],
+)
+def test_resolve_authority_status(
+    controller_values, graph_nodes, nested, status, reason_fragment, authority_snapshot
+) -> None:
+    worker = PolicyWorker()
+    session = MagicMock()
+    job = _job()
 
-    def test_returns_no_authority(self) -> None:
-        worker = PolicyWorker()
-        session = MagicMock()
-        job = _job()
+    snapshot = _minimal_snapshot(controller_values)
+    graph = _graph_with_nodes(graph_nodes)
 
-        snapshot = _minimal_snapshot({"state_variable:authority": {"value": ZERO_ADDRESS}})
-        graph = _graph_with_nodes([])
+    result = worker._resolve_authority(session, cast(Any, job), graph, snapshot, cast(Any, nested))
 
-        result = worker._resolve_authority(session, cast(Any, job), graph, snapshot, {})
-
-        assert result["principal_resolution"]["status"] == "no_authority"
-        assert "non-zero" in result["principal_resolution"]["reason"].lower()
-
-
-class TestResolveAuthorityNoSnapshot:
-    """A nested controller address is known but its snapshot is missing."""
-
-    def test_returns_no_authority_snapshot(self) -> None:
-        worker = PolicyWorker()
-        session = MagicMock()
-        job = _job()
-
-        snapshot = _minimal_snapshot({"external_contract:policy": {"value": AUTH_ADDRESS}})
-        graph = _graph_with_nodes([{"address": AUTH_ADDRESS, "artifacts": {}}])
-        nested = cast(
-            Any,
-            {
-                AUTH_ADDRESS: {
-                    "analysis": {
-                        "subject": {"address": AUTH_ADDRESS, "name": "Policy"},
-                    }
-                }
-            },
-        )
-
-        result = worker._resolve_authority(session, cast(Any, job), graph, snapshot, nested)
-
-        assert result["principal_resolution"]["status"] == "no_authority_snapshot"
-
-
-class TestResolveAuthorityWithSnapshot:
-    """A nested controller snapshot is joined without any policy-state backfill."""
-
-    def test_returns_authority_snapshot(self) -> None:
-        worker = PolicyWorker()
-        session = MagicMock()
-        job = _job()
-
-        snapshot = _minimal_snapshot({"external_contract:policy": {"value": AUTH_ADDRESS}})
-        graph = _graph_with_nodes([{"address": AUTH_ADDRESS, "artifacts": {"data_key": f"recursive:{AUTH_ADDRESS}"}}])
-        nested = cast(Any, {AUTH_ADDRESS: _authority_bundle()})
-
-        result = worker._resolve_authority(session, cast(Any, job), graph, snapshot, nested)
-
-        assert result["authority_snapshot"] == nested[AUTH_ADDRESS]["snapshot"]
-        assert result["principal_resolution"]["status"] == "complete"
-        assert "semantic" in result["principal_resolution"]["reason"]
+    resolution = result["principal_resolution"]
+    assert resolution["status"] == status
+    assert reason_fragment in resolution.get("reason", "").lower()
+    assert result.get("authority_snapshot") == authority_snapshot
 
 
 # ---------------------------------------------------------------------------

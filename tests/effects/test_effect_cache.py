@@ -446,21 +446,30 @@ def test_probe_bookkeeping_survives_a_verdict_flip(clean_effects):
 
 
 @requires_postgres
-def test_a_flip_with_a_fresh_attempt_count_takes_the_new_one(clean_effects):
+@pytest.mark.parametrize(
+    ("first_residue", "rewrite", "expected"),
+    [
+        pytest.param(
+            {"destination_probe_attempts": 1, "observed_reach_holders": ["0xaa"]},
+            {"verdict": "unknown", "observed_residue": {"destination_probe_attempts": 2}},
+            {"destination_probe_attempts": 2},
+            id="flip_with_a_fresh_attempt_count_takes_the_new_one",
+        ),
+        # A new behavior hash drops the residue for the same reason a flip does; the
+        # attempt count is still about this DEPLOYMENT's probe spend, not the code.
+        pytest.param(
+            {"destination_probe_attempts": 2, "observed_reach_value_usd": 1.0},
+            {"behavior_hash": "other-hash", "observed_residue": None},
+            {"destination_probe_attempts": 2},
+            id="code_change_keeps_the_probe_bookkeeping",
+        ),
+    ],
+)
+def test_probe_bookkeeping_across_rewrites(clean_effects, first_residue, rewrite, expected):
     session = clean_effects
-    _write(session, observed_residue={"destination_probe_attempts": 1, "observed_reach_holders": ["0xaa"]})
-    row = _write(session, verdict="unknown", observed_residue={"destination_probe_attempts": 2})
-    assert row.observed_residue == {"destination_probe_attempts": 2}
-
-
-@requires_postgres
-def test_a_code_change_also_keeps_the_probe_bookkeeping(clean_effects):
-    """A new behavior hash drops the residue for the same reason a flip does; the
-    attempt count is still about this DEPLOYMENT's probe spend, not the code."""
-    session = clean_effects
-    _write(session, observed_residue={"destination_probe_attempts": 2, "observed_reach_value_usd": 1.0})
-    row = _write(session, behavior_hash="other-hash", observed_residue=None)
-    assert row.observed_residue == {"destination_probe_attempts": 2}
+    _write(session, observed_residue=first_residue)
+    row = _write(session, **rewrite)
+    assert row.observed_residue == expected
 
 
 @requires_postgres
@@ -675,32 +684,35 @@ def test_cache_served_rewrite_keeps_freeze_pause_observations(clean_effects):
 
 
 @requires_postgres
-def test_cache_served_rewrite_never_resurrects_across_a_verdict_change(clean_effects):
-    """The adverse branch: evidence moves with the verdict. A downgrade served from
-    the cache must not carry the proven write's qualifiers forward."""
+@pytest.mark.parametrize(
+    ("rewrite", "absent", "present"),
+    [
+        # The adverse branch: evidence moves with the verdict. A downgrade served from
+        # the cache must not carry the proven write's qualifiers forward.
+        pytest.param(
+            {"verdict": "unknown", "witness": {"reason": "no_supply_delta", "observation": "executed"}},
+            ("input_seeded", "backing"),
+            {"reason": "no_supply_delta"},
+            id="verdict_change",
+        ),
+        # Same lifecycle as residue: a changed behavior hash means different code, and
+        # the old deployment-plane observation does not describe it.
+        pytest.param(
+            {"behavior_hash": "bh_upgraded", "witness": dict(STRIPPED_WITNESS)},
+            ("input_seeded", "contract_balance_seeded", "backing"),
+            {},
+            id="code_change",
+        ),
+    ],
+)
+def test_cache_served_rewrite_never_resurrects(clean_effects, rewrite, absent, present):
     session = clean_effects
     _write_burn(session, witness=dict(FULL_WITNESS))
-    row = _write_burn(
-        session,
-        verdict="unknown",
-        witness={"reason": "no_supply_delta", "observation": "executed"},
-        witness_from_cache=True,
-    )
-    assert "input_seeded" not in row.witness
-    assert "backing" not in row.witness
-    assert row.witness["reason"] == "no_supply_delta"
-
-
-@requires_postgres
-def test_cache_served_rewrite_never_resurrects_across_a_code_change(clean_effects):
-    """Same lifecycle as residue: a changed behavior hash means different code, and
-    the old deployment-plane observation does not describe it."""
-    session = clean_effects
-    _write_burn(session, witness=dict(FULL_WITNESS))
-    row = _write_burn(session, behavior_hash="bh_upgraded", witness=dict(STRIPPED_WITNESS), witness_from_cache=True)
-    assert "input_seeded" not in row.witness
-    assert "contract_balance_seeded" not in row.witness
-    assert "backing" not in row.witness
+    row = _write_burn(session, witness_from_cache=True, **rewrite)
+    for key in absent:
+        assert key not in row.witness, key
+    for key, value in present.items():
+        assert row.witness[key] == value
 
 
 @requires_postgres

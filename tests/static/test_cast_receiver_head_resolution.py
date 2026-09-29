@@ -113,24 +113,20 @@ def effects(compiled):
 # --- seam 1: the sink head is the state var, not a temporary ---------------
 
 
-def test_state_var_head_resolved_through_double_cast(effects):
-    heads = _ext_heads(effects["functions"]["deposit(uint256)"])
-    assert "underlying.safeTransferFrom" in heads, heads
+@pytest.mark.parametrize(
+    "signature,resolved_head",
+    [
+        pytest.param("deposit(uint256)", "underlying.safeTransferFrom", id="state_var_double_cast"),
+        pytest.param("depositDirect(uint256)", "underlying.transferFrom", id="direct_high_level_call"),
+        # Resolves to the parameter name, not a temporary (a parameter names no
+        # getter, which the hint layer enforces separately).
+        pytest.param("depositParam(address,uint256)", "token.safeTransferFrom", id="parameter_cast"),
+    ],
+)
+def test_head_resolved_through_cast(effects, signature, resolved_head):
+    heads = _ext_heads(effects["functions"][signature])
+    assert resolved_head in heads, heads
     assert not any(h.split(".")[0].startswith(("TMP_", "REF_", "TUPLE_")) for h in heads), heads
-
-
-def test_direct_high_level_call_head_resolved(effects):
-    heads = _ext_heads(effects["functions"]["depositDirect(uint256)"])
-    assert "underlying.transferFrom" in heads, heads
-    assert not any(h.split(".")[0].startswith("TMP_") for h in heads), heads
-
-
-def test_parameter_cast_head_is_the_parameter(effects):
-    heads = _ext_heads(effects["functions"]["depositParam(address,uint256)"])
-    # Resolves to the parameter name, not a temporary (a parameter names no
-    # getter, which the hint layer enforces separately).
-    assert "token.safeTransferFrom" in heads, heads
-    assert not any(h.split(".")[0].startswith("TMP_") for h in heads), heads
 
 
 def test_mapping_element_is_not_resolved_to_a_getter(effects):

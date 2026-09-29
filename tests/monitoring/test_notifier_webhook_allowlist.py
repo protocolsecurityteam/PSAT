@@ -31,25 +31,24 @@ def test_is_discord_webhook(url, ok):
     assert _is_discord_webhook(url) is ok
 
 
-def test_send_discord_skips_backslash_authority_bypass():
-    # The gate must refuse before POSTing, even though urlparse would read the
-    # authority as discord.com.
-    with patch("services.monitoring.notifier.requests.post") as mock_post:
-        _send_discord("https://x\\@discord.com/api/webhooks/1/x", {"title": "x"})
-    mock_post.assert_not_called()
+class _Resp:
+    ok = True
+    status_code = 204
 
 
-def test_send_discord_skips_non_discord_host():
-    with patch("services.monitoring.notifier.requests.post") as mock_post:
-        _send_discord("https://evil.example/webhook", {"title": "x"})
-    mock_post.assert_not_called()
-
-
-def test_send_discord_posts_to_discord_host():
-    class _Resp:
-        ok = True
-        status_code = 204
-
+@pytest.mark.parametrize(
+    ("url", "posted"),
+    [
+        # The gate must refuse before POSTing, even though urlparse would read the authority as discord.com.
+        pytest.param("https://x\\@discord.com/api/webhooks/1/x", False, id="backslash_authority_bypass"),
+        pytest.param("https://evil.example/webhook", False, id="non_discord_host"),
+        pytest.param("https://discord.com/api/webhooks/1/abc", True, id="discord_host_posts"),
+    ],
+)
+def test_send_discord_gate(url, posted):
     with patch("services.monitoring.notifier.requests.post", return_value=_Resp()) as mock_post:
-        _send_discord("https://discord.com/api/webhooks/1/abc", {"title": "x"})
-    mock_post.assert_called_once()
+        _send_discord(url, {"title": "x"})
+    if posted:
+        mock_post.assert_called_once()
+    else:
+        mock_post.assert_not_called()

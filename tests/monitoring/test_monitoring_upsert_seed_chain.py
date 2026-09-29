@@ -38,18 +38,17 @@ def test_base_enrollment_seeds_from_base_rpc(captured_url):
     assert block == 36_108_610
 
 
-def test_mainnet_enrollment_uses_default_rpc_verbatim(captured_url):
-    # Mainnet (and empty/None) keeps deps.DEFAULT_RPC_URL untouched.
-    for chain in ("ethereum", None):
-        captured_url.clear()
-        monitored._current_head_block(chain)
-        assert captured_url["url"] == deps.DEFAULT_RPC_URL
+# Mainnet (and empty/None) keeps deps.DEFAULT_RPC_URL untouched.
+@pytest.mark.parametrize("chain", ["ethereum", None])
+def test_mainnet_enrollment_uses_default_rpc_verbatim(captured_url, chain):
+    monitored._current_head_block(chain)
+    assert captured_url["url"] == deps.DEFAULT_RPC_URL
 
 
 def test_head_block_failure_is_not_determined_not_zero(monkeypatch):
     """An RPC failure reads as not-determined, never block 0: block 0 claims "watching since
     genesis", seeding a cursor 25M blocks behind and a floor letting every historical event
-    publish as live. See ``test_upsert_refuses_to_seed_a_floor_zero_row`` in
+    publish as live. See ``test_upsert_route_refuses_to_seed_a_floor_zero_row`` in
     tests/monitoring/test_cursor_hygiene.py."""
 
     def _boom(*_a, **_kw):

@@ -40,40 +40,28 @@ def proto_id(db_session):
 
 
 @requires_postgres
-def test_load_contract_row_finds_legacy_null_row_for_mainnet_job(db_session):
-    from db.models import Contract
-    from db.queue import create_job
-    from workers.static_worker import StaticWorker
-
-    addr = _addr()
-    job = create_job(db_session, {"address": addr, "name": "Subject"})  # chain_id=1, no request chain
-    db_session.add(Contract(address=addr.lower(), chain=None, contract_name="Legacy", job_id=None))
-    db_session.commit()
-
-    row = StaticWorker._load_contract_row(db_session, job)
-    assert row is not None
-    assert row.contract_name == "Legacy"
-
-
-@requires_postgres
-def test_load_contract_row_l2_job_does_not_bind_mainnet_row(db_session):
-    """A Base-routed job (chain only in ``jobs.chain_id``) must not bind a legacy mainnet NULL row at the same
-    address — the request-only read used to drop the filter and bleed."""
+@pytest.mark.parametrize(
+    ("job_chain_id", "expected_name"),
+    [
+        pytest.param(1, "Legacy", id="mainnet-job-finds-legacy-null-row"),
+        # A Base-routed job (chain only in ``jobs.chain_id``) must not bind a legacy mainnet NULL row at the
+        # same address; the request-only read used to drop the filter and bleed.
+        pytest.param(8453, None, id="l2-job-does-not-bind-mainnet-row"),
+    ],
+)
+def test_load_contract_row_coalesces_null_chain(db_session, job_chain_id, expected_name):
     from db.models import Contract
     from db.queue import create_job
     from workers.static_worker import StaticWorker
 
     addr = _addr()
     job = create_job(db_session, {"address": addr, "name": "Subject"})
-    job.chain_id = 8453  # routed to Base; request payload carries no chain
-    db_session.commit()
-
-    # Only a mainnet (legacy NULL) row exists for this address.
-    db_session.add(Contract(address=addr.lower(), chain=None, contract_name="Mainnet", job_id=None))
+    job.chain_id = job_chain_id  # request payload carries no chain
+    db_session.add(Contract(address=addr.lower(), chain=None, contract_name="Legacy", job_id=None))
     db_session.commit()
 
     row = StaticWorker._load_contract_row(db_session, job)
-    assert row is None
+    assert getattr(row, "contract_name", None) == expected_name
 
 
 # ---------------------------------------------------------------------------
@@ -117,34 +105,22 @@ def _stub_resolve_proxy_seams(monkeypatch):
 
 
 @requires_postgres
-def test_resolve_proxy_promotes_when_impl_on_same_chain(db_session, proto_id, monkeypatch, _stub_resolve_proxy_seams):
-    from db.models import Contract
-    from workers.static_worker import StaticWorker
-
-    job, proxy_addr, impl_addr = _seed_adoption_graph(db_session, proto_id, impl_chain="ethereum")
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {"type": "proxy", "proxy_type": "eip1967", "implementation": impl_addr},
-    )
-
-    StaticWorker()._resolve_proxy(db_session, job, proxy_addr, "Proxy")
-
-    proxy = (
-        db_session.query(Contract).filter(Contract.address == proxy_addr.lower(), Contract.chain == "ethereum").one()
-    )
-    assert proxy.protocol_id == proto_id
-
-
-@requires_postgres
-def test_resolve_proxy_does_not_promote_when_impl_only_on_other_chain(
-    db_session, proto_id, monkeypatch, _stub_resolve_proxy_seams
+@pytest.mark.parametrize(
+    ("impl_chain", "promoted"),
+    [
+        pytest.param("ethereum", True, id="impl-on-same-chain-promotes"),
+        # The same-address member impl exists only on Base: chain-scoped W2 verification finds no mainnet
+        # member, so no promotion (the fix against cross-chain evidence bleed).
+        pytest.param("base", False, id="impl-only-on-other-chain-does-not-promote"),
+    ],
+)
+def test_resolve_proxy_promotion_is_chain_scoped(
+    db_session, proto_id, monkeypatch, _stub_resolve_proxy_seams, impl_chain, promoted
 ):
-    """The same-address member impl exists only on Base: chain-scoped W2 verification finds no mainnet member,
-    so no promotion (the fix against cross-chain evidence bleed)."""
     from db.models import Contract
     from workers.static_worker import StaticWorker
 
-    job, proxy_addr, impl_addr = _seed_adoption_graph(db_session, proto_id, impl_chain="base")
+    job, proxy_addr, impl_addr = _seed_adoption_graph(db_session, proto_id, impl_chain=impl_chain)
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
         lambda address, rpc_url, **_kw: {"type": "proxy", "proxy_type": "eip1967", "implementation": impl_addr},
@@ -155,4 +131,4 @@ def test_resolve_proxy_does_not_promote_when_impl_only_on_other_chain(
     proxy = (
         db_session.query(Contract).filter(Contract.address == proxy_addr.lower(), Contract.chain == "ethereum").one()
     )
-    assert proxy.protocol_id is None
+    assert proxy.protocol_id == (proto_id if promoted else None)
