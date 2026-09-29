@@ -475,6 +475,10 @@ def _assert_url_chain_id(rpc_url: str, chain_id: int | None) -> None:
 # serves repeat runs and results stop drifting with chain state. Local/explicit
 # URLs (Anvil forks) are never rewritten: their "latest" is the fork's own head.
 PIN_BLOCKS_ENV = "PSAT_PIN_BLOCKS"
+# eRPC labels metrics by User-Agent, so pinned runs get their own series even
+# while unpinned previews share the proxy. Avoid "python"/"go/"/"rust": eRPC
+# collapses those substrings to generic agent names.
+PINNED_USER_AGENT = "psat-pinned/1"
 _MOVING_BLOCK_TAGS = frozenset({"latest", "pending", "safe", "finalized"})
 _BLOCK_PARAM_INDEX = {
     "eth_call": 1,
@@ -551,6 +555,8 @@ def rpc_headers(rpc_url: str, extra_headers: Mapping[str, str] | None = None) ->
             headers[ERPC_SECRET_HEADER] = secret
     if extra_headers:
         headers.update({str(key): str(value) for key, value in extra_headers.items()})
+    if os.getenv(PIN_BLOCKS_ENV) and _is_configured_erpc_url(rpc_url):
+        headers["User-Agent"] = PINNED_USER_AGENT
     return headers
 
 

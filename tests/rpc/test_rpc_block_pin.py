@@ -87,3 +87,12 @@ def test_unset_env_leaves_requests_alone(sent, monkeypatch):
     monkeypatch.delenv(rpc.PIN_BLOCKS_ENV)
     rpc.rpc_request(MAINNET, "eth_getCode", ["0xabc", "latest"])
     assert sent[0]["params"][1] == "latest"
+
+
+def test_pinned_requests_carry_their_own_user_agent(monkeypatch):
+    monkeypatch.setenv("ERPC_BASE_URL", ERPC)
+    monkeypatch.setenv(rpc.PIN_BLOCKS_ENV, f"1:{PIN}")
+    assert rpc.rpc_headers(MAINNET, {"User-Agent": "other/1"})["User-Agent"] == rpc.PINNED_USER_AGENT
+    assert "User-Agent" not in rpc.rpc_headers("http://127.0.0.1:8545")
+    monkeypatch.delenv(rpc.PIN_BLOCKS_ENV)
+    assert "User-Agent" not in rpc.rpc_headers(MAINNET)
