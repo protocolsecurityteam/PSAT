@@ -7,10 +7,21 @@ kill_timeout = 30
   dockerfile = "deploy/Dockerfile"
 
 [env]
+  # CI starts and removes preview workers; production owns their idle lifecycle.
+  PSAT_WORKER_LIFECYCLE_MODE = "off"
+  PSAT_INDEXER_GROUP = "monitor"
   PORT = "8000"
   PYTHONUNBUFFERED = "1"
   PSAT_MEMORY_SAMPLE_INTERVAL_S = "15"
   PSAT_EDGE_MODE = "preview"
+  PSAT_SUPPORTED_CHAIN_IDS = "1,8453"
+  PROTOCOL_SCAN_INTERVAL = "3600"
+  PROTOCOL_POLL_INTERVAL = "3600"
+  PSAT_COMPANY_MAX_INFLIGHT = "2"
+  PSAT_COMPANY_MAX_QUEUED = "8"
+  PSAT_COMPANY_QUEUE_TIMEOUT = "30"
+  PSAT_PREPARED_COMPANY_PAGES = "1"
+  PSAT_COMPANY_BUILDER_ON_WEB = "1"
   PSAT_EXA_CACHE = "1"
   PSAT_TAVILY_CACHE = "1"
   PSAT_EFFECTS_STAGE = "1"
@@ -53,7 +64,7 @@ kill_timeout = 30
 [[vm]]
   processes = ["web"]
   size = "shared-cpu-1x"
-  memory = "512mb"
+  memory = "1gb"
 
 [[vm]]
   processes = ["workers"]
@@ -67,9 +78,14 @@ kill_timeout = 30
 
 [[vm]]
   processes = ["monitor"]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = "shared-cpu-2x"
+  memory = "2048mb"
 
 [[restart]]
   policy = "always"
   processes = ["monitor"]
+
+[[restart]]
+  policy = "on-failure"
+  retries = 10
+  processes = ["workers"]
