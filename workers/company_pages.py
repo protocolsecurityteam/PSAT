@@ -188,9 +188,9 @@ def run(stop: Event | None = None) -> None:
             outcome = "error"
             logger.exception("Company page worker pass failed")
             record_heartbeat("company_pages", status="error")
-        # Drain due protocols immediately. A failed build has already advanced
+        # Drain due companies immediately. A failed build has already advanced
         # its own retry deadline, so it must not delay other ready companies.
-        # Idle/disabled/leased and unexpected errors still wait to avoid a spin.
+        # Idle/disabled and unexpected errors still wait to avoid a spin.
         if outcome not in {"prepared", "failed", "purged", "purge_failed"}:
             stop.wait(5)
 

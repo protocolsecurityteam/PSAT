@@ -175,7 +175,6 @@ fi
 "${PYTHON_CMD[@]}" -m workers.protocol_monitor --reconcile &
 PIDS+=($!)
 
-
 log_json INFO "All workers started: ${PIDS[*]}"
 # Exit on first death — Fly restarts the machine so every worker
 # relaunches. Silent-dead-worker is worse than a 30s restart.

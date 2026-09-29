@@ -1,5 +1,5 @@
 /**
- * Full-flow selection regression (SELECTION_FILTERING_DIAGNOSIS.md).
+ * Full-flow selection regression.
  *
  * Mirrors the original diagnosis reproduction: search-commit a safe, then walk
  * Detail / Agent / Audits / Activity asserting the safe — never one

@@ -76,8 +76,7 @@ def _witness_display_entry(row: ContractMembershipWitness) -> dict[str, Any]:
     entry: dict[str, Any] = {"rule": row.rule, "via_address": row.via_address}
     if row.rule == WITNESS_RULE_W2_STRUCTURAL and isinstance(row.evidence, dict):
         entry["edge_kind"] = row.evidence.get("edge_kind")
-    # DEPLOYER_HEURISTIC_SPEC.md §9 invariant 1: no export presents a
-    # heuristic membership as proven.
+    # Never present heuristic membership as proven.
     entry["heuristic"] = witness_is_heuristic(row)
     return entry
 
