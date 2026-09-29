@@ -96,7 +96,7 @@ def refresh_one(session_factory=SessionLocal) -> str:
             select(
                 Page.cache_key,
                 Page.protocol_id,
-                func.coalesce(Protocol.name, Page.company_name).label("name"),
+                func.coalesce(Protocol.name, Page.company_name),
                 Page.company_name,
                 Page.attempts,
                 *(due[s].label("due_" + s) for s in SECTIONS),
