@@ -211,11 +211,6 @@ def test_inv7_readonly_keyless():
 
 
 # ---------------------------------------------------------------------------
-# Every verdict is tiered and replayable from its transcript.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Duration/bound facts are read from source constants, never hardcoded.
 # ---------------------------------------------------------------------------
 
@@ -283,21 +278,6 @@ def test_inv10_duration_bound_from_source_constant():
     assert eff.details["duration_bound_source"] == "guard_constant"
     # No hardcoded duration literal lives in the recipe.
     assert "MAX_PAUSE_DURATION =" not in inspect.getsource(anvil)
-
-
-# ---------------------------------------------------------------------------
-# Own stage between policy and coverage; the cache is code-plane only.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Verdicts are gate-relative; gate_ref names structure, not an address.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Capabilities are probed, not assumed.
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

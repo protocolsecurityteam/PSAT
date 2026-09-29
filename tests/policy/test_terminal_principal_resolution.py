@@ -399,6 +399,39 @@ def test_steps_returned_but_unusable_is_not_a_proven_absence():
     assert record["status"] == "unknown_unfetched"
 
 
+def test_policy_worker_resolver_keeps_error_and_absence_apart():
+    """The collapse was at the CALL SITE: ``if not controllers: return None`` mapped both
+    ``read_contract_controllers`` answers onto ``None``."""
+    import workers.policy_worker as pw
+
+    calls: dict[str, object] = {}
+
+    def _fake_read(rpc_url, address, *, chain_id=None):
+        return calls["value"]
+
+    original_read = pw.read_contract_controllers
+    original_classify = pw.classify_resolved_address_with_status
+    pw.read_contract_controllers = _fake_read
+    pw.classify_resolved_address_with_status = lambda rpc_url, address, chain_id=None: ("eoa", {}, True)
+    try:
+        resolver = pw._make_terminal_controller_resolver("http://rpc.example", chain_id=1)
+        assert resolver is not None
+
+        calls["value"] = None  # probe error
+        assert resolver(CONTRACT_A) is None
+
+        calls["value"] = []  # probed clean, no controller
+        assert resolver(CONTRACT_A) == []
+
+        calls["value"] = [EOA]  # a real controller
+        steps = resolver(CONTRACT_A)
+        assert steps is not None
+        assert [step["address"] for step in steps] == [EOA]
+    finally:
+        pw.read_contract_controllers = original_read
+        pw.classify_resolved_address_with_status = original_classify
+
+
 def test_multi_plane_records_silence_per_plane():
     """A plane whose own walk goes canonical-getter-silent reports not-determined (with
     basis) on THAT plane, so a weakest-path scorer never sees a fabricated absence."""

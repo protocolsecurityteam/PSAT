@@ -104,6 +104,22 @@ def test_the_hash_commitment_binding_is_marked_as_flow_insensitive():
         assert verdict["pins"] is True, name
 
 
+def test_the_constraint_is_present_in_the_corpus_even_though_the_flow_fact_ignores_it():
+    """The evidence a narrowing would read is IN the predicate tree of each
+    constrained function and NOT in the control's, so a zero-diff after an A4 change
+    means the change did nothing, not that there was nothing to find."""
+    fns = _functions(CONSTRAINED)
+    allowlisted = fns["payAllowlisted(IERC20,address,uint256)"]["predicate_tree"]
+    anyone = fns["payAnyone(IERC20,address,uint256)"]["predicate_tree"]
+    # The allowlist read is a membership leaf; the control's only leaf is its
+    # owner check.
+    assert "membership" in allowlisted["leaf_kinds"]
+    assert "membership" not in anyone["leaf_kinds"]
+    assert allowlisted["leaf_count"] > anyone["leaf_count"]
+    for name in ("payCommitted(IERC20,address,uint256,bytes32)", "payTreasuryOnly(IERC20,address,uint256)"):
+        assert fns[name]["predicate_tree"]["leaf_count"] > anyone["leaf_count"], name
+
+
 # 3 + 9. delegatecall routes
 
 

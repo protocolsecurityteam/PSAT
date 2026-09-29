@@ -22,7 +22,6 @@ from tests.conftest import DATABASE_URL, requires_postgres, run_alembic_upgrade
 
 pytestmark = requires_postgres
 
-_REVISION = "b3d7e1f05a92"
 _DOWN_REVISION = "a1c94f2e6b73"
 
 

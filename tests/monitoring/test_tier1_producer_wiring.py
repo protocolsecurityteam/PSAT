@@ -53,11 +53,6 @@ PROXY_REGISTRY = "0x3333333333333333333333333333333333333333"
 ROLE_HASH = "0x" + "ab" * 32
 GRANTEE = "0x4444444444444444444444444444444444444444"
 
-# Verified at block 25643300: this pod manager answers
-# ``beaconChainETHStrategy()`` = 0xbeac0eee…beac0 and ``numPods()`` = 34704, and
-# its ``ownerToPod`` agrees with the node's own ``getEigenPod()``.
-EIGEN_POD_MANAGER = "0x91e677b07f7af907ec9a428aafa9fc14a0d3a338"
-DELEGATION_MANAGER = "0x39053d51b77dc0d36036fc1fcc8cb819df8ef37a"
 
 BLOCK = 25643300
 

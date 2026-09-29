@@ -589,11 +589,6 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
 
 
 # ---------------------------------------------------------------------------
-# 9. Object storage outage during read surfaces as a graceful skip in lists
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # 10. Inline-fallback path (no storage configured) still works
 # ---------------------------------------------------------------------------
 

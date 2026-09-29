@@ -7,6 +7,7 @@ funnel against the dev ``psat`` DB and skips when absent, so CI (fresh empty DB)
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -1027,6 +1028,40 @@ def test_equal_reach_orders_by_function_id_not_by_rounding(db_session):
     assert by_id[f_left.id].value_at_stake_usd == by_id[f_right.id].value_at_stake_usd
     ordered = [c.function_id for c in select_candidates(db_session, p.id)]
     assert ordered.index(f_right.id) < ordered.index(f_left.id)
+
+
+def test_reachable_value_is_identical_across_processes():
+    """The one shape a same-process test cannot express: DIFFERENT seeds.
+
+    Runs the real `AuthorityGraph` in child processes under four
+    PYTHONHASHSEED values and compares `repr()` of the result. Under the float
+    fold this returned up to three distinct values for one graph."""
+    import subprocess
+    import sys
+
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    prog = (
+        "import sys; sys.path.insert(0, %r)\n"
+        "from services.effects.selection import AuthorityGraph\n"
+        "from decimal import Decimal\n"
+        "usd = %r\n"
+        # Many nodes so the closure `set` is large enough for seed-dependent
+        # iteration order to be expressed.
+        "addrs = ['0x%%040x' %% (i + 1) for i in range(len(usd) * 40)]\n"
+        "g = AuthorityGraph()\n"
+        "g.balance = {a: Decimal(usd[i %% len(usd)]) for i, a in enumerate(addrs)}\n"
+        "g.controls = {'0x%%040x' %% 0xF00D: set(addrs)}\n"
+        "print(repr(g.reachable_value({'0x%%040x' %% 0xF00D})))\n"
+    ) % (repo, _ORDER_SENSITIVE_USD)
+
+    seen = set()
+    for seed in ("0", "1", "2", "3"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        out = subprocess.run(
+            [sys.executable, "-c", prog], capture_output=True, text=True, env=env, timeout=120, check=True
+        )
+        seen.add(out.stdout.strip())
+    assert len(seen) == 1, f"reachable_value varies with PYTHONHASHSEED: {sorted(seen)}"
 
 
 def test_token_holdings_order_is_total_under_a_value_tie(db_session):

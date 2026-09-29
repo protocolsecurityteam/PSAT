@@ -361,11 +361,6 @@ def test_detail_inlines_upgrade_history_and_graph_viz(mock_session_cls, mock_get
 
 
 # ===================================================================
-# 5. Graph builder: label uses display_name for generic proxy names
-# ===================================================================
-
-
-# ===================================================================
 # 6. Full data flow: unified -> graph viz -> upgrade history
 # ===================================================================
 

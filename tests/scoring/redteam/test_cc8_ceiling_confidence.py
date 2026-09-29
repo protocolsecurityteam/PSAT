@@ -4,8 +4,6 @@ The reach-magnitude term credited a signal on two paths: a witness on its own ca
 composed destination witness. A sheet ceiling is a THIRD answer (a proven bound from a balance
 observation); leaving it uncredited would report as open a question the document answers. These
 cases pin what is credited, what is not, and that the credit is not the vacuous kind.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
 """
 
 from __future__ import annotations

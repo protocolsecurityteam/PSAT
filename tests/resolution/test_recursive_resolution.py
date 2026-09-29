@@ -606,10 +606,6 @@ def test_resolve_control_graph_recurses_into_role_holder_contracts(monkeypatch):
     assert materialize_calls == [role_holder_address]
 
 
-# test_materialize_contract_artifacts_tolerates_slither_cli_failure was deleted in
-# commit 438a11c (Slither CLI subprocess rip-out): no code path left to exercise.
-
-
 def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch):
     address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 

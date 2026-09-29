@@ -535,16 +535,6 @@ def cached_weth(analyzed_weth, live_client: LiveClient) -> dict[str, Any]:
     return job
 
 
-@pytest.fixture
-def analyze_and_wait(live_client: LiveClient):
-    """Factory for tests that need their own fresh analysis of an address."""
-
-    def _fn(address: str, timeout: float = DEFAULT_SINGLE_TIMEOUT) -> dict[str, Any]:
-        return live_client.submit_and_wait(address, timeout=timeout)
-
-    return _fn
-
-
 # Shared with test_cache.py so its inventory is warm. Queue two candidates so
 # one terminal source/discovery failure does not make every company test fail.
 DEFAULT_TEST_COMPANY = "etherfi"

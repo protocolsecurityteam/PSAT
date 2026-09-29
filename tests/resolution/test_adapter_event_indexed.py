@@ -54,35 +54,6 @@ class NoCursorEventLogRepo:
         return EnumerationResult(members=[], confidence="partial", partial_reason="no_index_cursor")
 
 
-class OrderedEventLogRepo:
-    def __init__(self, events: list[tuple[str, str]]):
-        self.events = events
-
-    def fold_event_writes(
-        self, *, chain_id, event_address, topic0, topics_to_keys, data_to_keys, key_sources, direction, block=None
-    ):
-        del chain_id, event_address, topics_to_keys, data_to_keys, key_sources, direction, block
-        return EnumerationResult(
-            members=[member for event_topic0, member in self.events if event_topic0 == topic0],
-            confidence="enumerable",
-            last_indexed_block=18_000_000,
-        )
-
-    def fold_event_history(self, *, chain_id, event_address, event_hints, key_sources, block=None):
-        del chain_id, event_address, key_sources, block
-        directions = {hint.get("topic0"): hint.get("direction") for hint in event_hints}
-        state: dict[str, bool] = {}
-        for topic0, member in self.events:
-            direction = directions.get(topic0)
-            if direction in {"add", "remove"}:
-                state[member.lower()] = direction == "add"
-        return EnumerationResult(
-            members=sorted(addr for addr, present in state.items() if present),
-            confidence="enumerable",
-            last_indexed_block=18_000_000,
-        )
-
-
 class RaisingEventLogRepo:
     def fold_event_writes(
         self, *, chain_id, event_address, topic0, topics_to_keys, data_to_keys, key_sources, direction, block=None

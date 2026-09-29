@@ -412,11 +412,6 @@ class TestProcessAuditReportErrorPaths:
 
 
 # ---------------------------------------------------------------------------
-# Sanity — importable public error classes have the expected MRO.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # _fetch_html_page — SSRF egress guard routing + preserved download protections.
 #
 # The candidate URLs come from attacker-seedable Exa/Tavily results, and the

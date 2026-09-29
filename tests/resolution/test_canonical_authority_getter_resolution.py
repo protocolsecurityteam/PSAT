@@ -272,9 +272,9 @@ class TestTopUpSoladyFixture:
     """#6 against the verbatim Solady Ownable + on-chain TopUp.processTopUp gate."""
 
     # The fix: read the real owner(), never _OWNER_SLOT(), never mint 0x...dEaD. What the burn
-    # sentinel may CONCLUDE is narrower since A2 -- see
-    # ``test_owner_slot_burned_is_empty_but_not_a_proven_nobody``. A live (non-renounced) owner
-    # resolves to that owner: the positive proof.
+    # sentinel may CONCLUDE is narrower since A2: the ``burned-owner`` case below is an empty
+    # ``lower_bound`` ("no known caller"), never the exact "provably nobody". A live
+    # (non-renounced) owner resolves to that owner: the positive proof.
     @pytest.mark.parametrize(
         ("owner", "members", "quality", "empty_reason"),
         [

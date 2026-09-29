@@ -180,47 +180,6 @@ def test_real_role_leaves_are_admitted():
     assert _role_names_from_predicate_trees(trees, _vars("FINALIZE_ROLE")) == {"FINALIZE_ROLE"}
 
 
-# A cross-contract ``registry.hasRole(ROLE, msg.sender)`` gate, as the lowering
-# emits it. The constant IS a real role here — and it is still not admitted; see
-# ``test_external_registry_role_leaf_is_not_admitted``.
-REAL_EXTERNAL_REGISTRY_ROLE_LEAF = {
-    "kind": "external_bool",
-    "operator": "truthy",
-    "authority_role": "delegated_authority",
-    "operands": [
-        {
-            "source": "state_variable",
-            "state_variable_name": "MINTER_ROLE",
-            "constant_value": "0xf0887ba65ee2024ea881d91b74c2450ef19e1557f03bed3ea9f16b037cbe2dc9",
-        },
-        {"source": "msg_sender"},
-    ],
-    "references_msg_sender": True,
-    "parameter_indices": [],
-    "expression": "hasRole(...)",
-    "basis": ["require(TMP_0)"],
-    "callee_state_mutability": "view",
-    "gate_kind": "require",
-    "callee_signature": "hasRole(bytes32,address)",
-    "set_descriptor": {
-        "kind": "external_set",
-        "key_sources": [
-            {
-                "source": "state_variable",
-                "state_variable_name": "MINTER_ROLE",
-                "constant_value": "0xf0887ba65ee2024ea881d91b74c2450ef19e1557f03bed3ea9f16b037cbe2dc9",
-            },
-            {"source": "msg_sender"},
-        ],
-        "authority_contract": {"address_source": {"source": "state_variable", "state_variable_name": "roleRegistry"}},
-        "callee_function": "hasRole",
-        "callee_signature": "hasRole(bytes32,address)",
-        "callee_selector": "0x91d14854",
-    },
-    "confidence": "medium",
-}
-
-
 def test_real_slot_constant_leaves_are_rejected():
     """The two REAL measured slot-constant leaves — role_definitions ids 19 and
     1 — mint nothing."""

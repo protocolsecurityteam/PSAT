@@ -848,11 +848,6 @@ def test_analysis_detail_lookup_by_address(mock_session_cls, mock_get_all_artifa
 
 
 # ============================================================================
-# 8. GET /api/analyses - rank_scores and chain come from the contracts table
-# ============================================================================
-
-
-# ============================================================================
 # 9. GET /api/company/{company_name}
 # ============================================================================
 
@@ -1587,21 +1582,6 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
         db_session.execute(text("DELETE FROM jobs WHERE company = :c"), {"c": "myproj_proxy_test"})
         db_session.execute(text("DELETE FROM protocols WHERE id = :p"), {"p": protocol.id})
         db_session.commit()
-
-
-# ============================================================================
-# 18. GET /api/analyses - chain from inventory 'chain' field (not 'chains')
-# ============================================================================
-
-
-# ============================================================================
-# 19. GET /api/analyses - entry without contract_analysis is not appended
-# ============================================================================
-
-
-# ============================================================================
-# 20. GET /api/analyses - proxy uses impl analysis when proxy has none
-# ============================================================================
 
 
 # ============================================================================

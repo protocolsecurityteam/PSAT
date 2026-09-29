@@ -195,11 +195,6 @@ def test_worker_extracts_scope_for_spearbit_fixture(db_session, storage_bucket, 
 
 
 # ---------------------------------------------------------------------------
-# 2. Content-hash cache hit — second row clones without an LLM call
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # 3. Degenerate fixture — no scope section header → skipped
 # ---------------------------------------------------------------------------
 

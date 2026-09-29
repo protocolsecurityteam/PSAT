@@ -32,8 +32,6 @@ from db.models import (
 )
 from schemas.control_tracking import MonitoredContractType
 from services.monitoring.reanalysis import (
-    _REANALYSIS_WRITE_TARGETS,
-    REANALYSIS_POLL_FIELDS_VENDORED,
     maybe_queue_reanalysis,
     should_trigger_reanalysis,
 )
@@ -49,10 +47,6 @@ from tests.support.anvil import (
     _compile_and_deploy,
     anvil_env,  # noqa: F401
 )
-
-# Poll fields that trigger reanalysis: vendored triggers (``implementation``) plus the
-# analyzer's control-relevant write targets; the poll and event paths share this vocabulary.
-_REANALYSIS_POLL_FIELDS = REANALYSIS_POLL_FIELDS_VENDORED | _REANALYSIS_WRITE_TARGETS
 
 # Event types that trigger a full re-analysis; ``should_trigger_reanalysis`` derives the same
 # verdict from ``_HANDROLLED_EVENT_TYPE_TO_TAGS``. ``upgraded_revision`` is included because

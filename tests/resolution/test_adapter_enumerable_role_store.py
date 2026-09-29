@@ -49,7 +49,6 @@ _OZ_REVOKED = OZ_ACCESS_CONTROL_ENUMERABLE.grant_events[1].topic0
 _ROLE_1 = 1  # OPERATION_MULTISIG_ROLE (Solady uint256 id)
 
 _CALLEE_SIG = "onlyOperatingMultisig(address)"
-_CALLEE_SELECTOR = "0x" + keccak(text=_CALLEE_SIG).hex()[:8]
 
 
 # Behavior-bearing tests run under both earned-public flag states (the adapter doesn't branch on it).

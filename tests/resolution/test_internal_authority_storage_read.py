@@ -29,7 +29,6 @@ from tests.support.eq_tree import eq_tree
 CONTRACT = "0x" + "11" * 20
 MANAGER = "0x" + "ab" * 20
 MEMBERSHIP_MANAGER_SLOT = "0x" + format(2, "064x")  # sequential layout slot in the fixture
-MEMBERSHIP_MANAGER_GETTER = "0xee305116"  # membershipManager() — reverts on-chain (no public getter)
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "authority"
 
