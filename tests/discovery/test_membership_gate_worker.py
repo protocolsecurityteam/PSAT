@@ -9,9 +9,11 @@ real network.
 from __future__ import annotations
 
 import uuid
+from threading import Barrier, Thread
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy.orm import Session
 
 from db.models import (
     WITNESS_RULE_W1_CODE,
@@ -25,9 +27,11 @@ from db.models import (
     Job,
     JobStage,
     JobStatus,
+    MonitoringEnrollmentQueue,
     OpsKv,
     Protocol,
     ProtocolDeployer,
+    ProtocolScoreQueue,
 )
 from services.clients.rpc import EthCallResult
 from services.discovery import deployer_enumeration, probes
@@ -37,7 +41,7 @@ from services.discovery.deployer_enumeration import (
     enumerate_deployer_creations,
     session_deployer_enumerator,
 )
-from tests.conftest import ADDR, requires_postgres
+from tests.conftest import ADDR, DATABASE_URL, requires_postgres
 from utils.evm import OWNER_SELECTOR
 from workers.discovery import (
     ENABLED_CHAINS_SEEN_KEY,
@@ -48,6 +52,49 @@ from workers.discovery import (
 )
 
 pytestmark = [requires_postgres]
+
+
+def test_concurrent_gate_cascades_mark_protocol_queues_in_one_order(db_session):
+    """Opposite contract traversal orders must not deadlock on queue rows."""
+    from services.discovery.membership_gate.admission import _mark_membership_dirty, defer_membership_dirty
+
+    protocols = [Protocol(name=f"dirty-order-{uuid.uuid4().hex}") for _ in range(2)]
+    db_session.add_all(protocols)
+    db_session.commit()
+    ids = [protocol.id for protocol in protocols]
+    barrier = Barrier(2)
+    errors: list[BaseException] = []
+    engine = create_engine(DATABASE_URL)
+
+    def mark_in_order(order: list[int]) -> None:
+        try:
+            with Session(engine) as session:
+                session.execute(text("SET LOCAL statement_timeout = '5s'"))
+                with defer_membership_dirty(session):
+                    _mark_membership_dirty(session, order[0])
+                    barrier.wait(timeout=5)
+                    _mark_membership_dirty(session, order[1])
+                session.commit()
+        except BaseException as exc:
+            errors.append(exc)
+
+    try:
+        threads = [Thread(target=mark_in_order, args=(ids,)), Thread(target=mark_in_order, args=(ids[::-1],))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert not any(thread.is_alive() for thread in threads)
+        assert not errors
+        assert set(db_session.execute(select(MonitoringEnrollmentQueue.protocol_id)).scalars()) >= set(ids)
+    finally:
+        db_session.rollback()
+        db_session.execute(delete(MonitoringEnrollmentQueue).where(MonitoringEnrollmentQueue.protocol_id.in_(ids)))
+        db_session.execute(delete(ProtocolScoreQueue).where(ProtocolScoreQueue.protocol_id.in_(ids)))
+        db_session.execute(delete(Protocol).where(Protocol.id.in_(ids)))
+        db_session.commit()
+        engine.dispose()
+
 
 _TX = "0x" + "34" * 32
 _ZERO_WORD = "0x" + "0" * 64

@@ -64,6 +64,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate GitHub Actions workflows
+        run: |
+          curl -fsSL --retry 3 https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz -o "$RUNNER_TEMP/actionlint.tar.gz"
+          printf '%s  %s\n' '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes=
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --dev
       - run: uv run ruff check .
@@ -110,6 +116,11 @@ jobs:
     needs: changes
     if: github.event_name != 'pull_request' || needs.changes.outputs.python == 'true' || needs.changes.outputs.ci-config == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:16
@@ -125,6 +136,9 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
+      COVERAGE_FILE: ci-results/.coverage.${{ matrix.shard }}
+      # Model imports build engines from DATABASE_URL; fixtures use TEST_DATABASE_URL.
+      DATABASE_URL: postgresql://psat:psat@localhost:5432/psat_test
       TEST_DATABASE_URL: postgresql://psat:psat@localhost:5432/psat_test
       TEST_ARTIFACT_STORAGE_ENDPOINT: http://localhost:9000
       TEST_ARTIFACT_STORAGE_BUCKET: psat-artifacts-test
@@ -134,30 +148,39 @@ jobs:
       PSAT_LLM_STUB_DIR: tests/fixtures/scope_extraction/llm_responses
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # diff-cover needs origin/main history
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
       - uses: astral-sh/setup-uv@v5
       - name: Start minio
         run: |
-          docker run -d --name minio \
-            -p 9000:9000 \
-            -e MINIO_ROOT_USER=psat-minio \
-            -e MINIO_ROOT_PASSWORD=psat-minio-secret \
-            minio/minio:latest server /data
+          # The upstream container images are no longer publicly pullable.
+          # Use the same official release, pinned independently of its download URL.
+          minio_dir=$(mktemp -d "$RUNNER_TEMP/psat-minio.XXXXXX")
+          curl -fSL --retry 3 --connect-timeout 10 --max-time 120 \
+            https://github.com/minio/minio/releases/download/RELEASE.2025-09-07T16-13-09Z/minio.linux-amd64.RELEASE.2025-09-07T16-13-09Z \
+            -o "$minio_dir/minio"
+          echo "7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f  $minio_dir/minio" | sha256sum --check
+          chmod +x "$minio_dir/minio"
+          MINIO_ROOT_USER=psat-minio MINIO_ROOT_PASSWORD=psat-minio-secret \
+            "$minio_dir/minio" server "$minio_dir/data" \
+            --address 127.0.0.1:9000 --console-address 127.0.0.1:9001 \
+            > "$minio_dir/minio.log" 2>&1 &
+          minio_pid=$!
           for i in {1..30}; do
             if curl -sf http://localhost:9000/minio/health/live >/dev/null; then
               echo "minio ready"
               exit 0
             fi
+            if ! kill -0 "$minio_pid" 2>/dev/null; then
+              break
+            fi
             sleep 1
           done
           echo "minio failed to become ready"
-          docker logs minio
+          cat "$minio_dir/minio.log"
           exit 1
-      - run: uv sync --dev
+      - run: uv sync --dev --locked
       - run: forge --version
       # The offline network guard blocks solc downloads inside pytest, so any
       # test needing a real solc resolves it from solc-select's local store and
@@ -225,8 +248,45 @@ jobs:
       # job if any test attempts a real connect to a public IP (the in-process
       # guard in tests/conftest.py is the first line of defense; this catches
       # anything that bypasses `requests`/`urllib`). See tests/conftest.py.
-      - name: Run tests with coverage
-        run: uv run coverage run -m pytest -m "not live" -p local_netguard -q
+      - name: Run test shard with coverage
+        run: |
+          mkdir -p ci-results
+          uv run coverage run -m pytest -m "not live" -p local_netguard \
+            -p tests.ci_sharding --ci-shard=${{ matrix.shard }} -q
+
+      - name: Upload shard coverage and test manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-shard-${{ matrix.shard }}
+          path: |
+            ci-results/.coverage.${{ matrix.shard }}
+            ci-results/shard-${{ matrix.shard }}.json
+          include-hidden-files: true
+          if-no-files-found: error
+          # Stable names allow a failed-job rerun to replace just that shard.
+          overwrite: true
+          retention-days: 7
+
+  coverage:
+    needs: [changes, test]
+    if: needs.test.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # diff-cover needs origin/main history
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --dev --locked
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: python-shard-*
+          path: coverage-data
+          merge-multiple: true
+      - name: Validate shard completeness and coverage data
+        run: uv run python -m tests.ci_sharding coverage-data --revision="$GITHUB_SHA"
+      - name: Combine coverage
+        run: uv run coverage combine coverage-data
 
       - name: Coverage report
         run: |
@@ -240,8 +300,7 @@ jobs:
         if: github.event_name == 'pull_request'
         run: uv run coverage xml -o coverage.xml
 
-      # Only gates lines this PR added/changed — refactors that drop total coverage
-      # don't fail the build, but new uncovered code does.
+      # In addition to the total coverage floor, gate lines this PR added/changed.
       - name: Diff coverage check
         if: github.event_name == 'pull_request'
         run: |
@@ -257,36 +316,40 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diff-cover-report
+          overwrite: true
           path: diff-cover.html
           if-no-files-found: ignore
 
-  # Single aggregate status for branch protection. Treats `success` and
-  # `skipped` the same — a site-only PR where lint/typecheck/test are
-  # legitimately skipped still merges. Only fails when an upstream job
-  # actually failed or was cancelled.
-  #
-  # Set this as the sole required check on `main` in branch protection;
-  # the per-job checks should be removed from the required list since
-  # they'll appear as "Skipped" on site-only PRs and block the merge.
+  # Keep this as the sole required branch-protection check. Skips are allowed
+  # only when the path filter says that suite is unnecessary.
   ci-pass:
-    needs: [changes, lint, typecheck, frontend-test, test]
+    needs: [changes, lint, typecheck, frontend-test, test, coverage]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate upstream results
+        env:
+          PYTHON_REQUIRED: ${{ github.event_name != 'pull_request' || needs.changes.outputs.python == 'true' || needs.changes.outputs.ci-config == 'true' }}
+          FRONTEND_REQUIRED: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci-config == 'true' }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          TYPECHECK_RESULT: ${{ needs.typecheck.result }}
+          FRONTEND_RESULT: ${{ needs.frontend-test.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          COVERAGE_RESULT: ${{ needs.coverage.result }}
         run: |
-          # `changes` gates every other job — if it didn't succeed, the four
-          # downstream jobs all skip on missing outputs and would otherwise
-          # silently green-light a PR with zero checks executed.
-          if [[ "${{ needs.changes.result }}" != "success" ]]; then
-            echo "::error::changes job did not succeed: ${{ needs.changes.result }}"
-            exit 1
-          fi
           fail=0
-          for r in "${{ needs.lint.result }}" "${{ needs.typecheck.result }}" "${{ needs.frontend-test.result }}" "${{ needs.test.result }}"; do
-            if [[ "$r" == "failure" || "$r" == "cancelled" ]]; then
-              echo "::error::Upstream job result: $r"
+          check_result() {
+            local name=$1 result=$2 required=$3
+            if [[ "$result" != "success" && ( "$required" == "true" || "$result" != "skipped" ) ]]; then
+              echo "::error::$name result: $result (required: $required)"
               fail=1
             fi
-          done
-          exit $fail
+          }
+          check_result changes "$CHANGES_RESULT" true
+          check_result lint "$LINT_RESULT" "$PYTHON_REQUIRED"
+          check_result typecheck "$TYPECHECK_RESULT" "$PYTHON_REQUIRED"
+          check_result frontend-test "$FRONTEND_RESULT" "$FRONTEND_REQUIRED"
+          check_result test "$TEST_RESULT" "$PYTHON_REQUIRED"
+          check_result coverage "$COVERAGE_RESULT" "$PYTHON_REQUIRED"
+          exit "$fail"

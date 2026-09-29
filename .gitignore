@@ -37,6 +37,14 @@ old_tood
 phase-b-results.md
 
 # coverage / diff-cover artifacts
+ci-results/
+coverage-data/
 coverage.xml
 diff-cover.html
 diff-cover.md
+
+# Generated deployment configuration can contain health credentials.
+fly.production.toml
+fly.bridge.toml
+fly.rollback.json
+fly.lifecycle.json

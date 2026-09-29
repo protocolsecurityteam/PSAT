@@ -38,7 +38,11 @@ def page(rows: list[dict], *, page_length: int | None = None) -> TokenBalancePag
         status = ASSET_SET_STATUS_RETURNED_ASSETS
     else:
         status = ASSET_SET_STATUS_RETURNED_EMPTY
-    return TokenBalancePage(rows=rows, page_length=raw, status=status)
+    return TokenBalancePage(
+        rows=[dict(row, decimals_reported=row.get("decimals_reported", "decimals" in row)) for row in rows],
+        page_length=raw,
+        status=status,
+    )
 
 
 def failed_page() -> TokenBalancePage:

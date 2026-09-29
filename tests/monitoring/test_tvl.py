@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from db.models import (
+    BalanceCollectionState,
     Contract,
     ContractBalance,
     ContractBalanceFetch,
@@ -16,7 +17,6 @@ from db.models import (
 )
 from services.aggregations.company_overview import _entity_key
 from services.monitoring import tvl as tvl_module
-from services.monitoring.asset_sweep import SweepCost
 from services.monitoring.tvl import (
     DEFAULT_ENTITY_BALANCE_INTERVAL,
     _get_protocol_addresses,
@@ -78,23 +78,21 @@ def _no_pinned_native(monkeypatch):
 
 @pytest.fixture()
 def _no_escalation(monkeypatch):
-    """This cycle escalates nothing, so its ``partial`` is about pricing alone.
-
-    A contract with no prior fetch record escalates by rule, and the offline
-    suite has no RPC route to sweep over — so the cycle is honestly partial
-    (nothing gained completeness) for a reason that is a fact about the
-    environment rather than about what these tests assert. Stating "no
-    escalation this cycle" keeps that out of their subject; the tests that ARE
-    about the sweep stub the sweep itself.
-    """
-    monkeypatch.setattr("services.monitoring.tvl.escalation_reason", lambda *a, **kw: None)
+    """Normal collection must never invoke historical token scanning."""
+    history = MagicMock(side_effect=AssertionError("routine history forbidden"))
+    monkeypatch.setattr("services.clients.rpc.rpc_request", history)
+    yield
+    history.assert_not_called()
 
 
 @pytest.fixture()
 def _cleanup(db_session):
     """Ensure test rows are cleaned up even on failure."""
+    db_session.query(BalanceCollectionState).delete()
+    db_session.commit()
     yield
     db_session.rollback()
+    db_session.query(BalanceCollectionState).delete()
     db_session.query(TvlSnapshot).delete()
     db_session.query(ContractBalance).delete()
     db_session.query(Contract).delete()
@@ -341,10 +339,10 @@ class TestRefreshContractBalances:
         assert len(balances) == 2
         assert {b.token_symbol for b in balances} == {"ETH", "USDC"}
 
-    def test_priced_zero_is_published_unpriced_is_not(self, db_session, monkeypatch, _cleanup, _no_escalation):
-        """A priced ``usd_value == 0.0`` is a witnessed zero and enters the
-        breakdown; an unpriced ``usd_value: None`` does not — the two must be
-        distinguishable (readiness §2.3). Row storage is unaffected either way."""
+    def test_positive_dust_is_preserved_and_unpriced_is_unknown(
+        self, db_session, monkeypatch, _cleanup, _no_escalation
+    ):
+        """Provider positive dust is kept; unavailable prices remain unknown."""
         protocol = Protocol(name="TestProto_priced_zero")
         db_session.add(protocol)
         db_session.flush()
@@ -364,12 +362,12 @@ class TestRefreshContractBalances:
                 [
                     {
                         "token_address": "0x" + "ee" * 20,
-                        "token_name": "ZeroCoin",
-                        "token_symbol": "ZERO",
-                        "decimals": 6,
-                        "balance": 0,
+                        "token_name": "DustCoin",
+                        "token_symbol": "DUST",
+                        "decimals": 18,
+                        "balance": 1,
                         "price_usd": 1.0,
-                        "usd_value": 0.0,
+                        "usd_value": 1e-18,
                     },
                     {
                         "token_address": "0x" + "ff" * 20,
@@ -386,14 +384,14 @@ class TestRefreshContractBalances:
 
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
-        assert partial is False
+        assert partial is True  # the positive unpriced token remains a valuation gap
         key = _entity_key("ethereum", addr)
         assert breakdown[key]["total_usd"] == 2000.0
         published = {t["symbol"]: t["usd_value"] for t in breakdown[key]["tokens"]}
-        assert published == {"ETH": 2000.0, "ZERO": 0.0}
+        assert published == {"ETH": 2000.0, "DUST": 1e-18}
 
         balances = db_session.query(ContractBalance).filter(ContractBalance.contract_id == contract.id).all()
-        assert {b.token_symbol for b in balances} == {"ETH", "ZERO", "NOPRICE"}
+        assert {b.token_symbol for b in balances} == {"ETH", "DUST", "NOPRICE"}
 
     def test_handles_balance_failure_gracefully(self, db_session, monkeypatch, _cleanup):
         """Both reads fail ⇒ the contract is OMITTED and the cycle is partial.
@@ -428,9 +426,9 @@ class TestRefreshContractBalances:
         assert partial is True
         # The failure still has its durable trace in the fetch plane.
         fetches = db_session.query(ContractBalanceFetch).filter(ContractBalanceFetch.contract_id == contract.id).all()
-        assert len(fetches) == 1
-        assert fetches[0].native_status == NATIVE_STATUS_FETCH_FAILED
-        assert fetches[0].asset_set_status == ASSET_SET_STATUS_FETCH_FAILED
+        assert len(fetches) == 2
+        assert sum(f.native_status == NATIVE_STATUS_FETCH_FAILED for f in fetches) == 1
+        assert sum(f.asset_set_status == ASSET_SET_STATUS_FETCH_FAILED for f in fetches) == 1
 
 
 @requires_postgres
@@ -525,58 +523,21 @@ class TestRefreshAllProtocols:
         snapshots = db_session.query(TvlSnapshot).all()
         assert len(snapshots) == 2
 
-    def test_a_cycle_whose_sweeps_all_failed_beats_degraded(self, db_session, monkeypatch, _cleanup, caplog):
-        """A fleet-wide RPC outage during the sweeps used to beat as a clean cycle."""
-        import logging as _logging
-
-        from services.monitoring.asset_sweep import SweepOutcome
-        from utils.balance_status import SWEEP_STATUS_FAILED
-
-        proto = Protocol(name="Proto_sweepfail")
+    def test_empty_provider_page_never_invokes_history(self, db_session, monkeypatch, _cleanup):
+        proto = Protocol(name="Proto_no_history")
         db_session.add(proto)
         db_session.flush()
-        db_session.add(
-            Contract(
-                address=_addr("all_protos", "f0"),
-                chain="ethereum",
-                protocol_id=proto.id,
-                contract_name="Contract_sweepfail",
-            )
-        )
+        db_session.add(Contract(address=_addr("all_protos", "f0"), chain="ethereum", protocol_id=proto.id))
         db_session.commit()
-
         monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
-        monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda address, chain_id=1: 0)
+        monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda address, chain_id=1: 10**18)
         monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
-        # An empty page escalates, so the contract reaches the sweep — which
-        # then fails for it, the way an unreachable chain fails for all of them.
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
-
-        def _every_sweep_fails(requests, **_kwargs):
-            outcomes = {
-                request.subject: SweepOutcome(
-                    address=request.address.lower(),
-                    status=SWEEP_STATUS_FAILED,
-                    swept_from_block=0,
-                    swept_through_block=None,
-                    failure_reason="chain head unknown",
-                )
-                for request in requests
-            }
-            return outcomes, SweepCost(head_reads=1)
-
-        monkeypatch.setattr("services.monitoring.tvl.run_sweeps", _every_sweep_fails)
-
-        with patch("services.monitoring.record_heartbeat") as hb:
-            with caplog.at_level(_logging.WARNING, logger="services.monitoring.tvl"):
-                refresh_all_protocols(db_session)
-
-        _process, kwargs = hb.call_args
-        assert kwargs["status"] == "degraded"
-        assert kwargs["detail"]["partial"] is True
-        assert kwargs["detail"]["sweeps_failed"] == 1
-        assert kwargs["detail"]["sweeps_completed"] == 0
-        assert any("no escalated contract completed a scan" in r.message for r in caplog.records)
+        history = MagicMock(side_effect=AssertionError("routine history forbidden"))
+        monkeypatch.setattr("services.clients.rpc.rpc_request", history)
+        assert refresh_all_protocols(db_session) == 1
+        history.assert_not_called()
+        assert db_session.query(ContractBalanceFetch).filter_by(asset_set_status="returned_empty").count() == 1
 
     def test_rotation_oldest_and_no_snapshot_first_capped(self, db_session, monkeypatch, _cleanup):
         from datetime import datetime, timezone
@@ -600,6 +561,9 @@ class TestRefreshAllProtocols:
         db_session.add(
             TvlSnapshot(protocol_id=p_d.id, timestamp=datetime(2022, 1, 1, tzinfo=timezone.utc), source="on_chain")
         )
+        p_a.last_balance_attempt_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        p_b.last_balance_attempt_at = datetime(2021, 1, 1, tzinfo=timezone.utc)
+        p_d.last_balance_attempt_at = datetime(2022, 1, 1, tzinfo=timezone.utc)
         db_session.commit()
 
         monkeypatch.setenv("PSAT_TVL_PROTOCOLS_PER_PASS", "2")
@@ -771,10 +735,11 @@ class TestNativeAssetPricingDispatch:
         # Snapshot still written (the protocol completed with its ETH contract).
         assert count == 1
         rows = db_session.query(ContractBalance).all()
-        # Only the ETH contract got a balance row; the polygon one was skipped.
-        assert len(rows) == 1
-        assert rows[0].token_symbol == "ETH"
-        assert {r.token_symbol for r in rows} == {"ETH"}
+        # Quantity acquisition survives quote failure on both chains.
+        assert len(rows) == 2
+        polygon = next(r for r in rows if r.token_symbol != "ETH")
+        assert polygon.raw_balance == str(10**18)
+        assert polygon.usd_value is None
 
         # Operator-visible degraded cycle: exactly one partial heartbeat emitted.
         assert len(cycles) == 1
@@ -814,12 +779,9 @@ class TestEthPriceDegradationDB:
         # Both contracts hold 5 ETH that could not be valued. Neither appears:
         # an unpriced holding is not a holding worth $0, and $0 is what the
         # breakdown would have carried into the headline figure.
-        assert breakdown == {}
-
-        # The log message should mention the number of contracts affected
-        assert any("2 contract(s)" in r.message for r in caplog.records), (
-            f"Expected log mentioning '2 contract(s)' affected, got: {[r.message for r in caplog.records]}"
-        )
+        assert len(breakdown) == 2
+        assert all(entry["total_usd"] is None and entry["unpriced_count"] == 1 for entry in breakdown.values())
+        assert any("native quote unavailable" in r.message for r in caplog.records)
 
 
 @requires_postgres
@@ -899,9 +861,9 @@ class TestContractBreakdownCompositeKey:
         assert set(breakdown) == {eth_key, base_key}
         assert breakdown[eth_key]["total_usd"] == 2000.0
         assert breakdown[base_key]["total_usd"] == 4000.0
-        # These are legacy-shaped rows (no fetch recorded), and the view still
-        # publishes them: an absent fetch plane is not a failed one.
-        assert partial is False
+        # Legacy quantities remain visible with explicit unknown provenance/freshness.
+        assert partial is True
+        assert all(entry["stale"] for entry in breakdown.values())
 
     def test_read_existing_priced_zero_is_published_unpriced_is_not(self, db_session, _cleanup):
         """Same distinction as the refresh branch (readiness §2.3): a stored
@@ -945,7 +907,8 @@ class TestContractBreakdownCompositeKey:
         key = _entity_key("ethereum", addr)
         assert breakdown[key]["total_usd"] == 0.0
         assert {t["symbol"]: t["usd_value"] for t in breakdown[key]["tokens"]} == {"ZERO": 0.0}
-        assert partial is False
+        assert breakdown[key]["unpriced_count"] == 1
+        assert partial is True
 
     def test_snapshot_total_sums_both_chains(self, db_session, monkeypatch, _cleanup, _no_escalation):
         protocol, _addr_unused = self._two_chain_twin(db_session)
@@ -997,7 +960,8 @@ class TestMainnetEthQuoteFailurePartial:
         # The 3 ETH it holds has no USD figure, so the contract is omitted from
         # the breakdown rather than published at ``total_usd: 0.0`` — the same
         # omission the non-ETH branch already does when its native quote fails.
-        assert _entity_key("ethereum", addr) not in breakdown
+        assert breakdown[_entity_key("ethereum", addr)]["total_usd"] is None
+        assert breakdown[_entity_key("ethereum", addr)]["unpriced_count"] == 1
 
     def test_cycle_heartbeat_flags_partial(self, db_session, monkeypatch, _cleanup):
         protocol = Protocol(name="EthQuoteFailCycle")
@@ -1100,13 +1064,17 @@ class TestFailedReadIsNotAMeasuredZero:
         monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
 
+        monkeypatch.setattr(
+            "services.monitoring.balance_collection.pinned_native_balances",
+            lambda addresses, **kw: (123, {address.lower(): 0 for address in addresses}),
+        )
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
         assert partial is False
         assert breakdown[_entity_key("ethereum", addr)]["total_usd"] == 0.0
-        assert breakdown[_entity_key("ethereum", addr)]["tokens"] == []
+        assert breakdown[_entity_key("ethereum", addr)]["tokens"] == [{"symbol": "ETH", "usd_value": 0.0}]
 
-    def test_token_read_failure_alone_also_omits(self, db_session, monkeypatch, _cleanup):
+    def test_token_read_failure_keeps_native_subset_with_partial_disclosure(self, db_session, monkeypatch, _cleanup):
         """One unpublishable row class is enough — the same rule
         ``contracts_missing_current_rows`` applies on the sibling branch. A total
         built from the native leg only would understate the contract while
@@ -1129,7 +1097,10 @@ class TestFailedReadIsNotAMeasuredZero:
 
         breakdown, partial = refresh_contract_balances(db_session, protocol.id)
 
-        assert breakdown == {}
+        observed = breakdown[_entity_key("ethereum", addr)]
+        assert observed["total_usd"] == 2000.0
+        assert observed["partial"] is True
+        assert observed["coverage"] == "provider_observed_subset"
         assert partial is True
         # The measured native leg is still persisted; only the published total
         # is withheld.
@@ -1301,17 +1272,18 @@ class TestProvenCodelessHolderPopulation:
         db_session.commit()
         contracts_before = db_session.query(Contract).count()
 
+        monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda address, chain_id=1: 0)
         monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
         # The escalation fires (an empty page is a trigger, never a proof) and
         # the scan is what would answer it; this test pins the RECORD, so the
         # scan is stubbed to no outcome and the sheet stays honestly unproven.
-        monkeypatch.setattr("services.monitoring.tvl.run_sweeps", lambda requests, **kw: ({}, SweepCost()))
 
         report = refresh_entity_balances(db_session, proto.id)
         assert [h.entity_key for h in report.holders] == [f"ethereum::{eoa}"]
         assert report.excluded == []
-        assert report.etherscan_pages == 1
+        assert report.collection is not None
+        assert report.collection.attempted == 2
 
         fetch = (
             db_session.query(ContractBalanceFetch)
@@ -1379,13 +1351,25 @@ class TestEntityCohortInTheCycle:
         return proto, host, eoa
 
     def _readings(self, db_session, eoa: str) -> int:
-        return db_session.query(ContractBalanceFetch).filter(ContractBalanceFetch.entity_address == eoa).count()
+        return (
+            db_session.query(ContractBalanceFetch)
+            .filter(
+                ContractBalanceFetch.entity_address == eoa,
+                ContractBalanceFetch.asset_set_status != "unattempted",
+            )
+            .count()
+        )
 
     def _age(self, db_session, *addresses: str, seconds: int) -> None:
         from datetime import datetime, timedelta, timezone
 
         db_session.query(ContractBalanceFetch).filter(ContractBalanceFetch.entity_address.in_(addresses)).update(
             {ContractBalanceFetch.fetched_at: datetime.now(timezone.utc) - timedelta(seconds=seconds)},
+            synchronize_session=False,
+        )
+        past = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+        db_session.query(BalanceCollectionState).filter(BalanceCollectionState.address.in_(addresses)).update(
+            {BalanceCollectionState.observed_at: past, BalanceCollectionState.next_attempt_at: past},
             synchronize_session=False,
         )
         db_session.commit()
@@ -1412,7 +1396,6 @@ class TestEntityCohortInTheCycle:
             return real_contract_refresh(session, protocol_id, **kwargs)
 
         monkeypatch.setattr("services.monitoring.tvl.refresh_contract_balances", _counting_contract_refresh)
-        monkeypatch.setattr("services.monitoring.tvl.run_sweeps", lambda requests, **kw: ({}, SweepCost()))
 
         refresh_all_protocols(db_session)
         assert self._readings(db_session, eoa) == 1
@@ -1437,17 +1420,20 @@ class TestEntityCohortInTheCycle:
         itself wrote. A cohort read inside the window returns ``None`` (the pass
         did not run); one outside it reads again.
         """
-        from datetime import datetime, timedelta, timezone
 
         proto, _host, eoa = self._fixture(db_session, monkeypatch, "b")
-        monkeypatch.setattr("services.monitoring.tvl.run_sweeps", lambda requests, **kw: ({}, SweepCost()))
 
         first = refresh_entity_balances_if_due(db_session, proto.id)
         assert first is not None and [h.entity_key for h in first.holders] == [f"ethereum::{eoa}"]
 
-        now = datetime.now(timezone.utc)
-        assert refresh_entity_balances_if_due(db_session, proto.id, now=now + timedelta(hours=23)) is None
-        assert refresh_entity_balances_if_due(db_session, proto.id, now=now + timedelta(hours=25)) is not None
+        reused = refresh_entity_balances_if_due(db_session, proto.id)
+        assert reused is not None and reused.collection is not None
+        assert reused.collection.attempted == 0
+        assert reused.collection.reused == 2
+        self._age(db_session, eoa, seconds=DEFAULT_ENTITY_BALANCE_INTERVAL + 60)
+        due = refresh_entity_balances_if_due(db_session, proto.id)
+        assert due is not None and due.collection is not None
+        assert due.collection.attempted == 2
         assert self._readings(db_session, eoa) == 2
 
     def test_a_shared_members_fresh_row_cannot_mask_a_stale_exclusive_one(self, db_session, monkeypatch, _cleanup):
@@ -1471,7 +1457,6 @@ class TestEntityCohortInTheCycle:
         db_session.add(host_a)
         db_session.flush()
         self._eoa_node(db_session, host_a, shared)
-        monkeypatch.setattr("services.monitoring.tvl.run_sweeps", lambda requests, **kw: ({}, SweepCost()))
 
         assert refresh_entity_balances_if_due(db_session, proto_b.id) is not None
         assert (self._readings(db_session, exclusive), self._readings(db_session, shared)) == (1, 1)
@@ -1485,7 +1470,7 @@ class TestEntityCohortInTheCycle:
         assert refresh_entity_balances_if_due(db_session, proto_b.id) is not None
         assert self._readings(db_session, exclusive) == 2
 
-    def test_a_holder_that_was_never_read_is_not_a_stale_reading(self, db_session, monkeypatch, _cleanup):
+    def test_never_read_holder_is_due_without_refetching_fresh_cohort(self, db_session, monkeypatch, _cleanup):
         """No reading is a third state, and it is not a floor of zero.
 
         A holder discovered after the last pass has no reading at all. Folding
@@ -1494,59 +1479,25 @@ class TestEntityCohortInTheCycle:
         the pass the cohort's own age opens — and then it is read.
         """
         proto, host, first_eoa = self._fixture(db_session, monkeypatch, "e")
-        monkeypatch.setattr("services.monitoring.tvl.run_sweeps", lambda requests, **kw: ({}, SweepCost()))
         assert refresh_entity_balances_if_due(db_session, proto.id) is not None
 
         newcomer = self._addr("e9")
         self._eoa_node(db_session, host, newcomer)
 
-        assert refresh_entity_balances_if_due(db_session, proto.id) is None
-        assert self._readings(db_session, newcomer) == 0
+        newcomer_pass = refresh_entity_balances_if_due(db_session, proto.id)
+        assert newcomer_pass is not None and newcomer_pass.collection is not None
+        assert newcomer_pass.collection.attempted == 2
+        assert newcomer_pass.collection.reused == 2
+        assert self._readings(db_session, newcomer) == 1
 
         self._age(db_session, first_eoa, seconds=DEFAULT_ENTITY_BALANCE_INTERVAL + 60)
         assert refresh_entity_balances_if_due(db_session, proto.id) is not None
         assert (self._readings(db_session, first_eoa), self._readings(db_session, newcomer)) == (2, 1)
 
-    def test_the_cohort_spends_a_counter_the_contract_sweep_never_sees(self, db_session, monkeypatch, _cleanup):
-        """Budget isolation (b): two counters, each starting at zero.
-
-        ``SWEEP_REQUEST_BUDGET`` is a ceiling on whatever counter ``run_sweeps``
-        carries, so one counter shared across the two cohorts would be the daily
-        entity pass spending the hourly sweep's allowance. Each arm is recorded
-        as it arrives and made to spend a distinguishable amount: were the
-        sweep's counter ever passed along, the entity arm would arrive already
-        spent and both totals would read the sum. The property predates this
-        wiring — ``run_sweeps`` mints a counter per call — and the point of
-        pinning it is that the daily arm now depends on it.
-        """
+    def test_neither_contract_nor_entity_collection_invokes_history(self, db_session, monkeypatch, _cleanup):
         _proto, _host, eoa = self._fixture(db_session, monkeypatch, "c")
-        seen: list[tuple[str, SweepCost, int, bool, int]] = []
-        spend = {"contract": 3, "entity": 7}
-
-        def _recording_run_sweeps(requests, *, rpc_url_for, cost=None):
-            counter = cost if cost is not None else SweepCost()
-            kind = "entity" if requests and all(r.subject.is_entity for r in requests) else "contract"
-            seen.append((kind, counter, counter.total, cost is not None, len(requests)))
-            counter.get_logs += spend[kind]
-            return {}, counter
-
-        monkeypatch.setattr("services.monitoring.tvl.run_sweeps", _recording_run_sweeps)
-
+        history = MagicMock(side_effect=AssertionError("routine history forbidden"))
+        monkeypatch.setattr("services.clients.rpc.rpc_request", history)
         refresh_all_protocols(db_session)
-
-        # Ordering unchanged: the contract sweep still runs first, and both arms
-        # really did have something to sweep (an empty list would make the
-        # labelling below vacuous).
-        assert [k for k, _c, _t, _e, _n in seen] == ["contract", "entity"]
-        assert all(n > 0 for _k, _c, _t, _e, n in seen)
-        by_kind = {k: (counter, arrival, explicit) for k, counter, arrival, explicit, _n in seen}
-        contract_counter, contract_arrival, _ = by_kind["contract"]
-        entity_counter, entity_arrival, entity_explicit = by_kind["entity"]
-
-        assert contract_counter is not entity_counter
-        # Stated at the call site rather than left to a default two modules
-        # away, so a change to that default cannot silently merge the two.
-        assert entity_explicit is True
-        assert (contract_arrival, entity_arrival) == (0, 0)
-        assert (contract_counter.total, entity_counter.total) == (3, 7)
-        assert self._readings(db_session, eoa) == 1
+        history.assert_not_called()
+        assert self._readings(db_session, eoa) == 1  # helper counts the independent token unit

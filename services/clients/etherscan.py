@@ -7,6 +7,7 @@ global rate limit (``ETHERSCAN_RATE_LIMIT`` calls/sec).  Callers do
 
 import json as _json
 import logging
+import math
 import os
 import threading
 import time
@@ -359,7 +360,10 @@ def get(
     backoff = _RATE_LIMIT_BACKOFF
 
     for attempt in range(_RATE_LIMIT_RETRIES + 1):
+        from services.clients.request_budget import charge_attempt
+
         _wait_rate_limit()
+        charge_attempt("etherscan")
         resp = requests.get(
             ETHERSCAN_API,
             params={
@@ -793,7 +797,11 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                 page=str(pages_read + 1),
                 offset=str(TOKEN_BALANCE_PAGE_SIZE),
             )
-        except RuntimeError as exc:
+        except (RuntimeError, requests.RequestException) as exc:
+            from services.clients.request_budget import RequestBudgetExceeded
+
+            if isinstance(exc, RequestBudgetExceeded) and pages_read == 0:
+                raise
             # NOT silent: the caller writes an empty holdings set from this, which is
             # indistinguishable downstream from "this contract holds no tokens".
             record_degraded(
@@ -802,7 +810,11 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                 context={"address": address, "chain_id": chain_id, "page": pages_read + 1},
             )
             logger.warning(
-                "token balance fetch failed for %s on chain %s (page %d): %s", address, chain_id, pages_read + 1, exc
+                "token balance fetch failed for %s on chain %s (page %d): %s",
+                address,
+                chain_id,
+                pages_read + 1,
+                type(exc).__name__,
             )
             if pages_read == 0:
                 # page_length None, not 0: nothing was learned about the list, and a 0
@@ -838,6 +850,7 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
         fresh = 0
         for entry in page:
             if not isinstance(entry, dict):
+                incomplete_because = "malformed entry in provider response"
                 continue
             token = str(entry.get("TokenAddress") or "").lower()
             if token and token in seen_tokens:
@@ -862,7 +875,17 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
 
     results = []
     for entry in raw_entries:
-        raw_balance = int(entry.get("TokenQuantity", "0") or "0")
+        try:
+            raw_balance = int(entry["TokenQuantity"])
+            token = str(entry.get("TokenAddress") or "").lower()
+            if not (len(token) == 42 and token.startswith("0x")):
+                raise ValueError("invalid token address")
+            int(token[2:], 16)
+            if raw_balance < 0 or raw_balance >= 2**256:
+                raise ValueError("invalid token quantity")
+        except (KeyError, TypeError, ValueError):
+            incomplete_because = "malformed token quantity/address in provider response"
+            continue
         # A zero ENTRY is dropped rather than persisted, and that is a witness
         # rule and not a size optimisation. This endpoint answers ``tag=latest``
         # and its response carries no height, so a zero here is "zero at some
@@ -880,7 +903,14 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                 decimals = int(raw_divisor) if raw_divisor not in (None, "") else None
             except (TypeError, ValueError):
                 decimals = None
-            price_usd = float(entry.get("TokenPriceUSD", "0") or "0")
+            if decimals is not None and not 0 <= decimals <= 255:
+                decimals = None
+            try:
+                price_usd = float(entry.get("TokenPriceUSD", "0") or "0")
+                if not math.isfinite(price_usd) or price_usd <= 0 or price_usd >= 1e20:
+                    price_usd = 0.0
+            except (TypeError, ValueError):
+                price_usd = 0.0
             # No money from a guessed scale: with no divisor the USD figure would be
             # wrong by a factor of 10^n, and scoring weights on that figure. The column is NOT
             # NULL so the conventional 18 is still stored, but the value fields say
@@ -889,15 +919,17 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                 usd_value = None
             else:
                 usd_value = (raw_balance / (10**decimals)) * price_usd
+                if not math.isfinite(usd_value) or usd_value >= 1e20:
+                    usd_value = None
             results.append(
                 {
                     "token_address": (entry.get("TokenAddress") or "").lower(),
-                    "token_name": entry.get("TokenName", ""),
-                    "token_symbol": entry.get("TokenSymbol", ""),
+                    "token_name": str(entry.get("TokenName", ""))[:255],
+                    "token_symbol": str(entry.get("TokenSymbol", ""))[:50],
                     "decimals": 18 if decimals is None else decimals,
                     "decimals_reported": decimals is not None,
                     "balance": raw_balance,
-                    "price_usd": price_usd if decimals is not None else None,
+                    "price_usd": price_usd if decimals is not None and price_usd > 0 else None,
                     "usd_value": usd_value,
                 }
             )

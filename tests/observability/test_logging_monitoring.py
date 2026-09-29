@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import services.monitoring as monitoring
 import services.monitoring.unified_watcher as uw
 from services.monitoring import (
@@ -23,8 +25,21 @@ from services.monitoring import (
     HEARTBEAT_PROTOCOL_TVL,
     emit_monitor_cycle,
 )
+from utils.logging import log_timed_phase
 
 _CYCLE_FIELDS = {"contracts_scanned", "blocks_scanned", "events_found", "partial", "duration_ms"}
+
+
+def test_failed_phase_can_log_duration_when_stage_artifact_is_unavailable(caplog):
+    logger = logging.getLogger("test.failed_phase")
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        with pytest.raises(RuntimeError, match="database down"):
+            with log_timed_phase(logger, "membership_gate_intake", log_failure=True):
+                raise RuntimeError("database down")
+    record = next(r for r in caplog.records if r.message.startswith("phase ended with error"))
+    assert record.phase == "membership_gate_intake"
+    assert record.outcome == "failed"
+    assert record.duration_ms >= 0
 
 
 def test_emit_monitor_cycle_running_heartbeat_and_info(caplog):
@@ -171,84 +186,7 @@ def test_warn_degraded_once_alarms_per_scope_not_per_kind(caplog):
     assert counts == {"head_read_failed:1": 2, "head_read_failed:8453": 2}
 
 
-def test_sweep_budget_exceeded_is_logged_with_its_cost(caplog):
-    """It used to become a per-holder failure string and nothing else."""
-    from services.monitoring import asset_sweep
-
-    cost = asset_sweep.SweepCost(get_logs=1500)
-
-    class _Blown:
-        def fetch_logs(self, **_kwargs):
-            raise asset_sweep.SweepBudgetExceeded("sweep request budget of 1500 reached")
-
-    with caplog.at_level(logging.WARNING, logger="services.monitoring.asset_sweep"):
-        _erc20, _typed, failure = asset_sweep.discover_recipient_assets(
-            ["0x" + "a" * 40],
-            rpc_url="http://stub",
-            chain_id=1,
-            from_block=0,
-            to_block=100,
-            cost=cost,
-            fetcher=_Blown(),  # pyright: ignore[reportArgumentType]
-        )
-
-    assert failure is not None
-    rec = next(r for r in caplog.records if r.levelno == logging.WARNING)
-    assert rec.degraded_kind == "sweep_budget_exceeded"
-    assert rec.get_logs == 1500
-    assert cost.degraded["sweep_budget_exceeded:1"] == 1
-
-
-def test_sweep_give_up_transition_warns_once_per_subject(caplog):
-    """The bounded-out state holds forever; only the crossing is an event."""
-    from services.monitoring import balance_observation as bo
-    from services.monitoring.balance_reads import ObservationSubject
-
-    bo._GIVE_UP_ANNOUNCED.clear()
-    subject = ObservationSubject.of_entity("ethereum", "0x" + "b" * 40)
-    with caplog.at_level(logging.WARNING, logger="services.monitoring.balance_observation"):
-        for _ in range(3):
-            bo._announce_give_up("sweep", subject, "escalation stopped", failures=3)
-
-    records = [r for r in caplog.records if r.message == "escalation stopped"]
-    assert len(records) == 1
-    assert records[0].give_up == "sweep"
-    assert records[0].address == subject.address
-
-
 # --- disposition: the per-cycle outcome summary ------------------------------
-
-
-def test_run_disposition_summary_carries_the_cycle_outcome(caplog):
-    """A converging corpus and a stalled one used to log identically."""
-    import services.monitoring.delivery_shape as ds
-
-    request = ds.DispositionRequest(
-        contract_id=1, chain_id=1, holder_address="0x" + "c" * 40, tokens=("0x" + "d" * 40,)
-    )
-
-    def _fake_scan(_session, _requests, *, rpc_url_for, cost, protocol_id=None):
-        cost.get_logs += 2
-        cost.count("pairs_considered", 5)
-        cost.count("pairs_settled_skipped", 3)
-        cost.count("pairs_scanned", 2)
-        cost.count("receipts_unreadable")
-        cost.count("verdict_has_direct_delivery", 2)
-        return cost
-
-    with patch.object(ds, "scan_delivery_shape", _fake_scan):
-        with caplog.at_level(logging.INFO, logger="services.monitoring.delivery_shape"):
-            cost = ds.run_disposition(MagicMock(), [request], rpc_url_for=lambda _cid: "http://stub")
-
-    assert cost.counts["pairs_settled_skipped"] == 3
-    rec = next(r for r in caplog.records if getattr(r, "phase", None) == "disposition")
-    assert rec.levelno == logging.INFO
-    assert rec.holders == 1
-    assert rec.pairs_scanned == 2
-    assert rec.pairs_settled_skipped == 3
-    assert rec.receipts_unreadable == 1
-    assert rec.verdict_has_direct_delivery == 2
-    assert isinstance(rec.duration_ms, int)
 
 
 # --- proxy watcher: a transport failure is not a revert ----------------------

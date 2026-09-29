@@ -149,6 +149,8 @@ def maybe_queue_reanalysis(
             select(Job).where(
                 func.lower(Job.address) == mc.address.lower(),
                 Job.status.in_([JobStatus.queued, JobStatus.processing]),
+                # A token-input retry cannot observe a changed implementation/state.
+                Job.request["effects_resume_work_id"].astext.is_(None),
             )
         )
         .scalars()

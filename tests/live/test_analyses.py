@@ -24,7 +24,7 @@ def test_analyses_list_entry_shape(analyzed_weth, live_client: LiveClient):
 
 
 def test_analysis_detail_roundtrip(analyzed_weth, live_client: LiveClient):
-    detail = live_client.analysis_detail(analyzed_weth["name"])
+    detail = live_client.analysis_detail(analyzed_weth["job_id"])
     assert detail["run_name"] == analyzed_weth["name"]
     assert detail["job_id"] == analyzed_weth["job_id"]
     assert (detail.get("address") or "").lower() == WETH_ADDRESS.lower()
@@ -33,15 +33,15 @@ def test_analysis_detail_roundtrip(analyzed_weth, live_client: LiveClient):
 
 def test_analysis_detail_inlines_contract_analysis(analyzed_weth, live_client: LiveClient):
     # contract_analysis is unconditionally inlined (api.py:770-779).
-    detail = live_client.analysis_detail(analyzed_weth["name"])
+    detail = live_client.analysis_detail(analyzed_weth["job_id"])
     assert isinstance(detail.get("contract_analysis"), dict)
-    via_artifact = live_client.artifact(analyzed_weth["name"], "contract_analysis")
+    via_artifact = live_client.artifact(analyzed_weth["job_id"], "contract_analysis")
     assert isinstance(via_artifact, dict)
     assert detail["contract_analysis"].get("subject", {}).get("name") == via_artifact.get("subject", {}).get("name")
 
 
 def test_analysis_detail_contract_id_is_usable(analyzed_weth, live_client: LiveClient):
-    detail = live_client.analysis_detail(analyzed_weth["name"])
+    detail = live_client.analysis_detail(analyzed_weth["job_id"])
     contract_id = detail.get("contract_id")
     assert isinstance(contract_id, int), (
         f"contract_id must be int so audit_timeline etc. can look it up, got {type(contract_id).__name__}"

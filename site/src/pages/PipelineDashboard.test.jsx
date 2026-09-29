@@ -14,7 +14,8 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor, within, act } from "@testing-library/react";
 
 import PipelineDashboard from "./PipelineDashboard.jsx";
-import { computeFleetRates, daemonTone } from "./fleet/fleetHealth.js";
+import { computeFleetRates, countUnhealthy, daemonPulse, daemonTone, pillSub } from "./fleet/fleetHealth.js";
+import { DaemonDetail } from "./fleet/DaemonDetail.jsx";
 import { buildLogsDeeplink, inferFlyApp } from "./JobDetailPanel.jsx";
 import { setFetchHandler } from "../test/fetchMock.js";
 
@@ -354,6 +355,26 @@ describe("PipelineDashboard — fleet triad (Option B)", () => {
     expect(daemonTone(d, { backlogPerMin: 5 })).toBe("warn"); // backlog rising → falling behind
     expect(daemonTone(d, { backlogPerMin: -5 })).toBe("ok"); // backlog draining → healthy
     expect(daemonTone(d, {})).toBe("ok"); // no rate yet (first poll) → healthy
+  });
+
+  it("shows controller-confirmed sleep without stale-heartbeat or historical-rate alarms", () => {
+    const d = {
+      process: "enrollment_reconciler", label: "Enrollment reconciler", kind: "daemon",
+      status: "sleeping", last_beat_at: isoAgo(3_600_000), beat_age_s: 3600,
+      alive: false, stale: false, work: { backlog: 0 },
+    };
+    const rate = { backlogPerMin: 5 };
+    expect(daemonTone(d, rate)).toBe("idle");
+    expect(daemonPulse(d)).toBe(false);
+    expect(pillSub(d, "idle", rate)).toBe("sleeping");
+    expect(countUnhealthy({ daemons: [d] })).toBe(0);
+    const { container } = render(<DaemonDetail daemonKey={d.process} fleet={{ daemons: [d] }} rates={{ [d.process]: rate }} onClose={() => {}} />);
+    expect(screen.getByText("sleeping")).toBeInTheDocument();
+    expect(screen.getByText(/controller confirms no due work/)).toBeInTheDocument();
+    expect(container.querySelector(".dmn-alert")).toBeNull();
+    // Once the backend removes the sleep exemption, ordinary alarms resume.
+    expect(daemonTone({ ...d, status: "idle", stale: true }, rate)).toBe("warn");
+    expect(countUnhealthy({ daemons: [{ ...d, status: "idle", stale: true }] })).toBe(1);
   });
 
   it("shows a frontend-computed progress rate in the dock after two differing polls", async () => {

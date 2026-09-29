@@ -40,6 +40,7 @@ from services.discovery.ranking import (
     is_superseded_impl,
     rank_contract_rows,
 )
+from services.worker_workload import custom_claim_statement
 from utils.chains import chain_enabled
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker, JobHandledDirectly
@@ -96,6 +97,9 @@ class SelectionWorker(BaseWorker):
         """Stamp status/worker plus a fresh lease, mirroring ``db.queue.claim_job``:
         without the lease, the stale-job sweep can requeue a live selection job and
         a sibling double-runs it."""
+        from services.worker_lifecycle import note_claim
+
+        note_claim(session)
         job.status = JobStatus.processing
         job.worker_id = self.worker_id
         job.lease_id = uuid.uuid4()
@@ -110,23 +114,12 @@ class SelectionWorker(BaseWorker):
 
     def _claim_ready_job(self, session: Session) -> Job | None:
         """Claim a selection job whose DApp/DefiLlama siblings have settled (matched by ``request->>'root_job_id'``)."""
+        from services.worker_lifecycle import claim_allowed
+
+        if not claim_allowed(session):
+            return None
         claim_id = session.execute(
-            text(
-                """
-                SELECT j.id
-                FROM jobs j
-                WHERE j.stage = 'selection' AND j.status = 'queued'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM jobs sib
-                    WHERE sib.stage IN ('dapp_crawl', 'defillama_scan')
-                      AND sib.request->>'root_job_id' = j.id::text
-                      AND sib.status IN ('queued', 'processing')
-                  )
-                ORDER BY j.updated_at ASC
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
-                """
-            )
+            custom_claim_statement("selection", stuck=False),
         ).scalar_one_or_none()
         if claim_id is None:
             return None
@@ -137,18 +130,12 @@ class SelectionWorker(BaseWorker):
 
     def _claim_stuck_job(self, session: Session) -> Job | None:
         """Bypass readiness and claim a job that's been queued too long."""
+        from services.worker_lifecycle import claim_allowed
+
+        if not claim_allowed(session):
+            return None
         claim_id = session.execute(
-            text(
-                """
-                SELECT j.id
-                FROM jobs j
-                WHERE j.stage = 'selection' AND j.status = 'queued'
-                  AND j.updated_at < (NOW() - (:timeout * INTERVAL '1 second'))
-                ORDER BY j.updated_at ASC
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
-                """
-            ),
+            custom_claim_statement("selection", stuck=True),
             {"timeout": _STUCK_SELECTION_TIMEOUT},
         ).scalar_one_or_none()
         if claim_id is None:

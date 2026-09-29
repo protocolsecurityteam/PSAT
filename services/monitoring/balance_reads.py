@@ -30,17 +30,21 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import case, select, tuple_
 from sqlalchemy.orm import Session
 
 from db.models import Contract, ContractBalance, ContractBalanceFetch
 from services.clients.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3, rpc_request, rpc_url_for_chain_id, selector
 from utils.balance_status import (
+    ASSET_ACCEPTED_STATUSES,
+    ASSET_OBSERVED_STATUSES,
+    ASSET_SET_STATUS_AT_PAGE_CAP,
+    NATIVE_ACCEPTED_STATUSES,
     NATIVE_STATUS_FETCH_FAILED,
     NATIVE_STATUS_NOT_DETERMINED,
     NATIVE_STATUS_PROVEN_NONZERO,
     NATIVE_STATUS_PROVEN_ZERO,
-    STATUS_FETCH_FAILED,
+    asset_snapshot_priority,
 )
 from utils.logging import record_degraded
 
@@ -125,10 +129,9 @@ class ObservationSubject:
         return {"contract_id": None, "entity_chain": self.chain, "entity_address": self.address}
 
 
-# Steps back from head before pinning. Same margin the resolver's probe uses, and
-# the reason a height can be published at all: the read is issued AT this number,
-# so the number is a witness of the read rather than an assumption about when an
-# unpinned API answered.
+# Steps back from head before pinning, matching the existing probe policy.
+# This is a lagged height, NOT a chain-independent finality or reorg guarantee.
+# The persisted block identifies the read; consumers must not infer finality.
 PINNED_FINALITY_MARGIN = 12
 
 # A 32-byte word, hex-encoded with the ``0x`` prefix. Anything else — most
@@ -318,9 +321,14 @@ def prune_balance_fetches(session: Session, subject: ObservationSubject, observe
     if len(rows) <= depth:
         return 0
     keep = {r.id for r in rows[:depth]}
-    for status_index in (1, 2):  # native_status, then asset_set_status
+    # Keep native, accepted token snapshot and newest partial prefix separately.
+    for index, statuses in (
+        (1, NATIVE_ACCEPTED_STATUSES),
+        (2, ASSET_ACCEPTED_STATUSES),
+        (2, (ASSET_SET_STATUS_AT_PAGE_CAP,)),
+    ):
         for row in rows:
-            if row[status_index] != STATUS_FETCH_FAILED:
+            if row[index] in statuses:
                 keep.add(row.id)
                 break
     doomed = [r.id for r in rows if r.id not in keep]
@@ -339,7 +347,8 @@ def winning_asset_fetches(session: Session, protocol_id: int) -> dict[int, Contr
     a ``fetch_failed`` (or a shorter page) arriving after an ``at_page_cap`` read
     would withdraw the truncation while the truncated-prefix rows are still what
     the view returns and still what a sheet sums. Same rule as the view's ERC-20
-    arm — latest non-failed wins — so the two cannot disagree.
+    arm — prefer accepted snapshots, then the latest partial — so the two agree.
+    Newer partial coverage is read separately by ``latest_partial_asset_fetches``.
 
     A contract whose asset class has NO non-failed fetch is absent from the
     mapping: nothing current is known about its list, which is a third state and
@@ -352,19 +361,25 @@ def winning_asset_fetches(session: Session, protocol_id: int) -> dict[int, Contr
         .join(Contract, Contract.id == ContractBalanceFetch.contract_id)
         .filter(
             Contract.protocol_id == protocol_id,
-            ContractBalanceFetch.asset_set_status != STATUS_FETCH_FAILED,
+            ContractBalanceFetch.asset_set_status.in_(ASSET_OBSERVED_STATUSES),
         )
         .order_by(
             ContractBalanceFetch.contract_id,
+            case((ContractBalanceFetch.asset_set_status.in_(ASSET_ACCEPTED_STATUSES), 1), else_=0).desc(),
             ContractBalanceFetch.fetched_at.desc(),
             ContractBalanceFetch.id.desc(),
         )
+        .distinct(ContractBalanceFetch.contract_id)
         .all()
     )
     winners: dict[int, ContractBalanceFetch] = {}
     for fetch in rows:
         if fetch.contract_id is not None:
-            winners.setdefault(fetch.contract_id, fetch)
+            previous = winners.get(fetch.contract_id)
+            if previous is None or asset_snapshot_priority(fetch.asset_set_status) > asset_snapshot_priority(
+                previous.asset_set_status
+            ):
+                winners[fetch.contract_id] = fetch
     return winners
 
 
@@ -373,7 +388,7 @@ def winning_entity_asset_fetches(
 ) -> dict[ObservationSubject, ContractBalanceFetch]:
     """The same question as :func:`winning_asset_fetches`, for entity subjects.
 
-    Same rule — latest non-failed fetch per subject wins the ERC-20 class — asked
+    Same accepted-first rule for the ERC-20 class, asked
     over the OTHER identity arm. It is a separate function rather than a widened
     one because the two are scoped differently and neither scope can stand in for
     the other: a contract's fetches are scoped by ``contracts.protocol_id``, and
@@ -392,14 +407,16 @@ def winning_entity_asset_fetches(
         .filter(
             ContractBalanceFetch.contract_id.is_(None),
             tuple_(ContractBalanceFetch.entity_chain, ContractBalanceFetch.entity_address).in_(list(by_identity)),
-            ContractBalanceFetch.asset_set_status != STATUS_FETCH_FAILED,
+            ContractBalanceFetch.asset_set_status.in_(ASSET_OBSERVED_STATUSES),
         )
         .order_by(
             ContractBalanceFetch.entity_chain,
             ContractBalanceFetch.entity_address,
+            case((ContractBalanceFetch.asset_set_status.in_(ASSET_ACCEPTED_STATUSES), 1), else_=0).desc(),
             ContractBalanceFetch.fetched_at.desc(),
             ContractBalanceFetch.id.desc(),
         )
+        .distinct(ContractBalanceFetch.entity_chain, ContractBalanceFetch.entity_address)
         .all()
     )
     winners: dict[ObservationSubject, ContractBalanceFetch] = {}
@@ -408,7 +425,11 @@ def winning_entity_asset_fetches(
             continue
         subject = by_identity.get((fetch.entity_chain, fetch.entity_address))
         if subject is not None:
-            winners.setdefault(subject, fetch)
+            previous = winners.get(subject)
+            if previous is None or asset_snapshot_priority(fetch.asset_set_status) > asset_snapshot_priority(
+                previous.asset_set_status
+            ):
+                winners[subject] = fetch
     return winners
 
 
@@ -462,9 +483,9 @@ def contracts_missing_current_rows(session: Session, contract_ids: list[int]) ->
     fetched: set[int] = set()
     for fetch_id, contract_id, native_status, asset_status in fetches:
         fetched.add(contract_id)
-        if native_status != STATUS_FETCH_FAILED and contract_id not in native_winner:
+        if native_status in NATIVE_ACCEPTED_STATUSES and contract_id not in native_winner:
             native_winner[contract_id] = (fetch_id, native_status)
-        if asset_status != STATUS_FETCH_FAILED and contract_id not in asset_winner:
+        if asset_status in ASSET_OBSERVED_STATUSES and contract_id not in asset_winner:
             asset_winner[contract_id] = fetch_id
 
     promising = [fid for fid, status in native_winner.values() if status == NATIVE_STATUS_PROVEN_NONZERO]
@@ -525,3 +546,86 @@ __all__ = [
     "positive_raw_balance",
     "prune_balance_fetches",
 ]
+
+
+def latest_partial_asset_fetches(
+    session: Session, protocol_id: int, *, winners: dict[int, ContractBalanceFetch] | None = None
+) -> dict[int, ContractBalanceFetch]:
+    """Newest partial prefix, separately from the accepted monetary snapshot."""
+    rows = session.scalars(
+        select(ContractBalanceFetch)
+        .join(Contract)
+        .where(
+            Contract.protocol_id == protocol_id,
+            ContractBalanceFetch.asset_set_status == ASSET_SET_STATUS_AT_PAGE_CAP,
+        )
+        .order_by(
+            ContractBalanceFetch.contract_id, ContractBalanceFetch.fetched_at.desc(), ContractBalanceFetch.id.desc()
+        )
+        .distinct(ContractBalanceFetch.contract_id)
+    ).all()
+    out: dict[int, ContractBalanceFetch] = {}
+    if winners is None:
+        winners = winning_asset_fetches(session, protocol_id)
+    for row in rows:
+        if row.contract_id is None:
+            continue
+        winner = winners.get(row.contract_id)
+        if winner is None or (row.fetched_at, row.id) >= (winner.fetched_at, winner.id):
+            out.setdefault(row.contract_id, row)
+    return out
+
+
+def latest_partial_entity_asset_fetches(
+    session: Session,
+    subjects: list[ObservationSubject],
+    *,
+    winners: dict[ObservationSubject, ContractBalanceFetch] | None = None,
+) -> dict[ObservationSubject, ContractBalanceFetch]:
+    """Newer partial coverage for the caller's entity perimeter."""
+    by_identity = {(s.chain, s.address): s for s in subjects if s.is_entity}
+    if not by_identity:
+        return {}
+    rows = session.scalars(
+        select(ContractBalanceFetch)
+        .where(
+            ContractBalanceFetch.contract_id.is_(None),
+            tuple_(ContractBalanceFetch.entity_chain, ContractBalanceFetch.entity_address).in_(list(by_identity)),
+            ContractBalanceFetch.asset_set_status == ASSET_SET_STATUS_AT_PAGE_CAP,
+        )
+        .order_by(
+            ContractBalanceFetch.entity_chain,
+            ContractBalanceFetch.entity_address,
+            ContractBalanceFetch.fetched_at.desc(),
+            ContractBalanceFetch.id.desc(),
+        )
+        .distinct(ContractBalanceFetch.entity_chain, ContractBalanceFetch.entity_address)
+    ).all()
+    if winners is None:
+        winners = winning_entity_asset_fetches(session, subjects)
+    out: dict[ObservationSubject, ContractBalanceFetch] = {}
+    for row in rows:
+        if row.entity_address is None:
+            continue
+        subject = by_identity[(row.entity_chain, row.entity_address)]
+        winner = winners.get(subject)
+        if winner is None or (row.fetched_at, row.id) >= (winner.fetched_at, winner.id):
+            out.setdefault(subject, row)
+    return out
+
+
+def partial_asset_rows(session: Session, protocol_id: int) -> dict[int, list[ContractBalance]]:
+    fetches = latest_partial_asset_fetches(session, protocol_id)
+    if not fetches:
+        return {}
+    rows = session.scalars(
+        select(ContractBalance).where(
+            ContractBalance.fetch_id.in_([f.id for f in fetches.values()]),
+            ContractBalance.token_address.is_not(None),
+        )
+    ).all()
+    out: dict[int, list[ContractBalance]] = {}
+    for row in rows:
+        if row.contract_id is not None:
+            out.setdefault(row.contract_id, []).append(row)
+    return out

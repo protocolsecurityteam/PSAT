@@ -4,9 +4,10 @@ stratum-(iii) admission derivation."""
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
 from sqlalchemy import Text, cast, func, select
 from sqlalchemy.dialects.postgresql import ARRAY
@@ -29,6 +30,7 @@ from db.models import (
     UpgradeEvent,
 )
 from services.clients.rpc import chain_id_for_chain_name
+from utils.logging import log_timed_phase
 
 from .deployers import _proof_registry_row
 from .readers import (
@@ -248,12 +250,47 @@ def seed_llama_witness(session: Session, *, contract: Contract) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _mark_membership_dirty(session: Session, protocol_id: int) -> None:
+_DEFERRED_MARKS_KEY = "membership_gate_dirty_protocols"
+
+
+def _write_membership_dirty(session: Session, protocol_id: int) -> None:
     from services.monitoring.enrollment import mark_enrollment_dirty
     from services.scoring.dirty import SCORE_DIRTY_MEMBERSHIP, mark_protocol_score_dirty
 
-    mark_enrollment_dirty(session, protocol_id, MEMBERSHIP_DIRTY_REASON)
+    with log_timed_phase(logger, "membership_enrollment_queue_mark", log_failure=True, protocol_id=protocol_id):
+        mark_enrollment_dirty(session, protocol_id, MEMBERSHIP_DIRTY_REASON)
     mark_protocol_score_dirty(session, protocol_id, SCORE_DIRTY_MEMBERSHIP)
+
+
+def _mark_membership_dirty(session: Session, protocol_id: int) -> None:
+    deferred = session.info.get(_DEFERRED_MARKS_KEY)
+    if deferred is not None:
+        deferred.add(protocol_id)
+    else:
+        _write_membership_dirty(session, protocol_id)
+
+
+@contextmanager
+def defer_membership_dirty(session: Session) -> Iterator[None]:
+    """Write a fixpoint's queue marks once, in global protocol-id order.
+
+    A cascade can touch several protocols. Upserting their enrollment rows in
+    contract traversal order lets two concurrent cascades acquire the same rows
+    in opposite orders and deadlock. Keep the marks in the caller's transaction,
+    but issue them after the settled fixpoint in one stable order. A failed
+    fixpoint emits no marks and its caller rolls back its membership changes.
+    """
+    if _DEFERRED_MARKS_KEY in session.info:
+        yield
+        return
+    pending: set[int] = set()
+    session.info[_DEFERRED_MARKS_KEY] = pending
+    try:
+        yield
+        for protocol_id in sorted(pending):
+            _write_membership_dirty(session, protocol_id)
+    finally:
+        session.info.pop(_DEFERRED_MARKS_KEY, None)
 
 
 def promote(session: Session, *, contract: Contract, protocol_id: int) -> bool:

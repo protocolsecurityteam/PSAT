@@ -93,6 +93,7 @@ def _internal_creations(
     is then unresolvable and must not claim completeness. An empty answer is
     frozen in the PG cache only for a mature tx (``cache_empty``)."""
     found: list[DeployerCreation] = []
+
     for tx_hash, mature in sent_calls:
         try:
             data = etherscan.get(

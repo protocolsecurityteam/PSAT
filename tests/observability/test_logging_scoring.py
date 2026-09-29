@@ -241,9 +241,8 @@ class _Row:
 
 @pytest.fixture
 def _substituted_fold(monkeypatch):
-    """Substitute the three impure steps; the boundary is what is under test."""
-    state: dict[str, object] = {"universe": ProtocolUniverse(frozenset({"0xa"}), {}, "test"), "document": _document()}
-    monkeypatch.setattr(loop, "load_protocol_universe", lambda session, pid: state["universe"])
+    """Substitute fold and persistence; retired delivery loading is absent."""
+    state: dict[str, object] = {"document": _document()}
     monkeypatch.setattr(loop, "compute_protocol_score", lambda *a, **k: state["document"])
     monkeypatch.setattr(loop, "persist_score_document", lambda session, document: _Row())
     return state
@@ -263,10 +262,10 @@ def _score(caplog):
 def test_each_impure_step_is_timed_and_the_durations_reach_the_written_line(_substituted_fold, caplog):
     records = _score(caplog)
     phases = {r.phase for r in records if getattr(r, "phase", None)}
-    assert phases == {"universe_load", "fold", "persist"}
+    assert phases == {"fold", "persist"}
 
     written = next(r for r in records if r.message == "protocol score written")
-    assert set(written.durations_ms) == {"universe_load", "fold", "persist"}
+    assert set(written.durations_ms) == {"fold", "persist"}
     assert written.duration_ms_total == sum(written.durations_ms.values())
 
 
@@ -275,16 +274,13 @@ def test_one_summary_line_per_fold_carries_the_document(_substituted_fold, caplo
     summaries = [r for r in records if r.message == "score document summary"]
     assert len(summaries) == 1
     assert summaries[0].population_disposition == "scored"
-    assert summaries[0].universe_addresses == 1
+    assert summaries[0].universe_addresses is None
 
 
-def test_a_fail_closed_universe_warns_at_the_boundary(_substituted_fold, caplog):
-    _substituted_fold["universe"] = None
+def test_retired_delivery_loading_does_not_run_or_warn(_substituted_fold, caplog):
+    assert not hasattr(loop, "load_protocol_universe")
     records = _score(caplog)
-    warnings = [r for r in records if r.levelno == logging.WARNING and r.name == _LOOP_LOGGER]
-    assert len(warnings) == 1
-    assert "universe is not_determined" in warnings[0].message
-    assert warnings[0].protocol_id == 7
+    assert not [r for r in records if r.levelno >= logging.WARNING and r.name == _LOOP_LOGGER]
 
 
 def test_an_execution_evidence_fault_warns_with_its_reasons(_substituted_fold, caplog):
@@ -329,7 +325,7 @@ def test_the_cli_emits_the_same_summary_and_a_malformed_document_does_not_fail_i
         model_parameters={"confidence_detail": {"flow_pricing_decidable": {"ethereum::0x1": [None, 1]}}},
     )
     monkeypatch.setattr(cli, "distill_protocol_in_memory", lambda session, pid: [])
-    monkeypatch.setattr(cli, "load_protocol_universe", lambda session, pid: None)
+    assert not hasattr(cli, "load_protocol_universe")
     monkeypatch.setattr(cli, "compute_protocol_score", lambda *a, **k: document)
 
     with caplog.at_level(logging.INFO, logger="services.scoring.cli"):

@@ -26,27 +26,10 @@ from db.queue import create_job, get_artifact, store_artifact
 from schemas.control_tracking import ControlSnapshot, ControlTrackingPlan
 from services.clients.rpc import require_rpc_url
 from services.discovery.perimeter import queue_discovered_contracts
-from services.monitoring.asset_sweep import SweepOutcome
 from services.monitoring.balance_observation import (
-    NativeReading,
-    SweepRequest,
-    escalation_reason,
-    fetch_asset_page,
-    known_swept_assets,
-    known_typed_assets,
     observation_contract,
-    record_observation,
-    run_sweeps,
-    scanned_from_block,
-    sweep_from_block,
 )
-from services.monitoring.balance_reads import ObservationSubject, pinned_native_balances
-from services.monitoring.delivery_shape import (
-    discovered_request,
-    disposition_cost_note,
-    disposition_requests,
-    run_disposition,
-)
+from services.monitoring.balance_reads import ObservationSubject
 from services.monitoring.role_holder_cycle import (
     OUTCOME_GATE_CLOSED,
     OUTCOME_NO_REGISTRY,
@@ -71,7 +54,7 @@ from services.resolution.role_holder_plane import (
     resolve_role_holder_planes,
 )
 from services.resolution.tracking import build_control_snapshot
-from utils.balance_status import ASSET_SET_STATUS_FETCH_FAILED, BALANCE_WRITER_RESOLUTION
+from utils.balance_status import BALANCE_WRITER_RESOLUTION
 from utils.chains import UnknownChainError, chain_by_id, chain_enabled
 from utils.logging import record_degraded, record_stage_metric
 from workers.base import BaseWorker
@@ -338,6 +321,7 @@ class ResolutionWorker(BaseWorker):
             "resolution phase complete: recursive graph",
             extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "recursive_graph"},
         )
+        record_stage_metric("phase_ms_recursive_graph", int((time.monotonic() - t0) * 1000))
 
         graph_nodes = len(resolved_graph.get("nodes", [])) if resolved_graph else 0
         graph_edges = len(resolved_graph.get("edges", [])) if resolved_graph else 0
@@ -627,230 +611,38 @@ class ResolutionWorker(BaseWorker):
         chain_id: int,
         heartbeat: Callable[[], None] | None = None,
     ) -> None:
-        """Fetch ETH + token balances and store in contract_balances table.
+        """Bounded current holdings stay before effects; no history scans."""
+        from sqlalchemy.orm import sessionmaker
 
-        ``chain_id`` is required: it scopes every Etherscan v2 read to
-        the job's chain so an L2 job records L2 balances/prices, not mainnet
-        ones. A chainless balance fetch can no longer default to mainnet."""
-        from services.clients.etherscan import TokenBalancePage, get_eth_balance, get_native_price, parallel_get
-        from services.clients.rpc import rpc_url_for_chain_id
+        from services.monitoring.balance_collection import CollectionSubject, collect_balances
 
-        address = job.address
-        if not address or not contract_row:
+        if not job.address or contract_row is None:
             return
-
         request = job.request if isinstance(job.request, dict) else {}
-        # The address to READ. Which contract row the answer is FILED against is
-        # then decided by that address, not by the job — a proxy's holdings
-        # belong to the proxy's row. Filing them against the implementation's row
-        # is what let a later read at the implementation's own address win the
-        # native class and evict a real 19.06 ETH balance.
-        target_address = request.get("proxy_address") or address
         contract = observation_contract(
             session,
             fallback=contract_row,
             chain_id=chain_id,
-            requested_address=target_address,
+            requested_address=request.get("proxy_address") or job.address,
         )
-        observed_address = contract.address or target_address
-
-        self.update_detail(session, job, "Fetching token balances")
-        # One pinned native read first. A zero is only ever publishable as a
-        # PROVEN zero from here: Etherscan's ``account/balance`` is ``tag=latest``
-        # and its answer carries no height. Failure drops through to the unpinned
-        # path below, where the same zero is not_determined.
-        pinned_block, pinned_wei = pinned_native_balances([observed_address], chain_id=chain_id)
-
-        # Fan out the three Etherscan calls (eth balance, token balances, eth
-        # price). All three serialise on the global rate lock, so threading
-        # only stacks RTTs — the limiter is preserved.
-        results = parallel_get(
-            {
-                "eth_wei": (lambda: get_eth_balance(observed_address, chain_id=chain_id)),
-                "tokens": (lambda: fetch_asset_page(observed_address, chain_id=chain_id)),
-                "native_price": (lambda: get_native_price(chain_id)),
-            },
-            heartbeat=heartbeat,
+        target = CollectionSubject(ObservationSubject.of_contract(contract), chain_id)
+        factory = sessionmaker(bind=session.get_bind(), expire_on_commit=False)
+        self.update_detail(session, job, "Refreshing current balances")
+        # Release the pipeline connection before provider calls. Collection owns
+        # its small transactions; successful classes survive subsequent job errors.
+        session.commit()
+        report = collect_balances(
+            [target], writer=BALANCE_WRITER_RESOLUTION, session_factory=factory, heartbeat=heartbeat
         )
-
-        eth_wei_raw = results.get("eth_wei")
-        tokens_raw = results.get("tokens")
-        native_failed = isinstance(eth_wei_raw, BaseException)
-        tokens_failed = isinstance(tokens_raw, BaseException)
-        if native_failed or tokens_failed:
-            primary_exc = eth_wei_raw if native_failed else tokens_raw
-            assert isinstance(primary_exc, BaseException)
+        for name in ("attempted", "reused", "deferred", "committed", "failed", "partial"):
+            record_stage_metric("balance_" + name, getattr(report, name))
+        if report.failed or report.deferred or report.partial:
             record_degraded(
                 phase="balance_fetch",
-                exc=primary_exc,
-                context={
-                    "address": observed_address,
-                    "eth_failed": native_failed,
-                    "tokens_failed": tokens_failed,
-                },
+                exc=RuntimeError("balance inputs incomplete; durable retry scheduled"),
+                context={"failed": report.failed, "deferred": report.deferred, "partial": report.partial},
             )
-            logger.warning(
-                "Job %s: balance fetch failed: eth=%r tokens=%r",
-                job.id,
-                eth_wei_raw,
-                tokens_raw,
-            )
-        page = (
-            TokenBalancePage(
-                rows=[],
-                page_length=None,
-                status=ASSET_SET_STATUS_FETCH_FAILED,
-                pages_read=0,
-                basis="etherscan addresstokenbalance raised inside the parallel fan-out",
-            )
-            if tokens_failed
-            else cast(TokenBalancePage, tokens_raw)
-        )
-
-        # The pinned word wins when there is one; otherwise the unpinned answer,
-        # or nothing at all when the read failed. ``eth_wei is None`` is the
-        # not-known state and never becomes a zero.
-        eth_wei: int | None
-        native_block: int | None
-        if pinned_block is not None and observed_address.lower() in pinned_wei:
-            eth_wei = pinned_wei[observed_address.lower()]
-            native_block = pinned_block
-        else:
-            native_block = None
-            eth_wei = None if native_failed else cast(int, eth_wei_raw)
-
-        # Native gas balance, valued in this chain's OWN native coin: the
-        # symbol/name are the registry's native_asset, and the USD quote is that
-        # coin's price — an L2/alt-L1 balance is never labeled or priced as
-        # mainnet ETH.
-        native_asset = chain_by_id(chain_id).native_asset
-        if native_asset == "ETH":
-            native_symbol, native_name = "ETH", "Ether"
-        else:
-            native_symbol, native_name = native_asset, native_asset
-        native_price_raw = results.get("native_price")
-        native_price: float | None
-        if isinstance(native_price_raw, BaseException):
-            record_degraded(
-                phase="native_price_fetch",
-                exc=native_price_raw,
-                context={"address": observed_address, "chain_id": chain_id},
-            )
-            logger.warning("Job %s: native price fetch failed: %s", job.id, native_price_raw)
-            native_price = None
-        else:
-            native_price = cast(float, native_price_raw)
-
-        # THE HALVES FAIL INDEPENDENTLY, SO EACH IS PERSISTED INDEPENDENTLY.
-        # There is no early return here, and reinstating one would be a
-        # correctness bug rather than a shortcut: the fetch row's two statuses
-        # are per class, so returning on ``native_failed or tokens_failed``
-        # writes a row saying ``returned_assets`` (or ``proven_nonzero``) for the
-        # half that SUCCEEDED while persisting none of its rows. That row-less
-        # non-failed class then wins ``contract_balances_latest`` and withdraws
-        # every prior holding of it — an absence manufactured by the writer, and
-        # invisible to ``contracts_missing_current_rows``, which reads the status.
-        #
-        # The invariant every reader depends on: A NON-FAILED CLASS STATUS IS A
-        # PROMISE THAT THAT CLASS'S ROW SET WAS WRITTEN — possibly empty, when
-        # empty is what was observed (``proven_zero``, ``returned_empty``, or a
-        # page whose every entry was zero-balance), but never merely skipped.
-        # It is enforced in ``balance_observation.record_observation``, the one
-        # write point both producers go through.
-        subject = ObservationSubject.of_contract(contract)
-        escalation = escalation_reason(session, subject=subject, page=page)
-        sweeps: dict[ObservationSubject, SweepOutcome] = {}
-        sweep_cost = None
-        if escalation is not None and contract.address:
-            sweeps, sweep_cost = run_sweeps(
-                [
-                    SweepRequest(
-                        subject=subject,
-                        address=contract.address,
-                        chain_id=chain_id,
-                        from_block=sweep_from_block(session, subject=subject),
-                        reason=escalation,
-                        known_assets=known_swept_assets(session, subject=subject),
-                        known_typed=known_typed_assets(session, subject=subject),
-                        union_from_block=scanned_from_block(session, subject=subject),
-                    )
-                ],
-                rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
-            )
-
-        # THIRD PHASE, still before the write: how each unpriced holding
-        # ARRIVED. Scoped to this contract, but grouped by the account the
-        # readings were observed at — a proxy and its implementation that share
-        # one observed account are one holder here, and the evidence is filed
-        # where the deliveries actually landed.
-        if contract.protocol_id is not None:
-            discovered = discovered_request(
-                contract_id=contract.id,
-                chain_id=chain_id,
-                holder_address=observed_address,
-                page=page,
-                sweep=sweeps.get(subject),
-            )
-            disposition_cost = run_disposition(
-                session,
-                disposition_requests(
-                    session,
-                    protocol_id=contract.protocol_id,
-                    contract_ids={contract.id},
-                    discovered=[discovered] if discovered is not None else [],
-                ),
-                rpc_url_for=lambda cid: rpc_url_for_chain_id(cid),
-                # Refreshes the protocol-reference verdict for this contract's
-                # tokens alongside the delivery scan; the universe it is measured
-                # against is assembled on this side, never on a read path.
-                #
-                # This runs PER CONTRACT, and the universe is a per-PROTOCOL
-                # object: assembling one costs a measured 26.5 s of object
-                # storage, so a full re-resolution of this protocol's ~91
-                # contracts carrying unpriced tokens paid ~42 minutes to build
-                # the same answer 91 times. It is now assembled once per process
-                # and reused while the protocol's discovery extent is unchanged
-                # (``delivery_shape._protocol_universe``, which states which way
-                # a stale entry errs — larger, never shorter).
-                protocol_id=contract.protocol_id,
-            )
-            if disposition_cost.total:
-                # Logged, deliberately NOT folded into the fetch's ``cost_note``:
-                # that string is the SWEEP's cost carried onto the fetch record
-                # whose asset set the sweep produced, and this phase produced no
-                # part of that set.
-                logger.info("Job %s: disposition: %s", job.id, disposition_cost_note(disposition_cost))
-
-        recorded = record_observation(
-            session,
-            subject=subject,
-            chain_id=chain_id,
-            native=NativeReading(
-                wei=eth_wei,
-                block_number=native_block,
-                failed=native_failed and native_block is None,
-                price_usd=native_price,
-                symbol=native_symbol,
-                name=native_name,
-            ),
-            page=page,
-            writer=BALANCE_WRITER_RESOLUTION,
-            sweep=cast(SweepOutcome | None, sweeps.get(subject)),
-            escalation=escalation,
-            cost_note=(
-                f"cycle scan cost {sweep_cost.get_logs} getLogs + {sweep_cost.multicall} multicall + "
-                f"{sweep_cost.head_reads} head over 1 escalated contract"
-                if sweep_cost is not None
-                else None
-            ),
-        )
-        session.commit()
-        logger.info(
-            "Job %s: stored %d balance(s) for %s",
-            job.id,
-            len(recorded.rows),
-            observed_address,
-        )
+        session.expire_all()
 
     def _queue_discovered_contracts(self, session: Session, job: Job, resolved_graph: dict, rpc_url: str) -> None:
         """Queue analysis jobs for contracts found during resolution that have no existing job.

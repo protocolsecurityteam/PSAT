@@ -388,10 +388,8 @@ def test_sigterm_drains_inflight_jobs(mock_advance, mock_claim, mock_session_cls
 @patch("workers.base.signal.signal")
 @patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job")
-def test_sigterm_abandons_jobs_past_drain_timeout(mock_claim, mock_session_cls, mock_signal, monkeypatch):
-    """If in-flight jobs outlive the drain window, ``run_loop`` returns
-    anyway and logs the abandonment. The cross-worker stale-job sweep
-    recovers the abandoned rows on a sibling worker."""
+def test_sigterm_waits_for_jobs_even_past_stale_timeout(mock_claim, mock_session_cls, mock_signal, monkeypatch):
+    """An idle drain must never abandon work just because a stale timeout passed."""
     monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "1")
     # Force a short drain window for the test.
     monkeypatch.setattr("workers.base.STALE_JOB_TIMEOUT", 0)
@@ -432,10 +430,14 @@ def test_sigterm_abandons_jobs_past_drain_timeout(mock_claim, mock_session_cls, 
     try:
         assert started.wait(timeout=5.0), "worker did not start the claimed job"
         w._handle_sigterm(signal.SIGTERM, None)
-        runner.join(timeout=5.0)
+        runner.join(timeout=0.1)
 
-        assert not runner.is_alive(), "run_loop did not return after its zero-second drain timeout"
-        assert not finished.is_set(), "run_loop drained the in-flight job instead of abandoning it"
+        assert runner.is_alive(), "run_loop must wait for its live job"
+        assert not finished.is_set()
+        release.set()
+        runner.join(timeout=5.0)
+        assert finished.is_set()
+        assert not runner.is_alive()
     finally:
         # Drain the abandoned worker thread before yielding to the next test.
         release.set()

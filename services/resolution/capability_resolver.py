@@ -840,6 +840,7 @@ def _jobs_for_address(
     stmt = (
         select(Job)
         .where(func.lower(Job.address) == address.lower())
+        .where(Job.request["effects_resume_work_id"].astext.is_(None))
         .where(~Job.status.in_((JobStatus.failed, JobStatus.failed_terminal)))
         .order_by(Job.updated_at.desc(), Job.created_at.desc())
     )

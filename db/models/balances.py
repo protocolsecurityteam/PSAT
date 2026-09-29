@@ -136,6 +136,7 @@ class ContractBalanceFetch(Base):
     # no extent. It is also the cursor: the next cycle scans from here, which is
     # what keeps a full-history sweep a once-per-contract cost.
     swept_through_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     writer: Mapped[str] = mapped_column(String(32), nullable=False)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -197,6 +198,9 @@ class ContractBalance(Base):
     token_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     token_symbol: Mapped[str | None] = mapped_column(String(50), nullable=True)
     decimals: Mapped[int] = mapped_column(Integer, nullable=False, default=18)
+    decimals_known: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    price_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     raw_balance: Mapped[str] = mapped_column(String, nullable=False)  # stored as string to avoid overflow
     # 18 fractional digits because that is the resolution the QUANTITY is quoted
     # at: a cent-scaled column silently republished every sub-cent holding as
@@ -309,6 +313,9 @@ class ContractBalanceLatest(Base):
     token_name: Mapped[str | None] = mapped_column(String(255))
     token_symbol: Mapped[str | None] = mapped_column(String(50))
     decimals: Mapped[int] = mapped_column(Integer)
+    decimals_known: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    price_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     raw_balance: Mapped[str] = mapped_column(String)
     usd_value: Mapped[float | None] = mapped_column(Numeric(38, 18))
     price_usd: Mapped[float | None] = mapped_column(Numeric(38, 18))
@@ -554,6 +561,10 @@ class TvlSnapshot(Base):
     )
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="on_chain")
 
+    holdings_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    holdings_partial: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    valuation_partial: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
     __table_args__ = (Index("ix_tvl_snapshots_protocol_timestamp", "protocol_id", "timestamp"),)
 
 
@@ -589,6 +600,7 @@ class IndexedEventLog(Base):
             "transaction_index",
             "log_index",
         ),
+        Index("ix_indexed_event_logs_role_lookup", "chain_id", func.lower(event_address), "topic0", "block_number"),
         Index(
             "ix_indexed_event_logs_block",
             "chain_id",

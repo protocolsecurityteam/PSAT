@@ -7,6 +7,8 @@ re-exports the full former ``db.models`` module surface.
 
 from __future__ import annotations
 
+from .balance_collection import BalanceCollectionState
+from .balance_work import PendingEffectsWork
 from .balances import (
     CURSOR_BASIS_NOT_DETERMINED,
     DISAGREEMENTS_WITHHELD_SQL,
@@ -90,12 +92,14 @@ from .contracts import (
     UpgradeEvent,
     UpgradeTransaction,
 )
+from .indexer import IndexerWork
 from .jobs import (
     Artifact,
     Job,
     JobDependency,
     SourceFile,
 )
+from .lifecycle import WorkerLifecycle
 from .monitoring import (
     MonitoredContract,
     MonitoredEvent,
@@ -152,6 +156,8 @@ from .tokens import (
 )
 
 __all__ = [
+    "BalanceCollectionState",
+    "PendingEffectsWork",
     "ADMITTING_WITNESS_RULES",
     "AddressLabel",
     "Artifact",
@@ -213,6 +219,7 @@ __all__ = [
     "HOLDER_SET_EXHAUSTIVE_NOT_DETERMINED",
     "IndexedEventCursor",
     "IndexedEventLog",
+    "IndexerWork",
     "Job",
     "JobDependency",
     "JobStage",
@@ -268,6 +275,7 @@ __all__ = [
     "WITNESS_RULE_W6_LLAMA_SEED",
     "WatchedProxy",
     "WorkerHeartbeat",
+    "WorkerLifecycle",
     "derive_job_chain_id",
     "engine",
     "enrollment_basis_permits_exactness",

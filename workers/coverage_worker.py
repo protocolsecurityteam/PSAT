@@ -43,11 +43,13 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from db.models import Contract, Job, JobStage, JobStatus
+from services.worker_workload import custom_claim_statement
 from utils.logging import log_timed_phase, record_degraded, record_stage_metric
 from workers.base import BaseWorker
 
@@ -91,34 +93,27 @@ class CoverageWorker(BaseWorker):
         which is why the inner AND only guards on scope when text
         extraction ``succeeded``.
         """
+        from services.worker_lifecycle import claim_allowed
+
+        if not claim_allowed(session):
+            return None
         claim_id = session.execute(
-            text(
-                """
-                SELECT j.id
-                FROM jobs j
-                WHERE j.stage = 'coverage' AND j.status = 'queued'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM audit_reports ar
-                    WHERE ar.protocol_id = j.protocol_id
-                      AND (
-                        ar.text_extraction_status IS NULL
-                        OR ar.text_extraction_status = 'processing'
-                        OR (ar.text_extraction_status = 'success'
-                            AND (ar.scope_extraction_status IS NULL
-                                 OR ar.scope_extraction_status = 'processing'))
-                      )
-                  )
-                ORDER BY j.updated_at ASC
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
-                """
-            )
+            custom_claim_statement("coverage", stuck=False),
         ).scalar_one_or_none()
         if claim_id is None:
             return None
         job = session.get(Job, claim_id)
         if job is None:
             return None
+        from db.queue import DEFAULT_JOB_LEASE_TTL_S
+        from services.worker_lifecycle import note_claim
+
+        note_claim(session)
+        job.lease_id = uuid.uuid4()
+        session.execute(
+            text("UPDATE jobs SET lease_expires_at=now()+(:ttl * interval '1 second') WHERE id=:id"),
+            {"ttl": DEFAULT_JOB_LEASE_TTL_S, "id": job.id},
+        )
         job.status = JobStatus.processing
         job.worker_id = self.worker_id
         session.commit()
@@ -132,18 +127,12 @@ class CoverageWorker(BaseWorker):
         don't punish every contract in the protocol for it. Logs a
         warning so the wedge is visible in operational dashboards.
         """
+        from services.worker_lifecycle import claim_allowed
+
+        if not claim_allowed(session):
+            return None
         claim_id = session.execute(
-            text(
-                """
-                SELECT j.id
-                FROM jobs j
-                WHERE j.stage = 'coverage' AND j.status = 'queued'
-                  AND j.updated_at < (NOW() - (:timeout * INTERVAL '1 second'))
-                ORDER BY j.updated_at ASC
-                FOR UPDATE SKIP LOCKED
-                LIMIT 1
-                """
-            ),
+            custom_claim_statement("coverage", stuck=True),
             {"timeout": _STUCK_COVERAGE_TIMEOUT},
         ).scalar_one_or_none()
         if claim_id is None:
@@ -159,6 +148,15 @@ class CoverageWorker(BaseWorker):
             job.address or "?",
             _STUCK_COVERAGE_TIMEOUT,
             job.protocol_id,
+        )
+        from db.queue import DEFAULT_JOB_LEASE_TTL_S
+        from services.worker_lifecycle import note_claim
+
+        note_claim(session)
+        job.lease_id = uuid.uuid4()
+        session.execute(
+            text("UPDATE jobs SET lease_expires_at=now()+(:ttl * interval '1 second') WHERE id=:id"),
+            {"ttl": DEFAULT_JOB_LEASE_TTL_S, "id": job.id},
         )
         job.status = JobStatus.processing
         job.worker_id = self.worker_id

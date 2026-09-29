@@ -200,6 +200,7 @@ export function fmtBlockRate(perMin) {
 // falling-behind queue, or a stale-but-not-error daemon.
 export function daemonTone(d, rate) {
   if (d.status === "error") return "err";
+  if (d.status === "sleeping") return "idle";
   if (!d.last_beat_at || d.status === "unknown") return "mute";
   if (d.stale) return "warn";
   if (indexerLagging(d)) return "warn";
@@ -216,6 +217,7 @@ export function daemonPulse(d) {
 }
 
 export function pillSub(d, tone, rate) {
+  if (d.status === "sleeping") return "sleeping";
   // The two Option B health signals win the (tiny) pill sub when they fire.
   if (daemonStuck(d)) return "stuck";
   if (daemonFallingBehind(rate)) return fmtBacklogRate(rate.backlogPerMin);
@@ -258,7 +260,7 @@ export function watcherSub(w) {
 export function countUnhealthy(fleet) {
   const daemons = fleet?.daemons || [];
   let n = daemons.filter(
-    (d) => d.status === "error" || d.stale || indexerLagging(d) || daemonStuck(d),
+    (d) => d.status !== "sleeping" && (d.status === "error" || d.stale || indexerLagging(d) || daemonStuck(d)),
   ).length;
   if (fleet?.watchers && watcherStale(fleet.watchers)) n += 1;
   return n;

@@ -12,7 +12,7 @@ already carry such a cursor is operator tooling, kept outside the repo.)
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -114,6 +114,7 @@ def test_deferred_enrollment_is_requeued_not_reported_as_reconciled(db_session, 
             reason="policy_complete",
             dirty_at=claimed_at,
             lease_id=lease_id,
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=900),
         )
     )
     db_session.commit()

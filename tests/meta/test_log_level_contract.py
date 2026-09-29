@@ -73,10 +73,14 @@ PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
 # ``test_allow_list_entries_still_present`` below fails loudly when an entry
 # stops matching a real violation.
 ALLOW_LIST: dict[str, dict[int, str]] = {
+    "services/resolution/indexer_scheduler.py": {
+        88: "Indexer daemon has no job accumulator; failed enrollment remains in its durable retry queue.",
+        155: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
+    },
     "workers/discovery.py": {
         # Boot-time chain-enable sweep in main(): no job is claimed yet, so no
         # accumulator is bound and record_degraded would be a no-op.
-        1242: "Boot-time sweep failure; runs before any job context exists.",
+        1252: "Boot-time sweep failure; runs before any job context exists.",
     },
     "workers/policy_worker.py": {
         # Reanalysis-completion notifier: the reanalysis itself completed
@@ -91,7 +95,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # side-effect (port/memory), not a degradation of the stage's verdict
         # output. record_degraded would mislead /monitor into flagging a healthy
         # job's effects stage as degraded.
-        628: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
+        634: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
     },
     "services/effects/anvil.py": {
         # Same fork-close-cleanup exemption class as the effects_worker entry
@@ -105,7 +109,7 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # process. A malformed cap is a deployment misconfiguration, not a
         # per-job partial outcome, and recording it would stamp every job's
         # stage_errors with the same process-level fact.
-        60: "Process-level env parse; a bad cap is a misconfiguration, not a per-job degradation.",
+        62: "Process-level env parse; a bad cap is a misconfiguration, not a per-job degradation.",
     },
 }
 

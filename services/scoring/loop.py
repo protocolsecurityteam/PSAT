@@ -52,7 +52,7 @@ from sqlalchemy.orm import Session
 from db.queue import HEARTBEAT_PROTOCOL_SCORE, record_heartbeat
 from services.monitoring import emit_monitor_cycle
 from services.scoring.dirty import SCORE_DIRTY_STALENESS_SWEEP
-from services.scoring.distill import ProtocolUniverse, load_protocol_universe
+from services.scoring.distill import ProtocolUniverse
 from services.scoring.fold import compute_protocol_score
 from services.scoring.persist import persist_score_document
 from services.scoring.schema import ScoreDocument
@@ -430,17 +430,7 @@ def score_protocol(session: Session, due: DueProtocol) -> Any:
     """
     computed_at = session.execute(select(func.clock_timestamp())).scalar_one()
     durations: dict[str, int] = {}
-    # Assembled before the fold because it reads object storage and the fold's
-    # planes may not. ``None`` is the fail-closed answer to an unreadable source
-    # artifact and disposes nothing.
-    with log_timed_phase(logger, "universe_load", durations_ms=durations, protocol_id=due.protocol_id) as phase:
-        universe = load_protocol_universe(session, due.protocol_id)
-        phase["universe_addresses"] = len(universe.addresses) if universe is not None else None
-    if universe is None:
-        logger.warning(
-            "protocol score universe is not_determined: every disposition refuses",
-            extra={"protocol_id": due.protocol_id, "trigger": due.trigger},
-        )
+    universe = None  # Delivery classification no longer participates in scoring.
     with log_timed_phase(logger, "fold", durations_ms=durations, protocol_id=due.protocol_id):
         document = compute_protocol_score(
             session,

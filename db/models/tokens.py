@@ -47,7 +47,9 @@ class TokenDeliveryEvidence(Base):
       the protocol whose producer happened to measure it, and nothing here is
       protocol-scoped.
 
-    **The EVIDENCE accretes.** ``delivery_count`` and ``unreadable_deliveries``
+    **Within one anchored history, the EVIDENCE accretes.** A changed checkpoint
+    invalidates the aggregate and the scanner rebuilds it before extending it.
+    ``delivery_count`` and ``unreadable_deliveries``
     only rise, ``min_fan_out`` only falls, ``measured_through_block`` only
     advances, and ``scanned_from_block`` is written once at insert and never
     again. So the set the all-quantifier ranges over only ever grows: a later
@@ -107,6 +109,9 @@ class TokenDeliveryEvidence(Base):
     # else would claim completeness over blocks nobody scanned.
     scanned_from_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
     measured_through_block: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Anchor the aggregate to canonical history; legacy NULL rows must be rebuilt
+    # before a scanner can safely extend or skip them.
+    measured_through_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     # ``[{tx, block, log_index, fan_out, fan_out_basis}]`` — a BOUNDED sample of
     # the delivering transactions, each carrying the count of same-token transfer
     # LOGS measured from that transaction's own receipt. ``fan_out`` is null

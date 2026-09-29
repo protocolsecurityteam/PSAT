@@ -524,7 +524,7 @@ class TestSnapshotDoesNotPublishAFailedReadAsMoney:
         db_session.commit()
         assert contracts_missing_current_rows(db_session, [c.id]) == set()
         _breakdown, partial = _read_existing_balances(db_session, proto.id)
-        assert partial is False
+        assert partial is True  # Legacy observation times are unknown.
 
 
 @requires_postgres
@@ -1177,3 +1177,18 @@ class TestValuePlaneReadsEntityKeyedSheets:
         key = f"ethereum::{stranger.lower()}"
         assert plane.sheet_state(key) == P.SHEET_NO_ROWS
         assert plane.total(key) is None
+
+
+@requires_postgres
+def test_token_only_refresh_preserves_previous_native_zero_evidence(db_session):
+    from services.scoring import planes as P
+
+    proto = _protocol(db_session, "native-zero-token-only")
+    contract = _contract(db_session, proto.id, _addr("f1"))
+    _fetch(db_session, contract, native=NATIVE_STATUS_PROVEN_ZERO, block=25643300)
+    _fetch(db_session, contract, native="unattempted", assets=ASSET_SET_STATUS_RETURNED_ASSETS)
+    db_session.commit()
+    plane = P.load_value_plane(db_session, proto.id)
+    state = P.native_value_state(plane, f"ethereum::{contract.address}")
+    assert state.state == "proven_zero"
+    assert state.value == 0.0

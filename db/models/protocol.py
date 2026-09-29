@@ -61,6 +61,7 @@ class Protocol(Base):
     # Set to NOW() each time the enrollment reconciler successfully drains this
     # protocol. The K-per-tick slow sweep enqueues the least-recently-reconciled
     # protocols (NULLS FIRST) so drift from unknown write sites still converges.
+    last_balance_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_enrollment_reconcile_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     audit_reports: Mapped[list["AuditReport"]] = relationship(

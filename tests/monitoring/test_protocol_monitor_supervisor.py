@@ -362,6 +362,10 @@ def test_main_flag_dispatch(monkeypatch, argv, patch_targets, expected):
     main()
 
     for label, exp in expected.items():
+        if label == "rec":
+            stop_event = seen[label][1].pop("stop_event")
+            assert isinstance(stop_event, threading.Event)
+            assert not stop_event.is_set()
         assert seen.get(label) == exp
 
 

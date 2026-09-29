@@ -60,7 +60,7 @@ from workers.event_log_indexer import (
     _witness_seed_block,
     enroll_event_cursor,
     enroll_from_tracked_topics,
-    index_event_group_step,
+    index_event_group_steps,
 )
 
 # The lane-D specimen: 0x3994741a…, whose code is empty at 20265588 and present
@@ -691,7 +691,7 @@ def test_unreadable_page_downgrades_the_cursor_never_completes(db_session, monke
         enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT,
     )
     db_session.commit()
-    index_event_group_step(
+    for _ in index_event_group_steps(
         db_session,
         chain_id=1,
         event_address=_ADDR,
@@ -700,8 +700,8 @@ def test_unreadable_page_downgrades_the_cursor_never_completes(db_session, monke
         target=_SEED + 5_000,
         block_hash_fetcher=_NoHash(),
         max_block_span=1_000,
-    )
-    db_session.commit()
+    ):
+        db_session.commit()
     cursor = _row(db_session, topic0=_TOPIC_DENY_TO)
     assert cursor.max_window_log_count is None
     assert cursor.window_stats_basis == "not_determined"
@@ -855,7 +855,7 @@ def test_advancing_records_page_stats_or_downgrades(db_session, fetcher, expecte
     )
     db_session.commit()
     assert _row(db_session, topic0=_TOPIC_DENY_TO).window_stats_basis == WINDOW_STATS_CONTINUOUS
-    index_event_group_step(
+    for _ in index_event_group_steps(
         db_session,
         chain_id=1,
         event_address=_ADDR,
@@ -864,8 +864,8 @@ def test_advancing_records_page_stats_or_downgrades(db_session, fetcher, expecte
         target=_SEED + 5_000,
         block_hash_fetcher=_NoHash(),
         max_block_span=1_000,
-    )
-    db_session.commit()
+    ):
+        db_session.commit()
     cursor = _row(db_session, topic0=_TOPIC_DENY_TO)
     assert cursor.max_window_log_count == expected_max
     assert cursor.window_stats_cap == expected_cap

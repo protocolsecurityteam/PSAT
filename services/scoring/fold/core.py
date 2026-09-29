@@ -105,12 +105,8 @@ def compute_protocol_score(
     path — the population comes from the one pinned query and from nowhere else,
     so no caller can hand the fold a filtered or re-ordered population.
 
-    ``universe`` is the protocol's discovered address set, built in ``distill``
-    because assembling it reads object storage and this fold may not. UNSET is
-    the fail-closed default and it means no reading is disposed anywhere: the
-    predicate it feeds condemns what is ABSENT from the set, so an absent set
-    would condemn everything. Every hand-built plane in the suite relies on that
-    default, and so does every caller that has no storage to read.
+    ``universe`` is a legacy compatibility argument; delivery classification
+    no longer participates in the balance input.
     """
     row_faults: list[dict[str, Any]] = []
     if signals is None:

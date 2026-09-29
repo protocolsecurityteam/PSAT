@@ -162,10 +162,8 @@ const SHEET_STATE_LABELS = {
   unpriced: "unpriced",
   proven_empty: "proven empty",
   no_rows: "nothing observed",
-  // 1.4.0. Every recorded delivery of this sheet's remaining holdings was a
-  // mass distribution. A DELIVERY shape, never a worth claim — real tokens are
-  // airdropped too — so the word is "airdrop-delivered" and never "spam".
-  airdrop_determined: "airdrop-delivered",
+  // Legacy documents retain an explicit unknown-value label during migration.
+  airdrop_determined: "unpriced (legacy classification)",
 };
 
 const CEILING_REASON_LABELS = {
@@ -176,7 +174,7 @@ const CEILING_REASON_LABELS = {
   unpriced: "unpriced",
   asset_list_truncated: "asset list cut off",
   alias_ambiguous: "alias ambiguous",
-  airdrop_determined: "airdrop-delivered",
+  airdrop_determined: "unpriced (legacy classification)",
 };
 
 function label(table, token) {
@@ -193,45 +191,9 @@ export function ceilingReasonLabel(reason) {
   return label(CEILING_REASON_LABELS, reason);
 }
 
-const AIRDROP_DETERMINED = "airdrop_determined";
-
-// The backend's own claim, not a weaker paraphrase of it. The superseded
-// sentence said the holdings "are not presented as positions this protocol
-// holds", which describes what the PAGE does and leaves a reader to infer the
-// figure covers them. It does not: the assets are still held, and this document
-// values none of them.
-const AIRDROP_NOTE =
-  "the figure totals what this document PRICES at these nodes; the holdings behind it are STILL HELD and their " +
-  "worth is not_determined here — every delivery of them on record was a mass distribution, which is a claim " +
-  "about how they arrived and never about what they are worth";
-
-// The disposed part of a row's sheet ceilings, or `null` where there is none.
-//
-// `usd` is the sum of what the disposed entries PUBLISHED, and it is a real
-// measured figure — normally 0, because a sheet whose remaining holdings are all
-// airdrop-delivered has nothing left to price. It is carried so the page can
-// render "$0 · airdrop-delivered" rather than a bare zero: a zero with no reason
-// beside it reads as "this reaches nothing", which is a different claim and one
-// nobody proved. A published entry with no number gets `usd: null`, which the
-// cell renders as not-determined rather than as another zero.
-export function sheetDisposition(finding) {
-  const records = (finding?.reach_sheet_ceiling_magnitudes || []).filter(
-    (r) => r?.sheet_state === AIRDROP_DETERMINED || r?.ceiling_reason === AIRDROP_DETERMINED,
-  );
-  if (!records.length) return null;
-  const numbers = records.map((r) => r?.published_usd).filter((v) => typeof v === "number" && Number.isFinite(v));
-  const usd = numbers.length === records.length ? numbers.reduce((sum, v) => sum + v, 0) : null;
-  return {
-    count: records.length,
-    entities: records.map((r) => r?.entity).filter(Boolean),
-    usd,
-    // `$0` is printed exactly, not routed through the compact formatter: a
-    // disposed sheet's figure is small on purpose and rounding it away would
-    // hide the one number the label is attached to.
-    usdText: usd === null ? null : usd === 0 ? "$0" : usdCompact(usd),
-    label: sheetStateLabel(AIRDROP_DETERMINED),
-    reason: AIRDROP_NOTE,
-  };
+// Legacy delivery classifications never establish a dollar amount.
+export function sheetDisposition() {
+  return null;
 }
 
 // ── functions / targets ─────────────────────────────────────────────────────

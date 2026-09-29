@@ -39,7 +39,7 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -61,6 +61,12 @@ from db.effect_cache import (
 from db.models import EffectBehaviorCache, EffectiveFunction, EffectVerdict, Job, JobStage
 from db.queue import advance_job, store_artifact
 from services.effects import claims_bridge
+from services.effects.balance_dependencies import (
+    DEPENDENT_FAMILIES,
+    finish_work,
+    prepare_work,
+    reconcile_pending_effects,
+)
 from services.effects.config import (
     EFFECT_CLASS_VALUE_OUT,
     SCOPE_KERNEL,
@@ -644,6 +650,14 @@ class EffectsWorker(BaseWorker):
 
     # -- main entry --------------------------------------------------------
 
+    def _claim_job(self, session: Session) -> Job | None:
+        now = time.monotonic()
+        if now - getattr(self, "_last_balance_reconcile", float("-inf")) >= 60:
+            reconcile_pending_effects(session)
+            session.commit()
+            self._last_balance_reconcile = now
+        return super()._claim_job(session)
+
     def process(self, session: Session, job: Job) -> None:
         try:
             self._process(session, job)
@@ -666,9 +680,29 @@ class EffectsWorker(BaseWorker):
             candidates = self._select(session, job, funnel=counters.selection_funnel)
             # ``selection_selected`` IS the candidate count — no second spelling.
             ph.update(counters.selection_fields())
+        self._balance_work = {}
+        if candidates and isinstance(job.protocol_id, int):
+            self._balance_work = prepare_work(
+                session,
+                candidates,
+                protocol_id=job.protocol_id,
+                chain_id=_chain_id_for_job(job),
+                job_id=job.id,
+            )
+            if self._balance_work:
+                session.commit()
         counters.candidates_in = len(candidates)
 
         if not candidates:
+            resume_id = (job.request or {}).get("effects_resume_work_id")
+            if resume_id:
+                from db.models.balance_work import PendingEffectsWork
+
+                work = session.get(PendingEffectsWork, resume_id)
+                if work is not None and work.queued_job_id == job.id:
+                    work.state = "complete"
+                    work.reason = "not_applicable"
+                    work.queued_job_id = None
             # Inert, wire-free: emit the remaining phase spans for a complete
             # timeline and write zero metrics. No seam is ever constructed.
             for phase in _PHASES_AFTER_SELECTION:
@@ -699,7 +733,6 @@ class EffectsWorker(BaseWorker):
 
         # tier1_probes / tier2_fork → run recipes for misses + audit re-runs.
         self._run_probes(items, durations_ms, counters, seams)
-
         # verdict_write → cache + state-plane persistence + discrepancy routing,
         # then mint proven verdicts into registry claims on the matching
         # effective_functions rows — same job, same rows, same phase span so the
@@ -714,6 +747,7 @@ class EffectsWorker(BaseWorker):
         # outside the phase span: it writes no verdict and adds no stage to the
         # /monitor timeline.
         self._distill_score_signals(session, job)
+        finish_work(session, self._balance_work, job_id=job.id)
 
         self._record_seed_metrics(counters)
         self._record_metrics(counters)
@@ -779,7 +813,31 @@ class EffectsWorker(BaseWorker):
         # No address ⇒ a company/root job, which owns no contract of its own; it
         # falls back to protocol-wide selection so such a job still covers the
         # protocol rather than planning nothing.
-        return select_candidates(session, protocol_id, resource_cap=_resource_cap(), scope=scope, funnel=funnel)
+        resume_ids = (job.request or {}).get("effects_function_ids")
+        if resume_ids:
+            # Explicit recovery bypasses ownership and empty-plan markers, but is
+            # narrowed to exactly the durable function dependency on this chain.
+            candidates = select_candidates(
+                session,
+                protocol_id,
+                scope=None,
+                funnel=funnel,
+                chain_id=_chain_id_for_job(job),
+                function_ids=resume_ids,
+            )
+            from db.models.balance_work import PendingEffectsWork
+
+            work = session.get(PendingEffectsWork, (job.request or {}).get("effects_resume_work_id"))
+            if work is not None and work.effect_family in DEPENDENT_FAMILIES:
+                candidates = [replace(c, restrict_families=frozenset({work.effect_family})) for c in candidates]
+            return candidates
+        return select_candidates(
+            session,
+            protocol_id,
+            resource_cap=_resource_cap(),
+            scope=scope,
+            funnel=funnel,
+        )
 
     def _preflight(self, seams: _Seams, durations_ms: dict[str, int]) -> tuple[bool, int]:
         """Capability probe + the ONE ``eth_blockNumber`` that pins every Tier-1
@@ -971,6 +1029,14 @@ class EffectsWorker(BaseWorker):
                         "function_ids_sample": no_hash_candidates[:_NO_HASH_SAMPLE],
                     },
                 )
+            unclean_contracts.update(
+                c.contract_id
+                for c in candidates
+                if any(
+                    fid == c.function_id and r.state != "complete"
+                    for (fid, _), r in getattr(self, "_balance_work", {}).items()
+                )
+            )
             self._mark_empty_planning(
                 session, job, planned_per_contract, unclean_contracts, contracts_with_plans, counters
             )
@@ -998,6 +1064,15 @@ class EffectsWorker(BaseWorker):
                         contract_surface_hash=surface,
                         gate_ref=plan.gate_ref,
                     )
+                work = getattr(self, "_balance_work", {}).get((cand.function_id, plan.effect_class))
+                if (
+                    job is not None
+                    and (job.request or {}).get("effects_resume_work_id")
+                    and work is not None
+                    and work.queued_job_id == job.id
+                ):
+                    # Replay only the selected collection dependency with its new inputs.
+                    cached = None
                 # First re-encounter of a shared hash (writer left audit_status
                 # None) triggers the self-audit re-simulation.
                 needs_audit = cached is not None and cached.audit_status is None
@@ -1296,7 +1371,16 @@ class EffectsWorker(BaseWorker):
         session.flush()
         try:
             with session.begin_nested():
-                grouped = distill_job_signals(session, job)
+                resume_id = (job.request or {}).get("effects_resume_work_id")
+                if resume_id:
+                    from db.models.balance_work import PendingEffectsWork
+
+                    resumed_work = session.get(PendingEffectsWork, int(resume_id))
+                    if resumed_work is None:
+                        raise RuntimeError("effects recovery dependency disappeared")
+                    grouped = distill_job_signals(session, job, contract_ids=[resumed_work.contract_id])
+                else:
+                    grouped = distill_job_signals(session, job)
         except Exception as exc:
             # A real degradation, not a side-effect: this job's contracts are
             # now absent from the fold's population, so the protocol's next

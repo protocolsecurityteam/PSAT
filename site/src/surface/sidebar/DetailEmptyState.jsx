@@ -282,6 +282,15 @@ export function DetailEmptyState({
         </span>
       </div>
 
+      {companyData.analysis_pending_balance_effects?.incomplete > 0 && (
+        <div className="ps-glance-card" role="status">
+          {companyData.analysis_pending_balance_effects.incomplete} balance-dependent analysis checks incomplete
+          {companyData.analysis_pending_balance_effects.degraded > 0
+            ? ` · ${companyData.analysis_pending_balance_effects.degraded} await recovery after retries`
+            : " · awaiting required observations"}
+        </div>
+      )}
+
       <GlanceScoreCard
         companyName={companyName}
         scoreDoc={scoreDoc}
@@ -351,9 +360,14 @@ export function DetailEmptyState({
         <div className="ps-glance-card">
           {tvlUsd != null && (
             <div className="ps-glance-vhead">
-              <span className="ps-glance-tvl">{formatUsd(tvlUsd)}</span>
+              <span className="ps-glance-tvl">{formatUsd(tvlUsd) || "$0.00"}</span>
               <span className="ps-glance-vsrc">
-                {["TVL", tvlSource, tvl?.timestamp ? shortDate(tvl.timestamp) : null]
+                {["TVL", tvlSource,
+                  tvlSource === "tracked" && tvl?.holdings_partial !== false ? "coverage partial/unknown" : null,
+                  tvlSource === "tracked" && tvl?.valuation_partial !== false ? "valuation partial/unknown" : null,
+                  tvlSource === "tracked"
+                    ? (tvl?.holdings_observed_at ? shortDate(tvl.holdings_observed_at) : "observation time unknown")
+                    : (tvl?.timestamp ? shortDate(tvl.timestamp) : null)]
                   .filter(Boolean)
                   .join(" · ")}
               </span>

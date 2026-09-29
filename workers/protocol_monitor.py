@@ -302,8 +302,9 @@ def main():
         return
 
     if args.reconcile:
-        signal.signal(signal.SIGTERM, handle_signal)
-        signal.signal(signal.SIGINT, handle_signal)
+        stop_event = threading.Event()
+        signal.signal(signal.SIGTERM, lambda *_: stop_event.set())
+        signal.signal(signal.SIGINT, lambda *_: stop_event.set())
         from services.monitoring.reconciler import (
             DEFAULT_RECONCILE_INTERVAL_S,
             RECONCILER_FALLBACK_CHAIN,
@@ -318,7 +319,9 @@ def main():
             interval,
             RECONCILER_FALLBACK_CHAIN,
         )
-        run_enrollment_reconciler_loop(args.rpc_url, RECONCILER_FALLBACK_CHAIN, interval=interval)
+        run_enrollment_reconciler_loop(
+            args.rpc_url, RECONCILER_FALLBACK_CHAIN, interval=interval, stop_event=stop_event
+        )
         return
 
     if args.poll:

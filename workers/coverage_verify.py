@@ -172,6 +172,11 @@ class CoverageVerifyWorker:
         them; they accumulate as orphaned ``pending`` rows but never
         gate the worker. Cleanup of the orphans is a follow-up.
         """
+        from services.worker_lifecycle import claim_allowed, note_claim
+
+        if not claim_allowed(session):
+            return []
+
         result = session.execute(
             text(
                 """
@@ -196,6 +201,7 @@ class CoverageVerifyWorker:
         )
         ids = [row[0] for row in result]
         if ids:
+            note_claim(session)
             session.commit()
         else:
             session.rollback()

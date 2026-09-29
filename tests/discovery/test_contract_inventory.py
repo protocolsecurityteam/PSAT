@@ -17,6 +17,7 @@ from services.discovery.inventory import (
     _group_multi_deployments,
     search_protocol_inventory,
 )
+from services.discovery.inventory_domain import CHAIN_IDS
 from services.discovery.inventory_extract import (
     extract_inventory_entries_from_page_text,
 )
@@ -29,6 +30,12 @@ def _stub_inventory_search(monkeypatch):
     search/LLM results override these in-body."""
     monkeypatch.setattr("services.discovery.inventory._tavily_search", lambda *a, **k: [])
     monkeypatch.setattr("services.discovery.inventory._llm_select_domain", lambda *a, **k: (None, []))
+
+
+@pytest.fixture
+def _all_inventory_chains_enabled(monkeypatch):
+    """The resolver only probes allowlisted chains; multichain tests need them all."""
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", ",".join(str(i) for i in CHAIN_IDS.values()))
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +624,7 @@ class TestGroupMultiDeployments:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("_all_inventory_chains_enabled")
 class TestResolveUnknownChains:
     def test_resolves_unknown_to_correct_chain(self, monkeypatch):
         """Contracts with chains=["unknown"] get resolved via batch RPC probing."""
@@ -704,6 +712,23 @@ class TestResolveUnknownChains:
 # ---------------------------------------------------------------------------
 
 
+def test_resolver_skips_chains_off_the_allowlist(monkeypatch):
+    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
+    probed: list[str] = []
+
+    def fake_batch_get_code(rpc_url, addresses):
+        probed.append(rpc_url)
+        return {a: "0x" for a in addresses}
+
+    monkeypatch.setattr("services.discovery.chain_resolver._batch_get_code", fake_batch_get_code)
+
+    resolve_unknown_chains([{"name": "U", "address": "0x" + "b" * 40, "chains": ["unknown"]}])
+
+    assert probed == ["https://erpc-proxy.example/main/evm/1"]
+
+
+@pytest.mark.usefixtures("_all_inventory_chains_enabled")
 class TestEvidenceBasedChainMembership:
     @staticmethod
     def _record_probed_chain_ids(monkeypatch) -> list[str]:
@@ -919,6 +944,7 @@ class TestEnrichWithActivity:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("_all_inventory_chains_enabled")
 class TestOrchestratorIntegration:
     def test_pipeline_with_chain_resolution(self, monkeypatch):
         """End-to-end: entries → build → chain resolve → group → output.

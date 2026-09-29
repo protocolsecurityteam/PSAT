@@ -374,7 +374,10 @@ def test_run_loop_folds_recorded_metrics_into_artifact(monkeypatch):
 
     timing = next((data for name, data in writes if name == "stage_timing_static"), None)
     assert timing is not None, "stage_timing_static artifact was not written"
-    assert timing["metrics"] == {"dependencies": 5, "is_proxy": True}
+    assert timing["metrics"]["dependencies"] == 5
+    assert timing["metrics"]["is_proxy"] is True
+    assert timing["metrics"]["process_rss_peak_sampled_bytes"] >= timing["metrics"]["process_rss_start_bytes"]
+    assert timing["metrics"]["process_rss_peak_sampled_bytes"] >= timing["metrics"]["process_rss_end_bytes"]
     # Contextvar must be reset after the job — no leak into the next claim.
     assert stage_metrics_var.get() is None
 

@@ -132,11 +132,8 @@ describe("ScoreBand — computed grade", () => {
     expect(container.querySelectorAll(".sc-frow")).toHaveLength(28);
   });
 
-  it("renders a disposed sheet as $0 WITH its delivery-shape reason, never as a bare zero", async () => {
-    // 1.4.0. A sheet whose remaining holdings all arrived by mass distribution
-    // publishes a $0 ceiling. A bare $0 in this cell reads as "this reaches
-    // nothing" — a different claim, and one nobody proved — so the figure is
-    // rendered with its reason attached, and the reason is about DELIVERY.
+  it("does not render a retired delivery-derived zero badge", async () => {
+    // Old documents can still contain this retired classification.
     const disposed = {
       ...ETHERFI,
       findings: ETHERFI.findings.map((f, i) =>
@@ -161,16 +158,7 @@ describe("ScoreBand — computed grade", () => {
     await openBreakdown();
     const cells = [...container.querySelectorAll(".sc-val")];
     const badge = cells.map((c) => within(c).queryByText(/airdrop-delivered/i)).find(Boolean);
-    expect(badge).toBeTruthy();
-    expect(badge.textContent).toContain("$0");
-    expect(badge.getAttribute("title")).toMatch(/mass distribution/i);
-    // Never a claim about worth: real tokens arrive this way too.
-    for (const word of [/spam/i, /scam/i, /junk/i, /worthless/i]) {
-      expect(badge.getAttribute("title")).not.toMatch(word);
-    }
-    // And the badge is never blank — an unlabelled zero is the shape this
-    // replaces.
-    expect(badge.textContent.trim()).not.toBe("");
+    expect(badge).toBeFalsy();
   });
 
   it("grows no disposition badge where the shipped document names none", async () => {

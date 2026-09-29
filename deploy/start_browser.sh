@@ -3,6 +3,7 @@
 # Isolated because Chromium's RAM profile is much heavier than the
 # other queue workers — sharing a VM risks OOMing everything together.
 set -e
+unset PSAT_WORKER_LIFECYCLE_TOKEN
 
 cd "$(dirname "$0")/.."
 
