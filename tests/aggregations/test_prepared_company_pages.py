@@ -365,7 +365,11 @@ def test_encode_is_bounded_and_json_equivalent(monkeypatch):
         pages.encode({})
 
 
-@pytest.mark.parametrize("body", [b"invalid gzip", gzip.compress(b"x" * 100)])
+@pytest.mark.parametrize(
+    "body",
+    [b"invalid gzip", gzip.compress(b"x" * 100, mtime=0)],
+    ids=["corrupt-gzip", "oversized-json"],
+)
 def test_identity_decode_corruption_or_oversize_falls_back(prepared, monkeypatch, body):
     session, protocol, factory = prepared
     assert worker.refresh_one(factory) == "prepared"
