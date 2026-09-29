@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from sqlalchemy import tuple_
 from sqlalchemy.orm import Session
@@ -26,10 +26,6 @@ from utils.balance_status import (
     STATUS_UNATTEMPTED,
     SWEEP_STATUS_COMPLETED,
 )
-
-if TYPE_CHECKING:
-    from services.scoring.distill import ProtocolUniverse
-
 
 # --- what one (entity, asset) reading proves ---------------------------------
 # ``usd_value`` is a scaled decimal column, so a 0.00 reading may be its STORAGE
@@ -188,8 +184,8 @@ class ValuePlane:
     # accounts the evidence was held at, and the carriers' own basis strings.
     # Everything a narration says about a disposition derives from these fields,
     # so a published sentence quotes the evidence rather than a claim authored
-    # beside it. Empty unless a universe was supplied to the loader: no universe,
-    # no condemnation.
+    # beside it. Nothing populates it since delivery classification was retired,
+    # so it is always empty.
     asset_disposition: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
     annotations: list[dict[str, Any]] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
@@ -805,8 +801,8 @@ def load_entity_alias(session: Session, protocol_id: int) -> tuple[dict[str, str
     return alias, ambiguous
 
 
-def load_value_plane(session: Session, protocol_id: int, *, universe: ProtocolUniverse | None = None) -> ValuePlane:
-    """Load current balances under existing valuation rules; universe is a legacy argument."""
+def load_value_plane(session: Session, protocol_id: int) -> ValuePlane:
+    """Load current balances under existing valuation rules."""
     from db.models import Contract, ContractBalanceFetch, ContractBalanceLatest, RestakingPositionLatest
     from services.monitoring.balance_reads import (
         ObservationSubject,

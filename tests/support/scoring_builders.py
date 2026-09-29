@@ -314,10 +314,7 @@ def fold(monkeypatch):
         ``tests/scoring/test_three_arm_composition.py``.
         """
         monkeypatch.setattr(P, "discovery_relation_entities", lambda s, p: discovery or {})
-        # ``universe`` is accepted and ignored: a hand-built plane carries
-        # whatever disposition its own builder set, and the fold's default is
-        # None anyway, so no test plane is disposed by accident.
-        monkeypatch.setattr(P, "load_value_plane", lambda s, p, universe=None: value or value_plane())
+        monkeypatch.setattr(P, "load_value_plane", lambda s, p: value or value_plane())
         monkeypatch.setattr(P, "load_control_closure", lambda s, p: closure_of(closure))
         monkeypatch.setattr(P, "load_condition_plane", lambda s, p: conditions or condition_plane())
         monkeypatch.setattr(P, "load_conferral_plane", lambda s, p: conferral or conferral_plane())
