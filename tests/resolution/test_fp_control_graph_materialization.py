@@ -538,34 +538,27 @@ def test_the_ledger_never_names_an_uncommitted_row(db_session, anchor, monkeypat
         assert entry["address"] in {a.lower() for a in seen}
 
 
-def test_the_idempotence_key_ignores_origin_and_label(db_session, anchor, monkeypatch):
-    """The key is ``(chain, lower(address), contract_id, deployment_scope)``. Re-minting
-    after the FP rows change ORIGIN must still find the node."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    timelock = _addr()
-    _fp(db_session, contract, timelock, resolved_type="timelock", name="a")
-
-    _mint(db_session, contract)
-    _fp(db_session, contract, timelock, resolved_type="timelock", name="b", origin="something:else")
-    second, _payloads = _mint(db_session, contract)
-
-    assert len(_nodes(db_session, contract, timelock)) == 1
-    assert second["out_of_population"] == [{"address": timelock, "reason": "existing_node"}]
-
-
-def test_a_checksummed_fp_address_dedups_against_the_lowercase_node(db_session, anchor, monkeypatch):
+@pytest.mark.parametrize(
+    ("second_address", "second_origin"),
+    [
+        # The key is ``(chain, lower(address), contract_id, deployment_scope)``. Re-minting after the FP rows
+        # change ORIGIN must still find the node.
+        pytest.param(lambda t: t, "something:else", id="ignores_origin_and_label"),
+        pytest.param(lambda t: "0x" + t[2:].upper(), FINITE_SET, id="checksummed_dedups_against_lowercase_node"),
+    ],
+)
+def test_the_idempotence_key_dedups(db_session, anchor, monkeypatch, second_address, second_origin):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     timelock = _addr()
     _fp(db_session, contract, timelock, resolved_type="timelock", name="a")
     _mint(db_session, contract)
 
-    mixed = "0x" + timelock[2:].upper()
-    _fp(db_session, contract, mixed, resolved_type="timelock", name="b")
+    _fp(db_session, contract, second_address(timelock), resolved_type="timelock", name="b", origin=second_origin)
     second, _payloads = _mint(db_session, contract)
 
     assert len(_nodes(db_session, contract)) == 2  # the root + the one timelock
+    assert len(_nodes(db_session, contract, timelock)) == 1
     assert second["out_of_population"] == [{"address": timelock, "reason": "existing_node"}]
 
 
@@ -709,30 +702,40 @@ def test_an_earlier_gate_consumes_no_budget(db_session, anchor, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_zero_address_never_mints(db_session, anchor, monkeypatch):
-    """An unset controller resolves to 0x000…0. It is not a principal."""
+@pytest.mark.parametrize(
+    ("address_of", "rows", "reason"),
+    [
+        # An unset controller resolves to 0x000...0. It is not a principal.
+        pytest.param(lambda c: ZERO_ADDRESS, [("timelock", "gated")], "zero_address", id="zero_address"),
+        pytest.param(lambda c: "0xdeadbeef", [("timelock", "gated")], "invalid_address", id="malformed_address"),
+        # A NULL ``resolved_type`` determines no ``node_type``; defaulting would pick the job/no-job split by
+        # coin flip.
+        pytest.param(lambda c: None, [(None, "gated")], "resolved_type_not_determined", id="undetermined_type"),
+        # Two types for one principal at one anchor (0 of 413 corpus anchors reach this) must surface as a
+        # refusal, not a silently-picked winner, since the types straddle the job / no-job split.
+        pytest.param(
+            lambda c: None,
+            [("timelock", "a"), ("safe", "b")],
+            "resolved_type_conflict",
+            id="conflicting_types",
+        ),
+        # A self-referential FP row must not mint a duplicate of the root node or a self-edge.
+        pytest.param(lambda c: c.address, [("timelock", "gated")], "anchor_contract", id="anchor_contract"),
+    ],
+)
+def test_a_refused_principal_never_mints(db_session, anchor, monkeypatch, address_of, rows, reason):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
-    _fp(db_session, contract, ZERO_ADDRESS, resolved_type="timelock")
+    principal = address_of(contract) or _addr()
+    for resolved_type, name in rows:
+        _fp(db_session, contract, principal, resolved_type=resolved_type, name=name)
 
     ledger, payloads = _mint(db_session, contract)
 
     assert ledger["minted"] == []
     assert payloads == []
-    assert ledger["out_of_population"] == [{"address": ZERO_ADDRESS, "reason": "zero_address"}]
+    assert ledger["out_of_population"] == [{"address": principal, "reason": reason}]
     assert len(_nodes(db_session, contract)) == 1  # the root only
-
-
-def test_malformed_address_never_mints(db_session, anchor, monkeypatch):
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    _fp(db_session, contract, "0xdeadbeef", resolved_type="timelock")
-
-    ledger, payloads = _mint(db_session, contract)
-
-    assert ledger["minted"] == []
-    assert payloads == []
-    assert ledger["out_of_population"] == [{"address": "0xdeadbeef", "reason": "invalid_address"}]
 
 
 def test_a_missing_chain_anchor_never_mints_a_chainless_node(db_session, monkeypatch):
@@ -793,53 +796,6 @@ def test_a_null_chain_anchor_is_mainnet(db_session, anchor, monkeypatch):
 
     assert ledger["queued"] == [{"address": principal, "resolved_type": "timelock"}]
     assert ledger["omitted"] == []
-
-
-def test_an_undetermined_resolved_type_refuses(db_session, anchor, monkeypatch):
-    """A NULL ``resolved_type`` determines no ``node_type``; defaulting would pick the
-    job/no-job split by coin flip."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    principal = _addr()
-    _fp(db_session, contract, principal, resolved_type=None)
-
-    ledger, payloads = _mint(db_session, contract)
-
-    assert ledger["minted"] == []
-    assert payloads == []
-    assert ledger["out_of_population"] == [{"address": principal, "reason": "resolved_type_not_determined"}]
-
-
-def test_conflicting_resolved_types_refuse_to_guess(db_session, anchor, monkeypatch):
-    """Two types for one principal at one anchor, unresolved by the FP plane (0 of 413
-    corpus anchors reach this). It must surface as a refusal, not a silently-picked winner,
-    since the types straddle the job / no-job split."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    principal = _addr()
-    _fp(db_session, contract, principal, resolved_type="timelock", name="a")
-    _fp(db_session, contract, principal, resolved_type="safe", name="b")
-
-    ledger, payloads = _mint(db_session, contract)
-
-    assert ledger["minted"] == []
-    assert payloads == []
-    assert ledger["out_of_population"] == [{"address": principal, "reason": "resolved_type_conflict"}]
-
-
-def test_the_anchor_contract_is_never_its_own_principal_node(db_session, anchor, monkeypatch):
-    """A self-referential FP row must not mint a duplicate of the root node or a
-    self-edge."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _protocol, contract = anchor
-    _fp(db_session, contract, contract.address, resolved_type="timelock")
-
-    ledger, payloads = _mint(db_session, contract)
-
-    assert ledger["minted"] == []
-    assert payloads == []
-    assert ledger["out_of_population"] == [{"address": contract.address, "reason": "anchor_contract"}]
-    assert len(_nodes(db_session, contract)) == 1
 
 
 def test_a_deployment_scoped_mint_stays_in_its_scope(db_session, anchor, monkeypatch):

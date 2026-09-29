@@ -6,6 +6,8 @@ probe's leaf-selection + membership-resolution logic, not adapter behavior.
 
 from __future__ import annotations
 
+import pytest
+
 from services.resolution.adapters import AdapterRegistry, EvaluationContext
 from services.resolution.capabilities import CapabilityExpr, ExternalCheck
 from services.resolution.probe import probe_membership
@@ -72,32 +74,34 @@ def _and_node(*children: dict) -> dict:
 # Leaf selection
 
 
-def test_predicate_index_out_of_range():
-    tree = _leaf_node(_membership_leaf())
+@pytest.mark.parametrize(
+    ("tree", "predicate_index", "expected"),
+    [
+        pytest.param(
+            _leaf_node(_membership_leaf()),
+            5,
+            {"reason": "leaf_index_out_of_range", "leaf_count": 1},
+            id="predicate_index_out_of_range",
+        ),
+        pytest.param(
+            _leaf_node(_equality_leaf()),
+            0,
+            {"reason": "non_membership_leaf", "leaf_kind": "equality"},
+            id="non_membership_leaf",
+        ),
+    ],
+)
+def test_membership_probe_leaf_selection_is_unknown(tree, predicate_index, expected):
     res = probe_membership(
         tree,
-        predicate_index=5,
+        predicate_index=predicate_index,
         member="0x" + "11" * 20,
         registry=_StubRegistry(),
         ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "unknown"
-    assert res["reason"] == "leaf_index_out_of_range"
-    assert res["leaf_count"] == 1
-
-
-def test_non_membership_leaf_returns_unknown():
-    tree = _leaf_node(_equality_leaf())
-    res = probe_membership(
-        tree,
-        predicate_index=0,
-        member="0x" + "11" * 20,
-        registry=_StubRegistry(),
-        ctx=EvaluationContext(chain_id=1),
-    )
-    assert res["result"] == "unknown"
-    assert res["reason"] == "non_membership_leaf"
-    assert res["leaf_kind"] == "equality"
+    for key, value in expected.items():
+        assert res[key] == value
 
 
 def test_index_picks_leaf_by_dfs_order():
@@ -123,46 +127,100 @@ def test_index_picks_leaf_by_dfs_order():
 # CapabilityExpr resolution
 
 
-def test_finite_set_exact_yes():
-    addr = "0x" + "11" * 20
-    reg = _StubRegistry(CapabilityExpr.finite_set([addr], quality="exact"))
+_ADDR = "0x" + "11" * 20
+_OTHER = "0x" + "22" * 20
+
+
+def _composite(kind: str, *children: CapabilityExpr) -> CapabilityExpr:
+    return CapabilityExpr(kind=kind, children=list(children))  # pyright: ignore[reportArgumentType]
+
+
+@pytest.mark.parametrize(
+    ("cap", "member", "expected"),
+    [
+        pytest.param(
+            CapabilityExpr.finite_set([_ADDR], quality="exact"),
+            _ADDR,
+            {"result": "yes", "reason": "finite_set_exact", "membership_quality": "exact"},
+            id="finite_set_exact_yes",
+        ),
+        pytest.param(
+            CapabilityExpr.finite_set([_ADDR], quality="exact"),
+            _OTHER,
+            {"result": "no", "reason": "finite_set_exact"},
+            id="finite_set_exact_no",
+        ),
+        # Lower bound = known members only; an absent member is unknown, not no (fail-closed).
+        pytest.param(
+            CapabilityExpr.finite_set([_ADDR], quality="lower_bound"),
+            _OTHER,
+            {"result": "unknown", "reason": "lower_bound_absent"},
+            id="finite_set_lower_bound_absent_is_unknown",
+        ),
+        pytest.param(
+            CapabilityExpr.cofinite_blacklist([_ADDR]),
+            _ADDR,
+            {"result": "no", "reason": "cofinite_blacklisted"},
+            id="cofinite_blacklist_excluded_no",
+        ),
+        pytest.param(
+            CapabilityExpr.cofinite_blacklist([_ADDR]),
+            _OTHER,
+            {"result": "yes"},
+            id="cofinite_blacklist_not_listed_yes",
+        ),
+        pytest.param(
+            _composite(
+                "AND",
+                CapabilityExpr.finite_set([_ADDR], quality="exact"),
+                CapabilityExpr.finite_set([_ADDR], quality="exact"),
+            ),
+            _ADDR,
+            {"result": "yes", "reason": "and_all_yes"},
+            id="and_all_yes",
+        ),
+        pytest.param(
+            _composite(
+                "AND",
+                CapabilityExpr.finite_set([_ADDR], quality="exact"),
+                CapabilityExpr.finite_set(["0x" + "ff" * 20], quality="exact"),
+            ),
+            _ADDR,
+            {"result": "no", "reason": "and_any_no"},
+            id="and_one_no_returns_no",
+        ),
+        pytest.param(
+            _composite(
+                "OR",
+                CapabilityExpr.finite_set(["0x" + "ff" * 20], quality="exact"),
+                CapabilityExpr.finite_set([_ADDR], quality="exact"),
+            ),
+            _ADDR,
+            {"result": "yes", "reason": "or_any_yes"},
+            id="or_any_yes_returns_yes",
+        ),
+        pytest.param(
+            _composite(
+                "OR",
+                CapabilityExpr.finite_set(["0x" + "ff" * 20], quality="exact"),
+                CapabilityExpr.finite_set(["0x" + "ee" * 20], quality="exact"),
+            ),
+            _ADDR,
+            {"result": "no", "reason": "or_all_no"},
+            id="or_all_no_returns_no",
+        ),
+    ],
+)
+def test_capability_resolution(cap, member, expected):
     res = probe_membership(
         _leaf_node(_membership_leaf()),
         predicate_index=0,
-        member=addr,
-        registry=reg,
+        member=member,
+        registry=_StubRegistry(cap),
         ctx=EvaluationContext(chain_id=1),
     )
-    assert res["result"] == "yes"
-    assert res["reason"] == "finite_set_exact"
-    assert res["membership_quality"] == "exact"
-
-
-def test_finite_set_exact_no():
-    reg = _StubRegistry(CapabilityExpr.finite_set(["0x" + "11" * 20], quality="exact"))
-    res = probe_membership(
-        _leaf_node(_membership_leaf()),
-        predicate_index=0,
-        member="0x" + "22" * 20,
-        registry=reg,
-        ctx=EvaluationContext(chain_id=1),
-    )
-    assert res["result"] == "no"
-    assert res["reason"] == "finite_set_exact"
-
-
-def test_finite_set_lower_bound_absent_is_unknown():
-    """Lower bound = known members only; an absent member is unknown, not no."""
-    reg = _StubRegistry(CapabilityExpr.finite_set(["0x" + "11" * 20], quality="lower_bound"))
-    res = probe_membership(
-        _leaf_node(_membership_leaf()),
-        predicate_index=0,
-        member="0x" + "22" * 20,
-        registry=reg,
-        ctx=EvaluationContext(chain_id=1),
-    )
-    assert res["result"] == "unknown"
-    assert res["reason"] == "lower_bound_absent"
+    for key, value in expected.items():
+        assert res[key] == value
 
 
 def test_finite_set_upper_bound_absent_is_no():
@@ -211,31 +269,6 @@ def test_threshold_group_signer_yes():
     assert no["result"] == "no"
 
 
-def test_cofinite_blacklist_excluded_no():
-    reg = _StubRegistry(CapabilityExpr.cofinite_blacklist(["0x" + "11" * 20]))
-    res = probe_membership(
-        _leaf_node(_membership_leaf()),
-        predicate_index=0,
-        member="0x" + "11" * 20,
-        registry=reg,
-        ctx=EvaluationContext(chain_id=1),
-    )
-    assert res["result"] == "no"
-    assert res["reason"] == "cofinite_blacklisted"
-
-
-def test_cofinite_blacklist_not_listed_yes():
-    reg = _StubRegistry(CapabilityExpr.cofinite_blacklist(["0x" + "11" * 20]))
-    res = probe_membership(
-        _leaf_node(_membership_leaf()),
-        predicate_index=0,
-        member="0x" + "22" * 20,
-        registry=reg,
-        ctx=EvaluationContext(chain_id=1),
-    )
-    assert res["result"] == "yes"
-
-
 def test_external_check_only_surfaces_probe_descriptor():
     """``external_check_only`` can't be answered offline; the probe returns target + selector for the caller."""
     check = ExternalCheck(
@@ -274,86 +307,6 @@ def test_unsupported_capability_passes_reason_through():
 # Composite (AND / OR) via constructed CapabilityExpr
 
 
-def _composite(kind: str, *children: CapabilityExpr) -> CapabilityExpr:
-    return CapabilityExpr(kind=kind, children=list(children))  # pyright: ignore[reportArgumentType]
-
-
-def test_and_all_yes_returns_yes():
-    addr = "0x" + "11" * 20
-    cap = _composite(
-        "AND",
-        CapabilityExpr.finite_set([addr], quality="exact"),
-        CapabilityExpr.finite_set([addr], quality="exact"),
-    )
-    reg = _StubRegistry(cap)
-    res = probe_membership(
-        _leaf_node(_membership_leaf()),
-        predicate_index=0,
-        member=addr,
-        registry=reg,
-        ctx=EvaluationContext(chain_id=1),
-    )
-    assert res["result"] == "yes"
-    assert res["reason"] == "and_all_yes"
-
-
-def test_and_one_no_returns_no():
-    addr = "0x" + "11" * 20
-    cap = _composite(
-        "AND",
-        CapabilityExpr.finite_set([addr], quality="exact"),
-        CapabilityExpr.finite_set(["0x" + "ff" * 20], quality="exact"),
-    )
-    reg = _StubRegistry(cap)
-    res = probe_membership(
-        _leaf_node(_membership_leaf()),
-        predicate_index=0,
-        member=addr,
-        registry=reg,
-        ctx=EvaluationContext(chain_id=1),
-    )
-    assert res["result"] == "no"
-    assert res["reason"] == "and_any_no"
-
-
-def test_or_any_yes_returns_yes():
-    addr = "0x" + "11" * 20
-    cap = _composite(
-        "OR",
-        CapabilityExpr.finite_set(["0x" + "ff" * 20], quality="exact"),
-        CapabilityExpr.finite_set([addr], quality="exact"),
-    )
-    reg = _StubRegistry(cap)
-    res = probe_membership(
-        _leaf_node(_membership_leaf()),
-        predicate_index=0,
-        member=addr,
-        registry=reg,
-        ctx=EvaluationContext(chain_id=1),
-    )
-    assert res["result"] == "yes"
-    assert res["reason"] == "or_any_yes"
-
-
-def test_or_all_no_returns_no():
-    addr = "0x" + "11" * 20
-    cap = _composite(
-        "OR",
-        CapabilityExpr.finite_set(["0x" + "ff" * 20], quality="exact"),
-        CapabilityExpr.finite_set(["0x" + "ee" * 20], quality="exact"),
-    )
-    reg = _StubRegistry(cap)
-    res = probe_membership(
-        _leaf_node(_membership_leaf()),
-        predicate_index=0,
-        member=addr,
-        registry=reg,
-        ctx=EvaluationContext(chain_id=1),
-    )
-    assert res["result"] == "no"
-    assert res["reason"] == "or_all_no"
-
-
 def _signature_auth_leaf(signer_state_var: str = "trustedSigner") -> dict:
     return {
         "kind": "signature_auth",
@@ -373,36 +326,37 @@ def _signature_auth_leaf(signer_state_var: str = "trustedSigner") -> dict:
 # probe_signature
 
 
-def test_probe_signature_returns_unknown_for_non_signature_leaf():
-    """Reason is non_signature_leaf, distinct from the membership probe's non_membership_leaf."""
+@pytest.mark.parametrize(
+    ("tree", "predicate_index", "expected"),
+    [
+        # Reason is non_signature_leaf, distinct from the membership probe's non_membership_leaf.
+        pytest.param(
+            _leaf_node(_membership_leaf()),
+            0,
+            {"reason": "non_signature_leaf", "leaf_kind": "membership"},
+            id="non_signature_leaf",
+        ),
+        pytest.param(
+            _leaf_node(_signature_auth_leaf()),
+            5,
+            {"reason": "leaf_index_out_of_range"},
+            id="index_out_of_range",
+        ),
+    ],
+)
+def test_probe_signature_leaf_selection_is_unknown(tree, predicate_index, expected):
     from services.resolution.probe import probe_signature
 
-    tree = _leaf_node(_membership_leaf())
     res = probe_signature(
         tree,
-        predicate_index=0,
+        predicate_index=predicate_index,
         recovered_signer="0x" + "11" * 20,
         registry=_StubRegistry(),
         ctx=EvaluationContext(chain_id=1),
     )
     assert res["result"] == "unknown"
-    assert res["reason"] == "non_signature_leaf"
-    assert res["leaf_kind"] == "membership"
-
-
-def test_probe_signature_index_out_of_range():
-    from services.resolution.probe import probe_signature
-
-    tree = _leaf_node(_signature_auth_leaf())
-    res = probe_signature(
-        tree,
-        predicate_index=5,
-        recovered_signer="0x" + "11" * 20,
-        registry=_StubRegistry(),
-        ctx=EvaluationContext(chain_id=1),
-    )
-    assert res["result"] == "unknown"
-    assert res["reason"] == "leaf_index_out_of_range"
+    for key, value in expected.items():
+        assert res[key] == value
 
 
 def test_probe_signature_real_evaluator_for_state_var_signer():

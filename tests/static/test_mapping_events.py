@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from services.static.contract_analysis_pipeline.mapping_events import (
     discover_mapping_writer_events,
 )
@@ -148,92 +150,51 @@ def test_event_call_name_as_constant_does_not_crash():
     assert specs[0]["event_name"] == "Rely"
 
 
-def test_makerdao_deny_removes_via_zero_write():
-    wards = _mapping("wards")
-    guy = _local("guy")
-    index_lv = _tmp("TMP_0")
-    deny_fn = _function(
-        "deny",
-        nodes=[
-            _node(
-                [
-                    _index(wards, guy, index_lv),
-                    _assignment(index_lv, _constant(0)),
-                    _event_call("Deny(address)", [guy]),
-                ]
-            )
-        ],
-        written=[wards],
-    )
-    specs = discover_mapping_writer_events(_contract([deny_fn]))
-    assert len(specs) == 1
-    assert specs[0]["direction"] == "remove"
-
-
-def test_bool_mapping_true_is_add():
-    whitelist = _mapping("whitelist", value_type="bool")
-    x = _local("x")
-    lv = _tmp("T0", type_str="bool")
+@pytest.mark.parametrize(
+    ("fn_name", "mapping_name", "value_type", "write", "event_sig", "expected_direction"),
+    [
+        pytest.param(
+            "deny",
+            "wards",
+            "uint256",
+            lambda lv: _assignment(lv, _constant(0)),
+            "Deny(address)",
+            "remove",
+            id="makerdao_deny_zero_write",
+        ),
+        pytest.param(
+            "whitelist_user",
+            "whitelist",
+            "bool",
+            lambda lv: _assignment(lv, _constant(True, type_str="bool")),
+            "Whitelisted(address)",
+            "add",
+            id="bool_true",
+        ),
+        pytest.param(
+            "unwhitelist",
+            "whitelist",
+            "bool",
+            lambda lv: _assignment(lv, _constant(False, type_str="bool")),
+            "Unwhitelisted(address)",
+            "remove",
+            id="bool_false",
+        ),
+        pytest.param("denyViaDelete", "wards", "uint256", _delete, "Deny(address)", "remove", id="delete"),
+    ],
+)
+def test_write_direction(fn_name, mapping_name, value_type, write, event_sig, expected_direction):
+    mapping = _mapping(mapping_name, value_type=value_type)
+    key = _local("guy")
+    lv = _tmp("TMP_0", type_str=value_type)
     fn = _function(
-        "whitelist_user",
-        nodes=[
-            _node(
-                [
-                    _index(whitelist, x, lv),
-                    _assignment(lv, _constant(True, type_str="bool")),
-                    _event_call("Whitelisted(address)", [x]),
-                ]
-            )
-        ],
-        written=[whitelist],
+        fn_name,
+        nodes=[_node([_index(mapping, key, lv), write(lv), _event_call(event_sig, [key])])],
+        written=[mapping],
     )
     specs = discover_mapping_writer_events(_contract([fn]))
     assert len(specs) == 1
-    assert specs[0]["direction"] == "add"
-
-
-def test_bool_mapping_false_is_remove():
-    whitelist = _mapping("whitelist", value_type="bool")
-    x = _local("x")
-    lv = _tmp("T0", type_str="bool")
-    fn = _function(
-        "unwhitelist",
-        nodes=[
-            _node(
-                [
-                    _index(whitelist, x, lv),
-                    _assignment(lv, _constant(False, type_str="bool")),
-                    _event_call("Unwhitelisted(address)", [x]),
-                ]
-            )
-        ],
-        written=[whitelist],
-    )
-    specs = discover_mapping_writer_events(_contract([fn]))
-    assert len(specs) == 1
-    assert specs[0]["direction"] == "remove"
-
-
-def test_delete_is_remove():
-    wards = _mapping("wards")
-    guy = _local("guy")
-    lv = _tmp("T0")
-    fn = _function(
-        "denyViaDelete",
-        nodes=[
-            _node(
-                [
-                    _index(wards, guy, lv),
-                    _delete(lv),
-                    _event_call("Deny(address)", [guy]),
-                ]
-            )
-        ],
-        written=[wards],
-    )
-    specs = discover_mapping_writer_events(_contract([fn]))
-    assert len(specs) == 1
-    assert specs[0]["direction"] == "remove"
+    assert specs[0]["direction"] == expected_direction
 
 
 def test_write_with_no_emit_is_skipped():
@@ -352,91 +313,65 @@ def test_non_literal_value_emits_set_direction():
     assert specs[0]["key_position"] == 0
 
 
-def test_multi_arg_event_with_key_not_first():
-    wards = _mapping("wards")
-    id_var = _local("id", "uint256")
-    guy = _local("guy", "address")
-    lv = _tmp("T0")
+@pytest.mark.parametrize(
+    ("fn_name", "value_type", "assigned", "args", "event_sig", "event_inputs", "expected"),
+    [
+        pytest.param(
+            "setWard",
+            "uint256",
+            _constant(1),
+            [("id", "uint256"), ("guy", "address")],
+            "UserSet(uint256,address)",
+            None,
+            {"key_position": 1},
+            id="multi_arg_event_with_key_not_first",
+        ),
+        pytest.param(
+            "rely",
+            "uint256",
+            _constant(1),
+            [("guy", "address")],
+            "Rely",
+            [("guy", "address", True)],
+            {"indexed_positions": [0]},
+            id="indexed_positions_come_from_event_declaration",
+        ),
+        pytest.param(
+            "setWhitelisted",
+            "bool",
+            _constant(True, type_str="bool"),
+            [("guy", "address"), ("enabled", "bool")],
+            "SetWhitelisted",
+            [("guy", "address", False), ("enabled", "bool", False)],
+            {"key_position": 0, "indexed_positions": []},
+            id="non_indexed_key_position",
+        ),
+        pytest.param(
+            "setWard",
+            "uint256",
+            _constant(1),
+            [("tier", "uint256"), ("guy", "address")],
+            "Foo",
+            [("tier", "uint256", True), ("guy", "address", False)],
+            {"key_position": 1, "indexed_positions": [0]},
+            id="indexed_position_before_key",
+        ),
+    ],
+)
+def test_key_and_indexed_positions(fn_name, value_type, assigned, args, event_sig, event_inputs, expected):
+    mapping = _mapping("whitelist" if value_type == "bool" else "wards", value_type=value_type)
+    arg_vars = [_local(name, type_str) for name, type_str in args]
+    key = next(v for v in arg_vars if v.name == "guy")
+    lv = _tmp("T0", type_str=value_type)
     fn = _function(
-        "setWard",
-        nodes=[
-            _node(
-                [
-                    _index(wards, guy, lv),
-                    _assignment(lv, _constant(1)),
-                    _event_call("UserSet(uint256,address)", [id_var, guy]),
-                ]
-            )
-        ],
-        written=[wards],
+        fn_name,
+        nodes=[_node([_index(mapping, key, lv), _assignment(lv, assigned), _event_call(event_sig, arg_vars)])],
+        written=[mapping],
     )
-    specs = discover_mapping_writer_events(_contract([fn]))
+    events = None if event_inputs is None else [_event_decl(event_sig, event_inputs)]
+    specs = discover_mapping_writer_events(_contract([fn], events=events))
     assert len(specs) == 1
-    assert specs[0]["key_position"] == 1
-
-
-def test_indexed_positions_come_from_event_declaration():
-    wards = _mapping("wards")
-    guy = _local("guy")
-    lv = _tmp("T0")
-    fn = _function(
-        "rely",
-        nodes=[_node([_index(wards, guy, lv), _assignment(lv, _constant(1)), _event_call("Rely", [guy])])],
-        written=[wards],
-    )
-    specs = discover_mapping_writer_events(_contract([fn], events=[_event_decl("Rely", [("guy", "address", True)])]))
-    assert len(specs) == 1
-    assert specs[0]["indexed_positions"] == [0]
-
-
-def test_non_indexed_key_position_is_recorded():
-    whitelist = _mapping("whitelist", value_type="bool")
-    user = _local("user")
-    enabled = _local("enabled", "bool")
-    lv = _tmp("T0", type_str="bool")
-    fn = _function(
-        "setWhitelisted",
-        nodes=[
-            _node(
-                [
-                    _index(whitelist, user, lv),
-                    _assignment(lv, _constant(True, type_str="bool")),
-                    _event_call("SetWhitelisted", [user, enabled]),
-                ]
-            )
-        ],
-        written=[whitelist],
-    )
-    event = _event_decl("SetWhitelisted", [("user", "address", False), ("enabled", "bool", False)])
-    specs = discover_mapping_writer_events(_contract([fn], events=[event]))
-    assert len(specs) == 1
-    assert specs[0]["key_position"] == 0
-    assert specs[0]["indexed_positions"] == []
-
-
-def test_indexed_position_before_key_is_recorded():
-    wards = _mapping("wards")
-    tier = _local("tier", "uint256")
-    user = _local("user")
-    lv = _tmp("T0")
-    fn = _function(
-        "setWard",
-        nodes=[
-            _node(
-                [
-                    _index(wards, user, lv),
-                    _assignment(lv, _constant(1)),
-                    _event_call("Foo", [tier, user]),
-                ]
-            )
-        ],
-        written=[wards],
-    )
-    event = _event_decl("Foo", [("tier", "uint256", True), ("user", "address", False)])
-    specs = discover_mapping_writer_events(_contract([fn], events=[event]))
-    assert len(specs) == 1
-    assert specs[0]["key_position"] == 1
-    assert specs[0]["indexed_positions"] == [0]
+    assert {k: specs[0][k] for k in expected} == expected
 
 
 def test_dedupes_on_mapping_event_direction():

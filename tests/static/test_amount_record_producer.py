@@ -335,11 +335,41 @@ def test_a_scalar_mapping_publishes_an_empty_member_path(_unit):
     assert flow["amount_record_key_kinds"] == ["param"]
 
 
-def test_a_whole_variable_amount_is_storage_bounded_and_names_no_record(_unit):
-    """The sibling of ``paySimple``: ``totalPot`` is read out of storage too, so
-    the kind is identical — and there is no cell, no key, and nothing to join."""
-    flow = _flow(_unit, "Records", "payPot()")
-    assert flow["amount_kind"]["kind"] == "bounded_by_storage"
+@pytest.mark.parametrize(
+    "signature,kind",
+    [
+        # The sibling of ``paySimple``: ``totalPot`` is read out of storage too, so
+        # the kind is identical — and there is no cell, no key, and nothing to join.
+        pytest.param("payPot()", "bounded_by_storage", id="whole_variable"),
+        # ``bids[flag ? a : b].amount``: the base decides the KIND, which is why
+        # the amount is still storage-bounded — but the key IS the cell's identity and
+        # a merge selects one of two. The record is withheld, not guessed.
+        pytest.param("cancelBidMerged(uint256,uint256,bool)", "bounded_by_storage", id="merged_key"),
+        # ``deep[id].mid.inner.amount`` — three members. The kind is unchanged; the
+        # record is not published, because the path a join would compare against a
+        # guard leaf is deeper than anything this pass is specified to name.
+        pytest.param("payDeep(uint256)", "bounded_by_storage", id="member_nesting_past_v1"),
+        # The ``redeem`` shape: ``previewRedeem(shares)[0]`` is an element of a
+        # memory array returned by a call. The element root is not one this pass
+        # classifies from, so there is no record — the reason token for that absence
+        # belongs to the join, and inventing a record here would pre-empt it.
+        pytest.param("redeem(uint256)", "indeterminate", id="memory_element_root"),
+        # ``cfg.fee`` selects no cell: there is no key to compare against a guard's
+        # and no ownership question this producer can pose. Published records are
+        # keyed records, so this one is absent rather than half-formed.
+        pytest.param("payCfg()", "bounded_by_storage", id="keyless_struct_read"),
+        # ``three[a][b][c]`` — past the v1 bound, refused whole rather than
+        # published truncated to the two levels a consumer is specified to read.
+        pytest.param("payThree(uint256,uint256,uint256)", "bounded_by_storage", id="three_key_levels"),
+        # A site DID name a record here — and the fold is ``several``, so the flow's
+        # quantity is not, as a whole, read out of that cell. The record gate is the
+        # folded kind, never the site that would have supported one.
+        pytest.param("payRecordAndParam(uint256,uint256)", "several", id="not_storage_bounded"),
+    ],
+)
+def test_no_amount_record_published(_unit, signature, kind):
+    flow = _flow(_unit, "Records", signature)
+    assert flow["amount_kind"]["kind"] == kind
     for key in _RECORD_KEYS:
         assert key not in flow
 
@@ -372,16 +402,6 @@ def test_the_same_key_without_a_binding_names_no_caller(_unit):
 # --- refusals, each against the sibling it differs from ---------------------
 
 
-def test_a_merged_key_refuses_the_record_while_the_kind_stands(_unit):
-    """``bids[flag ? a : b].amount``: the base decides the KIND, which is why
-    the amount is still storage-bounded — but the key IS the cell's identity and
-    a merge selects one of two. The record is withheld, not guessed."""
-    flow = _flow(_unit, "Records", "cancelBidMerged(uint256,uint256,bool)")
-    assert flow["amount_kind"]["kind"] == "bounded_by_storage"
-    for key in _RECORD_KEYS:
-        assert key not in flow
-
-
 def test_a_merged_base_refuses_the_record(_unit):
     """A storage pointer reassigned in a branch. The published flow refuses on
     the kind as well, so the site is asserted directly: the walk reports the
@@ -396,27 +416,6 @@ def test_a_merged_base_refuses_the_record(_unit):
     roots = _element_walk(element, ctx)
     assert roots is not None and [root.merged_base for root in roots] == [True]
     assert _element_record_site(element, ctx) is None
-
-
-def test_member_nesting_past_the_v1_bound_refuses(_unit):
-    """``deep[id].mid.inner.amount`` — three members. The kind is unchanged; the
-    record is not published, because the path a join would compare against a
-    guard leaf is deeper than anything this pass is specified to name."""
-    flow = _flow(_unit, "Records", "payDeep(uint256)")
-    assert flow["amount_kind"]["kind"] == "bounded_by_storage"
-    for key in _RECORD_KEYS:
-        assert key not in flow
-
-
-def test_a_memory_element_root_publishes_no_record(_unit):
-    """The ``redeem`` shape: ``previewRedeem(shares)[0]`` is an element of a
-    memory array returned by a call. The element root is not one this pass
-    classifies from, so there is no record — the reason token for that absence
-    belongs to the join, and inventing a record here would pre-empt it."""
-    flow = _flow(_unit, "Records", "redeem(uint256)")
-    assert flow["amount_kind"]["kind"] == "indeterminate"
-    for key in _RECORD_KEYS:
-        assert key not in flow
 
 
 def test_two_declarations_publish_the_plural_and_no_scalar(_unit):
@@ -502,25 +501,6 @@ def test_a_caller_derived_key_is_not_a_caller_named_one(_unit):
 # --- shape and depth --------------------------------------------------------
 
 
-def test_a_keyless_struct_read_is_not_a_record(_unit):
-    """``cfg.fee`` selects no cell: there is no key to compare against a guard's
-    and no ownership question this producer can pose. Published records are
-    keyed records, so this one is absent rather than half-formed."""
-    flow = _flow(_unit, "Records", "payCfg()")
-    assert flow["amount_kind"]["kind"] == "bounded_by_storage"
-    for key in _RECORD_KEYS:
-        assert key not in flow
-
-
-def test_three_key_levels_refuse(_unit):
-    """``three[a][b][c]`` — past the v1 bound, refused whole rather than
-    published truncated to the two levels a consumer is specified to read."""
-    flow = _flow(_unit, "Records", "payThree(uint256,uint256,uint256)")
-    assert flow["amount_kind"]["kind"] == "bounded_by_storage"
-    for key in _RECORD_KEYS:
-        assert key not in flow
-
-
 def test_a_two_member_path_keeps_its_source_order(_unit):
     """``pair[id].inner.amount``: the path is read back out in source order, not
     in the reverse order the walk visits it. A join comparing paths against a
@@ -569,16 +549,6 @@ def test_one_site_without_a_record_suppresses_the_whole_fact(_unit):
     would name a cell half this flow's value never came out of."""
     flow = _flow(_unit, "Records", "payRecordAndPot(uint256)")
     assert flow["amount_kind"]["kind"] == "bounded_by_storage"
-    for key in _RECORD_KEYS:
-        assert key not in flow
-
-
-def test_an_amount_that_is_not_storage_bounded_publishes_no_record(_unit):
-    """A site DID name a record here — and the fold is ``several``, so the flow's
-    quantity is not, as a whole, read out of that cell. The record gate is the
-    folded kind, never the site that would have supported one."""
-    flow = _flow(_unit, "Records", "payRecordAndParam(uint256,uint256)")
-    assert flow["amount_kind"]["kind"] == "several"
     for key in _RECORD_KEYS:
         assert key not in flow
 

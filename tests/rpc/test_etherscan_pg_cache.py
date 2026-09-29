@@ -31,17 +31,21 @@ def _stable_etherscan_response_mock(payload: dict):
     return resp
 
 
-def test_params_hash_is_stable_for_same_inputs():
-    h1 = etherscan._params_hash("contract", "getsourcecode", 1, {"address": "0xabc", "extra": "x"})
-    h2 = etherscan._params_hash("contract", "getsourcecode", 1, {"extra": "x", "address": "0xabc"})
-    assert h1 == h2
+@pytest.mark.parametrize(
+    ("params_a", "params_b", "equal"),
+    [
+        # Key order must not change the hash.
+        pytest.param(
+            {"address": "0xabc", "extra": "x"}, {"extra": "x", "address": "0xabc"}, True, id="stable_across_key_order"
+        ),
+        pytest.param({"address": "0xa"}, {"address": "0xb"}, False, id="changes_with_params"),
+    ],
+)
+def test_params_hash(params_a, params_b, equal):
+    h1 = etherscan._params_hash("contract", "getsourcecode", 1, params_a)
+    h2 = etherscan._params_hash("contract", "getsourcecode", 1, params_b)
+    assert (h1 == h2) is equal
     assert len(h1) == 64  # sha256 hex
-
-
-def test_params_hash_changes_with_params():
-    h1 = etherscan._params_hash("contract", "getsourcecode", 1, {"address": "0xa"})
-    h2 = etherscan._params_hash("contract", "getsourcecode", 1, {"address": "0xb"})
-    assert h1 != h2
 
 
 def test_pg_cache_disabled_skips_db(monkeypatch):
@@ -248,26 +252,24 @@ def test_empty_txhash_txlistinternal_not_cached_for_immature_tx(monkeypatch):
     assert pg.store == {}, "immature empty must never persist"
 
 
-def test_empty_by_address_txlist_not_cached(monkeypatch):
-    empty = {"status": "0", "message": "No transactions found", "result": []}
+@pytest.mark.parametrize(
+    ("action", "message", "reason"),
+    [
+        pytest.param("txlist", "No transactions found", "by-address empty must never persist", id="txlist_by_address"),
+        pytest.param(
+            "addresstokenbalance", "No token found", "dynamic empty must never persist", id="addresstokenbalance"
+        ),
+    ],
+)
+def test_dynamic_empty_not_cached(monkeypatch, action, message, reason):
+    empty = {"status": "0", "message": message, "result": []}
     pg = _FakePgStore()
     wire = _wire_empty(empty, monkeypatch, pg)
 
-    etherscan.get("account", "txlist", 1, empty_result_ok=True, address="0xabc")
-    etherscan.get("account", "txlist", 1, empty_result_ok=True, address="0xabc")
+    etherscan.get("account", action, 1, empty_result_ok=True, address="0xabc")
+    etherscan.get("account", action, 1, empty_result_ok=True, address="0xabc")
     assert wire.get.call_count == 2
-    assert pg.store == {}, "by-address empty must never persist"
-
-
-def test_empty_addresstokenbalance_not_cached(monkeypatch):
-    empty = {"status": "0", "message": "No token found", "result": []}
-    pg = _FakePgStore()
-    wire = _wire_empty(empty, monkeypatch, pg)
-
-    etherscan.get("account", "addresstokenbalance", 1, empty_result_ok=True, address="0xabc")
-    etherscan.get("account", "addresstokenbalance", 1, empty_result_ok=True, address="0xabc")
-    assert wire.get.call_count == 2
-    assert pg.store == {}, "dynamic empty must never persist"
+    assert pg.store == {}, reason
 
 
 # Codex iter-5 P2: skip caching empty-source / unverified responses

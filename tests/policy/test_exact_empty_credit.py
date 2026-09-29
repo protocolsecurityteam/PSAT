@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from services.policy.capability_surface import exact_empty_credit
 
 BLOCK = 25643300
@@ -111,26 +113,27 @@ def test_each_allow_listed_producer_is_accepted():
 # ---------------------------------------------------------------------------
 
 
-def test_empty_by_design_never_earns_the_credit():
-    """Its only surviving producer classifies from the accessor's ``pending`` prefix
-    (``basis: "accessor_name"``). A name may not license the strongest negative — and
-    the one persisted row with this reason got it from a DEFAULT ARGUMENT VALUE."""
-    cap = _empty(empty_reason="empty_by_design")
-    credit = exact_empty_credit(cap)
+@pytest.mark.parametrize(
+    "reason",
+    [
+        # Its only surviving producer classifies from the accessor's ``pending`` prefix
+        # (``basis: "accessor_name"``). A name may not license the strongest negative — and
+        # the one persisted row with this reason got it from a DEFAULT ARGUMENT VALUE.
+        pytest.param("empty_by_design", id="empty_by_design"),
+        # CRITICAL: failure reasons (and None) must never earn the credit.
+        pytest.param("unreadable_revert", id="unreadable_revert"),
+        pytest.param("unreadable_empty", id="unreadable_empty"),
+        pytest.param("not_read", id="not_read"),
+        pytest.param("bad_input", id="bad_input"),
+        pytest.param(None, id="none"),
+        # ``0x…dEaD`` being unspendable is a convention, not a read.
+        pytest.param("owner_read_burn_address", id="burn_address"),
+    ],
+)
+def test_unconfirmed_empty_reasons_never_earn_the_credit(reason):
+    credit = exact_empty_credit(_empty(empty_reason=reason))
     assert credit["verdict"] == "not_determined"
     assert "read_confirmed_empty_reason" in credit["missing"]
-
-
-def test_failure_reasons_never_earn_the_credit():
-    for reason in ("unreadable_revert", "unreadable_empty", "not_read", "bad_input", None):
-        cap = _empty(empty_reason=reason)
-        assert exact_empty_credit(cap)["verdict"] == "not_determined", reason
-
-
-def test_the_burn_reason_never_earns_the_credit():
-    """``0x…dEaD`` being unspendable is a convention, not a read."""
-    cap = _empty(empty_reason="owner_read_burn_address")
-    assert exact_empty_credit(cap)["verdict"] == "not_determined"
 
 
 # ---------------------------------------------------------------------------
@@ -150,13 +153,13 @@ def test_a_lower_bound_or_partial_empty_can_never_earn():
 # ---------------------------------------------------------------------------
 
 
-def test_a_populated_set_is_not_applicable():
-    assert exact_empty_credit(_empty(members=["0x" + "11" * 20]))["verdict"] == "not_applicable"
-
-
-def test_a_non_finite_set_is_not_applicable():
-    assert exact_empty_credit({"kind": "AND", "children": []})["verdict"] == "not_applicable"
-
-
-def test_a_missing_capability_is_not_determined():
-    assert exact_empty_credit(None)["verdict"] == "not_determined"
+@pytest.mark.parametrize(
+    "cap,verdict",
+    [
+        pytest.param(_empty(members=["0x" + "11" * 20]), "not_applicable", id="populated_set"),
+        pytest.param({"kind": "AND", "children": []}, "not_applicable", id="non_finite_set"),
+        pytest.param(None, "not_determined", id="missing_capability"),
+    ],
+)
+def test_shape_guards(cap, verdict):
+    assert exact_empty_credit(cap)["verdict"] == verdict

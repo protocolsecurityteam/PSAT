@@ -24,45 +24,26 @@ from services.clients.tavily import (
 
 
 class TestNormalizeError:
-    def test_message_only(self):
-        err = normalize_error("boom")
-        assert err == {"provider": "tavily", "error": "boom"}
-
-    def test_with_status_code(self):
-        err = normalize_error("fail", status_code=500)
-        assert err["status_code"] == 500
-
-    def test_with_retryable(self):
-        err = normalize_error("fail", retryable=True)
-        assert err["retryable"] is True
-
-    def test_with_retryable_false(self):
-        err = normalize_error("fail", retryable=False)
-        assert err["retryable"] is False
-
-    def test_with_detail(self):
-        err = normalize_error("fail", detail="extra info")
-        assert err["detail"] == "extra info"
-
-    def test_detail_empty_string_omitted(self):
-        err = normalize_error("fail", detail="")
-        assert "detail" not in err
-
-    def test_all_fields(self):
-        err = normalize_error("fail", status_code=429, retryable=True, detail="rate")
-        assert err == {
-            "provider": "tavily",
-            "error": "fail",
-            "status_code": 429,
-            "retryable": True,
-            "detail": "rate",
-        }
-
-    def test_none_defaults_omitted(self):
-        err = normalize_error("x")
-        assert "status_code" not in err
-        assert "retryable" not in err
-        assert "detail" not in err
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            pytest.param({}, {"provider": "tavily", "error": "fail"}, id="message_only"),
+            pytest.param({"status_code": 500}, {"status_code": 500}, id="with_status_code"),
+            pytest.param({"retryable": True}, {"retryable": True}, id="with_retryable"),
+            pytest.param({"retryable": False}, {"retryable": False}, id="with_retryable_false"),
+            pytest.param({"detail": "extra info"}, {"detail": "extra info"}, id="with_detail"),
+            pytest.param({"detail": ""}, {}, id="detail_empty_string_omitted"),
+            pytest.param(
+                {"status_code": 429, "retryable": True, "detail": "rate"},
+                {"status_code": 429, "retryable": True, "detail": "rate"},
+                id="all_fields",
+            ),
+        ],
+    )
+    def test_fields(self, kwargs, expected):
+        # Unset/empty fields must be omitted from the dict, not present as None.
+        err = normalize_error("fail", **kwargs)
+        assert err == {"provider": "tavily", "error": "fail", **expected}
 
 
 # ---------------------------------------------------------------------------
@@ -124,15 +105,13 @@ class TestBuildPayload:
         assert payload["search_depth"] == "advanced"
         assert payload["include_raw_content"] is True
 
+    @pytest.mark.parametrize("key", [None, "   "], ids=["missing", "blank"])
     @patch("services.clients.tavily.load_dotenv")
-    def test_missing_api_key_raises(self, _mock_dotenv, monkeypatch):
-        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
-        with pytest.raises(TavilyError, match="Missing TAVILY_API_KEY"):
-            _build_payload("q", 5, "general", "advanced", True)
-
-    @patch("services.clients.tavily.load_dotenv")
-    def test_blank_api_key_raises(self, _mock_dotenv, monkeypatch):
-        monkeypatch.setenv("TAVILY_API_KEY", "   ")
+    def test_missing_api_key_raises(self, _mock_dotenv, monkeypatch, key):
+        if key is None:
+            monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        else:
+            monkeypatch.setenv("TAVILY_API_KEY", key)
         with pytest.raises(TavilyError, match="Missing TAVILY_API_KEY"):
             _build_payload("q", 5, "general", "advanced", True)
 
@@ -154,23 +133,19 @@ def _mock_response(status_code=200, json_data=None, text="", raise_on_json=False
 
 
 class TestSearch:
-    def test_empty_query_raises_value_error(self, monkeypatch):
-        with pytest.raises(ValueError, match="query must not be empty"):
-            search("", max_results=5)
-
-    def test_whitespace_only_query_raises_value_error(self, monkeypatch):
-        with pytest.raises(ValueError, match="query must not be empty"):
-            search("   ", max_results=5)
-
-    def test_max_results_zero_raises_value_error(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("query", "max_results", "match"),
+        [
+            pytest.param("", 5, "query must not be empty", id="empty_query"),
+            pytest.param("   ", 5, "query must not be empty", id="whitespace_query"),
+            pytest.param("hello", 0, "max_results must be >= 1", id="max_results_zero"),
+            pytest.param("hello", -1, "max_results must be >= 1", id="max_results_negative"),
+        ],
+    )
+    def test_invalid_input_raises_value_error(self, monkeypatch, query, max_results, match):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-        with pytest.raises(ValueError, match="max_results must be >= 1"):
-            search("hello", max_results=0)
-
-    def test_max_results_negative_raises_value_error(self, monkeypatch):
-        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-        with pytest.raises(ValueError, match="max_results must be >= 1"):
-            search("hello", max_results=-1)
+        with pytest.raises(ValueError, match=match):
+            search(query, max_results=max_results)
 
     @patch("services.clients.tavily.load_dotenv")
     def test_success_returns_filtered_list(self, _mock_dotenv, monkeypatch):
@@ -201,69 +176,35 @@ class TestSearch:
             result = search("query", max_results=5)
             assert result == [{"title": "A"}, {"title": "B"}]
 
+    @pytest.mark.parametrize(
+        ("post_kwargs", "match", "sleeps"),
+        [
+            pytest.param(
+                {"return_value": _mock_response(500, text="Internal Server Error")}, "HTTP 500", 2, id="http_500"
+            ),
+            pytest.param(
+                {"return_value": _mock_response(400, text="Bad Request")}, "HTTP 400", 0, id="http_400_no_retry"
+            ),
+            pytest.param({"return_value": _mock_response(429, text="Too Many Requests")}, "HTTP 429", 2, id="http_429"),
+            pytest.param({"side_effect": requests.Timeout("timed out")}, "timed out", 2, id="timeout"),
+            pytest.param(
+                {"side_effect": requests.ConnectionError("connection refused")},
+                "request failed",
+                2,
+                id="request_exception",
+            ),
+        ],
+    )
     @patch("services.clients.tavily.load_dotenv")
     @patch("services.clients.tavily.time.sleep")
-    def test_http_500_retries_then_raises(self, mock_sleep, _mock_dotenv, monkeypatch):
-        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-        resp = _mock_response(status_code=500, text="Internal Server Error")
-
-        with patch("services.clients.tavily.requests.post", return_value=resp):
-            with pytest.raises(TavilyError, match="HTTP 500"):
-                search("query", max_results=3)
-
-        assert mock_sleep.call_count == 2
-
-    @patch("services.clients.tavily.load_dotenv")
-    @patch("services.clients.tavily.time.sleep")
-    def test_http_400_no_retry(self, mock_sleep, _mock_dotenv, monkeypatch):
-        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-        resp = _mock_response(status_code=400, text="Bad Request")
-
-        with patch("services.clients.tavily.requests.post", return_value=resp):
-            with pytest.raises(TavilyError, match="HTTP 400"):
-                search("query", max_results=3)
-
-        mock_sleep.assert_not_called()
-
-    @patch("services.clients.tavily.load_dotenv")
-    @patch("services.clients.tavily.time.sleep")
-    def test_http_429_retries(self, mock_sleep, _mock_dotenv, monkeypatch):
-        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-        resp = _mock_response(status_code=429, text="Too Many Requests")
-
-        with patch("services.clients.tavily.requests.post", return_value=resp):
-            with pytest.raises(TavilyError, match="HTTP 429"):
-                search("query", max_results=3)
-
-        assert mock_sleep.call_count == 2
-
-    @patch("services.clients.tavily.load_dotenv")
-    @patch("services.clients.tavily.time.sleep")
-    def test_timeout_retries_then_raises(self, mock_sleep, _mock_dotenv, monkeypatch):
+    def test_retry_policy(self, mock_sleep, _mock_dotenv, monkeypatch, post_kwargs, match, sleeps):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
 
-        with patch(
-            "services.clients.tavily.requests.post",
-            side_effect=requests.Timeout("timed out"),
-        ):
-            with pytest.raises(TavilyError, match="timed out"):
+        with patch("services.clients.tavily.requests.post", **post_kwargs):
+            with pytest.raises(TavilyError, match=match):
                 search("query", max_results=3)
 
-        assert mock_sleep.call_count == 2
-
-    @patch("services.clients.tavily.load_dotenv")
-    @patch("services.clients.tavily.time.sleep")
-    def test_request_exception_retries_then_raises(self, mock_sleep, _mock_dotenv, monkeypatch):
-        monkeypatch.setenv("TAVILY_API_KEY", "test-key")
-
-        with patch(
-            "services.clients.tavily.requests.post",
-            side_effect=requests.ConnectionError("connection refused"),
-        ):
-            with pytest.raises(TavilyError, match="request failed"):
-                search("query", max_results=3)
-
-        assert mock_sleep.call_count == 2
+        assert mock_sleep.call_count == sleeps
 
     @patch("services.clients.tavily.load_dotenv")
     @patch("services.clients.tavily.time.sleep")

@@ -42,28 +42,21 @@ def _erpc_base(monkeypatch: pytest.MonkeyPatch) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_chain_context_binds_base_url_to_base_id(_erpc_base):
+@pytest.mark.parametrize(
+    ("chain_id", "rpc_url", "chain_name", "expected_url"),
+    [
+        # Chain-to-RPC binding (inv. 7): the Base id must bind the Base URL.
+        pytest.param(_BASE_ID, None, "base", "https://erpc.example" + _BASE_URL_SUFFIX, id="binds_base_url_to_base_id"),
+        pytest.param(1, None, "ethereum", "https://erpc.example" + _MAINNET_URL_SUFFIX, id="mainnet_unchanged"),
+        pytest.param(_BASE_ID, "http://127.0.0.1:8545", "base", "http://127.0.0.1:8545", id="local_override_wins"),
+    ],
+)
+def test_resolve_chain_context(_erpc_base, chain_id, rpc_url, chain_name, expected_url):
     from services.resolution.capability_resolver import _resolve_chain_context
 
-    ctx = _resolve_chain_context(_BASE_ID, None, "base")
-    assert ctx.chain_id == _BASE_ID
-    assert ctx.rpc_url.endswith(_BASE_URL_SUFFIX)
-
-
-def test_resolve_chain_context_mainnet_unchanged(_erpc_base):
-    from services.resolution.capability_resolver import _resolve_chain_context
-
-    ctx = _resolve_chain_context(1, None, "ethereum")
-    assert ctx.chain_id == 1
-    assert ctx.rpc_url.endswith(_MAINNET_URL_SUFFIX)
-
-
-def test_resolve_chain_context_local_override_wins(_erpc_base):
-    from services.resolution.capability_resolver import _resolve_chain_context
-
-    ctx = _resolve_chain_context(_BASE_ID, "http://127.0.0.1:8545", "base")
-    assert ctx.chain_id == _BASE_ID
-    assert ctx.rpc_url == "http://127.0.0.1:8545"
+    ctx = _resolve_chain_context(chain_id, rpc_url, chain_name)
+    assert ctx.chain_id == chain_id
+    assert ctx.rpc_url == expected_url
 
 
 # ---------------------------------------------------------------------------

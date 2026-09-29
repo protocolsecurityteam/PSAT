@@ -57,53 +57,64 @@ def test_single_address_param_signature():
     assert not _is_single_address_param_signature(None)
 
 
-def test_matches_delegated_role_gate():
-    assert _is_delegated_role_gate_descriptor(_gate_descriptor())
-
-
-def test_rejects_solmate_cancall():
-    desc = {
-        "kind": "external_set",
-        "callee_signature": "canCall(address,address,bytes4)",
-        "key_sources": [{"source": "msg_sender"}],
-    }
-    assert not _is_delegated_role_gate_descriptor(desc)
-
-
-def test_rejects_non_caller_keyed():
-    # onlyX(owner) — the arg is not the caller, so this is not a caller-gate.
+def _gate_with(**over: Any) -> dict[str, Any]:
     desc = _gate_descriptor()
-    desc["key_sources"] = [{"source": "state_variable", "state_variable_name": "owner"}]
-    assert not _is_delegated_role_gate_descriptor(desc)
+    desc.update(over)
+    return desc
 
 
-def test_rejects_non_external_set():
-    desc = _gate_descriptor()
-    desc["kind"] = "mapping_membership"
-    assert not _is_delegated_role_gate_descriptor(desc)
+@pytest.mark.parametrize(
+    "desc,expected",
+    [
+        pytest.param(_gate_descriptor(), True, id="matches_delegated_role_gate"),
+        pytest.param(
+            {
+                "kind": "external_set",
+                "callee_signature": "canCall(address,address,bytes4)",
+                "key_sources": [{"source": "msg_sender"}],
+            },
+            False,
+            id="rejects_solmate_cancall",
+        ),
+        # onlyX(owner) — the arg is not the caller, so this is not a caller-gate.
+        pytest.param(
+            _gate_with(key_sources=[{"source": "state_variable", "state_variable_name": "owner"}]),
+            False,
+            id="rejects_non_caller_keyed",
+        ),
+        pytest.param(_gate_with(kind="mapping_membership"), False, id="rejects_non_external_set"),
+    ],
+)
+def test_delegated_role_gate_predicate(desc, expected):
+    assert _is_delegated_role_gate_descriptor(desc) is expected
 
 
-# --- unit: topic0 selection (detect vs union-enroll) ------------------------
+def _boom(*a, **k):
+    raise RuntimeError("wire down")
 
 
-def test_topic0s_uses_detected_standard(monkeypatch):
-    monkeypatch.setattr(eli, "resolve_probe_code", lambda *a, **k: "0xdeadbeef")
-    monkeypatch.setattr(eli, "detect_standards", lambda code: [SOLADY_ENUMERABLE_ROLES])
-    assert eli._role_store_topic0s(cast(Any, None), _PROXY, 1, {}) == [_ROLE_SET]
+_REAL_DETECT = eli.detect_standards
 
 
-def test_topic0s_unions_when_inconclusive(monkeypatch):
-    monkeypatch.setattr(eli, "resolve_probe_code", lambda *a, **k: "0x00")
-    monkeypatch.setattr(eli, "detect_standards", lambda code: [])
-    assert eli._role_store_topic0s(cast(Any, None), _PROXY, 1, {}) == all_topic0s()
-
-
-def test_topic0s_unions_when_probe_raises(monkeypatch):
-    def _boom(*a, **k):
-        raise RuntimeError("wire down")
-
-    monkeypatch.setattr(eli, "resolve_probe_code", _boom)
-    assert eli._role_store_topic0s(cast(Any, None), _PROXY, 1, {}) == all_topic0s()
+@pytest.mark.parametrize(
+    "probe,detect,expected",
+    [
+        pytest.param(
+            lambda *a, **k: "0xdeadbeef",
+            lambda code: [SOLADY_ENUMERABLE_ROLES],
+            [_ROLE_SET],
+            id="uses_detected_standard",
+        ),
+        pytest.param(lambda *a, **k: "0x00", lambda code: [], all_topic0s(), id="unions_when_inconclusive"),
+        # CRITICAL: probe failure fails open to the union (over-index), never to an empty topic list.
+        # The real detector runs here: it must treat the missing code as inconclusive.
+        pytest.param(_boom, _REAL_DETECT, all_topic0s(), id="unions_when_probe_raises"),
+    ],
+)
+def test_topic0_selection(monkeypatch, probe, detect, expected):
+    monkeypatch.setattr(eli, "resolve_probe_code", probe)
+    monkeypatch.setattr(eli, "detect_standards", detect)
+    assert eli._role_store_topic0s(cast(Any, None), _PROXY, 1, {}) == expected
 
 
 def test_topic0s_cache_dedups_detection(monkeypatch):
@@ -275,29 +286,27 @@ def test_enrollment_is_idempotent(session, monkeypatch):
 
 
 @requires_postgres
-def test_zero_address_authority_skips(session, monkeypatch):
+@pytest.mark.parametrize(
+    "probe_code,authority",
+    [
+        pytest.param(
+            _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors), {"address": "0x" + "00" * 20}, id="zero_address"
+        ),
+        # Authority is a state_variable that never resolved (no ControllerValue feed)
+        # and there is no job fallback for the delegated path → no cursor.
+        pytest.param(
+            "0x00",
+            {"address_source": {"source": "state_variable", "state_variable_name": "roleRegistry"}},
+            id="unresolved",
+        ),
+    ],
+)
+def test_unusable_authority_skips(session, monkeypatch, probe_code, authority):
     from db.models import IndexedEventCursor
 
     _seed_creation_block(monkeypatch, 22_000_000)
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _completed_job_with_gate(session, _gate_descriptor(authority_address="0x" + "00" * 20))
-
-    enroll_from_completed_jobs(session)
-    any_cursor = session.execute(select(func.count()).select_from(IndexedEventCursor)).scalar_one()
-    assert any_cursor == 0
-
-
-@requires_postgres
-def test_unresolved_authority_skips(session, monkeypatch):
-    from db.models import IndexedEventCursor
-
-    _seed_creation_block(monkeypatch, 22_000_000)
-    _stub_probe_code(monkeypatch, "0x00")
-    # Authority is a state_variable that never resolved (no ControllerValue feed)
-    # and there is no job fallback for the delegated path → no cursor.
-    desc = _gate_descriptor(authority_address=None)
-    desc["authority_contract"] = {"address_source": {"source": "state_variable", "state_variable_name": "roleRegistry"}}
-    _completed_job_with_gate(session, desc)
+    _stub_probe_code(monkeypatch, probe_code)
+    _completed_job_with_gate(session, _gate_with(authority_contract=authority))
 
     enroll_from_completed_jobs(session)
     any_cursor = session.execute(select(func.count()).select_from(IndexedEventCursor)).scalar_one()

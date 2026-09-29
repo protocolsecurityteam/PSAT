@@ -9,6 +9,8 @@ injected ``resolve_controllers`` callable, so every case here stubs it.
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from services.governance.principals import (
     _build_company_function_entry,
     _function_principal_payload,
@@ -43,28 +45,35 @@ def test_is_terminal_principal_type():
         assert is_terminal_principal_type(non_terminal) is False
 
 
-def test_terminates_at_safe_controller():
-    resolver = _dict_resolver({CONTRACT_A: {"address": SAFE, "resolved_type": "safe", "details": {"threshold": 2}}})
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
+@pytest.mark.parametrize(
+    "edges, resolved_type, address, chain",
+    [
+        pytest.param(
+            {CONTRACT_A: {"address": SAFE, "resolved_type": "safe", "details": {"threshold": 2}}},
+            "safe",
+            SAFE,
+            [CONTRACT_A, SAFE],
+            id="safe-controller",
+        ),
+        pytest.param(
+            {
+                CONTRACT_A: {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
+                CONTRACT_B: {"address": EOA, "resolved_type": "eoa", "details": {}},
+            },
+            "eoa",
+            EOA,
+            [CONTRACT_A, CONTRACT_B, EOA],
+            id="multi-hop-contract-chain",
+        ),
+    ],
+)
+def test_walk_terminates(edges, resolved_type, address, chain):
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=_dict_resolver(edges))
     assert record["terminal"] is True
-    assert record["resolved_type"] == "safe"
-    assert record["address"] == SAFE
+    assert record["resolved_type"] == resolved_type
+    assert record["address"] == address
     assert record["status"] == "terminated"
-    assert record["chain"] == [CONTRACT_A, SAFE]
-
-
-def test_multi_hop_contract_chain_terminates():
-    resolver = _dict_resolver(
-        {
-            CONTRACT_A: {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
-            CONTRACT_B: {"address": EOA, "resolved_type": "eoa", "details": {}},
-        }
-    )
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
-    assert record["terminal"] is True
-    assert record["resolved_type"] == "eoa"
-    assert record["address"] == EOA
-    assert record["chain"] == [CONTRACT_A, CONTRACT_B, EOA]
+    assert record["chain"] == chain
 
 
 def test_unfetched_controller_is_unknown_not_resolved():
@@ -269,19 +278,17 @@ def _fp(address, resolved_type, *, details=None, principal_type="authority_role"
     )
 
 
-def test_contract_principal_marked_non_terminal():
-    payload = _function_principal_payload(_fp(CONTRACT_A, "contract"))
-    assert payload["terminal"] is False
-
-
-def test_safe_principal_marked_terminal():
-    payload = _function_principal_payload(_fp(SAFE, "safe", details={"threshold": 2}))
-    assert payload["terminal"] is True
-
-
-def test_unknown_principal_marked_non_terminal():
-    payload = _function_principal_payload(_fp(CONTRACT_A, None))
-    assert payload["terminal"] is False
+@pytest.mark.parametrize(
+    "fp, expected_terminal",
+    [
+        pytest.param(_fp(CONTRACT_A, "contract"), False, id="contract-non-terminal"),
+        pytest.param(_fp(SAFE, "safe", details={"threshold": 2}), True, id="safe-terminal"),
+        # A None type fails closed.
+        pytest.param(_fp(CONTRACT_A, None), False, id="unknown-non-terminal"),
+    ],
+)
+def test_principal_payload_terminal_flag(fp, expected_terminal):
+    assert _function_principal_payload(fp)["terminal"] is expected_terminal
 
 
 def test_terminal_principal_chain_surfaced_from_details():

@@ -335,20 +335,14 @@ def test_disagreeing_sites_fold_to_not_determined(effects):
     }
 
 
-def test_non_call_sinks_carry_no_receiver_key(effects):
-    """Absent means never computed. A state write has no receiver, and the key
-    must not appear holding a null that a consumer could read as an answer."""
+def test_receiver_schema_invariants(effects):
+    """Absent means never computed: a state write has no receiver, and the key must not appear holding a
+    null that a consumer could read as an answer. This plane resolves no address, so every state-variable
+    receiver reads ``contract_state_unresolved`` and carries no address key at all."""
     for info in effects["functions"].values():
         for sink in info["sinks"]:
             if sink["kind"] != "external_call":
                 assert "receiver" not in sink, sink
-
-
-def test_no_asset_address_is_ever_published_by_this_plane(effects):
-    """This plane resolves no address. Every state-variable receiver therefore
-    reads ``contract_state_unresolved`` and carries no address key at all."""
-    for info in effects["functions"].values():
-        for sink in info["sinks"]:
             receiver = sink.get("receiver")
             if receiver is None:
                 continue

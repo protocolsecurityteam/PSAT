@@ -162,20 +162,6 @@ def test_detect_named_address_var_pointer(inline_var_contract):
     assert "governor" not in by_name
 
 
-def test_detect_empty_for_plain_contract(tmp_path):
-    from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
-
-    c = _compile(
-        tmp_path,
-        """// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Plain { address public owner; function f() external {} }
-""",
-        "Plain",
-    )
-    assert detect_secondary_impl_pointers(c) == []
-
-
 def test_detect_eip1967_style_minus_one_slot(tmp_path):
     from eth_utils.crypto import keccak
 
@@ -216,22 +202,36 @@ contract C is S {
     assert "adminImpl" in {p["name"] for p in detect_secondary_impl_pointers(c)}
 
 
-def test_detect_rejects_plain_call_on_delegatecall_named_var(tmp_path):
-    """#3: a plain ``.call()`` on a variable merely NAMED ``delegatecallTarget``
-    must NOT be flagged — detection keys on the IR operation, not a substring."""
-    from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
-
-    c = _compile(
-        tmp_path,
-        """// SPDX-License-Identifier: MIT
+@pytest.mark.parametrize(
+    ("source", "contract_name"),
+    [
+        pytest.param(
+            """// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract Plain { address public owner; function f() external {} }
+""",
+            "Plain",
+            id="plain-contract",
+        ),
+        # #3: a plain ``.call()`` on a variable merely NAMED ``delegatecallTarget`` must NOT be
+        # flagged; detection keys on the IR operation, not a substring.
+        pytest.param(
+            """// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 contract C {
     address delegatecallTarget;
     function set(address a) external { delegatecallTarget = a; }
     fallback() external { (bool ok,) = delegatecallTarget.call(""); ok; }
 }""",
-        "C",
-    )
+            "C",
+            id="plain-call-on-delegatecall-named-var",
+        ),
+    ],
+)
+def test_detect_empty_for_non_delegating_contract(tmp_path, source, contract_name):
+    from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
+
+    c = _compile(tmp_path, source, contract_name)
     assert detect_secondary_impl_pointers(c) == []
 
 

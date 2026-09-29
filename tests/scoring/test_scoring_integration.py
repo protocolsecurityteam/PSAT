@@ -502,25 +502,22 @@ def _coverage_row(fx, status: str) -> AuditContractCoverage:
     return row
 
 
-def test_coverage_verify_flip_marks_dirty(fx):
+@pytest.mark.parametrize(
+    "initial_status, expected_reason",
+    [
+        pytest.param("pending", SCORE_DIRTY_COVERAGE_VERIFY, id="status-flip-marks-dirty"),
+        pytest.param("proven", None, id="restamp-of-the-same-status-marks-nothing"),
+    ],
+)
+def test_coverage_verify_dirty_mark(fx, initial_status, expected_reason):
     from services.audits.coverage import _stamp_coverage_row
 
-    row = _coverage_row(fx, "pending")
+    row = _coverage_row(fx, initial_status)
     _stamp_coverage_row(fx.session, row, status="proven", reason=None, proven=True, matched_commit_sha="abc")
     fx.session.commit()
 
     mark = fx.queued_row()
-    assert mark is not None and mark.reason == SCORE_DIRTY_COVERAGE_VERIFY
-
-
-def test_coverage_verify_restamp_of_the_same_status_marks_nothing(fx):
-    from services.audits.coverage import _stamp_coverage_row
-
-    row = _coverage_row(fx, "proven")
-    _stamp_coverage_row(fx.session, row, status="proven", reason=None, proven=True, matched_commit_sha="abc")
-    fx.session.commit()
-
-    assert fx.queued_row() is None
+    assert (mark.reason if mark is not None else None) == expected_reason
 
 
 def test_reanalysis_marks_dirty(fx):
@@ -1015,22 +1012,20 @@ def test_a_not_determined_grade_is_served_as_such_not_as_zero(fx, api_client):
     assert body["confidence_pct"] is None
 
 
-def test_score_endpoint_404s_when_no_score_exists(fx, api_client):
-    """One of two 404s; the detail is the only thing telling them apart.
-
-    The live suite branches on it: a client reading both alike reports a typo'd
-    protocol as "not scored yet", and the live skip would turn a missing test
-    company into a green run.
-    """
-    response = api_client.get(f"/api/company/{fx.protocol.name}/score")
+@pytest.mark.parametrize(
+    "company_name, detail",
+    [
+        # One of two 404s; the detail is the only thing telling them apart. The live suite branches on it: a
+        # client reading both alike reports a typo'd protocol as "not scored yet", and the live skip would
+        # turn a missing test company into a green run.
+        pytest.param(None, "No score has been computed for this protocol yet", id="no-score-exists"),
+        pytest.param("psat-no-such-protocol-xyz", "Company not found", id="unknown-company"),
+    ],
+)
+def test_score_endpoint_404s(fx, api_client, company_name, detail):
+    response = api_client.get(f"/api/company/{company_name or fx.protocol.name}/score")
     assert response.status_code == 404
-    assert response.json()["detail"] == "No score has been computed for this protocol yet"
-
-
-def test_score_endpoint_404s_for_an_unknown_company(api_client):
-    response = api_client.get("/api/company/psat-no-such-protocol-xyz/score")
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Company not found"
+    assert response.json()["detail"] == detail
 
 
 def test_score_endpoint_reassembles_a_spilled_document(fx, api_client, monkeypatch):

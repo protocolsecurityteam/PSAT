@@ -161,45 +161,33 @@ def test_global_rate_limit_triggers_429(client):
     assert codes[3] == 429
 
 
-def test_rotating_xff_does_not_escape_limit_when_fly_client_ip_constant(client):
-    import api
-
-    original = api._global_limiter.limit
-    api._global_limiter.limit = 3
-    api._global_limiter.reset()
-    try:
+@pytest.mark.parametrize(
+    "headers_for",
+    [
         # Rotate the client-controlled X-Forwarded-For every request; Fly-Client-IP
         # (set by the proxy) stays constant, so all four land in one bucket.
-        codes = [
-            client.get(
-                "/api/version",
-                headers={"Fly-Client-IP": "9.9.9.9", "X-Forwarded-For": f"{i}.{i}.{i}.{i}"},
-            ).status_code
-            for i in range(1, 5)
-        ]
-    finally:
-        api._global_limiter.limit = original
-        api._global_limiter.reset()
-    assert codes[3] == 429
-
-
-def test_rotating_left_xff_hop_does_not_escape_limit(client):
-    import api
-
-    original = api._global_limiter.limit
-    api._global_limiter.limit = 3
-    api._global_limiter.reset()
-    try:
+        pytest.param(
+            lambda i: {"Fly-Client-IP": "9.9.9.9", "X-Forwarded-For": f"{i}.{i}.{i}.{i}"},
+            id="rotating-xff-with-constant-fly-client-ip",
+        ),
         # No Fly-Client-IP: the trusted identity is the RIGHT-most XFF hop
         # (appended by our proxy). Rotating the left-most (spoofable) hop must
         # not mint fresh buckets.
-        codes = [
-            client.get(
-                "/api/version",
-                headers={"X-Forwarded-For": f"{i}.{i}.{i}.{i}, 5.5.5.5"},
-            ).status_code
-            for i in range(1, 5)
-        ]
+        pytest.param(
+            lambda i: {"X-Forwarded-For": f"{i}.{i}.{i}.{i}, 5.5.5.5"},
+            id="rotating-left-xff-hop",
+        ),
+    ],
+)
+def test_spoofed_forwarding_headers_do_not_escape_rate_limit(client, headers_for):
+    # CRITICAL: rate-limit spoof bypass via client-controlled forwarding headers.
+    import api
+
+    original = api._global_limiter.limit
+    api._global_limiter.limit = 3
+    api._global_limiter.reset()
+    try:
+        codes = [client.get("/api/version", headers=headers_for(i)).status_code for i in range(1, 5)]
     finally:
         api._global_limiter.limit = original
         api._global_limiter.reset()

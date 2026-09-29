@@ -424,40 +424,26 @@ contract LibReturn {
 )
 
 
-def test_library_storage_write_is_real_setter(tmp_path):
-    contract = _compile(tmp_path, _LIB_WRITE_SRC, "LibWrite")
+@pytest.mark.parametrize(
+    ("src", "name", "expected_kind"),
+    [
+        # box.owner is redirectable via L.put -> the alias is resolved to a setter.
+        pytest.param(_LIB_WRITE_SRC, "LibWrite", "storage_setter", id="library_write"),
+        # A storage ref passed only for reading is not a setter; the clean proof holds.
+        pytest.param(_LIB_READ_SRC, "LibRead", "storage_no_setter", id="library_read_only"),
+        # putNested forwards the storage ref into _inner, which writes it.
+        pytest.param(_LIB_NESTED_SRC, "LibNested", "storage_setter", id="library_transitive_write"),
+        # ``Box storage b = box;`` traces back to box -> a resolved setter.
+        pytest.param(_LIB_LOCAL_SRC, "LibLocal", "storage_setter", id="library_local_pointer_write"),
+        # The storage pointer comes from a call return: some unknown var was written
+        # through the alias, so no no-setter proof in the contract is sound.
+        pytest.param(_LIB_UNRESOLVABLE_SRC, "LibReturn", "indeterminate", id="library_unresolvable_alias"),
+    ],
+)
+def test_library_storage_alias_target_kind(tmp_path, src, name, expected_kind):
+    contract = _compile(tmp_path, src, name)
     effects = build_effects(contract)
-    # box.owner is redirectable via L.put -> the alias is resolved to a setter.
-    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_setter"
-
-
-def test_library_read_only_stays_no_setter(tmp_path):
-    contract = _compile(tmp_path, _LIB_READ_SRC, "LibRead")
-    effects = build_effects(contract)
-    # A storage ref passed only for reading is not a setter; the clean proof holds.
-    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_no_setter"
-
-
-def test_library_transitive_write_is_real_setter(tmp_path):
-    contract = _compile(tmp_path, _LIB_NESTED_SRC, "LibNested")
-    effects = build_effects(contract)
-    # putNested forwards the storage ref into _inner, which writes it.
-    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_setter"
-
-
-def test_library_local_pointer_write_is_real_setter(tmp_path):
-    contract = _compile(tmp_path, _LIB_LOCAL_SRC, "LibLocal")
-    effects = build_effects(contract)
-    # ``Box storage b = box;`` traces back to box -> a resolved setter.
-    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_setter"
-
-
-def test_library_unresolvable_alias_is_indeterminate(tmp_path):
-    contract = _compile(tmp_path, _LIB_UNRESOLVABLE_SRC, "LibReturn")
-    effects = build_effects(contract)
-    # The storage pointer comes from a call return: some unknown var was written
-    # through the alias, so no no-setter proof in the contract is sound.
-    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "indeterminate"
+    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == expected_kind
 
 
 # tx.origin destination (register #7): ``caller_controlled`` (theft-shaped), NOT

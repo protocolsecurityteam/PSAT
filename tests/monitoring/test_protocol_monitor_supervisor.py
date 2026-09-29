@@ -49,15 +49,24 @@ class RecordingEvent(threading.Event):
 # ---------------------------------------------------------------------------
 
 
-def test_raising_loop_restarts_with_growing_capped_backoff():
-    """Each death backs off exponentially from base, capped at the ceiling."""
-    ev = RecordingEvent(stop_after_waits=6)
+@pytest.mark.parametrize(
+    "stop_after,max_backoff_s,healthy_stretch_s,expected_waits",
+    [
+        # Each death backs off exponentially from base (5 → 10 → 20), then pins at the 20s cap;
+        # 1e9 means never "healthy", so the backoff never resets.
+        pytest.param(6, 20.0, 1e9, [5.0, 10.0, 20.0, 20.0, 20.0, 20.0], id="growing_capped"),
+        # A run that clears the healthy threshold resets the backoff to base (0.0: every run is healthy).
+        pytest.param(4, 300.0, 0.0, [5.0, 5.0, 5.0, 5.0], id="reset_after_healthy_stretch"),
+    ],
+)
+def test_raising_loop_restart_backoff(stop_after, max_backoff_s, healthy_stretch_s, expected_waits):
+    ev = RecordingEvent(stop_after_waits=stop_after)
     sup = Supervisor(
         [],
         stop_event=ev,
         base_backoff_s=5.0,
-        max_backoff_s=20.0,
-        healthy_stretch_s=1e9,  # never "healthy" → backoff never resets
+        max_backoff_s=max_backoff_s,
+        healthy_stretch_s=healthy_stretch_s,
     )
 
     def raiser(_ev):
@@ -65,27 +74,7 @@ def test_raising_loop_restarts_with_growing_capped_backoff():
 
     sup._supervise("protocol_scanner", raiser)
 
-    # 5 → 10 → 20 (grow), then pinned at the 20s cap.
-    assert ev.waits == [5.0, 10.0, 20.0, 20.0, 20.0, 20.0]
-
-
-def test_backoff_resets_after_a_healthy_stretch():
-    """A run that clears the healthy threshold resets the backoff to base."""
-    ev = RecordingEvent(stop_after_waits=4)
-    sup = Supervisor(
-        [],
-        stop_event=ev,
-        base_backoff_s=5.0,
-        max_backoff_s=300.0,
-        healthy_stretch_s=0.0,  # every run counts as healthy → always resets
-    )
-
-    def raiser(_ev):
-        raise ValueError("boom")
-
-    sup._supervise("protocol_scanner", raiser)
-
-    assert ev.waits == [5.0, 5.0, 5.0, 5.0]
+    assert ev.waits == expected_waits
 
 
 # ---------------------------------------------------------------------------
@@ -210,32 +199,18 @@ def _stub_scan_wire(monkeypatch, head: int = 100):
     monkeypatch.setattr(elr, "rpc_request", getlogs_rpc)
 
 
-def test_run_scan_loop_honors_stop_event_mid_interval(db_session, monkeypatch):
+@pytest.mark.parametrize("loop_name", ["run_scan_loop", "run_poll_loop"])
+def test_real_loop_honors_stop_event_mid_interval(db_session, monkeypatch, loop_name):
     """A stop mid-interval returns promptly instead of sleeping the interval."""
-    from services.monitoring.unified_watcher import run_scan_loop
+    import services.monitoring.unified_watcher as uw
 
+    loop = getattr(uw, loop_name)
     _stub_scan_wire(monkeypatch)
     stop = threading.Event()
     # 3600s interval: sleeping it out instead of waiting on the stop event would time out the join.
-    t = threading.Thread(target=run_scan_loop, args=("http://stub", 3600.0), kwargs={"stop_event": stop}, daemon=True)
+    t = threading.Thread(target=loop, args=("http://stub", 3600.0), kwargs={"stop_event": stop}, daemon=True)
     t.start()
     time.sleep(0.2)  # let it finish one empty-DB pass and enter the inter-pass wait
-    t0 = time.monotonic()
-    stop.set()
-    t.join(timeout=5.0)
-
-    assert not t.is_alive()
-    assert time.monotonic() - t0 < 5.0
-
-
-def test_run_poll_loop_honors_stop_event_mid_interval(db_session, monkeypatch):
-    from services.monitoring.unified_watcher import run_poll_loop
-
-    _stub_scan_wire(monkeypatch)
-    stop = threading.Event()
-    t = threading.Thread(target=run_poll_loop, args=("http://stub", 3600.0), kwargs={"stop_event": stop}, daemon=True)
-    t.start()
-    time.sleep(0.2)
     t0 = time.monotonic()
     stop.set()
     t.join(timeout=5.0)

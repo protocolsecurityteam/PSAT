@@ -4,6 +4,8 @@ _resolve_*/_merge_* helper functions."""
 
 from __future__ import annotations
 
+import pytest
+
 from tests.cache_helpers import (
     ADDR_A,
     FAKE_CLS_OUTPUT,
@@ -234,20 +236,6 @@ def test_dynamic_deps_still_run_on_cache_hit(db_session, monkeypatch):
     assert dynamic_called == [True]
 
 
-def test_static_deps_artifact_copied_by_cache(db_session):
-    from db.queue import copy_static_cache, create_job, get_artifact, store_artifact
-
-    source_job = _create_completed_job_with_static_data(db_session)
-    store_artifact(db_session, source_job.id, "static_dependencies", data=FAKE_STATIC_DEPS)
-
-    target_job = create_job(db_session, {"address": ADDR_A})
-    copy_static_cache(db_session, source_job.id, target_job.id)
-
-    art = get_artifact(db_session, target_job.id, "static_dependencies")
-    assert isinstance(art, dict)
-    assert art["dependencies"] == FAKE_STATIC_DEPS["dependencies"]
-
-
 # ---------------------------------------------------------------------------
 # Dynamic dependency append-only caching
 # ---------------------------------------------------------------------------
@@ -303,11 +291,18 @@ def test_dynamic_deps_artifact_stored_on_first_run(db_session, monkeypatch):
     assert len(art["transactions_analyzed"]) == 2
 
 
-def test_dynamic_deps_append_only_merge_on_rerun(db_session, monkeypatch):
+@pytest.mark.parametrize(
+    "extra_request",
+    [
+        pytest.param(None, id="append_only_merge_on_rerun"),
+        pytest.param({"static_cached": True}, id="static_cached_source_job_fallback"),
+    ],
+)
+def test_dynamic_deps_append_only_merge_on_rerun(db_session, monkeypatch, extra_request):
     from db.queue import get_artifact, store_artifact
     from workers.static_worker import StaticWorker
 
-    job = _make_dep_phase_job(db_session)
+    job = _make_dep_phase_job(db_session, extra_request=extra_request)
 
     store_artifact(db_session, job.id, "dynamic_dependencies", data=FAKE_DYN_DEPS_OLD)
 
@@ -402,43 +397,6 @@ def test_dynamic_deps_explicit_tx_hashes_skip_merge(db_session, monkeypatch):
     art = get_artifact(db_session, job.id, "dynamic_dependencies")
     assert isinstance(art, dict)
     assert art["transactions_analyzed"] == FAKE_DYN_DEPS_NEW["transactions_analyzed"]
-
-
-def test_dynamic_deps_source_job_fallback(db_session, monkeypatch):
-    from db.queue import get_artifact, store_artifact
-    from workers.static_worker import StaticWorker
-
-    job = _make_dep_phase_job(
-        db_session,
-        extra_request={
-            "static_cached": True,
-        },
-    )
-    store_artifact(db_session, job.id, "dynamic_dependencies", data=FAKE_DYN_DEPS_OLD)
-
-    captured_kwargs = {}
-
-    def mock_find_dyn(*args, **kwargs):
-        captured_kwargs.update(kwargs)
-        return FAKE_DYN_DEPS_NEW
-
-    _patch_dep_phase_helpers(monkeypatch, mock_find_dyn)
-
-    worker = StaticWorker()
-    monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "_run_analysis_phase", lambda *a, **kw: True)
-    monkeypatch.setattr(worker, "_run_tracking_plan_phase", lambda *a, **kw: None)
-    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-
-    worker.process(db_session, job)
-
-    assert captured_kwargs.get("start_block") == 201
-
-    art = get_artifact(db_session, job.id, "dynamic_dependencies")
-    assert isinstance(art, dict)
-    assert "0x0000000000000000000000000000000000000042" in art["dependencies"]
-    assert "0x0000000000000000000000000000000000000099" in art["dependencies"]
 
 
 # ---------------------------------------------------------------------------
@@ -540,20 +498,6 @@ def test_classifications_reused_via_pre_classified(db_session, monkeypatch):
     art = get_artifact(db_session, job.id, "classifications")
     assert isinstance(art, dict)
     assert "0x0000000000000000000000000000000000000099" in art["classifications"]
-
-
-def test_classifications_artifact_copied_as_seed(db_session):
-    from db.queue import copy_static_cache, create_job, get_artifact, store_artifact
-
-    source_job = _create_completed_job_with_static_data(db_session)
-    store_artifact(db_session, source_job.id, "classifications", data=FAKE_CLS_OUTPUT)
-
-    target_job = create_job(db_session, {"address": ADDR_A})
-    copy_static_cache(db_session, source_job.id, target_job.id)
-
-    art = get_artifact(db_session, target_job.id, "classifications")
-    assert isinstance(art, dict)
-    assert art["classifications"] == FAKE_CLS_OUTPUT["classifications"]
 
 
 # ---------------------------------------------------------------------------
@@ -728,22 +672,6 @@ def test_upgrade_history_no_new_events_uses_previous(db_session, monkeypatch):
     assert art["total_upgrades"] == 1
 
 
-def test_upgrade_history_artifact_copied_as_seed(db_session):
-    from db.queue import copy_static_cache, create_job, get_artifact, store_artifact
-
-    source_job = _create_completed_job_with_static_data(db_session)
-    store_artifact(db_session, source_job.id, "upgrade_history", data=FAKE_UH_PREV)
-
-    target_job = create_job(db_session, {"address": ADDR_A})
-    copy_static_cache(db_session, source_job.id, target_job.id)
-
-    art = get_artifact(db_session, target_job.id, "upgrade_history")
-    assert isinstance(art, dict)
-    assert art["total_upgrades"] == FAKE_UH_PREV["total_upgrades"]
-    proxy_addr = "0xdac17f958d2ee523a2206206994597c13d831ec7"
-    assert proxy_addr in art["proxies"]
-
-
 # ---------------------------------------------------------------------------
 # Enrichment cache tests
 # ---------------------------------------------------------------------------
@@ -794,25 +722,36 @@ def test_enrichment_cache_skips_cached_addresses(db_session, monkeypatch):
     assert unified["dependencies"][addr_c].get("contract_name") == "TokenC"
 
 
-def test_enrichment_cache_copied_by_copy_static_cache(db_session):
+@pytest.mark.parametrize(
+    ("name", "data"),
+    [
+        pytest.param("static_dependencies", FAKE_STATIC_DEPS, id="static_dependencies"),
+        pytest.param("classifications", FAKE_CLS_OUTPUT, id="classifications_as_seed"),
+        pytest.param("upgrade_history", FAKE_UH_PREV, id="upgrade_history_as_seed"),
+        pytest.param(
+            "enrichment_cache",
+            {
+                "0x0000000000000000000000000000000000000aaa": {
+                    "name": "SomeToken",
+                    "selectors": {"0x12345678": "transfer"},
+                }
+            },
+            id="enrichment_cache",
+        ),
+    ],
+)
+def test_artifact_copied_by_copy_static_cache(db_session, name, data):
     from db.queue import copy_static_cache, create_job, get_artifact, store_artifact
 
     source_job = _create_completed_job_with_static_data(db_session)
-    enrichment = {
-        "0x0000000000000000000000000000000000000aaa": {
-            "name": "SomeToken",
-            "selectors": {"0x12345678": "transfer"},
-        }
-    }
-    store_artifact(db_session, source_job.id, "enrichment_cache", data=enrichment)
+    store_artifact(db_session, source_job.id, name, data=data)
 
     target_job = create_job(db_session, {"address": ADDR_A})
     copy_static_cache(db_session, source_job.id, target_job.id)
 
-    art = get_artifact(db_session, target_job.id, "enrichment_cache")
+    art = get_artifact(db_session, target_job.id, name)
     assert isinstance(art, dict)
-    assert art["0x0000000000000000000000000000000000000aaa"]["name"] == "SomeToken"
-    assert art["0x0000000000000000000000000000000000000aaa"]["selectors"] == {"0x12345678": "transfer"}
+    assert art == data
 
 
 # ---------------------------------------------------------------------------

@@ -508,10 +508,22 @@ class TestResolutionStageObservability:
     def _job(self) -> Any:
         return SimpleNamespace(id=uuid.uuid4())
 
-    def test_a_closed_gate_is_recorded(self, plane_session, monkeypatch):
+    @pytest.mark.parametrize(
+        ("registry", "rows", "outcome"),
+        [
+            pytest.param(
+                HALF_ENROLLED,
+                lambda: [_cursor(HALF_ENROLLED, ROLE_GRANTED_TOPIC0)],
+                OUTCOME_GATE_CLOSED,
+                id="closed_gate",
+            ),
+            pytest.param(REGISTRY, lambda: _enrolled(REGISTRY), OUTCOME_NO_ROWS, id="open_gate_with_no_rows"),
+        ],
+    )
+    def test_a_no_write_pass_is_recorded(self, plane_session, monkeypatch, registry, rows, outcome):
         recorded = self._metrics(monkeypatch)
         session = plane_session
-        session.add(_cursor(HALF_ENROLLED, ROLE_GRANTED_TOPIC0))
+        session.add_all(rows())
         session.flush()
 
         written = ResolutionWorker()._resolve_role_holder_plane(
@@ -519,29 +531,11 @@ class TestResolutionStageObservability:
             self._job(),
             chain_id=1,
             rpc_url="http://stub",
-            registry_address=HALF_ENROLLED,
+            registry_address=registry,
         )
 
         assert written == 0
-        assert recorded == {"role_holder_planes": 0, "role_holder_plane_outcome": OUTCOME_GATE_CLOSED}
-        session.rollback()
-
-    def test_an_open_gate_with_no_rows_is_recorded(self, plane_session, monkeypatch):
-        recorded = self._metrics(monkeypatch)
-        session = plane_session
-        session.add_all(_enrolled(REGISTRY))
-        session.flush()
-
-        written = ResolutionWorker()._resolve_role_holder_plane(
-            session,
-            self._job(),
-            chain_id=1,
-            rpc_url="http://stub",
-            registry_address=REGISTRY,
-        )
-
-        assert written == 0
-        assert recorded == {"role_holder_planes": 0, "role_holder_plane_outcome": OUTCOME_NO_ROWS}
+        assert recorded == {"role_holder_planes": 0, "role_holder_plane_outcome": outcome}
         session.rollback()
 
     def test_written_rows_are_recorded(self, plane_session, monkeypatch, confirming_reads):

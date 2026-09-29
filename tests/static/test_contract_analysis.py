@@ -475,11 +475,13 @@ def test_modifier_helper_preserves_opaque_role_identifier(tmp_path):
     assert tracked["kind"] == "role_identifier"
 
 
-def test_opaque_external_void_helper_guard_is_controller_ref(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "OpaqueExternalGuard",
-        """
+# CRITICAL: an opaque external guard call must count as a controller ref, not vanish.
+@pytest.mark.parametrize(
+    ("project_name", "source", "function", "controller_ref"),
+    [
+        pytest.param(
+            "OpaqueExternalGuard",
+            """
         pragma solidity ^0.8.19;
 
         interface IGate {
@@ -513,19 +515,13 @@ def test_opaque_external_void_helper_guard_is_controller_ref(tmp_path):
             }
         }
         """,
-    )
-
-    analysis = collect_contract_analysis(project_dir)
-    semantic = _semantic_function(analysis, "pause()")
-    assert "gate" in semantic["controller_refs"]
-    assert "external_contract_call" in semantic["effect_labels"]
-
-
-def test_opaque_external_role_helper_is_controller_ref(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "OpaqueExternalRoleGuard",
-        """
+            "pause()",
+            "gate",
+            id="void_helper_guard",
+        ),
+        pytest.param(
+            "OpaqueExternalRoleGuard",
+            """
         pragma solidity ^0.8.19;
 
         interface IAuth {
@@ -560,19 +556,13 @@ def test_opaque_external_role_helper_is_controller_ref(tmp_path):
             }
         }
         """,
-    )
-
-    analysis = collect_contract_analysis(project_dir)
-    semantic = _semantic_function(analysis, "pause()")
-    assert "auth" in semantic["controller_refs"]
-    assert "external_contract_call" in semantic["effect_labels"]
-
-
-def test_opaque_external_policy_helper_is_controller_ref(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "OpaqueExternalPolicyGuard",
-        """
+            "pause()",
+            "auth",
+            id="role_helper",
+        ),
+        pytest.param(
+            "OpaqueExternalPolicyGuard",
+            """
         pragma solidity ^0.8.19;
 
         interface IPolicy {
@@ -608,11 +598,18 @@ def test_opaque_external_policy_helper_is_controller_ref(tmp_path):
             }
         }
         """,
-    )
+            "execute()",
+            "policy",
+            id="policy_helper",
+        ),
+    ],
+)
+def test_opaque_external_helper_is_controller_ref(tmp_path, project_name, source, function, controller_ref):
+    project_dir = _write_project(tmp_path, project_name, source)
 
     analysis = collect_contract_analysis(project_dir)
-    semantic = _semantic_function(analysis, "execute()")
-    assert "policy" in semantic["controller_refs"]
+    semantic = _semantic_function(analysis, function)
+    assert controller_ref in semantic["controller_refs"]
     assert "external_contract_call" in semantic["effect_labels"]
 
 

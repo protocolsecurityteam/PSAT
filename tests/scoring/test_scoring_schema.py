@@ -429,61 +429,87 @@ def test_signal_three_states_round_trip(db_session, scoring_protocol):
     assert rows[1].principal_refs[0]["function_principal_id"] == 3
 
 
-@pytest.mark.usefixtures("scoring_protocol")
-def test_undetermined_severity_cannot_carry_a_number(db_session, scoring_protocol):
-    fx = scoring_protocol
-    db_session.add(_row(fx, severity_state=SEVERITY_STATE_NOT_DETERMINED, severity_proven=1.0))
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
+# Each case is a row a DB CHECK must refuse. CRITICAL ones guard a published-state biconditional: a row that
+# reads as determined without its witness (or the reverse) would corrupt the fold.
+_REJECTED_SIGNAL_ROWS = [
+    pytest.param(
+        dict(severity_state=SEVERITY_STATE_NOT_DETERMINED, severity_proven=1.0), id="undetermined_severity_number"
+    ),
+    pytest.param(dict(severity_state=SEVERITY_STATE_PROVEN, severity_proven=None), id="proven_severity_no_number"),
+    pytest.param(
+        dict(severity_state=SEVERITY_STATE_PROVEN, severity_proven=0.9, severity_basis=[]),
+        id="proven_severity_no_basis",
+    ),
+    pytest.param(
+        dict(principal_state=PRINCIPAL_STATE_ENUMERATED, principal_refs=[]), id="empty_enumerated_principal_set"
+    ),
+    # A partial set under ``not_determined`` is a set a reader could total.
+    pytest.param(
+        dict(value_state=VALUE_STATE_NOT_DETERMINED, value_entity_keys=["ethereum::0x1"]),
+        id="undetermined_value_smuggles_entity_keys",
+    ),
+    pytest.param(
+        dict(destination_state=NOT_DETERMINED, destination_shape="caller_arbitrary"),
+        id="undetermined_destination_carries_shape",
+    ),
+    pytest.param(
+        dict(
+            claim_id="delegatecall.execute",
+            destination_state=DESTINATION_STATE_NOT_APPLICABLE,
+            destination_shape=DESTINATION_SHAPE_NOT_APPLICABLE,
+        ),
+        id="destination_bearing_claim_not_applicable",
+    ),
+    # N2: the reverse arm of the destination biconditional.
+    pytest.param(
+        dict(destination_state=DESTINATION_STATE_UNCONSTRAINED_PROVEN, destination_shape=None),
+        id="proven_destination_without_shape",
+    ),
+    # N2: the reverse arm of the principal pairing.
+    pytest.param(
+        dict(
+            principal_state=PRINCIPAL_STATE_NOT_DETERMINED,
+            principal_refs=[{"function_principal_id": 1, "chain": "ethereum", "address": "0xa"}],
+        ),
+        id="non_enumerated_principal_carries_refs",
+    ),
+    # S3: a JSONB object is invisible to a length test but not to a reader.
+    pytest.param(dict(principal_refs={"function_principal_id": 1}), id="principal_refs_as_object"),
+    # N2: the reverse arm of the value pairing — an earned negative is empty.
+    pytest.param(
+        dict(
+            value_state=VALUE_STATE_PROVEN_NO_REACH,
+            value_basis="proven_no_reach",
+            value_entity_keys=["ethereum::0x1"],
+        ),
+        id="proven_no_reach_carries_entity_keys",
+    ),
+    # S7: a NULL element is an entity the fold cannot key.
+    pytest.param(
+        dict(
+            value_state=VALUE_STATE_PROVEN_REACH,
+            value_basis="observed_reach_value_usd",
+            value_entity_keys=["ethereum::0x1", None],
+        ),
+        id="value_entity_keys_contain_null",
+    ),
+]
 
 
 @pytest.mark.usefixtures("scoring_protocol")
-def test_proven_severity_requires_a_number_and_a_basis(db_session, scoring_protocol):
-    fx = scoring_protocol
-    db_session.add(_row(fx, severity_state=SEVERITY_STATE_PROVEN, severity_proven=None))
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-    db_session.add(
-        _row(fx, severity_state=SEVERITY_STATE_PROVEN, severity_proven=0.9, severity_basis=[]),
-    )
+@pytest.mark.parametrize("overrides", _REJECTED_SIGNAL_ROWS)
+def test_signal_row_check_constraints_reject(db_session, scoring_protocol, overrides):
+    db_session.add(_row(scoring_protocol, **overrides))
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
 
 
 @pytest.mark.usefixtures("scoring_protocol")
-def test_empty_enumerated_principal_set_is_rejected(db_session, scoring_protocol):
-    fx = scoring_protocol
-    db_session.add(_row(fx, principal_state=PRINCIPAL_STATE_ENUMERATED, principal_refs=[]))
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-
-@pytest.mark.usefixtures("scoring_protocol")
-def test_undetermined_value_cannot_smuggle_entity_keys(db_session, scoring_protocol):
-    """A partial set under ``not_determined`` is a set a reader could total."""
-    fx = scoring_protocol
-    db_session.add(_row(fx, value_state=VALUE_STATE_NOT_DETERMINED, value_entity_keys=["ethereum::0x1"]))
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-
-@pytest.mark.usefixtures("scoring_protocol")
-def test_undetermined_destination_cannot_carry_a_shape(db_session, scoring_protocol):
-    fx = scoring_protocol
-    db_session.add(_row(fx, destination_state=NOT_DETERMINED, destination_shape="caller_arbitrary"))
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
+def test_unconstrained_proven_destination_may_carry_a_shape(db_session, scoring_protocol):
     db_session.add(
         _row(
-            fx,
+            scoring_protocol,
             destination_state=DESTINATION_STATE_UNCONSTRAINED_PROVEN,
             destination_shape="caller_arbitrary",
         )
@@ -671,44 +697,40 @@ def _score(fx, **overrides: Any) -> ProtocolScore:
 
 
 @pytest.mark.usefixtures("scoring_protocol")
-def test_score_grade_pairing_is_enforced(db_session, scoring_protocol):
-    fx = scoring_protocol
-    db_session.add(_score(fx, grade_state=GRADE_STATE_NOT_DETERMINED))
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param(dict(grade_state=GRADE_STATE_NOT_DETERMINED), id="grade_pairing_undetermined_with_values"),
+        pytest.param(dict(grade_state=GRADE_STATE_COMPUTED, confidence_pct=None), id="grade_pairing_no_confidence"),
+        pytest.param(dict(findings={"a": 1}, storage_key="scores/1.json"), id="document_inline_and_spilled"),
+        pytest.param(dict(findings=None, storage_key=None), id="document_neither_inline_nor_spilled"),
+    ],
+)
+def test_score_check_constraints_reject(db_session, scoring_protocol, overrides):
+    db_session.add(_score(scoring_protocol, **overrides))
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
-
-    db_session.add(_score(fx, grade_state=GRADE_STATE_COMPUTED, confidence_pct=None))
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-    db_session.add(
-        _score(
-            fx,
-            grade_state=GRADE_STATE_NOT_DETERMINED,
-            grade_lambda=None,
-            grade_exposure=None,
-            confidence_pct=None,
-        )
-    )
-    db_session.commit()
 
 
 @pytest.mark.usefixtures("scoring_protocol")
-def test_score_document_is_inline_or_spilled_never_both(db_session, scoring_protocol):
-    fx = scoring_protocol
-    db_session.add(_score(fx, findings={"a": 1}, storage_key="scores/1.json"))
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-    db_session.add(_score(fx, findings=None, storage_key=None))
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-    db_session.add(_score(fx, findings=None, storage_key="scores/1.json"))
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param(
+            dict(
+                grade_state=GRADE_STATE_NOT_DETERMINED,
+                grade_lambda=None,
+                grade_exposure=None,
+                confidence_pct=None,
+            ),
+            id="undetermined_grade_without_values",
+        ),
+        pytest.param(dict(findings=None, storage_key="scores/1.json"), id="spilled_document"),
+    ],
+)
+def test_score_check_constraints_accept_the_valid_pairing(db_session, scoring_protocol, overrides):
+    db_session.add(_score(scoring_protocol, **overrides))
     db_session.commit()
 
 
@@ -856,92 +878,6 @@ def test_destination_bearing_claim_cannot_be_not_applicable():
 
 
 @pytest.mark.usefixtures("scoring_protocol")
-def test_destination_bearing_claim_cannot_be_not_applicable_in_the_db(db_session, scoring_protocol):
-    fx = scoring_protocol
-    db_session.add(
-        _row(
-            fx,
-            claim_id="delegatecall.execute",
-            destination_state=DESTINATION_STATE_NOT_APPLICABLE,
-            destination_shape=DESTINATION_SHAPE_NOT_APPLICABLE,
-        )
-    )
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-
-@pytest.mark.usefixtures("scoring_protocol")
-def test_proven_destination_must_carry_a_shape_in_the_db(db_session, scoring_protocol):
-    """N2: the reverse arm of the destination biconditional."""
-    fx = scoring_protocol
-    db_session.add(_row(fx, destination_state=DESTINATION_STATE_UNCONSTRAINED_PROVEN, destination_shape=None))
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-
-@pytest.mark.usefixtures("scoring_protocol")
-def test_non_enumerated_principal_state_cannot_carry_refs(db_session, scoring_protocol):
-    """N2: the reverse arm of the principal pairing."""
-    fx = scoring_protocol
-    db_session.add(
-        _row(
-            fx,
-            principal_state=PRINCIPAL_STATE_NOT_DETERMINED,
-            principal_refs=[{"function_principal_id": 1, "chain": "ethereum", "address": "0xa"}],
-        )
-    )
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-
-@pytest.mark.usefixtures("scoring_protocol")
-def test_principal_refs_cannot_be_smuggled_as_an_object(db_session, scoring_protocol):
-    """S3: a JSONB object is invisible to a length test but not to a reader."""
-    fx = scoring_protocol
-    db_session.add(_row(fx, principal_refs={"function_principal_id": 1}))
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-
-@pytest.mark.usefixtures("scoring_protocol")
-def test_proven_no_reach_cannot_carry_entity_keys(db_session, scoring_protocol):
-    """N2: the reverse arm of the value pairing — an earned negative is empty."""
-    fx = scoring_protocol
-    db_session.add(
-        _row(
-            fx,
-            value_state=VALUE_STATE_PROVEN_NO_REACH,
-            value_basis="proven_no_reach",
-            value_entity_keys=["ethereum::0x1"],
-        )
-    )
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-
-@pytest.mark.usefixtures("scoring_protocol")
-def test_value_entity_keys_reject_nulls(db_session, scoring_protocol):
-    """S7: a NULL element is an entity the fold cannot key."""
-    fx = scoring_protocol
-    db_session.add(
-        _row(
-            fx,
-            value_state=VALUE_STATE_PROVEN_REACH,
-            value_basis="observed_reach_value_usd",
-            value_entity_keys=["ethereum::0x1", None],
-        )
-    )
-    with pytest.raises(IntegrityError):
-        db_session.commit()
-    db_session.rollback()
-
-
-@pytest.mark.usefixtures("scoring_protocol")
 def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protocol):
     """S5: every field's three states survive the trip through Postgres.
 
@@ -1004,14 +940,26 @@ def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protoc
     assert restored[0].severity.value is None
 
 
+# N-a: a mismatched chain is part of the entity key and mis-keys every value; a non-lowercased address breaks
+# the identity join.
 @pytest.mark.usefixtures("scoring_protocol")
-def test_replace_rejects_a_signal_for_another_contract(db_session, scoring_protocol):
+@pytest.mark.parametrize(
+    ("match", "overrides"),
+    [
+        pytest.param("passed to replace", lambda fx: dict(contract_id=fx.sibling.id), id="another_contract"),
+        pytest.param("claims chain", lambda fx: dict(chain="optimism"), id="another_chain"),
+        pytest.param(
+            "lowercased", lambda fx: dict(deployment_address=SHARED_ADDRESS.upper()), id="uppercased_deployment_address"
+        ),
+    ],
+)
+def test_replace_rejects_a_mismatched_signal(db_session, scoring_protocol, match, overrides):
     fx = scoring_protocol
-    with pytest.raises(ValueError, match="passed to replace"):
+    with pytest.raises(ValueError, match=match):
         replace_contract_signals(
             db_session,
             contract_id=fx.contract.id,
-            signals=[_signal_for(fx, contract_id=fx.sibling.id)],
+            signals=[_signal_for(fx, **overrides(fx))],
             job_id=fx.job.id,
         )
     db_session.rollback()
@@ -1108,20 +1056,6 @@ def test_replace_rejects_a_signal_claiming_another_protocol(db_session, scoring_
 
 
 @pytest.mark.usefixtures("scoring_protocol")
-def test_replace_rejects_a_signal_claiming_another_chain(db_session, scoring_protocol):
-    """N-a: chain is part of the entity key; a mismatch mis-keys every value."""
-    fx = scoring_protocol
-    with pytest.raises(ValueError, match="claims chain"):
-        replace_contract_signals(
-            db_session,
-            contract_id=fx.contract.id,
-            signals=[_signal_for(fx, chain="optimism")],
-            job_id=fx.job.id,
-        )
-    db_session.rollback()
-
-
-@pytest.mark.usefixtures("scoring_protocol")
 def test_replace_accepts_chain_aliases_of_the_contracts_chain(db_session, scoring_protocol):
     """The agreement test coalesces, so "mainnet" is not a false mismatch."""
     fx = scoring_protocol
@@ -1133,19 +1067,6 @@ def test_replace_accepts_chain_aliases_of_the_contracts_chain(db_session, scorin
     )
     db_session.commit()
     assert db_session.query(FunctionScoreSignal).filter_by(contract_id=fx.contract.id).count() == 1
-
-
-@pytest.mark.usefixtures("scoring_protocol")
-def test_replace_rejects_an_uppercased_deployment_address(db_session, scoring_protocol):
-    fx = scoring_protocol
-    with pytest.raises(ValueError, match="lowercased"):
-        replace_contract_signals(
-            db_session,
-            contract_id=fx.contract.id,
-            signals=[_signal_for(fx, deployment_address=SHARED_ADDRESS.upper())],
-            job_id=fx.job.id,
-        )
-    db_session.rollback()
 
 
 @pytest.mark.usefixtures("scoring_protocol")

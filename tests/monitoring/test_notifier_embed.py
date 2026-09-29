@@ -59,72 +59,173 @@ def _fields(embed: dict) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 
 
-def test_ownership_transferred_renders_old_and_new_owner():
-    evt = _make_evt(
-        "ownership_transferred",
-        {
-            "old_owner": "0x" + "11" * 20,
-            "new_owner": "0x" + "22" * 20,
-            "effect_tags": {"writes": ["owner"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Old Owner"]["value"] == "`0x" + "11" * 20 + "`"
-    assert fields["New Owner"]["value"] == "`0x" + "22" * 20 + "`"
-    assert fields["Old Owner"]["inline"] is False
+def _addr(byte: str) -> str:
+    return "0x" + byte * 20
 
 
-def test_ownership_transfer_started_renders_via_pending_owner_write():
-    """Ownable2Step intent phase: emitter writes ``pendingOwner``; decoder fills old/new owner."""
-    evt = _make_evt(
-        "ownership_transfer_started",
-        {
-            "old_owner": "0x" + "11" * 20,
-            "new_owner": "0x" + "22" * 20,
-            "effect_tags": {"writes": ["pendingOwner"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Old Owner"]["value"] == "`0x" + "11" * 20 + "`"
-    assert fields["New Owner"]["value"] == "`0x" + "22" * 20 + "`"
-
-
-def test_authority_updated_renders_old_and_new_authority():
-    evt = _make_evt(
-        "authority_updated",
-        {
-            "old_authority": "0x" + "11" * 20,
-            "new_authority": "0x" + "22" * 20,
-            "effect_tags": {"writes": ["authority"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Old Authority"]["value"] == "`0x" + "11" * 20 + "`"
-    assert fields["New Authority"]["value"] == "`0x" + "22" * 20 + "`"
-
-
+# (event_type, event data, expected {field name: value}, expected {field name: inline}).
+# An empty inline dict means the case doesn't pin layout.
 @pytest.mark.parametrize(
-    "event_type",
+    ("event_type", "data", "expected_values", "expected_inline"),
     [
-        "upgraded",
-        # GnosisSafe ChangedMasterCopy stores the new master copy under
-        # ``implementation`` for backward compat with the upgrade renderer.
-        "changed_master_copy",
-        # Synthetix TargetUpdated — same shape as Upgraded modulo the topic0.
-        "target_updated",
+        pytest.param(
+            "ownership_transferred",
+            {"old_owner": _addr("11"), "new_owner": _addr("22"), "effect_tags": {"writes": ["owner"]}},
+            {"Old Owner": f"`{_addr('11')}`", "New Owner": f"`{_addr('22')}`"},
+            {"Old Owner": False},
+            id="ownership_transferred",
+        ),
+        # Ownable2Step intent phase: emitter writes ``pendingOwner``; decoder fills old/new owner.
+        pytest.param(
+            "ownership_transfer_started",
+            {"old_owner": _addr("11"), "new_owner": _addr("22"), "effect_tags": {"writes": ["pendingOwner"]}},
+            {"Old Owner": f"`{_addr('11')}`", "New Owner": f"`{_addr('22')}`"},
+            {},
+            id="ownership_transfer_started",
+        ),
+        pytest.param(
+            "authority_updated",
+            {"old_authority": _addr("11"), "new_authority": _addr("22"), "effect_tags": {"writes": ["authority"]}},
+            {"Old Authority": f"`{_addr('11')}`", "New Authority": f"`{_addr('22')}`"},
+            {},
+            id="authority_updated",
+        ),
+        pytest.param(
+            "upgraded",
+            {"implementation": _addr("cc"), "effect_tags": {"writes": ["implementation"], "delegates": True}},
+            {"New Implementation": f"`{_addr('cc')}`"},
+            {"New Implementation": False},
+            id="upgraded",
+        ),
+        # GnosisSafe ChangedMasterCopy stores the new master copy under ``implementation`` for
+        # backward compat with the upgrade renderer.
+        pytest.param(
+            "changed_master_copy",
+            {"implementation": _addr("cc"), "effect_tags": {"writes": ["implementation"], "delegates": True}},
+            {"New Implementation": f"`{_addr('cc')}`"},
+            {"New Implementation": False},
+            id="changed_master_copy",
+        ),
+        # Synthetix TargetUpdated: same shape as Upgraded modulo the topic0.
+        pytest.param(
+            "target_updated",
+            {"implementation": _addr("cc"), "effect_tags": {"writes": ["implementation"], "delegates": True}},
+            {"New Implementation": f"`{_addr('cc')}`"},
+            {"New Implementation": False},
+            id="target_updated",
+        ),
+        # EIP-2535 facet swap: the first new facet is stored under ``implementation``.
+        pytest.param(
+            "diamond_cut",
+            {
+                "implementation": _addr("cc"),
+                "facets": [_addr("cc"), _addr("dd")],
+                "effect_tags": {"writes": ["facets"], "delegates": True},
+            },
+            {"New Implementation": f"`{_addr('cc')}`"},
+            {},
+            id="diamond_cut",
+        ),
+        pytest.param(
+            "admin_changed",
+            {"previous_admin": _addr("11"), "new_admin": _addr("22"), "effect_tags": {"writes": ["admin"]}},
+            {"Old Admin": f"`{_addr('11')}`", "New Admin": f"`{_addr('22')}`"},
+            {},
+            id="admin_changed",
+        ),
+        pytest.param(
+            "beacon_upgraded",
+            {"beacon": _addr("dd"), "effect_tags": {"writes": ["beacon"], "delegates": True}},
+            {"Beacon": f"`{_addr('dd')}`"},
+            {},
+            id="beacon_upgraded",
+        ),
+        pytest.param(
+            "paused",
+            {"account": _addr("ee"), "effect_tags": {"writes": ["paused"]}},
+            {"Account": f"`{_addr('ee')}`"},
+            {},
+            id="paused",
+        ),
+        pytest.param(
+            "unpaused",
+            {"account": _addr("ee"), "effect_tags": {"writes": ["paused"]}},
+            {"Account": f"`{_addr('ee')}`"},
+            {},
+            id="unpaused",
+        ),
+        *[
+            pytest.param(
+                event_type,
+                {
+                    "role": "0x" + "00" * 32,
+                    "account": _addr("ee"),
+                    "sender": _addr("ff"),
+                    "effect_tags": {"writes": ["_roles"]},
+                },
+                {"Role": "`0x" + "00" * 32 + "`", "Account": f"`{_addr('ee')}`", "Sender": f"`{_addr('ff')}`"},
+                {"Role": False, "Account": True, "Sender": True},
+                id=event_type,
+            )
+            for event_type in ("role_granted", "role_revoked")
+        ],
+        *[
+            pytest.param(
+                event_type,
+                {"owner": _addr("ee"), "effect_tags": {"writes": ["owners"]}},
+                {"Signer": f"`{_addr('ee')}`"},
+                {},
+                id=event_type,
+            )
+            for event_type in ("signer_added", "signer_removed")
+        ],
+        # Integers render bare (no backticks).
+        pytest.param(
+            "threshold_changed",
+            {"threshold": 3, "effect_tags": {"writes": ["threshold"]}},
+            {"New Threshold": "3"},
+            {"New Threshold": True},
+            id="threshold_changed",
+        ),
+        pytest.param(
+            "delay_changed",
+            {"old_delay": 3600, "new_delay": 7200, "effect_tags": {"writes": ["min_delay"]}},
+            {"Old Delay": "3600", "New Delay": "7200"},
+            {"Old Delay": True, "New Delay": True},
+            id="delay_changed",
+        ),
+        # Poll events carry no decoder or tags; the renderer keeps the (Field, Old, New) shape.
+        pytest.param(
+            "state_changed_poll",
+            {"field": "implementation", "old_value": _addr("aa"), "new_value": _addr("bb")},
+            {"Field": "implementation", "Old": f"`{_addr('aa')}`", "New": f"`{_addr('bb')}`"},
+            {},
+            id="state_changed_poll",
+        ),
+        # A custom slot ``protocolAdmin`` (not in the render table) renders via the generic name-match
+        # fallback: label from the write target, value from data["newProtocolAdmin"].
+        pytest.param(
+            "controller_changed:state_variable:protocolAdmin",
+            {"newProtocolAdmin": _addr("ee"), "effect_tags": {"writes": ["protocolAdmin"]}},
+            {"New ProtocolAdmin": f"`{_addr('ee')}`"},
+            {},
+            id="custom_named_slot",
+        ),
+        # Without a ``new<X>`` arg name the decoder stores the bare slot name; the fallback finds it and
+        # renders under the CamelCased bare-name label (not "New Guardian").
+        pytest.param(
+            "controller_changed:state_variable:guardian",
+            {"guardian": _addr("ee"), "effect_tags": {"writes": ["guardian"]}},
+            {"Guardian": f"`{_addr('ee')}`"},
+            {},
+            id="custom_slot_bare_name",
+        ),
     ],
 )
-def test_upgrade_family_renders_new_implementation(event_type):
-    evt = _make_evt(
-        event_type,
-        {
-            "implementation": "0x" + "cc" * 20,
-            "effect_tags": {"writes": ["implementation"], "delegates": True},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["New Implementation"]["value"] == "`0x" + "cc" * 20 + "`"
-    assert fields["New Implementation"]["inline"] is False
+def test_governance_embed_renders_expected_fields(event_type, data, expected_values, expected_inline):
+    fields = _fields(_format_governance_embed(_make_evt(event_type, data), _FakeSession()))
+    assert {name: fields[name]["value"] for name in expected_values} == expected_values
+    assert {name: fields[name]["inline"] for name in expected_inline} == expected_inline
 
 
 def test_new_implementation_renders_via_synthesis_fallback():
@@ -133,35 +234,6 @@ def test_new_implementation_renders_via_synthesis_fallback():
     evt = _make_evt("new_implementation", {"implementation": "0x" + "cc" * 20})
     fields = _fields(_format_governance_embed(evt, _FakeSession()))
     assert fields["New Implementation"]["value"] == "`0x" + "cc" * 20 + "`"
-
-
-def test_diamond_cut_renders_first_facet_as_implementation():
-    """EIP-2535 facet swap: the first new facet is stored under ``implementation`` so it
-    renders as ``New Implementation``."""
-    evt = _make_evt(
-        "diamond_cut",
-        {
-            "implementation": "0x" + "cc" * 20,
-            "facets": ["0x" + "cc" * 20, "0x" + "dd" * 20],
-            "effect_tags": {"writes": ["facets"], "delegates": True},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["New Implementation"]["value"] == "`0x" + "cc" * 20 + "`"
-
-
-def test_admin_changed_renders_old_and_new_admin():
-    evt = _make_evt(
-        "admin_changed",
-        {
-            "previous_admin": "0x" + "11" * 20,
-            "new_admin": "0x" + "22" * 20,
-            "effect_tags": {"writes": ["admin"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Old Admin"]["value"] == "`0x" + "11" * 20 + "`"
-    assert fields["New Admin"]["value"] == "`0x" + "22" * 20 + "`"
 
 
 def test_admin_changed_compound_single_new_admin():
@@ -177,110 +249,6 @@ def test_admin_changed_compound_single_new_admin():
     assert "New Admin" in fields
     assert fields["New Admin"]["value"] == "`0x" + "22" * 20 + "`"
     assert "Old Admin" not in fields
-
-
-def test_beacon_upgraded_renders_beacon_address():
-    evt = _make_evt(
-        "beacon_upgraded",
-        {
-            "beacon": "0x" + "dd" * 20,
-            "effect_tags": {"writes": ["beacon"], "delegates": True},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Beacon"]["value"] == "`0x" + "dd" * 20 + "`"
-
-
-@pytest.mark.parametrize("event_type", ["paused", "unpaused"])
-def test_pause_family_renders_account_field(event_type):
-    evt = _make_evt(
-        event_type,
-        {
-            "account": "0x" + "ee" * 20,
-            "effect_tags": {"writes": ["paused"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Account"]["value"] == "`0x" + "ee" * 20 + "`"
-
-
-@pytest.mark.parametrize("event_type", ["role_granted", "role_revoked"])
-def test_role_family_renders_role_account_sender(event_type):
-    evt = _make_evt(
-        event_type,
-        {
-            "role": "0x" + "00" * 32,
-            "account": "0x" + "ee" * 20,
-            "sender": "0x" + "ff" * 20,
-            "effect_tags": {"writes": ["_roles"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Role"]["value"] == "`0x" + "00" * 32 + "`"
-    assert fields["Account"]["value"] == "`0x" + "ee" * 20 + "`"
-    assert fields["Sender"]["value"] == "`0x" + "ff" * 20 + "`"
-    assert fields["Role"]["inline"] is False
-    assert fields["Account"]["inline"] is True
-    assert fields["Sender"]["inline"] is True
-
-
-@pytest.mark.parametrize("event_type", ["signer_added", "signer_removed"])
-def test_signer_family_renders_signer_address(event_type):
-    evt = _make_evt(
-        event_type,
-        {
-            "owner": "0x" + "ee" * 20,
-            "effect_tags": {"writes": ["owners"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Signer"]["value"] == "`0x" + "ee" * 20 + "`"
-
-
-def test_threshold_changed_renders_integer_threshold_inline():
-    evt = _make_evt(
-        "threshold_changed",
-        {
-            "threshold": 3,
-            "effect_tags": {"writes": ["threshold"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["New Threshold"]["value"] == "3"
-    assert "`" not in fields["New Threshold"]["value"]
-    assert fields["New Threshold"]["inline"] is True
-
-
-def test_delay_changed_renders_old_and_new_delays_inline():
-    evt = _make_evt(
-        "delay_changed",
-        {
-            "old_delay": 3600,
-            "new_delay": 7200,
-            "effect_tags": {"writes": ["min_delay"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Old Delay"]["value"] == "3600"
-    assert fields["New Delay"]["value"] == "7200"
-    assert fields["Old Delay"]["inline"] is True
-    assert fields["New Delay"]["inline"] is True
-
-
-def test_state_changed_poll_keeps_synthetic_field_shape():
-    """Poll events carry no decoder or tags; the renderer keeps the (Field, Old, New) shape."""
-    evt = _make_evt(
-        "state_changed_poll",
-        {
-            "field": "implementation",
-            "old_value": "0x" + "aa" * 20,
-            "new_value": "0x" + "bb" * 20,
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert fields["Field"]["value"] == "implementation"
-    assert fields["Old"]["value"] == "`0x" + "aa" * 20 + "`"
-    assert fields["New"]["value"] == "`0x" + "bb" * 20 + "`"
 
 
 # ---------------------------------------------------------------------------
@@ -301,37 +269,6 @@ def test_legacy_event_without_tags_renders_via_synthesis_fallback():
     )
     fields = _fields(_format_governance_embed(evt, _FakeSession()))
     assert fields["New Owner"]["value"] == "`0x" + "22" * 20 + "`"
-
-
-def test_custom_named_slot_renders_via_generic_fallback():
-    """A custom slot ``protocolAdmin`` (not in the render table) renders via the generic
-    name-match fallback: label from the write target, value from data["newProtocolAdmin"]."""
-    evt = _make_evt(
-        "controller_changed:state_variable:protocolAdmin",
-        {
-            "newProtocolAdmin": "0x" + "ee" * 20,
-            "effect_tags": {"writes": ["protocolAdmin"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    assert "New ProtocolAdmin" in fields
-    assert fields["New ProtocolAdmin"]["value"] == "`0x" + "ee" * 20 + "`"
-
-
-def test_custom_slot_bare_name_falls_through_when_no_new_prefix():
-    """Without a ``new<X>`` arg name the decoder stores the bare slot name; the fallback finds it."""
-    evt = _make_evt(
-        "controller_changed:state_variable:guardian",
-        {
-            "guardian": "0x" + "ee" * 20,
-            "effect_tags": {"writes": ["guardian"]},
-        },
-    )
-    fields = _fields(_format_governance_embed(evt, _FakeSession()))
-    # Renders under the CamelCased bare-name label (not "New Guardian")
-    # because there's no ``newGuardian`` arg.
-    assert "Guardian" in fields
-    assert fields["Guardian"]["value"] == "`0x" + "ee" * 20 + "`"
 
 
 def test_synthetic_write_target_no_extra_fields():
@@ -373,103 +310,102 @@ def test_unknown_event_type_with_no_tags_renders_only_envelope():
 # ---------------------------------------------------------------------------
 
 
-def test_color_critical_derives_from_write_target():
-    """Red for critical control writes (owner / authority / paused), derived from tags, so a
-    custom ABI classified as ownership_transferred gets red with no per-event_type entry."""
-    cases = [
-        ("ownership_transferred", {"writes": ["owner"]}),
-        ("authority_updated", {"writes": ["authority"]}),
-        ("paused", {"writes": ["paused"]}),
-        ("unpaused", {"writes": ["paused"]}),
-        # Custom event_type that happens to write ``owner`` — still red.
-        ("controller_changed:state_variable:protocolOwner", {"writes": ["owner"]}),
-    ]
-    for et, tags in cases:
-        evt = _make_evt(et, {"effect_tags": tags})
-        embed = _format_governance_embed(evt, _FakeSession())
-        assert embed["color"] == 0xFF0000, f"{et} should be red, got {hex(embed['color'])}"
-
-
-def test_color_warning_derives_from_upgrade_write_targets():
-    """Orange for upgrade-shape writes and intent-phase pendingOwner, all tag-derived."""
-    cases = [
-        ("upgraded", {"writes": ["implementation"], "delegates": True}),
-        ("admin_changed", {"writes": ["admin"]}),
-        ("beacon_upgraded", {"writes": ["beacon"], "delegates": True}),
-        ("ownership_transfer_started", {"writes": ["pendingOwner"]}),
-        ("new_pending_implementation", {"writes": ["pendingImplementation"]}),
-    ]
-    for et, tags in cases:
-        evt = _make_evt(et, {"effect_tags": tags})
-        embed = _format_governance_embed(evt, _FakeSession())
-        assert embed["color"] == 0xFF9900, f"{et} should be orange, got {hex(embed['color'])}"
-
-
-def test_color_blue_for_signer_changes():
-    """Safe signer set mutations (writes=['owners']) → blue, tag-derived."""
-    evt = _make_evt("signer_added", {"effect_tags": {"writes": ["owners"]}})
-    assert _format_governance_embed(evt, _FakeSession())["color"] == 0x3498DB
-
-
-def test_color_amber_for_operational_params():
-    """Roles, threshold, and min_delay — operational params, amber."""
-    for et, tags in (
-        ("role_granted", {"writes": ["_roles"]}),
-        ("role_revoked", {"writes": ["_roles"]}),
-        ("threshold_changed", {"writes": ["threshold"]}),
-        ("delay_changed", {"writes": ["min_delay"]}),
-    ):
-        evt = _make_evt(et, {"effect_tags": tags})
-        embed = _format_governance_embed(evt, _FakeSession())
-        assert embed["color"] == 0xF39C12, f"{et} should be amber, got {hex(embed['color'])}"
-
-
-def test_color_success_failure_for_safe_execution_via_event_type_override():
-    """Safe execution outcome: green success, red failure. Keyed on event_type via
-    _EVENT_TYPE_COLOR_OVERRIDES since both share writes=['_safe_op'] with no outcome marker."""
-    for et in ("safe_tx_executed", "safe_module_executed"):
-        evt = _make_evt(et, {"effect_tags": {"writes": ["_safe_op"]}})
-        assert _format_governance_embed(evt, _FakeSession())["color"] == 0x2ECC71, et
-
-    for et in ("safe_tx_failed", "safe_module_failed"):
-        evt = _make_evt(et, {"effect_tags": {"writes": ["_safe_op"]}})
-        assert _format_governance_embed(evt, _FakeSession())["color"] == 0xE74C3C, et
-
-
-def test_color_phase_split_for_timelock_via_event_type_override():
-    """Timelock scheduled (blue) vs executed (orange): same writes, phase lives in
-    _EVENT_TYPE_COLOR_OVERRIDES."""
-    scheduled = _make_evt("timelock_scheduled", {"effect_tags": {"writes": ["_timelock_op"]}})
-    assert _format_governance_embed(scheduled, _FakeSession())["color"] == 0x3498DB
-
-    executed = _make_evt("timelock_executed", {"effect_tags": {"writes": ["_timelock_op"]}})
-    assert _format_governance_embed(executed, _FakeSession())["color"] == 0xFF9900
-
-
-def test_color_state_changed_poll_uses_override():
-    """The synthetic poll event has no tags or decoder; color comes from the override map."""
-    evt = _make_evt("state_changed_poll", {"field": "owner"})
-    assert _format_governance_embed(evt, _FakeSession())["color"] == 0x9B59B6
-
-
-def test_color_multi_write_priority_picks_most_critical():
-    """Ownable2Step ``acceptOwnership`` writes owner AND pendingOwner: red (committed)
-    outranks orange (intent)."""
-    evt = _make_evt(
-        "ownership_transferred",
-        {"effect_tags": {"writes": ["owner", "pendingOwner"]}},
-    )
-    assert _format_governance_embed(evt, _FakeSession())["color"] == 0xFF0000
-
-
-def test_color_legacy_event_synthesis_fallback():
-    """A legacy event with no effect_tags resolves via _HANDROLLED_EVENT_TYPE_TO_TAGS."""
-    evt = _make_evt("ownership_transferred", {"new_owner": "0x" + "11" * 20})
-    assert _format_governance_embed(evt, _FakeSession())["color"] == 0xFF0000
-
-
-def test_color_unknown_event_falls_back_to_neutral():
-    """An event_type with no override and no recognizable writes gets
-    the neutral default color — never raises."""
-    evt = _make_evt("totally_unknown", {"effect_tags": {"writes": ["something_random"]}})
-    assert _format_governance_embed(evt, _FakeSession())["color"] == 0x95A5A6
+@pytest.mark.parametrize(
+    ("event_type", "data", "expected_color"),
+    [
+        # Red: critical control writes (owner / authority / paused), derived from tags, so a custom ABI
+        # classified as ownership_transferred gets red with no per-event_type entry.
+        pytest.param(
+            "ownership_transferred", {"effect_tags": {"writes": ["owner"]}}, 0xFF0000, id="red_ownership_transferred"
+        ),
+        pytest.param(
+            "authority_updated", {"effect_tags": {"writes": ["authority"]}}, 0xFF0000, id="red_authority_updated"
+        ),
+        pytest.param("paused", {"effect_tags": {"writes": ["paused"]}}, 0xFF0000, id="red_paused"),
+        pytest.param("unpaused", {"effect_tags": {"writes": ["paused"]}}, 0xFF0000, id="red_unpaused"),
+        # Custom event_type that happens to write ``owner``: still red.
+        pytest.param(
+            "controller_changed:state_variable:protocolOwner",
+            {"effect_tags": {"writes": ["owner"]}},
+            0xFF0000,
+            id="red_custom_owner_write",
+        ),
+        # Ownable2Step ``acceptOwnership`` writes owner AND pendingOwner: red (committed) outranks orange (intent).
+        pytest.param(
+            "ownership_transferred",
+            {"effect_tags": {"writes": ["owner", "pendingOwner"]}},
+            0xFF0000,
+            id="red_multi_write_priority",
+        ),
+        # Orange: upgrade-shape writes and intent-phase pendingOwner, all tag-derived.
+        pytest.param(
+            "upgraded",
+            {"effect_tags": {"writes": ["implementation"], "delegates": True}},
+            0xFF9900,
+            id="orange_upgraded",
+        ),
+        pytest.param("admin_changed", {"effect_tags": {"writes": ["admin"]}}, 0xFF9900, id="orange_admin_changed"),
+        pytest.param(
+            "beacon_upgraded",
+            {"effect_tags": {"writes": ["beacon"], "delegates": True}},
+            0xFF9900,
+            id="orange_beacon_upgraded",
+        ),
+        pytest.param(
+            "ownership_transfer_started",
+            {"effect_tags": {"writes": ["pendingOwner"]}},
+            0xFF9900,
+            id="orange_ownership_transfer_started",
+        ),
+        pytest.param(
+            "new_pending_implementation",
+            {"effect_tags": {"writes": ["pendingImplementation"]}},
+            0xFF9900,
+            id="orange_new_pending_implementation",
+        ),
+        # Blue: Safe signer set mutations, tag-derived.
+        pytest.param("signer_added", {"effect_tags": {"writes": ["owners"]}}, 0x3498DB, id="blue_signer_added"),
+        # Amber: roles, threshold, and min_delay (operational params).
+        pytest.param("role_granted", {"effect_tags": {"writes": ["_roles"]}}, 0xF39C12, id="amber_role_granted"),
+        pytest.param("role_revoked", {"effect_tags": {"writes": ["_roles"]}}, 0xF39C12, id="amber_role_revoked"),
+        pytest.param(
+            "threshold_changed", {"effect_tags": {"writes": ["threshold"]}}, 0xF39C12, id="amber_threshold_changed"
+        ),
+        pytest.param("delay_changed", {"effect_tags": {"writes": ["min_delay"]}}, 0xF39C12, id="amber_delay_changed"),
+        # Safe execution outcome: green success, red failure. Keyed on event_type via
+        # _EVENT_TYPE_COLOR_OVERRIDES since both share writes=['_safe_op'] with no outcome marker.
+        pytest.param(
+            "safe_tx_executed", {"effect_tags": {"writes": ["_safe_op"]}}, 0x2ECC71, id="green_safe_tx_executed"
+        ),
+        pytest.param(
+            "safe_module_executed", {"effect_tags": {"writes": ["_safe_op"]}}, 0x2ECC71, id="green_safe_module_executed"
+        ),
+        pytest.param("safe_tx_failed", {"effect_tags": {"writes": ["_safe_op"]}}, 0xE74C3C, id="red_safe_tx_failed"),
+        pytest.param(
+            "safe_module_failed", {"effect_tags": {"writes": ["_safe_op"]}}, 0xE74C3C, id="red_safe_module_failed"
+        ),
+        # Timelock scheduled (blue) vs executed (orange): same writes, phase lives in _EVENT_TYPE_COLOR_OVERRIDES.
+        pytest.param(
+            "timelock_scheduled", {"effect_tags": {"writes": ["_timelock_op"]}}, 0x3498DB, id="blue_timelock_scheduled"
+        ),
+        pytest.param(
+            "timelock_executed", {"effect_tags": {"writes": ["_timelock_op"]}}, 0xFF9900, id="orange_timelock_executed"
+        ),
+        # The synthetic poll event has no tags or decoder; color comes from the override map.
+        pytest.param("state_changed_poll", {"field": "owner"}, 0x9B59B6, id="purple_state_changed_poll"),
+        # A legacy event with no effect_tags resolves via _HANDROLLED_EVENT_TYPE_TO_TAGS.
+        pytest.param(
+            "ownership_transferred", {"new_owner": "0x" + "11" * 20}, 0xFF0000, id="legacy_event_synthesis_fallback"
+        ),
+        # No override and no recognizable writes: neutral default color, never raises.
+        pytest.param(
+            "totally_unknown",
+            {"effect_tags": {"writes": ["something_random"]}},
+            0x95A5A6,
+            id="unknown_event_falls_back_to_neutral",
+        ),
+    ],
+)
+def test_governance_embed_color(event_type, data, expected_color):
+    embed = _format_governance_embed(_make_evt(event_type, data), _FakeSession())
+    assert embed["color"] == expected_color, f"{event_type}: got {hex(embed['color'])}"

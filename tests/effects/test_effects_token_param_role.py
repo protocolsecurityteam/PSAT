@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from eth_utils.crypto import keccak
 
 from services.effects import calldata as cd
@@ -123,17 +124,32 @@ def _roles(sig: str, names: list[str], sinks: list[dict[str, Any]] | None = None
 # ---------------------------------------------------------------------------
 
 
-def test_asset_named_slot_is_a_token_and_the_receiver_is_not():
-    roles = _roles("deposit(address,uint256,address)", ["depositAsset", "amount", "receiver"])
-    assert roles[0] == cd.ROLE_TOKEN
-    assert roles[2] == cd.ROLE_RECIPIENT
-
-
-def test_a_swap_names_both_of_its_token_slots():
-    roles = _roles("swap(address,address,uint256,address)", ["tokenIn", "tokenOut", "amountIn", "to"])
-    assert roles[0] == cd.ROLE_TOKEN
-    assert roles[1] == cd.ROLE_TOKEN
-    assert roles[3] == cd.ROLE_RECIPIENT
+@pytest.mark.parametrize(
+    ("sig", "names", "expected", "roleless"),
+    [
+        pytest.param(
+            "deposit(address,uint256,address)",
+            ["depositAsset", "amount", "receiver"],
+            {0: cd.ROLE_TOKEN, 2: cd.ROLE_RECIPIENT},
+            (),
+            id="asset_named_slot_is_token_receiver_is_not",
+        ),
+        pytest.param(
+            "swap(address,address,uint256,address)",
+            ["tokenIn", "tokenOut", "amountIn", "to"],
+            {0: cd.ROLE_TOKEN, 1: cd.ROLE_TOKEN, 3: cd.ROLE_RECIPIENT},
+            (),
+            id="swap_names_both_token_slots",
+        ),
+        pytest.param("act(address,uint256)", ["", ""], {}, (0,), id="unnamed_address_slot_gets_no_role"),
+    ],
+)
+def test_address_param_roles_by_name(sig, names, expected, roleless):
+    roles = _roles(sig, names)
+    for index, role in expected.items():
+        assert roles[index] == role
+    for index in roleless:
+        assert index not in roles
 
 
 def test_a_sink_calling_through_a_parameter_names_it_a_token_without_any_vocabulary():
@@ -148,11 +164,6 @@ def test_a_name_carrying_both_vocabularies_is_no_evidence_at_all():
     probe exists for, so an ambiguous name keeps the principal."""
     roles = _roles("send(address,uint256)", ["tokenRecipient", "amount"])
     assert roles[0] == cd.ROLE_RECIPIENT
-
-
-def test_an_unnamed_address_slot_gets_no_role():
-    roles = _roles("act(address,uint256)", ["", ""])
-    assert 0 not in roles
 
 
 # ---------------------------------------------------------------------------

@@ -170,62 +170,45 @@ class _Response:
 
 
 class TestGetNativePrice:
-    def test_eth_native_uses_ethprice_action(self, monkeypatch):
-        import services.clients.etherscan as es
-
-        captured: dict[str, object] = {}
-
-        def _fake_get(module, action, chain_id, **params):
-            captured.update(module=module, action=action, chain_id=chain_id)
+    @pytest.mark.parametrize(
+        "chain_id,result,action,expected_price",
+        [
             # ethprice carries ethbtc + ethusd + *_timestamp siblings; only bare ``*usd`` is the price.
-            return {
-                "result": {
-                    "ethbtc": "0.05",
-                    "ethbtc_timestamp": "1",
-                    "ethusd": "1841.99",
-                    "ethusd_timestamp": "2",
-                }
-            }
-
-        monkeypatch.setattr(es, "get", _fake_get)
-        price = es.get_native_price(1)
-
-        assert price == 1841.99
-        assert captured == {"module": "stats", "action": "ethprice", "chain_id": 1}
-
-    def test_polygon_pol_priced_under_lying_ethusd_key(self, monkeypatch):
-        # Polygon's POL price comes back under "ethusd"; generic *usd parse must
-        # read it without inferring "ETH" from the key.
-        import services.clients.etherscan as es
-
-        captured: dict[str, object] = {}
-
-        def _fake_get(module, action, chain_id, **params):
-            captured.update(action=action, chain_id=chain_id)
-            return {"result": {"ethbtc": "0", "ethusd": "0.0826", "ethusd_timestamp": "1"}}
-
-        monkeypatch.setattr(es, "get", _fake_get)
-        price = es.get_native_price(137)
-
-        assert price == 0.0826
-        assert captured == {"action": "ethprice", "chain_id": 137}
-
-    def test_bsc_uses_bnbprice_action(self, monkeypatch):
-        # BSC rejects "ethprice": the registry override must drive the call to
-        # "bnbprice", whose value is (mislabeled) under "ethusd".
+            pytest.param(
+                1,
+                {"ethbtc": "0.05", "ethbtc_timestamp": "1", "ethusd": "1841.99", "ethusd_timestamp": "2"},
+                "ethprice",
+                1841.99,
+                id="eth",
+            ),
+            # Polygon's POL price comes back under "ethusd"; generic *usd parse must
+            # read it without inferring "ETH" from the key.
+            pytest.param(
+                137,
+                {"ethbtc": "0", "ethusd": "0.0826", "ethusd_timestamp": "1"},
+                "ethprice",
+                0.0826,
+                id="polygon_pol_under_lying_ethusd_key",
+            ),
+            # BSC rejects "ethprice": the registry override must drive the call to
+            # "bnbprice", whose value is (mislabeled) under "ethusd".
+            pytest.param(56, {"ethusd": "567.97"}, "bnbprice", 567.97, id="bsc_uses_bnbprice"),
+        ],
+    )
+    def test_native_price_per_chain(self, monkeypatch, chain_id, result, action, expected_price):
         import services.clients.etherscan as es
 
         captured: dict[str, object] = {}
 
         def _fake_get(module, action, chain_id, **params):
             captured.update(module=module, action=action, chain_id=chain_id)
-            return {"result": {"ethusd": "567.97"}}
+            return {"result": result}
 
         monkeypatch.setattr(es, "get", _fake_get)
-        price = es.get_native_price(56)
+        price = es.get_native_price(chain_id)
 
-        assert price == 567.97
-        assert captured == {"module": "stats", "action": "bnbprice", "chain_id": 56}
+        assert price == expected_price
+        assert captured == {"module": "stats", "action": action, "chain_id": chain_id}
 
     def test_missing_usd_field_raises(self, monkeypatch):
         import services.clients.etherscan as es

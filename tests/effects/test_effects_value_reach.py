@@ -9,6 +9,8 @@ with ``reach_indeterminate: true`` (floor zero on deployments holding billions).
 
 from __future__ import annotations
 
+import pytest
+
 from services.effects import recipes
 from services.effects.config import NATIVE_ASSET_LOG_EMITTER, VERDICT_PROVEN
 from services.effects.harness import SimContext
@@ -424,24 +426,21 @@ def test_a_reach_above_protocol_tvl_is_refused_not_published():
     assert eff.concrete["protocol_tvl_usd"] == 3_297_344_734.00
 
 
-def test_a_reach_within_protocol_tvl_passes_and_says_it_was_checked():
+@pytest.mark.parametrize(
+    ("tvl", "expected_check"),
+    [
+        pytest.param(1_000.0, "within_protocol_tvl", id="within_tvl_says_it_was_checked"),
+        # The skip is a PUBLISHED state: an absent ceiling that looked like a passed one is a mitigation
+        # that never fires and can't be told from one that does.
+        pytest.param(None, "skipped_no_tvl", id="no_tvl_snapshot_skips_out_loud"),
+    ],
+)
+def test_a_measured_reach_publishes_the_outcome_of_the_tvl_check(tvl, expected_check):
     holdings = (AssetHolding(CONTRACT, TOKEN, 100.0),)
     moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
-    eff = _value_out([moved], holders=holdings, floor=1.0, tvl=1_000.0)
+    eff = _value_out([moved], holders=holdings, floor=1.0, tvl=tvl)
 
-    assert eff.concrete["reach_tvl_check"] == "within_protocol_tvl"
-    assert eff.concrete["reach_determined"] is True
-    assert eff.concrete["observed_reach_value_usd"] == 100.0
-
-
-def test_no_tvl_snapshot_skips_the_ceiling_out_loud():
-    """The skip is a PUBLISHED state: an absent ceiling that looked like a passed one is a mitigation
-    that never fires and can't be told from one that does."""
-    holdings = (AssetHolding(CONTRACT, TOKEN, 100.0),)
-    moved = SimResult(calls=(SimCallResult(True, "0x", None, (transfer_log(TOKEN, CONTRACT, PAYEE, 5),)),))
-    eff = _value_out([moved], holders=holdings, floor=1.0, tvl=None)
-
-    assert eff.concrete["reach_tvl_check"] == "skipped_no_tvl"
+    assert eff.concrete["reach_tvl_check"] == expected_check
     assert eff.concrete["reach_determined"] is True
     assert eff.concrete["observed_reach_value_usd"] == 100.0
 
@@ -478,24 +477,24 @@ def test_a_priced_floor_above_protocol_tvl_is_refused_like_a_measured_figure():
     assert "reach_indeterminate" not in eff.concrete
 
 
-def test_a_priced_floor_within_protocol_tvl_is_published_and_says_it_was_checked():
-    """POSITIVE CONTROL for the refusal above: the floor branch keeps publishing its
-    floor, and the ceiling's outcome is now visible on it (it was absent entirely)."""
-    eff = _partial_floor(floor_usd=100.0, tvl=1_000.0)
+@pytest.mark.parametrize(
+    ("tvl", "expected_check"),
+    [
+        # POSITIVE CONTROL for the refusal above: the floor branch keeps publishing its floor, and the
+        # ceiling's outcome is visible on it (it was absent entirely).
+        pytest.param(1_000.0, "within_protocol_tvl", id="within_tvl_says_it_was_checked"),
+        # No ``defillama_tvl`` means the ceiling did not run; the floor is published with the skip
+        # beside it rather than looking checked.
+        pytest.param(None, "skipped_no_tvl", id="no_tvl_snapshot_skips_out_loud"),
+    ],
+)
+def test_a_priced_floor_publishes_the_outcome_of_the_tvl_check(tvl, expected_check):
+    eff = _partial_floor(floor_usd=100.0, tvl=tvl)
 
+    assert eff.concrete["reach_tvl_check"] == expected_check
+    assert eff.concrete["observed_reach_priced_usd"] == 100.0
     assert eff.concrete["reach_determined"] is False
-    assert eff.concrete["reach_tvl_check"] == "within_protocol_tvl"
-    assert eff.concrete["observed_reach_priced_usd"] == 100.0
     assert eff.concrete["observed_reach_unvalued_assets"] == [EETH]
-
-
-def test_a_priced_floor_with_no_tvl_snapshot_skips_the_ceiling_out_loud():
-    """The same on this branch: no ``defillama_tvl`` means the ceiling did not run, and
-    the floor is published with the skip beside it rather than looking checked."""
-    eff = _partial_floor(floor_usd=100.0, tvl=None)
-
-    assert eff.concrete["reach_tvl_check"] == "skipped_no_tvl"
-    assert eff.concrete["observed_reach_priced_usd"] == 100.0
 
 
 def test_an_unvalued_branch_with_nothing_priced_publishes_no_ceiling_outcome():

@@ -413,29 +413,25 @@ _CALLER_OP = {"source": "root_caller"}
 _TIME_OP = {"source": "block_context", "block_context_kind": "timestamp"}
 
 
-def test_denylist_discriminator_matches_both_operand_orders():
-    # proceed when caller_value <= now: caller LHS/lte, and reversed caller RHS/gte.
-    assert is_caller_keyed_time_denylist(_cmp_leaf([_CALLER_OP, _TIME_OP], "lte"))
-    assert is_caller_keyed_time_denylist(_cmp_leaf([_TIME_OP, _CALLER_OP], "gte"))
-
-
-def test_denylist_discriminator_rejects_allowlist_polarity():
-    # The allowlist (caller_value >= now) is NOT a denylist, and vice-versa —
-    # the two are exact proceed-relation inverses.
-    allow = _cmp_leaf([_CALLER_OP, _TIME_OP], "gte")
-    assert is_caller_keyed_time_allowlist(allow)
-    assert not is_caller_keyed_time_denylist(allow)
-    deny = _cmp_leaf([_CALLER_OP, _TIME_OP], "lte")
-    assert is_caller_keyed_time_denylist(deny)
-    assert not is_caller_keyed_time_allowlist(deny)
-
-
-def test_denylist_discriminator_requires_timestamp_and_caller():
-    # A caller-keyed balance/allowance threshold (RHS a parameter, not a
-    # timestamp) is not a time denylist.
-    assert not is_caller_keyed_time_denylist(
-        _cmp_leaf([_CALLER_OP, {"source": "parameter", "parameter_index": 0}], "lte")
-    )
+@pytest.mark.parametrize(
+    ("operands", "operator", "is_denylist", "is_allowlist"),
+    [
+        # proceed when caller_value <= now: caller LHS/lte, and reversed caller RHS/gte.
+        pytest.param([_CALLER_OP, _TIME_OP], "lte", True, False, id="caller_lhs_lte"),
+        pytest.param([_TIME_OP, _CALLER_OP], "gte", True, False, id="caller_rhs_gte"),
+        # CRITICAL: the allowlist (caller_value >= now) is NOT a denylist, and vice-versa — the two are exact
+        # proceed-relation inverses; an inverted polarity would open a gated function.
+        pytest.param([_CALLER_OP, _TIME_OP], "gte", False, True, id="allowlist_polarity"),
+        # A caller-keyed balance/allowance threshold (RHS a parameter, not a timestamp) is not a time denylist.
+        pytest.param(
+            [_CALLER_OP, {"source": "parameter", "parameter_index": 0}], "lte", False, False, id="non_time_threshold"
+        ),
+    ],
+)
+def test_denylist_discriminator(operands, operator, is_denylist, is_allowlist):
+    leaf = _cmp_leaf(operands, operator)
+    assert is_caller_keyed_time_denylist(leaf) is is_denylist
+    assert is_caller_keyed_time_allowlist(leaf) is is_allowlist
 
 
 # Section 2 — companion-2 leaf emission (shape-level, both flags).
@@ -500,35 +496,18 @@ def test_guard_fire_emits_metric_and_warning(session, both_flags, caplog):
     assert any("refine-only guard closed" in r.getMessage() for r in caplog.records)
 
 
-def test_delegated_gate_unresolved_emitted_on_settled_gate(earned_public):
-    # A caller gate that SETTLES external_check_only without a pending-index
-    # deferral trips the durability metric, keyed on the callee signature.
-    import services.resolution.predicate_evaluator as _pe
-    from utils.logging import stage_metrics_var
-
-    _pe._DELEGATED_GATE_UNRESOLVED_COUNTS.clear()
-    leaf = {
-        "kind": "external_set",
-        "operator": "truthy",
-        "operands": [{"source": "msg_sender"}],
-        "set_descriptor": {"kind": "external_set", "key_sources": [{"source": "msg_sender"}]},
-    }
-    check = CapabilityExpr.external_check_only(
-        _external_check(target="0x" + "a1" * 20, selector="0x12345678", sig="onlyOperatingMultisig(address)")
-    )
-    metrics: dict = {}
-    token = stage_metrics_var.set(metrics)
-    try:
-        out = _pe._stamp_caller_gate_check(check, cast(LeafPredicate, leaf))
-    finally:
-        stage_metrics_var.reset(token)
-    assert out.kind == "external_check_only"
-    assert metrics.get("delegated_gate_unresolved::onlyOperatingMultisig(address)") == 1
-
-
-def test_delegated_gate_unresolved_skipped_when_deferred(earned_public):
-    # A cold-index deferral is transient (the reconciler self-heals it) — it must
-    # NOT trip the tripwire, or every cold first pass would false-alarm.
+@pytest.mark.parametrize(
+    ("deferred", "expected_counts"),
+    [
+        # A caller gate that SETTLES external_check_only without a pending-index deferral trips the durability
+        # metric, keyed on the callee signature.
+        pytest.param(False, {"delegated_gate_unresolved::onlyOperatingMultisig(address)": 1}, id="settled_gate"),
+        # A cold-index deferral is transient (the reconciler self-heals it) — it must NOT trip the tripwire, or
+        # every cold first pass would false-alarm.
+        pytest.param(True, {}, id="deferred"),
+    ],
+)
+def test_delegated_gate_unresolved_metric(earned_public, deferred, expected_counts):
     import services.resolution.predicate_evaluator as _pe
     from utils.logging import stage_metrics_var
 
@@ -544,16 +523,17 @@ def test_delegated_gate_unresolved_skipped_when_deferred(earned_public):
             target="0x" + "a1" * 20,
             selector="0x12345678",
             sig="onlyOperatingMultisig(address)",
-            deferred=True,
+            deferred=deferred,
         )
     )
     metrics: dict = {}
     token = stage_metrics_var.set(metrics)
     try:
-        _pe._stamp_caller_gate_check(check, cast(LeafPredicate, leaf))
+        out = _pe._stamp_caller_gate_check(check, cast(LeafPredicate, leaf))
     finally:
         stage_metrics_var.reset(token)
-    assert not any(k.startswith("delegated_gate_unresolved") for k in metrics)
+    assert out.kind == "external_check_only"
+    assert {k: v for k, v in metrics.items() if k.startswith("delegated_gate_unresolved")} == expected_counts
 
 
 def _external_check(*, target: str, selector: str, sig: str, deferred: bool = False):
@@ -833,44 +813,41 @@ def test_fixture6_effectful_permissionless_stays_open(tmp_path, earned_public):
 # Section 5 — the counterfactual helper in isolation.
 
 
-def test_public_without_root_cofinites_conditional_universal_is_public():
+def _root_cofinite() -> CapabilityExpr:
+    return CapabilityExpr.cofinite_blacklist([], blacklist_quality="lower_bound", subject="root")
+
+
+def _conditional_universal(description: str) -> CapabilityExpr:
     from services.resolution.capabilities import Condition
 
-    cap = CapabilityExpr.conditional_universal(Condition(kind="business", description="! hasRole(...)"))
-    assert _public_without_root_cofinites(cap) is True
+    return CapabilityExpr.conditional_universal(Condition(kind="business", description=description))
 
 
-def test_public_without_root_cofinites_bare_cofinite_is_not_public():
-    cap = CapabilityExpr.cofinite_blacklist([], blacklist_quality="lower_bound", subject="root")
-    # Public ONLY via the cofinite -> counterfactual removes it -> not public.
-    assert _public_without_root_cofinites(cap) is False
-
-
-def test_public_without_root_cofinites_or_with_conditional_is_public():
-    from services.resolution.capabilities import Condition
-
-    or_cap = CapabilityExpr.structural_or(
-        [
-            CapabilityExpr.finite_set(["0x" + "ab" * 20], quality="exact"),
-            CapabilityExpr.conditional_universal(Condition(kind="business", description="opaque")),
-        ]
-    )
-    assert _public_without_root_cofinites(or_cap) is True
-
-
-def test_public_without_root_cofinites_or_cofinite_conditional_is_public():
-    """Milestone follow-up (b): OR(root cofinite, conditional_universal): the counterfactual strips
-    ONLY the cofinite, leaving a public conditional_universal, so a laundered allowlist
-    OR-composing a denylist with an opaque public arm keeps the guard's antecedent True."""
-    from services.resolution.capabilities import Condition
-
-    or_cap = CapabilityExpr.structural_or(
-        [
-            CapabilityExpr.cofinite_blacklist([], blacklist_quality="lower_bound", subject="root"),
-            CapabilityExpr.conditional_universal(Condition(kind="business", description="opaque authority")),
-        ]
-    )
-    assert _public_without_root_cofinites(or_cap) is True
+@pytest.mark.parametrize(
+    ("build_cap", "expected"),
+    [
+        pytest.param(lambda: _conditional_universal("! hasRole(...)"), True, id="conditional_universal"),
+        # Public ONLY via the cofinite -> counterfactual removes it -> not public.
+        pytest.param(_root_cofinite, False, id="bare_cofinite"),
+        pytest.param(
+            lambda: CapabilityExpr.structural_or(
+                [CapabilityExpr.finite_set(["0x" + "ab" * 20], quality="exact"), _conditional_universal("opaque")]
+            ),
+            True,
+            id="or_with_conditional",
+        ),
+        # Milestone follow-up (b): OR(root cofinite, conditional_universal): the counterfactual strips ONLY the
+        # cofinite, leaving a public conditional_universal, so a laundered allowlist OR-composing a denylist with an
+        # opaque public arm keeps the guard's antecedent True.
+        pytest.param(
+            lambda: CapabilityExpr.structural_or([_root_cofinite(), _conditional_universal("opaque authority")]),
+            True,
+            id="or_cofinite_conditional",
+        ),
+    ],
+)
+def test_public_without_root_cofinites(build_cap, expected):
+    assert _public_without_root_cofinites(build_cap()) is expected
 
 
 # ---------------------------------------------------------------------------

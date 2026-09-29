@@ -269,21 +269,22 @@ def test_no_events_is_external_check_not_phantom_empty() -> None:
     assert _status(cap) != "resolved_empty"
 
 
-def test_no_event_source_is_external_check() -> None:
-    """No hypersync token and no injected client -> external check, not a silent empty."""
-    cap = evaluate_tree(_eq_tree(PARAM_KEYED_OPERAND), _ctx({}))
-
-    assert cap.kind == "external_check_only"
-    assert _principals(cap) == []
-
-
-def test_no_writer_spec_is_external_check() -> None:
-    """A param-keyed mapping with no discoverable setter event can't be enumerated →
-    external check (even with a live event source)."""
-    cap = evaluate_tree(
-        _eq_tree(PARAM_KEYED_OPERAND_NO_SPEC),
-        _ctx(_seeded_meta(_receiver_set_log(30183, R1))),
-    )
+@pytest.mark.parametrize(
+    ("operand", "meta"),
+    [
+        # No hypersync token and no injected client -> external check, not a silent empty.
+        pytest.param(PARAM_KEYED_OPERAND, {}, id="no_event_source"),
+        # A param-keyed mapping with no discoverable setter event can't be enumerated -> external check (even with
+        # a live event source).
+        pytest.param(
+            PARAM_KEYED_OPERAND_NO_SPEC,
+            _seeded_meta(_receiver_set_log(30183, R1)),
+            id="no_writer_spec",
+        ),
+    ],
+)
+def test_unenumerable_mapping_is_external_check(operand, meta) -> None:
+    cap = evaluate_tree(_eq_tree(operand), _ctx(meta))
 
     assert cap.kind == "external_check_only"
     assert _principals(cap) == []

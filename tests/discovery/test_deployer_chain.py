@@ -4,6 +4,8 @@ The Etherscan calls (``getcontractcreation``, ``txlist``) must carry the searche
 default. Name resolution still uses ``get_contract_name`` (no chain param yet), so tests set ``resolve_names=False``.
 """
 
+import pytest
+
 from services.discovery import deployer
 
 _SEEDS = ["0x" + f"{n:040x}" for n in (0x11, 0x22, 0x33)]
@@ -24,26 +26,25 @@ def _fake_get_factory(seen):
     return fake_get
 
 
-def test_expand_from_deployers_threads_chain_id(monkeypatch):
+@pytest.mark.parametrize(
+    ("kwargs", "expected_chain"),
+    [
+        pytest.param({"chain_id": 8453}, 8453, id="threads_chain_id"),
+        pytest.param({}, 1, id="defaults_to_mainnet"),
+    ],
+)
+def test_expand_from_deployers_threads_chain_id(monkeypatch, kwargs, expected_chain):
     seen: list[tuple[str, int | None]] = []
     monkeypatch.setattr(deployer.etherscan, "get", _fake_get_factory(seen))
 
-    entries = deployer.expand_from_deployers(_SEEDS, resolve_names=False, chain_id=8453)
+    entries = deployer.expand_from_deployers(_SEEDS, resolve_names=False, **kwargs)
 
     assert entries, "expected at least one expanded entry"
     creation_chain_ids = [c for a, c in seen if a == "getcontractcreation"]
     txlist_chain_ids = [c for a, c in seen if a == "txlist"]
-    assert creation_chain_ids == [8453]
-    assert txlist_chain_ids == [8453]
-
-
-def test_expand_from_deployers_defaults_to_mainnet(monkeypatch):
-    seen: list[tuple[str, int | None]] = []
-    monkeypatch.setattr(deployer.etherscan, "get", _fake_get_factory(seen))
-
-    deployer.expand_from_deployers(_SEEDS, resolve_names=False)
-
-    assert {c for _, c in seen} == {1}
+    assert creation_chain_ids == [expected_chain]
+    assert txlist_chain_ids == [expected_chain]
+    assert {c for _, c in seen} == {expected_chain}
 
 
 def test_explorer_links_follow_the_expansion_chain(monkeypatch):
@@ -58,8 +59,7 @@ def test_explorer_links_follow_the_expansion_chain(monkeypatch):
     eth = deployer.expand_from_deployers(_SEEDS, resolve_names=False, chain_id=1)
     assert eth and all("etherscan.io/address/" in e["explorer_url"] for e in eth)
 
-
-def test_explorer_base_falls_back_for_unknown_chain():
+    # Unknown chains fall back to etherscan.
     assert deployer._explorer_base(1) == "https://etherscan.io"
     assert deployer._explorer_base(8453) == "https://basescan.org"
     assert deployer._explorer_base(999999999) == "https://etherscan.io"

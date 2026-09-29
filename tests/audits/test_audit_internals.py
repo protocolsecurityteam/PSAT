@@ -6,6 +6,11 @@ paths. No DB, HTTP or object storage; ``llm.chat`` and storage/download function
 
 from __future__ import annotations
 
+import json
+
+import pytest
+import requests
+
 from services.audits.text_extraction import (
     PdfDownloadError,
     PdfTooLargeError,
@@ -25,6 +30,27 @@ from services.discovery.audit_reports_llm import (
     generate_followup_query,
 )
 from tests.support.pdf import minimal_pdf_with_text
+
+_LONG_PDF = minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
+
+
+def _raising(message):
+    def boom(*_a, **_kw):
+        raise RuntimeError(message)
+
+    return boom
+
+
+def _raising_as(exc_type, message):
+    def boom(*_a, **_kw):
+        raise exc_type(message)
+
+    return boom
+
+
+def _returning(value):
+    return lambda *_a, **_kw: value
+
 
 # ---------------------------------------------------------------------------
 # _collapse_same_audit_mirrors — heuristic fallback when LLM is unavailable.
@@ -142,25 +168,31 @@ class TestCollapseSameAuditMirrors:
 
 
 class TestChunkedText:
-    def test_short_text_returns_single_chunk(self):
-        assert _chunked_text("small text") == ["small text"]
+    @pytest.mark.parametrize(
+        "text",
+        [
+            pytest.param("small text", id="short"),
+            pytest.param("B" * 15_000, id="exactly-at-cap"),
+        ],
+    )
+    def test_text_within_cap_returns_single_chunk(self, text):
+        assert _chunked_text(text) == [text]
 
-    def test_long_text_splits_into_overlapping_windows(self):
-        text = "A" * 45_000
+    @pytest.mark.parametrize(
+        "size",
+        [
+            pytest.param(45_000, id="long"),
+            pytest.param(300_000, id="huge-still-capped"),
+        ],
+    )
+    def test_long_text_splits_into_overlapping_windows(self, size):
+        text = "A" * size
         chunks = _chunked_text(text)
         assert len(chunks) == 3  # _MAX_CHUNKS
         assert all(len(c) <= 15_000 for c in chunks)
         # Consecutive chunks overlap by ``overlap`` chars so contracts
         # straddling the boundary aren't lost.
         assert chunks[0][-100:] == chunks[1][:100]
-
-    def test_exactly_at_cap_stays_one_chunk(self):
-        text = "B" * 15_000
-        assert _chunked_text(text) == [text]
-
-    def test_caps_at_max_chunks_even_for_huge_text(self):
-        text = "C" * 300_000
-        assert len(_chunked_text(text)) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -179,18 +211,11 @@ class TestExtractOneChunk:
         out = _extract_one_chunk("https://x.com", "some page text", "Acme")
         assert out == {"reports": [{"auditor": "OZ", "title": "X", "date": "2024-01-01"}]}
 
-    def test_llm_raises_returns_none(self, monkeypatch):
-        def boom(*_a, **_kw):
-            raise RuntimeError("LLM exploded")
-
-        monkeypatch.setattr("services.discovery.audit_reports_llm.llm.chat", boom)
-        assert _extract_one_chunk("https://x.com", "text", "Acme") is None
-
-    def test_unparseable_response_returns_none(self, monkeypatch):
-        monkeypatch.setattr(
-            "services.discovery.audit_reports_llm.llm.chat",
-            lambda *_a, **_kw: "not json",
-        )
+    @pytest.mark.parametrize(
+        "chat", [_raising("LLM exploded"), _returning("not json")], ids=["llm-raises", "unparseable"]
+    )
+    def test_llm_failure_returns_none(self, monkeypatch, chat):
+        monkeypatch.setattr("services.discovery.audit_reports_llm.llm.chat", chat)
         assert _extract_one_chunk("https://x.com", "text", "Acme") is None
 
 
@@ -262,22 +287,20 @@ class TestGenerateFollowupQuery:
         assert q is not None
         assert "Morpho" in q
 
-    def test_empty_llm_response_returns_none(self, monkeypatch):
-        """LLM strips to empty → None so the caller skips the second Tavily
-        query (falsy means no follow-up)."""
-        monkeypatch.setattr(
-            "services.discovery.audit_reports_llm.llm.chat",
-            lambda *_a, **_kw: "",
-        )
-        assert generate_followup_query([{"title": "t", "url": "u"}], "X") is None
-
-    def test_strips_surrounding_quotes(self, monkeypatch):
-        monkeypatch.setattr(
-            "services.discovery.audit_reports_llm.llm.chat",
-            lambda *_a, **_kw: '"aave audits 2024"',
-        )
-        q = generate_followup_query([{"title": "t", "url": "u"}], "Aave")
-        assert q == "aave audits 2024"
+    @pytest.mark.parametrize(
+        ("chat", "expected"),
+        [
+            # LLM strips to empty -> None so the caller skips the second Tavily
+            # query (falsy means no follow-up).
+            pytest.param(_returning(""), None, id="empty-llm-response"),
+            pytest.param(_returning('"aave audits 2024"'), "aave audits 2024", id="strips-surrounding-quotes"),
+            pytest.param(_returning("x" * 300), None, id="overlong-response-rejected"),
+            pytest.param(_raising("llm down"), None, id="llm-raises"),
+        ],
+    )
+    def test_followup_query_from_llm_response(self, monkeypatch, chat, expected):
+        monkeypatch.setattr("services.discovery.audit_reports_llm.llm.chat", chat)
+        assert generate_followup_query([{"title": "t", "url": "u"}], "Aave") == expected
 
     def test_mismatched_quotes_are_scrubbed(self, monkeypatch):
         """The LLM sometimes produces ``'foo"`` or ``"foo'`` — scrub to avoid
@@ -290,20 +313,6 @@ class TestGenerateFollowupQuery:
         assert q is not None
         assert '"' not in q
 
-    def test_overlong_response_rejected(self, monkeypatch):
-        monkeypatch.setattr(
-            "services.discovery.audit_reports_llm.llm.chat",
-            lambda *_a, **_kw: "x" * 300,
-        )
-        assert generate_followup_query([{"title": "t", "url": "u"}], "X") is None
-
-    def test_llm_raises_returns_none(self, monkeypatch):
-        def boom(*_a, **_kw):
-            raise RuntimeError("llm down")
-
-        monkeypatch.setattr("services.discovery.audit_reports_llm.llm.chat", boom)
-        assert generate_followup_query([{"title": "t", "url": "u"}], "X") is None
-
 
 # ---------------------------------------------------------------------------
 # classify_search_results — confidence threshold + LLM error paths
@@ -311,26 +320,19 @@ class TestGenerateFollowupQuery:
 
 
 class TestClassifySearchResults:
-    def test_is_audit_false_filtered(self, monkeypatch):
-        import json
-
-        monkeypatch.setattr(
-            "services.discovery.audit_reports_llm.llm.chat",
-            lambda *_a, **_kw: json.dumps(
-                [
-                    {"url": "https://x.com", "is_audit": False, "confidence": 0.95},
-                ]
+    @pytest.mark.parametrize(
+        "chat",
+        [
+            pytest.param(
+                _returning(json.dumps([{"url": "https://x.com", "is_audit": False, "confidence": 0.95}])),
+                id="is-audit-false-filtered",
             ),
-        )
+            pytest.param(_raising("LLM down"), id="llm-raises"),
+        ],
+    )
+    def test_classify_returns_empty(self, monkeypatch, chat):
+        monkeypatch.setattr("services.discovery.audit_reports_llm.llm.chat", chat)
         out = classify_search_results([{"url": "https://x.com", "title": "t", "content": "c"}], "Acme")
-        assert out == []
-
-    def test_llm_raises_returns_empty(self, monkeypatch):
-        def boom(*_a, **_kw):
-            raise RuntimeError("LLM down")
-
-        monkeypatch.setattr("services.discovery.audit_reports_llm.llm.chat", boom)
-        out = classify_search_results([{"url": "https://x.com", "title": "t", "content": "c"}], "X")
         assert out == []
 
 
@@ -341,65 +343,56 @@ class TestClassifySearchResults:
 
 
 class TestProcessAuditReportErrorPaths:
-    def test_missing_url_returns_failed(self):
-        out = process_audit_report(audit_report_id=1, url="")
-        assert out.status == "failed"
-        assert "no URL" in (out.error or "")
-
-    def test_http_failure_returns_failed(self, monkeypatch):
-        def raising(*_a, **_kw):
-            raise PdfDownloadError("HTTP 503")
-
-        monkeypatch.setattr("services.audits.text_extraction.download_pdf", raising)
-        out = process_audit_report(audit_report_id=1, url="https://x/a.pdf")
-        assert out.status == "failed"
-        assert "HTTP 503" in (out.error or "")
-
-    def test_oversized_pdf_returns_skipped(self, monkeypatch):
-        def too_big(*_a, **_kw):
-            raise PdfTooLargeError("streamed body exceeded cap")
-
-        monkeypatch.setattr("services.audits.text_extraction.download_pdf", too_big)
-        out = process_audit_report(audit_report_id=1, url="https://x/huge.pdf")
-        assert out.status == "skipped"
-        assert "too large" in (out.error or "")
-
-    def test_parse_error_returns_failed(self, monkeypatch):
-        monkeypatch.setattr(
-            "services.audits.text_extraction.download_pdf",
-            lambda *_a, **_kw: b"not a pdf",
-        )
-        out = process_audit_report(audit_report_id=1, url="https://x/a.pdf")
-        assert out.status == "failed"
-        assert "parse" in (out.error or "")
-
-    def test_short_text_returns_skipped(self, monkeypatch):
-        """Image-only PDFs return near-empty text — worker marks skipped so
-        OCR can be handled separately later."""
-        monkeypatch.setattr(
-            "services.audits.text_extraction.download_pdf",
-            lambda *_a, **_kw: minimal_pdf_with_text("tiny"),
-        )
-        out = process_audit_report(audit_report_id=1, url="https://x/a.pdf")
-        assert out.status == "skipped"
-        assert "image-only" in (out.error or "")
-
-    def test_storage_failure_returns_failed(self, monkeypatch):
-        """When download+parse succeed but object storage rejects the write,
-        the outcome must surface as ``failed`` so the worker can retry."""
-        pdf = minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
-        monkeypatch.setattr(
-            "services.audits.text_extraction.download_pdf",
-            lambda *_a, **_kw: pdf,
-        )
-
-        def broken_store(*_a, **_kw):
-            raise StorageWriteError("tigris down")
-
-        monkeypatch.setattr("services.audits.text_extraction.store_audit_text", broken_store)
-        out = process_audit_report(audit_report_id=1, url="https://x/a.pdf")
-        assert out.status == "failed"
-        assert "store" in (out.error or "") and "tigris" in (out.error or "")
+    @pytest.mark.parametrize(
+        ("url", "download", "store", "status", "error_parts"),
+        [
+            pytest.param("", _raising("unused"), None, "failed", ("no URL",), id="missing-url"),
+            pytest.param(
+                "https://x/a.pdf",
+                _raising_as(PdfDownloadError, "HTTP 503"),
+                None,
+                "failed",
+                ("HTTP 503",),
+                id="http-failure",
+            ),
+            pytest.param(
+                "https://x/huge.pdf",
+                _raising_as(PdfTooLargeError, "streamed body exceeded cap"),
+                None,
+                "skipped",
+                ("too large",),
+                id="oversized-pdf",
+            ),
+            pytest.param("https://x/a.pdf", _returning(b"not a pdf"), None, "failed", ("parse",), id="parse-error"),
+            # Image-only PDFs return near-empty text; worker marks skipped so OCR can be handled later.
+            pytest.param(
+                "https://x/a.pdf",
+                _returning(minimal_pdf_with_text("tiny")),
+                None,
+                "skipped",
+                ("image-only",),
+                id="short-text",
+            ),
+            # Download+parse succeed but object storage rejects the write: must surface as
+            # ``failed`` so the worker can retry.
+            pytest.param(
+                "https://x/a.pdf",
+                _returning(_LONG_PDF),
+                _raising_as(StorageWriteError, "tigris down"),
+                "failed",
+                ("store", "tigris"),
+                id="storage-failure",
+            ),
+        ],
+    )
+    def test_error_paths(self, monkeypatch, url, download, store, status, error_parts):
+        monkeypatch.setattr("services.audits.text_extraction.download_pdf", download)
+        if store is not None:
+            monkeypatch.setattr("services.audits.text_extraction.store_audit_text", store)
+        out = process_audit_report(audit_report_id=1, url=url)
+        assert out.status == status
+        for part in error_parts:
+            assert part in (out.error or "")
 
     def test_success_returns_all_metadata(self, monkeypatch):
         pdf = minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
@@ -449,12 +442,21 @@ class _FakeResp:
 
 
 class TestFetchHtmlPage:
-    def test_normal_page_parses(self, monkeypatch):
-        resp = _FakeResp(chunks=[b"<html>hello world</html>"])
-        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: resp)
-
-        out = _fetch_html_page("https://example.com/report")
-        assert out == "<html>hello world</html>"
+    @pytest.mark.parametrize(
+        ("safe_get", "expected"),
+        [
+            pytest.param(
+                lambda *a, **kw: _FakeResp(chunks=[b"<html>hello world</html>"]),
+                "<html>hello world</html>",
+                id="normal-page-parses",
+            ),
+            pytest.param(lambda *a, **kw: _FakeResp(status_code=404), None, id="non-200"),
+            pytest.param(_raising_as(requests.RequestException, "connection reset"), None, id="request-exception"),
+        ],
+    )
+    def test_fetch_outcome(self, monkeypatch, safe_get, expected):
+        monkeypatch.setattr("utils.egress.safe_get", safe_get)
+        assert _fetch_html_page("https://example.com/report") == expected
 
     def test_internal_target_refused_without_raising(self, monkeypatch):
         """A URL whose host would resolve to an internal address is refused by
@@ -488,12 +490,6 @@ class TestFetchHtmlPage:
         assert out is None
         assert resp.closed is True
 
-    def test_non_200_returns_none(self, monkeypatch):
-        resp = _FakeResp(status_code=404)
-        monkeypatch.setattr("utils.egress.safe_get", lambda *a, **kw: resp)
-
-        assert _fetch_html_page("https://example.com/missing") is None
-
     def test_download_cap_still_truncates(self, monkeypatch):
         oversized = [b"a" * 64_000 for _ in range(100)]  # 6.4 MB offered
         resp = _FakeResp(chunks=oversized)
@@ -505,13 +501,3 @@ class TestFetchHtmlPage:
         # first ceil(cap / chunk) chunks, nowhere near the 6.4 MB offered.
         assert len(out) == _MAX_DOWNLOAD_BYTES
         assert len(out) < sum(len(c) for c in oversized)
-
-    def test_request_exception_returns_none(self, monkeypatch):
-        import requests
-
-        def boom(*_a, **_kw):
-            raise requests.RequestException("connection reset")
-
-        monkeypatch.setattr("utils.egress.safe_get", boom)
-
-        assert _fetch_html_page("https://example.com/report") is None

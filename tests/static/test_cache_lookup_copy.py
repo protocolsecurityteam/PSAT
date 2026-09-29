@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from tests.cache_helpers import (
     ADDR_A,
     ADDR_B,
@@ -331,31 +333,19 @@ def test_no_duplicate_rows_after_two_runs(db_session, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_copy_row_skips_primary_key(db_session):
-    from db.models import Contract
-    from db.queue import copy_row, create_job
-
-    job = create_job(db_session, {"address": ADDR_A})
-    original = Contract(
-        job_id=job.id,
-        address=ADDR_A,
-        chain="ethereum",
-        contract_name="Original",
-        compiler_version="v0.8.24",
-        language="solidity",
-    )
-    db_session.add(original)
-    db_session.flush()
-
-    cloned = copy_row(db_session, original, job_id=job.id, address=ADDR_A, chain="base")
-    assert isinstance(cloned, Contract)
-    db_session.flush()
-
-    assert cloned.id != original.id
-    assert cloned.contract_name == "Original"
-
-
-def test_copy_row_applies_overrides(db_session):
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        pytest.param({}, {"contract_name": "Original", "compiler_version": "v0.8.24"}, id="skips_primary_key"),
+        pytest.param({"contract_name": "Cloned"}, {"contract_name": "Cloned"}, id="applies_overrides"),
+        pytest.param(
+            {"exclude": frozenset({"compiler_version", "language"})},
+            {"compiler_version": None, "language": None, "contract_name": "Original"},
+            id="respects_exclude",
+        ),
+    ],
+)
+def test_copy_row(db_session, overrides, expected):
     from db.models import Contract
     from db.queue import copy_row, create_job
 
@@ -366,48 +356,20 @@ def test_copy_row_applies_overrides(db_session):
         address=ADDR_A,
         chain="ethereum",
         contract_name="Original",
-    )
-    db_session.add(original)
-    db_session.flush()
-
-    cloned = copy_row(db_session, original, job_id=job2.id, contract_name="Cloned", address=ADDR_A, chain="base")
-    assert isinstance(cloned, Contract)
-    db_session.flush()
-
-    assert cloned.job_id == job2.id
-    assert cloned.contract_name == "Cloned"
-
-
-def test_copy_row_respects_exclude(db_session):
-    from db.models import Contract
-    from db.queue import copy_row, create_job
-
-    job = create_job(db_session, {"address": ADDR_A})
-    original = Contract(
-        job_id=job.id,
-        address=ADDR_A,
-        chain="ethereum",
-        contract_name="Original",
         compiler_version="v0.8.24",
         language="solidity",
     )
     db_session.add(original)
     db_session.flush()
 
-    cloned = copy_row(
-        db_session,
-        original,
-        job_id=job.id,
-        address=ADDR_A,
-        chain="base",
-        exclude=frozenset({"compiler_version", "language"}),
-    )
+    cloned = copy_row(db_session, original, job_id=job2.id, address=ADDR_A, chain="base", **overrides)
     assert isinstance(cloned, Contract)
     db_session.flush()
 
-    assert cloned.compiler_version is None
-    assert cloned.language is None
-    assert cloned.contract_name == "Original"
+    assert cloned.id != original.id
+    assert cloned.job_id == job2.id
+    for attr, value in expected.items():
+        assert getattr(cloned, attr) == value
 
 
 def test_copy_row_shallow_copies_lists(db_session):

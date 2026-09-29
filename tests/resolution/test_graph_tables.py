@@ -126,6 +126,7 @@ def _rows(session, contract_id: int):
 def test_refresh_rewrite_persists_role_principal_edges_and_converges(pg_session):
     """Resolution write, then policy-refresh write: the table plane must equal the refreshed
     graph (role_principal edge included), and a re-run must change nothing."""
+    from db.models import CONTROL_EDGE_RELATIONS, ControlGraphEdge
     from services.resolution.graph_tables import replace_control_graph_rows
 
     contract = _contract(pg_session, ROOT)
@@ -153,6 +154,19 @@ def test_refresh_rewrite_persists_role_principal_edges_and_converges(pg_session)
     principal_node = next(node for node in nodes if node.address == ROLE_PRINCIPAL)
     assert principal_node.resolved_type == "eoa"
     assert principal_node.analysis_state == "not_analyzable"
+
+    # The written role_principal edge satisfies the predicate the effects value closure selects on
+    # (``relation.in_(CONTROL_EDGE_RELATIONS)``); before the policy-stage rewrite these edges could
+    # not exist in the table.
+    closure_edges = pg_session.execute(
+        select(ControlGraphEdge.from_node_id, ControlGraphEdge.to_node_id, ControlGraphEdge.relation).where(
+            ControlGraphEdge.contract_id == contract.id,
+            ControlGraphEdge.relation.in_(CONTROL_EDGE_RELATIONS),
+        )
+    ).all()
+    assert (f"address:{ROOT}", f"address:{ROLE_PRINCIPAL}", "role_principal") in {
+        (row.from_node_id, row.to_node_id, row.relation) for row in closure_edges
+    }
 
     replace_control_graph_rows(
         pg_session, contract_id=contract.id, deployment_address=None, resolved_graph=_refreshed_graph()
@@ -213,27 +227,3 @@ def test_replace_is_scoped_to_contract_and_deployment(pg_session):
 
     other_nodes, other_edges = _rows(pg_session, other_contract.id)
     assert len(other_nodes) == 2 and len(other_edges) == 1
-
-
-def test_persisted_role_edges_reach_the_authority_closure_relations(pg_session):
-    """A written role_principal edge satisfies the predicate the effects value closure
-    selects on (``relation.in_(CONTROL_EDGE_RELATIONS)``); before the policy-stage rewrite
-    these edges could not exist in the table."""
-    from db.models import CONTROL_EDGE_RELATIONS, ControlGraphEdge
-    from services.resolution.graph_tables import replace_control_graph_rows
-
-    contract = _contract(pg_session, ROOT)
-    replace_control_graph_rows(
-        pg_session, contract_id=contract.id, deployment_address=None, resolved_graph=_refreshed_graph()
-    )
-    pg_session.commit()
-
-    closure_edges = pg_session.execute(
-        select(ControlGraphEdge.from_node_id, ControlGraphEdge.to_node_id, ControlGraphEdge.relation).where(
-            ControlGraphEdge.contract_id == contract.id,
-            ControlGraphEdge.relation.in_(CONTROL_EDGE_RELATIONS),
-        )
-    ).all()
-    assert (f"address:{ROOT}", f"address:{ROLE_PRINCIPAL}", "role_principal") in {
-        (row.from_node_id, row.to_node_id, row.relation) for row in closure_edges
-    }

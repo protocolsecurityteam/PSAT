@@ -111,26 +111,23 @@ def _run(coroutine):
     return asyncio.run(coroutine)
 
 
-def test_decode_address_topic_strips_padding():
-    padded = _indexed_topic(_addr("dead1234"))
-    assert _decode_address_topic(padded) == _addr("dead1234")
+_ALICE_WORD = "0x" + _addr("aa11")[2:].rjust(64, "0")
+_BOB_WORD = _addr("bb22")[2:].rjust(64, "0")
 
 
-def test_decode_address_topic_rejects_wrong_length():
-    assert _decode_address_topic("0xdead") == ""
-
-
-def test_decode_address_arg_from_data_position_0():
-    a = _addr("aa11")
-    padded = "0x" + a[2:].rjust(64, "0")
-    assert _decode_address_arg_from_data(padded, 0) == a
-
-
-def test_decode_address_arg_from_data_position_1():
-    a = _addr("aa11")
-    b = _addr("bb22")
-    data = "0x" + a[2:].rjust(64, "0") + b[2:].rjust(64, "0")
-    assert _decode_address_arg_from_data(data, 1) == b
+@pytest.mark.parametrize(
+    ("decode", "args", "expected"),
+    [
+        pytest.param(
+            _decode_address_topic, (_indexed_topic(_addr("dead1234")),), _addr("dead1234"), id="topic-strips-padding"
+        ),
+        pytest.param(_decode_address_topic, ("0xdead",), "", id="topic-rejects-wrong-length"),
+        pytest.param(_decode_address_arg_from_data, (_ALICE_WORD, 0), _addr("aa11"), id="data-position-0"),
+        pytest.param(_decode_address_arg_from_data, (_ALICE_WORD + _BOB_WORD, 1), _addr("bb22"), id="data-position-1"),
+    ],
+)
+def test_address_decoders(decode, args, expected):
+    assert decode(*args) == expected
 
 
 def _rely_spec():
@@ -157,52 +154,49 @@ def _deny_spec():
     }
 
 
-def test_single_add_appears_in_output():
-    rely_topic = _event_topic0("Rely(address)")
-    alice = _addr("a11ce")
+ALICE = _addr("a11ce")
+BOB = _addr("b0b")
+
+
+@pytest.mark.parametrize(
+    ("specs", "events", "expected"),
+    [
+        pytest.param((_rely_spec,), [("Rely", ALICE, 10)], [(ALICE, ["add"], 10)], id="single-add"),
+        # CRITICAL: a remove after an add must drop the principal.
+        pytest.param(
+            (_rely_spec, _deny_spec),
+            [("Rely", ALICE, 10), ("Deny", ALICE, 20)],
+            [],
+            id="add-then-remove-leaves-empty",
+        ),
+        pytest.param(
+            (_rely_spec, _deny_spec),
+            [("Rely", ALICE, 10), ("Deny", ALICE, 20), ("Rely", ALICE, 30)],
+            [(ALICE, ["add", "remove", "add"], 30)],
+            id="add-remove-add-ends-present",
+        ),
+        pytest.param(
+            (_rely_spec,),
+            [("Rely", ALICE, 10), ("Rely", BOB, 11)],
+            [(ALICE, ["add"], 10), (BOB, ["add"], 11)],
+            id="multiple-principals-independent",
+        ),
+    ],
+)
+def test_event_fold_semantics(specs, events, expected):
+    topics = {"Rely": _event_topic0("Rely(address)"), "Deny": _event_topic0("Deny(address)")}
     client, _ = _fake_client(
-        [
-            ([_log(rely_topic, indexed_args=[alice], block=10)], None),
-        ]
+        [([_log(topics[name], indexed_args=[who], block=block) for name, who, block in events], None)]
     )
     out = _run(
         enumerate_mapping_allowlist(
             "0xCC00000000000000000000000000000000000001",
-            [_rely_spec()],
+            [spec() for spec in specs],
             client=client,
             hypersync_module=_FakeHypersyncModule(),
         )
     )
-    addresses = [p["address"] for p in out]
-    assert addresses == [alice]
-    assert out[0]["direction_history"] == ["add"]
-    assert out[0]["last_seen_block"] == 10
-
-
-def test_add_then_remove_leaves_empty():
-    rely_topic = _event_topic0("Rely(address)")
-    deny_topic = _event_topic0("Deny(address)")
-    alice = _addr("a11ce")
-    client, _ = _fake_client(
-        [
-            (
-                [
-                    _log(rely_topic, indexed_args=[alice], block=10),
-                    _log(deny_topic, indexed_args=[alice], block=20),
-                ],
-                None,
-            ),
-        ]
-    )
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [_rely_spec(), _deny_spec()],
-            client=client,
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert out == []
+    assert sorted((p["address"], p["direction_history"], p["last_seen_block"]) for p in out) == sorted(expected)
 
 
 def test_conflicting_directions_for_same_event_topic_are_rejected():
@@ -233,62 +227,6 @@ def test_conflicting_directions_for_same_event_topic_are_rejected():
     )
     assert out == []
     assert calls["n"] == 0
-
-
-def test_add_remove_add_ends_present():
-    rely_topic = _event_topic0("Rely(address)")
-    deny_topic = _event_topic0("Deny(address)")
-    alice = _addr("a11ce")
-    client, _ = _fake_client(
-        [
-            (
-                [
-                    _log(rely_topic, indexed_args=[alice], block=10),
-                    _log(deny_topic, indexed_args=[alice], block=20),
-                    _log(rely_topic, indexed_args=[alice], block=30),
-                ],
-                None,
-            ),
-        ]
-    )
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [_rely_spec(), _deny_spec()],
-            client=client,
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert [p["address"] for p in out] == [alice]
-    assert out[0]["direction_history"] == ["add", "remove", "add"]
-    assert out[0]["last_seen_block"] == 30
-
-
-def test_multiple_principals_independent():
-    rely_topic = _event_topic0("Rely(address)")
-    alice = _addr("a11ce")
-    bob = _addr("b0b")
-    client, _ = _fake_client(
-        [
-            (
-                [
-                    _log(rely_topic, indexed_args=[alice], block=10),
-                    _log(rely_topic, indexed_args=[bob], block=11),
-                ],
-                None,
-            ),
-        ]
-    )
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [_rely_spec()],
-            client=client,
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    addresses = sorted(p["address"] for p in out)
-    assert addresses == sorted([alice, bob])
 
 
 def test_non_indexed_key_decodes_from_data_slot():
@@ -371,44 +309,31 @@ def test_pagination_via_next_block():
     assert calls["n"] == 3
 
 
-def test_unknown_topic_ignored():
-    rely_topic = _event_topic0("Rely(address)")
-    other_topic = _event_topic0("Unrelated(uint256)")
-    alice = _addr("a11ce")
-    client, _ = _fake_client(
-        [
-            (
-                [
-                    _log(other_topic, indexed_args=[alice], block=5),
-                    _log(rely_topic, indexed_args=[alice], block=10),
-                ],
-                None,
-            ),
-        ]
-    )
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [_rely_spec()],
-            client=client,
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert [p["address"] for p in out] == [alice]
-
-
-def test_malformed_address_topic_skipped():
-    rely_topic = _event_topic0("Rely(address)")
-    bad_log = SimpleNamespace(
+def _malformed_topic_log(rely_topic, _alice):
+    return SimpleNamespace(
         topics=[rely_topic, "0xdead"],
         data="0x",
         block_number=10,
         transaction_hash="0x" + "f" * 64,
         log_index=0,
     )
+
+
+@pytest.mark.parametrize(
+    "make_noise_log",
+    [
+        pytest.param(
+            lambda rely_topic, alice: _log(_event_topic0("Unrelated(uint256)"), indexed_args=[alice], block=5),
+            id="unknown-topic",
+        ),
+        pytest.param(_malformed_topic_log, id="malformed-address-topic"),
+    ],
+)
+def test_unusable_logs_are_skipped(make_noise_log):
+    rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
     good_log = _log(rely_topic, indexed_args=[alice], block=11)
-    client, _ = _fake_client([([bad_log, good_log], None)])
+    client, _ = _fake_client([([make_noise_log(rely_topic, alice), good_log], None)])
     out = _run(
         enumerate_mapping_allowlist(
             "0xCC00000000000000000000000000000000000001",

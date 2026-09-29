@@ -39,36 +39,32 @@ def _report(
 # ---------------------------------------------------------------------------
 
 
+_ARRAY = [{"a": 1}]
+_OBJECT = {"a": 1}
+
+
 class TestJsonParsing:
-    def test_parse_array_clean(self):
-        assert _parse_json_array('[{"a": 1}]') == [{"a": 1}]
-
-    def test_parse_array_with_markdown_fences(self):
-        assert _parse_json_array('```json\n[{"a": 1}]\n```') == [{"a": 1}]
-
-    def test_parse_array_with_surrounding_text(self):
-        assert _parse_json_array('Here is the result: [{"a": 1}] Done.') == [{"a": 1}]
-
-    def test_parse_array_garbage_returns_none(self):
-        assert _parse_json_array("not json at all") is None
-
-    def test_parse_array_empty(self):
-        assert _parse_json_array("[]") == []
-
-    def test_parse_object_clean(self):
-        assert _parse_json_object('{"a": 1}') == {"a": 1}
-
-    def test_parse_object_with_markdown_fences(self):
-        assert _parse_json_object('```json\n{"a": 1}\n```') == {"a": 1}
-
-    def test_parse_object_with_surrounding_text(self):
-        assert _parse_json_object('Here is the result: {"a": 1} Done.') == {"a": 1}
-
-    def test_parse_object_garbage_returns_none(self):
-        assert _parse_json_object("not json") is None
-
-    def test_parse_object_empty(self):
-        assert _parse_json_object("{}") == {}
+    @pytest.mark.parametrize(
+        "parse, text, expected",
+        [
+            pytest.param(_parse_json_array, '[{"a": 1}]', _ARRAY, id="array-clean"),
+            pytest.param(_parse_json_array, '```json\n[{"a": 1}]\n```', _ARRAY, id="array-markdown-fences"),
+            pytest.param(
+                _parse_json_array, 'Here is the result: [{"a": 1}] Done.', _ARRAY, id="array-surrounding-text"
+            ),
+            pytest.param(_parse_json_array, "not json at all", None, id="array-garbage-returns-none"),
+            pytest.param(_parse_json_array, "[]", [], id="array-empty"),
+            pytest.param(_parse_json_object, '{"a": 1}', _OBJECT, id="object-clean"),
+            pytest.param(_parse_json_object, '```json\n{"a": 1}\n```', _OBJECT, id="object-markdown-fences"),
+            pytest.param(
+                _parse_json_object, 'Here is the result: {"a": 1} Done.', _OBJECT, id="object-surrounding-text"
+            ),
+            pytest.param(_parse_json_object, "not json", None, id="object-garbage-returns-none"),
+            pytest.param(_parse_json_object, "{}", {}, id="object-empty"),
+        ],
+    )
+    def test_parse_json(self, parse, text, expected):
+        assert parse(text) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -84,50 +80,37 @@ class TestMergeAuditReports:
         urls = {r["url"] for r in merged["reports"]}
         assert urls == {"https://a.com/old", "https://b.com/new"}
 
-    def test_richer_entry_wins_on_overlap(self):
+    @pytest.mark.parametrize("prev_is_richer", [True, False], ids=["prev-richer-beats-new", "new-richer-beats-prev"])
+    def test_richer_entry_wins_on_overlap(self, prev_is_richer):
         sparse = _report(url="https://a.com/report", pdf_url=None, date=None)
         rich = _report(
             url="https://a.com/report",
             pdf_url="https://a.com/report.pdf",
             date="2023-06-15",
         )
+        prev, new = (rich, sparse) if prev_is_richer else (sparse, rich)
         merged = merge_audit_reports(
-            {"company": "X", "reports": [sparse]},
-            {"company": "X", "reports": [rich]},
+            {"company": "X", "reports": [prev]},
+            {"company": "X", "reports": [new]},
         )
         assert len(merged["reports"]) == 1
         assert merged["reports"][0]["pdf_url"] == "https://a.com/report.pdf"
+        assert merged["reports"][0]["date"] == "2023-06-15"
 
-    def test_prev_richer_beats_new(self):
-        rich = _report(
-            url="https://a.com/report",
-            pdf_url="https://a.com/report.pdf",
-            date="2023-01-01",
-        )
-        sparse = _report(url="https://a.com/report", pdf_url=None, date=None)
+    @pytest.mark.parametrize(
+        "prev_reports, new_reports, expected_count",
+        [
+            pytest.param([], [_report()], 1, id="empty-prev-returns-new"),
+            pytest.param([_report()], [], 1, id="empty-new-keeps-prev"),
+            pytest.param([], [], 0, id="both-empty"),
+        ],
+    )
+    def test_empty_side_merges(self, prev_reports, new_reports, expected_count):
         merged = merge_audit_reports(
-            {"company": "X", "reports": [rich]},
-            {"company": "X", "reports": [sparse]},
+            {"company": "X", "reports": prev_reports},
+            {"company": "X", "reports": new_reports},
         )
-        assert merged["reports"][0]["pdf_url"] == "https://a.com/report.pdf"
-        assert merged["reports"][0]["date"] == "2023-01-01"
-
-    def test_empty_prev_returns_new(self):
-        new = {"company": "X", "reports": [_report()]}
-        merged = merge_audit_reports({"company": "X", "reports": []}, new)
-        assert len(merged["reports"]) == 1
-
-    def test_empty_new_keeps_prev(self):
-        prev = {"company": "X", "reports": [_report()]}
-        merged = merge_audit_reports(prev, {"company": "X", "reports": []})
-        assert len(merged["reports"]) == 1
-
-    def test_both_empty(self):
-        merged = merge_audit_reports(
-            {"company": "X", "reports": []},
-            {"company": "X", "reports": []},
-        )
-        assert merged["reports"] == []
+        assert len(merged["reports"]) == expected_count
 
     def test_url_normalization_dedup(self):
         r1 = _report(url="https://Example.com/Audit/")
@@ -208,75 +191,65 @@ class TestFilenameDateExtraction:
 
 
 class TestGithubBlobToRaw:
-    def test_converts_blob_url_to_raw(self):
+    @pytest.mark.parametrize(
+        "src, expected",
+        [
+            pytest.param(
+                "https://github.com/a/b/blob/main/foo.md",
+                "https://raw.githubusercontent.com/a/b/main/foo.md",
+                id="converts-blob-url-to-raw",
+            ),
+            # Audit filenames often contain spaces encoded as %20; they must
+            # survive verbatim (no double-encode, no decode).
+            pytest.param(
+                "https://github.com/etherfi-protocol/smart-contracts/blob/master/audits/2023.12.20%20-%20Hats%20Finance.md",
+                "https://raw.githubusercontent.com/etherfi-protocol/smart-contracts/master/audits/2023.12.20%20-%20Hats%20Finance.md",
+                id="preserves-url-encoded-characters",
+            ),
+            pytest.param(
+                "https://example.com/foo/bar.md", "https://example.com/foo/bar.md", id="non-github-passes-through"
+            ),
+            pytest.param(
+                "https://raw.githubusercontent.com/a/b/main/foo.md",
+                "https://raw.githubusercontent.com/a/b/main/foo.md",
+                id="already-raw-passes-through",
+            ),
+            pytest.param(
+                "https://github.com/a/b/tree/main/audits",
+                "https://github.com/a/b/tree/main/audits",
+                id="tree-url-passes-through",
+            ),
+        ],
+    )
+    def test_github_blob_to_raw(self, src, expected):
         from services.discovery.audit_reports import github_blob_to_raw
 
-        assert (
-            github_blob_to_raw("https://github.com/a/b/blob/main/foo.md")
-            == "https://raw.githubusercontent.com/a/b/main/foo.md"
-        )
-
-    def test_preserves_url_encoded_characters(self):
-        """Audit filenames often contain spaces encoded as %20 — those must
-        survive the conversion verbatim (don't double-encode, don't decode)."""
-        from services.discovery.audit_reports import github_blob_to_raw
-
-        src = (
-            "https://github.com/etherfi-protocol/smart-contracts/blob/master/audits/2023.12.20%20-%20Hats%20Finance.md"
-        )
-        expected = "https://raw.githubusercontent.com/etherfi-protocol/smart-contracts/master/audits/2023.12.20%20-%20Hats%20Finance.md"
         assert github_blob_to_raw(src) == expected
-
-    def test_non_github_url_passes_through(self):
-        from services.discovery.audit_reports import github_blob_to_raw
-
-        assert github_blob_to_raw("https://example.com/foo/bar.md") == "https://example.com/foo/bar.md"
-
-    def test_already_raw_url_passes_through(self):
-        from services.discovery.audit_reports import github_blob_to_raw
-
-        raw = "https://raw.githubusercontent.com/a/b/main/foo.md"
-        assert github_blob_to_raw(raw) == raw
-
-    def test_github_tree_url_passes_through(self):
-        from services.discovery.audit_reports import github_blob_to_raw
-
-        tree = "https://github.com/a/b/tree/main/audits"
-        assert github_blob_to_raw(tree) == tree
 
 
 class TestReportEntryNormalization:
-    def test_build_report_entry_normalizes_github_blob_pdf_urls(self):
-        from services.discovery.audit_reports import _build_report_entry
+    @pytest.mark.parametrize("builder", ["report_entry", "fallback_entry"])
+    def test_builders_normalize_github_blob_pdf_urls(self, builder):
+        from services.discovery.audit_reports import _build_fallback_entry, _build_report_entry
 
         blob = "https://github.com/a/b/blob/main/audits/report.pdf"
-        out = _build_report_entry(
-            {
-                "auditor": "Foo",
-                "title": "Report",
-                "pdf_url": blob,
-            },
-            source_url="https://docs.example.com/audits",
-            confidence=0.9,
-            now_iso="2026-01-01T00:00:00+00:00",
-        )
-
-        assert out["pdf_url"] == "https://raw.githubusercontent.com/a/b/main/audits/report.pdf"
-        assert out["url"] == out["pdf_url"]
-
-    def test_build_fallback_entry_normalizes_github_blob_pdf_urls(self):
-        from services.discovery.audit_reports import _build_fallback_entry
-
-        blob = "https://github.com/a/b/blob/main/audits/report.pdf"
-        out = _build_fallback_entry(
-            blob,
-            {"auditor": "Foo", "title": "Report"},
-            "Acme",
-            [],
-            confidence=0.9,
-            now_iso="2026-01-01T00:00:00+00:00",
-            pdf_url=blob,
-        )
+        if builder == "report_entry":
+            out = _build_report_entry(
+                {"auditor": "Foo", "title": "Report", "pdf_url": blob},
+                source_url="https://docs.example.com/audits",
+                confidence=0.9,
+                now_iso="2026-01-01T00:00:00+00:00",
+            )
+        else:
+            out = _build_fallback_entry(
+                blob,
+                {"auditor": "Foo", "title": "Report"},
+                "Acme",
+                [],
+                confidence=0.9,
+                now_iso="2026-01-01T00:00:00+00:00",
+                pdf_url=blob,
+            )
 
         assert out["pdf_url"] == "https://raw.githubusercontent.com/a/b/main/audits/report.pdf"
         assert out["url"] == out["pdf_url"]
@@ -383,40 +356,26 @@ class TestFilenameDedup:
 
 
 class TestProvenanceFields:
-    def test_build_report_entry_passes_source_commit(self):
+    @pytest.mark.parametrize(
+        "provenance",
+        [
+            pytest.param(
+                {"source_commit": "a" * 40, "source_repo": "owner/repo", "source_path": "audits/X.pdf"},
+                id="passes-source-commit",
+            ),
+            pytest.param({}, id="omits-provenance-when-missing"),
+        ],
+    )
+    def test_build_report_entry_provenance(self, provenance):
         from services.discovery.audit_reports import _build_report_entry
 
-        sha = "a" * 40
         out = _build_report_entry(
-            {
-                "auditor": "Foo",
-                "title": "T",
-                "date": "2024-01-01",
-                "pdf_url": "https://x.pdf",
-                "source_commit": sha,
-                "source_repo": "owner/repo",
-                "source_path": "audits/X.pdf",
-            },
+            {"auditor": "Foo", "title": "T", "date": "2024-01-01", "pdf_url": "https://x.pdf", **provenance},
             "https://src/",
             0.9,
             "2024-01-01T00:00:00Z",
         )
-        assert out["source_commit"] == sha
-        assert out["source_repo"] == "owner/repo"
-        assert out["source_path"] == "audits/X.pdf"
-
-    def test_build_report_entry_omits_provenance_when_missing(self):
-        from services.discovery.audit_reports import _build_report_entry
-
-        out = _build_report_entry(
-            {"auditor": "Foo", "title": "T", "date": "2024-01-01", "pdf_url": "https://x.pdf"},
-            "https://src/",
-            0.9,
-            "2024-01-01T00:00:00Z",
-        )
-        assert "source_commit" not in out
-        assert "source_repo" not in out
-        assert "source_path" not in out
+        assert {k: out[k] for k in ("source_commit", "source_repo", "source_path") if k in out} == provenance
 
 
 # ---------------------------------------------------------------------------

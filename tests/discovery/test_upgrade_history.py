@@ -139,45 +139,44 @@ class TestParseUpgradeLog:
         assert event is not None
         assert event.get("log_index") == 0
 
-    def test_non_indexed_upgraded_event(self):
-        """OZ legacy proxies emit Upgraded(address) with impl in data, not topics."""
-        impl = ADDR(42)
-        data = "0x" + "0" * 24 + impl[2:]
-        log = _make_log(ADDR(1), uh.UPGRADED_TOPIC0, data=data)
+    @pytest.mark.parametrize(
+        "log, event_type, expected_fields",
+        [
+            # OZ legacy proxies emit Upgraded(address) with impl in data, not topics.
+            pytest.param(
+                _make_log(ADDR(1), uh.UPGRADED_TOPIC0, data="0x" + "0" * 24 + ADDR(42)[2:]),
+                "upgraded",
+                {"implementation": ADDR(42)},
+                id="non-indexed-upgraded",
+            ),
+            pytest.param(
+                _make_log(ADDR(1), uh.BEACON_UPGRADED_TOPIC0, data="0x" + "0" * 24 + ADDR(99)[2:]),
+                "beacon_upgraded",
+                {"beacon": ADDR(99)},
+                id="non-indexed-beacon-upgraded",
+            ),
+            pytest.param(
+                {
+                    "address": ADDR(1),
+                    "topics": [uh.ADMIN_CHANGED_TOPIC0, _topic_for(ADDR(50)), _topic_for(ADDR(51))],
+                    "data": "0x",
+                    "blockNumber": "0x1",
+                    "transactionHash": "0xaaa",
+                    "logIndex": "0x0",
+                    "timeStamp": "0x65a00000",
+                },
+                "admin_changed",
+                {"previous_admin": ADDR(50), "new_admin": ADDR(51)},
+                id="indexed-admin-changed",
+            ),
+        ],
+    )
+    def test_parse_event_variants(self, log, event_type, expected_fields):
         event = uh.parse_upgrade_log(log)
         assert event is not None
-        assert event["event_type"] == "upgraded"
-        assert event.get("implementation") == impl
-
-    def test_non_indexed_beacon_upgraded_event(self):
-        beacon = ADDR(99)
-        data = "0x" + "0" * 24 + beacon[2:]
-        log = _make_log(ADDR(1), uh.BEACON_UPGRADED_TOPIC0, data=data)
-        event = uh.parse_upgrade_log(log)
-        assert event is not None
-        assert event["event_type"] == "beacon_upgraded"
-        assert event.get("beacon") == beacon
-
-    def test_indexed_admin_changed_event(self):
-        old_admin, new_admin = ADDR(50), ADDR(51)
-        log = {
-            "address": ADDR(1),
-            "topics": [
-                uh.ADMIN_CHANGED_TOPIC0,
-                _topic_for(old_admin),
-                _topic_for(new_admin),
-            ],
-            "data": "0x",
-            "blockNumber": "0x1",
-            "transactionHash": "0xaaa",
-            "logIndex": "0x0",
-            "timeStamp": "0x65a00000",
-        }
-        event = uh.parse_upgrade_log(log)
-        assert event is not None
-        assert event["event_type"] == "admin_changed"
-        assert event.get("previous_admin") == old_admin
-        assert event.get("new_admin") == new_admin
+        assert event["event_type"] == event_type
+        for key, value in expected_fields.items():
+            assert event.get(key) == value
 
     def test_none_in_topics_array(self):
         log = {
@@ -540,13 +539,20 @@ def test_fetch_upgrade_events_parity_parallel_vs_sequential(monkeypatch, tmp_pat
 # ---------------------------------------------------------------------------
 
 
-def test_build_upgrade_history_threads_chain_id_to_getlogs(monkeypatch):
+@pytest.mark.parametrize(
+    "kwargs, expected_chain_id",
+    [
+        pytest.param({"chain_id": 8453}, 8453, id="non-mainnet-chain-threaded"),
+        pytest.param({}, 1, id="defaults-to-mainnet"),
+    ],
+)
+def test_build_upgrade_history_threads_chain_id_to_getlogs(monkeypatch, kwargs, expected_chain_id):
     import services.clients.etherscan as etherscan_mod
 
     seen_chain_ids = []
 
-    def fake_get(_module, action, **kwargs):
-        seen_chain_ids.append(kwargs.get("chain_id"))
+    def fake_get(_module, action, **kw):
+        seen_chain_ids.append(kw.get("chain_id"))
         return {"result": []}
 
     # _fetch_logs_etherscan does `from services.clients.etherscan import get` at call time,
@@ -566,36 +572,7 @@ def test_build_upgrade_history_threads_chain_id_to_getlogs(monkeypatch):
         "dependencies": {},
     }
 
-    uh.build_upgrade_history(deps, chain_id=8453)
+    uh.build_upgrade_history(deps, **kwargs)
 
     assert seen_chain_ids, "getLogs was never called"
-    assert set(seen_chain_ids) == {8453}
-
-
-def test_build_upgrade_history_defaults_to_mainnet(monkeypatch):
-    import services.clients.etherscan as etherscan_mod
-
-    seen_chain_ids = []
-
-    def fake_get(_module, action, **kwargs):
-        seen_chain_ids.append(kwargs.get("chain_id"))
-        return {"result": []}
-
-    monkeypatch.setattr(etherscan_mod, "get", fake_get)
-    monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda addr, **_kw: (None, {}))
-
-    target = ADDR(0xABC)
-    deps = {
-        "address": target,
-        "target_classification": {
-            "type": "proxy",
-            "proxy_type": "eip1967",
-            "implementation": ADDR(2),
-        },
-        "dependencies": {},
-    }
-
-    uh.build_upgrade_history(deps)
-
-    assert seen_chain_ids, "getLogs was never called"
-    assert set(seen_chain_ids) == {1}
+    assert set(seen_chain_ids) == {expected_chain_id}

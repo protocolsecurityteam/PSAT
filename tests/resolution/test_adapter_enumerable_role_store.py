@@ -295,21 +295,19 @@ def test_matches_markerless_authority_scores_0(session, monkeypatch):
 
 
 @requires_postgres
-def test_matches_non_caller_arg_scores_0(session, monkeypatch):
-    # onlyX(owner): the arg is a state var, not the caller → not this adapter's gate.
+@pytest.mark.parametrize(
+    "descriptor_kwargs",
+    [
+        # onlyX(owner): the arg is a state var, not the caller → not this adapter's gate.
+        pytest.param({"key_source": "state_variable"}, id="non_caller_arg"),
+        pytest.param({"callee_sig": "canCall(address,address,bytes4)"}, id="non_single_address_signature"),
+    ],
+)
+def test_matches_declines_scores_0(session, monkeypatch, descriptor_kwargs):
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     _seed_proxy_impl(session)
     session.commit()
-    desc = _descriptor(key_source="state_variable")
-    assert EnumerableRoleStoreAdapter.matches(desc, _ctx(session)) == 0
-
-
-@requires_postgres
-def test_matches_non_single_address_signature_scores_0(session, monkeypatch):
-    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
-    _seed_proxy_impl(session)
-    session.commit()
-    desc = _descriptor(callee_sig="canCall(address,address,bytes4)")
+    desc = _descriptor(**descriptor_kwargs)
     assert EnumerableRoleStoreAdapter.matches(desc, _ctx(session)) == 0
 
 

@@ -184,67 +184,54 @@ def test_zero_address_parity(monkeypatch):
     assert seq == batch == ("zero", {"address": addr}, False)
 
 
-def test_eoa_parity(monkeypatch):
-    """eth_getCode == '0x' → EOA, no probes issued either way."""
-    seq, batch = _both_paths(monkeypatch, {}, code="0x")
+@pytest.mark.parametrize(
+    ("scenario", "kwargs", "kind", "details", "had_error"),
+    [
+        # eth_getCode == '0x' -> EOA, no probes issued either way.
+        pytest.param(None, {"code": "0x"}, "eoa", {}, False, id="eoa"),
+        # getCode raised -> both paths return (contract, ..., had_error=True).
+        pytest.param(None, {"get_code_raises": True}, "contract", {}, True, id="get_code_failure"),
+        pytest.param("safe", {}, "safe", {"owners": [ADDR_OWNER.lower()], "threshold": 1}, False, id="safe"),
+        pytest.param(
+            "timelock_min_delay",
+            {},
+            "timelock",
+            {"delay": 60 * 60 * 24, "owner": ADDR_OWNER.lower()},
+            False,
+            id="timelock_min_delay",
+        ),
+        pytest.param(
+            "timelock_fallback_delay", {}, "timelock", {"delay": 60 * 60}, False, id="timelock_fallback_delay"
+        ),
+        pytest.param(
+            "proxy_admin",
+            {},
+            "proxy_admin",
+            {"upgrade_interface_version": "5.0.0", "owner": ADDR_OWNER.lower()},
+            False,
+            id="proxy_admin",
+        ),
+        # No probes succeed -> 'contract' branch with type_authority info merged in.
+        pytest.param("contract_no_probes", {}, "contract", {}, False, id="generic_contract"),
+        # type_authority_contract raised -> both paths set had_error=True though no probe returned _PROBE_ERROR.
+        pytest.param(
+            "contract_no_probes",
+            {"type_authority_raises": True},
+            "contract",
+            {},
+            True,
+            id="generic_contract_type_authority_failure",
+        ),
+    ],
+)
+def test_classify_branch_parity(monkeypatch, scenario, kwargs, kind, details, had_error):
+    probe_map = _probe_responses_for(scenario) if scenario else {}
+    seq, batch = _both_paths(monkeypatch, probe_map, **kwargs)
     assert seq == batch
-    assert seq[0] == "eoa"
-    assert seq[2] is False  # no error
-
-
-def test_get_code_failure_parity(monkeypatch):
-    """getCode raised → both paths return (contract, ..., had_error=True)."""
-    seq, batch = _both_paths(monkeypatch, {}, get_code_raises=True)
-    assert seq == batch
-    assert seq[0] == "contract"
-    assert seq[2] is True  # had_error
-
-
-def test_safe_branch_parity(monkeypatch):
-    seq, batch = _both_paths(monkeypatch, _probe_responses_for("safe"))
-    assert seq == batch
-    assert seq[0] == "safe"
-    assert seq[1]["owners"] == [ADDR_OWNER.lower()]
-    assert seq[1]["threshold"] == 1
-
-
-def test_timelock_min_delay_branch_parity(monkeypatch):
-    seq, batch = _both_paths(monkeypatch, _probe_responses_for("timelock_min_delay"))
-    assert seq == batch
-    assert seq[0] == "timelock"
-    assert seq[1]["delay"] == 60 * 60 * 24
-    assert seq[1]["owner"] == ADDR_OWNER.lower()
-
-
-def test_timelock_fallback_delay_branch_parity(monkeypatch):
-    seq, batch = _both_paths(monkeypatch, _probe_responses_for("timelock_fallback_delay"))
-    assert seq == batch
-    assert seq[0] == "timelock"
-    assert seq[1]["delay"] == 60 * 60
-
-
-def test_proxy_admin_branch_parity(monkeypatch):
-    seq, batch = _both_paths(monkeypatch, _probe_responses_for("proxy_admin"))
-    assert seq == batch
-    assert seq[0] == "proxy_admin"
-    assert seq[1]["upgrade_interface_version"] == "5.0.0"
-    assert seq[1]["owner"] == ADDR_OWNER.lower()
-
-
-def test_generic_contract_branch_parity(monkeypatch):
-    """No probes succeed → 'contract' branch with type_authority info merged in."""
-    seq, batch = _both_paths(monkeypatch, _probe_responses_for("contract_no_probes"))
-    assert seq == batch
-    assert seq[0] == "contract"
-    assert seq[2] is False  # no errors in this scenario
-
-
-def test_generic_contract_with_type_authority_failure_parity(monkeypatch):
-    """type_authority_contract raised → both paths set had_error=True though no probe returned _PROBE_ERROR."""
-    seq, batch = _both_paths(monkeypatch, _probe_responses_for("contract_no_probes"), type_authority_raises=True)
-    assert seq == batch
-    assert seq[0] == "contract"
-    assert seq[2] is True
+    assert seq[0] == kind
+    for key, value in details.items():
+        assert seq[1][key] == value
+    assert seq[2] is had_error
 
 
 def test_whole_batch_failure_marks_had_error(monkeypatch):
@@ -311,32 +298,18 @@ def test_partial_per_call_error_preserves_had_error(monkeypatch):
     assert had_error is True, "an errored probe in the batch must still set had_error"
 
 
-def test_classify_dispatch_uses_batched_path_when_env_enabled(monkeypatch):
-    """classify_resolved_address_with_status must route to the batched path when PSAT_CLASSIFY_BATCH is on."""
-    addr = "0x" + "00" * 20
-    monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", True)
-    called = {"batched": 0, "sequential": 0}
-    monkeypatch.setattr(
-        tracking,
-        "_classify_uncached_batched",
-        lambda *_a, **_kw: (called.update({"batched": called["batched"] + 1}), ("zero", {"address": addr}, False))[1],
-    )
-    monkeypatch.setattr(
-        tracking,
-        "_classify_uncached",
-        lambda *_a, **_kw: (
-            called.update({"sequential": called["sequential"] + 1}),
-            ("zero", {"address": addr}, False),
-        )[1],
-    )
-    tracking.classify_resolved_address_with_status("https://rpc", "0x" + "aa" * 20)
-    assert called == {"batched": 1, "sequential": 0}
-
-
-def test_classify_dispatch_uses_sequential_path_when_env_disabled(monkeypatch):
-    monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
-    called = {"batched": 0, "sequential": 0}
+@pytest.mark.parametrize(
+    ("batch_enabled", "expected_calls"),
+    [
+        pytest.param(True, {"batched": 1, "sequential": 0}, id="batched_when_env_enabled"),
+        pytest.param(False, {"batched": 0, "sequential": 1}, id="sequential_when_env_disabled"),
+    ],
+)
+def test_classify_dispatch_follows_env_flag(monkeypatch, batch_enabled, expected_calls):
+    """classify_resolved_address_with_status must route on PSAT_CLASSIFY_BATCH."""
     addr = "0x" + "aa" * 20
+    monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", batch_enabled)
+    called = {"batched": 0, "sequential": 0}
     monkeypatch.setattr(
         tracking,
         "_classify_uncached_batched",
@@ -351,7 +324,7 @@ def test_classify_dispatch_uses_sequential_path_when_env_disabled(monkeypatch):
         )[1],
     )
     tracking.classify_resolved_address_with_status("https://rpc", addr)
-    assert called == {"batched": 0, "sequential": 1}
+    assert called == expected_calls
 
 
 # Codex-iter-1 finding: whole-batch failure must fall back to sequential

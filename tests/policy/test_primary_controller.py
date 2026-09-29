@@ -7,6 +7,8 @@ on the Surface canvas; both call sites share this module.
 
 from __future__ import annotations
 
+import pytest
+
 from services.governance.primary_controller import (
     assign_co_controllers,
     assign_operand_render_groups,
@@ -67,15 +69,20 @@ def test_state_variable_destination_safe_excluded_by_fp():
     assert result[a99] == []
 
 
-def test_priority_tiebreaker():
-    """Safe wins over Timelock when both are eligible for the same contract."""
-    fp = {"0xc1": {"0xsafe", "0xtl"}}
-    result = assign_primary_controllers(
-        [_p("0xsafe", "safe"), _p("0xtl", "timelock")],
-        fp,
-    )
-    assert result["0xsafe"] == ["0xc1"]
-    assert result["0xtl"] == []
+@pytest.mark.parametrize(
+    ("principals", "winner", "loser"),
+    [
+        # Safe wins over Timelock when both are eligible for the same contract.
+        pytest.param([_p("0xsafe", "safe"), _p("0xtl", "timelock")], "0xsafe", "0xtl", id="type-priority"),
+        # All else equal, lex-smaller address wins (stable across re-runs).
+        pytest.param([_p("0xaaa", "safe"), _p("0xbbb", "safe")], "0xaaa", "0xbbb", id="lex-address"),
+    ],
+)
+def test_primary_tiebreakers(principals, winner, loser):
+    fp = {"0xc1": {winner, loser}}
+    result = assign_primary_controllers(principals, fp)
+    assert result[winner] == ["0xc1"]
+    assert result[loser] == []
 
 
 def test_portfolio_size_does_not_decide():
@@ -95,17 +102,6 @@ def test_portfolio_size_does_not_decide():
     )
     assert result["0xaaa"] == ["0xc1"]
     assert sorted(result["0xzzzbig"]) == ["0xc2", "0xc3", "0xc4"]
-
-
-def test_lex_address_tiebreaker():
-    """All else equal, lex-smaller address wins (stable across re-runs)."""
-    fp = {"0xc1": {"0xaaa", "0xbbb"}}
-    result = assign_primary_controllers(
-        [_p("0xaaa", "safe"), _p("0xbbb", "safe")],
-        fp,
-    )
-    assert result["0xaaa"] == ["0xc1"]
-    assert result["0xbbb"] == []
 
 
 def test_address_lowercasing():
@@ -587,16 +583,28 @@ def test_co_controller_non_principal_types_ignored():
     assert result["0xsafe"] == [contract]
 
 
-def test_co_controller_privileged_claim_upgrade_gain():
-    """``upgrade.implementation`` fires as a claim (its ``implementation_update`` legacy
-    label was corpus-dead), so a Safe holding an upgrade function co-controls even with
-    a wide caller set the gate arm would reject."""
-    big, guardian, contract = "0xbig", "0xguardian", "0xc1"
+@pytest.mark.parametrize(
+    "claims_by_contract",
+    [
+        # ``upgrade.implementation`` fires as a claim (its ``implementation_update`` legacy label was
+        # corpus-dead), so a Safe holding an upgrade function co-controls even with a wide caller set
+        # the gate arm would reject.
+        pytest.param({"0xc1": ["upgrade.implementation"]}, id="upgrade-implementation"),
+        # Claim families with no legacy label (``safe.*``, ``timelock.*``) make their callers co-controllers.
+        pytest.param(
+            {"0xsafecontract": ["safe.signer_mgmt"], "0xtlcontract": ["timelock.schedule"]},
+            id="new-claim-families",
+        ),
+    ],
+)
+def test_co_controller_privileged_claims(claims_by_contract):
+    big, guardian = "0xbig", "0xguardian"
     wide = {guardian, big} | {f"0xrando{i}" for i in range(8)}
-    primary_for = {big: [contract], guardian: []}
-    detail = {contract: [_fn(wide, claims=["upgrade.implementation"])]}
+    contracts = sorted(claims_by_contract)
+    primary_for = {big: contracts, guardian: []}
+    detail = {c: [_fn(wide, claims=claims)] for c, claims in claims_by_contract.items()}
     result = assign_co_controllers([_p(big, "safe"), _p(guardian, "safe")], detail, primary_for)
-    assert result[guardian] == [contract]
+    assert sorted(result[guardian]) == contracts
     assert result[big] == []
 
 
@@ -625,19 +633,6 @@ def test_co_controller_claims_take_precedence_over_legacy_labels():
         "claims are authoritative: the excluded callee_pointer.rotate claim must "
         "not be overridden by a privileged legacy label on the same row"
     )
-
-
-def test_co_controller_new_claim_families_are_privileged():
-    """Claim families with no legacy label (``safe.*``, ``timelock.*``) make their callers co-controllers."""
-    guardian, big, c_safe, c_tl = "0xguardian", "0xbig", "0xsafecontract", "0xtlcontract"
-    wide = {guardian, big} | {f"0xr{i}" for i in range(8)}
-    primary_for = {big: [c_safe, c_tl], guardian: []}
-    detail = {
-        c_safe: [_fn(wide, claims=["safe.signer_mgmt"])],
-        c_tl: [_fn(wide, claims=["timelock.schedule"])],
-    }
-    result = assign_co_controllers([_p(big, "safe"), _p(guardian, "safe")], detail, primary_for)
-    assert sorted(result[guardian]) == [c_safe, c_tl]
 
 
 def test_co_controller_empty_and_shape():

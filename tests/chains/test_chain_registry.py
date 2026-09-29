@@ -45,16 +45,19 @@ def test_chain_by_name_loose_label_alias():
     assert chain_by_name("matic").name == "polygon"
 
 
-def test_chain_by_name_unknown_sentinel_raises():
-    # The discovery "unknown" sentinel is intentionally not resolvable.
+@pytest.mark.parametrize(
+    "bad",
+    [
+        # The discovery "unknown" sentinel is intentionally not resolvable.
+        pytest.param("unknown", id="unknown_sentinel"),
+        pytest.param("fantom", id="unregistered_name"),
+        pytest.param("", id="empty"),
+        pytest.param("   ", id="blank"),
+    ],
+)
+def test_chain_by_name_unknown_and_empty_raise(bad):
     with pytest.raises(UnknownChainError):
-        chain_by_name("unknown")
-
-
-def test_chain_by_name_unknown_and_empty_raise():
-    for bad in ("fantom", "", "   "):
-        with pytest.raises(UnknownChainError):
-            chain_by_name(bad)
+        chain_by_name(bad)
 
 
 def test_all_chain_ids_positive_and_unique():
@@ -71,24 +74,25 @@ def test_every_chain_has_a_native_asset():
         assert info.native_asset == info.native_asset.strip()
 
 
-def test_native_asset_eth_native_chains():
-    # ETH-native chains are the only ones TVL can price at the ETH/USD quote.
-    by_name = {c.name: c for c in all_chains()}
-    for name in ("ethereum", "base", "arbitrum", "optimism", "linea", "scroll", "zksync", "blast", "mode"):
-        assert by_name[name].native_asset == "ETH", name
-
-
-def test_native_asset_non_eth_chains():
-    # These chains carry their own native gas token — never ETH — so TVL must
-    # refuse to quote their native balance at the ETH price.
-    by_name = {c.name: c for c in all_chains()}
-    # POL is the current canonical symbol (renamed from MATIC).
-    assert by_name["polygon"].native_asset == "POL"
-    assert by_name["bsc"].native_asset == "BNB"
-    assert by_name["avalanche"].native_asset == "AVAX"
-    assert by_name["berachain"].native_asset == "BERA"
-    for name in ("polygon", "bsc", "avalanche", "berachain"):
-        assert by_name[name].native_asset != "ETH", name
+@pytest.mark.parametrize(
+    ("name", "symbol"),
+    [
+        # ETH-native chains are the only ones TVL can price at the ETH/USD quote.
+        *[
+            pytest.param(n, "ETH", id=n)
+            for n in ("ethereum", "base", "arbitrum", "optimism", "linea", "scroll", "zksync", "blast", "mode")
+        ],
+        # These chains carry their own native gas token (never ETH), so TVL must
+        # refuse to quote their native balance at the ETH price. POL is the
+        # current canonical symbol for polygon (renamed from MATIC).
+        pytest.param("polygon", "POL", id="polygon"),
+        pytest.param("bsc", "BNB", id="bsc"),
+        pytest.param("avalanche", "AVAX", id="avalanche"),
+        pytest.param("berachain", "BERA", id="berachain"),
+    ],
+)
+def test_native_asset(name, symbol):
+    assert {c.name: c for c in all_chains()}[name].native_asset == symbol
 
 
 def test_supported_chain_ids_default_is_mainnet(monkeypatch):
@@ -96,14 +100,16 @@ def test_supported_chain_ids_default_is_mainnet(monkeypatch):
     assert supported_chain_ids() == frozenset({1})
 
 
-def test_supported_chain_ids_parses_env(monkeypatch):
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1, 8453 ,, bogus,10")
-    assert supported_chain_ids() == frozenset({1, 8453, 10})
-
-
-def test_supported_chain_ids_blank_falls_back_to_default(monkeypatch):
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "   ")
-    assert supported_chain_ids() == frozenset({1})
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param("1, 8453 ,, bogus,10", frozenset({1, 8453, 10}), id="parses_env"),
+        pytest.param("   ", frozenset({1}), id="blank_falls_back_to_default"),
+    ],
+)
+def test_supported_chain_ids_parses_env(monkeypatch, raw, expected):
+    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", raw)
+    assert supported_chain_ids() == expected
 
 
 def test_supported_property_tracks_env(monkeypatch):

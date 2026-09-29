@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
@@ -587,35 +588,30 @@ def test_analysis_detail_proxy_inherits_impl_artifacts(mock_session_cls, mock_ge
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("method", "url"),
+    [
+        pytest.param("get", "/api/company/nonexistent/audits", id="company-audits"),
+        pytest.param("delete", "/api/company/psat-unknown-xyz/queued-jobs", id="cancel-queued-jobs"),
+    ],
+)
 @patch("routers.deps.SessionLocal")
-def test_company_audits_not_found(mock_session_cls):
+def test_unknown_company_404(mock_session_cls, method, url):
     client = _make_client()
     mock_session = MagicMock()
     _mock_session_ctx(mock_session_cls, mock_session)
-
     mock_session.execute.return_value.scalar_one_or_none.return_value = None
 
-    response = client.get("/api/company/nonexistent/audits")
+    response = getattr(client, method)(url)
     assert response.status_code == 404
+    # Pure lookup: no DELETE should have run.
+    assert mock_session.commit.call_count == 0
 
 
 # ---------------------------------------------------------------------------
 # DELETE /api/company/{name}/queued-jobs — test-isolation teardown for
 # analyze-remaining flood
 # ---------------------------------------------------------------------------
-
-
-@patch("routers.deps.SessionLocal")
-def test_cancel_queued_company_jobs_unknown_company_404(mock_session_cls):
-    client = _make_client()
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-    mock_session.execute.return_value.scalar_one_or_none.return_value = None
-
-    response = client.delete("/api/company/psat-unknown-xyz/queued-jobs")
-    assert response.status_code == 404
-    # Pure lookup: no DELETE should have run.
-    assert mock_session.commit.call_count == 0
 
 
 @patch("routers.deps.SessionLocal")

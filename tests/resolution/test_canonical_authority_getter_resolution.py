@@ -143,21 +143,42 @@ def test_public_getter_view_call_not_double_resolved(monkeypatch: pytest.MonkeyP
     assert recorder == [GOVERNOR_SELECTOR]  # exactly one call, the literal getter
 
 
-def test_non_authority_internal_accessor_is_not_de_underscored(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hardening: a non-authority internal accessor (``_recoveryWallet()``) must NOT be
-    de-underscored to ``recoveryWallet()`` — a wrong controller is worse than a missing
-    one. Only owner/governor/authority (and pending variants) de-underscore; the public
-    getter is never called even though it would return an address."""
-    recovery_wallet_selector = "0x3ec954ed"  # keccak("recoveryWallet()")[:4]
+# Hardening: a wrong controller is worse than a missing one.
+# - A non-authority internal accessor (``_recoveryWallet()``) must NOT be de-underscored to
+#   ``recoveryWallet()``. Only owner/governor/authority (and pending variants) de-underscore; the
+#   public getter is never called even though it would return an address.
+# - A slot constant that is NOT an owner/governor/authority locator (e.g.
+#   ``BaseMessengerStorageLocation``) must not be rerouted to owner(); the literal
+#   ``BaseMessengerStorageLocation()`` is attempted (and reverts) like any bare state-var.
+@pytest.mark.parametrize(
+    ("returns", "operand", "forbidden_selector"),
+    [
+        pytest.param(
+            {"0x3ec954ed": OWNER},  # keccak("recoveryWallet()")[:4]
+            {"source": "view_call", "callee_signature": "_recoveryWallet()"},
+            "0x3ec954ed",
+            id="non-authority-internal-accessor-not-de-underscored",
+        ),
+        pytest.param(
+            {OWNER_SELECTOR: OWNER},
+            {"source": "state_variable", "state_variable_name": "BaseMessengerStorageLocation"},
+            OWNER_SELECTOR,
+            id="non-authority-storage-slot-stays-placeholder",
+        ),
+    ],
+)
+def test_non_authority_accessor_is_not_rerouted(
+    monkeypatch: pytest.MonkeyPatch, returns: dict[str, str | None], operand: dict, forbidden_selector: str
+) -> None:
     recorder: list = []
-    _stub_rpc_map(monkeypatch, {recovery_wallet_selector: OWNER}, recorder)
-    tree = _eq_tree({"source": "view_call", "callee_signature": "_recoveryWallet()"})
+    _stub_rpc_map(monkeypatch, returns, recorder)
+    tree = _eq_tree(operand)
 
     cap = evaluate_tree(tree, _ctx_with_rpc())
 
     assert cap.members == []
     assert cap.membership_quality == "lower_bound"
-    assert not _called(recorder, recovery_wallet_selector)  # never de-underscored
+    assert not _called(recorder, forbidden_selector)
 
 
 # ==========================================================================
@@ -165,11 +186,22 @@ def test_non_authority_internal_accessor_is_not_de_underscored(monkeypatch: pyte
 # ==========================================================================
 
 
-def test_owner_slot_constant_resolves_via_owner_getter(monkeypatch: pytest.MonkeyPatch) -> None:
+# ``_OWNER_SLOT()`` reverts (slot locator, not a getter); owner() resolves. OZ-v5 namespaced
+# Ownable surfaces the slot constant as a bare state-var operand (``OwnableStorageLocation``); it
+# maps to owner() too.
+@pytest.mark.parametrize(
+    ("returns", "slot_name"),
+    [
+        pytest.param({OWNER_SLOT_SELECTOR: None, OWNER_SELECTOR: OWNER}, "_OWNER_SLOT", id="owner-slot-constant"),
+        pytest.param({OWNER_SELECTOR: OWNER}, "OwnableStorageLocation", id="oz-v5-ownable-storage-location"),
+    ],
+)
+def test_owner_slot_constant_resolves_via_owner_getter(
+    monkeypatch: pytest.MonkeyPatch, returns: dict[str, str | None], slot_name: str
+) -> None:
     recorder: list = []
-    # _OWNER_SLOT() reverts (slot locator, not a getter); owner() resolves.
-    _stub_rpc_map(monkeypatch, {OWNER_SLOT_SELECTOR: None, OWNER_SELECTOR: OWNER}, recorder)
-    tree = _eq_tree({"source": "state_variable", "state_variable_name": "_OWNER_SLOT"})
+    _stub_rpc_map(monkeypatch, returns, recorder)
+    tree = _eq_tree({"source": "state_variable", "state_variable_name": slot_name})
 
     cap = evaluate_tree(tree, _ctx_with_rpc())
 
@@ -178,36 +210,6 @@ def test_owner_slot_constant_resolves_via_owner_getter(monkeypatch: pytest.Monke
     assert cap.membership_quality == "exact"
     # Resolved via owner(), NOT _OWNER_SLOT().
     assert _called(recorder, OWNER_SELECTOR)
-
-
-def test_oz_v5_ownable_storage_location_slot_resolves_via_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """OZ-v5 namespaced Ownable surfaces the slot constant as a bare state-var operand
-    (``OwnableStorageLocation``); it maps to owner() too."""
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {OWNER_SELECTOR: OWNER}, recorder)
-    tree = _eq_tree({"source": "state_variable", "state_variable_name": "OwnableStorageLocation"})
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.members == [OWNER]
-    assert cap.membership_quality == "exact"
-    assert _called(recorder, OWNER_SELECTOR)
-
-
-def test_non_authority_storage_slot_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail-closed precision: a slot constant that is NOT an owner/governor/authority
-    locator (e.g. ``BaseMessengerStorageLocation``) must not be rerouted to owner()."""
-    recorder: list = []
-    _stub_rpc_map(monkeypatch, {OWNER_SELECTOR: OWNER}, recorder)
-    tree = _eq_tree({"source": "state_variable", "state_variable_name": "BaseMessengerStorageLocation"})
-
-    cap = evaluate_tree(tree, _ctx_with_rpc())
-
-    assert cap.members == []
-    assert cap.membership_quality == "lower_bound"
-    # The literal ``BaseMessengerStorageLocation()`` is attempted (and reverts) like any
-    # bare state-var, but owner() must NOT be called.
-    assert not _called(recorder, OWNER_SELECTOR)
 
 
 # Integration: compile the REAL on-chain source and resolve its predicate trees
@@ -269,7 +271,21 @@ class TestGovernableFixture:
 class TestTopUpSoladyFixture:
     """#6 against the verbatim Solady Ownable + on-chain TopUp.processTopUp gate."""
 
-    def test_process_top_up_resolves_owner_not_slot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The fix: read the real owner(), never _OWNER_SLOT(), never mint 0x...dEaD. What the burn
+    # sentinel may CONCLUDE is narrower since A2 -- see
+    # ``test_owner_slot_burned_is_empty_but_not_a_proven_nobody``. A live (non-renounced) owner
+    # resolves to that owner: the positive proof.
+    @pytest.mark.parametrize(
+        ("owner", "members", "quality", "empty_reason"),
+        [
+            # The real on-chain owner() of TopUp/TopUpV2 is 0x...dEaD.
+            pytest.param(BURN, [], "lower_bound", "owner_read_burn_address", id="burned-owner"),
+            pytest.param(OWNER, [OWNER], "exact", None, id="live-owner"),
+        ],
+    )
+    def test_process_top_up_resolves_owner_not_slot(
+        self, monkeypatch: pytest.MonkeyPatch, owner: str, members: list[str], quality: str, empty_reason: str | None
+    ) -> None:
         sl = _compile_fixture("TopUpSolady.sol", (0, 8, 4))
         contract = _contract(sl, "TopUpSolady")
         trees = build_predicate_artifacts(contract)["trees"]
@@ -279,33 +295,15 @@ class TestTopUpSoladyFixture:
         assert "'state_variable_name': '_OWNER_SLOT'" in json.dumps(tree).replace('"', "'")
 
         recorder: list = []
-        # The real on-chain owner() of TopUp/TopUpV2 is 0x…dEaD.
-        _stub_rpc_map(monkeypatch, {OWNER_SLOT_SELECTOR: None, OWNER_SELECTOR: BURN}, recorder)
+        _stub_rpc_map(monkeypatch, {OWNER_SLOT_SELECTOR: None, OWNER_SELECTOR: owner}, recorder)
 
         cap = evaluate_tree(tree, _ctx_with_rpc())
 
-        # The fix is unchanged: read the real owner(), never _OWNER_SLOT(), never mint
-        # 0x…dEaD. What the burn sentinel may CONCLUDE is narrower since A2 — see
-        # ``test_owner_slot_burned_is_empty_but_not_a_proven_nobody``.
         assert cap.kind == "finite_set"
-        assert cap.members == []
-        assert cap.membership_quality == "lower_bound"
-        assert cap.empty_reason == "owner_read_burn_address"
+        assert cap.members == members
+        assert cap.membership_quality == quality
+        assert cap.empty_reason == empty_reason
         assert _called(recorder, OWNER_SELECTOR), "must read owner(), not _OWNER_SLOT()"
-
-    def test_process_top_up_resolves_live_owner(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A live (non-renounced) owner resolves to that owner — the positive proof."""
-        sl = _compile_fixture("TopUpSolady.sol", (0, 8, 4))
-        contract = _contract(sl, "TopUpSolady")
-        tree = build_predicate_artifacts(contract)["trees"]["processTopUp(address[])"]
-
-        recorder: list = []
-        _stub_rpc_map(monkeypatch, {OWNER_SLOT_SELECTOR: None, OWNER_SELECTOR: OWNER}, recorder)
-
-        cap = evaluate_tree(tree, _ctx_with_rpc())
-
-        assert cap.members == [OWNER]
-        assert _called(recorder, OWNER_SELECTOR)
 
     def test_controller_tracking_emits_no_dead_owner_slot_role(self) -> None:
         """No dead ``role_identifier:_OWNER_SLOT`` controller target.

@@ -38,12 +38,11 @@ def test_base_enrollment_seeds_from_base_rpc(captured_url):
     assert block == 36_108_610
 
 
-def test_mainnet_enrollment_uses_default_rpc_verbatim(captured_url):
-    # Mainnet (and empty/None) keeps deps.DEFAULT_RPC_URL untouched.
-    for chain in ("ethereum", None):
-        captured_url.clear()
-        monitored._current_head_block(chain)
-        assert captured_url["url"] == deps.DEFAULT_RPC_URL
+# Mainnet (and empty/None) keeps deps.DEFAULT_RPC_URL untouched.
+@pytest.mark.parametrize("chain", ["ethereum", None])
+def test_mainnet_enrollment_uses_default_rpc_verbatim(captured_url, chain):
+    monitored._current_head_block(chain)
+    assert captured_url["url"] == deps.DEFAULT_RPC_URL
 
 
 def test_head_block_failure_is_not_determined_not_zero(monkeypatch):

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
@@ -90,36 +91,33 @@ class TestDisplayName:
 
         return _display_name(entry)
 
-    def test_explicit_display_name_is_used(self):
-        assert self._dn({"display_name": "MyVault"}) == "MyVault"
-
-    def test_explicit_display_name_with_chain_suffix(self):
-        result = self._dn({"display_name": "MyVault", "chain": "ethereum"})
-        assert result == "MyVault (ethereum)"
-
-    def test_explicit_display_name_already_has_chain_suffix(self):
-        result = self._dn({"display_name": "MyVault (ethereum)", "chain": "ethereum"})
-        assert result == "MyVault (ethereum)"
-
-    def test_contract_name_used_when_no_display_name(self):
-        assert self._dn({"contract_name": "Vault"}) == "Vault"
-
-    def test_generic_proxy_name_falls_through_to_run_name(self):
-        result = self._dn({"contract_name": "ERC1967Proxy", "run_name": "MyRunName"})
-        assert result == "MyRunName"
-
-    def test_fallback_to_contract_name_when_no_run_name(self):
-        # When contract_name is generic AND no run_name, falls back to contract_name itself
-        result = self._dn({"contract_name": "Proxy"})
-        assert result == "Proxy"
-
-    def test_empty_entry(self):
-        result = self._dn({})
-        assert result == ""
-
-    def test_chain_suffix_not_added_to_empty_name(self):
-        result = self._dn({"chain": "ethereum"})
-        assert result == ""
+    @pytest.mark.parametrize(
+        ("entry", "expected"),
+        [
+            pytest.param({"display_name": "MyVault"}, "MyVault", id="explicit_display_name"),
+            pytest.param(
+                {"display_name": "MyVault", "chain": "ethereum"}, "MyVault (ethereum)", id="explicit_with_chain_suffix"
+            ),
+            # Idempotent: an existing chain suffix is not doubled.
+            pytest.param(
+                {"display_name": "MyVault (ethereum)", "chain": "ethereum"},
+                "MyVault (ethereum)",
+                id="explicit_already_has_chain_suffix",
+            ),
+            pytest.param({"contract_name": "Vault"}, "Vault", id="contract_name_when_no_display_name"),
+            pytest.param(
+                {"contract_name": "ERC1967Proxy", "run_name": "MyRunName"},
+                "MyRunName",
+                id="generic_proxy_name_falls_through_to_run_name",
+            ),
+            # Generic contract_name AND no run_name: falls back to contract_name itself.
+            pytest.param({"contract_name": "Proxy"}, "Proxy", id="fallback_to_contract_name_when_no_run_name"),
+            pytest.param({}, "", id="empty_entry"),
+            pytest.param({"chain": "ethereum"}, "", id="chain_suffix_not_added_to_empty_name"),
+        ],
+    )
+    def test_display_name(self, entry, expected):
+        assert self._dn(entry) == expected
 
 
 # ============================================================================

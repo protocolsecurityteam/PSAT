@@ -191,45 +191,44 @@ def test_apply_spa_overrides_injects(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_needs_dependency_pass_true_from_llm(monkeypatch):
+@pytest.mark.parametrize(
+    "protocol,contracts,audits,llm_reply,expected,prompt_fragment",
+    [
+        pytest.param(
+            "ether.fi",
+            [{"name": "BoringVault Manager"}],
+            [],
+            '{"should_run_dependency_pass": true, "confidence": 0.86, '
+            '"rationale": "uses Veda", "suspected_dependencies": ["BoringVault"]}',
+            True,
+            "BoringVault Manager",
+            id="true_from_llm",
+        ),
+        pytest.param(
+            "foo",
+            [{"name": "FooToken"}],
+            [{"title": "core protocol audit"}],
+            '{"should_run_dependency_pass": false, "confidence": 0.91, '
+            '"rationale": "core-only", "suspected_dependencies": []}',
+            False,
+            "FooToken",
+            id="false_from_llm",
+        ),
+        # A garbage response fails to False.
+        pytest.param("foo", [{"name": "FooToken"}], [], "not json", False, "FooToken", id="unparseable_llm_response"),
+    ],
+)
+def test_needs_dependency_pass_from_llm(monkeypatch, protocol, contracts, audits, llm_reply, expected, prompt_fragment):
     captured = {}
 
     def fake_chat(messages, **kwargs):
         captured["prompt"] = messages[0]["content"]
-        return (
-            '{"should_run_dependency_pass": true, "confidence": 0.86, '
-            '"rationale": "uses Veda", "suspected_dependencies": ["BoringVault"]}'
-        )
+        return llm_reply
 
     monkeypatch.setattr(rd.llm, "chat", fake_chat)
 
-    assert rd._needs_dependency_pass("ether.fi", contracts=[{"name": "BoringVault Manager"}], audits=[]) is True
-    assert "BoringVault Manager" in captured["prompt"]
-
-
-def test_needs_dependency_pass_false_from_llm(monkeypatch):
-    monkeypatch.setattr(
-        rd.llm,
-        "chat",
-        lambda messages, **kwargs: (
-            '{"should_run_dependency_pass": false, "confidence": 0.91, '
-            '"rationale": "core-only", "suspected_dependencies": []}'
-        ),
-    )
-
-    assert (
-        rd._needs_dependency_pass(
-            "foo",
-            contracts=[{"name": "FooToken"}],
-            audits=[{"title": "core protocol audit"}],
-        )
-        is False
-    )
-
-
-def test_needs_dependency_pass_unparseable_llm_response(monkeypatch):
-    monkeypatch.setattr(rd.llm, "chat", lambda messages, **kwargs: "not json")
-    assert rd._needs_dependency_pass("foo", contracts=[{"name": "FooToken"}], audits=[]) is False
+    assert rd._needs_dependency_pass(protocol, contracts=contracts, audits=audits) is expected
+    assert prompt_fragment in captured["prompt"]
 
 
 def test_needs_dependency_pass_no_evidence_skips_llm(monkeypatch):

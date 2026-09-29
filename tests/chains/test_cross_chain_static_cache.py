@@ -7,6 +7,7 @@ re-stamps the contract address and leaves chain-derived artifacts to be re-deriv
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import select
 
 from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
@@ -207,30 +208,20 @@ def test_fallback_fires_only_on_primary_miss(db_session):
     assert fb is not None and fb.id == hash_donor.id
 
 
-def test_version_mismatch_misses(db_session):
-    _make_donor(
-        db_session,
-        address=ADDR_OTHER,
-        chain="base",
-        source_content_hash=HASH,
-        schema_version=ANALYSIS_SCHEMA_VERSION + 1000,
-    )
-    assert find_completed_static_cache(db_session, ADDR_BASE, chain="base", source_content_hash=HASH) is None
-
-
-def test_legacy_null_hash_never_donor(db_session):
-    _make_donor(db_session, address=ADDR_OTHER, chain="base", source_content_hash=None, schema_version=None)
-    # A hash lookup can't match a NULL-hash row.
-    assert find_completed_static_cache(db_session, ADDR_BASE, chain="base", source_content_hash=HASH) is None
-    # No hash supplied → no fallback at all.
-    assert find_completed_static_cache(db_session, ADDR_BASE, chain="base") is None
-
-
-def test_proxy_donor_not_reused(db_session):
-    """A donor with the hash but only contract_flags (a proxy, no analysis) is
-    not a code-plane reuse source."""
-    _make_donor(db_session, address=ADDR_OTHER, chain="base", source_content_hash=HASH, with_analysis=False)
-    assert find_completed_static_cache(db_session, ADDR_BASE, chain="base", source_content_hash=HASH) is None
+@pytest.mark.parametrize(
+    ("donor_kwargs", "lookup_hashes"),
+    [
+        pytest.param({"schema_version": ANALYSIS_SCHEMA_VERSION + 1000}, [HASH], id="version_mismatch"),
+        # A hash lookup can't match a NULL-hash row, and no hash supplied means no fallback at all.
+        pytest.param({"source_content_hash": None, "schema_version": None}, [HASH, None], id="legacy_null_hash"),
+        # A donor with the hash but only contract_flags (a proxy, no analysis) is not a code-plane reuse source.
+        pytest.param({"with_analysis": False}, [HASH], id="proxy_donor"),
+    ],
+)
+def test_ineligible_cross_chain_donor_is_not_reused(db_session, donor_kwargs, lookup_hashes):
+    _make_donor(db_session, address=ADDR_OTHER, chain="base", **{"source_content_hash": HASH, **donor_kwargs})
+    for lookup_hash in lookup_hashes:
+        assert find_completed_static_cache(db_session, ADDR_BASE, chain="base", source_content_hash=lookup_hash) is None
 
 
 # ---------------------------------------------------------------------------

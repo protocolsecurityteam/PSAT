@@ -97,14 +97,16 @@ def test_emit_claim_valid_copies_witness():
     assert claim["witness"]["kind"] == "sink"  # emit_claim copied the witness
 
 
-def test_emit_claim_rejects_unregistered_id():
-    with pytest.raises(ValueError, match="unregistered claim_id"):
-        emit_claim("nope.not_a_claim", "standard_exact", {})
-
-
-def test_emit_claim_rejects_non_literal_tier():
-    with pytest.raises(ValueError, match="invalid claim tier"):
-        emit_claim("contract_deployment", "guess", {})  # pyright: ignore[reportArgumentType]
+@pytest.mark.parametrize(
+    ("claim_id", "tier", "match"),
+    [
+        pytest.param("nope.not_a_claim", "standard_exact", "unregistered claim_id", id="unregistered_id"),
+        pytest.param("contract_deployment", "guess", "invalid claim tier", id="non_literal_tier"),
+    ],
+)
+def test_emit_claim_rejects_invalid_input(claim_id, tier, match):
+    with pytest.raises(ValueError, match=match):
+        emit_claim(claim_id, tier, {})  # pyright: ignore[reportArgumentType]
 
 
 @pytest.mark.parametrize(

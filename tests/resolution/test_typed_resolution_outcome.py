@@ -81,29 +81,24 @@ def _assert_unchanged_empty(cap_dict: dict[str, Any]) -> None:
     assert _status(cap_dict) != "resolved_empty"
 
 
-def test_revert_carries_unreadable_revert(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_rpc(monkeypatch, "revert")
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(REVERTING_VAR), _ctx_with_rpc()))
-
-    assert cap_dict["empty_reason"] == "unreadable_revert"
-    _assert_unchanged_empty(cap_dict)
-
-
-def test_empty_return_carries_unreadable_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_rpc(monkeypatch, "empty")
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(EMPTY_RETURN_VAR), _ctx_with_rpc()))
-
-    assert cap_dict["empty_reason"] == "unreadable_empty"
-    _assert_unchanged_empty(cap_dict)
-
-
-def test_nothing_attempted_carries_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "mode, var, expected_reason, attempted",
+    [
+        pytest.param("revert", REVERTING_VAR, "unreadable_revert", True, id="revert"),
+        pytest.param("empty", EMPTY_RETURN_VAR, "unreadable_empty", True, id="empty-return"),
+        # not_read means no RPC was attempted at all.
+        pytest.param("revert", UNREAD_MEMBER, "not_read", False, id="nothing-attempted"),
+    ],
+)
+def test_empty_reason_labels_why_the_set_is_empty(
+    monkeypatch: pytest.MonkeyPatch, mode: str, var: Any, expected_reason: str, attempted: bool
+) -> None:
     recorder: list = []
-    _stub_rpc(monkeypatch, "revert", recorder=recorder)
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(UNREAD_MEMBER), _ctx_with_rpc()))
+    _stub_rpc(monkeypatch, mode, recorder=recorder)
+    cap_dict = _expr_dict(evaluate_tree(_eq_tree(var), _ctx_with_rpc()))
 
-    assert cap_dict["empty_reason"] == "not_read"
-    assert recorder == []  # nothing attempted
+    assert cap_dict["empty_reason"] == expected_reason
+    assert bool(recorder) is attempted
     _assert_unchanged_empty(cap_dict)
 
 

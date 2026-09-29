@@ -124,24 +124,22 @@ def _run_pipeline(tmp_path: Path, source: str, gate_fn: str) -> tuple[list[Any],
     return specs, (leaf.get("set_descriptor") or {})
 
 
-def test_v4_state_var_access_control_role_gate_is_enumerable(tmp_path: Path) -> None:
-    """Control: a direct-state-variable (OZ v4-style) role mapping is recognized
-    end to end — the RoleGranted writer is discovered and the gate carries the
-    enumeration hint the event-indexed adapter needs."""
-    specs, descriptor = _run_pipeline(tmp_path, _V4_SRC, "setMerkleRoot(bytes32)")
+# v4: control -- a direct-state-variable (OZ v4-style) role mapping is recognized end to end: the
+# RoleGranted writer is discovered and the gate carries the enumeration hint the event-indexed
+# adapter needs. v5: the same role logic via ERC-7201 namespaced storage is equally enumerable; the
+# assembly storage-pointer access resolves back to ``_roles``, closing the CumulativeMerkleDrop
+# (Mode B) recall gap.
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(_V4_SRC, id="v4-state-var"),
+        pytest.param(_V5_SRC, id="v5-namespaced"),
+    ],
+)
+def test_access_control_role_gate_is_enumerable(tmp_path: Path, source: str) -> None:
+    specs, descriptor = _run_pipeline(tmp_path, source, "setMerkleRoot(bytes32)")
 
     assert any(str(s.get("event_signature", "")).startswith("RoleGranted") for s in specs), specs
     assert descriptor.get("kind") == "mapping_membership"
     assert descriptor.get("storage_var") == "_roles"
-    assert descriptor.get("enumeration_hint"), "v4 role gate should carry a RoleGranted enumeration hint"
-
-
-def test_v5_namespaced_access_control_role_gate_is_enumerable(tmp_path: Path) -> None:
-    """Same role logic via ERC-7201 namespaced storage is equally enumerable: the
-    assembly storage-pointer access resolves back to ``_roles``, closing the
-    CumulativeMerkleDrop (Mode B) recall gap."""
-    specs, descriptor = _run_pipeline(tmp_path, _V5_SRC, "setMerkleRoot(bytes32)")
-
-    assert any(str(s.get("event_signature", "")).startswith("RoleGranted") for s in specs), specs
-    assert descriptor.get("storage_var") == "_roles"
-    assert descriptor.get("enumeration_hint"), "v5 namespaced role gate should carry a RoleGranted enumeration hint"
+    assert descriptor.get("enumeration_hint"), "role gate should carry a RoleGranted enumeration hint"

@@ -13,6 +13,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from db.models import JobStage, JobStatus
 from utils.logging import chain_var
 from workers.base import BaseWorker, _job_chain_log_value
@@ -48,24 +50,18 @@ def _make_job(**overrides):
 # ---------------------------------------------------------------------------
 
 
-def test_label_prefers_request_chain_name():
-    job = _make_job(chain_id=1)
-    assert _job_chain_log_value(job, {"chain": "base"}) == "base"
-
-
-def test_label_falls_back_to_chain_id_name():
-    job = _make_job(chain_id=8453)
-    assert _job_chain_log_value(job, {}) == "base"
-
-
-def test_label_none_when_no_chain_signal():
-    job = _make_job(chain_id=None)
-    assert _job_chain_log_value(job, {}) is None
-
-
-def test_label_none_for_unknown_chain_id():
-    job = _make_job(chain_id=999999)
-    assert _job_chain_log_value(job, {}) is None
+@pytest.mark.parametrize(
+    ("chain_id", "req", "expected"),
+    [
+        pytest.param(1, {"chain": "base"}, "base", id="request_chain_name_beats_chain_id"),
+        pytest.param(8453, {}, "base", id="falls_back_to_chain_id_name"),
+        pytest.param(None, {}, None, id="none_when_no_chain_signal"),
+        pytest.param(999999, {}, None, id="none_for_unknown_chain_id"),
+    ],
+)
+def test_job_chain_log_value(chain_id, req, expected):
+    job = _make_job(chain_id=chain_id)
+    assert _job_chain_log_value(job, req) == expected
 
 
 # ---------------------------------------------------------------------------

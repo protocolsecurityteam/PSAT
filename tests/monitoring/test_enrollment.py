@@ -75,67 +75,57 @@ def _mock_controller_value(controller_id="owner", value="0x" + "b" * 40, resolve
 
 
 class TestDetermineContractType:
-    def test_proxy_from_contract_fields_no_summary(self):
+    @pytest.mark.parametrize(
+        "contract_kw, summary_kw, controller_types, expected",
+        [
+            pytest.param(
+                {"is_proxy": True, "proxy_type": "eip1967"}, None, [], "proxy", id="proxy-from-contract-no-summary"
+            ),
+            pytest.param(
+                {"is_proxy": False, "proxy_type": "custom"}, None, [], "proxy", id="proxy-from-proxy-type-only"
+            ),
+            pytest.param(
+                {"is_proxy": True, "proxy_type": "eip1967"},
+                {"is_upgradeable": True},
+                [],
+                "proxy",
+                id="proxy-from-summary-and-contract",
+            ),
+            # UUPS-style implementation must not be misclassified as a proxy.
+            pytest.param(
+                {"is_proxy": False, "proxy_type": None},
+                {"is_upgradeable": True},
+                [],
+                "not-proxy",
+                id="upgradeable-implementation-is-not-proxy",
+            ),
+            pytest.param({}, {"has_timelock": True}, [], "timelock", id="timelock-from-summary"),
+            pytest.param({}, {"is_pausable": True}, [], "pausable", id="pausable-from-summary"),
+            # A controller's resolved type must not classify the contract it governs.
+            *[
+                pytest.param(
+                    {"is_proxy": False},
+                    None,
+                    [resolved],
+                    "regular",
+                    id=f"controller-type-{resolved}-does-not-propagate",
+                )
+                for resolved in ("safe", "timelock", "proxy_admin")
+            ],
+            pytest.param({}, None, [], "regular", id="regular-default"),
+        ],
+    )
+    def test_determine_contract_type(self, contract_kw, summary_kw, controller_types, expected):
         from services.monitoring.enrollment import _determine_contract_type
 
-        contract = _mock_contract(is_proxy=True, proxy_type="eip1967")
-        result = _determine_contract_type(contract, None, [])
-        assert result == "proxy"
-
-    def test_proxy_from_proxy_type_only(self):
-        from services.monitoring.enrollment import _determine_contract_type
-
-        contract = _mock_contract(is_proxy=False, proxy_type="custom")
-        result = _determine_contract_type(contract, None, [])
-        assert result == "proxy"
-
-    def test_proxy_from_summary_and_contract(self):
-        from services.monitoring.enrollment import _determine_contract_type
-
-        contract = _mock_contract(is_proxy=True, proxy_type="eip1967")
-        summary = _mock_summary(is_upgradeable=True)
-        result = _determine_contract_type(contract, summary, [])
-        assert result == "proxy"
-
-    def test_upgradeable_implementation_is_not_proxy(self):
-        from services.monitoring.enrollment import _determine_contract_type
-
-        contract = _mock_contract(is_proxy=False, proxy_type=None)
-        summary = _mock_summary(is_upgradeable=True)
-        result = _determine_contract_type(contract, summary, [])
-        assert result != "proxy"
-
-    def test_timelock_from_summary(self):
-        from services.monitoring.enrollment import _determine_contract_type
-
-        contract = _mock_contract()
-        summary = _mock_summary(has_timelock=True)
-        result = _determine_contract_type(contract, summary, [])
-        assert result == "timelock"
-
-    def test_pausable_from_summary(self):
-        from services.monitoring.enrollment import _determine_contract_type
-
-        contract = _mock_contract()
-        summary = _mock_summary(is_pausable=True)
-        result = _determine_contract_type(contract, summary, [])
-        assert result == "pausable"
-
-    def test_controller_type_does_not_propagate(self):
-        from services.monitoring.enrollment import _determine_contract_type
-
-        contract = _mock_contract(is_proxy=False)
-        for resolved in ("safe", "timelock", "proxy_admin"):
-            cv = _mock_controller_value(resolved_type=resolved)
-            result = _determine_contract_type(contract, None, [cv])
-            assert result == "regular", f"resolved_type={resolved} should not propagate"
-
-    def test_regular_default(self):
-        from services.monitoring.enrollment import _determine_contract_type
-
-        contract = _mock_contract()
-        result = _determine_contract_type(contract, None, [])
-        assert result == "regular"
+        contract = _mock_contract(**contract_kw)
+        summary = None if summary_kw is None else _mock_summary(**summary_kw)
+        cvs = [_mock_controller_value(resolved_type=t) for t in controller_types]
+        result = _determine_contract_type(contract, summary, cvs)
+        if expected == "not-proxy":
+            assert result != "proxy"
+        else:
+            assert result == expected
 
 
 # ---------------------------------------------------------------------------
@@ -144,40 +134,30 @@ class TestDetermineContractType:
 
 
 class TestBuildMonitoringConfig:
-    def test_proxy_config(self):
+    @pytest.mark.parametrize(
+        "summary_kw, contract_type, expected_flags",
+        [
+            pytest.param(
+                {"is_upgradeable": True},
+                "proxy",
+                {"watch_upgrades": True, "watch_ownership": True},
+                id="proxy",
+            ),
+            pytest.param(
+                {"is_pausable": True}, "pausable", {"watch_pause": True, "watch_upgrades": False}, id="pausable"
+            ),
+            pytest.param(None, "safe", {"watch_safe_signers": True}, id="safe"),
+            pytest.param(None, "timelock", {"watch_timelock": True}, id="timelock"),
+            pytest.param({"control_model": "role-based"}, "regular", {"watch_roles": True}, id="role-based"),
+        ],
+    )
+    def test_config_flags(self, summary_kw, contract_type, expected_flags):
         from services.monitoring.enrollment import _build_monitoring_config
 
-        summary = _mock_summary(is_upgradeable=True)
-        config = _build_monitoring_config(summary, [], "proxy")
-        assert config["watch_upgrades"] is True
-        assert config["watch_ownership"] is True
-
-    def test_pausable_config(self):
-        from services.monitoring.enrollment import _build_monitoring_config
-
-        summary = _mock_summary(is_pausable=True)
-        config = _build_monitoring_config(summary, [], "pausable")
-        assert config["watch_pause"] is True
-        assert config["watch_upgrades"] is False
-
-    def test_safe_config(self):
-        from services.monitoring.enrollment import _build_monitoring_config
-
-        config = _build_monitoring_config(None, [], "safe")
-        assert config["watch_safe_signers"] is True
-
-    def test_timelock_config(self):
-        from services.monitoring.enrollment import _build_monitoring_config
-
-        config = _build_monitoring_config(None, [], "timelock")
-        assert config["watch_timelock"] is True
-
-    def test_role_based_config(self):
-        from services.monitoring.enrollment import _build_monitoring_config
-
-        summary = _mock_summary(control_model="role-based")
-        config = _build_monitoring_config(summary, [], "regular")
-        assert config["watch_roles"] is True
+        summary = None if summary_kw is None else _mock_summary(**summary_kw)
+        config = _build_monitoring_config(summary, [], contract_type)
+        for flag, value in expected_flags.items():
+            assert config[flag] is value
 
     def test_tracked_topics_persisted_when_supplied(self):
         from services.monitoring.enrollment import _build_monitoring_config
@@ -1893,12 +1873,34 @@ class TestTrackingPlanNotDetermined:
                     pg_session.delete(row)
             pg_session.commit()
 
-    def test_no_materialization_row_is_not_determined(self, pg_session, materialization_factory):
-        """POSITIVE CONTROL, 35 of 85 rows. Mirrors ``0x02904af5…`` (RolesAuthority, ethereum): no materialization
-        row, so nothing ever read a tracking plan and the empty ``tracked_topics`` must not be persisted bare."""
+    @pytest.mark.parametrize(
+        "address_byte, row_overrides",
+        [
+            # POSITIVE CONTROL, 35 of 85 rows. Mirrors 0x02904af5 (RolesAuthority, ethereum): no materialization row, so
+            # nothing ever read a tracking plan and the empty tracked_topics must not be persisted bare.
+            pytest.param("11", None, id="no-materialization-row"),
+            # POSITIVE CONTROL, the subtle arm: a ready row with real governance events at a superseded
+            # analysis_schema_version. find_by_address reads that as a miss on purpose, a statement about our analyzer;
+            # publishing zero topics would claim a GuardianChanged contract has no governance events.
+            pytest.param(
+                "33", lambda version: {"analysis_schema_version": version - 1}, id="superseded-schema-version"
+            ),
+            # In-flight build is not_determined too.
+            pytest.param("44", lambda version: {"status": "building"}, id="unready-row"),
+        ],
+    )
+    def test_missing_current_materialization_is_not_determined(
+        self, pg_session, materialization_factory, address_byte, row_overrides
+    ):
+        from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
         from services.monitoring import enrollment as enr
 
-        contract = SimpleNamespace(address="0x" + "11" * 20, chain="ethereum")
+        address = "0x" + address_byte * 20
+        if row_overrides is not None:
+            materialization_factory(
+                address, tracking_plan=self._PLAN_WITH_EVENTS, **row_overrides(ANALYSIS_SCHEMA_VERSION)
+            )
+        contract = SimpleNamespace(address=address, chain="ethereum")
 
         topics, plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
         assert (topics, plan) == ([], None)
@@ -1907,38 +1909,6 @@ class TestTrackingPlanNotDetermined:
         config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
         assert "tracked_topics" not in config
         assert config["tracking_plan_not_determined"] == "no_current_materialization"
-
-    def test_superseded_schema_version_is_not_determined(self, pg_session, materialization_factory):
-        """POSITIVE CONTROL, the subtle arm: a ``ready`` row with real governance events at a superseded
-        ``analysis_schema_version``. ``find_by_address`` reads that as a miss on purpose, a statement about our
-        analyzer; publishing zero topics would claim a ``GuardianChanged`` contract has no governance events."""
-        from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
-        from services.monitoring import enrollment as enr
-
-        address = "0x" + "33" * 20
-        materialization_factory(
-            address,
-            analysis_schema_version=ANALYSIS_SCHEMA_VERSION - 1,
-            tracking_plan=self._PLAN_WITH_EVENTS,
-        )
-        contract = SimpleNamespace(address=address, chain="ethereum")
-
-        topics, plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
-        assert (topics, plan) == ([], None)
-        assert not_determined == "no_current_materialization"
-
-        config = enr._build_monitoring_config(None, [], "regular", topics, None, plan_not_determined=not_determined)
-        assert config["tracking_plan_not_determined"] == "no_current_materialization"
-
-    def test_unready_row_is_not_determined(self, pg_session, materialization_factory):
-        from services.monitoring import enrollment as enr
-
-        address = "0x" + "44" * 20
-        materialization_factory(address, status="building", tracking_plan=self._PLAN_WITH_EVENTS)
-        contract = SimpleNamespace(address=address, chain="ethereum")
-
-        _topics, _plan, not_determined = enr._load_tracking_plan_artifacts(pg_session, cast(Any, contract))
-        assert not_determined == "no_current_materialization"
 
     def test_unreadable_plan_is_stamped_with_its_own_reason(self, pg_session, materialization_factory, monkeypatch):
         """POSITIVE CONTROL: the row is current but the bucket will not answer; a distinct token, since an outage and a

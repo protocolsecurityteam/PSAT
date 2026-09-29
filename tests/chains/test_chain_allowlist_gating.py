@@ -25,40 +25,43 @@ pytestmark = [requires_postgres]
 # ---------------------------------------------------------------------------
 
 
-def test_chain_enabled_mainnet_default(monkeypatch):
-    """Unset allowlist = mainnet-only, so only chain 1 (and the NULL≡mainnet
-    coalescing of None/empty) is enabled."""
+@pytest.mark.parametrize(
+    ("allowlist", "expected"),
+    [
+        # Unset allowlist = mainnet-only, so only chain 1 (and the NULL≡mainnet coalescing of
+        # None/empty) is enabled.
+        pytest.param(
+            None,
+            {
+                1: True,
+                "ethereum": True,
+                "mainnet": True,
+                None: True,  # NULL≡mainnet
+                "": True,
+                8453: False,
+                "base": False,
+                "optimism": False,
+            },
+            id="mainnet_default",
+        ),
+        pytest.param(
+            "1,8453",
+            {"base": True, 8453: True, "8453": True, "optimism": False, 10: False},
+            id="widened_allowlist",
+        ),
+        # A non-empty but unresolvable name returns False rather than coalescing to mainnet: an unknown
+        # chain can never be 'enabled'.
+        pytest.param("1", {"not-a-real-chain": False}, id="unknown_chain_never_enabled"),
+    ],
+)
+def test_chain_enabled(monkeypatch, allowlist, expected):
     from utils.chains import chain_enabled
 
-    monkeypatch.delenv("PSAT_SUPPORTED_CHAIN_IDS", raising=False)
-    assert chain_enabled(1) is True
-    assert chain_enabled("ethereum") is True
-    assert chain_enabled("mainnet") is True
-    assert chain_enabled(None) is True  # NULL≡mainnet
-    assert chain_enabled("") is True
-    assert chain_enabled(8453) is False
-    assert chain_enabled("base") is False
-    assert chain_enabled("optimism") is False
-
-
-def test_chain_enabled_widened_allowlist(monkeypatch):
-    from utils.chains import chain_enabled
-
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
-    assert chain_enabled("base") is True
-    assert chain_enabled(8453) is True
-    assert chain_enabled("8453") is True
-    assert chain_enabled("optimism") is False
-    assert chain_enabled(10) is False
-
-
-def test_chain_enabled_unknown_chain_never_enabled(monkeypatch):
-    """A non-empty but unresolvable name returns False rather than coalescing to
-    mainnet — an unknown chain can never be 'enabled'."""
-    from utils.chains import chain_enabled
-
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    assert chain_enabled("not-a-real-chain") is False
+    if allowlist is None:
+        monkeypatch.delenv("PSAT_SUPPORTED_CHAIN_IDS", raising=False)
+    else:
+        monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", allowlist)
+    assert {chain: chain_enabled(chain) for chain in expected} == expected
 
 
 # ---------------------------------------------------------------------------

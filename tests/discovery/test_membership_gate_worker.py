@@ -302,23 +302,6 @@ def test_enumeration_skips_received_failed_and_frameless_txs(monkeypatch):
     assert complete is False  # empty enumeration can never license exclusivity
 
 
-def test_enumeration_internal_failure_is_incomplete(monkeypatch):
-    # EITHER endpoint failing for a chain ⇒ that chain out of scope,
-    # incomplete — a half-enumerated chain must never claim completeness.
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    eoa = ADDR(0x269)
-    tx_hash = "0x" + "4a" * 32
-    _stub_txlist(
-        monkeypatch,
-        {1: [_creation_tx(ADDR(0x26A)), _call_tx(eoa, tx_hash=tx_hash)]},
-        internal_by_txhash={tx_hash: RuntimeError("etherscan down")},
-    )
-    created, scope, complete = enumerate_deployer_creations(eoa)
-    assert created == []
-    assert scope == []
-    assert complete is False
-
-
 def test_internal_empty_caching_gated_on_tx_maturity(monkeypatch):
     """A lag-empty must not be frozen: the enumeration attests ``cache_empty``
     per tx from the txlist record's own ``confirmations`` — only a reading at
@@ -366,43 +349,58 @@ def test_enumeration_internal_budget_exceeded_is_incomplete(monkeypatch):
     assert [c for c in calls if c[1] == "txlistinternal"] == []
 
 
-def test_enumeration_combined_cap_is_incomplete(monkeypatch):
-    # The cap applies to the COMBINED direct ∪ internal creation set.
+_FAIL_EOA = ADDR(0x269)
+_FAIL_HASH = "0x" + "4a" * 32
+_COMBINED_EOA = ADDR(0x26C)
+_COMBINED_HASH = "0x" + "4b" * 32
+
+
+# A half-enumerated chain must never claim completeness: every case here
+# fails closed. Where a chain is dropped from the recorded scope, the
+# expected scope is [].
+@pytest.mark.parametrize(
+    ("eoa", "txs_by_chain", "internal_by_txhash", "expected"),
+    [
+        # EITHER endpoint failing for a chain => that chain out of scope, incomplete.
+        pytest.param(
+            _FAIL_EOA,
+            {1: [_creation_tx(ADDR(0x26A)), _call_tx(_FAIL_EOA, tx_hash=_FAIL_HASH)]},
+            {_FAIL_HASH: RuntimeError("etherscan down")},
+            ([], [], False),
+            id="internal_failure",
+        ),
+        # The cap applies to the COMBINED direct + internal creation set.
+        pytest.param(
+            _COMBINED_EOA,
+            {1: [_creation_tx(ADDR(0x26D)), _call_tx(_COMBINED_EOA, tx_hash=_COMBINED_HASH)]},
+            {
+                _COMBINED_HASH: [
+                    _create_frame(ADDR(0x100000 + n), ADDR(0x262)) for n in range(DEPLOYER_ENUMERATION_CAP - 1)
+                ]
+            },
+            ([], [], False),
+            id="combined_cap",
+        ),
+        # A full txlist window is a truncation, never a complete history, and the
+        # truncated chain never enters the recorded scope.
+        pytest.param(
+            ADDR(0x2FF),
+            {
+                1: [_creation_tx(ADDR(0x300 + n)) for n in range(3)]
+                + [{"to": ADDR(0x999), "contractAddress": ""}] * (DEPLOYER_ENUMERATION_CAP - 3)
+            },
+            None,
+            ([], [], False),
+            id="cap_exceeded",
+        ),
+        pytest.param(ADDR(0x210), {1: []}, None, ([], [1], False), id="empty_txlist"),
+        pytest.param(ADDR(0x210), {1: RuntimeError("etherscan down")}, None, ([], [], False), id="failed_txlist"),
+    ],
+)
+def test_enumeration_is_incomplete(monkeypatch, eoa, txs_by_chain, internal_by_txhash, expected):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    eoa = ADDR(0x26C)
-    tx_hash = "0x" + "4b" * 32
-    frames = [_create_frame(ADDR(0x100000 + n), ADDR(0x262)) for n in range(DEPLOYER_ENUMERATION_CAP - 1)]
-    _stub_txlist(
-        monkeypatch,
-        {1: [_creation_tx(ADDR(0x26D)), _call_tx(eoa, tx_hash=tx_hash)]},
-        internal_by_txhash={tx_hash: frames},
-    )
-    created, scope, complete = enumerate_deployer_creations(eoa)
-    assert created == []
-    assert scope == []
-    assert complete is False
-
-
-def test_enumeration_cap_exceeded_is_incomplete(monkeypatch):
-    # A full txlist window is a truncation, never a complete history — and the
-    # truncated chain never enters the recorded scope.
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    window = [_creation_tx(ADDR(0x300 + n)) for n in range(3)] + [{"to": ADDR(0x999), "contractAddress": ""}] * (
-        DEPLOYER_ENUMERATION_CAP - 3
-    )
-    _stub_txlist(monkeypatch, {1: window})
-    created, scope, complete = enumerate_deployer_creations(ADDR(0x2FF))
-    assert complete is False
-    assert created == []
-    assert scope == []
-
-
-def test_enumeration_empty_or_failed_is_incomplete(monkeypatch):
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    _stub_txlist(monkeypatch, {1: []})
-    assert enumerate_deployer_creations(ADDR(0x210)) == ([], [1], False)
-    _stub_txlist(monkeypatch, {1: RuntimeError("etherscan down")})
-    assert enumerate_deployer_creations(ADDR(0x210)) == ([], [], False)
+    _stub_txlist(monkeypatch, txs_by_chain, internal_by_txhash)
+    assert enumerate_deployer_creations(eoa) == expected
 
 
 def test_enumeration_zero_tx_chain_stays_in_scope(monkeypatch):
@@ -619,46 +617,46 @@ def test_ladder_wire_skips_enumeration_without_sibling_members(db_session, monke
     assert calls == []
 
 
-def test_ladder_wire_refuses_b_when_own_member_is_on_unenumerated_chain(db_session, monkeypatch):
+def _seed_own_member_on_unenumerated_chain(db_session, protocol, eoa, members):
     # Coverage refusal (scope): a KNOWN creation on a chain outside the
     # enumerated scope makes the enumeration incomplete — Class C.
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    protocol = _protocol(db_session)
-    eoa = ADDR(0x2B8)
-    members = _seed_class_b_shape(db_session, protocol, eoa)
     _contract(db_session, ADDR(0x2B9), chain="base", protocol_id=protocol.id, deployer=eoa)
-    _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members]})
-
-    assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
-    assert db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.address == eoa)).first() is None
+    return members
 
 
-def test_ladder_wire_refuses_b_when_any_protocols_row_is_out_of_scope(db_session, monkeypatch):
+def _seed_foreign_candidate_on_unenumerated_chain(db_session, protocol, eoa, members):
     # The scope check spans ANY contracts row claiming the deployer — a
     # foreign protocol's CANDIDATE on an unenumerated chain refuses too
     # (classify's collision check only sees foreign MEMBERS).
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    protocol = _protocol(db_session)
     other = _protocol(db_session)
-    eoa = ADDR(0x2BA)
-    members = _seed_class_b_shape(db_session, protocol, eoa)
     _contract(db_session, ADDR(0x2BB), chain="base", nominated_protocol_id=other.id, deployer=eoa)
-    _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in members]})
-
-    assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
+    return members
 
 
-def test_ladder_wire_refuses_b_when_known_creation_missing_from_enumeration(db_session, monkeypatch):
+def _drop_a_known_creation_from_enumeration(db_session, protocol, eoa, members):
     # Coverage refusal (consistency): a member recorded as this EOA's creation
     # that the enumeration does not contain is an attribution mismatch
     # (contractCreator vs txlist) — Class C, never B.
+    return members[:1]
+
+
+@pytest.mark.parametrize(
+    ("eoa", "seed"),
+    [
+        pytest.param(ADDR(0x2B8), _seed_own_member_on_unenumerated_chain, id="own_member_on_unenumerated_chain"),
+        pytest.param(ADDR(0x2BA), _seed_foreign_candidate_on_unenumerated_chain, id="any_protocols_row_out_of_scope"),
+        pytest.param(ADDR(0x2BC), _drop_a_known_creation_from_enumeration, id="known_creation_missing"),
+    ],
+)
+def test_ladder_wire_refuses_b_on_coverage_gap(db_session, monkeypatch, eoa, seed):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
-    eoa = ADDR(0x2BC)
     members = _seed_class_b_shape(db_session, protocol, eoa)
-    _stub_txlist(monkeypatch, {1: [_creation_tx(members[0].address)]})  # members[1] missing
+    enumerated = seed(db_session, protocol, eoa, members)
+    _stub_txlist(monkeypatch, {1: [_creation_tx(m.address) for m in enumerated]})
 
     assert _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa) is None
+    assert db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.address == eoa)).first() is None
 
 
 def test_ladder_wire_counterevidence_revokes_stale_b_row(db_session, monkeypatch):
@@ -1281,31 +1279,25 @@ def test_probe_pass_seeds_w6_and_promotes_defillama_nomination(db_session, monke
     assert candidate.id in result.promoted_contract_ids
 
 
-def test_probe_pass_no_w6_without_defillama_tag(db_session, monkeypatch, erpc_env):
+@pytest.mark.parametrize(
+    ("address", "sources", "code", "state"),
+    [
+        pytest.param(ADDR(0x2F1), ["exa_deep_research"], "0x6001", None, id="without_defillama_tag"),
+        pytest.param(ADDR(0x2F2), ["defillama"], "0x", "pruned", id="defillama_nomination_fails_w1"),
+    ],
+)
+def test_probe_pass_no_w6(db_session, monkeypatch, erpc_env, address, sources, code, state):
     protocol = _protocol(db_session)
-    candidate = _contract(
-        db_session, ADDR(0x2F1), nominated_protocol_id=protocol.id, discovery_sources=["exa_deep_research"]
-    )
+    candidate = _contract(db_session, address, nominated_protocol_id=protocol.id, discovery_sources=sources)
     db_session.flush()
-    _stub_probe_wire(monkeypatch)
+    _stub_probe_wire(monkeypatch, code=code)
 
     run_probe_pass(db_session, protocol.id)
 
     assert _w6_rows(db_session, candidate.id) == []
     assert candidate.protocol_id is None
-
-
-def test_probe_pass_no_w6_when_defillama_nomination_fails_w1(db_session, monkeypatch, erpc_env):
-    protocol = _protocol(db_session)
-    candidate = _contract(db_session, ADDR(0x2F2), nominated_protocol_id=protocol.id, discovery_sources=["defillama"])
-    db_session.flush()
-    _stub_probe_wire(monkeypatch, code="0x")
-
-    run_probe_pass(db_session, protocol.id)
-
-    assert _w6_rows(db_session, candidate.id) == []
-    assert candidate.protocol_id is None
-    assert gate.resolve_membership_state(db_session, candidate) == "pruned"
+    if state is not None:
+        assert gate.resolve_membership_state(db_session, candidate) == state
 
 
 def test_gate_intake_seeds_w6_for_already_probed_defillama_row(db_session, monkeypatch, erpc_env):

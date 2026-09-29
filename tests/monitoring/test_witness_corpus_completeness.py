@@ -461,43 +461,39 @@ def test_qualified_member_change_decodes_key_value_and_direction(corpus):
     assert "7" not in parsed["event_type"]
 
 
-def test_a_flag_set_publishes_no_value_even_when_an_arg_is_named_value(corpus):
-    """``WardAdded(address indexed usr, uint256 value)`` for ``wards[usr] = true``: the event
-    states NO value for the entry, so an arg merely named ``value`` must not be published as one
-    (on a ``member_changed`` row ``data.value`` is the witnessed new value, nothing else)."""
-    spec = _spec(corpus, "WardAdded(address,uint256)")
-    assert spec["event_type"] == "member_changed:wards"
+# An ``add``/``remove`` event states which entry, not what it holds; a value would be invented.
+# ``WardAdded(address indexed usr, uint256 value)`` for ``wards[usr] = true`` states NO value for the
+# entry, so an arg merely named ``value`` must not be published as one (on a ``member_changed`` row
+# ``data.value`` is the witnessed new value, nothing else).
+@pytest.mark.parametrize(
+    ("signature", "event_type", "key_byte", "data", "log_index"),
+    [
+        pytest.param(
+            "WardAdded(address,uint256)",
+            "member_changed:wards",
+            "ef",
+            "0x" + "0" * 62 + "09",
+            "0x2",
+            id="flag-set-with-arg-named-value",
+        ),
+        pytest.param("DenyFrom(address)", "member_changed:fromDenyList", "cd", "0x", "0x1", id="add-remove"),
+    ],
+)
+def test_add_remove_events_publish_no_value(corpus, signature, event_type, key_byte, data, log_index):
+    spec = _spec(corpus, signature)
+    assert spec["event_type"] == event_type
     assert spec["member_witness"]["value_position"] is None
 
-    ward = "0x" + "ef" * 20
     log = {
-        "topics": [_topic0("WardAdded(address,uint256)"), "0x" + "0" * 24 + "ef" * 20],
-        "data": "0x" + "0" * 62 + "09",
+        "topics": [_topic0(signature), "0x" + "0" * 24 + key_byte * 20],
+        "data": data,
         "blockNumber": "0x64",
         "transactionHash": "0x" + "ab" * 32,
-        "logIndex": "0x2",
+        "logIndex": log_index,
     }
     parsed = parse_tracked_log(log, spec)
     assert parsed is not None
-    assert parsed["key"] == ward
-    assert parsed["direction"] == "add"
-    assert "value" not in parsed
-
-
-def test_add_remove_events_publish_no_value(corpus):
-    """An ``add``/``remove`` event states which entry, not what it holds; a value would be invented."""
-    spec = _spec(corpus, "DenyFrom(address)")
-    denied = "0x" + "cd" * 20
-    log = {
-        "topics": [_topic0("DenyFrom(address)"), "0x" + "0" * 24 + "cd" * 20],
-        "data": "0x",
-        "blockNumber": "0x64",
-        "transactionHash": "0x" + "ab" * 32,
-        "logIndex": "0x1",
-    }
-    parsed = parse_tracked_log(log, spec)
-    assert parsed is not None
-    assert parsed["key"] == denied
+    assert parsed["key"] == "0x" + key_byte * 20
     assert parsed["direction"] == "add"
     assert "value" not in parsed
 

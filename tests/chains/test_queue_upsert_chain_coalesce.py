@@ -114,7 +114,16 @@ def test_single_upsert_base_entry_does_not_collapse_onto_legacy_null(db_session,
 
 
 @requires_postgres
-def test_is_known_proxy_finds_legacy_null_row_on_mainnet_lookup(db_session, proto_id):
+@pytest.mark.parametrize(
+    "chain,expected",
+    [
+        # Mainnet lookup coalesces NULL→'ethereum' and finds the legacy proxy row.
+        pytest.param("ethereum", True, id="mainnet_finds_legacy_null"),
+        # A Base lookup must not see the legacy (mainnet) NULL proxy row.
+        pytest.param("base", False, id="l2_isolated_from_legacy_null"),
+    ],
+)
+def test_is_known_proxy_against_legacy_null_row(db_session, proto_id, chain, expected):
     from db.models import Contract
     from db.queue import is_known_proxy
 
@@ -122,21 +131,7 @@ def test_is_known_proxy_finds_legacy_null_row_on_mainnet_lookup(db_session, prot
     db_session.add(Contract(address=addr, chain=None, protocol_id=proto_id, is_proxy=True))
     db_session.commit()
 
-    # Mainnet lookup coalesces NULL→'ethereum' and finds the legacy proxy row.
-    assert is_known_proxy(db_session, addr, chain="ethereum") is True
-
-
-@requires_postgres
-def test_is_known_proxy_isolated_from_legacy_null_row_on_l2_lookup(db_session, proto_id):
-    from db.models import Contract
-    from db.queue import is_known_proxy
-
-    addr = _addr()
-    db_session.add(Contract(address=addr, chain=None, protocol_id=proto_id, is_proxy=True))
-    db_session.commit()
-
-    # A Base lookup must not see the legacy (mainnet) NULL proxy row.
-    assert is_known_proxy(db_session, addr, chain="base") is False
+    assert is_known_proxy(db_session, addr, chain=chain) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -145,26 +140,22 @@ def test_is_known_proxy_isolated_from_legacy_null_row_on_l2_lookup(db_session, p
 
 
 @requires_postgres
-def test_static_cache_hit_on_legacy_null_chain_contract(db_session):
-    """A completed job (chain_id=1) whose Contract row is legacy ``chain=NULL`` is a mainnet cache hit; the raw
-    ``Contract.chain == 'ethereum'`` predicate used to miss it."""
+@pytest.mark.parametrize(
+    "chain,hit",
+    [
+        # A completed job (chain_id=1) whose Contract row is legacy ``chain=NULL`` is a mainnet cache hit; the raw
+        # ``Contract.chain == 'ethereum'`` predicate used to miss it.
+        pytest.param("ethereum", True, id="mainnet_hit"),
+        pytest.param("base", False, id="l2_miss"),
+    ],
+)
+def test_static_cache_against_legacy_null_chain_contract(db_session, chain, hit):
     from db.queue import find_completed_static_cache
     from tests.cache_helpers import ADDR_A, _create_completed_job_with_static_data
 
-    job = _create_completed_job_with_static_data(db_session)  # Contract.chain is NULL
-    found = find_completed_static_cache(db_session, ADDR_A, chain="ethereum")
-    assert found is not None
-    assert found.id == job.id
-
-
-@requires_postgres
-def test_static_cache_miss_for_l2_against_legacy_null_contract(db_session):
-    from db.queue import find_completed_static_cache
-    from tests.cache_helpers import ADDR_A, _create_completed_job_with_static_data
-
-    _create_completed_job_with_static_data(db_session)  # mainnet (chain_id=1) job + NULL Contract
-    found = find_completed_static_cache(db_session, ADDR_A, chain="base")
-    assert found is None
+    job = _create_completed_job_with_static_data(db_session)  # mainnet (chain_id=1) job, Contract.chain is NULL
+    found = find_completed_static_cache(db_session, ADDR_A, chain=chain)
+    assert (found.id if found is not None else None) == (job.id if hit else None)
 
 
 # ---------------------------------------------------------------------------

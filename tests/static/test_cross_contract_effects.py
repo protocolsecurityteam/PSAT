@@ -8,6 +8,7 @@ call boundary.
 
 from __future__ import annotations
 
+import pytest
 from eth_utils.crypto import keccak
 
 from services.static.cross_contract import (
@@ -103,23 +104,22 @@ def test_value_flow_propagation_emits_policy_derived():
     assert claim["witness"]["source_tier"] == "standard_exact"
 
 
-def test_guard_origin_call_is_not_a_value_flow():
-    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])})
-    target = _caller("guarded(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR, origin="guard")])
-    out = derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, callee_map)
-    assert out == {}
+_RESOLVED = {"state_variable:token": {"value": TOKEN}}
 
 
-def test_no_join_when_controller_value_unresolved():
-    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])})
-    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
-    # No controller_values: "token" cannot resolve to an address.
-    assert derive_cross_contract_claims(target, {}, callee_map) == {}
-
-
-def test_no_join_when_callee_not_analyzed():
-    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
-    assert derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, {}) == {}
+@pytest.mark.parametrize(
+    ("origin", "controller_values", "analyzed_callees"),
+    [
+        pytest.param("guard", _RESOLVED, {TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])}, id="guard_origin"),
+        # No controller_values: "token" cannot resolve to an address.
+        pytest.param("body", {}, {TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])}, id="controller_unresolved"),
+        pytest.param("body", _RESOLVED, {}, id="callee_not_analyzed"),
+    ],
+)
+def test_no_join_derives_nothing(origin, controller_values, analyzed_callees):
+    callee_map = build_callee_claim_map(analyzed_callees)
+    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR, origin=origin)])
+    assert derive_cross_contract_claims(target, controller_values, callee_map) == {}
 
 
 def test_external_contract_controller_id_format_resolves():
@@ -225,24 +225,20 @@ def test_transfer_policy_configure_on_bool_mapping_setter():
     assert claim["witness"]["set_vars"] == ["allowlist"]
 
 
-def test_transfer_policy_requires_bool_mapping_shape():
-    links = [{"sibling_address": VAULT, "pointer_var": "hook"}]
-    # A scalar address write (e.g. setOwner) is not a transfer allow/deny list.
+@pytest.mark.parametrize(
+    ("var", "declared_type", "links"),
+    [
+        # A scalar address write (e.g. setOwner) is not a transfer allow/deny list.
+        pytest.param("owner", "address", [{"sibling_address": VAULT, "pointer_var": "hook"}], id="not_bool_mapping"),
+        pytest.param("allowlist", "mapping(address => bool)", [], id="no_sibling_hook_link"),
+    ],
+)
+def test_transfer_policy_negatives(var, declared_type, links):
     out = derive_cross_contract_claims(
-        _teller_with_setter("owner", "address"),
+        _teller_with_setter(var, declared_type),
         {},
         {},
         sibling_transfer_hooks=links,
-    )
-    assert out == {}
-
-
-def test_transfer_policy_requires_a_sibling_hook_link():
-    out = derive_cross_contract_claims(
-        _teller_with_setter("allowlist", "mapping(address => bool)"),
-        {},
-        {},
-        sibling_transfer_hooks=[],
     )
     assert out == {}
 
