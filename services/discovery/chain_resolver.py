@@ -33,7 +33,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from services.clients.rpc import erpc_url_for_chain_id, rpc_headers
+from services.clients.rpc import erpc_url_for_chain_id, pinned_block, rpc_headers
 from utils.chains import canonical_chain, canonical_chain_list, chain_enabled
 from utils.logging import record_degraded
 
@@ -128,12 +128,14 @@ def _batch_get_code(rpc_url: str, addresses: list[str]) -> dict[str, str]:
     if not addresses:
         return {}
 
+    block = pinned_block(rpc_url)
+    block_tag = hex(block) if block is not None else "latest"
     results: dict[str, str] = {}
     for i in range(0, len(addresses), _BATCH_RPC_SIZE):
         batch = addresses[i : i + _BATCH_RPC_SIZE]
         payload = json.dumps(
             [
-                {"jsonrpc": "2.0", "id": idx, "method": "eth_getCode", "params": [addr, "latest"]}
+                {"jsonrpc": "2.0", "id": idx, "method": "eth_getCode", "params": [addr, block_tag]}
                 for idx, addr in enumerate(batch)
             ]
         ).encode("utf-8")
