@@ -1063,10 +1063,10 @@ def _apply_bytecode_anchor(
 
 @dataclass(frozen=True)
 class _EquivalenceInputs:
-    """Inputs to run ``check_audit_covers_impl`` without holding a session.
+    """Inputs to run ``verify_audit_covers_impl`` without holding a session.
 
     Materialized in the DB phase so the HTTP phase can run with no open
-    transaction: the GitHub fetches inside ``check_audit_covers_impl`` are
+    transaction: the GitHub fetches inside ``verify_audit_covers_impl`` are
     pure HTTP and need no session.
     """
 

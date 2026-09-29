@@ -6,7 +6,7 @@ The Envio HyperSync SDK issues a getLogs scan ONLY by constructing
 boundary so a 7th live-scan path can't reappear and 429-storm cold authority
 addresses (the failure mode of the local run that motivated this fix):
 
-  (a) the three HyperSync entry points reject an omitted ``from_block`` — a
+  (a) the HyperSync enumerator entry points reject an omitted ``from_block`` — a
       caller that forgets the floor fails fast instead of defaulting to 0;
   (b) a source-level scan catches any new ``.Query(`` site or any enumerator
       signature that reintroduces a ``from_block`` default;
@@ -25,7 +25,6 @@ import pytest
 
 import services.resolution.creation_block_floor as floor_mod
 from services.resolution import mapping_enumerator
-from services.resolution.repos.event_logs_hypersync import HyperSyncEventLogRepo
 
 _REPO = Path(__file__).resolve().parents[2]
 
@@ -46,8 +45,6 @@ def test_enumerators_raise_typeerror_when_from_block_omitted():
         asyncio.run(mapping_enumerator.enumerate_mapping_allowlist("0x" + "aa" * 20, [], bearer_token="t"))  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError, match="from_block"):
         asyncio.run(mapping_enumerator.enumerate_mapping_values("0x" + "aa" * 20, [], bearer_token="t"))  # pyright: ignore[reportCallIssue]
-    with pytest.raises(TypeError, match="from_block"):
-        HyperSyncEventLogRepo()  # pyright: ignore[reportCallIssue]
 
 
 # (b) completeness grep encoded as a source assertion ------------------------
@@ -60,7 +57,6 @@ _KNOWN_QUERY_MODULES = {
     "services/resolution/mapping_enumerator.py",
     "services/resolution/external_check_materializer.py",
     "services/resolution/predicate_evaluator/membership.py",
-    "services/resolution/repos/event_logs_hypersync.py",
 }
 
 
@@ -288,7 +284,7 @@ def test_no_enumerator_reintroduces_a_from_block_default():
     ``__init__`` ``from_block`` regains a default — whether it is declared
     keyword-only OR positional-with-default (``def f(addr, from_block=0)``).
     Both shapes silently re-arm a genesis scan, so both are guarded."""
-    for rel in ("services/resolution/mapping_enumerator.py", "services/resolution/repos/event_logs_hypersync.py"):
+    for rel in ("services/resolution/mapping_enumerator.py",):
         tree = ast.parse((_REPO / rel).read_text())
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):

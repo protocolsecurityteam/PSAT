@@ -575,50 +575,6 @@ def rpc_request(
     raise RuntimeError(f"RPC request failed for {sanitize_url(rpc_url)}: all {retries + 1} attempts exhausted")
 
 
-def get_transaction_receipt(
-    rpc_url: str,
-    tx_hash: str,
-    *,
-    chain_id: int | None = None,
-    retries: int = 1,
-    timeout: float | None = None,
-) -> dict | None:
-    """One ``eth_getTransactionReceipt``. The receipt dict, or ``None``.
-
-    ``None`` IS NOT AN EMPTY LOG SET, and a caller that reads it as one is
-    wrong. It means the receipt could not be read — transport failure, an
-    upstream error, a pending or pruned transaction, a payload that was not a
-    receipt — and every one of those leaves the transaction's log set unknown.
-    Counting it as zero logs would turn an unread receipt into a measurement,
-    so a caller must carry it as not_determined all the way to whatever it
-    publishes.
-
-    Reorg note: this method takes no block parameter, so unlike most chain reads
-    it cannot be pinned by parameter. The receipt carries ``blockHash`` and
-    ``blockNumber``, so a caller that stores either can DETECT a reorg later
-    rather than having to trust this observation.
-    """
-    try:
-        receipt = rpc_request(
-            rpc_url,
-            "eth_getTransactionReceipt",
-            [tx_hash],
-            retries=retries,
-            chain_id=chain_id,
-            timeout=timeout,
-        )
-    except Exception as exc:
-        # Stays DEBUG: this is a per-call hot path, and an unread receipt is a
-        # not_determined the CALLER must count — the disposition cycle folds
-        # these into its per-cycle summary (``receipts_unreadable``).
-        logger.debug(
-            "receipt fetch failed",
-            extra={"tx_hash": tx_hash, "chain_id": chain_id, "exc_type": type(exc).__name__, "error": str(exc)},
-        )
-        return None
-    return receipt if isinstance(receipt, dict) else None
-
-
 def get_code(rpc_url: str, address: str, *, chain_id: int | None = None) -> str:
     """Fetch deployed EVM bytecode at an address via eth_getCode.
 

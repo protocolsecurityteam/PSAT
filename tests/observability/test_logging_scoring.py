@@ -2,13 +2,13 @@
 
 The fold and the resolution planes are deliberately log-free — every refusal is
 published into the score document (SCORING_INVARIANTS inv. 11/12) — so the only
-place a pricing regression, a fail-closed universe or an unreadable execution
-record can become visible to an operator is the impure boundary around them.
+place a pricing regression or an unreadable execution record can become
+visible to an operator is the impure boundary around them.
 This file locks that boundary in:
 
 * ``document_summary`` reads every field off the finished document, so a step
   change between two folds is readable from the log stream alone;
-* ``score_protocol`` times its three impure steps, folds the durations into the
+* ``score_protocol`` times its impure steps, folds the durations into the
   written line, and raises a WARNING for the two grade-integrity facts that
   otherwise live only inside the document;
 * the distiller's I/O edges name what they could not read: the W2 asset-identity
@@ -16,7 +16,7 @@ This file locks that boundary in:
   distinguishes an absent artifact from a malformed one, and contracts skipped
   for a NULL ``protocol_id`` are counted rather than dropped.
 
-No database: the fold, the persist and the universe load are all substituted,
+No database: the fold and the persist are substituted,
 because what is under test is the boundary's own bookkeeping.
 """
 
@@ -38,7 +38,6 @@ from services.scoring.distill import (
     W2_PLANE_ABSENT,
     W2_SELECTOR_UNRESOLVED,
     W2_STATUS_NOT_RESOLVED,
-    ProtocolUniverse,
     _asset_identity,
     _ContractFacts,
     _token_identity,
@@ -98,8 +97,7 @@ def _document(**overrides) -> ScoreDocument:
 
 
 def test_the_summary_reads_every_field_off_the_finished_document():
-    universe = ProtocolUniverse(addresses=frozenset({"0xa", "0xb"}), sources={}, basis="test")
-    summary = loop.document_summary(_document(), universe)
+    summary = loop.document_summary(_document())
 
     assert summary["population_disposition"] == "scored"
     assert summary["signals"] == 120
@@ -111,7 +109,6 @@ def test_the_summary_reads_every_field_off_the_finished_document():
     # The pricing ratio: the pair is [decidable, seen] per entity.
     assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (1, 5)
     assert summary["tracked_total_usd"] == 1234.5
-    assert summary["universe_addresses"] == 2
     assert summary["confidence_pct"] == 44.2
     assert summary["confidence_value_priced_pct"] == 44.2
     assert summary["confidence_reach_magnitude_pct"] == 70.0
@@ -119,13 +116,8 @@ def test_the_summary_reads_every_field_off_the_finished_document():
     assert summary["execution_records_faulted"] == 0
 
 
-def test_a_fail_closed_universe_is_null_in_the_summary_and_never_a_zero():
-    summary = loop.document_summary(_document(), None)
-    assert summary["universe_addresses"] is None
-
-
 def test_a_document_with_no_provenance_blocks_omits_rather_than_guesses():
-    summary = loop.document_summary(_document(provenance={}, model_parameters={}), None)
+    summary = loop.document_summary(_document(provenance={}, model_parameters={}))
     assert summary["population_disposition"] is None
     assert summary["signals"] is None
     assert summary["tracked_total_usd"] is None
@@ -137,9 +129,7 @@ def test_a_document_with_no_provenance_blocks_omits_rather_than_guesses():
 def test_an_empty_pricing_census_is_a_real_zero():
     """Present and empty is the fold saying no flow claim was scored — the one
     case where 0 is the answer rather than a stand-in for an unasked question."""
-    summary = loop.document_summary(
-        _document(model_parameters={"confidence_detail": {"flow_pricing_decidable": {}}}), None
-    )
+    summary = loop.document_summary(_document(model_parameters={"confidence_detail": {"flow_pricing_decidable": {}}}))
     assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (0, 0)
 
 
@@ -157,26 +147,25 @@ def test_an_unaddable_pricing_pair_publishes_null_rather_than_a_short_sum(census
     """A partial sum presented as a whole one reads as a pricing regression that
     never happened — and raising would fail a fold that computed."""
     summary = loop.document_summary(
-        _document(model_parameters={"confidence_detail": {"flow_pricing_decidable": census}}), None
+        _document(model_parameters={"confidence_detail": {"flow_pricing_decidable": census}})
     )
     assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
 
 
 def test_a_kindless_warning_is_bucketed_as_unknown_not_as_the_string_none():
-    summary = loop.document_summary(_document(warnings=[{"note": "no kind here"}, {"kind": ""}, "not a dict"]), None)
+    summary = loop.document_summary(_document(warnings=[{"note": "no kind here"}, {"kind": ""}, "not a dict"]))
     assert summary["warnings_by_kind"] == {"unknown": 3}
 
 
 def test_the_execution_fault_census_is_counted_into_the_summary():
     summary = loop.document_summary(
         _document(execution_evidence_faults={"records_faulted": 3, "faulted_by_reason": {"fetch_failed": 3}}),
-        None,
     )
     assert summary["execution_records_faulted"] == 3
 
 
 def test_an_unreadable_fault_count_is_null_and_never_the_earned_zero():
-    summary = loop.document_summary(_document(execution_evidence_faults={"records_faulted": None}), None)
+    summary = loop.document_summary(_document(execution_evidence_faults={"records_faulted": None}))
     assert summary["execution_records_faulted"] is None
 
 
@@ -191,7 +180,6 @@ def test_the_summary_is_total_over_a_malformed_document():
             model_parameters={"confidence_detail": "not a dict"},
             execution_evidence_faults={"records_faulted": "three"},
         ),
-        None,
     )
     assert summary["undetermined_instances"] == 0
     assert summary["signals"] is None
@@ -274,13 +262,6 @@ def test_one_summary_line_per_fold_carries_the_document(_substituted_fold, caplo
     summaries = [r for r in records if r.message == "score document summary"]
     assert len(summaries) == 1
     assert summaries[0].population_disposition == "scored"
-    assert summaries[0].universe_addresses is None
-
-
-def test_retired_delivery_loading_does_not_run_or_warn(_substituted_fold, caplog):
-    assert not hasattr(loop, "load_protocol_universe")
-    records = _score(caplog)
-    assert not [r for r in records if r.levelno >= logging.WARNING and r.name == _LOOP_LOGGER]
 
 
 def test_an_execution_evidence_fault_warns_with_its_reasons(_substituted_fold, caplog):
@@ -302,7 +283,7 @@ def test_a_failing_summary_never_unmakes_a_committed_score(_substituted_fold, ca
     """The summary is emitted after the commit; letting it raise would arm the
     backoff for a protocol whose score is already durable."""
 
-    def _boom(document, universe):
+    def _boom(document):
         raise RuntimeError("summary is broken")
 
     monkeypatch.setattr(loop, "document_summary", _boom)
@@ -325,7 +306,6 @@ def test_the_cli_emits_the_same_summary_and_a_malformed_document_does_not_fail_i
         model_parameters={"confidence_detail": {"flow_pricing_decidable": {"ethereum::0x1": [None, 1]}}},
     )
     monkeypatch.setattr(cli, "distill_protocol_in_memory", lambda session, pid: [])
-    assert not hasattr(cli, "load_protocol_universe")
     monkeypatch.setattr(cli, "compute_protocol_score", lambda *a, **k: document)
 
     with caplog.at_level(logging.INFO, logger="services.scoring.cli"):
@@ -336,7 +316,6 @@ def test_the_cli_emits_the_same_summary_and_a_malformed_document_does_not_fail_i
     ]
     assert len(summaries) == 1
     assert summaries[0].flow_pricing_decidable is None
-    assert summaries[0].universe_addresses is None
 
 
 # --------------------------------------------------- the W2 precondition's arms

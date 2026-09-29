@@ -117,7 +117,7 @@ def member_for_evidence(session: Session, *, contract_id: int, protocol_id: int)
 
 def _member_anchors_ladder(session: Session, *, contract_id: int, protocol_id: int) -> bool:
     """§3.2 D2 non-transitivity mirrored into the ladder (F2, same discipline
-    as ``_via_is_transitive``): a member whose ONLY admitting witness is W3-D2
+    as ``_via_transitivity``): a member whose ONLY admitting witness is W3-D2
     must not anchor perimeter or corroboration facts — its principals would
     license what the D2 entry itself may not. Heuristic witnesses never anchor
     either (DEPLOYER_HEURISTIC_SPEC.md §6)."""

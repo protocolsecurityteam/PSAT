@@ -1,12 +1,10 @@
 """Unit tests for ``services.audits.source_equivalence`` internals.
 
-The DB-integrated behaviours (coverage matcher upgrading via
-``check_audit_row_covers_contract``) are covered in
-``test_audit_coverage.py``. What lives here is the network-side contract
-surface: Etherscan verified-source parsing, GitHub raw fetch guards,
-candidate-path generation, and the zero-input short-circuits on the
-``check_audit_row_covers_contract`` entry point. No DB, no network — we
-stub ``requests.get`` and ``services.clients.etherscan.get`` at module scope.
+The DB-integrated coverage behaviours are covered in ``test_audit_coverage.py``.
+What lives here is the network-side contract surface: Etherscan verified-source
+parsing, GitHub raw fetch guards, candidate-path generation, and the
+``verify_audit_covers_impl`` statuses. No DB, no network — we stub
+``requests.get`` and ``services.clients.etherscan.get`` at module scope.
 """
 
 from __future__ import annotations
@@ -19,14 +17,11 @@ import requests
 
 from services.audits import source_equivalence
 from services.audits.source_equivalence import (
-    EquivalenceMatch,
     VerifiedSource,
     _candidate_paths_for_name,
     _fetch_github_raw,
     _fetch_github_raw_hash,
     _hash_source_text,
-    check_audit_covers_impl,
-    check_audit_row_covers_contract,
     extract_reviewed_commits,
     fetch_db_source_files,
     fetch_etherscan_source_files,
@@ -569,242 +564,6 @@ class TestCandidatePathsForName:
 
 
 # ---------------------------------------------------------------------------
-# check_audit_covers_impl — empty-input short-circuits
-# ---------------------------------------------------------------------------
-
-
-class TestCheckAuditCoversImplShortCircuits:
-    def _src(self, files):
-        return VerifiedSource(contract_name="X", compiler_version="v0.8", files=files)
-
-    def test_empty_reviewed_commits_returns_empty(self):
-        assert (
-            check_audit_covers_impl(
-                reviewed_commits=[],
-                scope_contracts=["Pool"],
-                impl_source=self._src({"src/Pool.sol": "abc"}),
-                source_repo="r/n",
-            )
-            == []
-        )
-
-    def test_missing_source_repo_returns_empty(self):
-        """No repo = no URL to fetch from = can't prove equivalence."""
-        assert (
-            check_audit_covers_impl(
-                reviewed_commits=["abc1234"],
-                scope_contracts=["Pool"],
-                impl_source=self._src({"src/Pool.sol": "abc"}),
-                source_repo=None,
-            )
-            == []
-        )
-
-    def test_impl_source_with_no_files_returns_empty(self):
-        assert (
-            check_audit_covers_impl(
-                reviewed_commits=["abc1234"],
-                scope_contracts=["Pool"],
-                impl_source=self._src({}),
-                source_repo="r/n",
-            )
-            == []
-        )
-
-    def test_empty_scope_contracts_returns_empty(self):
-        assert (
-            check_audit_covers_impl(
-                reviewed_commits=["abc1234"],
-                scope_contracts=[],
-                impl_source=self._src({"src/Pool.sol": "abc"}),
-                source_repo="r/n",
-            )
-            == []
-        )
-
-    def test_candidate_path_not_in_etherscan_bundle_skipped(self, monkeypatch):
-        """The conventional-fallback path (``src/Pool.sol``) won't match
-        bundles that use a deeper tree (``contracts/pool/Pool.sol``). Prove
-        we skip rather than false-positive when the path is absent."""
-
-        def should_not_be_called(*_a, **_k):
-            raise AssertionError("GitHub fetch must not run when path is absent from Etherscan")
-
-        monkeypatch.setattr(
-            "services.audits.source_equivalence.fetch_github_source_hash",
-            should_not_be_called,
-        )
-        assert (
-            check_audit_covers_impl(
-                reviewed_commits=["abc1234"],
-                scope_contracts=["Pool"],  # falls back to src/Pool.sol, contracts/Pool.sol
-                impl_source=self._src({"lib/other/File.sol": "hash"}),
-                source_repo="r/n",
-            )
-            == []
-        )
-
-    def test_github_fetch_returning_404_skipped(self, monkeypatch):
-        """GitHub 404 on a candidate path = file didn't exist at that commit.
-        Don't record a match; the outer wrapper returns empty matches."""
-        monkeypatch.setattr(
-            "services.audits.source_equivalence.fetch_github_source_hash",
-            lambda *_a, **_k: source_equivalence.GithubHashResult(sha256=None, status="http_404", detail="not found"),
-        )
-        # After every candidate path 404s, the verifier probes the repo root to
-        # tell "commit missing" from "commit exists, path missing" — stub that
-        # probe to "commit exists" so we exercise the path-missing branch (and
-        # don't hit raw.githubusercontent.com).
-        monkeypatch.setattr(
-            "services.audits.source_equivalence._commit_exists_in_repo",
-            lambda *_a, **_k: source_equivalence.GithubFetch(content="# readme", status="ok", detail=""),
-        )
-        assert (
-            check_audit_covers_impl(
-                reviewed_commits=["abc1234"],
-                scope_contracts=["Pool"],
-                impl_source=self._src({"src/Pool.sol": "hash"}),
-                source_repo="r/n",
-            )
-            == []
-        )
-
-    def test_records_match_on_hash_equality(self, monkeypatch):
-        """The one true-positive path. Preserved both as sanity and so we
-        know the match's dataclass shape is actually constructable."""
-        monkeypatch.setattr(
-            "services.audits.source_equivalence.fetch_github_source_hash",
-            lambda *_a, **_k: source_equivalence.GithubHashResult(sha256="matching-hash", status="ok", detail=""),
-        )
-        matches = check_audit_covers_impl(
-            reviewed_commits=["abc1234"],
-            scope_contracts=["Pool"],
-            impl_source=self._src({"src/Pool.sol": "matching-hash"}),
-            source_repo="r/n",
-        )
-        assert matches == [
-            EquivalenceMatch(
-                commit="abc1234",
-                scope_name="Pool",
-                etherscan_path="src/Pool.sol",
-                source_sha256="matching-hash",
-            )
-        ]
-
-
-# ---------------------------------------------------------------------------
-# check_audit_row_covers_contract — DB-wrapper short-circuits (mock sessions)
-# ---------------------------------------------------------------------------
-
-
-class TestCheckAuditRowCoversContractShortCircuits:
-    """Cover every ``return []`` short-circuit so the matcher can be called
-    from places where inputs aren't guaranteed to be complete (e.g. before
-    scope extraction fills in ``reviewed_commits``)."""
-
-    def test_returns_empty_when_audit_missing(self):
-        session = MagicMock()
-        session.get.return_value = None
-        assert check_audit_row_covers_contract(session, 1, 2) == []
-
-    def test_returns_empty_when_contract_missing(self):
-        session = MagicMock()
-        audit = MagicMock()
-        # First session.get for AuditReport returns audit, second for Contract returns None
-        session.get.side_effect = [audit, None]
-        assert check_audit_row_covers_contract(session, 1, 2) == []
-
-    def test_returns_empty_when_reviewed_commits_empty(self):
-        session = MagicMock()
-        audit = MagicMock()
-        audit.reviewed_commits = []
-        audit.scope_contracts = ["Pool"]
-        audit.source_repo = "r/n"
-        contract = MagicMock()
-        contract.address = "0x" + "a" * 40
-        session.get.side_effect = [audit, contract]
-        assert check_audit_row_covers_contract(session, 1, 2) == []
-
-    def test_returns_empty_when_source_repo_missing(self):
-        session = MagicMock()
-        audit = MagicMock()
-        audit.reviewed_commits = ["abc1234"]
-        audit.scope_contracts = ["Pool"]
-        audit.source_repo = None
-        contract = MagicMock()
-        contract.address = "0x" + "a" * 40
-        session.get.side_effect = [audit, contract]
-        assert check_audit_row_covers_contract(session, 1, 2) == []
-
-    def test_returns_empty_when_contract_has_no_address(self):
-        """Can't reach Etherscan for a contract with no address — punt rather
-        than pass an empty string down and get a useless API error."""
-        session = MagicMock()
-        audit = MagicMock()
-        audit.reviewed_commits = ["abc1234"]
-        audit.scope_contracts = ["Pool"]
-        audit.source_repo = "r/n"
-        contract = MagicMock()
-        contract.address = ""
-        session.get.side_effect = [audit, contract]
-        assert check_audit_row_covers_contract(session, 1, 2) == []
-
-    def test_returns_empty_when_impl_source_unavailable(self, monkeypatch):
-        """DB + Etherscan both empty — no source to compare against. The
-        underlying ``verify_audit_row_covers_contract`` reports the
-        failure as ``etherscan_fetch_failed``; the legacy wrapper just
-        returns an empty match list."""
-        session = MagicMock()
-        audit = MagicMock()
-        audit.reviewed_commits = ["abc1234"]
-        audit.scope_contracts = ["Pool"]
-        audit.source_repo = "r/n"
-        contract = MagicMock()
-        contract.address = "0x" + "a" * 40
-        contract.job_id = None
-        session.get.side_effect = [audit, contract, contract]  # .get may be called again inside
-        monkeypatch.setattr(
-            source_equivalence,
-            "fetch_contract_source",
-            lambda *_a, **_k: source_equivalence.EtherscanFetch(source=None, status="fetch_failed", detail="no source"),
-        )
-        assert check_audit_row_covers_contract(session, 1, 2) == []
-
-    def test_delegates_to_verify_on_full_inputs(self, monkeypatch):
-        """All inputs present: delegate with the expected arguments and
-        return the proven matches. This is the single happy-path shape
-        the coverage matcher relies on."""
-        session = MagicMock()
-        audit = MagicMock()
-        audit.reviewed_commits = ["abc1234", "def5678"]
-        audit.scope_contracts = ["Pool", "Vault"]
-        audit.source_repo = "r/n"
-        contract = MagicMock()
-        contract.address = "0x" + "a" * 40
-        session.get.side_effect = [audit, contract]
-
-        src = VerifiedSource(contract_name="X", compiler_version="v0.8", files={"src/Pool.sol": "h"})
-        monkeypatch.setattr(
-            source_equivalence,
-            "fetch_contract_source",
-            lambda *_a, **_k: source_equivalence.EtherscanFetch(source=src, status="ok", detail=""),
-        )
-
-        expected_matches = (
-            EquivalenceMatch(commit="abc1234", scope_name="Pool", etherscan_path="src/Pool.sol", source_sha256="h"),
-        )
-        monkeypatch.setattr(
-            source_equivalence,
-            "verify_audit_covers_impl",
-            lambda **_kw: source_equivalence.EquivalenceOutcome(
-                status="proven", reason="test", matches=expected_matches
-            ),
-        )
-        got = check_audit_row_covers_contract(session, 1, 2, github_token="tok")
-        assert got == list(expected_matches)
-
-
-# ---------------------------------------------------------------------------
 # _hash_source_text — sanity: same text → same hash
 # ---------------------------------------------------------------------------
 
@@ -841,6 +600,27 @@ class TestVerifyAuditCoversImplStatuses:
         )
         assert out.status == "proven"
         assert len(out.matches) == 1
+
+    def test_candidate_path_absent_from_etherscan_bundle_never_fetches_github(self, monkeypatch):
+        """``src/Pool.sol`` / ``contracts/Pool.sol`` are absent from a bundle rooted
+        elsewhere: skip rather than false-positive, without a GitHub hash fetch."""
+
+        def should_not_be_called(*_a, **_k):
+            raise AssertionError("GitHub fetch must not run when path is absent from Etherscan")
+
+        monkeypatch.setattr("services.audits.source_equivalence.fetch_github_source_hash", should_not_be_called)
+        monkeypatch.setattr(
+            "services.audits.source_equivalence._commit_exists_in_repo",
+            lambda *_a, **_k: source_equivalence.GithubFetch(content="# readme", status="ok", detail=""),
+        )
+        out = source_equivalence.verify_audit_covers_impl(
+            reviewed_commits=["abc1234"],
+            scope_name="Pool",
+            impl_source=self._src({"lib/other/File.sol": "hash"}),
+            source_repo="r/n",
+        )
+        assert out.matches == ()
+        assert out.status != "proven"
 
     def test_hash_mismatch_when_files_differ(self, monkeypatch):
         """Both sides fetched content; hashes don't match. Strong negative."""

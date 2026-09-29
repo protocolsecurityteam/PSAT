@@ -39,8 +39,6 @@ from .scope_extraction import (
 from .source_equivalence import (
     EquivalenceMatch,
     VerifiedSource,
-    check_audit_covers_impl,
-    check_audit_row_covers_contract,
     extract_reviewed_commits,
     fetch_contract_source_files,
     fetch_db_source_files,
@@ -96,8 +94,6 @@ __all__ = [
     # source-equivalence exports
     "EquivalenceMatch",
     "VerifiedSource",
-    "check_audit_covers_impl",
-    "check_audit_row_covers_contract",
     "extract_reviewed_commits",
     "fetch_contract_source_files",
     "fetch_db_source_files",

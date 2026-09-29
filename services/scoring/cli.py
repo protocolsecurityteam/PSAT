@@ -51,11 +51,10 @@ def score(session: Session, protocol_id: int) -> ScoreDocument:
     from services.scoring.loop import document_summary
 
     signals = distill_protocol_in_memory(session, protocol_id)
-    universe = None  # Retired delivery classification is not a score input.
-    document = compute_protocol_score(session, protocol_id, signals=signals, universe=universe)
+    document = compute_protocol_score(session, protocol_id, signals=signals)
     # The same summary the score loop emits, so a CLI fold and a persisted one
     # are the same line in the log stream and comparable against each other.
-    logger.info("score document summary", extra=document_summary(document, universe))
+    logger.info("score document summary", extra=document_summary(document))
     return document
 
 

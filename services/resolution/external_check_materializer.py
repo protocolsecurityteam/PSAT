@@ -297,7 +297,7 @@ async def _candidate_addresses_from_hypersync_async(*, checker_address: str, lim
     except Exception:
         return []
 
-    from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
+    from services.resolution.hypersync_bound import hypersync_url_for_chain
 
     # Per-chain HyperSync endpoint (inv. 5), env override kept for backward compat.
     # A chain with no registry coverage (or no env override) has no scan surface —
@@ -306,7 +306,7 @@ async def _candidate_addresses_from_hypersync_async(*, checker_address: str, lim
     # per-chain registry URL — a SINGLE-CHAIN DEV OVERRIDE only. Do not set it in
     # a multichain deployment (it would pin every chain to one endpoint);
     # per-chain routing must come from the registry.
-    url = os.getenv("PSAT_HYPERSYNC_URL") or _hypersync_url_for_chain(chain_id)
+    url = os.getenv("PSAT_HYPERSYNC_URL") or hypersync_url_for_chain(chain_id)
     if not url:
         return []
     timeout_s = float(os.getenv("PSAT_EXTERNAL_CHECK_CANDIDATE_TIMEOUT_S", "20"))
