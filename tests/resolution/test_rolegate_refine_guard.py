@@ -771,7 +771,7 @@ def test_fixture2_or_mix_gates(session, both_flags):
     "guard does not fire. Not a regression (pre-fix also public); real corpus mixes are "
     "separate modifiers that gate correctly. Flips to xpass under a tighter counterfactual "
     "or the Stage-2 enumeration adapter.",
-    strict=False,
+    strict=True,
 )
 def test_and_mix_denylist_absorbs_opaque_authority_should_gate(session, both_flags):
     """A single callee ``AND(time-denylist(caller), opaque-hasRole(caller))``: the real

@@ -14,12 +14,8 @@ and the governor Safe resolves as the proxy's controller.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from db.models import ControlGraphNode, EffectiveFunction, FunctionPrincipal
 from services.aggregations.company_overview import (

@@ -449,12 +449,11 @@ def test_protocol_tvl_caps_days(mock_session_cls) -> None:
 
 
 @patch("routers.deps.SessionLocal")
-def test_stage_timings_endpoint_returns_per_stage_artifacts(mock_session_cls) -> None:
+def test_stage_timings_endpoint_returns_per_stage_artifacts(mock_session_cls, monkeypatch) -> None:
     """Bench harness needs a reliable per-stage timing source. The endpoint
     must collect every ``stage_timing_<stage>`` artifact for the job and
     return them keyed by stage name (the suffix after ``stage_timing_``).
     Mirrors what the worker writes via ``_record_stage_timing``."""
-    from routers import deps
 
     client = make_client()
     fake_job = _make_fake_job()
@@ -503,7 +502,7 @@ def test_stage_timings_endpoint_returns_per_stage_artifacts(mock_session_cls) ->
     mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
     mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
-    deps.ADMIN_KEY = "test-admin-key"
+    monkeypatch.setattr("routers.deps.ADMIN_KEY", "test-admin-key")
     resp = client.get(
         f"/api/jobs/{fake_job.id}/stage_timings",
         headers={"X-PSAT-Admin-Key": "test-admin-key"},
@@ -518,8 +517,7 @@ def test_stage_timings_endpoint_returns_per_stage_artifacts(mock_session_cls) ->
 
 
 @patch("routers.deps.SessionLocal")
-def test_stage_timings_endpoint_404_for_unknown_job(mock_session_cls) -> None:
-    from routers import deps
+def test_stage_timings_endpoint_404_for_unknown_job(mock_session_cls, monkeypatch) -> None:
 
     client = make_client()
     mock_session = MagicMock()
@@ -527,7 +525,7 @@ def test_stage_timings_endpoint_404_for_unknown_job(mock_session_cls) -> None:
     mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
     mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
-    deps.ADMIN_KEY = "test-admin-key"
+    monkeypatch.setattr("routers.deps.ADMIN_KEY", "test-admin-key")
     resp = client.get(
         f"/api/jobs/{uuid.uuid4()}/stage_timings",
         headers={"X-PSAT-Admin-Key": "test-admin-key"},

@@ -19,11 +19,6 @@ target their source modules (``services.clients.rpc`` / ``services.audits.covera
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
 import uuid
 
 from services.aggregations import contract_audit_timeline as cat

@@ -92,13 +92,7 @@ def test_get_errors_corrupt_artifact_does_not_500(db_session, api_client):
 
 
 @requires_postgres
-def test_get_errors_uuid_format_validation(api_client):
-    """Bogus job ids that aren't UUIDs surface as a 4xx (FastAPI path validation
-    or a 404 from the session.get miss)."""
+def test_get_errors_non_uuid_job_id_is_404(api_client):
     response = api_client.get("/api/jobs/not-a-uuid/errors")
-    # FastAPI lets the str through but session.get fails to coerce — surface as 404 or 500-class.
-    # Either way, the test simply documents we don't crash with an unhandled exception.
-    assert response.status_code in (404, 422, 500), response.text
-    # Even on 500, response is JSON.
-    if response.headers.get("content-type", "").startswith("application/json"):
-        response.json()
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "Job not found"

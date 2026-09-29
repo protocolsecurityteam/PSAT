@@ -21,12 +21,8 @@ resolution layer keys by the composite entity token.
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from db.models import FunctionPrincipal
 from services.aggregations.company_overview import (
