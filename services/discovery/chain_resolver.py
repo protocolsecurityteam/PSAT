@@ -34,7 +34,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from services.clients.rpc import erpc_url_for_chain_id, rpc_headers
-from utils.chains import canonical_chain, canonical_chain_list
+from utils.chains import canonical_chain, canonical_chain_list, chain_enabled
 from utils.logging import record_degraded
 
 from .inventory_domain import CHAIN_IDS, RateLimiter, _debug_log
@@ -93,10 +93,16 @@ def _record_error_fill(exc: BaseException | None) -> None:
 
 
 def _erpc_url_for_chain(chain_name: str) -> str | None:
-    """eRPC route for a chain name, or None when the chain isn't mapped or
-    ``ERPC_BASE_URL`` is unset."""
+    """eRPC route for a chain name, or None when the chain isn't mapped, is off
+    the ``PSAT_SUPPORTED_CHAIN_IDS`` allowlist, or ``ERPC_BASE_URL`` is unset.
+
+    eRPC only serves allowlisted chains; probing any other returns 404, which
+    the batch path treats as a rejected batch and retries per address.
+    """
     chain_id = CHAIN_IDS.get(chain_name)
-    return erpc_url_for_chain_id(chain_id) if chain_id else None
+    if not chain_id or not chain_enabled(chain_id):
+        return None
+    return erpc_url_for_chain_id(chain_id)
 
 
 def _individual_get_code(rpc_url: str, addr: str, limiter: RateLimiter) -> tuple[str, str]:

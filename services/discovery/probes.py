@@ -25,6 +25,7 @@ from services.clients.rpc import (
     rpc_request,
     selector,
 )
+from utils.chains import chain_enabled
 from utils.evm import (
     EIP1967_ADMIN_SLOT,
     EIP1967_BEACON_SLOT,
@@ -222,7 +223,7 @@ def run_probe(session: Session, contract: Contract) -> ProbeResult:
     ``contract_probe_attempts``."""
     address = (contract.address or "").lower()
     chain_id = chain_id_for_chain_name(contract.chain)
-    rpc_url = erpc_url_for_chain_id(chain_id)
+    rpc_url = erpc_url_for_chain_id(chain_id) if chain_enabled(chain_id) else None
     if not address or rpc_url is None:
         results = {"status": STATUS_NOT_ROUTABLE, "chain": contract.chain}
         _persist_attempt(session, contract_id=contract.id, chain_id=chain_id, block_number=None, results=results)
