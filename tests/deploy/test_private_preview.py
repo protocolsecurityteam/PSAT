@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import socket
 import subprocess
@@ -9,10 +8,12 @@ from pathlib import Path
 import pytest
 import tomli
 
+from deploy.preview import control
 from deploy.preview.control import (
     ConfigurationError,
     build_plan,
     database_url,
+    dump_toml,
     render_config,
     validate_app_inventory,
     validate_ip_inventory,
@@ -50,9 +51,15 @@ def test_preview_plan_rejects_production_and_command_injection(pr: str, org: str
         build_plan(pr, org, prefix)
 
 
+def _render_preview() -> tuple[dict, dict]:
+    plan = build_plan(42, "psat-staging", "psat-stage-pr")
+    source = (ROOT / "fly.toml").read_text()
+    return tomli.loads(source), tomli.loads(render_config(source, plan))
+
+
 def test_generated_config_is_private_flycast_http_with_idle_wake() -> None:
     plan = build_plan(42, "psat-staging", "psat-stage-pr")
-    rendered = render_config((PREVIEW / "fly.preview.toml.template").read_text(), plan)
+    rendered = render_config((ROOT / "fly.toml").read_text(), plan)
     config = tomli.loads(rendered)
     assert config["app"] == "psat-stage-pr-42"
     assert (ROOT / config["build"]["dockerfile"]).is_file()
@@ -76,26 +83,36 @@ def test_generated_config_is_private_flycast_http_with_idle_wake() -> None:
         ],
     }
     assert ".fly.dev" not in rendered
+    assert "REPLACE_WITH_PSAT_HEALTH_SECRET" not in rendered
 
 
-def test_render_rejects_template_that_can_force_public_https() -> None:
+def _changed(a: dict, b: dict) -> set[str]:
+    return {key for key in a.keys() | b.keys() if a.get(key) != b.get(key)}
+
+
+def test_preview_differs_from_production_only_by_allowlisted_settings() -> None:
+    # A live run is only evidence about production if the preview runs the same
+    # process layout (lifecycle mode, indexer placement), sizing and settings.
+    production, preview = _render_preview()
+    assert _changed(production, preview) == {"app", "env", "http_service"}
+    assert _changed(production["env"], preview["env"]) == {"PSAT_EDGE_MODE", "PSAT_SITE_ORIGIN", "PSAT_PIN_BLOCKS"}
+    assert "PSAT_SITE_ORIGIN" not in preview["env"]
+    prod_http, preview_http = production["http_service"], preview["http_service"]
+    assert _changed(prod_http, preview_http) == {"force_https", "min_machines_running", "checks"}
+    unheadered = [{k: v for k, v in check.items() if k != "headers"} for check in prod_http["checks"]]
+    assert preview_http["checks"] == unheadered
+
+
+def test_toml_dump_round_trips_production_config() -> None:
+    source = tomli.loads((ROOT / "fly.toml").read_text())
+    assert tomli.loads(dump_toml(source)) == source
+
+
+def test_render_rejects_overrides_that_can_force_public_https(monkeypatch: pytest.MonkeyPatch) -> None:
     plan = build_plan(42, "psat-staging", "psat-stage-pr")
-    unsafe = (PREVIEW / "fly.preview.toml.template").read_text().replace("force_https = false", "force_https = true")
+    monkeypatch.setitem(control.PREVIEW_HTTP, "force_https", True)
     with pytest.raises(ConfigurationError, match="unsafe preview config"):
-        render_config(unsafe, plan)
-
-
-def test_preview_matches_production_company_cache_and_web_capacity() -> None:
-    production = tomli.loads((ROOT / "fly.toml").read_text())
-    plan = build_plan(42, "psat-staging", "psat-stage-pr")
-    preview = tomli.loads(render_config((PREVIEW / "fly.preview.toml.template").read_text(), plan))
-    for key in ("PSAT_PREPARED_COMPANY_PAGES", "PSAT_COMPANY_BUILDER_ON_WEB"):
-        assert preview["env"][key] == production["env"][key] == "1"
-    assert preview["processes"]["web"] == production["processes"]["web"] == "./deploy/start_web.sh"
-    preview_web = next(vm for vm in preview["vm"] if vm["processes"] == ["web"])
-    production_web = next(vm for vm in production["vm"] if vm["processes"] == ["web"])
-    assert preview_web == production_web
-    assert preview_web["memory"] == "1gb"
+        render_config((ROOT / "fly.toml").read_text(), plan)
 
 
 def test_app_inventory_requires_exact_staging_owner() -> None:
@@ -268,6 +285,27 @@ def test_deploy_and_http_jobs_enforce_private_path() -> None:
         assert "http://127.0.0.1:" in workflow
 
 
+def test_preview_deploy_provisions_managed_worker_lifecycle() -> None:
+    pr = (WORKFLOWS / "pr.yml").read_text()
+    deploy_job = pr.split("\n  deploy:\n", 1)[1].split("\n  live-tests:\n", 1)[0]
+    # Session advisory locks need the direct endpoint, never the pooler.
+    assert 'PSAT_LIFECYCLE_DATABASE_URL="$LIFECYCLE_DB_URL"' in deploy_job
+    assert '--host "$NEON_STAGING_ADMIN_HOST"' in deploy_job
+    assert "!= *-pooler*" in deploy_job
+    # Scoped to the one preview app with read + control only; the staging token
+    # is org-wide and cannot mint app tokens.
+    assert '{apps: {($id): "rC"}}' in deploy_job
+    assert "flyctl tokens attenuate" in deploy_job
+    assert "flyctl tokens create" not in deploy_job
+    assert "::add-mask::$token" in deploy_job
+    assert "flyctl secrets import --stage" in deploy_job
+    assert "PSAT_WORKER_LIFECYCLE_TOKEN=$" not in deploy_job
+    assert deploy_job.index("Stage app-scoped worker lifecycle token") < deploy_job.index("Deploy private preview")
+    assert deploy_job.index("Start non-web process groups") < deploy_job.index("Activate worker lifecycle")
+    for workflow in (deploy_job, (WORKFLOWS / "reset-pr-db.yml").read_text()):
+        assert "UPDATE worker_lifecycle SET paused = false WHERE id = 1;" in workflow
+
+
 def test_tunnel_jobs_use_staging_org_token_without_inventory_commands() -> None:
     pr = (WORKFLOWS / "pr.yml").read_text()
     live_job = pr.split("\n  live-tests:\n", 1)[1].split("\n  destroy-preview-workers:\n", 1)[0]
@@ -326,25 +364,3 @@ def test_comment_commands_are_exact_and_revalidate_pr() -> None:
     assert "pr.head.repo?.full_name" in commands
     assert "--ref main" in commands
     assert 'head_sha="$HEAD_SHA"' in commands
-
-
-def test_plan_cli_never_performs_remote_operations(tmp_path: Path) -> None:
-    result = subprocess.run(
-        [
-            "python",
-            "-m",
-            "deploy.preview.control",
-            "plan",
-            "--pr-number",
-            "42",
-            "--organization",
-            "psat-staging",
-            "--app-prefix",
-            "psat-stage-pr",
-        ],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert json.loads(result.stdout)["mode"] == "plan-only; no remote operations implemented"

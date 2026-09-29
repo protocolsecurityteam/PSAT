@@ -1,9 +1,7 @@
 """F3 — deployer expansion runs on the requested chain, not a mainnet default.
 
-``search_protocol_inventory`` traces deployer wallets via the Etherscan
-``getcontractcreation``/``txlist`` endpoints. Those calls must carry the
-requested chain's id, or an L2 inventory search silently expands mainnet
-deployers. A genuinely chainless search (chain=None) keeps the documented
+``search_protocol_inventory``'s Etherscan ``getcontractcreation``/``txlist`` calls must carry the requested chain's
+id, or an L2 search silently expands mainnet deployers. A chainless search (chain=None) keeps the documented
 mainnet fallback.
 """
 
@@ -13,7 +11,6 @@ from services.discovery import inventory
 
 
 def _stub_inventory_flow(monkeypatch, captured):
-    """Stub every upstream seam so the flow reaches the deployer branch offline."""
     monkeypatch.setattr(inventory, "_tavily_search", lambda *a, **k: [])
     monkeypatch.setattr(inventory, "_llm_select_domain", lambda *a, **k: ("example.com", []))
     monkeypatch.setattr(

@@ -1,20 +1,15 @@
 """The external_bool gate-shape discriminator (Wave 5 B2).
 
-A void external call on a state-var-held address that passes ``msg.sender``
-is NOT caller-gate evidence when the callee is effectful: the msg.sender
-argument is the funds/burn subject (``permit(msg.sender, …)``,
-``transferFrom(msg.sender, …)``, ``burnShares(msg.sender, …)``,
-``vault.enter(msg.sender, …)``), not an authorization subject. On PR-161
-this classified wstETH as a *controller* of Lido's WithdrawalQueueERC721 —
-chain-refuted. The classifier now applies the same discriminator the
-resolution plane proves at ``permissionless_shapes.py`` (external_bool arm),
-and the tracking harvest applies it again as belt-and-braces.
+A void external call on a state-var-held address that passes ``msg.sender`` is NOT
+caller-gate evidence when the callee is effectful: msg.sender is the funds/burn
+subject (``permit``, ``transferFrom``, ``burnShares``, ``vault.enter``), not an
+authorization subject. On PR-161 this classified wstETH as a *controller* of Lido's
+WithdrawalQueueERC721, chain-refuted. The classifier applies the discriminator the
+resolution plane proves at ``permissionless_shapes.py``; the tracking harvest
+applies it again as belt-and-braces.
 
-Fixtures are structurally faithful to the refuted mainnet shapes
-(WithdrawalQueueERC721 permit/transferFrom, LiquidityPool burnShares,
-TellerWithMultiAssetSupport vault.enter) and to the load-bearing TRUE
-controls (RoleRegistry.only* void view calls, canCall oracles, the merkle
-bytes32[] witness carve-out).
+Fixtures are faithful to the refuted mainnet shapes and to the load-bearing TRUE
+controls (RoleRegistry.only* void view calls, canCall oracles, merkle witness).
 """
 
 from __future__ import annotations
@@ -68,9 +63,7 @@ def _fn_leaves(contract, full_name: str) -> list[dict]:
     return _leaves(build_predicate_tree(fn))
 
 
-# ---------------------------------------------------------------------------
 # Classifier: the refuted FALSE families flip to business / no descriptor
-# ---------------------------------------------------------------------------
 
 
 def test_permit_and_transfer_from_are_not_delegated_authority(tmp_path):
@@ -160,9 +153,7 @@ def test_result_checked_effectful_transfer_is_not_delegated_authority(tmp_path):
         assert not leaf.get("set_descriptor")
 
 
-# ---------------------------------------------------------------------------
 # Classifier: the load-bearing TRUE families keep delegated_authority
-# ---------------------------------------------------------------------------
 
 
 def test_void_view_role_registry_call_stays_delegated_authority(tmp_path):
@@ -284,9 +275,7 @@ def test_const_compare_oracle_view_vs_nonview(tmp_path):
     assert all(lf.get("authority_role") == "business" for lf in ungated)
 
 
-# ---------------------------------------------------------------------------
 # Tracking harvest: no caller_gate from a non-gate-shaped leaf
-# ---------------------------------------------------------------------------
 
 
 def _teller_artifact_and_contract(tmp_path):
@@ -372,8 +361,7 @@ def test_harvest_rejects_persisted_nonview_descriptor_tree():
     }
     assert _collect_authority_state_vars(leaf_tree(view_leaf)) == {"roleRegistry"}
 
-    # R2 second arm: a descriptor on a NON-authority-role leaf (business)
-    # must not mint a caller-gate var either, whatever the mutability.
+    # R2 second arm: a descriptor on a NON-authority-role leaf must not mint a caller-gate var.
     business_leaf = dict(view_leaf)
     business_leaf["authority_role"] = "business"
     assert _collect_authority_state_vars(leaf_tree(business_leaf)) == set()

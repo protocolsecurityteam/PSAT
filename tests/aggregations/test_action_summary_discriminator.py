@@ -4,11 +4,6 @@ renders it, so it is the quotable copy of the structured planes.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
 from services.aggregations.action_summary import (
     ARBITRARY_SUMMARY,
     VACUOUS_SUMMARY,

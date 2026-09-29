@@ -1,15 +1,10 @@
-"""Tests for ``build_predicate_tree`` (services.static…predicates).
+"""Tests for ``build_predicate_tree`` (services.static...predicates).
 
-End-to-end: from a Solidity function source through ProvenanceEngine +
-RevertDetector to a fully-typed PredicateTree. Focuses on:
-  - basic equality + membership leaves
-  - polarity normalization (require vs if-revert)
-  - authority_role classification (Rule A: caller equality;
-    Rule B: auth-shaped membership for multi-key)
-  - 1-key caller-only membership defaults to business (week-3
-    writer-key two-pass promotes if applicable)
-  - external_bool delegated_authority (state-var target + sender arg)
-  - unguarded function returns None
+End-to-end from a Solidity function through ProvenanceEngine + RevertDetector to a
+typed PredicateTree: equality/membership leaves, polarity normalization,
+authority_role classification (Rule A caller equality; Rule B multi-key
+membership), 1-key caller-only membership defaulting to business (week-3 writer-key
+two-pass may promote), external_bool delegated_authority, unguarded -> None.
 """
 
 from __future__ import annotations
@@ -59,14 +54,10 @@ def _all_leaves(tree):
     return out
 
 
-# ---------------------------------------------------------------------------
 # Equality leaves
-# ---------------------------------------------------------------------------
 
 
 def test_caller_equals_state_var_classifies_caller_authority(tmp_path):
-    """``require(msg.sender == owner)`` is the canonical Rule A
-    case: equality, op=eq, msg_sender vs state_variable."""
     sl = _compile(
         tmp_path,
         """
@@ -91,10 +82,8 @@ def test_caller_equals_state_var_classifies_caller_authority(tmp_path):
 
 
 def test_if_revert_inverts_operator(tmp_path):
-    """``if (msg.sender != owner) revert()`` — polarity
-    allowed_when_false. After normalization the leaf is
-    equality, op=eq (the original ``!=`` is flipped via the
-    polarity rule, NOT via a NOT node)."""
+    """``if (msg.sender != owner) revert()``: the ``!=`` is flipped to eq via the
+    polarity rule (allowed_when_false), NOT via a NOT node."""
     sl = _compile(
         tmp_path,
         """
@@ -112,18 +101,15 @@ def test_if_revert_inverts_operator(tmp_path):
     leaves = _all_leaves(tree)
     assert len(leaves) == 1
     leaf = leaves[0]
-    # Source: if (a != b) revert  ⇒ allowed when a == b.
-    # ne with allowed_when_false flips to eq. caller_authority because
-    # one operand is msg.sender, the other is state_var.
+    # if (a != b) revert => allowed when a == b; caller_authority as one operand is msg.sender.
     assert leaf["kind"] == "equality"
     assert leaf["operator"] == "eq"
     assert leaf["authority_role"] == "caller_authority"
 
 
 def test_caller_equals_parameter_classifies_caller_authority(tmp_path):
-    """``require(account == msg.sender)`` (renounceRole-style) — the
-    other operand is a parameter (an address-typed parameter is
-    treated as 'who is allowed', so this is caller_authority)."""
+    """``require(account == msg.sender)`` (renounceRole-style): an address parameter
+    is 'who is allowed', so this is caller_authority."""
     sl = _compile(
         tmp_path,
         """
@@ -147,15 +133,10 @@ def test_caller_equals_parameter_classifies_caller_authority(tmp_path):
     assert leaf["authority_role"] == "caller_authority"
 
 
-# ---------------------------------------------------------------------------
 # Membership leaves
-# ---------------------------------------------------------------------------
 
 
 def test_two_key_membership_with_caller_promotes_to_caller_authority(tmp_path):
-    """``require(_members[role][msg.sender])`` is a 2-key mapping
-    with msg.sender as a key — Rule B's multi-key direct promotion
-    to caller_authority (a permission table by structure)."""
     sl = _compile(
         tmp_path,
         """
@@ -179,10 +160,9 @@ def test_two_key_membership_with_caller_promotes_to_caller_authority(tmp_path):
 
 
 def test_one_key_caller_membership_defaults_to_business(tmp_path):
-    """``require(claimed[msg.sender])`` is a 1-key caller-only bool
-    map — could be auth (blacklist) or business (claim flag).
-    Without writer-key analysis (week 3), default to business so we
-    don't over-admit."""
+    """``require(claimed[msg.sender])`` is a 1-key caller-only bool map, auth
+    (blacklist) or business (claim flag). Without writer-key analysis (week 3),
+    default to business so we don't over-admit."""
     sl = _compile(
         tmp_path,
         """
@@ -204,9 +184,7 @@ def test_one_key_caller_membership_defaults_to_business(tmp_path):
     assert leaf["authority_role"] == "business"
 
 
-# ---------------------------------------------------------------------------
 # Multiple gates → AND tree
-# ---------------------------------------------------------------------------
 
 
 def test_two_requires_combine_via_and(tmp_path):
@@ -234,15 +212,10 @@ def test_two_requires_combine_via_and(tmp_path):
     assert kinds == ["comparison", "equality"]
 
 
-# ---------------------------------------------------------------------------
 # Unguarded function
-# ---------------------------------------------------------------------------
 
 
 def test_time_gate_classifies_as_time(tmp_path):
-    """``require(block.timestamp > deadline)`` — at least one operand
-    is block_context and no operand is caller-related, so leaf
-    authority_role is "time"."""
     sl = _compile(
         tmp_path,
         """
@@ -263,11 +236,9 @@ def test_time_gate_classifies_as_time(tmp_path):
 
 
 def test_caller_keyed_time_check_stays_caller_authority(tmp_path):
-    """``require(block.timestamp > cooldown[msg.sender])`` has both
-    block_context AND msg.sender — caller takes priority. The leaf
-    classifies based on the comparison structure; current logic
-    keeps it as business since comparison + caller-key isn't an
-    authority shape we recognize. Documents the expectation."""
+    """``require(block.timestamp > cooldown[msg.sender])`` has both block_context AND
+    msg.sender; caller takes priority, and comparison + caller-key isn't an
+    authority shape we recognize, so it stays business."""
     sl = _compile(
         tmp_path,
         """
@@ -284,18 +255,13 @@ def test_caller_keyed_time_check_stays_caller_authority(tmp_path):
     tree = build_predicate_tree(fn)
     leaves = _all_leaves(tree)
     assert len(leaves) == 1
-    # The leaf has both msg.sender (in the cooldown index) and
-    # block_context. Caller-priority means it doesn't classify as
-    # time. Without a writer-gate or explicit auth shape this is
-    # business.
+    # msg.sender (cooldown index) and block_context: caller priority, so not time; no auth shape, so business.
     assert leaves[0]["authority_role"] != "time"
 
 
 def test_logical_or_splits_into_or_subtree(tmp_path):
-    """``require(msg.sender == owner || amount > threshold)`` should
-    produce an OR root with two leaves: a caller_authority equality
-    and a comparison/business. The business leaf is preserved under
-    OR so admission is correct."""
+    """``require(msg.sender == owner || amount > threshold)``: an OR root with a
+    caller_authority equality and a business leaf, preserved so admission is correct."""
     sl = _compile(
         tmp_path,
         """
@@ -317,7 +283,6 @@ def test_logical_or_splits_into_or_subtree(tmp_path):
     assert len(leaves) == 2
     kinds = sorted(leaf["kind"] for leaf in leaves)
     assert kinds == ["comparison", "equality"]
-    # Caller authority leaf is present.
     auth_roles = [leaf["authority_role"] for leaf in leaves]
     assert "caller_authority" in auth_roles
 
@@ -339,8 +304,7 @@ def test_logical_and_splits_into_and_subtree(tmp_path):
     fn = _function(sl, "f")
     tree = build_predicate_tree(fn)
     assert tree is not None
-    # Multiple AND levels are allowed (top-level AND from gates wraps
-    # the inner AND from && operator). Either flat AND or nested.
+    # Either flat AND or nested (top-level gates AND wraps the inner && AND).
     leaves = _all_leaves(tree)
     assert len(leaves) == 2
     kinds = sorted(leaf["kind"] for leaf in leaves)
@@ -348,11 +312,9 @@ def test_logical_and_splits_into_and_subtree(tmp_path):
 
 
 def test_ecrecover_equality_classifies_signature_auth(tmp_path):
-    """``address recovered = ecrecover(...); require(recovered == signerAddr)``
-    — an equality between a signature_recovery operand and an
-    address operand is the canonical signature-auth pattern. Leaf
-    kind must be ``signature_auth`` (shape-tight by construction;
-    always caller_authority)."""
+    """``recovered = ecrecover(...); require(recovered == signerAddr)``: a
+    signature_recovery operand equal to an address operand is the canonical
+    signature-auth pattern (shape-tight, always caller_authority)."""
     sl = _compile(
         tmp_path,
         """
@@ -377,9 +339,8 @@ def test_ecrecover_equality_classifies_signature_auth(tmp_path):
 
 
 def test_inline_ecrecover_in_require(tmp_path):
-    """Inline form: ``require(msg.sender == ecrecover(...))``. The
-    ecrecover output goes through TMP propagation. Should still
-    classify as signature_auth."""
+    """Inline ``require(msg.sender == ecrecover(...))``: the output goes through TMP
+    propagation and must still classify as signature_auth."""
     sl = _compile(
         tmp_path,
         """
@@ -402,12 +363,10 @@ def test_inline_ecrecover_in_require(tmp_path):
 @pytest.mark.parametrize(
     "source_template,expected_kind,expected_op",
     [
-        # Equality / inequality
         ("require(a == b);", "equality", "eq"),
         ("require(a != b);", "equality", "ne"),
         ("if (a == b) revert();", "equality", "ne"),
         ("if (a != b) revert();", "equality", "eq"),
-        # Comparison
         ("require(a > b);", "comparison", "gt"),
         ("require(a < b);", "comparison", "lt"),
         ("require(a >= b);", "comparison", "gte"),
@@ -419,9 +378,6 @@ def test_inline_ecrecover_in_require(tmp_path):
     ],
 )
 def test_polarity_normalization_truth_table(tmp_path, source_template, expected_kind, expected_op):
-    """For each of {require, if-revert} × {eq, ne, lt, lte, gt, gte},
-    assert the normalized leaf has the expected kind + operator.
-    No NOT survives the normalization."""
     sl = _compile(
         tmp_path,
         f"""
@@ -444,9 +400,8 @@ def test_polarity_normalization_truth_table(tmp_path, source_template, expected_
 
 
 def test_modifier_only_owner_admits(tmp_path):
-    """Function gated entirely by an `onlyOwner` modifier (no inline
-    require) — RevertDetector now walks modifier bodies, so the gate
-    is found and the function admits with caller_authority."""
+    """A gate entirely in an `onlyOwner` modifier: RevertDetector walks modifier
+    bodies, so it admits with caller_authority."""
     sl = _compile(
         tmp_path,
         """
@@ -509,10 +464,8 @@ def test_caller_equals_external_getter_classified_caller_authority(tmp_path):
 
 
 def test_modifier_with_external_bool_call(tmp_path):
-    """Modifier body contains an external authority call. Provenance
-    runs over the modifier nodes, finds the HighLevelCall whose
-    target is a state-var and whose args include msg.sender. Leaf
-    classifies as delegated_authority."""
+    """A modifier body with an external authority call: provenance finds the
+    HighLevelCall on a state-var target with msg.sender in args -> delegated_authority."""
     sl = _compile(
         tmp_path,
         """
@@ -660,7 +613,6 @@ def test_try_catch_external_bool_call_builds_delegated_authority(tmp_path):
 
 
 def test_modifier_chained_yields_multiple_gates(tmp_path):
-    """Two modifiers chained — both reverts get captured."""
     sl = _compile(
         tmp_path,
         """
@@ -710,14 +662,10 @@ def test_unguarded_function_returns_none(tmp_path):
     assert tree is None
 
 
-# ---------------------------------------------------------------------------
 # Confidence levels (HIGH / MEDIUM / LOW)
-# ---------------------------------------------------------------------------
 
 
 def test_confidence_high_for_caller_equals_state_var(tmp_path):
-    """Rule A (msg.sender == state_var address) is shape-tight:
-    the operands are caller + state_variable directly. HIGH."""
     sl = _compile(
         tmp_path,
         """
@@ -737,8 +685,6 @@ def test_confidence_high_for_caller_equals_state_var(tmp_path):
 
 
 def test_confidence_high_for_multi_key_caller_membership(tmp_path):
-    """Multi-key (>=2) membership with caller key direct-promotes to
-    caller_authority. Shape-tight by structure → HIGH."""
     sl = _compile(
         tmp_path,
         """
@@ -759,8 +705,6 @@ def test_confidence_high_for_multi_key_caller_membership(tmp_path):
 
 
 def test_confidence_low_for_business_residual(tmp_path):
-    """Bare-bool flag check that doesn't match any authority shape
-    classifies as business → LOW."""
     sl = _compile(
         tmp_path,
         """
@@ -780,8 +724,6 @@ def test_confidence_low_for_business_residual(tmp_path):
 
 
 def test_confidence_low_for_unsupported(tmp_path):
-    """An opaque condition we can't classify ends up unsupported,
-    which is LOW."""
     sl = _compile(
         tmp_path,
         """
@@ -800,15 +742,12 @@ def test_confidence_low_for_unsupported(tmp_path):
     assert leaves[0]["confidence"] == "low"  # pyright: ignore[reportTypedDictNotRequiredAccess]
 
 
-# ---------------------------------------------------------------------------
 # AuthorityClassifier rule expansion
-# ---------------------------------------------------------------------------
 
 
 def test_caller_equals_constant_address_classifies_caller_authority(tmp_path):
-    """``require(msg.sender == 0x1234...)`` — the other operand is
-    a constant address. This is a hardcoded auth check; the
-    expanded Rule A accepts ``constant`` as address-typed."""
+    """``require(msg.sender == 0x1234...)``: a hardcoded auth check; expanded Rule A
+    accepts ``constant`` as address-typed."""
     sl = _compile(
         tmp_path,
         """
@@ -828,11 +767,8 @@ def test_caller_equals_constant_address_classifies_caller_authority(tmp_path):
 
 
 def test_caller_equals_block_context_does_not_classify_as_caller_authority(tmp_path):
-    """Pre-expansion this would have classified as caller_authority
-    just because msg.sender appears, but `require(uint256(uint160(
-    msg.sender)) == block.number)` is nonsense as auth — block.number
-    isn't address-typed. After Rule A expansion this stays
-    business."""
+    """``require(uint256(uint160(msg.sender)) == block.number)`` is nonsense as auth
+    (block.number isn't address-typed); after the Rule A expansion it stays business."""
     sl = _compile(
         tmp_path,
         """
@@ -852,13 +788,10 @@ def test_caller_equals_block_context_does_not_classify_as_caller_authority(tmp_p
 
 
 def test_parameter_indices_resolved_caller_side_through_modifier(tmp_path):
-    """The leaf's ``parameter_indices`` field must reference the
-    FUNCTION's parameter positions, not the modifier's. Without
-    caller-side ParameterBindingEnv substitution, a modifier-bound
-    operand would carry the modifier's parameter index (0) which
-    happens to coincide with f's index 0 — so use a function with
-    ≥2 params and a modifier that takes one to make the mapping
-    distinguishable."""
+    """``parameter_indices`` must reference the FUNCTION's parameter positions, not
+    the modifier's. Without caller-side ParameterBindingEnv substitution a modifier
+    index (0) coincides with f's index 0, so use a function with >=2 params and a
+    modifier taking one to make the mapping distinguishable."""
     sl = _compile(
         tmp_path,
         """
@@ -885,8 +818,6 @@ def test_parameter_indices_resolved_caller_side_through_modifier(tmp_path):
 
 
 def test_parameter_indices_resolved_caller_side_through_helper(tmp_path):
-    """Two-hop chain (modifier → internal helper) — the leaf still
-    reports the function's parameter_index, not the helper's."""
     sl = _compile(
         tmp_path,
         """
@@ -909,10 +840,8 @@ def test_parameter_indices_resolved_caller_side_through_helper(tmp_path):
 
 
 def test_caller_equals_keccak_does_not_classify_as_caller_authority(tmp_path):
-    """``require(uint256(uint160(msg.sender)) == keccak256(...))``
-    — the other side is computed (hash output). After Rule A
-    expansion this stays business, since the operand isn't
-    address-typed by source."""
+    """``require(uint256(uint160(msg.sender)) == keccak256(...))``: the other side is
+    computed (hash), so after Rule A expansion it stays business."""
     sl = _compile(
         tmp_path,
         """
@@ -932,9 +861,6 @@ def test_caller_equals_keccak_does_not_classify_as_caller_authority(tmp_path):
 
 
 def test_confidence_high_for_time_gate(tmp_path):
-    """``require(block.timestamp >= deadline)`` is a time gate.
-    The classifier reads block_context with no caller, so the
-    authority_role is ``time`` → HIGH."""
     sl = _compile(
         tmp_path,
         """
@@ -954,12 +880,10 @@ def test_confidence_high_for_time_gate(tmp_path):
 
 
 def test_multi_statement_caller_guard_yields_caller_authority_leaf(tmp_path):
-    """#115 -> #114 end-to-end at the builder: a multi-statement caller guard
-    ``if (msg.sender != owner) { emit Denied(...); revert(); }`` (the revert is
-    two hops below the IF) recovers the same ``caller_authority`` equality leaf
-    as the single-statement ``require(msg.sender == owner)``. HEAD produced no
-    gate -> ``None`` tree -> the function defaulted to public; the fix restores
-    correct owner attribution so the policy no longer projects it public."""
+    """#115 -> #114 end-to-end: a multi-statement caller guard
+    ``if (msg.sender != owner) { emit Denied(...); revert(); }`` (revert two hops below
+    the IF) recovers the same ``caller_authority`` leaf as ``require(msg.sender ==
+    owner)``. HEAD produced no gate -> ``None`` tree -> the function defaulted to public."""
     sl = _compile(
         tmp_path,
         """
@@ -989,13 +913,9 @@ def test_multi_statement_caller_guard_yields_caller_authority_leaf(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# #120 — bool-authority ``return true`` polarity + multi-IF deny fork
-#
-# ``build_return_predicate_tree`` lifts a bool-returning authority
-# provider's if/else chain into an OR of per-path predicates. A tail
-# ``return true`` must carry the negation of EVERY dominating deny-IF (or
-# fail closed), never an always-true leaf and never the deny set re-cast
-# as the allow set.
+# #120 — bool-authority ``return true`` polarity + multi-IF deny fork. A tail
+# ``return true`` must carry the negation of EVERY dominating deny-IF (or fail
+# closed), never an always-true leaf and never the deny set re-cast as the allow set.
 # ---------------------------------------------------------------------------
 
 
@@ -1004,10 +924,9 @@ def _membership_var(leaf):
 
 
 def test_issue120_single_early_deny_returns_complement_not_deny_set(tmp_path):
-    """``if (blocked[src]) return false; return true;`` — the tail
-    ``return true`` is the ELSE of the deny-IF, so ``allowed ⇔ src ∉
-    blocked``. The leaf must be ``falsy`` (complement / cofinite), NOT
-    ``truthy`` (which would make the deny set the allow set — fail-open)."""
+    """``if (blocked[src]) return false; return true;``: the tail is the ELSE of the
+    deny-IF, so the leaf must be ``falsy`` (cofinite), NOT ``truthy`` (deny set as
+    allow set: fail-open)."""
     sl = _compile(
         tmp_path,
         """
@@ -1030,13 +949,10 @@ def test_issue120_single_early_deny_returns_complement_not_deny_set(tmp_path):
 
 
 def test_issue120_multi_deny_chain_ands_all_negations_zero_fabrication(tmp_path):
-    """THE FORK. ``if (a[src]) return false; if (b[src]) return false;
-    return true;`` — the tail ``return true`` must AND the negation of
-    BOTH deny-IFs: ``allowed ⇔ src ∉ a ∧ src ∉ b``. Attributing it to
-    only the closest deny-IF (``falsy[b]`` alone) drops ``!a`` and
-    re-admits every principal in ``a`` (a NEW fail-open). The tree must
-    be an AND of ``falsy[a]`` and ``falsy[b]`` with NO ``truthy``
-    membership anywhere (zero fabricated access)."""
+    """THE FORK. ``if (a[src]) return false; if (b[src]) return false; return true;``:
+    the tail must AND the negation of BOTH deny-IFs. Attributing it to only the
+    closest (``falsy[b]``) drops ``!a`` and re-admits every principal in ``a`` (a NEW
+    fail-open). Expect AND(``falsy[a]``, ``falsy[b]``) with NO ``truthy`` membership."""
     sl = _compile(
         tmp_path,
         """
@@ -1067,9 +983,8 @@ def test_issue120_multi_deny_chain_ands_all_negations_zero_fabrication(tmp_path)
 
 
 def test_issue120_unconditional_true_fails_closed_to_unsupported(tmp_path):
-    """A ``return true`` with no dominating IF is unattributable; it must
-    become a fail-closed ``unsupported`` leaf, never an empty always-true
-    ``business`` leaf that makes the OR tree trivially public."""
+    """A ``return true`` with no dominating IF is unattributable: fail-closed
+    ``unsupported``, never an empty always-true ``business`` leaf (trivially public)."""
     sl = _compile(
         tmp_path,
         """
@@ -1089,12 +1004,10 @@ def test_issue120_unconditional_true_fails_closed_to_unsupported(tmp_path):
 
 
 def test_issue120_maker_dsauth_allow_chain_unchanged(tmp_path):
-    """Regression bar: verbatim Maker ds-auth ``DSAuth.isAuthorized``. Its
-    ``return true`` paths are the THEN-side (``son_true``) of their IFs —
-    genuine allows — so they stay positive equality leaves, and the dropped
-    null-authority guard leaves the ``canCall`` path an external_bool. The
-    tree must remain ``OR(eq[this], eq[owner], external_bool:canCall)`` with
-    NO negation (``falsy``) and NO ``unsupported`` introduced by the fix."""
+    """Regression bar: verbatim Maker ds-auth ``DSAuth.isAuthorized``. Its ``return
+    true`` paths are the THEN-side of their IFs (genuine allows), so the tree stays
+    ``OR(eq[this], eq[owner], external_bool:canCall)`` with NO ``falsy`` and NO
+    ``unsupported`` introduced by the fix."""
     sl = _compile(
         tmp_path,
         """
@@ -1133,11 +1046,9 @@ def test_issue120_maker_dsauth_allow_chain_unchanged(tmp_path):
 
 
 def test_issue120_mixed_allow_then_deny_then_tail(tmp_path):
-    """Combined shape exercising both branches of the fix in one function:
-    ``if (a[src]) return true;`` (an allow-IF — emitted as its own OR child
-    and SKIPPED when negating the tail) then ``if (b[src]) return false;``
-    (a deny-IF — negated on the tail). Result: ``OR(truthy[a], falsy[b])``
-    = ``a ∨ ¬b``, not the fail-open ``OR(truthy[a], truthy[b])``."""
+    """Both branches of the fix in one function: an allow-IF (its own OR child, SKIPPED
+    when negating the tail) then a deny-IF (negated on the tail). Result
+    ``OR(truthy[a], falsy[b])`` = ``a ∨ ¬b``, not the fail-open ``OR(truthy[a], truthy[b])``."""
     sl = _compile(
         tmp_path,
         """
@@ -1164,13 +1075,10 @@ def test_issue120_mixed_allow_then_deny_then_tail(tmp_path):
 
 
 def test_issue120_revert_if_deny_ands_positive_guard(tmp_path):
-    """#120 — a revert-IF guard is a CFG sink, not a leak.
-    ``if (!auth[src]) revert(); if (b[src]) return false; return true;`` — the
-    revert son of the first IF keeps a structural fall-through edge to the
-    ENDIF merge, so without terminator-as-sink the ``!auth`` guard leaks into
-    the post-join region and the tail collapses to a lone ``falsy[b]`` =
-    public-minus-b (a fabrication). The fix must AND the positive ``auth``
-    guard with the ``b`` negation: ``allowed ⇔ src ∈ auth ∧ src ∉ b``."""
+    """#120 — a revert-IF guard is a CFG sink, not a leak. The revert son keeps a
+    fall-through edge to the ENDIF merge, so without terminator-as-sink the ``!auth``
+    guard leaks and the tail collapses to a lone ``falsy[b]`` (public-minus-b, a
+    fabrication). Must AND ``auth`` with the ``b`` negation."""
     sl = _compile(
         tmp_path,
         """
@@ -1200,12 +1108,9 @@ def test_issue120_revert_if_deny_ands_positive_guard(tmp_path):
 
 
 def test_issue120_standalone_require_not_projected_public(tmp_path):
-    """#120 — a standalone ``require(cond)`` is a dominating
-    positive guard, not an ignorable non-IF statement.
-    ``require(wl[src]); if(bl[src]) return false; return true;`` — the builder
-    only inspects IF nodes, so the ``require(wl)`` guard was dropped and the
-    tail became a bare ``falsy[bl]`` = public-minus-bl. The fix conjoins the
-    dominating require: ``allowed ⇔ src ∈ wl ∧ src ∉ bl`` — never public."""
+    """#120 — a standalone ``require(cond)`` is a dominating positive guard. The
+    builder only inspects IF nodes, so ``require(wl)`` was dropped and the tail became
+    a bare ``falsy[bl]`` = public-minus-bl. The fix conjoins the require."""
     sl = _compile(
         tmp_path,
         """
@@ -1234,13 +1139,10 @@ def test_issue120_standalone_require_not_projected_public(tmp_path):
 
 
 def test_issue120_two_revert_guards_and_both_never_public(tmp_path):
-    """#120 — a multi-revert guard chain must AND EVERY
-    guard. ``if(!authA[src]) revert(); if(!authB[src]) revert(); return true;``
-    — both reverts leak their fall-through son to ENDIF, so pre-fix the tail
-    dropped both guards (→ unattributable ``unsupported``, safe but lossy).
-    With terminator-as-sink each ``!authX`` else path negates to a positive
-    membership: ``allowed ⇔ src ∈ authA ∧ src ∈ authB``. Never public, and
-    no fabricated ``falsy`` opening."""
+    """#120 — a multi-revert guard chain must AND EVERY guard. Pre-fix both reverts
+    leaked their fall-through son and the tail went ``unsupported`` (safe but lossy);
+    with terminator-as-sink each ``!authX`` negates to a positive membership. Never
+    public, no fabricated ``falsy`` opening."""
     sl = _compile(
         tmp_path,
         """
@@ -1270,12 +1172,9 @@ def test_issue120_two_revert_guards_and_both_never_public(tmp_path):
 
 
 def test_issue120_single_revert_guard_is_positive_membership(tmp_path):
-    """#120 — the ``_branch_value_is_only_true`` sink change.
-    ``if (!auth[src]) revert(); return true;`` — without treating the revert
-    as a sink, the revert branch reaches the downstream ``return true`` and is
-    misread as an *allow* branch, so its else-guard is skipped and the tail
-    goes ``unsupported``. With the sink the revert branch is a deny, so the
-    tail negates ``!auth`` to ``truthy[auth]`` (``allowed ⇔ src ∈ auth``)."""
+    """#120 — the ``_branch_value_is_only_true`` sink change. Without treating the
+    revert as a sink it reaches ``return true`` and is misread as an *allow* branch,
+    so the tail goes ``unsupported``; with it the tail is ``truthy[auth]``."""
     sl = _compile(
         tmp_path,
         """
@@ -1311,15 +1210,10 @@ def _assert_no_lone_falsy(tree):
 
 
 def test_issue120_internal_call_revert_deny_ands_positive_guard(tmp_path):
-    """#120 — a deny expressed as an internal helper call
-    (not an inline ``revert``) is still a CFG sink. ``if (!auth[src]) _deny();
-    if (b[src]) return false; return true;`` where ``_deny`` always reverts.
-    The ``_deny()`` EXPRESSION node keeps a structural fall-through edge to
-    the ENDIF merge, so unless a call to a provably always-reverting callee is
-    sunk, the ``!auth`` guard leaks and the tail collapses to a lone
-    ``falsy[b]`` = public-minus-b (a fabrication). The fix ANDs the positive
-    ``auth`` guard with the ``b`` negation: ``allowed ⇔ src ∈ auth ∧ src ∉ b``.
-    Never a lone ``falsy``."""
+    """#120 — a deny via an internal helper call (``_deny()``, always reverts) is
+    still a CFG sink. Its EXPRESSION node keeps a fall-through edge to ENDIF, so
+    unless a provably always-reverting callee is sunk the ``!auth`` guard leaks and
+    the tail becomes a lone ``falsy[b]`` (a fabrication). Never a lone ``falsy``."""
     sl = _compile(
         tmp_path,
         """
@@ -1351,12 +1245,9 @@ def test_issue120_internal_call_revert_deny_ands_positive_guard(tmp_path):
 
 
 def test_issue120_library_call_revert_deny_ands_positive_guard(tmp_path):
-    """#120, library variant — a ``LibraryCall`` to an
-    always-reverting library function (``Guard.enforce()``) sinks control
-    identically to the internal-call and inline-``revert`` forms. Same shape
-    (``if (!auth[src]) Guard.enforce(); if (b[src]) return false; return
-    true;``) must yield ``AND(truthy[auth], falsy[b])``, never a lone
-    ``falsy[b]``."""
+    """#120, library variant: a ``LibraryCall`` to an always-reverting function
+    (``Guard.enforce()``) sinks control like the internal-call and inline-``revert``
+    forms, yielding ``AND(truthy[auth], falsy[b])``, never a lone ``falsy[b]``."""
     sl = _compile(
         tmp_path,
         """
@@ -1386,15 +1277,11 @@ def test_issue120_library_call_revert_deny_ands_positive_guard(tmp_path):
 
 
 def test_issue120_unclassified_call_deny_fails_closed(tmp_path):
-    """#120 backstop — a deny routed through a call whose
-    revert can't be PROVEN (an external call) must fail closed, not leak.
-    ``if (!auth[src]) g.enforce(src); if (b[src]) return false; return true;``
-    where ``g.enforce`` is an external interface call: ``_callee_always_reverts``
-    can't see its body, so the ``!auth`` edge is not sunk and the ``!auth``
-    guard leaks. Because an unclassified mid-body call sits on the path to the
-    ``return true`` whose guards already opened cofinite (``falsy[b]``), the
-    child fails closed to ``unsupported`` — never the lone public-minus-b
-    opening."""
+    """#120 backstop: a deny through a call whose revert can't be PROVEN (an external
+    call, so ``_callee_always_reverts`` can't see its body) must fail closed. An
+    unclassified mid-body call sits on the path to a ``return true`` whose guards
+    already opened cofinite, so the child becomes ``unsupported``, never the lone
+    public-minus-b opening."""
     sl = _compile(
         tmp_path,
         """
@@ -1420,18 +1307,14 @@ def test_issue120_unclassified_call_deny_fails_closed(tmp_path):
 
 
 def test_hash_commitment_leaf_keeps_its_computed_operand_and_names_what_it_commits(tmp_path):
-    """The Teller ``refundDeposit`` shape, reduced.
+    """The Teller ``refundDeposit`` shape, reduced. Two things must hold at once:
 
-    Two things must hold at once and they pull against each other:
-
-    1. The gate names the parameters the hash commits — without that a consumer
-       cannot tell which arguments the commitment pins, and the guard reads as a
-       constraint on ``nonce`` alone.
-    2. The ``computed`` operand SURVIVES. It is the only thing that says
-       *hash commitment* rather than *equality against storage*, and the
-       resolver routes on it: promoting a committed parameter into the operand
-       slot would turn a commitment gate into ``parameter``, i.e. "self-service,
-       anyone on their own argument" — an opening, from a fix.
+    1. The gate names the parameters the hash commits; otherwise a consumer cannot
+       tell which arguments the commitment pins.
+    2. The ``computed`` operand SURVIVES: it is the only thing saying *hash
+       commitment* rather than *equality against storage*, and promoting a committed
+       parameter into the operand slot would read as ``parameter`` (self-service,
+       anyone on their own argument), an opening from a fix.
     """
     sl = _compile(
         tmp_path,
@@ -1487,37 +1370,11 @@ def test_computed_operand_without_argument_provenance_says_not_determined(tmp_pa
     assert all(o.get("derived_from") is None for o in computed)
 
 
-def test_non_computed_operands_do_not_carry_derived_from(tmp_path):
-    """Absence means "the question does not apply", so it must be reserved for
-    operands that are not computed at all."""
-    sl = _compile(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C {
-            address public owner;
-            function f() external view {
-                require(msg.sender == owner, "no");
-            }
-        }
-    """,
-    )
-    leaves = _all_leaves(build_predicate_tree(_function(sl, "f")))
-    operands = [o for le in leaves for o in le["operands"]]
-    assert operands
-    assert all("derived_from" not in o for o in operands if o["source"] != "computed")
-
-
 # ---------------------------------------------------------------------------
-# guard_extraction_uncertain — the producer half.
-#
-# Re-measured over the full 88-contract replay: every tree-less predicate
-# target has ZERO revert gates (the class-F/R widening lowered every gated
-# function the earlier count covered), so the marker has zero realised rows
-# on this corpus — a lower bound, not a proof of unreachability. These tests
-# are the fallback: the sentinel is reachable by construction (a caller-eq
-# gate whose subtree lowering fails) and the discriminator is precise in both
-# directions (a genuinely ungated / value-gated function is never flagged).
+# guard_extraction_uncertain — the producer half. Over the 88-contract replay every
+# tree-less predicate target has ZERO revert gates, so the marker has zero realised
+# rows (a lower bound, not proof of unreachability). These tests are the fallback:
+# the sentinel is reachable by construction and the discriminator is precise both ways.
 # ---------------------------------------------------------------------------
 
 
@@ -1544,10 +1401,9 @@ _VALUE_GATED = """
 
 
 def test_uncertain_marker_fires_on_unlowerable_caller_eq_gate(tmp_path, monkeypatch):
-    """Constructed lowering failure: when no subtree can be built for a
-    function whose gate IS a direct caller EQ/NEQ compare, the builder must
-    flag the full_name instead of silently returning None (which the policy
-    would then read as 'unguarded')."""
+    """Constructed lowering failure: when no subtree can be built for a function whose
+    gate IS a direct caller EQ/NEQ compare, flag the full_name instead of returning
+    None (which the policy would read as 'unguarded')."""
     import services.static.contract_analysis_pipeline.predicates.tree as predicates_mod
 
     sl = _compile(tmp_path, _CALLER_EQ_GATED)
@@ -1561,9 +1417,8 @@ def test_uncertain_marker_fires_on_unlowerable_caller_eq_gate(tmp_path, monkeypa
 
 
 def test_uncertain_marker_not_fired_for_value_gate_under_same_failure(tmp_path, monkeypatch):
-    """Discriminator, adverse direction: the SAME constructed lowering failure
-    on a value-check gate (``require(amount > 0)``) must NOT flag the function
-    — a fail-closed sweep that marks real public functions unsupported is an
+    """Adverse direction: the SAME failure on a value-check gate (``require(amount >
+    0)``) must NOT flag the function; marking real public functions unsupported is an
     over-hedge the spec forbids."""
     import services.static.contract_analysis_pipeline.predicates.tree as predicates_mod
 
@@ -1578,9 +1433,8 @@ def test_uncertain_marker_not_fired_for_value_gate_under_same_failure(tmp_path, 
 
 
 def test_uncertain_marker_not_fired_when_gate_lowers(tmp_path):
-    """Production path (no constructed failure): the caller-eq gate lowers into
-    a tree, so nothing is flagged — the marker only ever names functions whose
-    guard was seen AND lost."""
+    """Production path: the caller-eq gate lowers into a tree, so nothing is flagged;
+    the marker only names functions whose guard was seen AND lost."""
     sl = _compile(tmp_path, _CALLER_EQ_GATED)
     fn = _function(sl, "sweep")
     uncertain: set[str] = set()
@@ -1590,11 +1444,9 @@ def test_uncertain_marker_not_fired_when_gate_lowers(tmp_path):
 
 
 def test_uncertain_marker_reaches_artifact_and_policy_routes_unsupported(tmp_path, monkeypatch):
-    """End-to-end (compiled source -> artifact -> policy): the flagged
-    signature is carried as ``guard_extraction_uncertain`` on the predicate
-    artifact and build_effective_permissions routes it to ``unsupported`` with
-    the truthful reason, while a genuinely gate-less public function on the
-    same contract stays public."""
+    """End-to-end (source -> artifact -> policy): the flagged signature is carried as
+    ``guard_extraction_uncertain`` and routed to ``unsupported`` with the truthful
+    reason, while a genuinely gate-less public function on the same contract stays public."""
     import services.static.contract_analysis_pipeline.predicates.tree as predicates_mod
     from services.policy.effective_permissions import build_effective_permissions
     from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts
@@ -1660,10 +1512,9 @@ def test_uncertain_marker_reaches_artifact_and_policy_routes_unsupported(tmp_pat
 
 
 def test_operand_sort_key_totally_orders_element_fields():
-    """``absorbed_operands`` is evidence, so its order must come from content.
-    Two operands separated only by the element fields would otherwise settle on
-    input order under a stable sort — and an operand carrying none of them has
-    to order against one that does without the comparison raising."""
+    """``absorbed_operands`` is evidence, so its order must come from content: two
+    operands differing only in the element fields must not settle on input order, and
+    an operand with none of them must order against one that has them without raising."""
 
     def key(op: dict[str, Any]) -> tuple[str, ...]:
         # A plain dict, because ``bare`` is the shape an operand that resolved

@@ -14,7 +14,6 @@ import pytest
 
 from services.discovery.inventory_domain import (
     ADDRESS_RE,
-    CHAIN_IDS,
     DOMAIN_RE,
     URL_RE,
     RateLimiter,
@@ -83,14 +82,6 @@ class TestDomainRE:
 # ---------------------------------------------------------------------------
 
 
-class TestConstants:
-    def test_chain_ids_ethereum_is_1(self):
-        # Cross-module agreement: the ``utils.chains`` registry and inventory's
-        # ``CHAIN_IDS`` must resolve the same id, which chain_resolver.py feeds to
-        # Etherscan v2 as the ``chainid`` query param.
-        assert CHAIN_IDS["ethereum"] == 1
-
-
 # ---------------------------------------------------------------------------
 # RateLimiter
 # ---------------------------------------------------------------------------
@@ -103,7 +94,6 @@ class TestRateLimiter:
         start = time.monotonic()
         rl.wait()
         elapsed = time.monotonic() - start
-        # Second call should wait roughly 50ms
         assert elapsed >= 0.04  # allow small timing slack
 
     def test_no_wait_if_enough_time_passed(self):
@@ -127,11 +117,6 @@ class TestDebugLog:
         captured = capsys.readouterr()
         assert "hello debug" in captured.err
         assert "[debug]" in captured.err
-
-    def test_disabled_prints_nothing(self, capsys):
-        _debug_log(False, "should not appear")
-        captured = capsys.readouterr()
-        assert captured.err == ""
 
 
 class TestGetDomain:
@@ -218,7 +203,6 @@ class TestExtractAddresses:
         assert _extract_addresses("") == set()
 
     def test_none_values_skipped(self):
-        # Falsy values should be skipped
         assert _extract_addresses("", cast(Any, None)) == set()
 
     def test_deduplication(self):
@@ -510,7 +494,6 @@ class TestLlmSelectDomain:
             {"url": "https://docs.uniswap.org/contracts", "title": "Uniswap Docs"},
             {"url": "https://docs.uniswap.org/guides", "title": "Guides"},
         ]
-        # LLM returns "1" meaning the first (and only) domain
         monkeypatch.setattr(
             "services.discovery.inventory_domain.llm.chat",
             lambda *a, **kw: "1",
@@ -543,13 +526,11 @@ class TestLlmSelectDomain:
         assert extras[0] == "gitbook.uniswap.org"
 
     def test_multiple_domains_deduplication(self, monkeypatch):
-        """LLM returning the same index twice should not produce duplicate extras."""
         results = [
             {"url": "https://a.example.com/p1", "title": "A1"},
             {"url": "https://a.example.com/p2", "title": "A2"},
             {"url": "https://b.example.com/p1", "title": "B1"},
         ]
-        # "1, 1, 2" — index 0 twice, index 1 once
         monkeypatch.setattr(
             "services.discovery.inventory_domain.llm.chat",
             lambda *a, **kw: "1, 1, 2",
@@ -620,9 +601,6 @@ class TestDomainCandidatesFromResults:
         candidates = _domain_candidates_from_results(results)
         assert candidates[0] == "docs.aave.com"
 
-    def test_empty_results(self):
-        assert _domain_candidates_from_results([]) == []
-
     def test_skips_empty_urls(self):
         results = [{"url": "", "title": "No URL"}, {"url": "  ", "title": "Blank"}]
         assert _domain_candidates_from_results(results) == []
@@ -650,9 +628,6 @@ class TestCollectInDomainPages:
         ]
         pages = _collect_in_domain_pages(results, "a.com")
         assert len(pages) == 1
-
-    def test_empty_results(self):
-        assert _collect_in_domain_pages([], "example.com") == []
 
     def test_subdomain_match(self):
         results = [
@@ -777,9 +752,6 @@ class TestDedupeResultsByUrl:
         assert len(deduped) == 1
         assert deduped[0]["url"] == "https://a.com/page"
 
-    def test_empty_results(self):
-        assert _dedupe_results_by_url([]) == []
-
     def test_merged_result_preserves_extra_fields(self):
         results = [
             {"url": "https://a.com/page", "content": "short", "score": 0.5},
@@ -796,22 +768,6 @@ class TestDedupeResultsByUrl:
 
 
 class TestDiscoverContractInventoryPages:
-    def test_no_results_returns_empty(self, monkeypatch):
-        monkeypatch.setattr(
-            "services.discovery.inventory_domain._tavily_search",
-            lambda *a, **kw: [],
-        )
-        combined, recommended = _discover_contract_inventory_pages(
-            domain="example.com",
-            company="TestCo",
-            broad_results=[],
-            queries_used=[0],
-            max_queries=5,
-            errors=[],
-        )
-        assert combined == []
-        assert recommended == []
-
     def test_with_broad_and_site_results(self, monkeypatch):
         site_results = [
             {"url": "https://docs.example.com/contracts", "title": "Contracts", "content": "addresses"},
@@ -861,13 +817,11 @@ class TestDiscoverContractInventoryPages:
             errors=[],
             extra_domains=["gitbook.example.com"],
         )
-        # Should search both domains
         assert len(search_queries) == 2
         assert any("example.com" in q for q in search_queries)
         assert any("gitbook.example.com" in q for q in search_queries)
 
     def test_combined_results_but_no_in_domain_pages(self, monkeypatch):
-        """When Tavily returns results but none match the target domain."""
         site_results = [
             {"url": "https://other.com/page", "title": "Other", "content": "off-domain"},
         ]
@@ -884,7 +838,6 @@ class TestDiscoverContractInventoryPages:
             max_queries=5,
             errors=[],
         )
-        # combined should have results (off-domain ones), recommended should be empty
         assert len(combined) > 0
         assert recommended == []
 

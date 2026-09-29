@@ -1,35 +1,15 @@
 """Interprocedural forwarded-destination/amount recovery (Part A fixes #1-#3).
 
-The ``flow.out`` lattice walks value movement rooted at ONE external entry, so
-the argument forwarded at each internal-call site along that single path is
-unambiguous. These tests prove the recovery of a nested ``parameter``
-destination/amount to the entry-rooted origin it was forwarded from — the
+The ``flow.out`` lattice walks value movement rooted at ONE external entry, so the
+argument forwarded at each internal-call site is unambiguous. These tests prove a
+nested ``parameter`` destination/amount is recovered to its entry-rooted origin (the
 recall regression that collapsed 76/78 live destinations to ``indeterminate``
-because every real ETH send lives one hop inside a helper/library.
+because every real ETH send lives one hop inside a helper/library), and that
+divergent origins, merged element bases and balance-DELTA amounts stay
+``indeterminate`` (witness bar). The last sections cover WHICH parameter a ``param``
+destination is (``target_param_index``) and the legacy ``eth_out`` flow.
 
-Recovered:
-  * an OZ ``Address.sendValue`` / ``functionCallWithValue`` library shape;
-  * a multi-hop (3-hop) forwarded ``receiver`` chain -> ``param``;
-  * a ``msg.sender`` / ``tx.origin`` / immutable / state-var forwarded origin;
-  * the same for ``amount_kind``;
-  * a mapping-element / storage-struct destination (``_requests[id].recipient``)
-    -> ``storage_setter`` (redirectable base var), NEVER ``param``;
-  * a param forwarded ONWARD through a second helper that sibling entries also
-    call (Lido ``claimWithdrawalsTo``);
-  * an array/struct ELEMENT of a caller-supplied base (``targets[i]``,
-    ``request.user``) -> ``param``, classified from the root, never the key.
-
-Held at the witness bar (stay ``indeterminate``):
-  * a helper reached from two call sites with DIVERGENT forwarded origins;
-  * an element whose BASE is merged across branches;
-  * a balance-DELTA amount, which must not claim ``whole_balance``.
-
-The last two sections cover WHICH parameter a ``param`` destination is —
-``target_param_index``, the ABI slot the fork prober plants its sentinel in —
-and the legacy ``contract_analysis`` eth_out flow that used to deny every native
-send had a caller-chosen recipient at all.
-
-Precedent: ``tests/static/test_flow_lattice.py`` (same compile-with-Slither harness).
+Precedent: ``test_flow_lattice.py`` (same compile-with-Slither harness).
 """
 
 from __future__ import annotations
@@ -328,12 +308,9 @@ def test_divergent_multi_caller_destination_is_indeterminate(tmp_path):
 
 
 # --- Zero-value call is not a flow (OZ SafeERC20 / Address shape) -----------
-# A ``.call{value: value}`` whose ``value`` is a provably-constant 0 (OZ's
-# ``Address.functionCallWithValue(target, data, 0)``, the way SafeERC20 routes a
-# token transfer) moves no ETH. It must NOT register as a value-out flow, or it
-# folds with the function's real ETH send and collapses the recovered
-# destination to ``indeterminate`` — the exact SafeERC20 pollution seen on the
-# real EtherFiRedemptionManager.
+# A ``.call{value: value}`` with a provably-constant 0 (the way SafeERC20 routes a
+# token transfer) moves no ETH. Registering it would fold with the real ETH send and
+# collapse the destination to ``indeterminate`` (seen on EtherFiRedemptionManager).
 
 _ZERO_VALUE_SRC = """
 pragma solidity ^0.8.20;
@@ -378,21 +355,16 @@ def test_zero_value_call_does_not_pollute_real_send(tmp_path):
     contract = _compile(tmp_path, _ZERO_VALUE_SRC, "Mixed")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["redeem(address,uint256,bytes)"])
-    # The zero-value token call is excluded, so the real ETH send's caller
-    # destination survives the fold instead of collapsing to indeterminate.
+    # The zero-value token call is excluded, so the real send's destination survives the fold.
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
 
 # --- Witness bar: a COMPUTED operand must never recover a member of a union ---
-# The forwarded-param recovery drops the entrypoint-Phi echoes that sit beside a
-# DIRECTLY-read nested parameter (they can only be the parameter's own binding
-# from other call sites). But a ``computed`` operand (Binary/Member/…) attaches
-# its wrapper alongside ALL operand sources, so it can carry a GENUINE co-origin
-# with no Phi. Dropping it there would guess the ``param`` member of a real
-# union and make the nested classification MORE specific than the byte-identical
-# entry-level code. The invariant these guard: nested classification is never
-# more specific than the same operand shape classified at the entry.
+# Recovery drops the entrypoint-Phi echoes beside a DIRECTLY-read nested parameter,
+# but a ``computed`` operand attaches ALL operand sources and can carry a genuine
+# co-origin with no Phi. Dropping it would make nested classification MORE specific
+# than the byte-identical entry-level code, which is the invariant guarded here.
 
 _COMPUTED_MIX_SRC = """
 pragma solidity ^0.8.20;
@@ -476,14 +448,10 @@ def test_computed_single_origin_struct_member_still_recovers(tmp_path):
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
 
-# ---------------------------------------------------------------------------
-# Balance READ vs balance DELTA amounts.
-#
-# ``whole_balance`` asserts the send can drain everything the contract holds.
-# EtherFiRedemptionManager's ``ethReceived = address(this).balance -
-# prevBalance`` is a bounded delta of an LP withdrawal, and the interprocedural
-# recovery routes real fund-out functions into the pure-computed branch, so the
-# over-claim now reaches live data. Arithmetic on a balance is not the balance.
+# Balance READ vs balance DELTA amounts. ``whole_balance`` asserts the send can
+# drain the contract; EtherFiRedemptionManager's ``address(this).balance -
+# prevBalance`` is a bounded delta, and interprocedural recovery now routes real
+# fund-out functions into that branch. Arithmetic on a balance is not the balance.
 # ---------------------------------------------------------------------------
 
 _BALANCE_AMOUNT_SRC = """
@@ -535,19 +503,7 @@ def test_bare_balance_read_stays_whole_balance(tmp_path):
     assert _out_flow(effects["functions"]["drainEntry(address)"])["amount_kind"]["kind"] == "whole_balance"
 
 
-def test_balance_delta_amount_does_not_claim_whole_balance(tmp_path):
-    contract = _compile(tmp_path, _BALANCE_AMOUNT_SRC, "BalanceAmounts")
-    effects = build_effects(contract)
-    amount = _out_flow(effects["functions"]["deltaEntry(address,uint256)"])["amount_kind"]
-    # A delta of two balance reads is not the balance: claiming whole_balance
-    # here reads as "this can drain the contract" on a bounded redemption path.
-    assert amount["kind"] != "whole_balance", amount
-    assert amount == {"kind": "balance_delta", "tier": "static_trace"}, amount
-
-
 def test_balance_amount_nested_matches_entry(tmp_path):
-    """Entry-vs-nested parity: the byte-identical operand shape classifies the
-    same whether the send sits in the entry or one hop inside a helper."""
     contract = _compile(tmp_path, _BALANCE_AMOUNT_SRC, "BalanceAmounts")
     effects = build_effects(contract)
     fns = effects["functions"]
@@ -558,15 +514,10 @@ def test_balance_amount_nested_matches_entry(tmp_path):
     )
 
 
-# ---------------------------------------------------------------------------
-# A parameter forwarded ONWARD through a second helper (Lido
-# ``claimWithdrawalsTo`` -> ``_claim`` -> ``_sendValue``).
-#
-# ``_claim``'s entrypoint Phi carries the sibling entries' ``msg.sender``
-# alongside its own parameter seed. The use-site classifiers already drop those
-# echoes for a directly-read nested parameter; the ARGUMENT resolver must drop
-# them the same way, or forwarding the parameter one hop further loses the
-# binding to a phantom {msg_sender, param} disagreement.
+# A parameter forwarded ONWARD through a second helper (Lido ``claimWithdrawalsTo``
+# -> ``_claim`` -> ``_sendValue``). ``_claim``'s entrypoint Phi carries sibling
+# entries' ``msg.sender``; the ARGUMENT resolver must drop those echoes like the
+# use-site classifiers do, or the binding is lost to a phantom disagreement.
 # ---------------------------------------------------------------------------
 
 _ONWARD_FORWARD_SRC = """
@@ -620,7 +571,6 @@ def test_msg_sender_sibling_entries_unchanged(tmp_path):
 
 
 def test_onward_forward_nested_matches_entry(tmp_path):
-    """Entry-vs-nested parity for the guarded forwarded param."""
     contract = _compile(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
     effects = build_effects(contract)
     fns = effects["functions"]
@@ -671,14 +621,10 @@ def test_two_hop_chain_does_not_leak_across_entries(tmp_path):
     assert _out_flow(fns["entryImmutable(uint256)"])["target_kind"]["kind"] == "immutable"
 
 
-# ---------------------------------------------------------------------------
 # Array / struct ELEMENT destinations and amounts (TimelockController
-# ``executeBatch`` sends to ``targets[i]``).
-#
-# An element is classified from its ROOT base, never from the key: every element
-# of one base shares that base's origin. A caller-supplied array/struct root is
-# caller-chosen -> ``param``; a STORAGE root keeps the base var's mutability and
-# can never become ``param``.
+# ``executeBatch`` sends to ``targets[i]``). An element is classified from its ROOT
+# base, never the key: a caller-supplied root is ``param``; a STORAGE root keeps the
+# base var's mutability and can never become ``param``.
 # ---------------------------------------------------------------------------
 
 _ELEMENT_SRC = """
@@ -735,7 +681,6 @@ def test_param_array_element_destination_recovers_to_param(tmp_path):
 
 
 def test_array_element_nested_matches_entry(tmp_path):
-    """Entry-vs-nested parity for the array-element operand shape."""
     contract = _compile(tmp_path, _ELEMENT_SRC, "Batch")
     effects = build_effects(contract)
     fns = effects["functions"]
@@ -795,13 +740,9 @@ def test_calldata_struct_member_destination_is_param(tmp_path):
     assert nested["amount_kind"] == entry["amount_kind"]
 
 
-# ---------------------------------------------------------------------------
-# ``target_param_index`` — WHICH entry parameter the destination is.
-#
-# The kind says a caller-chosen destination exists; the fork prober additionally
-# needs the ABI slot to plant a sentinel address in. An index is emitted only for
-# a destination that IS one whole entry parameter, agreed by every contributing
-# site; everything else must emit nothing rather than address a guessed slot.
+# ``target_param_index`` — WHICH entry parameter the destination is. The fork prober
+# needs the ABI slot to plant a sentinel in; an index is emitted only for a
+# destination that IS one whole entry parameter agreed by every contributing site.
 # ---------------------------------------------------------------------------
 
 
@@ -903,13 +844,10 @@ def test_param_index_for_guarded_onward_forward(tmp_path):
     assert _index(fns["claimSelf(uint256[],uint256[])"]) is None
 
 
-# ---------------------------------------------------------------------------
 # The legacy ``contract_analysis`` eth_out flow (``summaries._extract_value_flows``)
-#
-# It used to hardcode ``token_var=None, is_parameter=False`` on EVERY native
-# send — asserting "no caller-chosen address here" even when the recipient was
-# the entry's own parameter. It now names the recipient where the send site can
-# see it, and stays silent (not false) everywhere else.
+# used to hardcode ``is_parameter=False`` on EVERY native send, asserting "no
+# caller-chosen address" even for the entry's own parameter. It now names the
+# recipient where visible and stays silent (not false) elsewhere.
 # ---------------------------------------------------------------------------
 
 

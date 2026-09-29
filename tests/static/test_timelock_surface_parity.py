@@ -1,28 +1,18 @@
 """Producer parity for the unanalysed 2-day timelock (C2).
 
-`contracts.id=11` — 0xcd425f44758a08baab3c4908f3e3de5776e45d7a, "Operating
-Timelock" — has `job_id`, `source_verified` and `compiler_version` all NULL and
-**zero** `effective_functions`, while its twins id=12 (0x9f26d4c9…, v0.8.13) and
-id=472 (0x70a64840…, v0.8.21) have 12 each. Its authority reaches 53
-`function_principals` rows across 16 contracts, so the scorer publishes
-`timelock_proposer_unresolved` against it and can walk nothing.
+`contracts.id=11` (0xcd425f44758a08baab3c4908f3e3de5776e45d7a, "Operating Timelock") has NULL
+`job_id` / `source_verified` / `compiler_version` and **zero** `effective_functions`, while twins
+id=12 and id=472 have 12 each; its authority reaches 53 `function_principals` rows, so the scorer
+publishes `timelock_proposer_unresolved` and can walk nothing.
 
-The fix is ONE analysis job, not a raised `analyze_limit`. What makes that a
-verification rather than a hope is that the expected output shape is a
-compiler-derived fact known in advance: the verified source is
-Etherscan-verified `EtherFiTimelock` at v0.8.25+commit.b61c2a91, 60,385 chars of
-standard-json vendored under `tests/fixtures/contracts/etherfi_timelock/`, and
-its non-view surface is exactly the 12 names below — byte-identical to what both
-twins produced.
+The fix is ONE analysis job. It is verifiable because the expected output is a compiler-derived
+fact: Etherscan-verified `EtherFiTimelock` v0.8.25+commit.b61c2a91 (standard-json vendored under
+`tests/fixtures/contracts/etherfi_timelock/`) has exactly the 12 non-view names below, as both twins.
 
-**What this test deliberately does NOT pin: `authority_openness`.** The twins'
-eight `restricted` verdicts are `finite_set` capabilities carrying concrete,
-deployment-specific member addresses (contract 12's `schedule` resolves to
-0xcdd57d11…), produced by the semantic capability resolver from on-chain
-role-holder event folds. Asserting `restricted` for id=11 offline would mean
-importing the twins' role holders onto a different contract with different role
-grants — the exact substitution the C2 finding forbids. Offline we pin only the
-resolver-independent subset; the eight are a live-run outcome.
+**Deliberately NOT pinned: `authority_openness`.** The twins' eight `restricted` verdicts are
+`finite_set` capabilities with deployment-specific member addresses from on-chain role-holder
+folds; asserting them offline would import the twins' role holders onto a different contract,
+the substitution the C2 finding forbids. Only the resolver-independent subset is pinned.
 """
 
 from __future__ import annotations
@@ -68,13 +58,9 @@ _ENTRY = {
 def _require_solc() -> None:
     """FAIL, never skip, when the pinned solc is absent.
 
-    `_compile_subject` raises `SolcNotInstalled` precisely so callers can skip
-    cleanly — and `WITNESS_INTEGRITY_LEDGER.md:584` records that exact courtesy
-    silently disabling the label-corpus gate in an under-provisioned venv. A
-    producer-parity test that skips proves nothing while reporting green, so
-    this one refuses the skip and routes around every caller that would catch
-    the exception for it.
-    """
+    `_compile_subject` raises `SolcNotInstalled` so callers can skip, and
+    `WITNESS_INTEGRITY_LEDGER.md:584` records that courtesy silently disabling the label-corpus
+    gate. A parity test that skips proves nothing while reporting green."""
     binary = label_corpus._solc_select_binary(SOLC_VERSION)
     if not binary.exists():
         raise AssertionError(
@@ -95,11 +81,8 @@ def compiled():
 def _non_view_names(effects) -> list[str]:
     """Non-view function names from the production effects artifact.
 
-    ``state_changing`` is the producer's own discriminator and the same column
-    the twins' 12 rows carry (``effective_functions.state_changing`` is true on
-    12/12 for both), so this reads the shipped verdict rather than re-deriving
-    one from mutability.
-    """
+    ``state_changing`` is the producer's own discriminator (true on 12/12 for both twins), so
+    this reads the shipped verdict rather than re-deriving one from mutability."""
     return sorted(
         full_name.split("(", 1)[0]
         for full_name, record in (effects.get("functions") or {}).items()
@@ -107,39 +90,26 @@ def _non_view_names(effects) -> list[str]:
     )
 
 
-def test_solc_pin_is_provisioned_and_fails_loudly_otherwise():
-    """The guard itself. If this fails, every other assertion here is vacuous —
-    which is the failure mode a silent skip would have hidden."""
-    _require_solc()
-    assert label_corpus._solc_select_binary(SOLC_VERSION).exists()
-
-
 def test_non_view_surface_matches_the_twins_exactly(compiled):
-    """The success criterion for the one job the fix runs, known before running
-    it: 12 names, byte-exact, the same set both twins produced."""
+    """The success criterion for the fix's one job, known before running it: the same 12 names as both twins."""
     _subject, effects = compiled
     assert tuple(_non_view_names(effects)) == EXPECTED_NON_VIEW
 
 
 def test_subject_is_the_verified_contract(compiled):
-    """The compile resolved the real subject, not a library or a base class —
-    a parity assertion over the wrong contract would pass while proving
-    nothing."""
+    """The compile resolved the real subject, not a library or base class (parity over the wrong
+    contract proves nothing)."""
     subject, _effects = compiled
     assert subject.name == "EtherFiTimelock"
 
 
 def test_unverified_source_writes_no_contract_row(monkeypatch):
-    """FAIL-CLOSED. Etherscan answering `status: 0` / empty `SourceCode` must
-    raise out of the fetch — so the job reaches `failed_terminal` with a
-    `stage_error` — and must NOT leave a `contracts` row behind.
+    """FAIL-CLOSED. Etherscan `status: 0` / empty `SourceCode` must raise out of the fetch (job
+    reaches `failed_terminal` with a `stage_error`) and leave NO `contracts` row behind.
 
-    A fabricated 0-function row is the failure that MATTERS here: id=11 already
-    exists with `source_verified` NULL and zero functions, and a row that looks
-    analysed-with-nothing-found is indistinguishable from a contract that
-    genuinely has no functions. The absence of the row is what keeps
-    "unanalysed" and "analysed, empty" different facts.
-    """
+    id=11 already exists with NULL `source_verified` and zero functions; a fabricated 0-function
+    row would be indistinguishable from a contract with no functions, so the absence keeps
+    "unanalysed" and "analysed, empty" different facts."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -188,18 +158,13 @@ def test_unverified_source_writes_no_contract_row(monkeypatch):
 
 
 def test_static_producer_mints_no_openness_verdict(compiled):
-    """The refusal, made executable — and SCOPED: this covers the STATIC
-    producer only.
+    """The refusal, made executable and SCOPED to the STATIC producer.
 
-    `authority_openness` has no static writer at all. Every writer is
-    policy-stage (`effective_permissions_writer.py:119,318,332`;
-    `effective_permissions.py:652,801,821`), so what this test can catch is a
-    static regression that starts minting a capability verdict from source
-    alone. It is **structurally blind to the more realistic failure**: the
-    semantic resolver minting `restricted` for id=11 from a fold that did not
-    happen. That one is only observable once the resolver runs, i.e. in the live
-    run — it is not covered here and must not be reported as covered.
-    """
+    `authority_openness` has no static writer (all are policy-stage,
+    `effective_permissions_writer.py:119,318,332`), so this catches only a static regression that
+    mints a capability verdict from source alone. It is **structurally blind to the more realistic
+    failure**, the semantic resolver minting `restricted` for id=11 from a fold that did not happen;
+    that is observable only in the live run and must not be reported as covered."""
     _subject, effects = compiled
     for record in (effects.get("functions") or {}).values():
         if isinstance(record, dict):

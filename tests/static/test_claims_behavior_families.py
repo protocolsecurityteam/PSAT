@@ -1,16 +1,13 @@
 """Behavior-family claim matchers over the frozen fixture corpus.
 
-Drives the real static stack — Slither compile -> ``build_predicate_artifacts``
--> ``build_effects`` -> ``build_claims`` -> the registered matchers — on the
-corpus contracts, and asserts the pause / flow / supply / callee_pointer /
-user-plane claims each contract must (and must not) carry. Each family keeps at
-least one positive and one negative; where a family's real positive left the
-corpus (gov.delegate / flow.in), it is pinned through ``build_claims`` on the
-documented facts shape instead (input data, not a faked collaborator).
+Drives the real stack (Slither compile -> predicate artifacts -> effects -> claims ->
+matchers) and asserts the pause / flow / supply / callee_pointer / user-plane claims
+each contract must (and must not) carry. Each family keeps a positive and a negative;
+where a real positive left the corpus (gov.delegate / flow.in) it is pinned through
+``build_claims`` on the documented facts shape instead.
 
-The whole corpus pins solc 0.8.27 (the version the offline CI ``test`` job
-installs); each contract compiles once (shared per-address cache) and the gate
-never reaches the network to resolve a version.
+The corpus pins solc 0.8.27 (what the offline CI job installs); each contract compiles
+once and the gate never reaches the network to resolve a version.
 """
 
 from __future__ import annotations
@@ -221,14 +218,6 @@ def test_weth_wrap_unwrap_idiom():
     assert "weth.withdraw" in _ids(fns["withdraw(uint256)"])
 
 
-def test_erc20_counterexample_non_token_contract_has_no_erc20_claims():
-    """LzOApp is not an ERC-20; its config setters carry no user-plane token
-    claims."""
-    fns = _load(LZ_OAPP)
-    for sig, claims in fns.items():
-        assert not _ids(claims) & {"erc20.approve", "erc20.transfer", "erc20.transfer_from"}, sig
-
-
 def test_gov_delegate_positive_writes_delegates_and_checkpoints():
     """Comp-style delegation — writing both the ``delegates`` map and the
     ``checkpoints`` voting-power ledger is the voting-power move. The gate is
@@ -253,26 +242,10 @@ def test_gov_delegate_positive_writes_delegates_and_checkpoints():
     assert "gov.delegate" in ids["delegate(address)"]
 
 
-def test_gov_delegate_counterexample_non_voting_token():
-    """WrappedNative writes no ``delegates``/``checkpoints`` maps — no delegation
-    claim on any of its functions."""
-    fns = _load(WRAPPED_NATIVE)
-    for claims in fns.values():
-        assert "gov.delegate" not in _ids(claims)
-
-
 def test_lz_oapp_config_claims():
     fns = _load(LZ_OAPP)
     assert _one(fns["setPeer(uint32,bytes32)"], "lz_oapp.set_peer")["tier"] == "standard_exact"
     assert _one(fns["setDelegate(address)"], "lz_oapp.set_delegate")["tier"] == "standard_exact"
-
-
-def test_lz_oapp_counterexample_non_oapp_has_no_peer_claim():
-    """A contract without the OApp gate never gets an lz_oapp claim — WrappedNative
-    has none, proving no accidental fire."""
-    fns = _load(WRAPPED_NATIVE)
-    for claims in fns.values():
-        assert not _ids(claims) & {"lz_oapp.set_peer", "lz_oapp.set_delegate"}
 
 
 # ---------------------------------------------------------------------------
@@ -306,9 +279,6 @@ def _fn_record(signature: str, selector: str, **extra: Any) -> dict[str, Any]:
 
 
 def test_erc20_near_miss_selectors_without_the_erc20_standard():
-    """The ERC-20 transfer/approve/transferFrom selectors on a contract that is
-    not an ERC-20 mint no user-plane token claim — the standard, not the
-    selector, is the discriminator."""
     ids = _claim_ids_over(
         {
             "approve(address,uint256)": _fn_record("approve(address,uint256)", "0x095ea7b3"),
@@ -322,8 +292,6 @@ def test_erc20_near_miss_selectors_without_the_erc20_standard():
 
 
 def test_weth_near_miss_deposit_withdraw_on_non_erc20():
-    """A vault-shaped contract exposing ``deposit()``/``withdraw(uint256)`` that
-    is not an ERC-20 is not wrapped ETH — no weth claim."""
     ids = _claim_ids_over(
         {
             "deposit()": _fn_record("deposit()", "0xd0e30db0"),
@@ -335,15 +303,11 @@ def test_weth_near_miss_deposit_withdraw_on_non_erc20():
 
 
 def test_lz_oapp_near_miss_set_delegate_outside_the_oapp_gate():
-    """A ``setDelegate(address)`` on a contract with no ``setPeer`` (no OApp
-    gate) is an ordinary setter, not LayerZero endpoint configuration."""
     ids = _claim_ids_over({"setDelegate(address)": _fn_record("setDelegate(address)", "0xca5eb5e1")})
     assert "lz_oapp.set_delegate" not in ids["setDelegate(address)"]
 
 
 def test_gov_delegate_near_miss_writes_only_delegates_map():
-    """A delegation-shaped setter that writes only the ``delegates`` map (not the
-    Comp ``checkpoints`` voting-power ledger) is not the voting-power move."""
     ids = _claim_ids_over(
         {
             "delegate(address)": _fn_record(

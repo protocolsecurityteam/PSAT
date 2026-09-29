@@ -1,12 +1,9 @@
 """End-to-end integration for the Plane-1 claims plumbing.
 
-Drives the real production stack — the static pipeline
-(``collect_contract_analysis_with_artifacts``, i.e. Slither -> effects ->
-authority labels -> the new claims phase in ``core.py``), the effective-
-permissions dual-write, the row writer, and the API serializers — on a real
-compiled factory fixture, and asserts a ``contract_deployment`` claim survives
-onto the ``EffectiveFunction.claims`` column and out through the payloads. Only
-the solc binary + Postgres are external; nothing under test is faked.
+Drives the real stack (static pipeline claims phase in ``core.py``, effective-
+permissions dual-write, row writer, API serializers) on a compiled factory fixture
+and asserts a ``contract_deployment`` claim survives onto ``EffectiveFunction.claims``
+and out through the payloads. Only solc + Postgres are external.
 """
 
 from __future__ import annotations

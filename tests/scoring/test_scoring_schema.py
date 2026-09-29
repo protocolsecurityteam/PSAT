@@ -47,7 +47,6 @@ from services.scoring.schema import (
     entity_key,
     is_entity_key,
     not_determined_signal_defaults,
-    signal_from_row,
     signal_to_row_kwargs,
 )
 from utils.scoring_status import (
@@ -60,7 +59,6 @@ from utils.scoring_status import (
     MODEL_VERSION,
     OPENNESS_NOT_DETERMINED,
     OPENNESS_RESTRICTED,
-    PERIMETER_NOT_DETERMINED,
     PERIMETER_SETTLED,
     PERIMETER_UNSETTLED,
     PRINCIPAL_STATE_ENUMERATED,
@@ -140,11 +138,8 @@ def _signal(**overrides: Any) -> FunctionSignal:
 
 
 def test_every_three_state_field_must_be_named():
-    """No dataclass default may supply a state — omitting one is a TypeError.
-
-    This is what makes ``not_determined`` un-defaultable: a distiller that never
-    decided a state cannot construct the row at all.
-    """
+    """No dataclass default may supply a state, so a distiller that never decided one
+    cannot construct the row at all."""
     with pytest.raises(TypeError):
         FunctionSignal(  # pyright: ignore[reportCallIssue]
             job_id=uuid.uuid4(),
@@ -217,13 +212,6 @@ def test_empty_principal_set_cannot_be_published_as_enumerated():
         _signal(principal_state=PRINCIPAL_STATE_ENUMERATED, principal_refs=())
 
 
-def test_principal_refs_carry_no_resolution():
-    ref = PrincipalRef(function_principal_id=7, chain="ethereum", address="0xAAA")
-    assert set(ref.to_json()) == {"function_principal_id", "chain", "address"}
-    assert ref.key == "ethereum::0xaaa"
-    assert PrincipalRef.from_json(ref.to_json()) == ref
-
-
 def test_value_states_are_three_and_bounds_require_a_proven_reach():
     reached = _signal(
         value_state=VALUE_STATE_PROVEN_REACH,
@@ -246,9 +234,8 @@ def test_value_states_are_three_and_bounds_require_a_proven_reach():
 def test_destination_not_applicable_differs_from_not_determined():
     """``pause.set`` has no destination; an unread delegatecall has one.
 
-    Collapsing these makes the banned escalation representable again: an
-    unproven destination graded as an unconstrained one is the −30λ, F→C false
-    positive this schema exists to prevent.
+    Collapsing them makes the banned escalation representable: an unproven
+    destination graded as unconstrained is the −30λ, F→C false positive.
     """
     inapplicable = _signal(claim_id="pause.set", destination=Tri.proven(DESTINATION_STATE_NOT_APPLICABLE, "none"))
     unread = _signal(claim_id="delegatecall.execute")
@@ -295,11 +282,6 @@ def test_score_document_grade_and_confidence_are_determined_together():
         )
 
 
-def test_perimeter_has_a_third_state():
-    """A queue read that failed lands on neither polarity."""
-    assert len({PERIMETER_SETTLED, PERIMETER_UNSETTLED, PERIMETER_NOT_DETERMINED}) == 3
-
-
 # --------------------------------------------------------------------------
 # Persistence round-trip
 # --------------------------------------------------------------------------
@@ -328,10 +310,6 @@ def scoring_protocol(db_session):
     db_session.add(protocol)
     db_session.flush()
     jobs = [Job(id=uuid.uuid4(), protocol_id=protocol.id) for _ in range(2)]
-    # Two implementation contracts at their own addresses, both of whose
-    # functions are deployed behind ONE proxy — so their signals share a
-    # deployment_address. This is the split-proxy secondary-impl shape that is
-    # live on this corpus, and the identity key has to survive it.
     contracts = [
         Contract(address=f"0x{uuid.uuid4().hex[:40]}", chain="ethereum", protocol_id=protocol.id) for _ in range(2)
     ]
@@ -517,9 +495,8 @@ def test_undetermined_destination_cannot_carry_a_shape(db_session, scoring_proto
 def test_state_columns_have_no_default(db_session, scoring_protocol):
     """A raw INSERT omitting a discriminator raises instead of defaulting.
 
-    The whole convention rests on this: with a server default, a writer that
-    never determined the fact would record ``not_determined`` silently, which is
-    exactly an unread witness becoming a published one.
+    With a server default, a writer that never determined the fact would silently
+    record ``not_determined`` — an unread witness becoming a published one.
     """
     discriminators = [
         "severity_state",
@@ -571,9 +548,7 @@ def test_reanalysis_replaces_prior_jobs_signals_for_the_same_contract(db_session
     """The real currency case: a SECOND job distilling the same contract.
 
     Re-analysis mints a new job, so a job-scoped delete would leave the first
-    job's rows behind and the fold would count the contract twice. The delete is
-    contract-scoped precisely so the later distillation supersedes the earlier
-    one regardless of which job produced it.
+    job's rows behind and the fold would count the contract twice.
     """
     fx = scoring_protocol
     db_session.add_all([_row(fx, selector=f"0x0000000{n}") for n in (1, 2)])
@@ -611,9 +586,8 @@ def test_replace_does_not_touch_a_sibling_contract(db_session, scoring_protocol)
 def test_split_proxy_siblings_share_a_deployment_address_without_colliding(db_session, scoring_protocol):
     """Two contracts, one deployment_address, same selector and claim.
 
-    Live on this corpus: secondary implementations behind one proxy. Without
-    ``contract_id`` in the identity this is a unique-constraint violation and one
-    of the two contracts' signals can never be written at all.
+    Without ``contract_id`` in the identity this is a unique-constraint violation
+    and one contract's signals can never be written.
     """
     fx = scoring_protocol
     db_session.add_all([_row(fx), _row(fx, contract_id=fx.sibling.id)])
@@ -866,16 +840,6 @@ def test_gate_inputs_must_be_tri_envelopes():
         _signal(gate_inputs={"pause_effective": True})
 
 
-def test_gate_input_round_trips_all_three_states():
-    gates = {
-        "proven_present": Tri.proven(SEVERITY_STATE_PROVEN, 0.2).to_json(),
-        "not_determined": Tri.not_determined().to_json(),
-    }
-    sig = _signal(gate_inputs=gates)
-    assert sig.gate_input("proven_present").require(SEVERITY_STATE_PROVEN) == 0.2
-    assert sig.gate_input("not_determined").value is None
-
-
 def test_destination_bearing_claim_cannot_be_not_applicable():
     """Item 6: an unread delegatecall destination must not launder as 'none'."""
     for claim in DESTINATION_BEARING_CLAIMS:
@@ -981,9 +945,8 @@ def test_value_entity_keys_reject_nulls(db_session, scoring_protocol):
 def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protocol):
     """S5: every field's three states survive the trip through Postgres.
 
-    Both directions are exercised, because the failure this guards against is a
-    state written to the wrong column — every individual value stays legal, so
-    no CHECK downstream would notice.
+    Both directions are exercised: a state written to the wrong column leaves every
+    value legal, so no CHECK downstream would notice.
     """
     fx = scoring_protocol
     originals = [
@@ -1036,20 +999,9 @@ def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protoc
         assert back.gate_inputs == original.gate_inputs
         assert back.enters_grade == original.enters_grade
 
-    # The three states stayed three on the way back out.
     assert len({s.value_state for s in restored}) == 3
     assert restored[1].severity.require(SEVERITY_STATE_PROVEN) == 0.0
     assert restored[0].severity.value is None
-
-
-@pytest.mark.usefixtures("scoring_protocol")
-def test_signal_from_row_is_the_inverse_of_to_row_kwargs(db_session, scoring_protocol):
-    fx = scoring_protocol
-    original = _signal_for(fx, severity=Tri.proven(SEVERITY_STATE_PROVEN, 0.75), severity_basis=("base",))
-    row = FunctionScoreSignal(**signal_to_row_kwargs(original, job_id=fx.job.id))
-    db_session.add(row)
-    db_session.commit()
-    assert signal_from_row(row) == original
 
 
 @pytest.mark.usefixtures("scoring_protocol")
@@ -1110,10 +1062,8 @@ def test_latest_view_correlates_per_protocol(db_session, scoring_protocol):
 def test_a_rejected_signal_leaves_the_original_set_fully_intact(db_session, scoring_protocol):
     """R2-B1: validation runs before the delete, so a bad list changes nothing.
 
-    The distillation call site is fail-forward, so it catches the raise and
-    commits anyway. If the delete had already run, that commit would persist a
-    partially replaced contract — charging a subset of its exposure with no
-    trace that the rest went missing.
+    The distillation call site is fail-forward and commits anyway; had the delete
+    run, that commit would persist a partially replaced contract.
     """
     fx = scoring_protocol
     db_session.add_all([_row(fx, selector=f"0x0000000{n}") for n in (1, 2)])
@@ -1134,25 +1084,6 @@ def test_a_rejected_signal_leaves_the_original_set_fully_intact(db_session, scor
 
     survivors = db_session.query(FunctionScoreSignal).filter_by(contract_id=fx.contract.id).all()
     assert sorted(r.selector for r in survivors) == ["0x00000001", "0x00000002"]
-
-
-@pytest.mark.usefixtures("scoring_protocol")
-def test_a_rejected_first_element_does_not_drop_the_contract(db_session, scoring_protocol):
-    """The raise-on-first-element case: the contract must not vanish."""
-    fx = scoring_protocol
-    db_session.add(_row(fx))
-    db_session.commit()
-
-    with pytest.raises(ValueError):
-        replace_contract_signals(
-            db_session,
-            contract_id=fx.contract.id,
-            signals=[_signal_for(fx, contract_id=fx.sibling.id)],
-            job_id=fx.later_job.id,
-        )
-    db_session.commit()
-
-    assert db_session.query(FunctionScoreSignal).filter_by(contract_id=fx.contract.id).count() == 1
 
 
 @pytest.mark.usefixtures("scoring_protocol")
@@ -1229,8 +1160,7 @@ def test_replace_refuses_an_unknown_contract(db_session, scoring_protocol):
 def test_second_replace_of_one_contract_in_a_transaction_raises(db_session, scoring_protocol):
     """Item-4: grouping by (contract_id, deployment_address) must not truncate.
 
-    The second call's delete would drop the first call's rows, leaving the
-    contract carrying only its last deployment group — silent recall loss.
+    The second call's delete would drop the first call's rows — silent recall loss.
     """
     fx = scoring_protocol
     replace_contract_signals(

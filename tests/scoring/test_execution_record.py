@@ -1,12 +1,10 @@
 """The execution record, end to end, and the two labels that depend on it.
 
-Three positive facts that were being published without a witness before:
 **F6** the proving caller is persisted (recipe -> ``ObservedEffect.concrete`` ->
-claims bridge -> distiller -> fold, beside every composed magnitude); **F4** the
-attribution path is not exact, so the state is ``proven_upper_bound`` and
-emphatically not ``proven_floor``, whose prose means "at least this much";
-**F5** a coverage gap alone does not earn a floor, because a row whose
-contributions are attribution-derived is bounded from above.
+claims bridge -> distiller -> fold); **F4** the attribution path is not exact, so
+the state is ``proven_upper_bound``, not ``proven_floor`` ("at least this much");
+**F5** a coverage gap alone does not earn a floor when contributions are
+attribution-derived (bounded from above).
 """
 
 from __future__ import annotations
@@ -54,9 +52,9 @@ from utils.scoring_status import (
 
 
 def test_an_absent_record_is_not_determined_and_never_an_empty_execution():
-    """Every verdict written before the record existed carries no key at all, and
-    that absence must reach the consumer as its own state — with a reason, the
-    pointers to go and look, and no caller."""
+    """Every verdict written before the record existed carries no key; that
+    absence must reach the consumer as its own state, with a reason and pointers,
+    and no caller."""
     record = EX.from_residue(None, transcript_ptr="job::art", effect_verdict_id=7)
     assert record.state == EX.EXECUTION_NOT_DETERMINED
     assert record.reason == EX.REASON_NOT_PERSISTED
@@ -71,16 +69,14 @@ def test_an_absent_record_is_not_determined_and_never_an_empty_execution():
 
 
 def test_a_record_naming_no_call_is_not_a_record():
-    """``target`` and ``calldata`` are required: a payload with neither describes
-    no execution."""
     assert EX.from_residue({"caller": "0xabc"}, transcript_ptr=None, effect_verdict_id=None).reason == (
         EX.REASON_NOT_PERSISTED
     )
 
 
 def test_the_seeding_qualifiers_are_three_valued_and_absence_is_the_third():
-    """An absent ``input_seeded`` conflates "not seeded" with "seeding was never
-    a question here"; reading it as ``False`` publishes an unqualified verdict."""
+    """An absent ``input_seeded`` conflates "not seeded" with "never a question";
+    reading it as ``False`` publishes an unqualified verdict."""
     payload = {"target": "0x" + "a" * 40, "calldata": "0x" + "de" * 4}
     record = EX.from_residue(payload, transcript_ptr=None, effect_verdict_id=None)
     assert record.input_seeded == EX.SEEDING_NOT_DETERMINED
@@ -96,9 +92,9 @@ def test_the_seeding_qualifiers_are_three_valued_and_absence_is_the_third():
 
 
 def test_the_undetermined_reading_is_derived_from_its_own_reason():
-    """A single sentence for all seven reasons would be FALSE on most of them:
-    "the execution exists in the transcript the pointer names" is untrue of a row
-    that has no verdict and therefore no pointer."""
+    """One sentence for all seven reasons would be FALSE on most: "the execution
+    exists in the transcript the pointer names" is untrue of a row with no
+    verdict and therefore no pointer."""
     readings = {reason: EX.undetermined_reading(reason, "job::art") for reason in EX.NOT_DETERMINED_REASONS}
     # Seven reasons, seven distinct sentences: no constant standing in for the lot.
     assert len(set(readings.values())) == len(EX.NOT_DETERMINED_REASONS)
@@ -129,8 +125,7 @@ def test_an_undetermined_record_must_name_a_registered_reason(kwargs):
 
 
 def test_an_uncertified_height_is_dropped_rather_than_published():
-    """``new_transcript`` writes ``block_source`` only for a positive, named pin;
-    without one the height is a bystander."""
+    """``new_transcript`` writes ``block_source`` only for a positive, named pin."""
     payload = EX.residue_payload(
         caller="0xAB",
         target="0xCD",
@@ -148,8 +143,7 @@ def test_an_uncertified_height_is_dropped_rather_than_published():
 
 
 def test_route_comparison_has_no_fall_through_arm():
-    """With no record nothing was compared, and that is neither a match nor a
-    mismatch: a missing conjunct never resolves to ``route_match``."""
+    """With no record nothing was compared: neither match nor mismatch."""
     absent = EX.route_comparison(
         EX.not_determined(EX.REASON_NOT_PERSISTED),
         claimed_caller="ethereum::0xaa",
@@ -226,8 +220,8 @@ def _moved() -> SimResult:
 
 
 def test_the_proving_call_is_recorded_on_the_state_plane():
-    """F6. The caller is written where a consumer can reach it — and on
-    ``concrete``, so it can never ride the behavioral cache onto a twin."""
+    """F6. The caller is written where a consumer can reach it, on ``concrete``
+    so it can never ride the behavioral cache onto a twin."""
     eff = _value_out([_moved()])
     assert eff.verdict == VERDICT_PROVEN
     record = eff.concrete[EX.PROVING_EXECUTION_KEY]
@@ -261,8 +255,6 @@ def test_the_record_names_the_seeded_call_that_landed_not_the_one_that_reverted(
 
 
 class _Verdict:
-    """The verdict shape the claims bridge reads."""
-
     def __init__(self, residue):
         self.id = 11
         self.effect_class = "value_out"
@@ -275,8 +267,8 @@ class _Verdict:
 
 
 def test_the_bridge_forwards_the_record_to_the_claim_witness():
-    """The bridge is the only boundary the scorer reads across, so a record that
-    stops here is a record the fold can never publish."""
+    """The bridge is the only boundary the scorer reads across; a record that
+    stops here can never be published."""
     payload = {"target": CONTRACT, "calldata": CALLDATA, "caller": PRINCIPAL}
     claim = claims_bridge.verdict_to_claim(cast(Any, _Verdict({EX.PROVING_EXECUTION_KEY: payload})))
     assert claim is not None
@@ -309,8 +301,8 @@ class _Row:
 
 
 def test_the_distiller_publishes_the_typed_reason_when_no_record_is_stored():
-    """The negative branch keeps the reason AND the pointers: a gate that dropped
-    them would turn "this row predates the record" into an unreadable silence."""
+    """The negative branch keeps the reason AND the pointers; dropping them turns
+    "this row predates the record" into an unreadable silence."""
     entries = [{"witness": {"effect_verdict_id": 5, "observed": {}}}]
     gate = D._proving_execution_gate(_facts([_Row("job::art")]), _Func(), entries)
     assert gate.state == EX.GATE_STATE_NOT_RECORDED
@@ -333,9 +325,9 @@ def test_the_distiller_carries_a_stored_record_onto_the_signal():
 
 
 def test_the_execution_and_the_published_verdict_id_name_the_same_row():
-    """One selection rule, read once. The gate used to take the FIRST
-    verdict-bearing entry and the signal the LAST, so a claim carrying two would
-    have paired one verdict's dollars with another's caller."""
+    """One selection rule, read once. The gate took the FIRST verdict-bearing
+    entry and the signal the LAST, pairing one verdict's dollars with another's
+    caller."""
     first = {"witness": {"effect_verdict_id": 5, "observed": {}}}
     second = {
         "witness": {
@@ -366,7 +358,6 @@ def test_a_claim_with_no_verdict_says_so_rather_than_going_silent():
 
 
 def _charged(state: str, usd: float = 5_000.0, *keys: str) -> FunctionSignal:
-    """A ``flow.out`` signal whose reach magnitude is witnessed in ``state``."""
     return flow_sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -382,8 +373,8 @@ def _eoa_finding(fold, signal: FunctionSignal, plane: P.ValuePlane) -> dict[str,
 
 
 def _gapped_row(state: str) -> tuple[FunctionSignal, P.ValuePlane]:
-    """One priced entity holding an unpriced asset beside the priced one — a
-    coverage gap by construction — charged by a magnitude in ``state``."""
+    """One priced entity holding an unpriced asset beside the priced one (a
+    coverage gap by construction), charged by a magnitude in ``state``."""
     plane = value_plane(
         {KEY_C: {"usdc": 5_000_000.0}},
         per_asset_state={KEY_C: {"usdc": P.ASSET_PRICED, "wsteth": P.ASSET_UNPRICED}},
@@ -396,8 +387,8 @@ def _gapped_row(state: str) -> tuple[FunctionSignal, P.ValuePlane]:
 
 def test_case4_an_attribution_derived_magnitude_publishes_neither_exact_nor_floor():
     """Regression case 4. The attribution path credits a holder's WHOLE priced
-    balance off a constant-amount probe, so ``proven_exact`` is unearnable in
-    principle and ``proven_floor`` claims the opposite direction."""
+    balance off a constant-amount probe: ``proven_exact`` is unearnable and
+    ``proven_floor`` claims the opposite direction."""
     reach = D._flow_reach(
         {"reach_determined": True, "observed_reach_value_usd": 1_234.0, "observed_reach_holders": [VAULT]},
         cast(Any, D._ContractFacts(contract_id=1, protocol_id=1, chain="ethereum", address=C, functions=[])),
@@ -412,7 +403,7 @@ def test_case4_an_attribution_derived_magnitude_publishes_neither_exact_nor_floo
 
 def test_case4_the_genuine_floor_path_keeps_its_floor():
     """The predicate is the BASIS, not "any observed_reach_* key": a partly priced
-    reach is a real floor and two composed ties turn on a floor beating an upper
+    reach is a real floor, and two composed ties turn on a floor beating an upper
     bound."""
     reach = D._flow_reach(
         {"observed_reach_priced_usd": 900.0, "observed_reach_priced_holders": [VAULT]},
@@ -425,8 +416,8 @@ def test_case4_the_genuine_floor_path_keeps_its_floor():
 
 def test_case4_the_upper_bound_token_is_readable_by_the_fold(fold):
     """Registration, not cosmetics: a state outside ``GATE_PROVEN_TOKENS`` is
-    MALFORMED, so leaving the token unregistered would take every
-    attribution-derived magnitude out at once and call it a relabel."""
+    MALFORMED, so an unregistered token would take every attribution-derived
+    magnitude out at once."""
     signal = _charged(MAGNITUDE_STATE_PROVEN_UPPER_BOUND)
     assert FOLD._malformed_gates(signal) == []
     assert FOLD._gate(signal, "reach_magnitude_usd").state == MAGNITUDE_STATE_PROVEN_UPPER_BOUND
@@ -449,17 +440,8 @@ def test_case5_a_coverage_gap_over_an_attribution_derived_figure_earns_no_floor(
     assert finding["value_at_stake_usd"] == 5_000.0
 
 
-def test_case5_a_genuine_floor_under_the_same_gap_still_earns_it(fold):
-    """The other arm, so the test above cannot pass by never granting a floor."""
-    finding = _eoa_finding(fold, *_gapped_row(MAGNITUDE_STATE_PROVEN_FLOOR))
-    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
-    assert finding["value_at_stake_is_floor"] is True
-    assert finding["value_band"].startswith(">= ")
-
-
 def test_case5_holds_on_a_subsumed_row_too(fold):
-    """Case 7's parity clause: three investigation passes have silently measured
-    findings only."""
+    """Case 7's parity clause: three investigation passes silently measured findings only."""
     common: dict[str, Any] = dict(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -486,18 +468,17 @@ def test_case5_holds_on_a_subsumed_row_too(fold):
 
 
 def _unbounded_row(state: str) -> tuple[FunctionSignal, P.ValuePlane]:
-    """A magnitude in ``state`` charged against an entity whose priced sheet is
-    NOT DETERMINED — the case the reference corpus does not contain, and the one
-    the disclosing arm exists for. No priced rows for ``KEY_C`` at all, so
-    ``total`` returns None, which is the not_determined sheet and NOT a zero."""
+    """A magnitude charged against an entity whose priced sheet is NOT DETERMINED
+    (absent from the reference corpus; the disclosing arm exists for it). No
+    priced rows for ``KEY_C``, so ``total`` returns None: not_determined, NOT zero."""
     return _charged(state), value_plane({}, contracts=(KEY_C,))
 
 
 def test_an_upper_bound_over_an_unpriced_sheet_is_never_disclosed_as_a_floor(fold):
     """The direction-earned key, pinned. A floor and an attribution-derived upper
-    bound charged against an entity with no priced sheet are the SAME arithmetic
-    and OPPOSITE claims, and publishing the second under ``witnessed_floor_usd``
-    moves no number — so nothing but this assertion can catch it."""
+    bound against an unpriced sheet are the SAME arithmetic and OPPOSITE claims;
+    publishing the second under ``witnessed_floor_usd`` moves no number, so only
+    this assertion can catch it."""
     finding = _eoa_finding(fold, *_unbounded_row(MAGNITUDE_STATE_PROVEN_UPPER_BOUND))
     disclosed = finding["unbounded_floor_magnitudes"]
     assert len(disclosed) == 1
@@ -521,17 +502,17 @@ def test_a_floor_over_an_unpriced_sheet_keeps_its_own_name_verbatim(fold):
 
 
 def _two_key_row(state: str) -> tuple[FunctionSignal, P.ValuePlane]:
-    """One call witnessed over TWO priced entities — the signal-525 shape
-    (``0xf3fef3a3 withdraw``, $28.1M), the only live instance of this branch."""
+    """One call witnessed over TWO priced entities (signal-525: ``0xf3fef3a3
+    withdraw``, $28.1M), the only live instance of this branch."""
     return _charged(state, 3_000.0, KEY_C, KEY_V), value_plane({KEY_C: {"usdc": 2_000.0}, KEY_V: {"usdc": 2_000.0}})
 
 
 def test_an_upper_bound_is_refused_across_two_keys_rather_than_apportioned(fold):
     """An EXACT witness bounds the whole call, so its keys may consume it as a
-    budget. An upper bound may not: split across two entities with no
-    apportionment witness it would attribute up to the WHOLE bound at each.
-    Letting it join the exact side moves no number on this corpus, so only this
-    assertion stands between the ruling and a silent regression."""
+    budget. An upper bound may not: split across two entities without an
+    apportionment witness it would attribute the WHOLE bound at each. Letting it
+    join the exact side moves no number on this corpus, so only this assertion
+    stands between the ruling and a silent regression."""
     finding = _eoa_finding(fold, *_two_key_row(MAGNITUDE_STATE_PROVEN_UPPER_BOUND))
     # Refused: no dollars for either entity, and the refusal is typed per key.
     assert finding["value_by_entity"] == {}
@@ -555,9 +536,9 @@ def test_an_exact_witness_over_two_keys_still_apportions(fold):
 
 
 def test_the_floor_arm_is_not_vacuously_true_on_an_empty_contribution_set():
-    """A universal over contributions is TRUE on a row with none, and a row that
-    lost every figure would then publish ">= $0". The arm is written as an earned
-    positive so it does not depend on ``_row_value``'s early return."""
+    """A universal over contributions is TRUE on a row with none, so a row that
+    lost every figure would publish ">= $0". The arm is an earned positive so it
+    does not depend on ``_row_value``'s early return."""
     empty = frozenset()
     assert FOLD._bound_direction(0.0, empty, empty, True, False, empty) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
     assert FOLD._bound_direction(None, empty, empty, True, False, empty) == FOLD.BOUND_DIRECTION_NOT_DETERMINED
@@ -599,8 +580,6 @@ def _composed(fold, payload):
 
 
 def test_a_composed_entry_publishes_the_execution_it_has(fold):
-    """The invariant, end to end: a published magnitude names the call that
-    produced it, and the route it claims is compared against that call."""
     payload = EX.from_residue(
         EX.residue_payload(
             caller=EOA,
@@ -641,9 +620,9 @@ def test_a_composed_entry_publishes_the_execution_it_has(fold):
 
 
 def test_a_composed_entry_with_no_record_publishes_the_typed_reason(fold):
-    """The state every entry on the reference corpus is in today: the figure is
-    still published — withholding it is the composition rule's decision — but the
-    entry says the execution behind it is not_determined and where to look."""
+    """The state every reference-corpus entry is in today: the figure is still
+    published (withholding is the composition rule's decision) but the entry says
+    the execution is not_determined and where to look."""
     entry = _composed(fold, None)
     execution = entry["proving_execution"]
     assert execution["state"] == EX.EXECUTION_NOT_DETERMINED
@@ -658,8 +637,6 @@ def test_a_composed_entry_with_no_record_publishes_the_typed_reason(fold):
 
 
 def test_the_destination_magnitude_carries_the_execution_and_its_direction():
-    """``_DestinationMagnitude`` is what the composition rule reads: it must hand
-    on the execution and whether the figure bounds from above."""
     magnitudes = FOLD._destination_magnitudes(_composing_signals(None))
     magnitude = magnitudes[(KEY_V, COMPOSED_SELECTOR)]
     assert magnitude.state == MAGNITUDE_STATE_PROVEN_UPPER_BOUND

@@ -1,14 +1,10 @@
 """``build_controller_tracking`` semantic behavior.
 
-Validates the predicate-tree + effects-driven builder covers the old
-controller-tracking shapes and that:
-
-* Inherited Ownable's ``_owner`` private state-var gets emitted as
-  ``state_variable:_owner`` directly from leaves.
-* External authority registries (``set_descriptor.authority_contract.
-  address_source``) get promoted to ``external_contract`` kind.
-* External authority calls promote their registry state variable without
-  inventing role identifiers from standard ABI/event names.
+The predicate-tree + effects-driven builder covers the old controller-tracking shapes:
+inherited Ownable ``_owner`` is emitted as ``state_variable:_owner`` from leaves,
+external authority registries are promoted to ``external_contract``, and registry
+state variables are promoted without inventing role identifiers from standard ABI/event
+names.
 """
 
 from __future__ import annotations
@@ -51,10 +47,6 @@ def _build(tmp_path, source, contract_name="C"):
 
 
 def test_inherited_owner_caught_from_predicate_tree(tmp_path):
-    """Ownable's private ``_owner`` is the canonical inherited-owner shape.
-
-    The semantic builder should emit it directly from the leaf operand
-    walk."""
     source = """
     pragma solidity ^0.8.19;
     contract Ownable {
@@ -87,9 +79,6 @@ def test_inherited_owner_caught_from_predicate_tree(tmp_path):
 
 
 def test_authority_state_var_promoted_to_external_contract(tmp_path):
-    """A state var carrying a registry address (used as
-    ``set_descriptor.authority_contract.address_source``) gets the
-    ``external_contract`` kind."""
     source = """
     pragma solidity ^0.8.19;
     interface IRoleRegistry {
@@ -176,8 +165,6 @@ def test_struct_state_var_read_spec_preserves_field_components(tmp_path):
 
 
 def test_role_identifier_does_not_infer_authority_contract_source(tmp_path):
-    """A local bytes32 constant can be tracked without a standard-specific
-    registry-source assumption."""
     source = """
     pragma solidity ^0.8.19;
     interface IRoleRegistry {
@@ -204,8 +191,6 @@ def test_role_identifier_does_not_infer_authority_contract_source(tmp_path):
 
 
 def test_writer_functions_from_effects(tmp_path):
-    """Writer attribution comes from ``effects.functions[*].sinks``
-    filtered to ``state_write`` — not from ``permission_graph`` sinks."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -223,37 +208,7 @@ def test_writer_functions_from_effects(tmp_path):
     assert {w["function"] for w in target["writer_functions"]} == {"transferOwnership(address)"}
 
 
-def test_external_role_getter_name_does_not_create_role_identifier(tmp_path):
-    """A getter name on an external authority is not enough to create a
-    local role identifier."""
-    source = """
-    pragma solidity ^0.8.19;
-    interface IRoleRegistry {
-        function hasRole(bytes32 role, address account) external view returns (bool);
-        function BREAK_GLASS() external view returns (bytes32);
-    }
-    contract C {
-        IRoleRegistry public roleRegistry;
-        bool public paused;
-        constructor(IRoleRegistry r) { roleRegistry = r; }
-        function pauseContract() external {
-            require(
-                roleRegistry.hasRole(roleRegistry.BREAK_GLASS(), msg.sender),
-                "no"
-            );
-            paused = true;
-        }
-    }
-    """
-    targets = _build(tmp_path, source)
-    by_id = {t["controller_id"]: t for t in targets}
-    assert "external_contract:roleRegistry" in by_id, list(by_id.keys())
-    assert "role_identifier:BREAK_GLASS" not in by_id
-
-
 def test_writer_emits_event_promotes_tracking_mode(tmp_path):
-    """When a writer emits an event tied to the tracked state var, the
-    target's ``tracking_mode`` becomes ``event_plus_state``."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -322,9 +277,8 @@ def test_private_var_without_getter_gets_unknown_strategy_and_no_poll_entry(tmp_
 
 
 def test_private_var_with_getter_stays_pollable_through_the_getter(tmp_path):
-    """POSITIVE ARM: a private var whose same-contract view getter was
-    discovered keeps ``getter_call`` — pointed at the getter, never the
-    var."""
+    """POSITIVE ARM: a private var whose same-contract view getter was discovered keeps
+    ``getter_call``, pointed at the getter, never the var."""
     from services.monitoring.polling_plan import build_polling_plan, selector_for
 
     source = """

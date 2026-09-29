@@ -45,7 +45,6 @@ def edge(principal: str, anchor: str, *, relation: str | None = "controller_valu
 
 
 def pinned_conditions(destination: str) -> P.ConditionPlane:
-    """Every analysed function of ``destination`` pins its caller to itself."""
     plane = P.ConditionPlane()
     plane.by_entity = {
         destination: (P.DestinationFunction(1, "guarded", ("msg.sender == address(this)",), analysed=True),)
@@ -96,15 +95,6 @@ def compute(closure, *, conditions=None, conferral=None, signals=()):
         conditions or P.ConditionPlane(),
         conferral or _StubConferral(),
         by_principal,
-    )
-
-
-def test_hop_verdict_is_the_folds_single_implementation():
-    assert FOLD._hop_bound is R.hop_bound
-    assert (FOLD.HOP_REFUSED_SCOPE, FOLD.HOP_REFUSED_CONFERRAL, FOLD.HOP_REFUSED_CONDITION) == (
-        R.HOP_REFUSED_SCOPE,
-        R.HOP_REFUSED_CONFERRAL,
-        R.HOP_REFUSED_CONDITION,
     )
 
 

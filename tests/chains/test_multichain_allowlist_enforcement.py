@@ -1,15 +1,11 @@
 """Allowlist enforcement at user-facing chain-accepting edges (inv. 14).
 
-The registry validates that a chain *exists*; ``PSAT_SUPPORTED_CHAIN_IDS`` gates
-whether this deployment has *enabled* it. State-writing / work-spawning edges —
-``/api/analyze``, monitored-contract enrollment, protocol re-enroll — must reject
-a registered-but-unsupported chain (e.g. Base on a mainnet-only deployment) with
-HTTP 400 before any job/lease is created, while the mainnet default and
-chainless submissions stay unaffected on every deployment.
+The registry validates a chain *exists*; ``PSAT_SUPPORTED_CHAIN_IDS`` gates whether the deployment *enabled*
+it. Work-spawning edges (``/api/analyze``, monitored enrollment, protocol re-enroll) must 400 a
+registered-but-unsupported chain before any job/lease is created; the mainnet default and chainless
+submissions stay unaffected.
 
-No DB is required: enforcement happens before any session work, and the accept
-path is proven by the handler advancing past the chain gate (to the mocked
-session's "not found") rather than 400ing on the chain.
+No DB: the accept path is proven by the handler advancing past the chain gate to the mocked session's "not found".
 """
 
 from __future__ import annotations
@@ -32,7 +28,6 @@ def _client() -> TestClient:
 
 
 def _mock_session_ctx(mock_session_cls, mock_session):
-    """Wire a mock ``SessionLocal`` so ``with SessionLocal() as session:`` works."""
     mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
     mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
@@ -182,7 +177,6 @@ def test_monitoring_enroll_rejects_unsupported_chain(mock_session_cls, monkeypat
 
     assert resp.status_code == 400
     assert _BASE in resp.json()["detail"]
-    # Rejected before any session work.
     mock_session_cls.assert_not_called()
 
 
@@ -199,7 +193,6 @@ def test_monitoring_enroll_passes_chain_gate_when_allowlisted(mock_session_cls, 
         json={"address": _ADDR, "chain": _BASE, "contract_type": "proxy"},
     )
 
-    # The chain gate passed (not 400); the handler advanced to protocol lookup.
     assert resp.status_code == 404
 
 
@@ -248,7 +241,6 @@ def test_re_enroll_default_ethereum_passes_gate(mock_session_cls, monkeypatch):
 
 
 def _fake_job(address: str | None = None, company: str | None = None):
-    """Minimal Job stand-in whose ``to_dict`` is JSON-serializable."""
     job = MagicMock()
     job.stage = MagicMock(value="discovery")
     job.id = "00000000-0000-0000-0000-000000000000"

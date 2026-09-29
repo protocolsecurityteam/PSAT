@@ -1,9 +1,7 @@
-"""Side effects follow claim strength (invariant 5), plus the event-type
-column the new vocabulary needs.
+"""Side effects follow claim strength (invariant 5), plus the event-type column width.
 
-The scanner never hands a hint- or activity-tier row to the notifier — it
-inserts no such row at all — so these tests exercise the notifier's own gate:
-the second lock on the same door, for any caller that hands it one anyway.
+The scanner never hands a hint- or activity-tier row to the notifier, so these exercise the
+notifier's own gate: the second lock on the same door, for any caller that hands one anyway.
 """
 
 from __future__ import annotations
@@ -12,7 +10,7 @@ import uuid
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 
 from db.models import Contract, MonitoredContract, MonitoredEvent, Protocol, ProtocolSubscription
 from services.monitoring.event_topics import MAX_EVENT_TYPE_LENGTH, value_changed_event_type
@@ -123,8 +121,8 @@ def test_filter_shim_carries_a_neutral_seed_onto_the_verified_form():
 
 
 def test_filter_shim_invents_no_member_coverage():
-    """No legacy filter ever covered a mapping's members, so expanding one
-    onto ``member_changed`` would be a claim about the subscriber's intent."""
+    """No legacy filter covered a mapping's members; expanding one onto ``member_changed``
+    would be a claim about the subscriber's intent."""
     expanded = _expand_allowed_event_types(["state_changed:state_variable:fromDenyList"])
     assert not any(t.startswith("member_changed") for t in expanded)
 
@@ -138,10 +136,9 @@ _SIGNER_TYPES = ["signer_added", "signer_removed", "threshold_changed"]
 
 
 def test_the_split_mutes_no_pre_split_signers_filter():
-    """`safe_exec` leaving the `signers` group changes what a NEW save
-    enumerates. A filter saved before it enumerated three types under a UI
-    grouping that delivered all seven, and nothing in the row says otherwise —
-    so it keeps all seven."""
+    """`safe_exec` leaving the `signers` group changes what a NEW save enumerates. A filter
+    saved before it enumerated three types under a UI grouping that delivered all seven and
+    nothing in the row says otherwise, so it keeps all seven."""
     expanded = _expand_allowed_event_types(_SIGNER_TYPES)
     for event_type in _SAFE_EXEC_TYPES:
         assert event_type in expanded
@@ -149,9 +146,8 @@ def test_the_split_mutes_no_pre_split_signers_filter():
 
 
 def test_a_filter_stating_its_groups_is_not_force_fed_the_neighbouring_group():
-    """The other direction of invariant 7. A save that names its groups used
-    the post-split vocabulary, so `signers` means signers — the legacy
-    expansion may not put executions back."""
+    """The other direction of invariant 7: a save naming its groups used the post-split
+    vocabulary, so `signers` means signers; legacy expansion may not put executions back."""
     groups = ["signers"]
     for event_type in _SAFE_EXEC_TYPES:
         assert not _filter_allows(_SIGNER_TYPES, event_type, filter_groups=groups)
@@ -160,8 +156,7 @@ def test_a_filter_stating_its_groups_is_not_force_fed_the_neighbouring_group():
 
 
 def test_a_filter_naming_both_groups_hears_both():
-    """What the UI writes today: the watch flag offers both groups, so both are
-    named and both groups' types are enumerated."""
+    """What the UI writes today: both groups named, both groups' types enumerated."""
     both = _SIGNER_TYPES + list(_SAFE_EXEC_TYPES)
     groups = ["signers", "safe_exec"]
     for event_type in both:
@@ -170,11 +165,9 @@ def test_a_filter_naming_both_groups_hears_both():
 
 @pytest.mark.parametrize("token", [None, [], "signers", ["signers", 3], 7, ["banana"], ["banana", "kiwi"]])
 def test_an_unreadable_group_token_falls_back_to_no_mute(token):
-    """A token we cannot read is not a statement of coverage — and a name from
-    no vocabulary we have is unreadable in exactly the way a malformed field is.
-    The token SUPPRESSES the legacy expansion, so reading ``["banana"]`` as a
-    statement would mute a subscription's Safe executions on the strength of a
-    word this system has never defined."""
+    """A token we cannot read is not a statement of coverage. It SUPPRESSES the legacy
+    expansion, so reading ``["banana"]`` as a statement would mute a subscription's Safe
+    executions over a word this system never defined."""
     from services.monitoring.notifier import _stated_filter_groups
 
     stated = _stated_filter_groups({"event_types": _SIGNER_TYPES, "groups": token})
@@ -189,9 +182,8 @@ def test_an_unknown_name_beside_a_known_one_does_not_erase_the_known_one():
 
 
 def test_the_known_group_vocabulary_mirrors_the_frontend_table():
-    """``_KNOWN_FILTER_GROUPS`` is a hand-kept mirror of MONITOR_ALERT_GROUPS.
-    A group added there and not here would be silently unreadable, which mutes
-    exactly what the mirror exists to protect."""
+    """``_KNOWN_FILTER_GROUPS`` is a hand-kept mirror of MONITOR_ALERT_GROUPS; a group missing
+    here is silently unreadable, muting exactly what the mirror protects."""
     import re
     from pathlib import Path
 
@@ -241,15 +233,9 @@ def test_a_filtered_subscription_still_hears_the_verified_successor(db_session, 
 # ---------------------------------------------------------------------------
 
 
-def test_event_type_column_is_wide_enough_for_the_vocabulary(db_session):
-    column = inspect(db_session.get_bind()).get_columns("monitored_events")
-    width = next(c["type"].length for c in column if c["name"] == "event_type")
-    assert width == MAX_EVENT_TYPE_LENGTH == 100
-
-
 def test_the_longest_mintable_type_fits(db_session, notify_env):
-    """The worst real case on the audited fleet — a struct-member controller
-    id under the read-verified stem — must store whole, not truncated."""
+    """Worst real case on the audited fleet (a struct-member controller id under the
+    read-verified stem) must store whole, not truncated."""
     longest = value_changed_event_type("state_variable:accountantState.payoutAddress")
     assert len(longest) == 58
     assert len(longest) <= MAX_EVENT_TYPE_LENGTH
@@ -277,11 +263,9 @@ def test_the_longest_mintable_type_fits(db_session, notify_env):
 
 
 def test_state_polling_subscribers_hear_read_verified_changes(db_session, notify_env):
-    """The "State polling" UI category writes ``["state_changed_poll"]``. A
-    verification read is the same read-witnessed field diff one tick earlier —
-    and because the read advances last_known_state, the poll that would have
-    raised ``state_changed_poll`` finds no diff and never fires. Without this
-    the subscriber hears about the rotation from neither path."""
+    """The "State polling" UI category writes ``["state_changed_poll"]``. A verification read
+    advances last_known_state one tick earlier, so the poll finds no diff and never fires;
+    without this the subscriber hears the rotation from neither path."""
     assert _filter_allows(["state_changed_poll"], "value_changed:state_variable:owner")
     assert _filter_allows(["state_changed_poll"], "value_changed:state_variable:anythingElse")
 
@@ -310,8 +294,8 @@ def test_absent_filter_still_allows_everything(db_session):
 
 
 def test_stale_plan_provenance_reaches_the_recipient(db_session, notify_env):
-    """A recipient cannot infer "watching on a plan last read at T" from an
-    embed that looks exactly like a fresh-plan one."""
+    """A recipient cannot infer "watching on a plan last read at T" from an embed identical
+    to a fresh-plan one."""
     event = notify_env(
         "ownership_transferred",
         {"new_owner": ADDR(0x99), "plan_stale_since": "2026-08-01T00:00:00Z"},

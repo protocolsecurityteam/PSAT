@@ -11,10 +11,8 @@ from tests.live.conftest import DEFAULT_TEST_COMPANY, LiveClient
 def _drain_etherfi_queue(live_client: LiveClient):
     """Cancel every queued etherfi job after the test.
 
-    ``analyze-remaining`` legitimately queues hundreds of rows and our test
-    only asserts the response shape, not that any complete. Without this
-    teardown the flood sits in the queue and starves downstream tests
-    (test_concurrency especially) that run against the same preview DB.
+    ``analyze-remaining`` queues hundreds of rows; left in place they starve downstream tests
+    (test_concurrency especially) on the same preview DB.
     """
     yield
     live_client.cancel_queued_company_jobs(DEFAULT_TEST_COMPANY)

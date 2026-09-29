@@ -1,20 +1,10 @@
 """Real-Slither tests for the static token-slot derivation pass.
 
-Compiles minimal Solidity fixtures with the production Slither toolchain and
-drives ``derive_token_slots`` / ``build_effects`` — the exact calls the static
-worker makes. Pins the two supported layout standards and the fail-closed
-boundary:
-
-  * plain ERC-20: a public-mapping auto-getter and a handwritten getter both
-    yield ``storage_layout`` entries at the correct sequential base slots;
-  * OZ-v5 ERC-7201 namespaced ERC-20: entries at the folded ``*StorageLocation``
-    constant, with ``_allowances`` one slot past ``_balances``;
-  * rebasing token: a computed ``balanceOf`` gets NO entry (the read-back anchor
-    needs a raw read), while the direct ``sharesOf`` does;
-  * negatives: no family getters ⇒ no ``token_slots`` key; an ambiguous getter
-    (reads a second mapping) is skipped; a packed struct member before the
-    target abandons the namespaced derivation.
-
+Compiles minimal fixtures and drives ``derive_token_slots`` / ``build_effects`` (the static
+worker's exact calls). Pins the two supported layouts (plain ERC-20; OZ-v5 ERC-7201 namespaced
+with ``_allowances`` one slot past ``_balances``) and the fail-closed boundary: a computed
+``balanceOf`` gets NO entry (the read-back anchor needs a raw read), an ambiguous getter is
+skipped, and a packed struct member before the target abandons namespaced derivation.
 Skips only when no compatible solc is installed. No live marker, no RPC.
 """
 

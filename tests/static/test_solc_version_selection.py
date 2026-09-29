@@ -17,10 +17,8 @@ def test_detect_solc_still_bumps_buggy_0_8_versions():
 
 
 def test_detect_solc_ignores_standalone_upper_bound_pragma():
-    """A ``<0.9.0`` ceiling (common in interface/lib files) must not be picked
-    as the compiler version — solc 0.9.0 has no release artifact, so foundry
-    fails with "version not found in artifacts for this platform: 0.9.0".
-    The real target pragma wins instead."""
+    """A ``<0.9.0`` ceiling must not be picked as the compiler version: solc 0.9.0 has no release
+    artifact, so foundry fails with "version not found in artifacts for this platform: 0.9.0"."""
     sources = {
         "src/Vault.sol": "pragma solidity ^0.8.26;\ncontract Vault {}",
         "src/IThing.sol": "pragma solidity <0.9.0;\ninterface IThing {}",

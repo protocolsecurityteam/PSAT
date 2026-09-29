@@ -1,7 +1,4 @@
-"""U3 — the composed-candidate tie-break, and the destination's own predicates.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""U3: the composed-candidate tie-break, and the destination's own predicates."""
 
 from __future__ import annotations
 
@@ -33,12 +30,9 @@ from utils import execution_record as EX
 def test_u3_a_tied_composed_figure_publishes_the_weakest_witness_state(fold):
     """Two independent calls at one figure: the state published claims the least.
 
-    Both selectors are licensed, both carry a ``flow.out`` witness, and both
-    witnesses are the same number. The dollars are therefore not in question and
-    the SELECTOR is: whichever candidate wins names the published
-    ``witness_state``. Taking the first one offered mints ``proven_exact`` out of
-    iteration order while an equally-witnessed candidate at the identical figure
-    supports only a floor.
+    Dollars are not in question, the SELECTOR is: the winner names the published
+    ``witness_state``. Taking the first offered mints ``proven_exact`` from
+    iteration order while an equally-witnessed candidate supports only a floor.
     """
     document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
     row = _gate_row(document)
@@ -56,10 +50,8 @@ def test_u3_the_published_chain_is_the_chosen_candidates_own(fold):
     """The whole candidate is selected, never a field of it.
 
     ``act_as_chain`` is hard-indexed against the function that admitted the
-    published selector. A tie-break that changed the selector and left the chain
-    behind would publish a path that ends at a different function from the one
-    named beside it — with the calling function, the pointer and the block of
-    the candidate that lost.
+    published selector; a tie-break that left the chain behind would publish a
+    path ending at a different function from the one named beside it.
     """
     document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
     entry = next(e for e in _gate_row(document)["reach_composed_magnitudes"] if e["entity"] == KEY_V)
@@ -74,10 +66,9 @@ def test_u3_the_published_chain_is_the_chosen_candidates_own(fold):
 def test_u3_the_tie_is_disclosed_and_names_every_candidate(fold):
     """An arbitrary rule is only admissible if the document says it ran.
 
-    ``composed_selector_tie`` lists both candidates with the figure and the
-    state each supports, marks which one was published, and states the rule.
-    Where nothing was decided by the rule it is ``null`` — the proven "one
-    candidate" — and never an absent field.
+    ``composed_selector_tie`` lists both candidates with figure and state,
+    marks the published one, and states the rule. Where the rule decided
+    nothing it is ``null``, never an absent field.
     """
     document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
     entry = next(e for e in _gate_row(document)["reach_composed_magnitudes"] if e["entity"] == KEY_V)
@@ -110,8 +101,6 @@ def test_u3_the_tie_is_disclosed_and_names_every_candidate(fold):
 def test_u3_a_candidate_that_loses_on_dollars_is_not_a_tie(fold):
     """The figure is still a MAX: the larger call wins outright and is not tied.
 
-    Two selectors at one entity are two independent calls, so the row publishes
-    the best of them. A resolved comparison must not be spelled as a tie —
     ``composed_selector_tie`` names candidates the EVIDENCE could not separate.
     """
     document = fold(_tied_signals(tie_usd=400_000.0), principals=_composing_principals(), **_tied_case())
@@ -137,9 +126,8 @@ def _candidate(
 
     ``steps`` is ``(caller, destination, selector, calling_selector,
     receiver_variable, receiver_block)`` per hop. The DESTINATION is the raw
-    anchor the walk landed on, which is not the entity: a proxy and its
-    implementation fold to one entity under two anchors, so two candidates can
-    carry the same ``entity`` and different step destinations.
+    anchor, not the entity: a proxy and its implementation fold to one entity
+    under two anchors.
     """
     chain = tuple(
         P.ActAsStep(
@@ -172,9 +160,8 @@ def _candidate(
 def _identity(entry: Any) -> tuple[Any, ...]:
     """Everything the published entry is rendered from, chain included.
 
-    The chain is compared through ``as_json`` — the step's whole PUBLISHED
-    identity — so this assertion cannot pass by agreeing on a hand-picked subset
-    of the fields a reader is shown.
+    The chain is compared through ``as_json`` (the step's whole PUBLISHED
+    identity) so the assertion cannot pass on a hand-picked subset of fields.
     """
     return (
         entry.usd,
@@ -189,11 +176,10 @@ def test_u3_no_permutation_of_the_candidates_moves_a_dollar():
     """inv. 8 at the composition level: the order is not evidence.
 
     Seven pools, each tied through the ordering key and separated at exactly ONE
-    component, so every component is the deciding one somewhere. Every ordering
-    of every pool must select the same entry — same figure, same selector, same
-    CHAIN, compared through the step's whole published identity — or some
-    published field is a statement about the order the fold happened to build
-    the candidates in.
+    component, so every component decides somewhere. Every ordering of every
+    pool must select the same entry (figure, selector, and CHAIN through the
+    step's whole published identity), or some published field reflects the order
+    the fold built candidates in.
     """
     pools: dict[str, tuple[list[Any], Any]] = {}
 
@@ -237,13 +223,10 @@ def test_u3_no_permutation_of_the_candidates_moves_a_dollar():
         ],
         _candidate(steps=((KEY_T, KEY_V, COMPOSED_SELECTOR, "0xaaaa0001", "vaultPtr", 22),)),
     )
-    # 7. THE PROXY FOLD. One entity, two raw anchors — an implementation folded
-    #    onto its proxy is one entity under two of them — so two candidates
-    #    agree on the caller, the selector, the calling selector, the pointer
-    #    and the block, and differ only in the step's own ``destination`` and
-    #    the basis rendered from it. Both are published; neither is in a
-    #    hand-written list of "the fields that identify a step", which is why
-    #    the key reads the step's whole published identity instead.
+    # 7. THE PROXY FOLD. One entity, two raw anchors, so two candidates agree on
+    #    everything but the step's own ``destination`` and the basis rendered
+    #    from it. Neither is in a hand-written list of "the fields that identify
+    #    a step", which is why the key reads the step's whole published identity.
     pools["proxy_folded_destination"] = (
         [
             _candidate(steps=((KEY_C, KEY_V, COMPOSED_SELECTOR, "0xaaaa0001", "vault", 1),)),
@@ -267,11 +250,9 @@ def test_u3_no_permutation_of_the_candidates_moves_a_dollar():
 def test_u3_an_unrankable_witness_state_can_never_win_a_tie():
     """A state the claim map does not know must not be PREFERRED to one it does.
 
-    Ranking an unknown state with the weakest would be the fail-open: "we cannot
-    tell what this claims" would beat a state proven to claim little, and an
-    unrankable string would be published over a witness. It loses every tie, so
-    it reaches the document only where it is the sole candidate — where nothing
-    was compared and it is the only thing there is to publish.
+    Ranking an unknown state with the weakest is the fail-open: "we cannot tell
+    what this claims" would beat a state proven to claim little. It loses every
+    tie, so it reaches the document only as the sole candidate.
     """
     unknown = _candidate(state="not_determined", selector="0x0a0a0a0a")
     for known in (_candidate(state="proven_floor"), _candidate(state="proven_exact")):
@@ -295,7 +276,6 @@ VAULT_PREDICATES = (AUTH_GUARD, TRANSFER_POSTCONDITION, SSA_MARKER)
 
 
 def _predicate_plane() -> P.ConditionPlane:
-    """The vault's ``exit``, with its stored condition texts and its selector."""
     plane = P.ConditionPlane()
     plane.by_entity = {
         KEY_V: (
@@ -317,10 +297,10 @@ def _predicate_plane() -> P.ConditionPlane:
 def test_u3_a_composed_entry_publishes_the_destinations_own_predicates(fold):
     """The ceiling claim points at the evidence it was NOT made against.
 
-    The shipped disclosure asserts the destination's own argument semantics went
-    unread. Without a pointer that assertion is unfalsifiable by the reader, so
-    the entry carries the texts verbatim, in stored order, from the canonical
-    column — and says in the same object that it evaluated none of them.
+    The disclosure asserts the destination's own argument semantics went unread;
+    without a pointer that is unfalsifiable, so the entry carries the texts
+    verbatim, in stored order, from the canonical column, and says it evaluated
+    none of them.
     """
     document = fold(
         _composing_signals(),
@@ -342,8 +322,6 @@ def test_u3_a_composed_entry_publishes_the_destinations_own_predicates(fold):
     assert block["evaluated"] is False
     for fragment in ("WITHOUT POLARITY", "EVALUATES", "authorization guard"):
         assert fragment in block["reading"], fragment
-    # The reading's clause (4) pointed at caller_holding_precondition, which is
-    # cut — a dangling cross-reference is a claim that a field exists.
     assert "caller_holding_precondition" not in block["reading"]
     assert "bound_kind" not in block
 
@@ -351,9 +329,8 @@ def test_u3_a_composed_entry_publishes_the_destinations_own_predicates(fold):
 def test_u3_the_predicates_ride_on_both_act_as_witness_shapes(fold):
     """The disclosure is a DESTINATION fact and does not depend on how it was reached.
 
-    An ACL-admitted step and a state-variable step publish the same destination
-    function's predicates — the block describes the callee's body, not the
-    witness that got there.
+    ACL-admitted and state-variable steps publish the same destination
+    predicates; the block describes the callee's body, not the witness.
     """
     shapes = {
         P.ACT_AS_WITNESS_CALLER_STATE_VARIABLE: _composing_case(conditions=_predicate_plane()),
@@ -369,10 +346,10 @@ def test_u3_the_predicates_ride_on_both_act_as_witness_shapes(fold):
 def test_u3_the_predicate_lookup_keeps_its_three_states():
     """ "No predicate was stored" is three different facts and each keeps its name.
 
-    An extraction that ran and found nothing is a read; a column holding no
-    array is an extraction that never ran; and no function under that selector
-    is a join that missed. Collapsing any two would publish a coverage gap as a
-    proven absence of guards.
+    Extraction ran and found nothing (a read); a column holding no array
+    (extraction never ran); no function under that selector (a join that
+    missed). Collapsing any two would publish a coverage gap as proven absence
+    of guards.
     """
     plane = P.ConditionPlane()
     plane.by_entity = {
@@ -406,11 +383,11 @@ def test_u3_the_predicate_lookup_keeps_its_three_states():
 
 
 def test_u3_the_predicate_texts_are_read_verbatim_from_the_stored_array():
-    """The canonical column, unfiltered — and an entry with no text is counted.
+    """The canonical column, unfiltered, and an entry with no text is counted.
 
     ``kind`` is not read (the extractor labels everything ``business``), nothing
-    is deduped or reordered, and an entry carrying no string ``description``
-    raises ``entries_stored`` above the text count instead of disappearing.
+    is deduped or reordered, and an entry with no string ``description`` raises
+    ``entries_stored`` above the text count instead of disappearing.
     """
     texts, entries = P._stored_predicates(
         [

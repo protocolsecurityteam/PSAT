@@ -1,11 +1,9 @@
 """The confidence side of the ceiling (CC8).
 
-The reach-magnitude term asks "was this reach's magnitude answered", and it
-credited a signal on exactly two paths: a witness on its own call, or a
-composed destination witness. A sheet ceiling is a THIRD answer — a proven
-bound, from a balance observation — and leaving it uncredited would report a
-question as open that the document answers on its own page. The cases below
-pin what is credited, what is not, and that the credit is not the vacuous kind.
+The reach-magnitude term credited a signal on two paths: a witness on its own call, or a
+composed destination witness. A sheet ceiling is a THIRD answer (a proven bound from a balance
+observation); leaving it uncredited would report as open a question the document answers. These
+cases pin what is credited, what is not, and that the credit is not the vacuous kind.
 
 One of the twenty sections of the former ``test_scoring_redteam.py``.
 """
@@ -41,9 +39,8 @@ def _magnitude(document) -> dict[str, Any]:
 def _ceiling_signal(**over: Any) -> FunctionSignal:
     """Code control at ``C``, proven for an EOA, reaching ``C`` itself.
 
-    The overrides are MERGED rather than splatted after the defaults so a case
-    can move the signal to another deployment or another reach without the
-    keyword colliding with the default it means to replace.
+    Overrides are MERGED (not splatted after the defaults) so a case can move the signal
+    without the keyword colliding with the default it replaces.
     """
     base: dict[str, Any] = {
         "authority_openness": "restricted",
@@ -58,13 +55,10 @@ def _ceiling_signal(**over: Any) -> FunctionSignal:
 def test_cc8_a_sheet_ceiling_answers_the_reach_magnitude_question(fold):
     """The third credit path, counted under its own name.
 
-    The signal carries no magnitude witness of its own and composes nothing —
-    code control names no destination function — so before this path it was
-    counted as an open question while the row beside it published a banded
-    figure. The term now credits it, and the credit is counted APART from the
-    other two: the three answers are three different proofs of three different
-    strengths, and a consumer sizing what the pipeline MEASURED has to be able to
-    subtract the one that only bounds.
+    The signal has no magnitude witness and composes nothing (code control names no destination
+    function), so it was counted as open while the row beside it published a banded figure. The
+    credit is counted APART from the other two: they are proofs of different strengths, and a
+    consumer sizing what was MEASURED must be able to subtract the one that only bounds.
     """
     document = fold(
         [_ceiling_signal()],
@@ -74,24 +68,19 @@ def test_cc8_a_sheet_ceiling_answers_the_reach_magnitude_question(fold):
     census = _magnitude(document)
     assert census["magnitude_sheet_ceiling"] == 1
     assert census["sheet_ceiling_by_capability"] == {"upgrade.implementation": 1}
-    # Counted as ANSWERED in the term's own census, and by neither of the two
-    # older paths.
+    # Counted as ANSWERED in the term's own census, and by neither older path.
     assert census["by_capability"]["upgrade.implementation"] == [1, 1]
     assert census["magnitude_witnessed"] == 1
     assert census["magnitude_composed"] == 0
     assert document.model_parameters["confidence_detail"]["reach_magnitude_witnessed_pct"] > 0.0
-    # And it has a carrier: the row publishes the figure the credit is for.
     assert _cc_row(document)["entities_priced_from_a_sheet_ceiling"] == [KEY_C]
 
 
 def test_cc8_a_refused_sheet_ceiling_is_not_credited(fold):
-    """No ceiling, no credit. The anti-regression for "reached money, so answered".
+    """No ceiling, no credit (anti-regression for "reached money, so answered").
 
-    The capability is the same code control over the same key; only the SHEET
-    differs. Nothing was observed at the node, so nothing bounds the move, and
-    the magnitude question is exactly as open as it was — crediting it here would
-    answer it with a number no row publishes, which is the whole failure mode the
-    credit population was scoped to avoid.
+    Same code control over the same key; only the SHEET differs. Nothing was observed at the
+    node, so nothing bounds the move; crediting it would answer with a number no row publishes.
     """
     plane = value_plane({}, contracts=(KEY_C,), per_asset_state={KEY_C: {}})
     assert plane.sheet_state(KEY_C) == P.SHEET_NO_ROWS
@@ -106,11 +95,9 @@ def test_cc8_a_refused_sheet_ceiling_is_not_credited(fold):
 def test_cc8_gate_control_over_a_priced_node_earns_no_ceiling_credit(fold):
     """CC2's anti-regression, one level up.
 
-    The node is priced and the reach is proven; the capability is not code
-    control, so the vault's own share math, caps and caller conditions are all
-    still standing and none of them has been examined. The row earns no ceiling
-    and the term must not credit one either — the two surfaces answer the same
-    question and a credit the row cannot show is a credit with no carrier.
+    The node is priced and the reach proven, but the capability is not code control, so the
+    vault's own share math, caps and caller conditions still stand unexamined. The row earns no
+    ceiling and the term must not credit one (a credit the row cannot show has no carrier).
     """
     signal = _ceiling_signal(claim_id="authority.replace", function_name="setAuthority", selector="0x11112222")
     document = fold(
@@ -125,21 +112,16 @@ def test_cc8_gate_control_over_a_priced_node_earns_no_ceiling_credit(fold):
 
 
 def test_cc8_a_ceiling_credit_is_not_vacuous_credit(fold):
-    """It carries a witness — the balance observation — so the vacuous share stays put.
+    """It carries a witness (the balance observation), so the vacuous share stays put.
 
-    ``reach_magnitude_vacuous_credit_pct`` exists because a proven-codeless
-    entity answers this term with no magnitude witness AT ALL, and publishing the
-    headline alone would let a perimeter full of EOAs read as answered magnitude.
-    A sheet ceiling is the opposite case: the question is answered because
-    something was OBSERVED. So the ceiling has to move the witnessed term while
-    leaving the vacuous share exactly where it was, and the two figures are read
-    together here because subtracting one from the other is what a consumer does.
+    ``reach_magnitude_vacuous_credit_pct`` exists because a proven-codeless entity answers this
+    term with NO magnitude witness, and the headline alone would let a perimeter of EOAs read as
+    answered. A sheet ceiling is the opposite: answered because something was OBSERVED, so it
+    must move the witnessed term and leave the vacuous share where it was.
     """
-    # The two documents differ ONLY in the capability, so the perimeter, the
-    # denominator and the codeless entity's weight are identical in both and the
-    # ceiling credit is the single moving part. Varying the SHEET instead would
-    # move the entity's own band and change the denominator underneath the
-    # comparison.
+    # The two documents differ ONLY in the capability, so perimeter, denominator and the codeless
+    # entity's weight are identical and the ceiling credit is the single moving part (varying the
+    # SHEET would move the entity's band and the denominator underneath the comparison).
     eoa_key = entity_key("ethereum", EOA)
 
     def _document(**over: Any):
@@ -163,31 +145,23 @@ def test_cc8_a_ceiling_credit_is_not_vacuous_credit(fold):
     assert ceiling_detail["reach_magnitude_vacuous_credit_pct"] > 0.0
     assert ceiling_detail["reach_magnitude_vacuous_credit_pct"] == plain_detail["reach_magnitude_vacuous_credit_pct"]
     assert ceiling_detail["reach_magnitude_witnessed_pct"] > plain_detail["reach_magnitude_witnessed_pct"]
-    # The witness-backed share is what moved.
     assert (
         ceiling_detail["reach_magnitude_witnessed_pct"] - ceiling_detail["reach_magnitude_vacuous_credit_pct"]
         > plain_detail["reach_magnitude_witnessed_pct"] - plain_detail["reach_magnitude_vacuous_credit_pct"]
     )
-    # And the term's HEADROOM is a different quantity that neither case moves:
-    # the name collision is one field apart and they must not track each other.
+    # The term's HEADROOM is a different quantity (one field apart by name) that neither case moves.
     assert ceiling_detail["reach_magnitude_ceiling_pct"] == plain_detail["reach_magnitude_ceiling_pct"]
 
 
 def test_cc8_every_credited_ceiling_has_a_carrier_in_the_published_document(fold):
-    """The S4 population rule, over a document that carries both answers.
+    """The S4 population rule, over a document carrying both answers.
 
-    The credited set is the fold's OWN per-entity standing set: the signals whose
-    sheet ceiling is the figure a row actually publishes at that entity. That
-    rule has two revocations built into it — a ceiling a larger contribution
-    displaces, and one the per-key sheet reconciliation withdraws — and neither
-    is constructible from this fixture, for a reason worth recording rather than
-    working around. Every alternative candidate at the controlled node is
-    ``min(held, magnitude)`` against that node's own sheet (``fold._entity_contribution``),
-    so a code-control candidate can TIE the sheet and can never beat it, and a
-    tie keeps the credit because each tied call did prove the published figure.
-    The revocations are guards against a branch that does not exist yet; what is
-    testable today is the invariant they exist to hold, which is that no credit
-    outruns the rows.
+    The credited set is the fold's OWN per-entity standing set: signals whose sheet ceiling is
+    the figure a row publishes at that entity. Its two revocations (a ceiling a larger
+    contribution displaces; one per-key sheet reconciliation withdraws) are not constructible
+    here: every alternative candidate is ``min(held, magnitude)`` against the node's own sheet
+    (``fold._entity_contribution``), so a code-control candidate can TIE but never beat it, and a
+    tie keeps the credit. What is testable is the invariant they guard: no credit outruns the rows.
     """
     priced = _ceiling_signal()
     unpriced = _ceiling_signal(
@@ -209,20 +183,16 @@ def test_cc8_every_credited_ceiling_has_a_carrier_in_the_published_document(fold
         for entity in (row.get("entities_priced_from_a_sheet_ceiling") or [])
     }
     assert carriers == {KEY_C}
-    # One credit, and the entity it names is one a row publishes.
     assert census["magnitude_sheet_ceiling"] == 1
     assert census["by_capability"]["upgrade.implementation"] == [1, 2]
 
 
 def test_cc8_the_document_rolls_the_ceiling_population_up_with_its_dollars(fold):
-    """Step 4's provenance block, derived from the rows and from nothing else.
+    """Step 4's provenance block, derived from the rows and nothing else.
 
-    These dollars are the one class of published magnitude deliberately absent
-    from ``exposure_usd``, so a consumer reading only the grade figures has no
-    way to see how much the model bounded from above and then declined to charge.
-    The block is the place that says so, and every count in it is taken off what
-    the rows published — including the refusals, which are counted by the reason
-    the SHEET gave rather than rolled into one number.
+    These dollars are deliberately absent from ``exposure_usd``, so a reader of the grade
+    figures cannot see how much the model bounded and declined to charge. Every count is taken
+    off the published rows, refusals counted by the reason the SHEET gave.
     """
     priced = _ceiling_signal()
     refused = _ceiling_signal(
@@ -241,9 +211,8 @@ def test_cc8_the_document_rolls_the_ceiling_population_up_with_its_dollars(fold)
     assert block["ceiling_usd_over_distinct_entities"] == 5_000_000.0
     assert block["entities_by_capability"] == {"upgrade.implementation": 1}
     assert block["entities_in_more_than_one_capability"] == 0
-    # Named zeros over the closed vocabularies: a reason absent from the map
-    # would read identically as "this rule did not fire here" and "this rule is
-    # not in the model", and only the first is a fact about the protocol.
+    # Named zeros over the closed vocabularies: an absent reason would read the same as "rule did
+    # not fire here" and "rule not in the model", and only the first is a fact about the protocol.
     assert block["entities_by_ceiling_reason"] == {
         P.CEILING_ADMITTED: 1,
         P.CEILING_PROVEN_EMPTY: 0,
@@ -260,7 +229,6 @@ def test_cc8_the_document_rolls_the_ceiling_population_up_with_its_dollars(fold)
     assert block["entities_by_bound_direction"] == {FOLD.BOUND_DIRECTION_NOT_DETERMINED: 0, "ceiling": 1}
     assert block["entities_publishing_more_than_one_figure"] == []
     assert block["entities_withheld_on_sheet_reconciliation"] == 0
-    # The confidence pass's own count, not a second derivation of it.
     assert block["signals_credited_in_confidence"] == 1
     assert block["signals_credited_by_capability"] == {"upgrade.implementation": 1}
     assert "must never be rendered as dollars at risk" in block["reading"]
@@ -269,12 +237,9 @@ def test_cc8_the_document_rolls_the_ceiling_population_up_with_its_dollars(fold)
 def test_cc8_one_sheet_read_by_two_rows_is_counted_once_in_the_rollup(fold):
     """Dollars per distinct ENTITY, because a sheet ceiling is a fact about a node.
 
-    Two principals with code control over the same node both publish that node's
-    sheet, and they publish the SAME number because it is the same sheet.
-    Summing over rows would report twice the money that exists. The agreement is
-    checked rather than assumed — a disagreement would mean the per-key
-    reconciliation let two figures stand under one claim — and it is published as
-    a count so a corpus where it happens says so.
+    Two principals with code control over one node publish the SAME sheet number; summing over
+    rows would double the money. The agreement is checked, not assumed (a disagreement would
+    mean per-key reconciliation let two figures stand) and published as a count.
     """
     first = _ceiling_signal()
     second = _ceiling_signal(
@@ -292,20 +257,16 @@ def test_cc8_one_sheet_read_by_two_rows_is_counted_once_in_the_rollup(fold):
     assert block["entities_priced_from_a_sheet_ceiling"] == 1
     assert block["ceiling_usd_over_distinct_entities"] == 5_000_000.0
     assert block["entities_publishing_more_than_one_figure"] == []
-    # Two signals, one sheet: the two meters count different things and both are
-    # published, so neither is read as the other.
+    # Two signals, one sheet: the two meters count different things and both are published.
     assert block["signals_credited_in_confidence"] == 2
 
 
 def test_cc8_one_node_under_two_code_control_capabilities_counts_once_in_the_population(fold):
-    """The capability breakdown counts MEMBERSHIPS and the population counts entities.
+    """The capability breakdown counts MEMBERSHIPS; the population counts entities.
 
-    A node reached by two code-control capabilities is priced from its own sheet
-    under both, so it sits in two buckets while being one entity holding one
-    sheet. The dollars are deduped and the breakdown is not — they answer
-    different questions — and a reader summing the buckets would over-count the
-    population unless the document says so. It says so with a count, not with a
-    caveat.
+    A node reached by two code-control capabilities sits in two buckets but is one entity with
+    one sheet. Dollars are deduped and the breakdown is not, so the document says so with a
+    count, not a caveat.
     """
     upgrade = _ceiling_signal()
     execute = _ceiling_signal(claim_id="exec.arbitrary", function_name="execute", selector="0x33334444")
@@ -316,7 +277,6 @@ def test_cc8_one_node_under_two_code_control_capabilities_counts_once_in_the_pop
     )
     block = document.provenance["sheet_ceilings"]
     assert block["entities_by_capability"] == {"exec.arbitrary": 1, "upgrade.implementation": 1}
-    # Two memberships, one entity, one sheet's worth of dollars.
     assert sum(block["entities_by_capability"].values()) == 2
     assert block["entities_priced_from_a_sheet_ceiling"] == 1
     assert block["entities_in_more_than_one_capability"] == 1

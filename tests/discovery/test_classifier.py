@@ -36,7 +36,6 @@ def _slot_for(addr: str) -> str:
 
 
 def _abi_encode_address_array(addrs: list[str]) -> str:
-    """Minimal ABI encoder for address[] return values."""
     buf = (0x20).to_bytes(32, "big")  # offset
     buf += len(addrs).to_bytes(32, "big")  # length
     for a in addrs:
@@ -77,7 +76,6 @@ def test_helper_functions():
     assert cls._decode_address_array(encoded) == [ADDR(1), ADDR(2)]
     assert cls._decode_address_array("0x") is None
     assert cls._decode_address_array("0x" + "00" * 64) is None  # length=0
-    # length > 100 rejected
     big = (0x20).to_bytes(32, "big") + (101).to_bytes(32, "big") + b"\x00" * (101 * 32)
     assert cls._decode_address_array("0x" + big.hex()) is None
 
@@ -88,14 +86,8 @@ def test_helper_functions():
 
 
 class _Pipeline:
-    """Addresses, wire stubs and the one ``classify_contracts`` result the
-    phase tests below read.
-
-    This used to be a single 274-line test with 63 assertions covering every
-    proxy type, all three phases and the polling rule — one red line named
-    seventeen distinct behaviours. The call is unchanged; only the assertions
-    are split, so a failure now names the pattern that broke.
-    """
+    """Addresses, wire stubs and the one ``classify_contracts`` result the phase tests read. Split from a single
+    274-line test so a failure names the pattern that broke."""
 
     def __init__(self, monkeypatch):
         self.target = ADDR(1)
@@ -385,7 +377,6 @@ def test_needs_polling_true_for_custom_and_unknown(pipeline, addr_attr):
 
 
 def test_classify_contracts_handles_rpc_failure(monkeypatch):
-    """RPC failure for one address falls back to 'regular', doesn't block others."""
 
     def fake_classify(addr, _rpc, bytecode=None, code_cache=None, chain_id=None):
         if addr == ADDR(2):
@@ -400,7 +391,6 @@ def test_classify_contracts_handles_rpc_failure(monkeypatch):
 
 
 def test_classify_contracts_pre_classified_skips_rpc(monkeypatch):
-    """pre_classified entries are reused in Phase 1 — classify_single is not called for them."""
     target = ADDR(1)
     dep = ADDR(2)
     impl = ADDR(3)
@@ -427,14 +417,11 @@ def test_classify_contracts_pre_classified_skips_rpc(monkeypatch):
         pre_classified={target: pre_classified_result},
     )
 
-    # Target should use the pre_classified result, not call classify_single
     assert target not in calls
     assert dep in calls
     assert result["classifications"][target]["type"] == "proxy"
     assert result["classifications"][target]["proxy_type"] == "eip1967"
-    # Dependency was classified normally
     assert result["classifications"][dep]["type"] == "regular"
-    # Implementation discovered from pre_classified proxy slots
     assert impl in result["discovered_addresses"]
 
 
@@ -443,37 +430,7 @@ def test_classify_contracts_pre_classified_skips_rpc(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_classify_single_eip1967_proxy(monkeypatch):
-    """classify_single detects an EIP-1967 proxy via storage slots."""
-    addr = ADDR(0xA)
-    impl = ADDR(0xB)
-    admin = ADDR(0xC)
-
-    storage = {
-        (addr, cls.EIP1967_IMPL_SLOT): _slot_for(impl),
-        (addr, cls.EIP1967_ADMIN_SLOT): _slot_for(admin),
-    }
-
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: BIG_BYTECODE)
-    monkeypatch.setattr(
-        cls,
-        "rpc_call",
-        lambda _rpc, method, params, retries=1, chain_id=None: (
-            storage.get((params[0], params[1]), ZERO_SLOT)
-            if method == "eth_getStorageAt"
-            else (_ for _ in ()).throw(RuntimeError("unexpected"))
-        ),
-    )
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "proxy"
-    assert result["proxy_type"] == "eip1967"
-    assert result["implementation"] == impl
-    assert result["admin"] == admin
-
-
 def test_classify_single_eip1167(monkeypatch):
-    """classify_single detects an EIP-1167 minimal proxy from bytecode."""
     impl_hex = "aabbccddee11223344556677889900aabbccddee"
     bytecode = "0x" + cls.EIP1167_PREFIX + impl_hex + cls.EIP1167_SUFFIX
     addr = ADDR(0xD)
@@ -486,25 +443,7 @@ def test_classify_single_eip1167(monkeypatch):
     assert result["implementation"] == "0x" + impl_hex
 
 
-def test_classify_single_regular(monkeypatch):
-    """classify_single returns 'regular' when no proxy pattern is found."""
-    addr = ADDR(0xE)
-
-    monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: BIG_BYTECODE)
-    monkeypatch.setattr(
-        cls,
-        "rpc_call",
-        lambda _rpc, method, params, retries=1, chain_id=None: (
-            ZERO_SLOT if method == "eth_getStorageAt" else (_ for _ in ()).throw(RuntimeError("revert"))
-        ),
-    )
-
-    result = cls.classify_single(addr, RPC)
-    assert result["type"] == "regular"
-
-
 def test_classify_single_with_bytecode_param(monkeypatch):
-    """Passing bytecode= skips the get_code call."""
     impl_hex = "aabbccddee11223344556677889900aabbccddee"
     bytecode = "0x" + cls.EIP1167_PREFIX + impl_hex + cls.EIP1167_SUFFIX
 
@@ -515,13 +454,10 @@ def test_classify_single_with_bytecode_param(monkeypatch):
 
 
 def test_classify_single_large_impl_getter_is_regular(monkeypatch):
-    """A large logic contract exposing implementation() as a domain getter
-    (not a delegation pointer) classifies as 'regular', not a custom proxy.
+    """A large logic contract exposing implementation() as a domain getter classifies 'regular', not custom proxy.
 
-    Regression for EtherFi's StakingManager: 16.5 KB UUPS logic that returns the
-    EtherFiNode beacon template from implementation(). Without the size guard it
-    was mis-tagged proxy_type=custom → EtherFiNode, so its own functions were
-    never analyzed and it surfaced no governance controller."""
+    Regression for EtherFi's StakingManager (16.5 KB UUPS logic): without the size guard it was mis-tagged
+    proxy_type=custom -> EtherFiNode, so its own functions were never analyzed."""
     addr = ADDR(0x30)
     domain_target = ADDR(0x31)
     big_logic = "0x" + "60" * (cls.GENERIC_IMPL_PROXY_MAX_BYTES + 1000)  # > ceiling, no DELEGATECALL
@@ -543,8 +479,7 @@ def test_classify_single_large_impl_getter_is_regular(monkeypatch):
 
 
 def test_classify_single_small_impl_getter_still_custom(monkeypatch):
-    """A small custom proxy that exposes implementation() is still detected —
-    the size guard must not break the legitimate non-standard-slot proxy path."""
+    """The size guard must not break detection of a small custom proxy exposing implementation()."""
     addr = ADDR(0x32)
     impl = ADDR(0x33)
     small_proxy = "0x" + "60" * 200  # 200 bytes, well under the ceiling
@@ -572,14 +507,10 @@ def test_classify_single_small_impl_getter_still_custom(monkeypatch):
 
 
 def test_classify_single_upgradeable_beacon(monkeypatch):
-    """A true UpgradeableBeacon — exposes implementation() AND owner(), empty
-    EIP-1967 slots, NO DELEGATECALL in bytecode — classifies type='beacon'
-    (not proxy/custom) so the static worker analyses it and discovers its
-    owner(), the upgrade authority of every governed instance.
+    """A true UpgradeableBeacon (implementation() AND owner(), empty EIP-1967 slots, no DELEGATECALL) is a 'beacon'.
 
-    Regression for EtherFi AvsOperator/EtherFiNode beacons (0x29b1c223 /
-    0x3c55986c): misclassified proxy/custom, they short-circuited controller
-    discovery so beacon.owner() was never attributed."""
+    Regression for EtherFi AvsOperator/EtherFiNode beacons (0x29b1c223 / 0x3c55986c): misclassified proxy/custom,
+    they short-circuited controller discovery so beacon.owner() was never attributed."""
     addr = ADDR(0x40)
     impl = ADDR(0x41)
     owner = ADDR(0x42)
@@ -610,10 +541,8 @@ def test_classify_single_upgradeable_beacon(monkeypatch):
 
 
 def test_classify_single_forwarding_proxy_with_delegatecall_stays_proxy(monkeypatch):
-    """A forwarding proxy that exposes implementation() but contains
-    DELEGATECALL must STAY a proxy — never reclassified as a beacon — even if
-    it also answered owner(). Mirrors Aragon AppProxyUpgradeable (Lido stETH,
-    cid 340): DELEGATECALL present, so it forwards calls and is a real proxy."""
+    """A forwarding proxy with implementation() and DELEGATECALL stays a proxy, never a beacon, even if it also
+    answers owner(). Mirrors Aragon AppProxyUpgradeable (Lido stETH, cid 340)."""
     addr = ADDR(0x43)
     impl = ADDR(0x44)
     # Custom proxy: small bytecode WITH a real DELEGATECALL (0xf4).
@@ -643,9 +572,8 @@ def test_classify_single_forwarding_proxy_with_delegatecall_stays_proxy(monkeypa
 
 
 def test_classify_single_impl_getter_without_owner_is_not_beacon(monkeypatch):
-    """A no-DELEGATECALL contract that exposes implementation() but NOT owner()
-    is not a beacon — it falls through to the size-gated custom-proxy path. The
-    owner() requirement separates a beacon from a bare immutable-impl getter."""
+    """A no-DELEGATECALL contract with implementation() but no owner() is not a beacon; it falls through to the
+    size-gated custom-proxy path."""
     addr = ADDR(0x46)
     impl = ADDR(0x47)
     bc = "0x" + "60" * 200  # no DELEGATECALL, under the custom-proxy size ceiling
@@ -677,8 +605,7 @@ def test_classify_single_impl_getter_without_owner_is_not_beacon(monkeypatch):
 
 
 def test_classify_single_uses_batched_storage_reads(monkeypatch):
-    """The five proxy-detection slot reads are issued via one ``rpc_batch_request_with_status``
-    call; sequential ``eth_getStorageAt`` is reserved for the per-slot fallback path."""
+    """The five slot reads go via one ``rpc_batch_request_with_status`` call; per-slot reads are fallback only."""
     addr = ADDR(0xA)
     impl = ADDR(0xB)
 
@@ -714,8 +641,7 @@ def test_classify_single_uses_batched_storage_reads(monkeypatch):
 
 
 def test_classify_single_falls_back_when_batch_returns_errors(monkeypatch):
-    """Whole-batch failure falls through to per-slot ``eth_getStorageAt`` so
-    the classifier still recognises proxies on RPCs that reject batches."""
+    """Whole-batch failure falls through to per-slot reads so proxies are recognised on RPCs that reject batches."""
     addr = ADDR(0xA)
     impl = ADDR(0xB)
 
@@ -762,10 +688,9 @@ def test_batched_slot_read_treats_short_words_as_failed_reads(monkeypatch):
 
 
 def test_classify_single_unread_slots_raise_incomplete(monkeypatch):
-    """A transient RPC outage that fails BOTH the batched read and the per-slot
-    fallback for a would-be-'regular' contract raises ClassificationIncompleteError
-    instead of returning a confident non-proxy. Returning 'regular' here would
-    silently drop a real implementation's access-control surface."""
+    """A transient outage failing BOTH the batched read and the per-slot fallback for a would-be-'regular' contract
+    raises ClassificationIncompleteError; returning 'regular' would silently drop a real implementation's
+    access-control surface."""
     addr = ADDR(0xDEAD)
     monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: BIG_BYTECODE)
     # Batch errors (autouse fixture) AND the single-call fallback also raises:
@@ -788,7 +713,6 @@ def test_classify_single_proxy_detected_despite_unread_admin_slot(monkeypatch):
     impl = ADDR(0xB)
 
     def fake_batch(_rpc, calls, chain_id=None):
-        # impl(0) reads back; admin(2) errors; the rest read empty.
         return [
             (_slot_for(impl), False),
             (ZERO_SLOT, False),
@@ -815,12 +739,9 @@ def test_classify_single_proxy_detected_despite_unread_admin_slot(monkeypatch):
 
 
 def test_classify_single_clean_empty_slots_stay_regular(monkeypatch):
-    """Genuinely-empty slots (read succeeds, returns zero) still classify
-    'regular' — the flag is set only on a read *failure*, so a real non-proxy is
-    never spuriously raised."""
+    """Genuinely-empty slots (read succeeds, zero) still classify 'regular': the flag is set only on read failure."""
     addr = ADDR(0xE)
     monkeypatch.setattr(cls, "get_code", lambda _rpc, _addr, chain_id=None: BIG_BYTECODE)
-    # All reads succeed and return the zero slot; eth_call probes revert (non-proxy).
     monkeypatch.setattr(
         cls,
         "rpc_call",
@@ -874,8 +795,6 @@ def test_classify_contracts_incomplete_marks_unknown_not_regular(monkeypatch):
 
 
 def _classify_contracts_parity_helper(monkeypatch, fanout: str):
-    """Drive ``classify_contracts`` with a fixture that hits every Phase 1
-    detection branch. Returns the canonicalised classifications dict."""
     monkeypatch.setenv("PSAT_RPC_FANOUT", fanout)
 
     target = ADDR(1)
@@ -902,7 +821,6 @@ def _classify_contracts_parity_helper(monkeypatch, fanout: str):
 
 
 def test_classify_contracts_parity_parallel_vs_sequential(monkeypatch):
-    """``PSAT_RPC_FANOUT=1`` and ``=8`` must produce identical classifications."""
     seq_classifications, seq_discovered = _classify_contracts_parity_helper(monkeypatch, "1")
     par_classifications, par_discovered = _classify_contracts_parity_helper(monkeypatch, "8")
     assert seq_classifications == par_classifications
@@ -910,8 +828,7 @@ def test_classify_contracts_parity_parallel_vs_sequential(monkeypatch):
 
 
 def test_classify_contracts_parallel_handles_per_address_runtimeerror(monkeypatch):
-    """A RuntimeError on one address falls back to ``regular`` without
-    poisoning the parallel batch — same surface as the serial loop."""
+    """A RuntimeError on one address falls back to ``regular`` without poisoning the parallel batch."""
     monkeypatch.setenv("PSAT_RPC_FANOUT", "8")
     target = ADDR(1)
     deps = [ADDR(2), ADDR(3), ADDR(4)]

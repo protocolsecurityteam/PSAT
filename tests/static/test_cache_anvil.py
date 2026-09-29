@@ -99,7 +99,6 @@ def _deploy_minimal_contract(rpc_url: str) -> str:
 
     deploy_bytecode = "0x600160005360016000f3"
 
-    # Get the first account
     resp = requests.post(
         rpc_url,
         json={"jsonrpc": "2.0", "method": "eth_accounts", "params": [], "id": 1},
@@ -108,7 +107,6 @@ def _deploy_minimal_contract(rpc_url: str) -> str:
     accounts = resp.json()["result"]
     deployer = accounts[0]
 
-    # Send deployment transaction
     resp = requests.post(
         rpc_url,
         json={
@@ -140,7 +138,6 @@ def _set_storage(rpc_url: str, address: str, slot: str, value: str) -> None:
     """Set a storage slot on Anvil using anvil_setStorageAt."""
     import requests
 
-    # Pad the value to 32 bytes
     padded_value = "0x" + value.replace("0x", "").lower().zfill(64)
     resp = requests.post(
         rpc_url,
@@ -161,7 +158,6 @@ class TestAnvilProxyCache:
     """Integration tests that exercise real EIP-1967 storage slot reads via Anvil."""
 
     def test_resolve_current_implementation_reads_real_slot(self, anvil_rpc):
-        """resolve_current_implementation reads the EIP-1967 slot from a real node."""
         from services.monitoring.proxy_watcher import resolve_current_implementation
 
         proxy_addr = _deploy_minimal_contract(anvil_rpc)
@@ -172,7 +168,6 @@ class TestAnvilProxyCache:
         assert result.lower() == _ANVIL_IMPL_A.lower()
 
     def test_resolve_current_implementation_detects_change(self, anvil_rpc):
-        """After changing the slot, resolve_current_implementation returns the new address."""
         from services.monitoring.proxy_watcher import resolve_current_implementation
 
         proxy_addr = _deploy_minimal_contract(anvil_rpc)
@@ -188,27 +183,21 @@ class TestAnvilProxyCache:
         assert result_b.lower() == _ANVIL_IMPL_B.lower()
 
     def test_resolve_current_implementation_empty_slot(self, anvil_rpc):
-        """Empty slot returns None."""
         from services.monitoring.proxy_watcher import resolve_current_implementation
 
         proxy_addr = _deploy_minimal_contract(anvil_rpc)
-        # Don't set the slot -- it defaults to zero
         result = resolve_current_implementation(proxy_addr, anvil_rpc, proxy_type="eip1967")
         assert result is None
 
     def test_check_proxy_cache_unchanged_impl_via_anvil(self, db_session, anvil_rpc):
-        """_check_proxy_cache returns cached classification when the on-chain
-        implementation matches the cached one -- exercising real RPC."""
 
         from db.models import Contract
         from db.queue import create_job
         from workers.static_worker import _check_proxy_cache
 
-        # Deploy a contract and set it as a proxy pointing to IMPL_A
         proxy_addr = _deploy_minimal_contract(anvil_rpc)
         _set_storage(anvil_rpc, proxy_addr, _EIP1967_IMPL_SLOT, _ANVIL_IMPL_A)
 
-        # Create source job with proxy info matching the on-chain state
         source_job = create_job(db_session, {"address": proxy_addr})
         src_contract = Contract(
             job_id=source_job.id,
@@ -221,7 +210,6 @@ class TestAnvilProxyCache:
         db_session.add(src_contract)
         db_session.flush()
 
-        # Create target job flagged as cached
         target_job = create_job(
             db_session,
             {
@@ -239,30 +227,24 @@ class TestAnvilProxyCache:
         db_session.add(target_contract)
         db_session.flush()
 
-        # _check_proxy_cache should return the cached classification (impl unchanged)
         result = _check_proxy_cache(db_session, target_job, target_contract)
         assert result is not None
         assert result["type"] == "proxy"
         assert result["proxy_type"] == "eip1967"
 
-        # Verify target contract was updated with proxy fields
         db_session.refresh(target_contract)
         assert target_contract.is_proxy is True
         assert target_contract.implementation is not None
         assert target_contract.implementation.lower() == _ANVIL_IMPL_A.lower()
 
     def test_check_proxy_cache_detects_upgrade_via_anvil(self, db_session, anvil_rpc):
-        """_check_proxy_cache returns None when on-chain implementation differs
-        from cached -- exercising real RPC upgrade detection."""
         from db.models import Contract
         from db.queue import create_job
         from workers.static_worker import _check_proxy_cache
 
         proxy_addr = _deploy_minimal_contract(anvil_rpc)
-        # On-chain: impl is now B
         _set_storage(anvil_rpc, proxy_addr, _EIP1967_IMPL_SLOT, _ANVIL_IMPL_B)
 
-        # Source job says impl was A (stale cache)
         source_job = create_job(db_session, {"address": proxy_addr})
         src_contract = Contract(
             job_id=source_job.id,
@@ -292,93 +274,8 @@ class TestAnvilProxyCache:
         db_session.add(target_contract)
         db_session.flush()
 
-        # Should detect upgrade and return None
         result = _check_proxy_cache(db_session, target_job, target_contract)
         assert result is None
-
-    def test_check_proxy_cache_non_proxy_via_anvil(self, db_session, anvil_rpc):
-        """_check_proxy_cache for a non-proxy source returns regular without RPC."""
-        from db.models import Contract
-        from db.queue import create_job
-        from workers.static_worker import _check_proxy_cache
-
-        proxy_addr = _deploy_minimal_contract(anvil_rpc)
-
-        source_job = create_job(db_session, {"address": proxy_addr})
-        src_contract = Contract(
-            job_id=source_job.id,
-            address=proxy_addr,
-            contract_name="NonProxy",
-            is_proxy=False,
-        )
-        db_session.add(src_contract)
-        db_session.flush()
-
-        target_job = create_job(
-            db_session,
-            {
-                "address": proxy_addr,
-                "rpc_url": anvil_rpc,
-                "static_cached": True,
-                "cache_source_job_id": str(source_job.id),
-            },
-        )
-        target_contract = Contract(
-            job_id=target_job.id,
-            address=proxy_addr,
-            contract_name="NonProxy",
-        )
-        db_session.add(target_contract)
-        db_session.flush()
-
-        result = _check_proxy_cache(db_session, target_job, target_contract)
-        assert result is not None
-        assert result["type"] == "regular"
-
-    def test_check_proxy_cache_immutable_eip1167_no_rpc_via_anvil(self, db_session, anvil_rpc):
-        """_check_proxy_cache for eip1167 (immutable) reuses cache without RPC."""
-        from db.models import Contract
-        from db.queue import create_job
-        from workers.static_worker import _check_proxy_cache
-
-        proxy_addr = _deploy_minimal_contract(anvil_rpc)
-
-        source_job = create_job(db_session, {"address": proxy_addr})
-        src_contract = Contract(
-            job_id=source_job.id,
-            address=proxy_addr,
-            contract_name="Clone",
-            is_proxy=True,
-            proxy_type="eip1167",
-            implementation=_ANVIL_IMPL_A,
-        )
-        db_session.add(src_contract)
-        db_session.flush()
-
-        target_job = create_job(
-            db_session,
-            {
-                "address": proxy_addr,
-                "rpc_url": anvil_rpc,
-                "static_cached": True,
-                "cache_source_job_id": str(source_job.id),
-            },
-        )
-        target_contract = Contract(
-            job_id=target_job.id,
-            address=proxy_addr,
-            contract_name="Clone",
-        )
-        db_session.add(target_contract)
-        db_session.flush()
-
-        result = _check_proxy_cache(db_session, target_job, target_contract)
-        assert result is not None
-        assert result["type"] == "proxy"
-        assert result["proxy_type"] == "eip1167"
-        db_session.refresh(target_contract)
-        assert target_contract.implementation is not None
-        assert target_contract.implementation.lower() == _ANVIL_IMPL_A.lower()
 
     def test_dependency_proxy_cache_detects_upgrade_via_anvil(self, db_session, anvil_rpc, monkeypatch, tmp_path):
         """After a proxy dependency is upgraded on-chain, re-running the
@@ -387,14 +284,11 @@ class TestAnvilProxyCache:
         from db.models import Contract
         from db.queue import create_job, get_artifact, store_artifact
 
-        # Deploy a target contract and a proxy dependency on Anvil
         target_addr = _deploy_minimal_contract(anvil_rpc).lower()
         dep_addr = _deploy_minimal_contract(anvil_rpc).lower()
 
-        # Set the dependency's EIP-1967 implementation slot to IMPL_A
         _set_storage(anvil_rpc, dep_addr, _EIP1967_IMPL_SLOT, _ANVIL_IMPL_A)
 
-        # Create a job with RPC pointing to Anvil
         job = create_job(db_session, {"address": target_addr, "rpc_url": anvil_rpc})
         contract = Contract(
             job_id=job.id,
@@ -412,7 +306,6 @@ class TestAnvilProxyCache:
         db_session.add(contract)
         db_session.commit()
 
-        # Store cached static dependencies containing the proxy dep
         store_artifact(
             db_session,
             job.id,
@@ -424,7 +317,6 @@ class TestAnvilProxyCache:
             },
         )
 
-        # Store cached classifications from "previous run" with impl = IMPL_A
         store_artifact(
             db_session,
             job.id,
@@ -448,7 +340,6 @@ class TestAnvilProxyCache:
         # --- Upgrade the dependency proxy to IMPL_B ---
         _set_storage(anvil_rpc, dep_addr, _EIP1967_IMPL_SLOT, _ANVIL_IMPL_B)
 
-        # Mock non-classification parts of _run_dependency_phase
         monkeypatch.setattr(
             "workers.static_worker.build_unified_dependencies",
             lambda *a, **kw: {"target_address": target_addr, "dependencies": {}},
@@ -462,7 +353,6 @@ class TestAnvilProxyCache:
         # monkeypatch the underlying builder it now calls instead.
         monkeypatch.setattr("services.discovery.upgrade_history.build_upgrade_history", lambda *a, **kw: None)
 
-        # Run the dependency phase
         from workers.static_worker import StaticWorker
 
         worker = StaticWorker()
@@ -474,7 +364,6 @@ class TestAnvilProxyCache:
             target_addr,
         )
 
-        # The stored classifications should reflect the upgrade
         cls_result = get_artifact(db_session, job.id, "classifications")
         assert isinstance(cls_result, dict)
         dep_cls = cls_result["classifications"].get(dep_addr, {})

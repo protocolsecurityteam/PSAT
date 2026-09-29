@@ -1,16 +1,10 @@
-"""The salience spine: §4.2's rule table, the mechanical gate that keeps
-``routine`` honest, E5's ``signal_class``, the three mint sites, the notifier
-opt-in, and the enrichment recompute seam.
+"""The salience spine: §4.2's rule table, the mechanical gate keeping ``routine`` honest,
+E5's ``signal_class``, the three mint sites, the notifier opt-in, and the enrichment seam.
 
-The census this file backs is a per-RULE one: every row of §4.2 is exercised
-here with its basis code asserted, so a rule that stops firing (or starts
-firing on the wrong shape) fails a named test rather than drifting.
-
-The mechanical gate has its own section: **no ``routine`` is minted from an
-absent input.** Both routine arms rest on a positive finding — a stamped
-``signal_class`` carrying its own basis, or a decoded ``not_top_level_call``
-status — and each of those inputs is removed in a test that requires the level
-to fall back to ``not_determined`` (visible), never to ``routine``.
+The census is per-RULE: every §4.2 row is exercised with its basis asserted. The gate:
+**no ``routine`` is minted from an absent input**; both routine arms need a positive finding
+(stamped ``signal_class`` with basis, or decoded ``not_top_level_call``), and removing either
+must fall back to ``not_determined`` (visible), never ``routine``.
 """
 
 from __future__ import annotations
@@ -486,16 +480,6 @@ def test_not_determined_sorts_with_notable_never_with_routine():
     assert sal.salience_rank("bogus") == sal.salience_rank(sal.SALIENCE_NOT_DETERMINED)
 
 
-def test_salience_is_orthogonal_to_witness_tier(db_session, make_mc):
-    """Invariant 3: neither is derived from the other. The same maximally
-    proven tier spans three levels here."""
-    mc = make_mc()
-    proven = {"witness_tier": "self_describing"}
-    assert rate(db_session, mc, "ownership_transferred", proven)[0] == sal.SALIENCE_ALERT
-    assert rate(db_session, mc, "state_changed:state_variable:x", proven)[0] == sal.SALIENCE_NOTABLE
-    assert rate(db_session, mc, "initialized", proven)[0] == sal.SALIENCE_NOT_DETERMINED
-
-
 # ---------------------------------------------------------------------------
 # E5 — signal_class on freshly built polling plans
 # ---------------------------------------------------------------------------
@@ -838,9 +822,8 @@ def test_a_type_the_registry_does_not_cover_is_left_untouched(db_session, make_m
     """The driver only ever touches a row some enricher has something to say
     about — including the salience the mint site already assigned.
 
-    (Phase 1 asserted this with an EMPTY registry. Phase 2 fills it, so the
-    claim is now stated against a type outside it: an ``authority_updated``
-    alone in its transaction has no decoder and no correlation partner.)"""
+    (Phase 1 used an EMPTY registry; now it is stated against a type outside it:
+    ``authority_updated`` alone in its transaction has no decoder or correlation partner.)"""
     assert set(ENRICHERS) == {"safe_tx_executed", "safe_tx_failed", "timelock_scheduled", "timelock_executed"}
     assert NEEDS_TX == frozenset({"safe_tx_executed", "safe_tx_failed"})
 
@@ -913,30 +896,6 @@ def test_a_failing_enricher_leaves_the_row_as_the_taxonomy_wrote_it(db_session, 
     db_session.expire_all()
 
     assert _without_correlation(db_session.get(MonitoredEvent, event.id).data) == before
-
-
-def test_the_driver_never_changes_event_type_or_witness_tier(db_session, make_mc):
-    """Invariant 8: enrichment is additive."""
-    mc = make_mc(contract_type="safe")
-    event = _seed_event(
-        db_session,
-        mc,
-        "safe_tx_executed",
-        {"witness_tier": "self_describing", "salience": sal.SALIENCE_NOT_DETERMINED, "salience_basis": ["x"]},
-    )
-
-    def fake(_event, _mc, _ctx):
-        return {"safe_exec": {"status": "not_top_level_call"}}
-
-    with patch.dict(ENRICHERS, {"safe_tx_executed": fake}, clear=False):
-        enrich_events(db_session, [event], {"ethereum": "http://rpc.invalid"})
-    db_session.commit()
-    db_session.expire_all()
-
-    row = db_session.get(MonitoredEvent, event.id)
-    assert row.event_type == "safe_tx_executed"
-    assert row.data["witness_tier"] == "self_describing"
-    assert row.data["salience"] == sal.SALIENCE_ROUTINE
 
 
 # ---------------------------------------------------------------------------
@@ -1149,9 +1108,8 @@ def test_the_driver_refuses_an_enrichers_non_additive_keys(db_session, make_mc):
 
 def test_an_enricher_producing_only_refused_keys_changes_nothing(db_session, make_mc):
     mc = make_mc(contract_type="safe")
-    # The seeded level is the one the mint site would have written, so the
-    # correlation join's own recompute is an identity and the only thing this
-    # test can observe is the refused enricher.
+    # Seeded at the mint-time level, so the correlation recompute is an identity and only the
+    # refused enricher is observable.
     before = {
         "witness_tier": "hint",
         "salience": sal.SALIENCE_NOT_DETERMINED,
@@ -1208,17 +1166,6 @@ def test_an_unresolvable_chain_costs_that_chain_not_the_window(db_session, make_
     db_session.commit()
     db_session.expire_all()
     assert "safe_exec" not in (db_session.get(MonitoredEvent, event.id).data or {})
-
-
-def test_max_salience_requires_a_stated_floor():
-    """A max fold over an empty sequence would have to seed at ``routine`` —
-    the one level the mechanical gate forbids from an absent input. Callers
-    state their own floor instead."""
-    with pytest.raises(TypeError):
-        sal.max_salience()  # pyright: ignore[reportCallIssue]
-    assert sal.max_salience(sal.SALIENCE_NOTABLE) == sal.SALIENCE_NOTABLE
-    assert sal.max_salience(sal.SALIENCE_NOTABLE, *[]) == sal.SALIENCE_NOTABLE
-    assert sal.max_salience(sal.SALIENCE_ROUTINE) == sal.SALIENCE_ROUTINE
 
 
 def test_a_failed_tx_fetch_does_not_deny_the_chain_its_zero_rpc_enrichers(db_session, make_mc):

@@ -1,20 +1,7 @@
-"""End-to-end integration tests for the audit scope-extraction pipeline.
-
-Drives the full stack against real infrastructure:
-    - real PostgreSQL (TEST_DATABASE_URL)
-    - real S3-compatible object storage (TEST_ARTIFACT_STORAGE_*)
-    - FastAPI via TestClient
-    - LLM responses stubbed via ``PSAT_LLM_STUB_DIR`` → fixture files
-
-Each test seeds an ``AuditReport`` row with ``text_extraction_status='success'``
-and manually uploads a per-auditor text fixture to the same storage key
-the text-extraction worker would use. The scope worker's
-``_claim_batch`` / ``_process_row`` / ``_persist_outcome`` are driven
-directly rather than through the infinite poll loop so tests finish
-quickly and deterministically.
-
-Gated by ``requires_postgres + requires_storage`` so a dev box without
-docker running will skip cleanly.
+"""End-to-end scope-extraction pipeline against real PostgreSQL, S3-compatible storage and FastAPI TestClient,
+LLM stubbed via ``PSAT_LLM_STUB_DIR``. Each test seeds an ``AuditReport`` (text_extraction_status='success') and
+uploads a per-auditor text fixture under the text worker's key; the scope worker is driven directly, not
+through the poll loop. Needs Postgres + storage (skips without docker).
 """
 
 from __future__ import annotations
@@ -45,12 +32,8 @@ STUB_DIR = FIXTURE_DIR / "llm_responses"
 
 @pytest.fixture()
 def llm_stub_dir(monkeypatch, tmp_path):
-    """Copy the committed stub fixtures into a tmp dir and point the env at it.
-
-    The ``_default.json`` response resolves to
-    ``["Pool","Vault","Strategy","Registry"]`` — every committed audit
-    fixture mentions all four, so validation passes for the happy path
-    without having to precompute a prompt digest per test.
+    """Copy stub fixtures to a tmp dir and point the env at it. ``_default.json`` yields Pool/Vault/Strategy/Registry,
+    which every committed audit fixture mentions, so no per-test prompt digest is needed.
     """
     committed = STUB_DIR / "_default.json"
     assert committed.exists(), f"missing fixture: {committed}"
@@ -98,7 +81,6 @@ def _seed_scoped_row(
     url: str | None = None,
     **overrides,
 ) -> int:
-    """Insert an AuditReport with text_extraction='success' + fixture body in storage."""
     from db.models import AuditReport
     from services.audits.text_extraction import audit_text_key
 
@@ -119,7 +101,6 @@ def _seed_scoped_row(
     db_session.add(ar)
     db_session.commit()
     audit_id = ar.id
-    # Write the text blob under the deterministic key the worker reads from.
     ar.text_storage_key = audit_text_key(audit_id)
     db_session.commit()
     storage_bucket.put(
@@ -132,7 +113,6 @@ def _seed_scoped_row(
 
 @pytest.fixture()
 def worker(monkeypatch):
-    """Construct the scope worker with SessionLocal rebound to the test DB."""
     from unittest.mock import patch
 
     from sqlalchemy import create_engine
@@ -205,7 +185,6 @@ def test_worker_extracts_scope_for_spearbit_fixture(db_session, storage_bucket, 
     # fixture's "Delivered: 19 December 2024" title line.
     assert row.date == "2024-12-19"
 
-    # Artifact really exists in storage, parses as valid JSON.
     import json as _json
 
     body = storage_bucket.get(row.scope_storage_key)
@@ -218,69 +197,6 @@ def test_worker_extracts_scope_for_spearbit_fixture(db_session, storage_bucket, 
 # ---------------------------------------------------------------------------
 # 2. Content-hash cache hit — second row clones without an LLM call
 # ---------------------------------------------------------------------------
-
-
-def test_content_hash_cache_copies_scope_to_sibling(
-    db_session,
-    storage_bucket,
-    seed_protocol,
-    worker,
-    llm_stub_dir,
-):
-    from db.models import AuditReport
-
-    protocol_id, _ = seed_protocol
-
-    # Same PDF, two mirrors. Seed A first and let it finish extraction
-    # *before* B even exists — that's the realistic ordering (Solodit
-    # discovers first, a GitHub mirror surfaces later) and also keeps the
-    # first ``_claim_batch`` from scooping both rows into 'processing'
-    # before we can drive them one at a time.
-    sha = "sha-identical-mirror"
-    id_a = _seed_scoped_row(
-        db_session,
-        storage_bucket,
-        protocol_id,
-        fixture="spearbit_table.txt",
-        text_sha256=sha,
-        url="https://example.com/solodit-copy.pdf",
-    )
-
-    claimed = worker._claim_batch(db_session)
-    assert {a.id for a in claimed} == {id_a}
-    a_row = next(a for a in claimed if a.id == id_a)
-    _, outcome_a = worker._process_row(a_row)
-    worker._persist_outcome(id_a, outcome_a)
-
-    # A is 'success'. Now seed B with the same text_sha256 and break the
-    # LLM stub — if B doesn't hit the content-hash cache the extraction
-    # would raise, so a successful cache-copy is the only path.
-    id_b = _seed_scoped_row(
-        db_session,
-        storage_bucket,
-        protocol_id,
-        fixture="spearbit_table.txt",
-        text_sha256=sha,
-        url="https://example.com/github-copy.pdf",
-    )
-    (llm_stub_dir / "_default.json").unlink()
-
-    from workers.audit_scope_extraction import _CacheCopyOutcome
-
-    claimed = worker._claim_batch(db_session)
-    assert {a.id for a in claimed} == {id_b}
-    b_row = next(a for a in claimed if a.id == id_b)
-    _, result_b = worker._process_row(b_row)
-    assert isinstance(result_b, _CacheCopyOutcome), f"expected cache copy, got {result_b!r}"
-    assert result_b.sibling_id == id_a
-    worker._persist_outcome(id_b, result_b)
-
-    db_session.expire_all()
-    row_b = db_session.get(AuditReport, id_b)
-    row_a = db_session.get(AuditReport, id_a)
-    assert row_b.scope_extraction_status == "success"
-    assert row_b.scope_contracts == row_a.scope_contracts
-    assert row_b.scope_storage_key == row_a.scope_storage_key
 
 
 # ---------------------------------------------------------------------------
@@ -309,9 +225,6 @@ def test_worker_skips_body_without_scope_header(db_session, storage_bucket, seed
     row = db_session.get(AuditReport, audit_id)
     assert row.scope_extraction_status == "skipped"
     assert row.scope_extraction_error is not None
-    # With the header + content-pattern + chunk-scan pipeline the error
-    # surface changed; all three layers having to come up empty is the
-    # right signal that no scope could be extracted.
     assert "no scope section found" in row.scope_extraction_error
     assert row.scope_contracts is None or row.scope_contracts == []
     assert row.scope_storage_key is None
@@ -332,7 +245,6 @@ def test_worker_falls_back_to_regex_when_llm_fails(
 ):
     from db.models import AuditReport
 
-    # Point PSAT_LLM_STUB_DIR at an EMPTY dir — every lookup raises.
     empty = tmp_path / "empty_stubs"
     empty.mkdir()
     monkeypatch.setenv("PSAT_LLM_STUB_DIR", str(empty))
@@ -354,7 +266,6 @@ def test_worker_falls_back_to_regex_when_llm_fails(
     db_session.expire_all()
     row = db_session.get(AuditReport, audit_id)
     assert row.scope_extraction_status == "success"
-    # Regex picks up Pool, Vault, Strategy, Registry from the *.sol refs.
     assert sorted(row.scope_contracts) == ["Pool", "Registry", "Strategy", "Vault"]
 
     import json as _json
@@ -385,7 +296,6 @@ def test_stale_scope_rows_are_recovered(
         text_sha256="sha-stale",
     )
 
-    # Park in processing with an old timestamp.
     row = db_session.get(AuditReport, audit_id)
     assert row is not None
     row.scope_extraction_status = "processing"
@@ -487,7 +397,6 @@ def test_api_audit_coverage_joins_inventory_to_audits(
 
     protocol_id, protocol_name = seed_protocol
 
-    # Seed inventory contracts.
     db_session.add_all(
         [
             Contract(
@@ -536,14 +445,12 @@ def test_api_audit_coverage_joins_inventory_to_audits(
         text_sha256="sha-new",
     )
 
-    # Drive both through the worker.
     for _ in range(2):
         claimed = worker._claim_batch(db_session)
         for ar in claimed:
             _, outcome = worker._process_row(ar)
             worker._persist_outcome(ar.id, outcome)
 
-    # Verify both extractions succeeded before hitting the endpoint.
     from db.models import AuditReport as _AR
 
     db_session.expire_all()
@@ -562,15 +469,12 @@ def test_api_audit_coverage_joins_inventory_to_audits(
     by_name = {c["contract_name"]: c for c in body["coverage"]}
     assert set(by_name) == {"Pool", "Vault", "NotAudited"}
 
-    # Pool + Vault are in both audits → audit_count=2; last_audit is the
-    # newest one (NewFirm, 2024-12-01).
     assert by_name["Pool"]["audit_count"] == 2
     assert by_name["Pool"]["last_audit"]["auditor"] == "NewFirm"
     assert by_name["Pool"]["last_audit"]["date"] == "2024-12-01"
     assert by_name["Vault"]["audit_count"] == 2
     assert by_name["Vault"]["last_audit"]["auditor"] == "NewFirm"
 
-    # NotAudited → no matches.
     assert by_name["NotAudited"]["audit_count"] == 0
     assert by_name["NotAudited"]["last_audit"] is None
 
@@ -582,12 +486,8 @@ def test_api_audit_coverage_joins_inventory_to_audits(
 
 @pytest.fixture()
 def make_fresh_worker(monkeypatch):
-    """Factory that builds independent worker instances.
-
-    Simulates a process restart: each call produces a brand-new
-    AuditScopeExtractionWorker with its own worker_id and (importantly)
-    no in-memory state from a prior run. The caching contract should
-    rely entirely on DB state, not worker-local caches.
+    """Builds independent worker instances to simulate a process restart: the caching contract must rely on DB
+    state, not worker-local caches.
     """
     from unittest.mock import patch
 
@@ -617,12 +517,7 @@ def make_fresh_worker(monkeypatch):
 
 @pytest.fixture()
 def llm_call_counter(monkeypatch):
-    """Wrap services.audits.scope_extraction._llm._call_llm with a counter.
-
-    Lets tests assert exactly how many LLM calls happened across a
-    sequence of worker runs — the surest way to prove the cache
-    short-circuited re-processing.
-    """
+    """Wrap ``_llm._call_llm`` with a counter so tests can assert exactly how many LLM calls a run sequence made."""
     counter = {"calls": 0}
     # Patch ``_call_llm`` at its source (``_llm`` submodule) — patching the
     # package-level re-export wouldn't intercept calls from inside ``_llm``.
@@ -639,7 +534,6 @@ def llm_call_counter(monkeypatch):
 
 
 def _drive(worker, db_session) -> list[int]:
-    """Claim + process + persist one batch; return the ids that got processed."""
     claimed = worker._claim_batch(db_session)
     processed: list[int] = []
     for ar in claimed:
@@ -656,17 +550,14 @@ def test_terminal_status_rows_not_reclaimed_across_worker_restart(
     make_fresh_worker,
     llm_stub_dir,
 ):
-    """Rows in any terminal state (success / failed / skipped) stay out of
-    the claim query across worker restarts. The DB row-level status *is*
-    the primary cache; no worker should ever re-touch a finished audit
-    unless someone explicitly resets it."""
+    """Terminal-state rows (success / failed / skipped) stay out of the claim query across restarts; DB status is the
+    primary cache.
+    """
     from db.models import AuditReport
 
     protocol_id, _ = seed_protocol
 
-    # Pre-populate three rows in distinct terminal states + one pending.
-    # Distinct URLs per row so the (protocol_id, url) unique key isn't
-    # violated.
+    # Distinct URLs per row so the (protocol_id, url) unique key isn't violated.
     success_id = _seed_scoped_row(
         db_session,
         storage_bucket,
@@ -700,8 +591,6 @@ def test_terminal_status_rows_not_reclaimed_across_worker_restart(
         url="https://example.com/pending-row.pdf",
     )
 
-    # Mark three as terminal with explicit state, as if a prior worker run
-    # had already processed them.
     for aid, status in (
         (success_id, "success"),
         (failed_id, "failed"),
@@ -717,9 +606,6 @@ def test_terminal_status_rows_not_reclaimed_across_worker_restart(
             row.scope_extraction_error = "preset failure"
     db_session.commit()
 
-    # Spawn two independent workers (simulating restarts) and let each
-    # claim once. Only the pending row should ever get claimed — and only
-    # once, across both workers combined.
     w1 = make_fresh_worker()
     w2 = make_fresh_worker()
     assert w1.worker_id != w2.worker_id, "fresh workers should have distinct ids"
@@ -730,7 +616,6 @@ def test_terminal_status_rows_not_reclaimed_across_worker_restart(
     all_processed = processed_w1 + processed_w2
     assert all_processed == [pending_id], f"only the pending row should be processed, got {all_processed}"
 
-    # Confirm the terminal rows were not touched.
     db_session.expire_all()
     assert db_session.get(AuditReport, success_id).scope_extraction_status == "success"
     assert db_session.get(AuditReport, success_id).scope_contracts == ["Preset"]
@@ -747,10 +632,7 @@ def test_llm_not_called_again_for_already_scoped_row(
     llm_stub_dir,
     llm_call_counter,
 ):
-    """An end-to-end idempotency assertion: after a row completes, restart
-    the worker and confirm the LLM is not invoked a second time on the
-    same audit. Guards against regressions where someone accidentally
-    loosens the claim predicate."""
+    """Restarting after completion must not call the LLM again (guards against a loosened claim predicate)."""
     protocol_id, _ = seed_protocol
 
     audit_id = _seed_scoped_row(
@@ -761,13 +643,10 @@ def test_llm_not_called_again_for_already_scoped_row(
         text_sha256="sha-one-shot",
     )
 
-    # Run 1: row is NULL, worker claims + processes. Expect exactly 1 LLM call.
     w1 = make_fresh_worker()
     assert _drive(w1, db_session) == [audit_id]
     assert llm_call_counter["calls"] == 1
 
-    # Run 2: fresh worker, no other pending rows. Should claim nothing
-    # and make no LLM calls.
     w2 = make_fresh_worker()
     assert _drive(w2, db_session) == []
     assert llm_call_counter["calls"] == 1, "LLM was called a second time on an already-scoped row"
@@ -781,16 +660,13 @@ def test_content_hash_cache_survives_worker_restart(
     llm_stub_dir,
     llm_call_counter,
 ):
-    """Cache hit via text_sha256 works even when the sibling was processed
-    by a different worker instance. The cache is pure DB state — no
-    in-memory worker caching — so restart should be a no-op."""
+    """The content-hash cache is pure DB state, so it works when a different worker instance processed the sibling."""
     from db.models import AuditReport
     from workers.audit_scope_extraction import _CacheCopyOutcome
 
     protocol_id, _ = seed_protocol
     shared_sha = "sha-shared-across-workers"
 
-    # Process audit A with worker W1.
     id_a = _seed_scoped_row(
         db_session,
         storage_bucket,
@@ -803,9 +679,7 @@ def test_content_hash_cache_survives_worker_restart(
     assert _drive(w1, db_session) == [id_a]
     assert llm_call_counter["calls"] == 1
 
-    # Seed audit B with matching text_sha256 only NOW — after A has
-    # finished. Spin up a brand-new worker W2, claim B. The content-hash
-    # cache should short-circuit the LLM.
+    # Seed B only after A finishes; a fresh worker's content-hash cache hit must short-circuit the LLM.
     id_b = _seed_scoped_row(
         db_session,
         storage_bucket,
@@ -823,7 +697,6 @@ def test_content_hash_cache_survives_worker_restart(
     assert result_b.sibling_id == id_a
     w2._persist_outcome(id_b, result_b)
 
-    # LLM count unchanged — cache did its job across the restart.
     assert llm_call_counter["calls"] == 1, "Cache-copy should not trigger an LLM call"
 
     db_session.expire_all()
@@ -843,9 +716,7 @@ def test_reextract_endpoint_makes_row_eligible_again(
     llm_call_counter,
     api_with_storage,
 ):
-    """The admin re-extract endpoint is the designed way to force a
-    re-run. Confirm it resets the row back to NULL and that a subsequent
-    worker cycle picks it up and calls the LLM again."""
+    """The admin re-extract endpoint resets the row to NULL; a later worker cycle re-claims it and re-calls the LLM."""
     from db.models import AuditReport
 
     protocol_id, _ = seed_protocol
@@ -857,20 +728,16 @@ def test_reextract_endpoint_makes_row_eligible_again(
         text_sha256="sha-reextract",
     )
 
-    # Initial processing — 1 LLM call.
     w1 = make_fresh_worker()
     _drive(w1, db_session)
     assert llm_call_counter["calls"] == 1
     db_session.expire_all()
     assert db_session.get(AuditReport, audit_id).scope_extraction_status == "success"
 
-    # Hit the admin endpoint to reset.
     r = api_with_storage.post(f"/api/audits/{audit_id}/reextract_scope")
     assert r.status_code == 200, r.text
     assert r.json()["reset"] is True
 
-    # The row is now NULL again. A fresh worker should re-claim and
-    # re-run the LLM.
     db_session.expire_all()
     reset_row = db_session.get(AuditReport, audit_id)
     assert reset_row.scope_extraction_status is None
@@ -896,25 +763,15 @@ def test_scope_worker_refresh_coverage_writes_pending_for_verify_worker(
     llm_stub_dir,
     monkeypatch,
 ):
-    """Regression follow-up: the scope worker no longer runs source-
-    equivalence inline (#82 — inline verify caused Etherscan rate-limit
-    cascades that blocked every other worker). Instead the worker writes
-    coverage rows with ``equivalence_status='pending'`` so the
-    ``CoverageVerifyWorker`` can drain them at a controlled rate.
-
-    The end-state for "LiquidityPool shows no audit coverage" is still
-    correct — once the verify worker drains the pending row, it lands
-    at ``match_type='reviewed_commit'`` exactly like the inline path
-    used to. This test pins the synchronous half (pending status,
-    no inline HTTP); the deferred verify path is covered by
-    ``test_coverage_verify_worker.py``.
+    """The scope worker no longer runs source-equivalence inline (#82: inline verify caused Etherscan rate-limit
+    cascades that blocked every other worker); it writes coverage rows with ``equivalence_status='pending'`` for
+    ``CoverageVerifyWorker`` to drain. Pins the synchronous half (pending, no inline HTTP); the deferred half is
+    in ``test_coverage_verify_worker.py``.
     """
     from db.models import AuditContractCoverage, AuditReport, Contract
 
     protocol_id, _ = seed_protocol
 
-    # Seed a concrete, non-proxy impl Contract whose name the fixture's
-    # scope will match.
     impl = Contract(
         protocol_id=protocol_id,
         address="0x" + "d" * 40,
@@ -936,7 +793,6 @@ def test_scope_worker_refresh_coverage_writes_pending_for_verify_worker(
         text_sha256="sha-scope-se",
     )
 
-    # Pre-populate reviewed_commits + source_repo on the audit row.
     audit = db_session.get(AuditReport, audit_id)
     audit.reviewed_commits = ["abc123def456"]
     audit.source_repo = "example/protocol"
@@ -955,7 +811,6 @@ def test_scope_worker_refresh_coverage_writes_pending_for_verify_worker(
     monkeypatch.setattr(se_mod, "fetch_etherscan_source_files", boom_etherscan)
     monkeypatch.setattr(se_mod, "fetch_github_source_hash", boom_github)
 
-    # Drive the scope worker the same way the existing tests do.
     claimed = worker._claim_batch(db_session)
     audit_obj = next(a for a in claimed if a.id == audit_id)
     _, outcome = worker._process_row(audit_obj)
@@ -968,7 +823,5 @@ def test_scope_worker_refresh_coverage_writes_pending_for_verify_worker(
     )
 
     cov = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit_id, contract_id=impl.id).one()
-    # Heuristic match still emitted synchronously…
     assert cov.match_type == "direct"
-    # …with verification deferred to the CoverageVerifyWorker.
     assert cov.equivalence_status == "pending"

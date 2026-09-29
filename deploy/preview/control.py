@@ -7,6 +7,7 @@ outputs before invoking flyctl, psql, or aws explicitly.
 from __future__ import annotations
 
 import argparse
+import copy
 import ipaddress
 import json
 import os
@@ -16,6 +17,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import quote
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
 
 _PR_RE = re.compile(r"[1-9][0-9]{0,5}")
 _SLUG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
@@ -88,10 +94,81 @@ def build_plan(pr_number: str | int, organization: str, app_prefix: str) -> Prev
     )
 
 
-def render_config(template: str, plan: PreviewPlan) -> str:
-    if template.count("__PSAT_PREVIEW_APP__") != 1:
-        raise ConfigurationError("preview template must contain exactly one app placeholder")
-    rendered = template.replace("__PSAT_PREVIEW_APP__", plan.app)
+# A preview runs production's fly.toml. These are the only permitted differences;
+# tests/deploy/test_private_preview.py fails on any other divergence.
+PREVIEW_ENV = {
+    "PSAT_EDGE_MODE": "preview",
+    # Live tests read the chain as of these finalized heights so eRPC's
+    # forever-cache replays repeat runs instead of billing Alchemy. The pipeline
+    # still analyzes everything; only its chain inputs are fixed. Roll forward
+    # by editing these (the first run at a new pin pays once to warm the cache).
+    "PSAT_PIN_BLOCKS": "1:26079000,8453:51927000,10:157522000",
+}
+# The per-PR Flycast origin is staged as a secret.
+PREVIEW_ENV_REMOVED = ("PSAT_SITE_ORIGIN",)
+PREVIEW_HTTP = {"force_https": False, "min_machines_running": 0}
+
+_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _toml_key(key: str) -> str:
+    return key if _BARE_KEY_RE.fullmatch(key) else json.dumps(key)
+
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list) and not any(isinstance(item, dict) for item in value):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    raise ConfigurationError(f"unsupported TOML value in fly.toml: {value!r}")
+
+
+def _is_table_array(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(item, dict) for item in value)
+
+
+def dump_toml(data: Mapping[str, Any], path: tuple[str, ...] = ()) -> str:
+    lines = [
+        f"{_toml_key(key)} = {_toml_value(value)}"
+        for key, value in data.items()
+        if not isinstance(value, dict) and not _is_table_array(value)
+    ]
+    for key, value in data.items():
+        child = (*path, key)
+        header = ".".join(_toml_key(part) for part in child)
+        if isinstance(value, dict):
+            lines += ["", f"[{header}]", dump_toml(value, child)]
+        elif _is_table_array(value):
+            for item in value:
+                lines += ["", f"[[{header}]]", dump_toml(item, child)]
+    return "\n".join(lines)
+
+
+def preview_config(production: Mapping[str, Any], plan: PreviewPlan) -> dict[str, Any]:
+    config = copy.deepcopy(dict(production))
+    config["app"] = plan.app
+    env = config["env"]
+    for key in PREVIEW_ENV_REMOVED:
+        env.pop(key, None)
+    env.update(PREVIEW_ENV)
+    http = config["http_service"]
+    http.update(PREVIEW_HTTP)
+    for check in http.get("checks", []):
+        # Production's placeholder health secret must never reach a preview.
+        check.pop("headers", None)
+    return config
+
+
+def render_config(production_source: str, plan: PreviewPlan) -> str:
+    try:
+        production = tomllib.loads(production_source)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigurationError(f"cannot parse production fly.toml: {exc}") from exc
+    rendered = dump_toml(preview_config(production, plan)) + "\n"
     required = (
         "force_https = false",
         'auto_stop_machines = "stop"',
@@ -101,7 +178,7 @@ def render_config(template: str, plan: PreviewPlan) -> str:
         'processes = ["web"]',
     )
     missing = [item for item in required if item not in rendered]
-    forbidden = ("force_https = true", ".fly.dev", 'app = "psat"')
+    forbidden = ("force_https = true", ".fly.dev", 'app = "psat"', "snif.sh", "REPLACE_WITH_PSAT_HEALTH_SECRET")
     present = [item for item in forbidden if item in rendered]
     if missing or present:
         raise ConfigurationError(f"unsafe preview config; missing={missing}, forbidden={present}")
@@ -239,7 +316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     render_parser = subparsers.add_parser("render-config")
     _add_plan_args(render_parser)
-    render_parser.add_argument("--template", type=Path, required=True)
+    render_parser.add_argument("--source", type=Path, required=True)
     render_parser.add_argument("--output", type=Path, required=True)
 
     app_parser = subparsers.add_parser("validate-app-inventory")
@@ -276,7 +353,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(json.dumps({"mode": "plan-only; no remote operations implemented", **values}, indent=2))
         elif args.command == "render-config":
             plan = _plan_from_args(args)
-            args.output.write_text(render_config(args.template.read_text(), plan))
+            args.output.write_text(render_config(args.source.read_text(), plan))
         elif args.command == "validate-app-inventory":
             exists = validate_app_inventory(
                 _load_json(args.inventory), _plan_from_args(args), allow_missing=args.allow_missing

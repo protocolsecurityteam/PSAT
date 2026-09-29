@@ -1,24 +1,9 @@
-"""Static guardrail for the WARNING-degraded-with-record_degraded contract.
+"""Static guardrail for the WARNING-degraded-with-record_degraded contract (``utils/logging.py``).
 
-The level contract in ``utils/logging.py`` says: any worker emitting
-``logger.warning`` (or ``logger.exception``) inside a swallowed-exception
-path must also call ``record_degraded(...)`` in the same except block, so
-the partial outcome shows up in the ``stage_errors`` artifact downstream.
-
-This test parses each in-perimeter module with ``ast`` and flags any
-``logger.warning`` / ``logger.exception`` call inside an ``except``
-handler that:
-
-  * does not end with ``raise`` (i.e. the exception is swallowed), AND
-  * does not call ``record_degraded(...)`` anywhere in the same handler.
-
-Approximate by design: it resolves one level of module-local indirection
-(a handler calling a helper defined in the same module that itself calls
-``record_degraded`` counts as paired) but doesn't chase call-chains
-further, and doesn't try to classify control-flow patterns. Catches the
-common regression where a new ``except → logger.warning → continue``
-lands without a paired ``record_degraded``. Per-file allow-list below
-covers the few intentional exceptions; every entry has a one-line reason.
+Any ``logger.warning`` / ``logger.exception`` in an ``except`` handler that swallows (no trailing ``raise``) must also
+call ``record_degraded(...)`` in that handler so the partial outcome reaches the ``stage_errors`` artifact.
+Approximate by design: resolves one level of module-local helper indirection, no deeper call-chains or control flow.
+The per-file allow-list below carries a one-line reason per exception.
 """
 
 from __future__ import annotations
@@ -65,13 +50,9 @@ PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
 )
 
 # {file: {line_of_logger_call: reason}}
-# Sites where WARNING in a swallowed except is *intentionally* not paired
-# with record_degraded. Each entry needs justification — when in doubt,
-# prefer adding record_degraded to silence the test.
-# The keys are LINE-PINNED, so any edit above a listed call site shifts them and
-# this file must be re-pinned in the same commit.
-# ``test_allow_list_entries_still_present`` below fails loudly when an entry
-# stops matching a real violation.
+# Sites where WARNING in a swallowed except is intentionally NOT paired with record_degraded; when in doubt, prefer
+# adding record_degraded. Keys are LINE-PINNED: any edit above a listed call shifts them, so re-pin in the same
+# commit. ``test_allow_list_entries_still_present`` fails when an entry stops matching a real violation.
 ALLOW_LIST: dict[str, dict[int, str]] = {
     "services/resolution/indexer_scheduler.py": {
         88: "Indexer daemon has no job accumulator; failed enrollment remains in its durable retry queue.",
@@ -139,12 +120,7 @@ def _is_logger_warning_or_exception(node: ast.Call) -> bool:
 
 
 def _recording_helper_names(tree: ast.AST) -> set[str]:
-    """Functions in this module that themselves call ``record_degraded``.
-
-    A module that funnels its degraded records through a local wrapper (to
-    attach a fixed phase prefix, say) still honours the contract; without
-    this the check would read the wrapper as an unpaired swallow.
-    """
+    """Functions in this module that themselves call ``record_degraded``; a local wrapper still honours the contract."""
     names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -211,7 +187,6 @@ def _enforced_paths(repo_root: Path) -> list[str]:
 
 
 def test_service_globs_still_match_files() -> None:
-    """A renamed package would empty a glob and silently drop the perimeter."""
     repo_root = Path(__file__).resolve().parents[2]
     empty = [pattern for pattern in PIPELINE_SERVICE_GLOBS if not list(repo_root.glob(pattern))]
     assert not empty, "PIPELINE_SERVICE_GLOBS entries match nothing: " + ", ".join(empty)
@@ -235,8 +210,7 @@ def test_warning_in_swallowed_except_pairs_with_record_degraded() -> None:
 
 
 def test_allow_list_entries_still_present() -> None:
-    """If an allow-listed line moves or disappears, the entry rots silently —
-    fail loudly so the next maintainer re-evaluates the exemption."""
+    """A moved or vanished allow-listed line would rot the entry silently; fail so the exemption is re-evaluated."""
     repo_root = Path(__file__).resolve().parents[2]
     enforced = set(_enforced_paths(repo_root))
     outside = sorted(rel for rel in ALLOW_LIST if rel not in enforced)

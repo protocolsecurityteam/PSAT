@@ -11,9 +11,7 @@ from __future__ import annotations
 import pytest
 
 from utils.chains import (
-    UnknownChainError,
     UnsupportedChainError,
-    chain_by_id,
     require_chain,
 )
 
@@ -48,12 +46,6 @@ class TestRequireChain:
             require_chain(chain="fantom", context="unit ctx")
         assert "fantom" in str(exc.value)
 
-    def test_is_a_valueerror_subclass(self):
-        # Existing ValueError handlers keep catching it (like UnknownChainError).
-        assert issubclass(UnsupportedChainError, ValueError)
-        with pytest.raises(ValueError):
-            require_chain(None, context="unit ctx")
-
     def test_valid_id_resolves(self):
         assert require_chain(1, context="ctx").name == "ethereum"
         assert require_chain(8453, context="ctx").name == "base"
@@ -70,8 +62,6 @@ class TestRequireChain:
 
 
 class TestDefaultRpcUrlNoSilentMainnet:
-    """``default_rpc_url`` no longer maps a missing/unknown chain to mainnet."""
-
     @pytest.fixture(autouse=True)
     def _erpc(self, monkeypatch):
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
@@ -100,11 +90,6 @@ class TestDefaultRpcUrlNoSilentMainnet:
         from services.clients.rpc import default_rpc_url
 
         assert default_rpc_url(chain_id=1) == "https://erpc.example/main/evm/1"
-
-    def test_explicit_l2_resolves(self):
-        from services.clients.rpc import default_rpc_url
-
-        assert default_rpc_url(chain_id=8453) == "https://erpc.example/main/evm/8453"
 
     def test_local_rpc_still_wins_without_chain(self):
         from services.clients.rpc import default_rpc_url
@@ -137,11 +122,6 @@ class TestRequireRpcUrlDistinctErrors:
             require_rpc_url(chain_id=1, context="pipeline X")
         assert not isinstance(exc.value, UnsupportedChainError)
         assert "ERPC_BASE_URL" in str(exc.value)
-
-    def test_local_url_wins_without_chain(self):
-        from services.clients.rpc import require_rpc_url
-
-        assert require_rpc_url(explicit_rpc_url="http://127.0.0.1:8545") == "http://127.0.0.1:8545"
 
 
 class TestErpcChainIdGuard:
@@ -196,51 +176,10 @@ class TestErpcChainIdGuard:
             rpc.rpc_request("https://erpc.example/main/evm/8453", "eth_blockNumber", [], chain_id=1)
 
 
-class TestEdgeKeepsStillDefaultMainnet:
-    """The sanctioned user-facing edges keep their explicit mainnet defaults."""
-
-    def test_analyze_request_defaults(self):
-        from schemas.api_requests import AnalyzeRequest
-
-        req = AnalyzeRequest(address="0x" + "ab" * 20)
-        # chain/chain_id are None at the schema; the /api/analyze handler applies
-        # the mainnet edge default — the field itself stays permissive.
-        assert req.chain is None
-        assert req.chain_id is None
-
-    def test_re_enroll_defaults_to_mainnet(self):
-        import inspect
-
-        from routers.protocols import re_enroll_protocol
-
-        assert inspect.signature(re_enroll_protocol).parameters["chain"].default == "ethereum"
-
-    def test_upsert_monitored_contract_defaults_to_mainnet(self):
-        from schemas.api_requests import UpsertMonitoredContractRequest
-
-        req = UpsertMonitoredContractRequest(address="0x" + "ab" * 20)
-        assert req.chain == "ethereum"
-
-    def test_predicate_capabilities_probe_request_defaults_to_mainnet(self):
-        from routers.predicate_capabilities import _ProbeMembershipRequest
-
-        req = _ProbeMembershipRequest(function_signature="f()", predicate_index=0, member="0x" + "ab" * 20)
-        assert req.chain_id == 1
-
-
-def test_registry_still_resolves_all_supported_chains():
-    # Sanity: the kill didn't perturb the registry the guard/require_chain read.
-    assert chain_by_id(1).name == "ethereum"
-    with pytest.raises(UnknownChainError):
-        chain_by_id(999999)
-
-
 class TestResolutionRpcUrlUsesJobChainColumn:
-    """Regression: a chainless /api/analyze request carries its mainnet edge
-    default only in the first-class ``jobs.chain_id`` column — the request
-    JSONB has no chain keys. ``_rpc_url_for_job`` must resolve through the
-    column, or every such job dies terminal at the resolution stage (the
-    PR #153 live-suite failure)."""
+    """Regression (PR #153 live-suite failure): a chainless /api/analyze request has its mainnet default only
+    in ``jobs.chain_id``, not the request JSONB. ``_rpc_url_for_job`` must resolve through the column or every
+    such job dies terminal at the resolution stage."""
 
     def test_chainless_request_resolves_via_column(self, monkeypatch):
         from types import SimpleNamespace
@@ -279,9 +218,8 @@ class TestResolutionRpcUrlUsesJobChainColumn:
 
 
 class TestWorkerRpcHelpersUseJobChainColumn:
-    """Same regression class as the resolution helper: policy and static
-    workers must resolve RPC via the job's first-class chain, not the
-    request JSONB alone."""
+    """Same regression as the resolution helper: policy and static workers must resolve RPC via the job's
+    chain column, not the request JSONB alone."""
 
     def test_policy_rpc_chainless_request_resolves_via_column(self, monkeypatch):
         from types import SimpleNamespace

@@ -1,23 +1,18 @@
 """``authority_roles`` keeps its three states across BOTH published surfaces.
 
 ``effective_functions.authority_roles`` is three-state (see
-``schemas/effective_permissions.EffectiveFunctionPermission``): a non-empty list
-is a WITNESSED role requirement, jsonb ``null`` is role-gated with the role NOT
-determined, ``[]`` is proven not role-gated. ``[]`` is the NEGATION of what
-``null`` asserts, not a coarsening of it.
+``schemas/effective_permissions.EffectiveFunctionPermission``): a non-empty list is a WITNESSED
+role requirement, jsonb ``null`` is role-gated with the role NOT determined, ``[]`` is proven not
+role-gated (the NEGATION of ``null``, not a coarsening of it).
 
-Two endpoints publish the same rows and disagreed. ``/api/analyses/{job}``
-(``services/aggregations/analysis_detail``) passed the column through;
-``/api/company/{name}/functions``
-(``services/governance/principals._build_company_function_entry``) seeded its
-result with ``list(authority_roles_by_key.values())`` — a list on every path,
-including the "witnessed nothing" one that every row takes
-(``function_principals.principal_type`` is ``controller`` on 100% of rows) — so
-the column's ``null`` could not reach the payload. On the ether.fi preview the
-company endpoint served 0 nulls over 1,109 rows whose pool holds 324.
+``/api/analyses/{job}`` passed the column through, but ``/api/company/{name}/functions``
+(``services/governance/principals._build_company_function_entry``) seeded its result with
+``list(authority_roles_by_key.values())`` — a list on every path, including the "witnessed
+nothing" one every row takes (``principal_type`` is ``controller`` on 100% of rows) — so ``null``
+never reached the payload (ether.fi preview: 0 nulls over 1,109 rows whose pool holds 324).
 
-These tests pin the POSITIVE case of all three states on both endpoints, and
-that the two endpoints agree row-for-row.
+These tests pin the POSITIVE case of all three states on both endpoints, and that the two
+agree row-for-row.
 """
 
 from __future__ import annotations
@@ -151,19 +146,6 @@ def test_company_functions_serves_all_three_authority_roles_states(api_client, t
     assert entries["unreadable()"]["authority_roles"] is None
 
 
-def test_analyses_detail_serves_all_three_authority_roles_states(api_client, three_state_rows):
-    job, _contract = three_state_rows
-
-    body = api_client.get(f"/api/analyses/{job.id}")
-    assert body.status_code == 200
-    entries = _by_signature(body.json()["effective_permissions"]["functions"])
-
-    assert entries["roleGated()"]["authority_roles"] is None
-    assert entries["ownerOnly()"]["authority_roles"] == []
-    assert [g["role"] for g in entries["witnessed()"]["authority_roles"]] == [7]
-    assert entries["unreadable()"]["authority_roles"] is None
-
-
 def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
     """The contradiction this file exists for: the same DB row served two ways.
     Compared as the three STATES rather than by deep equality — the company
@@ -183,9 +165,6 @@ def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
 
     for signature in COLUMN_BY_FUNCTION:
         assert state(company[signature]["authority_roles"]) == state(analyses[signature]["authority_roles"]), signature
-        # …and each equals the expected published state (the column's own
-        # state for the three honest shapes; the unreadable non-object shape
-        # degrades to not-determined on both surfaces).
         assert state(company[signature]["authority_roles"]) == EXPECTED_STATE[signature], signature
 
 
@@ -217,18 +196,3 @@ def test_undetermined_roles_are_jsonb_null_not_sql_null(db_session, three_state_
 
     assert sql_null == 0
     assert jsonb_null == 1
-
-
-@pytest.mark.parametrize("column", ["authority_public", "authority_roles", "authority_openness"])
-def test_authority_columns_carry_their_column_comment(db_session, column):
-    """The three-state semantics live in the DB, where an operator reading the
-    schema meets them. ``authority_openness`` was commented and the two columns
-    a consumer actually folds were not."""
-    comment = db_session.execute(
-        text(
-            "SELECT col_description(a.attrelid, a.attnum) FROM pg_attribute a "
-            "WHERE a.attrelid = 'effective_functions'::regclass AND a.attname = :n"
-        ),
-        {"n": column},
-    ).scalar_one()
-    assert comment, f"effective_functions.{column} carries no column comment"

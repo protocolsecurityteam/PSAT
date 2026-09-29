@@ -159,7 +159,6 @@ def test_merge_witness_collision_both_active_keeps_dst(db_session, two_protocols
     src, dst = two_protocols
     member = _contract(db_session, ADDR(0x3C01), protocol_id=dst.id)
     subject = _contract(db_session, ADDR(0x3C02), nominated_protocol_id=src.id)
-    # Distinguishable evidence proves survival by content, not just row id.
     src_row = _w2(db_session, contract=subject, protocol_id=src.id, member=member, via=member.address)
     dst_row = _w2(
         db_session, contract=subject, protocol_id=dst.id, member=member, via=member.address, edge_kind="beacon"

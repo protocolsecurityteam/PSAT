@@ -1,29 +1,15 @@
-"""``UpgradeEvent`` write-path integrity.
+"""``UpgradeEvent`` write-path integrity across the three ``upgrade_events`` writers
+(artifact projection, log scanner, storage-slot poller).
 
-Three writers fill ``upgrade_events``: the upgrade-history artifact
-projection, the log scanner, and the storage-slot poller. Two properties are
-pinned here, both of which were false before this file existed:
+1. No writer may invent a block number. The poller has no block and used to write
+   ``block_number=0``; consumers order by ``block_number ASC NULLS LAST``, so 0 sorted the
+   poll row ahead of the genuine genesis deployment and shifted every impl-era window.
+2. Every writer identifies itself via ``source``: ``old_impl`` NULL is ambiguous and
+   ``timestamp`` is a block time for two writers but a detection time for the third.
 
-1. **No writer may invent a block number.** The poller reads a slot, so it has
-   no block; it used to write ``block_number=0``. Every consumer orders by
-   ``block_number ASC NULLS LAST``
-   (``services/audits/coverage.py``, ``services/aggregations/
-   contract_audit_timeline.py``, ``services/discovery/upgrade_history.py``),
-   and ``0 < every real block``, so the poll row sorted *ahead of the genuine
-   genesis deployment* and every impl-era window shifted by one.
-2. **Every writer identifies itself.** ``old_impl`` is NULL both when a writer
-   does not record predecessors and when there was none; ``timestamp`` is a
-   block time for two writers and a detection time for the third. ``source``
-   is the only thing that tells those apart.
-
-Each ordering test carries its own **defect control**: the same fixture with
-``block_number=0`` re-inserted, asserted to still corrupt the ordering. If a
-future change makes 0 harmless the control fails and the test says so, rather
-than passing vacuously.
-
-Fixture addresses and blocks are real mainnet data for the proxy this item's
-positive control names — ``0x8b71140a…`` (contract_id 518 locally, 18 real
-upgrade events, actively polled on the EIP-1967 slot).
+Each ordering test carries a defect control (the same fixture with ``block_number=0``,
+asserted to still corrupt ordering) so it can't pass vacuously. Fixture addresses and
+blocks are real mainnet data for proxy ``0x8b71140a…``.
 """
 
 from __future__ import annotations
@@ -46,8 +32,8 @@ from db.models import (
 )
 from services.monitoring.unified_watcher import _sync_relational_tables, poll_for_state_changes
 
-# Real mainnet values (verified by eth_getStorageAt on the EIP-1967 slot at
-# blocks 18000000 / 24000000 / 25619159 / head-10).
+# Real mainnet values (eth_getStorageAt on the EIP-1967 slot at blocks 18000000 / 24000000 /
+# 25619159 / head-10).
 PROXY = "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f"
 IMPL_GENESIS = "0x0c5631727ecf13f3e726bc3301e364af51b69295"  # active at block 18000000
 IMPL_MIDDLE = "0x0f366df7af5003fc7c6524665ca58bdeaddc3745"  # active at block 24000000
@@ -58,7 +44,7 @@ BLOCK_GENESIS = 17174453
 BLOCK_MIDDLE = 23000000
 BLOCK_CURRENT = 25533308
 
-# The exact ordering all three consumers use.
+# The ordering all three consumers use.
 CANONICAL_ORDER = (UpgradeEvent.block_number.asc().nullslast(), UpgradeEvent.id.asc())
 
 
@@ -178,11 +164,9 @@ def test_poll_detected_upgrade_writes_no_block_and_no_tx(db_session, proxy_with_
 
     assert row.new_impl == IMPL_NEXT
     assert row.old_impl == IMPL_CURRENT, "the poller knows the predecessor and must record it"
-    # The whole item: not 0, and not any other fabricated block.
     assert row.block_number is None
     assert row.block_number != 0
     assert row.tx_hash is None
-    # Absent here is the previously-fixed root cause of ImplWindow.from_ts=None.
     assert row.timestamp is not None
     assert row.timestamp >= datetime.now(timezone.utc) - timedelta(hours=1)
 
@@ -293,9 +277,8 @@ def test_artifact_projection_stamps_backfill_source(db_session, proxy_with_histo
 
 
 def test_impl_windows_keep_genesis_first_when_a_row_has_no_block(db_session, proxy_with_history):
-    """``_compute_impl_windows_batch`` used to fold NULL→0 and sort on it,
-    which put a block-less event back in front of genesis after the SQL
-    ordering had correctly sunk it."""
+    """``_compute_impl_windows_batch`` used to fold NULL to 0 and sort on it, putting a
+    block-less event back in front of genesis after SQL ordering had sunk it."""
     from services.audits.coverage import _compute_impl_windows_batch
 
     db_session.add(
@@ -343,9 +326,8 @@ def test_impl_windows_keep_genesis_first_when_a_row_has_no_block(db_session, pro
 
 
 def test_undated_audit_does_not_attach_to_a_superseded_impl():
-    """The open-window pick keyed off ``to_block is None``, which a block-less
-    successor also produces — an undated audit would then be filed against an
-    impl that had already been replaced."""
+    """The open-window pick keyed off ``to_block is None``, which a block-less successor
+    also produces, filing an undated audit against an already-replaced impl."""
     from services.audits.coverage import ImplWindow, _confidence_for_impl_era
 
     superseded = ImplWindow(
@@ -379,10 +361,8 @@ def test_undated_audit_does_not_attach_to_a_superseded_impl():
 
 
 def test_half_known_block_window_is_not_published_as_open_ended():
-    """A NULL ``covered_to_block`` beside a non-NULL ``covered_from_block``
-    reads as an open-ended bound, but absence of a proven upper bound is not
-    proof the coverage extends forward. A window whose upper bound is unknown
-    must therefore publish neither bound."""
+    """A NULL ``covered_to_block`` beside a non-NULL ``covered_from_block`` reads as open-ended,
+    but an unproven upper bound is not proof coverage extends forward, so publish neither bound."""
     from services.audits.coverage import ImplWindow, _publishable_block_bounds
 
     closed = ImplWindow(

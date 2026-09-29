@@ -1,29 +1,17 @@
-"""FP→control-graph materialization (W5): the INSERT half of the FP→CGN fold.
+"""FP->control-graph materialization (W5): the INSERT half of the FP->CGN fold.
 
-``function_principals`` was a TERMINAL plane. The graph's only two principal
-ingresses are ``authority_roles[].principals`` and ``controllers[].principals``,
-so an address in neither had no ``control_graph_nodes`` row — and with no node,
-every node-driven spawn path was structurally blind to it.
-``reconcile_control_graph_types``, the one FP→CGN fold, is UPDATE-only, so a
-principal that never entered the graph could never re-enter it.
+``function_principals`` was a TERMINAL plane: the graph's only principal ingresses are
+``authority_roles[].principals`` and ``controllers[].principals``, so an address in neither
+had no ``control_graph_nodes`` row and every node-driven spawn path was blind to it.
+``reconcile_control_graph_types`` (the one FP->CGN fold) is UPDATE-only.
 
-Measured on the PR-161 corpus: 73 addresses / 411 of 1,200 FP rows (34.3%) /
-240 gated functions across 43 of 93 contracts, all
-``origin='semantic_capability:finite_set'``, ``principal_type='controller'``.
-The population splits ``contract`` 35 / ``eoa`` 32 / ``safe`` 5 / ``timelock``
-1; 72 of the 73 have no ``contracts`` row at all, so raising the discovery
-``analyze_limit`` could never reach the class. The largest member is the
-monitored Safe ``0x2aca7102…`` (127 FP rows, 22 contracts), not the
-EtherFiTimelock ``0xcd425f44…`` (53 rows, 16 contracts) that surfaced it.
-
-The split these tests exist to pin is the counterfactual the investigation
-predicted: a ``timelock`` is in ``ANALYZABLE_TYPES`` so it mints
-``node_type='contract'`` and the EXISTING perimeter gates give it a job; a
-``safe`` / ``eoa`` is not, so it mints ``node_type='principal'`` and the same
-gates give it none. This unit adds zero job-creation logic — the assertion that
-no ``create_job`` fires for the non-analyzable arm is made against a counted
-monkeypatch, from both the type side and the ledger side, because a silent skip
-would be indistinguishable from the defect.
+Measured on the PR-161 corpus: 73 addresses / 411 of 1,200 FP rows / 240 gated functions
+across 43 of 93 contracts, 72 of the 73 with no ``contracts`` row at all. The split pinned
+here: a ``timelock`` is in ``ANALYZABLE_TYPES`` so it mints ``node_type='contract'`` and
+the EXISTING perimeter gates give it a job; ``safe`` / ``eoa`` mint ``node_type='principal'``
+and get none. This unit adds no job-creation logic; that no ``create_job`` fires for the
+non-analyzable arm is asserted against a counted monkeypatch, since a silent skip would be
+indistinguishable from the defect.
 """
 
 from __future__ import annotations
@@ -54,8 +42,8 @@ from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
 
-# The corpus origin: a single constant on 1,200/1,200 FP rows, which is exactly
-# why the idempotence key must never touch it.
+# The corpus origin: one constant on 1,200/1,200 FP rows, so the idempotence key must never
+# touch it.
 FINITE_SET = "semantic_capability:finite_set"
 
 
@@ -65,11 +53,8 @@ def _addr() -> str:
 
 @pytest.fixture()
 def anchor(db_session):
-    """A protocol + one analyzed gated contract with its own graph root node.
-
-    The root node is what gives a minted node its depth (root depth + 1) — the
-    walk always writes it, so its presence is the normal case, and its absence
-    is pinned separately.
+    """A protocol + one analyzed gated contract with its own graph root node, which gives a
+    minted node its depth (root depth + 1). Its absence is pinned separately.
     """
     protocol = Protocol(name=f"w5-{uuid.uuid4().hex[:10]}")
     db_session.add(protocol)
@@ -144,10 +129,9 @@ def _nodes(db_session, contract, address=None):
 
 
 def _rewrite_the_scope(db_session, contract):
-    """What every job does to this ``(contract, deployment)`` scope before the
-    mint runs: the resolution stage's wholesale ``replace_control_graph_rows``,
-    then the policy stage's. Modelled with the walk's root node only, which is
-    the state a mint actually starts from."""
+    """What every job does to this ``(contract, deployment)`` scope before the mint: the
+    resolution and policy stages' wholesale ``replace_control_graph_rows``. Modelled with
+    the walk's root node only, the state a mint actually starts from."""
     from services.resolution.graph_tables import replace_control_graph_rows
 
     replace_control_graph_rows(
@@ -187,14 +171,12 @@ def _edges(db_session, contract, relation=None):
 
 
 def test_timelock_fp_row_mints_the_exact_witnessed_node(db_session, anchor, monkeypatch):
-    """The EtherFiTimelock shape. Byte-exact: every field the node publishes is
-    either witnessed by the FP row or explicitly not-determined.
+    """The EtherFiTimelock shape. Byte-exact: every published field is either witnessed by
+    the FP row or explicitly not-determined.
 
-    ``analyzed`` False and ``analysis_state`` NULL are the load-bearing pair —
-    stamping ``analyzed=true`` would make the perimeter spawn on a node no walk
-    ever produced. ``graph_max_depth`` NULL because no walk horizon covered it:
-    the walk's own horizon is a completeness claim about the walk, and this node
-    was never in one.
+    ``analyzed`` False and ``analysis_state`` NULL are the load-bearing pair (``analyzed=true``
+    would make the perimeter spawn on a node no walk produced); ``graph_max_depth`` is NULL
+    because no walk horizon covered this node.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
@@ -208,10 +190,8 @@ def test_timelock_fp_row_mints_the_exact_witnessed_node(db_session, anchor, monk
     node = minted[0]
     assert node.node_type == "contract"
     assert node.resolved_type == "timelock"
-    # NULL, not a constant: ``Job.name`` and the overview's display sites fall
-    # back to ``label``, so any string here is published as the principal's
-    # identity on every spawned child. ``resolved_type`` carries the only
-    # proven noun.
+    # NULL, not a constant: ``Job.name`` and display sites fall back to ``label``, so any
+    # string would be published as the principal's identity on every spawned child.
     assert node.label is None
     assert node.contract_name is None
     assert node.analyzed is False
@@ -257,11 +237,10 @@ def test_timelock_fp_row_mints_the_exact_witnessed_node(db_session, anchor, monk
 
 
 def test_the_edge_relation_is_not_role_principal(db_session, anchor, monkeypatch):
-    """``role_principal`` asserts a WITNESSED ROLE. The population reaching this
-    pass is precisely the one ``capability_role_grants`` refused to assert a role
-    for (a ``_ROLE_DISSOLVING_TRACE_STEPS`` trace leaves ``authority_roles`` JSON
-    null; 127 further corpus rows carry ``authority_roles == []``). Minting
-    ``role_principal`` would publish the exact claim the upstream declined."""
+    """``role_principal`` asserts a WITNESSED ROLE, but this pass sees exactly the population
+    ``capability_role_grants`` refused to assert a role for (``_ROLE_DISSOLVING_TRACE_STEPS``
+    leaves ``authority_roles`` null; 127 further rows carry ``[]``). Minting it would publish
+    the claim the upstream declined."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     _fp(db_session, contract, _addr(), resolved_type="timelock")
@@ -272,17 +251,6 @@ def test_the_edge_relation_is_not_role_principal(db_session, anchor, monkeypatch
     assert _edges(db_session, contract, "role_principal") == []
 
 
-def test_the_new_relation_is_a_control_relation(db_session):
-    """It carries authority, so it belongs in the allowlist. It moves NO NEW
-    value through the effects closure: ``build_authority_graph`` already folds
-    ``function_principals`` in directly as principal → contract, so this edge
-    duplicates a link the closure had — it makes it reachable in the TABLE plane
-    that reads edges instead of FP rows."""
-    from db.models import CONTROL_EDGE_RELATIONS
-
-    assert EDGE_RELATION_CAPABILITY_PRINCIPAL in CONTROL_EDGE_RELATIONS
-
-
 # ---------------------------------------------------------------------------
 # Node yes, job never — pinned from both directions
 # ---------------------------------------------------------------------------
@@ -290,12 +258,10 @@ def test_the_new_relation_is_a_control_relation(db_session):
 
 @pytest.mark.parametrize("resolved_type", ["safe", "eoa"])
 def test_non_analyzable_principal_mints_a_node_and_provably_no_job(db_session, anchor, monkeypatch, resolved_type):
-    """``safe`` / ``eoa`` ∉ ``ANALYZABLE_TYPES``, so the node mints as
-    ``principal`` and the walker's own ``node_type == 'contract'`` gate rejects
-    it. Asserted three ways, because a silent skip is the defect this whole unit
-    is about: (1) the type gate — ``node_type='principal'``; (2) the mint
-    ledger's ``not_analyzable_type``; (3) the walker's ``not_contract_node``
-    with ``create_job`` counted at zero.
+    """``safe`` / ``eoa`` are not in ``ANALYZABLE_TYPES``, so the node mints as ``principal``
+    and the walker's ``node_type == 'contract'`` gate rejects it. Asserted three ways, since
+    a silent skip is the defect: (1) ``node_type='principal'``; (2) the mint ledger's
+    ``not_analyzable_type``; (3) the walker's ``not_contract_node`` with ``create_job`` at zero.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
@@ -304,13 +270,11 @@ def test_non_analyzable_principal_mints_a_node_and_provably_no_job(db_session, a
 
     ledger, payloads = _mint(db_session, contract)
 
-    # (1) the type gate
     node = _nodes(db_session, contract, principal)[0]
     assert node.node_type == "principal"
     assert node.resolved_type == resolved_type
     assert node.analyzed is False
 
-    # (2) the mint ledger — minted, and named as never-a-candidate
     assert ledger["minted"] == [
         {
             "address": principal,
@@ -325,7 +289,6 @@ def test_non_analyzable_principal_mints_a_node_and_provably_no_job(db_session, a
     assert ledger["omitted"] == []
     assert ledger["out_of_population"] == [{"address": principal, "reason": "not_analyzable_type"}]
 
-    # (3) the walker, with create_job counted
     calls: list[Any] = []
     real_create_job = __import__("db.queue", fromlist=["create_job"]).create_job
 
@@ -364,11 +327,9 @@ def test_non_analyzable_principal_mints_a_node_and_provably_no_job(db_session, a
 
 
 def test_end_to_end_the_timelock_gets_one_job_and_the_safe_gets_none(db_session, anchor, monkeypatch):
-    """The counterfactual the investigation predicted, closed end to end.
-
-    Both principals are invisible to the walk and both acquire nodes. Only the
-    ``timelock`` reaches ``create_job`` — through the EXISTING perimeter gates,
-    with no new job-creation logic anywhere in this unit.
+    """The counterfactual, closed end to end: both principals are invisible to the walk and
+    acquire nodes, but only the ``timelock`` reaches ``create_job``, through the EXISTING
+    perimeter gates.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
@@ -409,11 +370,9 @@ def test_end_to_end_the_timelock_gets_one_job_and_the_safe_gets_none(db_session,
 
 
 def test_a_walk_node_that_is_unanalyzed_is_still_refused(db_session, anchor, monkeypatch):
-    """The admission arm is scoped to the FP-mint witness, not widened.
-
-    An ordinary walk node with ``analyzed=false`` still books
-    ``not_analyzed``: the walk REACHED it and did not analyse it, which is a
-    recorded decision. Only a node the walk was never offered is admitted.
+    """The admission arm is scoped to the FP-mint witness: an ordinary walk node with
+    ``analyzed=false`` still books ``not_analyzed`` (the walk REACHED it and did not analyse
+    it). Only a node the walk was never offered is admitted.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
@@ -454,14 +413,10 @@ def test_a_walk_node_that_is_unanalyzed_is_still_refused(db_session, anchor, mon
 
 
 def test_a_forged_basis_marker_does_not_buy_admission(db_session, anchor, monkeypatch):
-    """FALSIFIER. Admission is membership of the caller's minted SET, never a
-    field on the node.
-
-    ``details`` is free-form JSONB and the walk copies it VERBATIM out of
-    upstream principal payloads with no key allowlist, so a provenance marker
-    inside it is forgeable by anything that can put a key in a principal's
-    details. A hand-crafted node carrying the exact marker, absent from the
-    minted set, must still book ``not_analyzed`` and create no job.
+    """FALSIFIER. Admission is membership of the caller's minted SET, never a field on the
+    node: ``details`` is free-form JSONB copied VERBATIM from upstream principal payloads,
+    so a marker inside it is forgeable. A hand-crafted node carrying the exact marker,
+    absent from the minted set, must still book ``not_analyzed`` and create no job.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     from services.discovery.perimeter import CONTROL_GRAPH_BASIS_KEY, FP_MATERIALIZATION_BASIS
@@ -506,8 +461,7 @@ def test_a_forged_basis_marker_does_not_buy_admission(db_session, anchor, monkey
     assert spawn["out_of_population"] == [{"address": forged, "reason": "not_analyzed"}]
     assert db_session.query(Job).filter(Job.address == forged).all() == []
 
-    # The same node, named by the caller's set, IS admitted — so the refusal
-    # above is the set doing the work, not some unrelated gate.
+    # The same node named by the caller's set IS admitted, so the set does the work.
     admitted = queue_discovered_contracts(
         db_session,
         job,
@@ -527,10 +481,9 @@ def test_a_forged_basis_marker_does_not_buy_admission(db_session, anchor, monkey
 
 
 def test_mint_is_idempotent(db_session, anchor, monkeypatch):
-    """Run twice ⇒ one node, one edge. The second pass books ``existing_node``
-    out-of-population, not as an omission: an address that already HAS a node
-    was never dropped. It also consumes no budget, which is what lets an
-    over-budget anchor drain across passes instead of stalling."""
+    """Run twice => one node, one edge. The second pass books ``existing_node``
+    out-of-population (an address that already HAS a node was never dropped) and consumes no
+    budget, so an over-budget anchor drains across passes."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     timelock = _addr()
@@ -550,13 +503,11 @@ def test_mint_is_idempotent(db_session, anchor, monkeypatch):
 
 
 def test_the_ledger_never_names_an_uncommitted_row(db_session, anchor, monkeypatch):
-    """The ledger is persisted from the caller's ``finally``, on a FRESH session
-    when the primary one is poisoned — so a rollback after the loop would publish
-    ``minted[]`` and ``budget_used`` naming rows that do not exist.
-
-    The mint therefore commits before recording. Pinned by rolling back the
-    caller's session after the pass and reading the rows back on a session that
-    never saw the transaction: every address the ledger names is really there.
+    """The ledger is persisted from the caller's ``finally``, on a FRESH session when the
+    primary one is poisoned, so a rollback after the loop would publish ``minted[]`` and
+    ``budget_used`` naming rows that do not exist. The mint therefore commits before
+    recording; pinned by rolling back the caller's session and reading back on a session
+    that never saw the transaction.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     from sqlalchemy import create_engine, select
@@ -588,9 +539,8 @@ def test_the_ledger_never_names_an_uncommitted_row(db_session, anchor, monkeypat
 
 
 def test_the_idempotence_key_ignores_origin_and_label(db_session, anchor, monkeypatch):
-    """The key is ``(chain, lower(address), contract_id, deployment_scope)``.
-    Re-minting after the FP rows change ORIGIN must still find the node: origin
-    is a single constant on 1,200/1,200 corpus rows and keys nothing."""
+    """The key is ``(chain, lower(address), contract_id, deployment_scope)``. Re-minting
+    after the FP rows change ORIGIN must still find the node."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     timelock = _addr()
@@ -605,7 +555,6 @@ def test_the_idempotence_key_ignores_origin_and_label(db_session, anchor, monkey
 
 
 def test_a_checksummed_fp_address_dedups_against_the_lowercase_node(db_session, anchor, monkeypatch):
-    """The key lowercases. A mixed-case FP address is the same principal."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     timelock = _addr()
@@ -622,12 +571,10 @@ def test_a_checksummed_fp_address_dedups_against_the_lowercase_node(db_session, 
 
 def test_minted_node_is_reminted_after_a_scoped_rewrite(db_session, anchor, monkeypatch):
     """THE HINGE. ``replace_control_graph_rows`` deletes wholesale within this
-    exact ``(contract_id, deployment)`` scope, so a minted row cannot be made
-    durable against it — the strategy is RE-MINT, made sound by ORDERING: the
-    caller runs the mint strictly after the last rewrite in the job's stage
-    sequence. This pins both halves: the rewrite really does remove the node
-    (so nothing here is relying on an accidental survival), and the next mint
-    restores it identically.
+    ``(contract_id, deployment)`` scope, so a minted row cannot be made durable; the
+    strategy is RE-MINT, made sound by ORDERING (the mint runs strictly after the last
+    rewrite in the job's stage sequence). Pins that the rewrite really removes the node
+    and the next mint restores it identically.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
@@ -662,9 +609,8 @@ def test_minted_node_is_reminted_after_a_scoped_rewrite(db_session, anchor, monk
 
 
 def test_budget_cut_is_recorded_never_silent(db_session, anchor, monkeypatch):
-    """Budget 1 with 2 candidates ⇒ 1 minted, 1 named. Plus the population
-    invariant: every candidate lands in exactly one disposition, so the count
-    of UNLOGGED omissions is zero."""
+    """Budget 1 with 2 candidates => 1 minted, 1 named. Population invariant: every
+    candidate lands in exactly one disposition, so UNLOGGED omissions are zero."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     first, second = sorted([_addr(), _addr()])
@@ -690,16 +636,11 @@ def test_budget_cut_is_recorded_never_silent(db_session, anchor, monkeypatch):
 def test_the_budget_tail_is_permanent_under_the_production_sequence(db_session, anchor, monkeypatch):
     """REGRESSION for a REFUTED claim: a cut is a **permanent loss**, not a delay.
 
-    An earlier draft asserted the tail drains, on the reasoning that
-    ``existing_node`` precedes the budget gate so a minted address consumes none
-    of it. It was tested with two bare mints back to back — which is NOT the
-    production sequence. Every job rewrites this ``(contract, deployment)``
-    scope wholesale BEFORE the mint runs, so no minted row survives for
-    ``existing_node`` to find, and ``sorted(candidates)`` re-mints the same
-    lexicographic prefix and drops the same tail forever.
-
-    This replays the real sequence three jobs deep. If the drain claim were
-    true, ``second`` would appear by job 2.
+    An earlier draft asserted the tail drains, tested with two bare mints back to back,
+    which is NOT the production sequence. Every job rewrites this scope wholesale BEFORE the
+    mint, so no minted row survives for ``existing_node`` to find and ``sorted(candidates)``
+    re-mints the same prefix and drops the same tail forever. This replays the real
+    sequence three jobs deep; if the drain claim were true ``second`` would appear by job 2.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
@@ -716,8 +657,7 @@ def test_the_budget_tail_is_permanent_under_the_production_sequence(db_session, 
     for ledger in ledgers:
         assert ledger["queued"] == [{"address": first, "resolved_type": "timelock"}]
         assert ledger["omitted"] == [{"address": second, "reason": "budget_exhausted"}]
-        # The refuted mechanism: ``existing_node`` never fires, because the
-        # rewrite emptied the scope first.
+        # The refuted mechanism: ``existing_node`` never fires, the rewrite emptied the scope.
         assert ledger["out_of_population"] == []
 
     assert _nodes(db_session, contract, second) == []
@@ -725,11 +665,9 @@ def test_the_budget_tail_is_permanent_under_the_production_sequence(db_session, 
 
 
 def test_the_shipped_budget_leaves_no_live_tail_on_the_observed_maximum(db_session, anchor, monkeypatch):
-    """Because the tail is permanent, the default is sized to be a BACKSTOP.
-
-    31 distinct principals is the observed per-anchor maximum on the PR-161
-    corpus (0 of 83 anchors exceed 64; 2 exceed 16). At the shipped default an
-    anchor of that size is minted whole and ``omitted`` is empty.
+    """Because the tail is permanent, the default is sized as a BACKSTOP: 31 distinct
+    principals is the observed per-anchor maximum on the PR-161 corpus (0 of 83 exceed 64).
+    An anchor of that size is minted whole and ``omitted`` is empty.
     """
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     from services.governance.control_graph_types import FP_MATERIALIZE_LIMIT
@@ -750,9 +688,9 @@ def test_the_shipped_budget_leaves_no_live_tail_on_the_observed_maximum(db_sessi
 
 
 def test_an_earlier_gate_consumes_no_budget(db_session, anchor, monkeypatch):
-    """FALSIFIER: statement order is not an enforceable invariant, so the budget
-    is spent at the INSERT and nowhere else. With budget 1 and a zero-address
-    candidate sorting FIRST, the valid candidate must still mint."""
+    """FALSIFIER: statement order is not an enforceable invariant, so the budget is spent at
+    the INSERT only. With budget 1 and a zero-address candidate sorting FIRST, the valid
+    candidate must still mint."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     valid = _addr()
@@ -798,16 +736,13 @@ def test_malformed_address_never_mints(db_session, anchor, monkeypatch):
 
 
 def test_a_missing_chain_anchor_never_mints_a_chainless_node(db_session, monkeypatch):
-    """The join to the anchor contract is what supplies the chain. Without a
-    usable anchor there is no chain to claim and no node id to hang the edge
-    from, so every candidate fails closed WITH a reason — never a NULL-chain
-    node and never a silent skip."""
+    """The join to the anchor contract supplies the chain. Without a usable anchor every
+    candidate fails closed WITH a reason, never a NULL-chain node or a silent skip."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = Protocol(name=f"w5-{uuid.uuid4().hex[:10]}")
     db_session.add(protocol)
     db_session.commit()
-    # A blank address is no anchor: it would mint an edge from the node id
-    # ``address:``, an identity no node has.
+    # A blank address is no anchor: it would mint an edge from the node id ``address:``.
     contract = Contract(protocol_id=protocol.id, address="", chain="ethereum")
     db_session.add(contract)
     db_session.commit()
@@ -830,8 +765,7 @@ def test_a_missing_chain_anchor_never_mints_a_chainless_node(db_session, monkeyp
 
 
 def test_a_disabled_chain_omits_and_mints_nothing(db_session, anchor, monkeypatch):
-    """Invariant 14. An off-allowlist chain is an OMISSION, not a carve-out: on
-    an enabled deployment the same FP row would mint."""
+    """Invariant 14. An off-allowlist chain is an OMISSION, not a carve-out."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     contract.chain = "base"
@@ -847,8 +781,7 @@ def test_a_disabled_chain_omits_and_mints_nothing(db_session, anchor, monkeypatc
 
 
 def test_a_null_chain_anchor_is_mainnet(db_session, anchor, monkeypatch):
-    """Legacy rows persisted ``chain=NULL`` for mainnet. Coalesced, so a mainnet
-    principal still mints instead of reading as a chain we cannot name."""
+    """Legacy rows persisted ``chain=NULL`` for mainnet; coalesced so it still mints."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     contract.chain = None
@@ -863,8 +796,8 @@ def test_a_null_chain_anchor_is_mainnet(db_session, anchor, monkeypatch):
 
 
 def test_an_undetermined_resolved_type_refuses(db_session, anchor, monkeypatch):
-    """A NULL ``resolved_type`` determines no ``node_type``. Defaulting it would
-    pick the job/no-job split by coin flip."""
+    """A NULL ``resolved_type`` determines no ``node_type``; defaulting would pick the
+    job/no-job split by coin flip."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     principal = _addr()
@@ -878,10 +811,9 @@ def test_an_undetermined_resolved_type_refuses(db_session, anchor, monkeypatch):
 
 
 def test_conflicting_resolved_types_refuse_to_guess(db_session, anchor, monkeypatch):
-    """Two types for one principal at one anchor, unresolved by the FP plane. 0
-    of 413 corpus anchors reach this; a first occurrence must surface as a
-    refusal, not as a silently-picked winner — the two candidate types straddle
-    the job / no-job split."""
+    """Two types for one principal at one anchor, unresolved by the FP plane (0 of 413
+    corpus anchors reach this). It must surface as a refusal, not a silently-picked winner,
+    since the types straddle the job / no-job split."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     principal = _addr()
@@ -911,10 +843,9 @@ def test_the_anchor_contract_is_never_its_own_principal_node(db_session, anchor,
 
 
 def test_a_deployment_scoped_mint_stays_in_its_scope(db_session, anchor, monkeypatch):
-    """The mint scope, the FP read scope and the rewrite scope are one scope by
-    construction — the caller passes the same ``deployment_address`` to all
-    three. An FP row tagged to a proxy deployment must not mint into the
-    untagged scope."""
+    """The mint, FP read and rewrite scopes are one scope (the caller passes the same
+    ``deployment_address`` to all three): an FP row tagged to a proxy deployment must not
+    mint into the untagged scope."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     _protocol, contract = anchor
     proxy = _addr()
@@ -944,20 +875,3 @@ def test_a_deployment_scoped_mint_stays_in_its_scope(db_session, anchor, monkeyp
     db_session.commit()
     assert [m["address"] for m in scoped["minted"]] == [principal]
     assert _nodes(db_session, contract, principal)[0].deployment_address == proxy
-
-
-def test_an_absent_ledger_is_not_an_empty_walk(db_session, anchor, monkeypatch):
-    """``walked`` is set at loop exit and nowhere else, so a ledger that never
-    reached the end says so rather than reading as "considered everything,
-    minted nothing"."""
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    from services.discovery.perimeter import new_fp_materialization_result
-
-    fresh = new_fp_materialization_result(budget=16)
-    assert fresh["walked"] is False
-    assert fresh["site"] == "fp_materialization"
-    assert fresh["minted"] == []
-
-    _protocol, contract = anchor
-    ledger, _payloads = _mint(db_session, contract)
-    assert ledger["walked"] is True

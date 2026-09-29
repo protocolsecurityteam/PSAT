@@ -19,12 +19,8 @@ def monitored_contract(
     company_protocol_id: int,
     live_client: LiveClient,
 ) -> dict[str, Any]:
-    """Upsert a MonitoredContract for USDC under the test protocol.
-
-    No admin DELETE exists for /api/monitored-contracts, so this fixture
-    relies on the (address, chain) uniqueness constraint to make re-runs
-    idempotent — the POST handler upserts when a row already exists.
-    """
+    """Upsert a MonitoredContract for USDC; no admin DELETE exists, so the (address, chain) unique key makes re-runs
+    idempotent."""
     payload = {
         "address": USDC_ADDRESS.lower(),
         "chain": "ethereum",
@@ -37,14 +33,10 @@ def monitored_contract(
 
 
 def _caller_keys(config: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
-    """The caller's own keys out of a stored config.
+    """The caller's own keys out of a stored config, compared as a subset.
 
-    Compared as a subset rather than for equality because the route stamps
-    ``tracking_plan_not_determined="config_supplied_by_caller"`` into every
-    caller-supplied config (``routers/monitored._stamp_caller_supplied``): a
-    config no analyzer produced must not read as "the tracking plan was read and
-    named nothing", which is what the absent key means on the auto-enrollment
-    path. The caller's keys still round-trip untouched.
+    The route stamps ``tracking_plan_not_determined="config_supplied_by_caller"`` into every caller-supplied config
+    (``routers/monitored._stamp_caller_supplied``) so it cannot read as "the tracking plan named nothing".
     """
     return {key: config.get(key) for key in expected}
 

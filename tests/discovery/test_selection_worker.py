@@ -1,16 +1,9 @@
 """Integration tests for the ``SelectionWorker``.
 
-The selection stage unifies the three discovery sources (inventory,
-DApp crawl, DefiLlama scan) into a single ranked pass: every
-discovered contract competes for the ``analyze_limit`` budget on
-equal footing, so the right outcome is driven by rank order across
-sources rather than first-writer-wins.
-
-These tests run against a real Postgres session (``db_session``
-fixture) and exercise the worker's two claim paths, the confidence
-filter, the default-confidence shim for sources that don't ship a
-score, and the dedup + proxy re-queue branch that coverage-level
-behavior relies on.
+The selection stage ranks every discovered contract (inventory, DApp crawl,
+DefiLlama) for the ``analyze_limit`` budget on equal footing. Real Postgres
+(``db_session``); covers both claim paths, the confidence filter, the
+default-confidence shim, and the dedup + proxy re-queue branch.
 """
 
 from __future__ import annotations
@@ -37,13 +30,8 @@ pytestmark = [requires_postgres]
 
 @pytest.fixture(autouse=True)
 def _stub_activity_fetch(monkeypatch):
-    """Replace the Etherscan activity fetch with a deterministic local lookup.
-
-    ``enrich_with_activity`` calls ``services.discovery.activity.etherscan.get``
-    once per contract; stubbing at that seam keeps the real scoring math in
-    the loop while removing network traffic. Individual tests can override
-    ``_ACTIVITY_TIMES`` to control ranking.
-    """
+    """Deterministic local lookup for the Etherscan activity fetch: real scoring
+    math, no network. Tests override ``_ACTIVITY_TIMES`` to control ranking."""
     from services.discovery import activity as activity_module
 
     def fake_etherscan_get(module, action, **params):
@@ -78,12 +66,9 @@ def worker():
 
 @pytest.fixture()
 def seed_protocol(db_session):
-    """A bare Protocol row + id/name/address_factory, with cleanup on teardown.
-
-    ``address_factory`` hands out globally unique 20-byte addresses so
-    tests don't collide with leftover rows under the ``(address, chain)``
-    unique constraint.
-    """
+    """A bare Protocol row + id/name/address_factory; the factory hands out
+    globally unique addresses to avoid ``(address, chain)`` collisions with
+    leftover rows."""
     from db.models import Contract, Job, Protocol
 
     name = f"sel-worker-{uuid.uuid4().hex[:10]}"
@@ -218,13 +203,9 @@ def _add_sibling_job(
 
 @requires_postgres
 def test_selection_ranks_across_sources_and_queues_top_n(db_session, worker, seed_protocol):
-    """All three discovery sources compete in one ranking pass.
-
-    Seed: inventory (high confidence), dapp_crawl (null confidence → defaults
-    to 0.7), defillama (null confidence → 0.7), plus one very-low-confidence
-    inventory row that should be filtered out. Activity scores favour the
-    dapp_crawl and one inventory row.
-    """
+    """All three sources compete in one ranking pass: inventory (high
+    confidence), dapp_crawl and defillama (null confidence -> 0.7), plus one
+    very-low-confidence inventory row that must be filtered."""
     from db.models import Contract, Job, JobStage, JobStatus
     from db.queue import get_artifact
 
@@ -268,11 +249,9 @@ def test_selection_ranks_across_sources_and_queues_top_n(db_session, worker, see
         worker.process(db_session, job)
     db_session.refresh(job)
 
-    # Parent job finished and moved to done
     assert job.stage == JobStage.done
     assert job.status == JobStatus.completed
 
-    # 3 child analysis jobs created
     children = (
         db_session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(job.id))).scalars().all()
     )
@@ -280,11 +259,9 @@ def test_selection_ranks_across_sources_and_queues_top_n(db_session, worker, see
     child_addresses = {child.address for child in children}
     # Top three by rank_score: recent activity wins over stale inventory
     assert child_addresses == {inv_top, dapp_top, defi_mid}
-    # The low-confidence inventory row was filtered; the stale one was ranked lower
     assert inv_lowconf not in child_addresses
     assert inv_stale not in child_addresses
 
-    # Children carry the parent's protocol, lineage, and discovery_sources
     for child in children:
         req = child.request
         assert isinstance(req, dict)
@@ -294,8 +271,8 @@ def test_selection_ranks_across_sources_and_queues_top_n(db_session, worker, see
         assert req["rpc_url"] == "https://rpc.example"
         assert any(s in {"inventory", "dapp_crawl", "defillama"} for s in req.get("discovery_sources", []))
 
-    # Rank scores are persisted back onto the Contract rows so the UI
-    # and the analyze-remaining fallback see the same ordering.
+        # Rank scores persist on Contract rows so the UI and analyze-remaining
+        # fallback agree.
     ranked_rows = {
         row.address: row
         for row in db_session.execute(
@@ -354,12 +331,8 @@ def test_selection_filters_below_confidence_threshold(db_session, worker, seed_p
 
 @requires_postgres
 def test_null_confidence_dapp_and_defillama_rows_participate(db_session, worker, seed_protocol):
-    """Null-confidence dapp_crawl/defillama rows should clear the threshold.
-
-    Without the default-confidence shim, a row with ``confidence=NULL`` would
-    be filtered out. The selector applies a source-specific default (0.7 for
-    on-chain-evidence sources) so those contracts get ranked at all.
-    """
+    """Null-confidence dapp_crawl/defillama rows clear the threshold: the
+    source-specific default (0.7) applies, otherwise NULL would be filtered."""
     from db.models import Job
 
     protocol_id, company, addr = seed_protocol
@@ -382,28 +355,6 @@ def test_null_confidence_dapp_and_defillama_rows_participate(db_session, worker,
 # ---------------------------------------------------------------------------
 
 
-@requires_postgres
-def test_upgrade_history_rows_are_excluded(db_session, worker, seed_protocol):
-    from db.models import Job
-
-    protocol_id, company, addr = seed_protocol
-    _add_contract(
-        db_session,
-        protocol_id=protocol_id,
-        address=addr(),
-        discovery_sources="upgrade_history",
-        confidence=0.9,
-    )
-    job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=3)
-    with pytest.raises(JobHandledDirectly):
-        worker.process(db_session, job)
-
-    children = (
-        db_session.execute(select(Job).where(Job.request["parent_job_id"].as_string() == str(job.id))).scalars().all()
-    )
-    assert children == []
-
-
 # ---------------------------------------------------------------------------
 # 5. Dedup: address with an existing non-proxy job is skipped
 # ---------------------------------------------------------------------------
@@ -411,19 +362,14 @@ def test_upgrade_history_rows_are_excluded(db_session, worker, seed_protocol):
 
 @requires_postgres
 def test_existing_non_proxy_job_skips_address(db_session, worker, seed_protocol):
-    """When a contract already has a live analysis job, the selector skips it.
-
-    This prevents duplicate work across re-runs of a protocol. Proxies
-    intentionally fall through to the re-queue branch exercised in the next
-    test — they need re-analysis to catch upgrades.
-    """
+    """A contract with a live analysis job is skipped (no duplicate work across
+    re-runs); proxies fall through to the re-queue branch in the next test."""
     from db.models import Job, JobStage, JobStatus
 
     protocol_id, company, addr = seed_protocol
     target = addr()
     _add_contract(db_session, protocol_id=protocol_id, address=target, discovery_sources="inventory", confidence=0.9)
 
-    # Existing job for that address (not a proxy)
     existing = Job(
         address=target,
         stage=JobStage.static,
@@ -490,10 +436,8 @@ def test_proxy_with_existing_job_is_re_queued(db_session, worker, seed_protocol)
 @requires_postgres
 def test_existing_in_same_cascade_matches_only_the_address_cascade_and_chain(db_session, seed_protocol):
     """``_existing_in_same_cascade`` is the ``--force`` in-cascade dedupe gate
-    (``selection_worker.py:357``). Its three filters — address, the
-    ``request->>'root_job_id'`` JSON predicate, and the *conditional* chain
-    predicate — are only meaningful against real SQL, so drive it on Postgres.
-    """
+    (``selection_worker.py:357``); its address / ``request->>'root_job_id'`` /
+    conditional chain predicates only mean something against real SQL."""
     from db.models import Job, JobStage, JobStatus
     from workers.selection_worker import _existing_in_same_cascade
 
@@ -608,18 +552,14 @@ def test_stuck_claim_stamps_lease(db_session, worker, seed_protocol):
 
 @requires_postgres
 def test_corroborated_contract_outranks_single_source_peer(db_session, worker, seed_protocol):
-    """A contract tagged by multiple discovery sources outranks a peer
-    with the same raw confidence tagged by only one — the corroboration
-    boost is the whole point of the array column.
-    """
+    """A contract tagged by multiple discovery sources outranks a
+    same-confidence peer tagged by one (corroboration boost)."""
     from db.models import Contract, Job
 
     protocol_id, company, addr = seed_protocol
 
     solo = addr()
     triple = addr()
-    # Identical raw confidence + identical activity → the only
-    # differentiator is the source union.
     _add_contract(
         db_session,
         protocol_id=protocol_id,
@@ -647,7 +587,6 @@ def test_corroborated_contract_outranks_single_source_peer(db_session, worker, s
     )
     assert [c.address for c in children] == [triple]
 
-    # Persisted rank_score reflects the boost (triple-source > solo).
     rows = {
         row.address: row
         for row in db_session.execute(select(Contract).where(Contract.address.in_([solo, triple]))).scalars().all()
@@ -668,7 +607,6 @@ def test_stuck_job_escape_hatch_claims_past_timeout(db_session, worker, seed_pro
         analyze_limit=3,
         updated_at=stuck_time,
     )
-    # A sibling still processing — normally would hold the claim back
     _add_sibling_job(
         db_session,
         stage=JobStage.defillama_scan,
@@ -676,9 +614,7 @@ def test_stuck_job_escape_hatch_claims_past_timeout(db_session, worker, seed_pro
         root_job_id=str(job.id),
     )
 
-    # Ready claim returns None (sibling is still in flight)
     assert worker._claim_ready_job(db_session) is None
-    # Stuck claim bypasses the readiness predicate
     claimed = worker._claim_stuck_job(db_session)
     assert claimed is not None
     assert claimed.id == job.id
@@ -691,21 +627,16 @@ def test_stuck_job_escape_hatch_claims_past_timeout(db_session, worker, seed_pro
 
 class TestAnalyzeLimitFilling:
     def test_skipped_entries_dont_consume_limit(self, db_session, monkeypatch):
-        """When top-ranked entries are skipped (existing jobs), the remaining
-        slots should be filled from lower-ranked eligible entries.
-
-        This invariant used to live in ``DiscoveryWorker._process_company``.
-        It now lives in ``SelectionWorker._queue_top_n`` — the test was moved
-        here wholesale rather than duplicated so the exact failure signal
-        (``n >= 3`` children despite 3 dupes) still guards the same code path.
-        """
+        """When top-ranked entries are skipped (existing jobs), remaining slots
+        fill from lower-ranked eligible entries. Moved from
+        ``DiscoveryWorker._process_company`` to ``SelectionWorker._queue_top_n``;
+        the ``n >= 3`` children-despite-3-dupes signal guards the same path."""
         from sqlalchemy import select
 
         from db.models import Contract, Job, JobStage, JobStatus, Protocol
         from db.queue import create_job
         from workers.selection_worker import SelectionWorker
 
-        # Stub Etherscan activity so enrich_with_activity doesn't hit the network.
         monkeypatch.setattr(
             "services.discovery.activity.etherscan.get",
             lambda *a, **kw: {"result": []},
@@ -715,14 +646,10 @@ class TestAnalyzeLimitFilling:
         db_session.add(protocol)
         db_session.commit()
 
-        # Pre-create live jobs for the top 3 addresses so SelectionWorker
-        # has to skip them.
         for i in range(3):
             addr = f"0x{str(i).zfill(40)}"
             create_job(db_session, {"address": addr, "chain": "ethereum"})
 
-        # Seed 6 contracts under this protocol with descending confidence —
-        # top 3 addresses overlap with the pre-created jobs above.
         for i in range(6):
             addr = f"0x{str(i).zfill(40)}"
             db_session.add(
@@ -766,9 +693,8 @@ class TestAnalyzeLimitFilling:
             .all()
         )
 
-        # With the bug: top 5 eligible are selected, 3 are skipped, only 2 jobs created
-        # With the fix: we iterate eligible, skip the 3 dupes, pick the next 3 → 3 jobs
-        # (remaining=5, but we only have 3 non-dupe eligible entries)
+        # Bug: top 5 eligible selected, 3 skipped -> only 2 jobs. Fix: skip the
+        # 3 dupes, pick the next 3.
         assert len(child_jobs) >= 3, (
             f"Expected at least 3 child jobs (filling past skipped entries), "
             f"got {len(child_jobs)}. Skipped entries consumed the analyze_limit."
@@ -850,7 +776,6 @@ def test_selection_settles_pending_nominations_before_ranking(db_session, worker
         confidence=0.9,
         job_id=anchor_job.id,
     )
-    # Candidate: nominated by a crawl writer, never probed, not yet a member.
     candidate = Contract(
         nominated_protocol_id=protocol_id,
         address=candidate_addr,

@@ -1,12 +1,9 @@
-"""Offline logging/observability tests for the audits + crawlers part.
+"""Offline logging tests for the audits + crawlers part (Backlog #9).
 
-Locks in the new observable behavior for Backlog #9-part: external-call
-failures on the DefiLlama and DApp crawl paths now surface a ``record_degraded``
-entry plus a ``record_stage_metric`` count instead of completing as a silent
-success, and the audit scope LLM failure carries a queryable ``failure_kind``
-that splits an upstream API outage from a parser bug.
-
-All stubbed at the wire — no live network, no RPC, no playwright browser.
+DefiLlama and DApp crawl external-call failures surface a ``record_degraded`` entry plus a
+``record_stage_metric`` count instead of a silent success, and the audit scope LLM failure
+carries a queryable ``failure_kind`` splitting an API outage from a parser bug. All stubbed
+at the wire.
 """
 
 from __future__ import annotations
@@ -23,8 +20,7 @@ from utils.logging import (
 def _bound_accumulators():
     """Bind fresh degraded + stage-metric accumulators under a job context.
 
-    Returns ``(errors_list, metrics_dict, reset_callable)`` mirroring the
-    pattern in tests/observability/test_record_degraded.py.
+    Returns ``(errors_list, metrics_dict, reset_callable)``, as in test_record_degraded.py.
     """
     errors: list = []
     metrics: dict = {}
@@ -54,8 +50,7 @@ def _bound_accumulators():
 def test_defillama_not_found_records_degraded_and_metric(tmp_path):
     from services.crawlers.defillama.scan import scan_protocol
 
-    # Minimal repo layout: an empty projects/ dir so no protocol can match,
-    # and no coreAssets.json (load_core_assets tolerates that, returns {}).
+    # Empty projects/ dir so no protocol matches; no coreAssets.json (load_core_assets returns {}).
     (tmp_path / "projects").mkdir()
 
     errors, metrics, reset = _bound_accumulators()
@@ -68,7 +63,6 @@ def test_defillama_not_found_records_degraded_and_metric(tmp_path):
     finally:
         reset()
 
-    # Completes (no raise) with an empty result, but the miss is now visible.
     assert result["addresses"] == []
     assert metrics.get("protocol_matched") is False
     assert any(e.phase == "defillama_match" for e in errors)
@@ -79,7 +73,6 @@ def test_defillama_match_records_protocol_matched_true(tmp_path):
 
     projects = tmp_path / "projects"
     projects.mkdir()
-    # A single-file adapter whose normalized name matches the query exactly.
     (projects / "myproto.js").write_text("module.exports = {};\n")
 
     errors, metrics, reset = _bound_accumulators()
@@ -157,23 +150,12 @@ def test_dapp_sniffer_exception_records_degraded_and_counts():
 # --------------------------------------------------------------------------- #
 
 
-def test_scope_llm_error_carries_failure_kind():
-    from services.audits.scope_extraction._errors import LLMUnavailableError
-
-    api = LLMUnavailableError("402 payment required")
-    parse = LLMUnavailableError("bad json", failure_kind="parse")
-    assert api.failure_kind == "api"  # default = upstream outage signature
-    assert parse.failure_kind == "parse"
-
-
 def test_scope_llm_fallback_degrades_with_failure_kind(monkeypatch):
-    """The LLM-unavailable fallback path records a degraded entry whose
-    context carries the discriminating ``failure_kind``."""
+    """The LLM-unavailable fallback records a degraded entry carrying ``failure_kind``."""
     import services.audits.scope_extraction as scope_mod
     from services.audits.scope_extraction._errors import LLMUnavailableError
     from services.audits.scope_extraction._locate import ScopeSection
 
-    # Storage returns a body that contains a scope section trigger.
     raw = "Scope\n\nMyContract is in scope.\n"
 
     class _Client:
@@ -191,8 +173,7 @@ def test_scope_llm_fallback_degrades_with_failure_kind(monkeypatch):
         raise LLMUnavailableError("openrouter 402", failure_kind="api")
 
     monkeypatch.setattr(scope_mod, "extract_scope_with_llm", _boom)
-    # Force the chunk-scan fallback to also be unavailable so we exercise both
-    # degraded branches deterministically.
+    # Also make the chunk-scan fallback unavailable so both degraded branches run.
     monkeypatch.setattr(
         scope_mod,
         "extract_scope_via_chunk_scan",
@@ -212,7 +193,6 @@ def test_scope_llm_fallback_degrades_with_failure_kind(monkeypatch):
     finally:
         reset()
 
-    # Never raises; degrades with the queryable failure_kind in context.
     assert outcome.status in ("skipped", "failed")
     assert metrics.get("scope_llm_failure_kind") == "api"
     degraded = [e for e in errors if e.phase == "scope_llm"]

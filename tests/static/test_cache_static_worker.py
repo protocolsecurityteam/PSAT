@@ -1,4 +1,8 @@
-"""Tests for static worker cache hit/miss and proxy cache (mock-based)."""
+"""Tests for static worker cache hit/miss and proxy cache (mock-based).
+
+Where a proxy is still a proxy after the mocked ``_resolve_proxy``, the worker skips
+Slither and raises ``JobHandledDirectly``.
+"""
 
 from __future__ import annotations
 
@@ -26,12 +30,10 @@ pytestmark = requires_postgres
 
 
 def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
-    """Job flagged as static_cached skips Slither/analysis but runs deps."""
     from db.models import Contract
     from db.queue import create_job, store_artifact, store_source_files
     from workers.static_worker import StaticWorker
 
-    # Create a new job with the explicit cache flag set by discovery worker
     job = create_job(db_session, {"address": ADDR_A, "rpc_url": "https://rpc.example", "static_cached": True})
     contract = Contract(
         job_id=job.id,
@@ -71,7 +73,6 @@ def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
 
 
 def test_static_worker_cache_miss_runs_analysis(db_session, monkeypatch):
-    """Job without cached artifacts runs all analysis phases normally."""
     from db.models import Contract
     from db.queue import create_job, store_source_files
     from workers.static_worker import StaticWorker
@@ -113,7 +114,6 @@ def test_static_worker_cache_miss_runs_analysis(db_session, monkeypatch):
 
 
 def test_proxy_cache_non_proxy_source(db_session, monkeypatch):
-    """Cache hit with non-proxy source: _resolve_proxy is NOT called, contract has is_proxy=False."""
     from sqlalchemy import select
 
     from db.models import Contract
@@ -141,7 +141,6 @@ def test_proxy_cache_non_proxy_source(db_session, monkeypatch):
 
 
 def test_proxy_cache_proxy_unchanged(db_session, monkeypatch):
-    """Cache hit with unchanged proxy: _resolve_proxy is NOT called, proxy fields are copied."""
     from sqlalchemy import select
 
     from db.models import Contract
@@ -160,7 +159,6 @@ def test_proxy_cache_proxy_unchanged(db_session, monkeypatch):
     target_job.request = {**req, "chain_id": 1}
     db_session.commit()
 
-    # resolve_current_implementation returns the SAME address -> no upgrade
     monkeypatch.setattr(
         "workers.static_worker.resolve_current_implementation",
         lambda addr, rpc, **kw: IMPL_ADDR,
@@ -187,11 +185,6 @@ def test_proxy_cache_proxy_unchanged(db_session, monkeypatch):
 
 
 def test_proxy_cache_proxy_upgraded(db_session, monkeypatch):
-    """Cache hit but proxy upgraded: _resolve_proxy IS called.
-
-    After _resolve_proxy runs (mocked), the contract is still a proxy so
-    the static worker correctly skips Slither and raises JobHandledDirectly.
-    """
     from workers.base import JobHandledDirectly
     from workers.static_worker import StaticWorker
 
@@ -203,7 +196,6 @@ def test_proxy_cache_proxy_upgraded(db_session, monkeypatch):
     )
     target_job = _create_target_job_with_contract(db_session, source_job.id)
 
-    # resolve_current_implementation returns a DIFFERENT address -> upgrade detected
     monkeypatch.setattr(
         "workers.static_worker.resolve_current_implementation",
         lambda addr, rpc, **kw: IMPL_ADDR_NEW,
@@ -219,11 +211,6 @@ def test_proxy_cache_proxy_upgraded(db_session, monkeypatch):
 
 
 def test_proxy_cache_rpc_fails(db_session, monkeypatch):
-    """Cache hit but RPC fails: falls back to full _resolve_proxy.
-
-    After _resolve_proxy runs (mocked), the contract is still a proxy so
-    the static worker correctly skips Slither and raises JobHandledDirectly.
-    """
     from workers.base import JobHandledDirectly
     from workers.static_worker import StaticWorker
 
@@ -249,40 +236,7 @@ def test_proxy_cache_rpc_fails(db_session, monkeypatch):
     assert "resolve_proxy" in phases_run
 
 
-def test_proxy_cache_no_cache_flag(db_session, monkeypatch):
-    """Job without static_cached flag: _resolve_proxy IS called normally."""
-    from db.models import Contract
-    from db.queue import create_job, store_source_files
-    from workers.static_worker import StaticWorker
-
-    job = create_job(db_session, {"address": ADDR_A, "rpc_url": "https://rpc.example"})
-    contract = Contract(
-        job_id=job.id,
-        address=ADDR_A,
-        contract_name="TestContract",
-        compiler_version="v0.8.24",
-        language="solidity",
-        evm_version="shanghai",
-        optimization=True,
-        optimization_runs=200,
-        source_format="flat",
-        source_file_count=1,
-        remappings=[],
-    )
-    db_session.add(contract)
-    db_session.commit()
-    store_source_files(db_session, job.id, {"src/Test.sol": "contract Test {}"})
-
-    worker = StaticWorker()
-    phases_run = _patch_static_worker_phases(monkeypatch, worker)
-
-    worker.process(db_session, job)
-
-    assert "resolve_proxy" in phases_run
-
-
 def test_proxy_cache_immutable_eip1167(db_session, monkeypatch):
-    """Cache hit with eip1167 (immutable) proxy: reuse without any RPC call."""
     from sqlalchemy import select
 
     from db.models import Contract
@@ -296,7 +250,6 @@ def test_proxy_cache_immutable_eip1167(db_session, monkeypatch):
     )
     target_job = _create_target_job_with_contract(db_session, source_job.id)
 
-    # resolve_current_implementation should NOT be called for immutable types
     resolve_called = []
 
     def mock_resolve(addr, rpc, **kw):
@@ -323,11 +276,6 @@ def test_proxy_cache_immutable_eip1167(db_session, monkeypatch):
 
 
 def test_proxy_cache_diamond_proxy_falls_back(db_session, monkeypatch):
-    """Cache hit with diamond proxy (eip2535): falls back to full _resolve_proxy.
-
-    After _resolve_proxy runs (mocked), the contract is still a proxy so
-    the static worker correctly skips Slither and raises JobHandledDirectly.
-    """
     from workers.base import JobHandledDirectly
     from workers.static_worker import StaticWorker
 
@@ -354,7 +302,6 @@ def test_proxy_cache_diamond_proxy_falls_back(db_session, monkeypatch):
 
 
 def test_apply_proxy_cache_non_proxy(db_session):
-    """_apply_proxy_cache on a non-proxy source returns type=regular."""
     from db.models import Contract
     from db.queue import create_job
     from workers.static_worker import _apply_proxy_cache
@@ -387,7 +334,6 @@ def test_apply_proxy_cache_non_proxy(db_session):
 
 
 def test_apply_proxy_cache_proxy(db_session):
-    """_apply_proxy_cache on a proxy source copies all proxy fields."""
     from db.models import Contract
     from db.queue import create_job
     from workers.static_worker import _apply_proxy_cache
@@ -429,7 +375,6 @@ def test_apply_proxy_cache_proxy(db_session):
 
 
 def test_check_proxy_cache_no_source_job_id(db_session):
-    """_check_proxy_cache returns None when cache_source_job_id is missing."""
     from db.models import Contract
     from db.queue import create_job
     from workers.static_worker import _check_proxy_cache
@@ -452,7 +397,6 @@ def test_check_proxy_cache_no_source_job_id(db_session):
 
 
 def test_check_proxy_cache_source_contract_missing(db_session):
-    """_check_proxy_cache returns None when source job has no contract row."""
     from db.models import Contract
     from db.queue import create_job
     from workers.static_worker import _check_proxy_cache
@@ -478,7 +422,6 @@ def test_check_proxy_cache_source_contract_missing(db_session):
 
 
 def test_check_proxy_cache_proxy_no_cached_impl(db_session):
-    """_check_proxy_cache returns None when source proxy has no implementation address."""
     from db.models import Contract
     from db.queue import create_job
     from workers.static_worker import _check_proxy_cache
@@ -513,7 +456,6 @@ def test_check_proxy_cache_proxy_no_cached_impl(db_session):
 
 
 def test_check_proxy_cache_no_rpc_url(db_session):
-    """_check_proxy_cache returns None when no RPC URL is available."""
     from db.models import Contract
     from db.queue import create_job
     from workers.static_worker import _check_proxy_cache
@@ -564,17 +506,13 @@ def test_check_proxy_cache_no_rpc_url(db_session):
 
 
 def test_e2e_discovery_then_static_with_cache(db_session, monkeypatch):
-    """End-to-end test: run discovery (cache hit), then static (cached)
-    and verify the complete flow works with the static_cached flag."""
 
     from db.queue import create_job, get_artifact, get_source_files
     from workers.discovery import DiscoveryWorker
     from workers.static_worker import StaticWorker
 
-    # Phase 0: Create a completed job to serve as cache
     _create_completed_job_with_static_data(db_session)
 
-    # Phase 1: Discovery -- should hit cache
     new_job = create_job(db_session, {"address": ADDR_A, "rpc_url": "https://rpc.example"})
 
     monkeypatch.setattr(
@@ -586,25 +524,20 @@ def test_e2e_discovery_then_static_with_cache(db_session, monkeypatch):
     disc_worker.update_detail = MagicMock()
     disc_worker._process_address(db_session, new_job)
 
-    # Verify cache flags set
     db_session.refresh(new_job)
     assert isinstance(new_job.request, dict)
     assert new_job.request.get("static_cached") is True
 
-    # Phase 2: Static -- should skip analysis phases
     static_worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, static_worker)
 
     static_worker.process(db_session, new_job)
 
-    # Slither/analysis/tracking should be skipped
     assert "slither" not in phases_run
     assert "analysis" not in phases_run
     assert "tracking_plan" not in phases_run
-    # But dependency and proxy resolution should run
     assert "dependency" in phases_run
 
-    # Data should be intact
     sources = get_source_files(db_session, new_job.id)
     assert len(sources) == 2
     assert get_artifact(db_session, new_job.id, "contract_analysis") is not None

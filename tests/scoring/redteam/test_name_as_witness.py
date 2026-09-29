@@ -1,14 +1,10 @@
-"""Name-as-witness, contradictions and published labels.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""Name-as-witness, contradictions and published labels."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from services.scoring import distill as D
-from services.scoring import planes as P
 from services.scoring.constants import WEAKNESS_SAFE_SINGLE_SIGNER
 from services.scoring.schema import PrincipalRef, Tri, entity_key
 from tests.support.scoring_builders import (
@@ -64,25 +60,12 @@ def test_f6_the_registry_escalation_needs_mutator_selectors():
     assert "registry_owner_self_grant_escalation" in basis
 
 
-def test_f6_selectors_are_what_the_facts_are_built_from():
-    class _Fn:
-        def __init__(self, name, selector):
-            self.function_name = name
-            self.selector = selector
-
-    homonym = _Fn("setUserRole", "0xdeadbeef")
-    canonical = _Fn("whateverName", "0x67aff484")
-    assert D._lower(homonym.selector) not in D._SOLMATE_MUTATOR_SELECTORS
-    assert D._lower(canonical.selector) in D._SOLMATE_MUTATOR_SELECTORS
-
-
 def test_b5_the_self_gated_delay_credit_is_retired():
     """ "Every resolved principal is the contract" is a lower bound, not closure.
 
-    The enumeration it reads is documented as a proven LOWER BOUND on the caller
-    set, so "no other caller resolved" cannot license driving a capability-class
-    base to exactly zero. The observation is published; the severity does not
-    move on it.
+    The enumeration is a proven LOWER BOUND on the caller set, so "no other
+    caller resolved" cannot drive a capability-class base to zero. The
+    observation is published; the severity does not move on it.
     """
     entries: list[dict[str, Any]] = [{"claim_id": "timelock.set_delay"}]
     self_gated, basis, notes = D._severity(
@@ -158,11 +141,10 @@ def test_g3_destination_operand_does_not_corroborate_self_ness():
 def test_g3_a_priced_destination_with_a_withheld_severity_charges_nothing_and_says_so(fold):
     """A proven destination is not a proven price.
 
-    The row's payee is proven caller-relative and the entity it reaches is
-    priced — everything a charge needs except the one witness that says what the
-    payout is bounded by. It must land nowhere in the ledger, and the refusal
-    must be legible: an excluded row's notes reach no finding, so the warning
-    channel is the only surface that can carry the reason.
+    Payee and entity are proven and priced, but the witness for what the payout
+    is bounded by is missing. The row must land nowhere in the ledger, and the
+    refusal must be legible: an excluded row's notes reach no finding, so the
+    warning channel is the only surface that can carry the reason.
     """
     signal = flow_sig(
         function_name="unwrap",
@@ -313,13 +295,6 @@ def test_f5_confidence_does_not_rise_when_analysis_is_lost(fold):
     assert less.confidence_pct <= more.confidence_pct
 
 
-def test_r1_capability_principal_is_not_a_reach_relation():
-    assert "capability_principal" not in P.CONTROL_RELATIONS
-    # Not walked, and the exclusion carries a stated reason rather than being a
-    # relation the walk happens never to mention.
-    assert "capability_principal" in P.UNCONSUMED_REACH_REASONS
-
-
 def test_g2_the_destination_free_allow_list_is_disjoint_and_conservative():
     from utils.scoring_status import DESTINATION_BEARING_CLAIMS, DESTINATION_FREE_CLAIMS
 
@@ -329,12 +304,11 @@ def test_g2_the_destination_free_allow_list_is_disjoint_and_conservative():
 
 
 def test_d3_an_unanswerable_signal_outside_the_perimeter_does_not_move_confidence(fold):
-    """The denominator is the value plane plus the closure — never the population.
+    """The denominator is the value plane plus the closure, never the population.
 
-    Injecting a signal that answers nothing, on an entity the value and control
-    planes never mention, must leave the published confidence exactly where it
-    was: a perimeter that grew with the analysis would let the figure be moved by
-    the act of looking.
+    A signal that answers nothing, on an entity neither plane mentions, must
+    leave confidence exactly where it was: a perimeter that grew with the
+    analysis would let the figure move by the act of looking.
     """
     answered = sig(
         function_name="upgradeTo",

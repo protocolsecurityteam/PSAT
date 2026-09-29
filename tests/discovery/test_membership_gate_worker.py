@@ -243,8 +243,8 @@ def test_enumeration_collects_direct_creations(monkeypatch):
 
 def test_enumeration_unions_internal_creations_with_factory_attribution(monkeypatch):
     # Etherscan attributes factory-mediated creations to the tx ORIGIN, so the
-    # EOA's own sent calls are resolved per-txhash and their CREATE frames
-    # union with the direct creations — factory recorded per child.
+    # EOA's own sent calls are resolved per-txhash and unioned with direct
+    # creations.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     eoa = ADDR(0x260)
     tx_hash = "0x" + "45" * 32
@@ -261,7 +261,6 @@ def test_enumeration_unions_internal_creations_with_factory_attribution(monkeypa
 
 
 def test_enumeration_internal_only_creation_is_complete(monkeypatch):
-    # A purely factory-mediated deployer now has an enumerable history.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     eoa = ADDR(0x264)
     tx_hash = "0x" + "46" * 32
@@ -277,8 +276,8 @@ def test_enumeration_internal_only_creation_is_complete(monkeypatch):
 
 
 def test_enumeration_skips_received_failed_and_frameless_txs(monkeypatch):
-    # Received txs, reverted txs, failed CREATE frames and call frames are
-    # never creations of this EOA; only its own successful calls are resolved.
+    # Only the EOA's own successful calls are resolved (not received/reverted
+    # txs, failed CREATE frames or call frames).
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     eoa = ADDR(0x267)
     resolved = "0x" + "47" * 32
@@ -500,9 +499,8 @@ def test_ladder_wire_cap_exceeded_is_class_c_no_row(db_session, monkeypatch):
 
 
 def test_ladder_wire_counts_unknown_creations_without_materializing(db_session, monkeypatch):
-    """DEPLOYER_HEURISTIC_SPEC.md §7 ruling 3: a complete enumeration's
-    unknown creation is COUNTED (Class B refuses on it) but never becomes a
-    contracts row."""
+    """DEPLOYER_HEURISTIC_SPEC.md §7 ruling 3: an unknown creation in a complete
+    enumeration is COUNTED (Class B refuses) but never becomes a contracts row."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
     eoa = ADDR(0x2C0)
@@ -548,16 +546,13 @@ def test_ladder_wire_member_factory_child_mints_b_with_factory_evidence(db_sessi
     assert row.evidence["member_factory_mapped"] == {"count": 1, "factories": [factory.address]}
     assert row.evidence["enumeration"]["factories"] == {child: factory.address}
     assert child in row.evidence["enumeration"]["addresses"]
-    # Mapping only (§7 ruling 3): the child is counted in the evidence, never
-    # materialized as a contracts row.
     assert db_session.execute(select(Contract).where(Contract.address == child)).first() is None
     assert sink == set()
 
 
 def test_fixpoint_enumeration_counts_unknowns_without_materializing(db_session, monkeypatch):
-    """The gate-side wire, DEPLOYER_HEURISTIC_SPEC.md §7 ruling 3: a complete
-    enumeration inside the fixpoint's ladder stratum counts unknown creations
-    against Class B but never creates a contracts row for them."""
+    """Gate-side wire of §7 ruling 3: unknown creations count against Class B
+    but never create a contracts row."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
     protocol = _protocol(db_session)
     eoa = ADDR(0x2C8)
@@ -702,7 +697,6 @@ def test_ladder_wire_counterevidence_revokes_stale_b_row(db_session, monkeypatch
     assert registry.revocation_reason == "foreign_or_unknown_creations"
     assert lineage_only.protocol_id is None
     assert lineage_only.nominated_protocol_id == protocol.id
-    # Independently witnessed members are untouched.
     assert all(m.protocol_id == protocol.id for m in members)
 
 
@@ -775,7 +769,6 @@ def test_ladder_wire_snapshot_reuse_skips_reenumeration(db_session, monkeypatch)
     first = _register_protocol_deployer(db_session, protocol_id=protocol.id, deployer=eoa)
     assert first is not None and len(calls) == 1
 
-    # Address inside the recorded snapshot: reuse, no re-enumeration.
     again = _register_protocol_deployer(
         db_session, protocol_id=protocol.id, deployer=eoa, contract_address=members[0].address
     )
@@ -861,7 +854,6 @@ def test_class_b_verdict_parity_between_ladder_wire_and_fixpoint(db_session, mon
     assert verdict.trust_class is None
     assert db_session.execute(select(ProtocolDeployer).where(ProtocolDeployer.address == eoa)).first() is None
 
-    # A window covering the stray flips BOTH paths to Class B.
     _stub_txlist(monkeypatch, {1: [_creation_tx(c.address) for c in (*members, stray)]})
     history, complete = session_deployer_enumerator(db_session)(eoa)
     parity_verdict = gate.classify_deployer(
@@ -1005,7 +997,6 @@ def test_gate_intake_registers_deployer_and_writes_w4(db_session, monkeypatch):
     db_session.add(
         ContractProbeAttempt(contract_id=newcomer.id, chain_id=1, block_number=90, results={"status": "probed"})
     )
-    # Creation tx already witnessed (probe pass persisted it).
     db_session.add(
         ContractCreationWitness(chain_id=1, address=newcomer.address, creation_tx_hash=_TX, creation_block=50)
     )
@@ -1088,7 +1079,6 @@ def test_probe_pass_probes_fresh_candidates_and_writes_w1(db_session, monkeypatc
 
     run_probe_pass(db_session, protocol.id)
 
-    # Bounded: only THIS protocol's un-probed candidate hit the wire.
     assert seen["probed"] == [fresh.address]
     w1 = db_session.query(ContractMembershipWitness).filter_by(contract_id=fresh.id, rule=WITNESS_RULE_W1_CODE).one()
     assert w1.evidence == {"chain_id": 1, "code_probe_block": 120, "code_present": True}
@@ -1152,7 +1142,6 @@ def test_probe_pass_budget_defers_tail_with_named_record(db_session, monkeypatch
     finally:
         degraded_errors_var.reset(token)
 
-    # Lowest-id slice only, one heartbeat per wire probe.
     assert seen["probed"] == [c1.address, c2.address]
     assert beats["n"] == 2
     budget_errors = [e for e in errors if e.phase == "membership_probe_pass_budget"]
@@ -1241,7 +1230,6 @@ def test_gate_intake_reprobes_members_demoted_by_counterevidence(db_session, mon
     db_session.refresh(registry)
     assert registry.revoked_at is not None
     assert lineage_only.protocol_id is None
-    # The demoted member was re-probed in the same pass, not parked silently.
     assert lineage_only.address in seen["probed"]
 
 
@@ -1304,7 +1292,6 @@ def test_probe_pass_no_w6_without_defillama_tag(db_session, monkeypatch, erpc_en
     run_probe_pass(db_session, protocol.id)
 
     assert _w6_rows(db_session, candidate.id) == []
-    # W1 alone admits nothing.
     assert candidate.protocol_id is None
 
 
@@ -1438,7 +1425,6 @@ def test_boot_sweep_probes_new_chain_and_enqueues_selection(db_session, monkeypa
 
     run_chain_enable_sweep(db_session)
 
-    # Only the newly enabled chain's non-pruned candidates were swept.
     assert seen["probed"] == [parked.address]
     db_session.refresh(parked)
     assert parked.protocol_id == protocol.id
@@ -1452,7 +1438,6 @@ def test_boot_sweep_probes_new_chain_and_enqueues_selection(db_session, monkeypa
     marker = db_session.get(OpsKv, ENABLED_CHAINS_SEEN_KEY)
     assert marker is not None and marker.value == [1, 8453]
 
-    # Re-running with the marker updated is a no-op (no duplicate selection job).
     def no_wire(*args, **kwargs):
         raise AssertionError("swept chain must not re-probe")
 

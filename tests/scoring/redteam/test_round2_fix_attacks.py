@@ -1,7 +1,4 @@
-"""Round 2: attacking the fixes.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""Round 2: attacking the fixes."""
 
 from __future__ import annotations
 
@@ -39,9 +36,8 @@ from utils.scoring_status import VALUE_BOUND_EXACT
 def test_b1_subsumption_never_drops_a_units_exclusive_value(fold):
     """Subsumption removes a row's POINTS, never the unit's reach.
 
-    A vault that only a subsumed row reaches is still value the unit provably
-    reaches, and dropping it from the exposure accounting publishes a smaller
-    exposure for a unit that got no smaller.
+    Dropping a vault only a subsumed row reaches publishes a smaller exposure
+    for a unit that got no smaller.
     """
     top = sig(
         function_name="upgradeTo",
@@ -154,7 +150,6 @@ def test_b2_a_well_formed_recovery_payload_still_reads(fold):
 
 
 def test_b3_a_proven_public_path_refuses_the_earned_negative(fold):
-    """``none_required`` is the opposite pole, and the worse contradiction."""
     earned = Tri.proven("earned", {"empty_reason": "owner_read_zero", "block": 21_000_000})
     signal = sig(
         function_name="upgradeTo",
@@ -172,7 +167,6 @@ def test_b3_a_proven_public_path_refuses_the_earned_negative(fold):
 
 
 def test_b4_unresolved_contracts_lower_confidence(fold):
-    """An unpriced, unclosured contract still carries its unanswered weight."""
     vault = sig(
         function_name="upgradeTo",
         deployment_address=VAULT,
@@ -287,9 +281,8 @@ def test_s7_the_destination_free_allow_list_exists_in_the_claims_registry():
 def test_r3_subsumed_value_is_charged_at_the_contributing_rows_fraction(fold):
     """The delayed path's value keeps the delayed path's fraction.
 
-    Keying rows by access path separated an undelayed reach from a delayed one;
-    charging the subsumed row's value at the TOP row's fraction re-merges them
-    inside the exposure term, at up to the full undelayed rate.
+    Charging the subsumed row's value at the TOP row's fraction re-merges
+    undelayed and delayed reach, at up to the full undelayed rate.
     """
     population = [
         sig(
@@ -358,7 +351,6 @@ def test_r3_subsumed_value_is_charged_at_the_contributing_rows_fraction(fold):
 
 
 def _signal_row(**over: Any):
-    """A ``FunctionScoreSignal``-shaped row; only the JSONB columns vary."""
 
     class _Row:
         job_id = None

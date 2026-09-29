@@ -1,10 +1,7 @@
 """Chain-awareness of the ``/api/analyses`` listing for CREATE2 twins.
 
-A single address deployed on two chains (a CREATE2 twin) has one completed
-Job and one Contract row per chain. The listing must pair each job with its
-*own* chain's Contract row and hide/fold impls only within a chain — never
-let one chain's metadata (rank_score, name, proxy_type, implementation) or
-impl entry bleed into the other chain's listing entry.
+The listing must pair each job with its *own* chain's Contract row and hide/fold impls only
+within a chain, never letting one chain's metadata or impl entry bleed into the other's.
 """
 
 from __future__ import annotations
@@ -53,8 +50,6 @@ def _seed_contract(db_session, job, *, address, chain, **kw):
 
 @requires_postgres
 def test_twin_listing_entries_carry_own_chain_metadata(api_client, db_session):
-    """Two non-proxy jobs at one address on ethereum + base each surface with
-    their own chain's rank_score and contract_name — no cross-chain bleed."""
     now = datetime.now(timezone.utc)
     j_eth = _seed_job(db_session, address=ADDR, chain_id=1, request={"chain": "ethereum"}, updated_at=now)
     j_base = _seed_job(
@@ -77,8 +72,6 @@ def test_twin_listing_entries_carry_own_chain_metadata(api_client, db_session):
 
 @requires_postgres
 def test_twin_proxy_impl_fold_stays_within_chain(api_client, db_session):
-    """A proxy/impl twin folds each proxy with its own chain's impl — the
-    ethereum proxy must not display the base impl (and vice versa)."""
     now = datetime.now(timezone.utc)
     # ethereum impl newest, base impl oldest → base impl is last in the
     # updated_at-desc iteration, so the buggy last-wins fold would attach
@@ -129,8 +122,6 @@ def test_twin_proxy_impl_fold_stays_within_chain(api_client, db_session):
 
 @requires_postgres
 def test_proxy_hidden_when_impl_completed_only_on_other_chain(api_client, db_session):
-    """An ethereum proxy whose impl completed only on *base* stays hidden —
-    the presence of a base impl job must not un-hide the ethereum proxy."""
     now = datetime.now(timezone.utc)
     p_eth = _seed_job(
         db_session, address=PROXY, chain_id=1, is_proxy=True, request={"chain": "ethereum"}, updated_at=now
@@ -154,6 +145,5 @@ def test_proxy_hidden_when_impl_completed_only_on_other_chain(api_client, db_ses
     assert resp.status_code == 200
     body = resp.json()
 
-    # The ethereum proxy at PROXY has no completed ethereum impl → hidden.
     eth_proxy = [e for e in body if e["address"] == PROXY and e["chain"] == "ethereum"]
     assert eth_proxy == []

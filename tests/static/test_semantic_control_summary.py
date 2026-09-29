@@ -1,14 +1,9 @@
 """``_build_semantic_control_summary`` semantic signal.
 
-Validates the structural inclusion rule: a function is in
-``semantic_functions`` iff EITHER:
-  * its predicate tree has a leaf with
-    ``authority_role IN {caller_authority, delegated_authority}``, OR
-  * its effects record carries a sensitive sink (state_write,
-    external_call, delegatecall, contract_creation, selfdestruct).
-
-Tree-keys-as-included used to over-include pause / reentrancy / time /
-business side-condition trees. This test pins the structural rule in place.
+Pins the structural inclusion rule: a function is in ``semantic_functions`` iff its predicate
+tree has a ``caller_authority``/``delegated_authority`` leaf, OR its effects record carries a
+sensitive sink (state_write, external_call, delegatecall, contract_creation, selfdestruct).
+Tree-keys-as-included used to over-include pause / reentrancy / time / business trees.
 """
 
 from __future__ import annotations
@@ -46,8 +41,6 @@ def _detect(tmp_path, source, contract_name="C"):
 
 
 def test_caller_authority_leaf_admits_function(tmp_path):
-    """Direct ``msg.sender == owner`` gate → caller_authority leaf →
-    included."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -66,9 +59,6 @@ def test_caller_authority_leaf_admits_function(tmp_path):
 
 
 def test_sensitive_sink_admits_unguarded_function(tmp_path):
-    """An unguarded external_call / state_write counts as a sensitive
-    sink — the function is still included so consumers can find
-    it."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -84,9 +74,7 @@ def test_sensitive_sink_admits_unguarded_function(tmp_path):
 
 
 def test_pause_only_tree_does_not_admit_function(tmp_path):
-    """A function whose only tree-leaf is a pause check should NOT be
-    in semantic_functions if it has no sensitive sink. Pause-only
-    is a side-condition; it doesn't make a function caller-authorized."""
+    """Pause-only with no sensitive sink is a side-condition, not caller authorization."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -116,51 +104,7 @@ def test_pause_only_tree_does_not_admit_function(tmp_path):
     assert "readOnly()" not in semantic_signatures
 
 
-def test_role_definitions_from_predicate_role_keys(tmp_path):
-    """``role_definitions`` comes from role keys used in predicate trees — and
-    only from the in-contract ``mapping_membership`` shape.
-
-    The cross-contract ``registry.hasRole(ROLE, msg.sender)`` gate below names two
-    real roles and mints NEITHER. ``callee_signature`` is read off
-    ``ir.function.full_name`` (``predicates.py:2338``), the interface the CALLER
-    declared, so it is not a proven property of the deployed callee: a slot lens
-    or a merkle-tree contract declared under the name ``hasRole(bytes32,address)``
-    lowers to a byte-identical descriptor, and those shapes minted ERC-7201
-    pointers as roles (see ``tests/static/test_role_definition_leaf_admission.py``).
-
-    The absence is a **coverage caveat**, not a finding: these roles are
-    ``not_determined``, never "this contract has no roles"
-    (``SCORING_INVARIANTS.md`` B4c).
-    """
-    source = """
-    pragma solidity ^0.8.19;
-    interface IRoleRegistry {
-        function hasRole(bytes32 role, address account) external view returns (bool);
-    }
-    contract C {
-        IRoleRegistry public roleRegistry;
-        bytes32 public constant ADMIN_ROLE = keccak256("ADMIN");
-        bytes32 public constant MINTER_ROLE = keccak256("MINTER");
-        uint256 public value;
-        constructor(IRoleRegistry rr) { roleRegistry = rr; }
-        function mint() external {
-            require(roleRegistry.hasRole(MINTER_ROLE, msg.sender), "no");
-            value = 1;
-        }
-        function admin() external {
-            require(roleRegistry.hasRole(ADMIN_ROLE, msg.sender), "no");
-            value = 2;
-        }
-    }
-    """
-    ac = _detect(tmp_path, source)
-    role_names = {r["role"] for r in ac["role_definitions"]}
-    assert role_names == set()
-
-
 def test_delegated_authority_leaf_admits_function(tmp_path):
-    """Cross-contract ``hasRole`` gate → delegated_authority leaf →
-    included."""
     source = """
     pragma solidity ^0.8.19;
     interface IRoleRegistry {

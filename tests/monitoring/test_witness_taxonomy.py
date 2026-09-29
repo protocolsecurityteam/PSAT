@@ -1,9 +1,8 @@
 """The three-tier witness taxonomy and its verification reads (F1 / F2 / F9b).
 
-Unit coverage of ``classify_witness_tier`` + ``extract_governance_topics``, and
-integration coverage of the runtime halves — the ``_process_window`` tier gate,
-the coalesced verification-read pass, and the notifier gate — against the real
-test DB with only the RPC wire stubbed.
+Unit coverage of ``classify_witness_tier`` + ``extract_governance_topics``, and integration
+coverage of the ``_process_window`` tier gate, the coalesced verification-read pass and the
+notifier gate against the real test DB with only the RPC wire stubbed.
 """
 
 from __future__ import annotations
@@ -70,8 +69,8 @@ def _word(value: str) -> str:
 def test_minted_type_vocabulary():
     assert value_changed_event_type("state_variable:owner") == "value_changed:state_variable:owner"
     assert member_changed_event_type("fromDenyList") == "member_changed:fromDenyList"
-    # Key / value / direction never enter the type string — they would make
-    # every entry its own event type and defeat the identity index.
+    # Key / value / direction never enter the type string: each entry would become its own
+    # event type and defeat the identity index.
     assert ":" not in member_changed_event_type("fromDenyList").split(":", 1)[1]
 
 
@@ -147,8 +146,7 @@ def test_old_new_pair_qualifies_only_when_attributable():
         {"name": "oldRate", "type": "uint256", "indexed": False},
         {"name": "newRate", "type": "uint256", "indexed": False},
     ]
-    # Single-write emitter naming this controller, over a slot PROVEN to hold a
-    # single value: the pair can only be about that value.
+    # Single-write emitter naming this controller over a slot PROVEN single-valued.
     assert (
         classify_witness_tier(
             event_type="state_changed:state_variable:rate",
@@ -159,8 +157,7 @@ def test_old_new_pair_qualifies_only_when_attributable():
         )
         == WITNESS_TIER_SELF_DESCRIBING
     )
-    # A multi-write emitter donates its whole slot set to every event it
-    # emits, so the pair says nothing about which slot moved.
+    # A multi-write emitter donates its whole slot set to every event it emits.
     assert (
         classify_witness_tier(
             event_type="state_changed:state_variable:rate",
@@ -200,11 +197,10 @@ def test_old_new_pair_qualifies_only_when_attributable():
     ],
 )
 def test_only_a_proven_single_cell_slot_takes_the_old_new_arm(read_spec, scalar):
-    """An old/new pair over a MAPPING states that one entry moved and names no
-    key, so publishing it under the slot stem puts one entry's value where
-    consumers read the slot's — the P1c wrong-claim shape. An absent or
-    unrecognized type_kind is the not-determined state and refuses too:
-    the absence of a proof that the slot is scalar is not a proof that it is.
+    """An old/new pair over a MAPPING says one entry moved and names no key, so publishing under
+    the slot stem puts an entry's value where consumers read the slot's (P1c wrong-claim shape).
+    An absent or unrecognized type_kind is not-determined and refuses too: no proof the slot is
+    scalar is not proof that it is.
     """
     assert read_spec_is_scalar_slot(read_spec) is scalar
     tier = classify_witness_tier(
@@ -221,8 +217,7 @@ def test_only_a_proven_single_cell_slot_takes_the_old_new_arm(read_spec, scalar)
 
 
 def test_the_old_new_arm_defaults_to_refusing():
-    """A caller that does not supply the proof gets the refusal, not the
-    promotion — the default is the not-determined state."""
+    """A caller that supplies no proof gets the refusal; the default is not-determined."""
     assert (
         classify_witness_tier(
             event_type="state_changed:state_variable:rate",
@@ -238,9 +233,8 @@ def test_the_old_new_arm_defaults_to_refusing():
 
 
 def test_untypable_controller_id_demotes_rather_than_truncates():
-    """A controller id whose ``value_changed`` form overflows the column
-    cannot be published under its own identity; truncating it would name a
-    different slot, so the spec drops to activity instead."""
+    """A controller id whose ``value_changed`` form overflows the column can't be published under
+    its own identity; truncating would name a different slot, so the spec drops to activity."""
     long_id = "state_variable:" + "a" * MAX_EVENT_TYPE_LENGTH
     assert len(value_changed_event_type(long_id)) > MAX_EVENT_TYPE_LENGTH
     assert (
@@ -290,10 +284,9 @@ def test_extract_stamps_the_tier_and_the_three_state_openness():
 
 
 def test_extract_reads_the_g3_qualification_fields():
-    """The record has to be PUBLISHABLE to promote: it names the mapping whose
-    entry moved, and its key position is inside the event's own argument list.
-    A record missing either is covered in ``test_witness_qualification_units``,
-    where the tier stays ``activity``."""
+    """The record must be PUBLISHABLE to promote: it names the mapping whose entry moved and its
+    key position is inside the event's arg list. A record missing either is covered in
+    ``test_witness_qualification_units`` (tier stays ``activity``)."""
     witness = {"mapping_name": "rate", "key_position": 0, "direction": "add"}
     spec = extract_governance_topics(_plan_with(None, member_witness=witness, writer_openness="restricted"))[0]
     assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
@@ -303,9 +296,8 @@ def test_extract_reads_the_g3_qualification_fields():
 
 
 def test_qualification_fields_round_trip_through_the_plan_assembler():
-    """G3 writes ``member_witness`` / ``writer_openness`` onto the analysis
-    events; the tracking-plan artifact must carry them through untouched or
-    the tier never sees them at enrollment."""
+    """G3 writes ``member_witness`` / ``writer_openness`` onto the analysis events; the
+    tracking-plan artifact must carry them through or the tier never sees them at enrollment."""
     analysis = {
         "subject": {"address": ADDR(1), "name": "Vault"},
         "controller_tracking": [
@@ -470,9 +462,8 @@ def test_hint_occurrences_publish_nothing_and_coalesce_to_one_read(db_session, s
 
 
 def test_pre_enrollment_hint_never_marks_a_read(db_session, seeded):
-    """Invariant 9 through the new route: a verification read compares the
-    CURRENT slot against last_known_state, so letting an ancient occurrence
-    trigger one would publish pre-enrollment history as a live change."""
+    """Invariant 9 via the new route: a verification read compares the CURRENT slot against
+    last_known_state, so an ancient occurrence triggering one would publish history as live."""
     mc = seeded(WITNESS_TIER_HINT)
     mc.enrollment_block = 10_000
     db_session.commit()
@@ -499,8 +490,8 @@ def test_self_describing_occurrences_publish_and_carry_their_tier(db_session, se
 
 
 def test_legacy_spec_without_a_tier_is_reclassified_not_grandfathered(db_session, seeded):
-    """A spec persisted before the taxonomy has no proof attached, so it is
-    re-classified from what the row carries rather than published on trust."""
+    """A spec persisted before the taxonomy has no proof attached, so it is re-classified
+    rather than published on trust."""
     with_read = seeded(None, with_plan=True)
     dirty: dict = {}
     assert _process_window(db_session, _cohort(with_read), _logs(1), 200, 210, dirty) == []
@@ -520,7 +511,6 @@ def test_legacy_spec_without_a_tier_is_reclassified_not_grandfathered(db_session
 
 
 def _run_scan(db_session, *, batch_result, head: int = 1000, monkeypatch_env: dict | None = None):
-    """Drive one real ``scan_for_events`` pass with the wire stubbed."""
     with (
         patch("services.monitoring.unified_watcher.get_latest_block", return_value=head),
         patch("services.monitoring.unified_watcher.RpcEventLogFetcher") as fetcher,
@@ -545,8 +535,7 @@ def test_verification_read_diff_publishes_a_witnessed_value_changed(db_session, 
     assert row.data["old"] == "7"
     assert row.data["new"] == "9"
     assert row.data["witness"] == "read_verified"
-    # A read observes a slot, not a log: no block, no tx, and outside the
-    # scan-path identity index by design.
+    # A read observes a slot, not a log: no block, no tx, outside the scan-path identity index.
     assert row.log_index is None
     db_session.refresh(mc)
     assert mc.last_known_state["rate"] == 9
@@ -558,7 +547,7 @@ def test_verification_read_without_a_diff_publishes_nothing(db_session, seeded):
 
     assert db_session.query(MonitoredEvent).count() == 0
     db_session.refresh(mc)
-    # An earned negative touches nothing — not the state, not the status map.
+    # An earned negative touches neither the state nor the status map.
     assert mc.last_known_state == {"rate": 7}
     assert not (mc.last_poll_status or {})
 
@@ -601,23 +590,20 @@ def test_over_budget_reads_are_recorded_not_dropped(db_session, seeded, monkeypa
         "over_budget": 1,
         "no_read_binding": 0,
         "contracts_affected": 1,
-        # The census says what it is counting: markers present now, which the
-        # poller erases — never a cumulative tally.
+        # The census counts markers present now (which the poller erases), never a cumulative tally.
         "basis": CENSUS_BASIS,
     }
 
 
 def _scan_detail(db_session, *, batch_result, **kwargs) -> dict:
-    """One pass's heartbeat ``extra_detail``."""
     with patch("services.monitoring.unified_watcher.emit_monitor_cycle") as beat:
         _run_scan(db_session, batch_result=batch_result, **kwargs)
     return beat.call_args.kwargs["extra_detail"]
 
 
 def test_failed_read_is_counted_on_the_pass_not_only_marked(db_session, seeded):
-    """F9b wiring: the markers are erased by the poller's next answered pass, so
-    on a healthy fleet the census is usually blind to a failure that happened.
-    The pass counts its own outcomes, and the heartbeat carries them."""
+    """F9b wiring: the poller's next answered pass erases the markers, so on a healthy fleet the
+    census is usually blind to a past failure. The pass counts its own outcomes in the heartbeat."""
     seeded(WITNESS_TIER_HINT, state={"rate": 7})
     detail = _scan_detail(db_session, batch_result=lambda *_a, **_k: [(None, "error")])
     assert detail["verification_reads_failed"] == 1
@@ -633,7 +619,7 @@ def test_over_budget_skips_are_counted_on_the_pass(db_session, seeded, monkeypat
 
 
 def test_an_answered_pass_reports_earned_zeroes(db_session, seeded):
-    """Every dirty controller was read and answered — the zeroes are proven."""
+    """Every dirty controller was read and answered, so the zeroes are proven."""
     seeded(WITNESS_TIER_HINT, state={"rate": 7})
     detail = _scan_detail(db_session, batch_result=lambda *_a, **_k: [("0x" + hex(7)[2:].zfill(64), "ok")])
     assert detail["verification_reads_failed"] == 0
@@ -641,8 +627,8 @@ def test_an_answered_pass_reports_earned_zeroes(db_session, seeded):
 
 
 def test_a_verification_pass_that_died_reports_not_determined_not_zero(db_session, seeded):
-    """A pass that never got to its outcomes has nothing to report — publishing
-    0 there would state an earned negative the pass did not earn."""
+    """A pass that never reached its outcomes has nothing to report; 0 would be an unearned
+    negative."""
     seeded(WITNESS_TIER_HINT, state={"rate": 7})
     with patch(
         "services.monitoring.unified_watcher._resolve_verification_reads",
@@ -654,8 +640,8 @@ def test_a_verification_pass_that_died_reports_not_determined_not_zero(db_sessio
 
 
 def test_verified_control_slot_change_triggers_reanalysis(db_session):
-    """The reanalysis trigger keys off the READ's field, which is the
-    witnessed fact — not the emitter's donated write set."""
+    """The reanalysis trigger keys off the READ's field (the witnessed fact), not the emitter's
+    donated write set."""
     protocol = Protocol(name="taxonomy-reanalysis", chains=["ethereum"])
     db_session.add(protocol)
     db_session.flush()
@@ -746,19 +732,16 @@ def test_verified_control_slot_change_triggers_reanalysis(db_session):
 
 
 def test_only_a_proven_controller_identity_binds_a_read(db_session, seeded):
-    """A polling entry is bound to a controller by its ``source`` stamp, never
-    by sharing a field name.
+    """A polling entry binds to a controller by its ``source`` stamp, never a shared field name.
 
-    Two different slots share a name routinely — ``build_polling_plan`` drops
-    an analyzer entry whose field collides with a vendored standard — so a name
-    match would read one storage location and publish under another
-    controller's id, and would let runtime re-classification PROMOTE a spec
-    whose analyzer proved no getter at all.
+    Slots share names routinely (``build_polling_plan`` drops an analyzer entry colliding with a
+    vendored standard), so a name match would read one location and publish under another
+    controller's id, and let re-classification PROMOTE a spec whose analyzer proved no getter.
     """
     mc = seeded(None, with_plan=False)
     config = dict(mc.monitoring_config or {})
     config["polling_plan"] = [
-        # Same field name, different (vendored) origin — not this controller's.
+        # Same field name, different (vendored) origin.
         {
             "field": "rate",
             "kind": "storage_slot",
@@ -771,13 +754,13 @@ def test_only_a_proven_controller_identity_binds_a_read(db_session, seeded):
     db_session.commit()
 
     assert _poll_entry_for_controller(mc, "state_variable:rate") is None
-    # ... and so a tierless legacy spec is NOT promoted to hint by the name.
+    # ... so a tierless legacy spec is NOT promoted to hint by the name.
     assert _resolve_spec_tier(_tracked_spec(None), mc) == WITNESS_TIER_ACTIVITY
 
 
 def test_unbindable_hint_records_not_determined(db_session, seeded):
-    """Invariant 9: a hint that resolves to no read at all is recorded, not
-    dropped — an unverifiable interval must not look like a quiet one."""
+    """Invariant 9: a hint resolving to no read is recorded, not dropped; an unverifiable
+    interval must not look quiet."""
     mc = seeded(WITNESS_TIER_HINT, with_plan=False)
     dirty: dict = {}
     assert _process_window(db_session, _cohort(mc), _logs(2), 200, 210, dirty) == []
@@ -791,11 +774,9 @@ def test_unbindable_hint_records_not_determined(db_session, seeded):
 
 
 def test_verification_read_writes_through_the_proxy_plane(db_session):
-    """Whichever reader observes an implementation move first advances
-    last_known_state and silences the other, so both must record it on the
-    WatchedProxy plane. A missed write-through freezes
-    ``last_known_implementation``, which is what the NEXT scanner-detected
-    upgrade publishes as its old value."""
+    """Whichever reader sees an implementation move first advances last_known_state and silences
+    the other, so both must write through to the WatchedProxy plane; a miss freezes
+    ``last_known_implementation``, which the NEXT scanner-detected upgrade publishes as its old."""
     protocol = Protocol(name="proxy-write-through", chains=["ethereum"])
     db_session.add(protocol)
     db_session.flush()
@@ -896,9 +877,8 @@ def test_verification_read_writes_through_the_proxy_plane(db_session):
 
 
 def test_lost_scanner_lease_cancels_the_verification_reads(db_session, seeded):
-    """value_changed rows carry log_index NULL and so sit outside the identity
-    index — there is no ON CONFLICT to catch a second scanner's duplicate, and
-    a duplicate is a duplicate Discord post and reanalysis job."""
+    """value_changed rows have log_index NULL, outside the identity index: no ON CONFLICT catches
+    a second scanner's duplicate, which would be a duplicate Discord post and reanalysis job."""
     mc = seeded(WITNESS_TIER_HINT, state={"rate": 7})
     with (
         patch("services.monitoring.unified_watcher.get_latest_block", return_value=1000),
@@ -916,8 +896,8 @@ def test_lost_scanner_lease_cancels_the_verification_reads(db_session, seeded):
 
 
 def test_budget_rotates_least_recently_verified_first():
-    """A stable address+id sort hands the budget to the same controllers every
-    pass and starves the tail forever."""
+    """A stable address+id sort would give the budget to the same controllers every pass and
+    starve the tail."""
     from services.monitoring.unified_watcher import _LAST_VERIFIED_AT, _verification_read_order
 
     mc_id = uuid.uuid4()
@@ -949,9 +929,8 @@ def test_budget_rotates_least_recently_verified_first():
 
 @pytest.mark.parametrize("witness", [True, "yes", 1, [], {}, ["x"]])
 def test_only_a_populated_correspondence_record_promotes(witness):
-    """The G2<->G3 trust boundary: a truthy non-dict is not a proof of
-    emit-write correspondence, and accepting one would let a serialization bug
-    upstream promote every event on the contract."""
+    """G2<->G3 trust boundary: a truthy non-dict is not proof of emit-write correspondence, and
+    accepting one would let an upstream serialization bug promote every event on the contract."""
     assert (
         classify_witness_tier(
             event_type="state_changed:state_variable:fromDenyList",
@@ -965,10 +944,8 @@ def test_only_a_populated_correspondence_record_promotes(witness):
 
 
 def test_events_from_a_stale_plan_carry_its_timestamp(db_session, seeded):
-    """F5 keeps a last-good watch-list rather than manufacturing an empty one.
-    The rows it catches are real, but the watch-list behind them is only as
-    current as that timestamp, and what it MISSED is invisible by
-    construction — so the event says so rather than reading fresh-equivalent."""
+    """F5 keeps a last-good watch-list rather than an empty one. Its rows are real but only as
+    current as that timestamp, and what it MISSED is invisible, so the event says so."""
     mc = seeded(WITNESS_TIER_SELF_DESCRIBING)
     config = dict(mc.monitoring_config or {})
     config["tracked_topics_stale_since"] = "2026-08-01T00:00:00Z"
@@ -981,9 +958,8 @@ def test_events_from_a_stale_plan_carry_its_timestamp(db_session, seeded):
 
 
 def test_read_verified_events_carry_no_plan_staleness(db_session, seeded):
-    """Their claim rests on the read, which is current regardless of when the
-    plan was last refreshed — stamping it would imply doubt about a proven
-    fact."""
+    """Their claim rests on the read, current regardless of plan refresh; stamping would imply
+    doubt about a proven fact."""
     mc = seeded(WITNESS_TIER_HINT, state={"rate": 7})
     config = dict(mc.monitoring_config or {})
     config["tracked_topics_stale_since"] = "2026-08-01T00:00:00Z"
@@ -1010,11 +986,10 @@ def _conn_lost_error():
 
 
 def test_deadlocked_verification_unit_rolls_back_without_killing_the_pass(db_session, seeded):
-    """maybe_queue_reanalysis's first statement autoflushes the staged
-    last_known_state UPDATE against the rows the scanner's cohort UPDATE locks,
-    so it is a deadlock candidate. Swallowing the DB error would leave the
-    session pending-rollback and the NEXT member's sync would raise
-    PendingRollbackError past the handler, taking the whole pass with it."""
+    """maybe_queue_reanalysis's first statement autoflushes the staged last_known_state UPDATE
+    against rows the scanner's cohort UPDATE locks, a deadlock candidate. Swallowing the DB error
+    would leave the session pending-rollback and the NEXT member's sync would raise
+    PendingRollbackError past the handler, taking the whole pass."""
     mc = seeded(WITNESS_TIER_HINT, state={"rate": 7})
     with (
         patch("services.monitoring.unified_watcher.get_latest_block", return_value=1000),
@@ -1033,16 +1008,15 @@ def test_deadlocked_verification_unit_rolls_back_without_killing_the_pass(db_ses
     assert db_session.query(MonitoredEvent).count() == 0
     db_session.refresh(mc)
     assert mc.last_known_state == {"rate": 7}
-    # ...but it does NOT report clean. A deadlocked unit takes its events AND
-    # its not-determined markers back with it, so this is the one failure in
-    # the pass that leaves no surviving signal of itself; a healthy-looking
-    # cycle would publish "nothing to see" for an interval nobody verified.
+    # ...but it does NOT report clean: a deadlocked unit takes its events AND not-determined
+    # markers back with it, leaving no surviving signal, so a healthy-looking cycle would
+    # publish "nothing to see" for an unverified interval.
     assert result.degraded is True
 
 
 def test_non_deadlock_db_error_is_not_swallowed_per_unit(db_session, seeded):
-    """A lost connection is not per-unit recoverable — it must reach the
-    caller so the pass records an honest degraded cycle."""
+    """A lost connection is not per-unit recoverable; it must reach the caller so the pass
+    records an honest degraded cycle."""
     seeded(WITNESS_TIER_HINT, state={"rate": 7})
     with (
         patch("services.monitoring.unified_watcher.get_latest_block", return_value=1000),
@@ -1055,16 +1029,14 @@ def test_non_deadlock_db_error_is_not_swallowed_per_unit(db_session, seeded):
     ):
         fetcher.return_value.fetch_logs.side_effect = lambda **_kw: _logs(2)
         result = scan_for_events(db_session, "http://rpc.invalid")
-    # scan_for_events catches it at the pass boundary and marks the cycle
-    # degraded rather than pretending the reads happened.
+    # scan_for_events catches it at the pass boundary and marks the cycle degraded.
     assert result.degraded is True
     assert db_session.query(MonitoredEvent).count() == 0
 
 
 def test_reads_are_issued_before_any_write_is_staged(db_session, seeded):
-    """Transaction shape: holding row locks on monitored_contracts across
-    network IO is what the scanner's cohort UPDATE deadlocks against, so every
-    RPC for a chain is issued before that chain's writes are staged."""
+    """Row locks on monitored_contracts held across network IO are what the scanner's cohort
+    UPDATE deadlocks against, so every RPC for a chain precedes that chain's writes."""
     seeded(WITNESS_TIER_HINT, state={"rate": 7})
     dirty_at_read_time: list[bool] = []
 
@@ -1087,11 +1059,9 @@ def test_reads_are_issued_before_any_write_is_staged(db_session, seeded):
 def test_unbindable_hint_marker_converges(db_session, seeded):
     """The marker is stamped once, not once per occurrence.
 
-    An unbound controller is usually one whose events are frequent — that is
-    why it was hinted at all — so re-stamping an identical value would emit a
-    monitored_contracts UPDATE on every window forever, inside the same
-    transaction that carries the scanner's cursor UPDATE. That is the
-    documented deadlock counterpart to the poller.
+    An unbound controller is usually a frequent emitter, so re-stamping an identical value would
+    emit a monitored_contracts UPDATE every window, in the transaction carrying the scanner's
+    cursor UPDATE: the documented deadlock counterpart to the poller.
     """
     mc = seeded(WITNESS_TIER_HINT, with_plan=False)
     key = "controller:state_variable:rate"

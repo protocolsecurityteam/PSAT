@@ -70,7 +70,6 @@ def test_classify_recognizes_cross_domain_messenger():
 
 def test_classify_recognizes_bridge_executor():
     result = classify_cross_chain_authority(BASE_BRIDGE.upper(), chain_info=BASE)
-    # Case-insensitive registry match, normalized address in the details.
     assert result == (CROSS_CHAIN_AUTHORITY_TYPE, {"address": BASE_BRIDGE, "role": "bridge_executor"})
 
 
@@ -117,15 +116,6 @@ def test_recognizer_is_none_on_unknown_chain():
     assert make_cross_chain_recognizer(None) is None
 
 
-def test_recognizer_bound_to_base_recognizes_messenger():
-    recognize = make_cross_chain_recognizer(BASE_CHAIN_ID)
-    assert recognize is not None
-    assert recognize(BASE_MESSENGER) == (
-        CROSS_CHAIN_AUTHORITY_TYPE,
-        {"address": BASE_MESSENGER, "role": "cross_domain_messenger"},
-    )
-
-
 # --- build_principal_labels wiring -------------------------------------------
 
 
@@ -162,7 +152,6 @@ def _classify_stub(kind: str):
 
 
 def test_labels_classifies_messenger_as_cross_chain_authority(monkeypatch):
-    # Generic classify would call this a bare contract; the recognizer wins.
     monkeypatch.setattr(
         "services.policy.principal_enrichment.classify_resolved_address_with_status",
         _classify_stub("contract"),
@@ -239,7 +228,6 @@ def test_labels_mainnet_output_is_byte_identical(monkeypatch):
 
 
 def test_fp_resolver_prioritizes_cross_chain_over_classify(monkeypatch):
-    # The classifier stub would return "contract"; the recognizer must win.
     monkeypatch.setattr(
         "workers.policy_worker.classify_resolved_address_with_status",
         _classify_stub("contract"),

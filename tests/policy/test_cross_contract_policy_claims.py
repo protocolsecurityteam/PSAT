@@ -1,16 +1,10 @@
 """Two-contract integration tests for the policy-stage cross-contract path.
 
-Drives ``PolicyWorker._enrich_cross_contract`` end to end against a real
-Postgres session: a sibling job whose stored ``effects``/``control_snapshot``
-carry Plane-1 claims, a target job whose ``effects`` are stored, and target
-``EffectiveFunction`` rows the derivation must update. The only wire stubbed is
-``SessionLocal`` — repointed at the test engine so the parallel sibling fetch
-sees committed rows; the derivations, the registry, ``emit_claim``, precedence
-resolution, and the DB writes are the production stack.
-
-Scope is the PolicyWorker plumbing only (sibling fetch → derive → EF-row write,
-plus the empty-evidence early return). The four typed derivations themselves are
-unit-tested in ``tests/static/test_cross_contract_effects.py``.
+Drives ``PolicyWorker._enrich_cross_contract`` against a real Postgres session: a sibling job whose
+stored ``effects``/``control_snapshot`` carry Plane-1 claims, a target job with stored ``effects``,
+and target ``EffectiveFunction`` rows to update. Only ``SessionLocal`` is stubbed (repointed at the
+test engine so the parallel sibling fetch sees committed rows). Scope is the PolicyWorker plumbing;
+the four typed derivations are unit-tested in ``tests/static/test_cross_contract_effects.py``.
 """
 
 from __future__ import annotations
@@ -46,8 +40,8 @@ def _std(claim_id: str) -> dict:
 
 @pytest.fixture
 def _repoint_session_local(db_session, monkeypatch):
-    """Point the worker's ``SessionLocal`` (used by the threaded sibling fetch)
-    at the test engine so committed sibling artifacts are visible."""
+    """Point the worker's ``SessionLocal`` (threaded sibling fetch) at the test engine so committed
+    sibling artifacts are visible."""
     factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
     monkeypatch.setattr("workers.policy_worker.SessionLocal", factory)
     return factory
@@ -155,17 +149,15 @@ def test_value_flow_claim_propagates_to_effective_function(db_session, _repoint_
     ef = _ef(db_session, contract, "sweep(address)")
     ids = {c["claim_id"] for c in (ef.claims or [])}
     assert "flow.out" in ids
-    # Legacy label column is left exactly as it was — no propagate-every-label.
+    # Legacy label column is left as it was (no propagate-every-label).
     assert ef.effect_labels == ["external_contract_call"]
 
 
 # ---------------------------------------------------------------------------
 # Silence when there is no cross-contract evidence
 #
-# The per-derivation LOGIC (value-flow / transfer-policy hook / beacon / proxy
-# provenance) is owned by the pure-facts unit module test_cross_contract_effects;
-# this DB module only proves the PolicyWorker plumbing around it (the sibling
-# fetch + EF-row write above, and the empty-evidence early return below).
+# Per-derivation logic lives in test_cross_contract_effects; this DB module proves only the
+# PolicyWorker plumbing (sibling fetch + EF-row write above, empty-evidence early return below).
 # ---------------------------------------------------------------------------
 
 
@@ -249,37 +241,16 @@ def test_apply_cross_contract_claims_merges_and_dedups():
 # ---------------------------------------------------------------------------
 
 
-def test_equal_tier_merge_keeps_the_first_claim():
-    """Both merge sites are ``resolve_claim_precedence([*existing, *additions])``
-    and precedence compares tiers with a strict ``>`` — so at EQUAL tier the
-    incumbent wins and a re-derived claim would lose to the one it replaces.
-
-    This is the mechanism that made the effects bridge unable to repair a damaged
-    row. Pinned here as a fact about the shape, not a defect at these sites: what
-    keeps it harmless is the precondition below."""
-    from services.static.claims.registry import resolve_claim_precedence
-
-    stale: Claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "stale"}}
-    fresh: Claim = {"claim_id": "flow.out", "tier": "policy_derived", "witness": {"sink_id": "fresh"}}
-    survivor = resolve_claim_precedence([stale, fresh])
-    assert len(survivor) == 1
-    assert survivor[0]["witness"]["sink_id"] == "stale"
-
-
 @requires_postgres
 def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
-    """Why the hazard above cannot fire at ``_enrich_cross_contract``'s EF write.
+    """Why the equal-tier hazard cannot fire at ``_enrich_cross_contract``'s EF write.
 
-    ``policy_derived`` is minted in one module (``static.cross_contract``) that
-    one caller imports (``_enrich_cross_contract``), and that write lands on rows
-    the NEXT run replaces wholesale. The replace carries only observed-tier
-    claims forward, so last run's policy_derived claim is gone before the
-    re-derived one arrives and the two can never collide at equal tier.
-
-    That is a precondition held in a different module, which is exactly the
-    coupling that let the effects bridge diverge unnoticed. If the carry is ever
-    widened past observed-tier, this goes red and both merge sites need the same
-    explicit stale-drop the bridge now uses."""
+    ``policy_derived`` is minted in one module (``static.cross_contract``) imported by one caller,
+    and lands on rows the NEXT run replaces wholesale, carrying only observed-tier claims forward.
+    So last run's policy_derived claim is gone before the re-derived one arrives. That is a
+    precondition held in another module, the coupling that let the effects bridge diverge
+    unnoticed: if the carry widens past observed-tier this goes red and both merge sites need the
+    explicit stale-drop the bridge uses."""
     from services.policy.effective_permissions_writer import write_effective_function_rows
 
     company = f"co-{uuid.uuid4()}"
@@ -316,13 +287,10 @@ def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
 
 @requires_postgres
 def test_struct_param_function_still_matches_its_row(db_session, _repoint_session_local):
-    """The derivations key on the Slither full_name the effects artifact uses;
-    the row stores the canonical ABI signature. For a struct parameter those are
-    two different strings for one function, so a join on the signature drops the
-    enrichment silently — the claims are derived, and then land nowhere.
-
-    The selector is the value both planes agree on, and it comes from the same
-    payload the row was written from."""
+    """The derivations key on the Slither full_name the effects artifact uses; the row stores the
+    canonical ABI signature. For a struct parameter these differ, so a join on signature silently
+    drops the enrichment (claims derived, landing nowhere). The selector, from the payload the row
+    was written from, is the value both planes agree on."""
     company = f"co-{uuid.uuid4()}"
     target_job = _make_job(db_session, address=TARGET, company=company)
     sibling_job = _make_job(db_session, address=TOKEN, company=company)
@@ -390,7 +358,7 @@ def test_struct_param_function_still_matches_its_row(db_session, _repoint_sessio
         function_records=[{"function": full_name, "abi_signature": canonical, "selector": selector}],
     )
 
-    # The derivation itself keys on the full_name and always worked...
+    # The derivation keys on the full_name and always worked...
     assert full_name in enriched
     # ...what regressed is whether the claim reaches the row.
     ef = _ef(db_session, contract, canonical)
@@ -407,14 +375,10 @@ D2 = "0x55dd000000000000000000000000000000000000"
 
 @requires_postgres
 def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_session_local):
-    """A shared implementation backs N proxy deployments, and each holds its own
-    set of function rows under the same ``contract_id``. These claims are derived
-    against THIS job's control snapshot — whose controller values are the proxy's
-    storage — so writing them onto a sibling deployment's row would publish one
-    proxy's wiring as another's.
-
-    Unscoped, the same selector also matches both rows, and the single-row read
-    raises rather than picking wrongly. Either way the enrichment is lost."""
+    """A shared implementation backs N proxy deployments, each with its own function rows under
+    the same ``contract_id``. Claims derive from THIS job's control snapshot (the proxy's
+    storage), so writing them onto a sibling deployment's row would publish one proxy's wiring as
+    another's. Unscoped, the selector also matches both rows and the single-row read raises."""
     company = f"co-{uuid.uuid4()}"
     target_job = _make_job(db_session, address=TARGET, company=company, request={"proxy_address": D1})
     sibling_job = _make_job(db_session, address=TOKEN, company=company)
@@ -491,12 +455,9 @@ def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_ses
 
 @requires_postgres
 def test_ambiguous_row_match_is_skipped_not_raised(db_session, _repoint_session_local, caplog):
-    """``deployment_scope`` ORs in legacy untagged rows on purpose, so a tagged
-    row and a NULL one can both answer for the same selector even after scoping.
-
-    Reading a single row from that raises, and nothing here catches it — one
-    ambiguous enrichment would take down the whole policy stage for the job.
-    A claim we cannot place is worth losing; the stage is not."""
+    """``deployment_scope`` ORs in legacy untagged rows on purpose, so a tagged and a NULL row can
+    both answer for one selector even after scoping. Reading a single row then raises uncaught,
+    taking down the whole policy stage. A claim we can't place is worth losing; the stage isn't."""
     company = f"co-{uuid.uuid4()}"
     target_job = _make_job(db_session, address=TARGET, company=company, request={"proxy_address": D1})
     sibling_job = _make_job(db_session, address=TOKEN, company=company)

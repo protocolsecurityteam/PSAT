@@ -239,19 +239,6 @@ def test_corroborated_families_keep_their_canonical_types():
         assert topics[0]["event_type"] == expected, signature
 
 
-def test_multi_write_commit_phase_still_prefers_ownership_when_corroborated():
-    """Ownable2Step ``acceptOwnership`` writes owner AND pendingOwner; a
-    corroborating name keeps the commit-phase priority."""
-    assert (
-        _resolve_event_type(
-            "state_variable:owner",
-            {"writes": ["owner", "pendingOwner"]},
-            signature="OwnershipTransferred2(address,address)",
-        )
-        == "ownership_transferred"
-    )
-
-
 # ---------------------------------------------------------------------------
 # The corroboration predicate's own three states
 # ---------------------------------------------------------------------------

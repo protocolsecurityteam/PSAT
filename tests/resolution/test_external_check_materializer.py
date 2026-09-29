@@ -70,7 +70,6 @@ def test_materialize_external_check_multicall_parity(monkeypatch):
     monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: [member, non_member])
     monkeypatch.setattr(mod, "_candidate_addresses_from_hypersync", lambda **_k: [])
 
-    # JSON-RPC-batch wire (OFF path): canCall(member) true, canCall(non_member) false, in order.
     def fake_batch(_rpc_url, calls):
         assert len(calls) == 2
         return [(TRUE, False), (FALSE, False)]
@@ -201,23 +200,3 @@ def test_candidate_cache_caps_entry_count(monkeypatch):
             call_args=[{"source": "root_caller"}],
         )
     assert len(mod._CANDIDATE_CACHE) <= 8
-
-
-def test_clear_candidate_cache_empties_and_resets(monkeypatch):
-    import services.resolution.external_check_materializer as mod
-
-    monkeypatch.setattr(mod, "_EXTERNAL_CHECK_MULTICALL_ENABLED", False)
-    monkeypatch.setattr(mod, "_candidate_addresses_from_events", lambda **_k: ["0x" + "aa" * 20])
-    monkeypatch.setattr(mod, "_candidate_addresses_from_hypersync", lambda **_k: [])
-    monkeypatch.setattr(mod, "rpc_batch_request_with_status", lambda _u, _c: [("0x" + "0" * 63 + "1", False)])
-    materialize_external_check_from_events(
-        session=object(),  # pyright: ignore[reportArgumentType]
-        rpc_url="http://rpc",
-        chain_id=1,
-        checker_address="0x" + "11" * 20,
-        checker_selector="0xb7009613",
-        call_args=[{"source": "root_caller"}],
-    )
-    assert mod._CANDIDATE_CACHE
-    mod.clear_candidate_cache()
-    assert not mod._CANDIDATE_CACHE

@@ -1,14 +1,10 @@
 """Claims must rest on what the chain publishes, not on what identifiers say.
 
-Every fixture here is deliberately named OFF the conventional vocabulary — the
-pause latch is not called ``paused``, the delegation ledger is not called
-``delegates``, the supply variable does not exist — so a matcher that still keys
-on identifier text cannot pass. Each positive is paired with a same-vocabulary
-near-miss whose published ABI (selector set / event topic0) does not match the
-standard, which must therefore earn no claim, or a strictly weaker tier.
-
-Compiles the real static stack (Slither -> predicate artifacts -> effects ->
-build_claims) on solc 0.8.27, the version the offline CI ``test`` job installs.
+Every fixture is deliberately named OFF the conventional vocabulary (the pause latch
+is not ``paused``, the delegation ledger not ``delegates``), so a matcher keyed on
+identifier text cannot pass. Each positive is paired with a same-vocabulary near-miss
+whose published ABI (selector set / topic0) does not match, which must earn no claim
+or a weaker tier. Compiles the real static stack on solc 0.8.27 (the offline CI version).
 """
 
 from __future__ import annotations
@@ -472,8 +468,6 @@ def test_gov_delegate_proven_by_the_delegate_changed_topic():
 
 
 def test_gov_delegate_near_miss_same_writes_without_the_log():
-    """``assignAgent`` writes the very same two maps but emits no governance log
-    — no delegation claim."""
     fns = _compiled(_OFF_VOCABULARY_VOTES, "OffVocabularyVotes")
     assert "gov.delegate" not in _ids(fns["assignAgent(address)"])
 
@@ -521,8 +515,6 @@ def test_upgrade_gate_rejects_a_same_named_event_with_a_different_topic():
 
 
 def test_upgrade_gate_accepts_the_published_1967_topics():
-    """Same contract shape, the real EIP-1967 argument lists: both claims land,
-    proving the negative above is the topic and not the shape."""
     fns = _compiled(_RIGHT_TOPIC_UPGRADED, "RightTopicUpgraded")
     assert _tier(fns["upgradeTo(address)"], "upgrade.implementation") == "standard_exact"
     assert _tier(fns["changeAdmin(address)"], "proxy.admin_change") == "standard_exact"
@@ -544,9 +536,6 @@ def test_callee_pointer_reads_the_type_not_the_capitalisation():
 
 
 def test_callee_pointer_still_recognizes_a_plain_address_pointer():
-    """Recall pin for the type-object rewrite: ``feeSink`` is an
-    ``address payable`` a sibling invokes as a call destination, and it must keep
-    its rotate."""
     fns = _compiled(_STRUCT_IS_NOT_A_POINTER, "StructIsNotAPointer")
     claim = next(c for c in fns["setFeeSink(address)"] if c["claim_id"] == "callee_pointer.rotate")
     assert claim["tier"] == "idiom_structural"

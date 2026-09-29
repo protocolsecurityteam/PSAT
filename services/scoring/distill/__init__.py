@@ -133,12 +133,6 @@ from .signals import (
     _signals_for_function,
     _token_identity,
 )
-from .universe import (
-    _ADDRESS_LITERAL,
-    ProtocolUniverse,
-    _literal_addresses,
-    load_protocol_universe,
-)
 
 __all__ = [
     "SELF_SERVICE_DISCLOSE_SIBLING",
@@ -155,7 +149,6 @@ __all__ = [
     "MSG_VALUE_ARM_SELF_RETURN",
     "MSG_VALUE_REPETITION_RESIDUAL",
     "PAUSE_SET_GATES",
-    "ProtocolUniverse",
     "REPOINT_ADMISSIBLE_TIERS",
     "SELF_SERVICE_BASIS",
     "SELF_SERVICE_UNCHARGED_NOTE",
@@ -164,7 +157,6 @@ __all__ = [
     "W2_PLANE_ABSENT",
     "W2_SELECTOR_UNRESOLVED",
     "W2_STATUS_NOT_RESOLVED",
-    "_ADDRESS_LITERAL",
     "_AMOUNT_TIER_DISPOSITIVE",
     "_ContractFacts",
     "_DESTINATION_MEET_RANK",
@@ -213,7 +205,6 @@ __all__ = [
     "_is_true",
     "_latch_gate",
     "_licensed_reach_entities",
-    "_literal_addresses",
     "_load_contract_facts",
     "_lower",
     "_meet_destinations",
@@ -241,5 +232,4 @@ __all__ = [
     "clear_transcript_cache",
     "distill_contract_signals",
     "distill_job_signals",
-    "load_protocol_universe",
 ]

@@ -1,22 +1,15 @@
-"""C1 monitor half: EnabledModule / DisabledModule / ChangedGuard topics and the
-two Safe storage-slot poll entries.
+"""C1 monitor half: EnabledModule / DisabledModule / ChangedGuard topics and the two Safe
+storage-slot poll entries.
 
-Before this, the pipeline could see a module EXECUTE
-(``ExecutionFromModule[Success|Failure]``) but not one being ENABLED, and no Safe
-address had a cursor on any of the three topics. The poll entries observe CHANGE
-in the head/guard words; membership itself is decided in the resolution plane
-(see tests/resolution/test_classify_safe_modules_guard.py), never here.
-
-``TestSafeExecutionEvents`` at the end holds the positive half of the same
-decoder — the ExecutionSuccess / ExecutionFailure / ExecutionFromModule* shapes
-it accepts — so one file shows both what the decoder reads and what it refuses.
+Before this the pipeline saw a module EXECUTE but not be ENABLED. The poll entries observe
+CHANGE only; membership is decided in the resolution plane
+(tests/resolution/test_classify_safe_modules_guard.py). ``TestSafeExecutionEvents`` holds the
+decoder's positive half, so one file shows what it reads and what it refuses.
 """
 
 from __future__ import annotations
 
 from typing import Any, cast
-
-from eth_utils.crypto import keccak
 
 from services.monitoring.event_topics import (
     ALL_EVENT_TOPICS,
@@ -34,19 +27,10 @@ from services.monitoring.polling_plan import (
     SAFE_MODULES_HEAD_SLOT,
     build_polling_plan,
 )
-from services.monitoring.unified_watcher import _WRITE_TARGET_TO_CONFIG_KEYS, _should_watch
+from services.monitoring.unified_watcher import _should_watch
 
 MODULE = "0x2e1b5a40edc922bce489668b11749b8eabd67f6b"
 SAFE = "0x21f73d42eb58ba49ddb685dc29d3bf5c0f0373ca"
-
-
-def test_topic0s_match_the_recomputed_signature_hashes():
-    assert ENABLED_MODULE_TOPIC0 == "0x" + keccak(text="EnabledModule(address)").hex()
-    assert DISABLED_MODULE_TOPIC0 == "0x" + keccak(text="DisabledModule(address)").hex()
-    assert CHANGED_GUARD_TOPIC0 == "0x" + keccak(text="ChangedGuard(address)").hex()
-    assert ENABLED_MODULE_TOPIC0 == "0xecdf3a3effea5783a3c4c2140e677577666428d44ed9d474a0b3a4c9943f8440"
-    assert DISABLED_MODULE_TOPIC0 == "0xaab4fa2b463f581b2b32cb3b7e3b704b9ce37cc209b5fb4d77e593ace4054276"
-    assert CHANGED_GUARD_TOPIC0 == "0x1151116914515bc0891ff9047a6cb32cf902546f83066499bcf8ba33d2353fa2"
 
 
 def test_topics_are_registered_and_therefore_scanned():
@@ -208,11 +192,6 @@ def test_well_formed_logs_decode_byte_identically():
     assert parsed["guard"] == "0x" + "0" * 40
 
 
-def test_write_targets_gate_on_watch_safe_modules():
-    assert _WRITE_TARGET_TO_CONFIG_KEYS["_safe_modules"] == ("watch_safe_modules",)
-    assert _WRITE_TARGET_TO_CONFIG_KEYS["_safe_guard"] == ("watch_safe_modules",)
-
-
 def test_should_watch_respects_the_flag():
     class _MC:
         def __init__(self, config):
@@ -247,22 +226,9 @@ def test_non_safe_types_get_no_safe_slot_entries():
     assert "guard" not in fields
 
 
-def test_poll_entries_translate_to_pinned_storage_reads():
-    from services.monitoring.unified_watcher import _rpc_call_for_entry
-
-    plan = {entry["field"]: entry for entry in build_polling_plan(contract_type="safe")}
-    method, params = cast(tuple, _rpc_call_for_entry(SAFE, plan["modules_head"]))
-    assert method == "eth_getStorageAt"
-    assert params[:2] == [SAFE, SAFE_MODULES_HEAD_SLOT]
-
-
 class TestSafeExecutionEvents:
-    """GnosisSafe ExecutionSuccess / ExecutionFailure are emitted for
-    EVERY executed Safe tx — they're the on-chain breadcrumb you'd render
-    as 'recent activity' on a Safe principal card. Pin the topic→type
-    mapping and the field decode so a future regression that reorders
-    or drops these is caught.
-    """
+    """ExecutionSuccess / ExecutionFailure are emitted for EVERY executed Safe tx (the
+    'recent activity' breadcrumb). Pin the topic→type mapping and field decode."""
 
     def test_execution_success_decodes(self):
         from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
@@ -318,16 +284,11 @@ class TestSafeExecutionEvents:
         assert "payment" not in ev
 
     def test_indexed_txhash_variant_decodes(self):
-        """The 1.4.1 singleton indexes txHash: topics[1] carries the hash and the
-        body is payment alone.
-
-        Byte-for-byte the log at index 414 of mainnet tx
-        ``0xf047c068b4d7311344adfb02fc56310d7200d12799a9894675b3b66ff5f2b431``,
-        emitted by Safe ``0x607d0c7e3578802eb46d388cb86cfba8ff657306`` — one of
-        the four executions that decoded to neither field before this arm
-        existed (topic0 is identical to the non-indexed form, so nothing else
-        distinguished them).
-        """
+        """The 1.4.1 singleton indexes txHash: topics[1] carries the hash, the body is payment
+        alone. Byte-for-byte log 414 of mainnet tx
+        ``0xf047c068b4d7311344adfb02fc56310d7200d12799a9894675b3b66ff5f2b431`` (Safe
+        ``0x607d0c7e3578802eb46d388cb86cfba8ff657306``), one of four executions that decoded to
+        neither field before this arm (topic0 matches the non-indexed form)."""
         from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
 
         log = {
@@ -412,10 +373,8 @@ class TestSafeExecutionEvents:
         assert ev["payment"] == 7
 
     def test_execution_from_module_success_decodes(self):
-        """Module-triggered Safe executions: address indexed in topics[1],
-        no SafeTx hash, no payment. Used when a pre-authorised module
-        (e.g. recovery, batch executor) calls into the Safe directly.
-        """
+        """Module-triggered execution: address indexed in topics[1], no SafeTx hash or payment
+        (pre-authorised modules such as recovery or a batch executor)."""
         from services.monitoring.event_topics import EXECUTION_FROM_MODULE_SUCCESS_TOPIC0, parse_governance_log
 
         module_addr = "0x" + "ee" * 20

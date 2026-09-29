@@ -1,17 +1,10 @@
 """Discovery must not emit non-authority state vars as resolvable controllers.
 
-Two complementary admission predicates in
-``build_controller_tracking`` (the single producer of controller targets):
-
-* A bare non-address aggregate (struct/array/mapping) with no ``member_path``
-  has no single storable address value — only the member-path projection of an
-  address field is a controller.
-* A compile-time ``constant`` address/contract consulted only by business logic
-  (never under a ``caller_authority`` / ``delegated_authority`` leaf) is a
-  sentinel identifier, not an authority.
-
-Each case compiles real Solidity through Slither and drives the production
-predicate/effects/tracking builders end to end.
+Two admission predicates in ``build_controller_tracking`` (the single producer of controller
+targets): a bare non-address aggregate with no ``member_path`` has no single storable address
+(only an address member projection is a controller), and a compile-time ``constant`` consulted
+only by business logic (never under a caller/delegated authority leaf) is a sentinel, not an
+authority. Each case compiles real Solidity and drives the production builders end to end.
 """
 
 from __future__ import annotations
@@ -75,7 +68,6 @@ def test_authority_role_collector_groups_by_operand():
                     "operands": [{"source": "state_variable", "state_variable_name": "SENTINEL"}],
                 },
             },
-            # A leaf with no authority_role contributes nothing.
             "c()": {
                 "op": "LEAF",
                 "leaf": {"operands": [{"source": "state_variable", "state_variable_name": "ROLELESS"}]},
@@ -173,10 +165,8 @@ def test_business_only_constant_sentinel_dropped(tmp_path):
 
 
 def test_business_only_constant_address_sentinel_dropped(tmp_path):
-    """A getter-less ``internal constant`` sentinel address consulted only in
-    business logic (DEFAULT_BURN_ADDRESS / NATIVE / DEFAULT_LIB shape) is not an
-    authority and is dropped — the same constant-business-only predicate as the
-    contract-typed sentinel."""
+    """A getter-less ``internal constant`` sentinel (DEFAULT_BURN_ADDRESS / NATIVE / DEFAULT_LIB
+    shape) consulted only in business logic is dropped, like the contract-typed sentinel."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -232,8 +222,6 @@ def test_immutable_business_contract_survives(tmp_path):
 
 
 def test_immutable_authority_survives(tmp_path):
-    """``delegationManager`` is immutable (not constant) and gated on
-    (``msg.sender == delegationManager``) — must survive."""
     source = """
     pragma solidity ^0.8.19;
     interface IDelegationManager {}

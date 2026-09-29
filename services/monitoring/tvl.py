@@ -20,12 +20,11 @@ from threading import Event
 
 import requests
 from dotenv import load_dotenv
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from db.models import (
     Contract,
-    ContractBalanceFetch,
     ContractBalanceLatest,
     Protocol,
     SessionLocal,
@@ -353,38 +352,6 @@ def refresh_entity_balances(
         mark_protocol_score_dirty(session, protocol_id, "entity_balance_observation")
         session.commit()
     return report
-
-
-def entity_cohort_oldest_reading(session: Session, holders: list[EntityHolder]) -> datetime | None:
-    """The OLDEST current reading in this cohort — the age the cohort really is.
-
-    Per holder its newest fetch, then the minimum across holders, because a
-    cohort is only as fresh as its stalest member. The newest-anywhere reading
-    would be the wrong anchor for a reason that is structural rather than
-    hypothetical: a fetch row's identity is ``(chain, address)`` and carries no
-    protocol, while this cohort is protocol-scoped, so one EOA reached from two
-    protocols' control graphs is ONE row. Anchoring on the maximum would let
-    protocol A's daily pass keep that shared row fresh and starve protocol B's
-    exclusive holders for as long as both protocols exist.
-
-    Holders that have never been read are deliberately NOT in the minimum. They
-    are not a stale reading, they are no reading, and folding them in as a
-    floor would make a cohort the producer keeps declining re-fire every tick.
-    Their first reading arrives with the next pass this anchor does open.
-
-    ``None`` = nobody in the cohort has ever been read, so nothing bounds how
-    old it is and the caller must read it.
-    """
-    if not holders:
-        return None
-    # Scoped by ``ObservationSubject.filters`` — the same predicate the
-    # observation modules select a subject's rows with, not a second spelling.
-    newest_per_holder = session.execute(
-        select(func.max(ContractBalanceFetch.fetched_at))
-        .where(or_(*[and_(*holder.subject.filters(ContractBalanceFetch)) for holder in holders]))
-        .group_by(ContractBalanceFetch.entity_chain, ContractBalanceFetch.entity_address)
-    ).scalars()
-    return min((ts for ts in newest_per_holder if ts is not None), default=None)
 
 
 def refresh_entity_balances_if_due(

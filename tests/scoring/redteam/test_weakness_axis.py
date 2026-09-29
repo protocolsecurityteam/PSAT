@@ -1,7 +1,4 @@
-"""Weakness axis.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""Weakness axis."""
 
 from __future__ import annotations
 
@@ -78,9 +75,9 @@ def test_f3_proven_owner_set_still_earns_its_rung(fold):
 def test_f2_an_unread_pauser_key_set_moves_severity_in_neither_direction(fold):
     """The freezing key set was never read, so independence is uncomputable.
 
-    Nothing may move on that: not the recoverable credit (which would need proven
-    independence) and not the sustainable component (which would need proven
-    dependence). The question is published instead.
+    Nothing may move: not the recoverable credit (needs proven independence) nor
+    the sustainable component (needs proven dependence). The question is
+    published instead.
     """
     document = _pause_document(
         fold,
@@ -97,7 +94,6 @@ def test_f2_an_unread_pauser_key_set_moves_severity_in_neither_direction(fold):
 
 
 def test_f2_every_undetermined_recovery_arm_lands_on_the_same_rung(fold):
-    """No recovery claim, an unresolved recovery principal and an unread key set."""
     pauser = facts(1, SAFE, "safe", owners=OWNERS, threshold=2)
     arms = [
         _pause_document(fold, pauser, None),
@@ -108,7 +104,6 @@ def test_f2_every_undetermined_recovery_arm_lands_on_the_same_rung(fold):
 
 
 def test_f2_proven_dependence_adds_the_sustainable_component(fold):
-    """The only witness that raises the freeze rung is a PROVEN dependent key set."""
     shared = ("0x" + "1" * 40, "0x" + "2" * 40, "0x" + "3" * 40)
     document = _pause_document(
         fold,
@@ -123,7 +118,6 @@ def test_f2_proven_dependence_adds_the_sustainable_component(fold):
 
 
 def test_f2_an_eoa_pauser_is_its_own_key_set(fold):
-    """The address fallback is admissible exactly where the principal IS a key."""
     recovery = [{"function_principal_id": 2, "chain": "ethereum", "address": SAFE2}]
     signal = pause_sig(
         authority_openness="restricted",

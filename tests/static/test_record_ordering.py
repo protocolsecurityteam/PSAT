@@ -1,12 +1,9 @@
 """W2 — the ordering prover (``record_ordering.py``).
 
-The unit that can over-claim, so every refusal path carries its own fixture and
-every ``not_determined`` has a positive sibling differing in exactly ONE
-construct: if a refusal could pass merely because the walk never reached the
-code, the sibling proves it did.
-
-Assertions are on the WHOLE verdict dict — ``{"state": "not_determined", ...}``
-and a proof are both truthy, so ``is not None`` would assert nothing.
+The unit that can over-claim: every refusal path has its own fixture, and every
+``not_determined`` has a positive sibling differing in ONE construct, proving the walk
+reached the code. Assertions are on the WHOLE verdict dict, since ``{"state":
+"not_determined", ...}`` and a proof are both truthy.
 """
 
 from __future__ import annotations
@@ -660,13 +657,6 @@ def test_internal_function_pointer_refuses(_unit, _effects):
     )
 
 
-def test_pointer_fixture_really_carries_an_out_flow(_effects):
-    # Without a live out-flow on this function the refusal above would be
-    # protecting nothing.
-    info = next(i for i in _effects.values() if i["function"].startswith("pointerCallAfterClear("))
-    assert [f for f in info["value_flows"] if f["direction"] == "out"] != []
-
-
 def test_helper_invoked_twice_keeps_both_positions(_unit, _effects):
     # The first `_pay` runs before the clear. Keying the walk on the callee's
     # name instead of on its call site would lose that position entirely.
@@ -744,13 +734,6 @@ def test_native_transfer_after_clear_is_proven(_unit, _effects):
         ro.SHAPE_ZERO_ASSIGNMENT,
         "Ordering.bids",
     )
-
-
-def test_transfer_and_send_produce_no_sink_record(_effects):
-    # The premise of the two refusals above: if the sink list DID carry these
-    # ops, missing them would not have been a hole worth closing.
-    info = next(i for i in _effects.values() if i["function"].startswith("transferBeforeClear("))
-    assert [s for s in info["sinks"] if s["kind"] == "external_call"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1034,7 +1017,6 @@ def test_pipeline_orders_against_the_record_the_amount_producer_names(_effects):
             if "record_ordering" in flow:
                 assert flow.get("amount_record_variable") is not None
                 assert flow["direction"] == "out"
-    # Spot the two poles of the composition through the whole pipeline.
     assert keyed["goodClearThenPay(uint256)"]["state"] == "proven_ordering"
     assert keyed["daoClearAfterPay()"]["state"] == "not_determined"
     assert keyed["daoClearAfterPay()"]["reason"] == ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS

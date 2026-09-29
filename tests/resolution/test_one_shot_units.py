@@ -1,8 +1,7 @@
 """Pure-function unit coverage for the one-shot static + resolver helpers.
 
-No Slither, no wire — exercises the guard/classify/decode primitives and the
-proxy-standard fallbacks (implementation() getter, EIP-2535 diamond) directly,
-so the branch logic is pinned independently of the real-compile fixtures.
+No Slither, no wire: guard/classify/decode primitives and proxy-standard fallbacks
+(implementation() getter, EIP-2535 diamond), independent of the real-compile fixtures.
 """
 
 from __future__ import annotations
@@ -58,10 +57,8 @@ def test_write_falsifies_guard_every_operator():
 
 
 def test_monotonic_ascent_latch_excludes_rearmable_and_descending():
-    # consuming: ALLOW while flag falsy, write moves it up
     assert _is_monotonic_ascent_latch("falsy", None, {1}) is True
     assert _is_monotonic_ascent_latch("falsy", None, {0}) is False  # writing 0 doesn't consume
-    # versioned: eq 0 guard, write to >0
     assert _is_monotonic_ascent_latch("eq", 0, {1, 2}) is True
     assert _is_monotonic_ascent_latch("eq", 1, {2}) is True
     # inverted / descending forms are NOT latches (re-armable)
@@ -97,11 +94,9 @@ def _eq_leaf(operands: list[dict[str, Any]]) -> LeafPredicate:
 
 
 def test_scalar_candidate_partitions_operands_by_position():
-    """The non-state-variable operands are the complement of the state-variable
-    POSITIONS. This pins that semantics; it is not evidence of a fixed defect —
-    it holds for the dict-equality form too, which was correct exactly because
-    the state-variable test is a pure function of the operand dict. Widening
-    that test is what would separate the two forms."""
+    """The non-state-variable operands are the complement of the state-variable POSITIONS.
+    This pins that semantics; it is not evidence of a fixed defect (it holds for the
+    dict-equality form too). Widening the state-variable test would separate the forms."""
     sv = {"source": "state_variable", "state_variable_name": "initialized"}
     const = {"source": "constant", "constant_value": "0"}
     contract = _latch_contract("initialized")
@@ -117,9 +112,8 @@ def test_scalar_candidate_partitions_operands_by_position():
     twins = _eq_leaf([dict(sv), dict(sv), dict(const)])
     assert _scalar_candidate(contract, twins, writes) is None
 
-    # A structural twin carrying one extra field is judged on its own: it is
-    # not a state-variable operand and not a constant, so the candidate is
-    # refused.
+    # A structural twin with one extra field is judged on its own: neither a state-variable
+    # operand nor a constant, so the candidate is refused.
     asymmetric = _eq_leaf([dict(sv), {**sv, "member_path": ["flag"]}, dict(const)])
     assert _scalar_candidate(contract, asymmetric, writes) is None
 
@@ -161,9 +155,8 @@ def test_parse_guard_constant_forms():
 
 
 def test_classify_value_standard_storage_layout():
-    """The classification AND the oracle that produced it — a consumed verdict
-    reached through the sentinel, the version compare and the bare non-zero
-    compare are three different claims and must not collapse to one label."""
+    """The classification AND the oracle that produced it: consumed via the sentinel, the
+    version compare and the bare non-zero compare are three different claims."""
     v4 = {"standard": "storage_layout", "size_bytes": 1, "expected_version": 1}
     assert _classify_value(v4, 1) == ("consumed", "version_ge")
     assert _classify_value(v4, 0) == ("armed", "version_ge")
@@ -181,7 +174,6 @@ def test_classify_value_structural_guard():
     assert _classify_value(latch, 0) == ("armed", "guard")  # guard allows → not yet consumed
     assert _classify_value(latch, 1) == ("consumed", "guard")
     unknown = {"standard": "unstructured_slot_latch", "guard": {"operator": "weird", "constant": None}}
-    # Nothing decided: no basis, so nothing may be published as the oracle.
     assert _classify_value(unknown, 5) == ("unknown", None)
 
 

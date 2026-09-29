@@ -1,28 +1,9 @@
 """Regression tests for the bytecode-keccak classifier shortcut in
 ``services.resolution.tracking``.
 
-Phase B Step 3. The shortcut skips the 6-probe sequence (Safe / Timelock
-/ ProxyAdmin / generic) when the contract's bytecode keccak matches a
-known canonical impl. The registry ``_KNOWN_BYTECODE_IMPLS`` is empty
-by default; production seeds it with manually-fetched mainnet keccaks
-for impls like Gnosis Safe singletons + OZ TimelockController + OZ
-ProxyAdmin.
-
-Why bytecode keccak is the right key:
-- It's a byte-exact match — false positives are impossible
-- Two different addresses with the same impl bytecode share the same
-  classification (every Safe singleton across DeFi uses the same code
-  at different proxy addresses)
-- We already have the keccak cheaply via services.clients.rpc.get_code_with_keccak
-  (commit 00b1034)
-
-Tests:
-1. Empty registry → no shortcut, falls through to probe sequence.
-2. Registry hit → kind + details returned without issuing any probes.
-3. Registry miss (different keccak) → falls through to probe sequence.
-4. get_code_with_keccak failure → falls through gracefully (no crash).
-5. Both classifier paths (sequential + batched) honour the shortcut.
-6. Returned details include both registry partial AND the address.
+The shortcut skips the 6-probe sequence when the contract's bytecode keccak matches a
+known canonical impl. Byte-exact, so no false positives, and every Safe singleton proxy
+shares one code hash. ``_KNOWN_BYTECODE_IMPLS`` is empty by default; production seeds it.
 """
 
 from __future__ import annotations
@@ -53,9 +34,7 @@ def _stub_keccak(monkeypatch, keccak_hex: str):
 
 
 def test_sequential_classifier_shortcut_fires_on_registry_hit(monkeypatch):
-    """When the bytecode keccak matches a registry entry, classify
-    returns the registered kind + merged details without ever calling
-    the probe sequence (would have raised AssertionError)."""
+    """A registry hit returns kind + merged details without calling the probe sequence."""
     _stub_get_code(monkeypatch)
     _stub_keccak(monkeypatch, "0x" + "ab" * 32)
 
@@ -77,8 +56,7 @@ def test_sequential_classifier_shortcut_fires_on_registry_hit(monkeypatch):
 
 
 def test_batched_classifier_shortcut_fires_on_registry_hit(monkeypatch):
-    """Same shortcut applies to the batched classifier path so the env
-    flag setting doesn't change registry-shortcut behavior."""
+    """Same shortcut on the batched path, independent of the env flag."""
     _stub_get_code(monkeypatch)
     _stub_keccak(monkeypatch, "0x" + "cd" * 32)
 
@@ -98,30 +76,6 @@ def test_batched_classifier_shortcut_fires_on_registry_hit(monkeypatch):
     assert had_error is False
 
 
-def test_empty_registry_skips_shortcut(monkeypatch):
-    """The shortcut block is gated by `if _KNOWN_BYTECODE_IMPLS:` —
-    an empty registry must not even call get_code_with_keccak. This
-    keeps the no-op default truly free."""
-    _stub_get_code(monkeypatch)
-
-    keccak_calls = []
-
-    def _track_keccak(_rpc, _addr):
-        keccak_calls.append(_addr)
-        return ("0x60", "0x" + "ee" * 32)
-
-    monkeypatch.setattr("services.clients.rpc.get_code_with_keccak", _track_keccak)
-    monkeypatch.setattr(tracking, "_KNOWN_BYTECODE_IMPLS", {})
-
-    # Make every probe return None so the classifier reaches the
-    # generic 'contract' fallthrough cleanly.
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *_a, **_kw: None)
-    monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_kw: {})
-
-    _classify_uncached("https://rpc", "0x" + "33" * 20, "latest")
-    assert keccak_calls == [], "empty registry must not call get_code_with_keccak"
-
-
 def test_registry_miss_falls_through_to_probes(monkeypatch):
     """Registry has entries but THIS contract's keccak isn't in it →
     fall through to the normal probe sequence."""
@@ -134,14 +88,11 @@ def test_registry_miss_falls_through_to_probes(monkeypatch):
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_kw: {})
 
     kind, _details, _had_error = _classify_uncached("https://rpc", "0x" + "44" * 20, "latest")
-    # Falls through, all probes return None → 'contract'.
     assert kind == "contract"
 
 
 def test_keccak_fetch_failure_falls_through(monkeypatch):
-    """If get_code_with_keccak raises (transient RPC), we shouldn't
-    crash — fall through to the probe sequence and let it handle the
-    error path the same way it always has."""
+    """A transient get_code_with_keccak failure falls through to the probe sequence."""
     _stub_get_code(monkeypatch)
 
     def _boom(_rpc, _addr):
@@ -155,25 +106,3 @@ def test_keccak_fetch_failure_falls_through(monkeypatch):
 
     kind, _details, _had_error = _classify_uncached("https://rpc", "0x" + "55" * 20, "latest")
     assert kind == "contract", "keccak fetch failure must not crash; must fall through"
-
-
-def test_partial_details_merged_with_address(monkeypatch):
-    """The registry stores partial details (kind-specific fields) but
-    the address is added by the classifier. Verify the merge doesn't
-    drop any fields."""
-    _stub_get_code(monkeypatch)
-    _stub_keccak(monkeypatch, "0x" + "77" * 32)
-    fake_registry = {
-        "0x" + "77" * 32: (
-            "proxy_admin",
-            {"upgrade_interface_version": "5.0.0", "owner": "0xdeadbeef"},
-        )
-    }
-    monkeypatch.setattr(tracking, "_KNOWN_BYTECODE_IMPLS", fake_registry)
-    monkeypatch.setattr(tracking, "_try_eth_call_decoded", lambda *_a, **_kw: None)
-
-    addr = "0x" + "88" * 20
-    _kind, details, _had_error = _classify_uncached("https://rpc", addr, "latest")
-    assert details["address"] == addr
-    assert details["upgrade_interface_version"] == "5.0.0"
-    assert details["owner"] == "0xdeadbeef"

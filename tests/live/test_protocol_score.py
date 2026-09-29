@@ -1,11 +1,7 @@
-"""The score endpoint and the score loop's liveness, on a deployed preview.
+"""The score endpoint and the score loop's liveness, on a deployed preview (read-only, idempotent).
 
-Both are cheap and idempotent — they read, they never analyse. The endpoint
-tests SKIP when no fold has landed yet: the live suite can run before any
-effects job on this preview has completed, and a 404 there is the endpoint
-answering correctly, not a failure. What is never skipped is the shape: once a
-score exists, the ledger payload's keys and its three-state fields must be
-present, because a consumer branches on them.
+Endpoint tests SKIP when no fold has landed yet (a 404 is then correct). The shape is never skipped: once a
+score exists, the ledger payload's keys and three-state fields must be present, because a consumer branches on them.
 """
 
 from __future__ import annotations
@@ -32,13 +28,10 @@ PERIMETER_STATES = {"settled", "unsettled", "not_determined"}
 
 
 def _score_or_skip(live_client: LiveClient) -> dict:
-    """The score, or a skip — but ONLY for the one 404 that is legitimate.
+    """The score, or a skip — but ONLY for the legitimate 404.
 
-    The endpoint 404s both for an unknown protocol and for a protocol with no
-    fold yet. Skipping on the first would turn a missing test company (a real
-    failure — every other test in the suite depends on it) into a green run, so
-    existence is established against a different endpoint first and only then is
-    a 404 read as "not scored yet".
+    The endpoint 404s for an unknown protocol and for one with no fold yet. Skipping on the first would turn a missing
+    test company (a real failure) into a green run, so existence is checked against another endpoint first.
     """
     response = live_client.company_score(DEFAULT_TEST_COMPANY)
     if response.status_code == 404:
@@ -66,7 +59,6 @@ def test_score_payload_shape(analyzed_company, live_client: LiveClient):
 
 
 def test_score_three_states_are_named_not_implied(analyzed_company, live_client: LiveClient):
-    """The consumer branches on the state; it may never infer one from a null."""
     body = _score_or_skip(live_client)
     assert body["grade_state"] in GRADE_STATES, body["grade_state"]
     assert body["perimeter_state"] in PERIMETER_STATES, body["perimeter_state"]

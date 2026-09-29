@@ -1,18 +1,9 @@
 """Effects worker end-to-end orchestration.
 
-Drives the whole stage against STUBBED seams with recorded transcripts:
-selection → preflight → cache lookup (kernel vs projection) → probes →
-self-audit → verdict persistence → discrepancy routing. No live RPC; the
-zero-candidate path is asserted to touch no wire.
-
-Covers:
-  - flag-on end-to-end with stubbed seams ⇒ persisted verdicts + transcripts
-  - kernel transfers across a twin fixture ⇒ cache hit, no re-sim
-  - projection does NOT transfer across different surfaces
-  - self-audit catches an injected hash collision (disagreeing kernels ⇒ withhold)
-  - both discrepancy directions (static-pos/sim-neg → warning+discrepancy;
-    static-silent/sim-pos → witness + idiom candidate)
-  - zero-candidate ⇒ no wire, no rows
+Drives the whole stage (selection, preflight, cache lookup kernel vs projection, probes, self-audit,
+verdict persistence, discrepancy routing) against STUBBED seams with recorded transcripts. No live
+RPC; the zero-candidate path is asserted to touch no wire. Numbered sections below map to the
+scenarios (twin cache hit, projection non-transfer, injected hash collision, both discrepancy directions).
 """
 
 from __future__ import annotations
@@ -75,8 +66,7 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
     cand = _candidate(CONTRACT_A, fns[CONTRACT_A])
     monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: [cand])
 
-    # A real supply recipe against a scripted simulate, so a genuine transcript
-    # is emitted through the injected store.
+    # A real supply recipe against a scripted simulate, so a genuine transcript is emitted through the store.
     zero = "0x" + "00" * 20
 
     def mint_log():
@@ -115,7 +105,6 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
     )
     errors, metrics = _run(worker, session, job)
 
-    # Code-plane cache row (kernel, empty surface) written.
     cache = session.query(EffectBehaviorCache).one()
     assert cache.behavior_hash == "kernel_hash_A"
     assert cache.scope == SCOPE_KERNEL
@@ -139,7 +128,6 @@ def test_flag_on_end_to_end_persists_verdicts_and_transcripts(clean_effects, mon
     assert observed[0]["witness"]["effect_verdict_id"] == verdict.id
     assert "mint" in (ef_row.effect_labels or [])
 
-    # Transcript artifact actually persisted and resolvable.
     _job_id, _, name = cache.transcript_ptr.partition("::")
     tr = get_artifact(session, job.id, name)
     assert isinstance(tr, dict) and tr["effect_class"] == EFFECT_CLASS_SUPPLY
@@ -182,10 +170,9 @@ def test_zero_candidate_touches_no_wire(clean_effects, monkeypatch):
 
 
 def _twin_jobs(session, monkeypatch, addresses):
-    """One protocol+contract+function+job per address (each contract is its own
-    job, as in production — twins are cross-JOB). Returns (jobs, function_ids).
-    ``select_candidates`` is keyed by protocol_id so each job sees only its own
-    single candidate."""
+    """One protocol+contract+function+job per address (twins are cross-JOB, as in production).
+    Returns (jobs, function_ids). ``select_candidates`` is keyed by protocol_id so each job sees only
+    its own candidate."""
     jobs = []
     cand_by_pid: dict[int, list] = {}
     fn_ids: dict[str, int] = {}
@@ -201,13 +188,11 @@ def _twin_jobs(session, monkeypatch, addresses):
 
 @requires_postgres
 def test_kernel_twin_cache_hit_no_resim(clean_effects, monkeypatch):
-    """Three deployments (three jobs) share one kernel hash. The first writes
-    (miss); the second re-simulates ONCE for the self-audit; the third is a
-    free, trusted hit with NO probe."""
+    """Three deployments share one kernel hash: the first writes (miss); the second re-simulates ONCE
+    for the self-audit; the third is a free, trusted hit with NO probe."""
     session = clean_effects
     jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B, CONTRACT_C])
 
-    # Same kernel hash for all three (a resolved-behavior twin); distinct surfaces.
     hashes = {fns[CONTRACT_A]: ("K", "sA"), fns[CONTRACT_B]: ("K", "sB"), fns[CONTRACT_C]: ("K", "sC")}
     prober = _Prober(lambda c, ctx: proven(EFFECT_CLASS_SUPPLY, details={"supply_delta_sign": "mint"}))
     worker = EffectsWorker(
@@ -219,7 +204,6 @@ def test_kernel_twin_cache_hit_no_resim(clean_effects, monkeypatch):
         hits += metrics["cache_hits_kernel"]
         misses += metrics["cache_misses"]
 
-    # A ran (miss) + B ran (audit); C did NOT run (free hit).
     assert fns[CONTRACT_A] in prober.runs
     assert fns[CONTRACT_B] in prober.runs
     assert fns[CONTRACT_C] not in prober.runs
@@ -242,12 +226,10 @@ def test_kernel_twin_cache_hit_no_resim(clean_effects, monkeypatch):
 
 @requires_postgres
 def test_tier0_historical_verdict_never_transfers_across_twins(clean_effects, monkeypatch):
-    """Three EIP-1967 proxies share a runtime-bytecode kernel hash but DIVERGE in
-    current state: A/B are upgraded with a non-zero impl (proven-now), C's impl is
-    currently zero (historical-only ⇒ unknown). A cached Tier-0 verdict would let
-    C free-hit A's ``proven`` "upgradeable now" though C's own current-state check
-    never ran. The fix: Tier-0 is never code-plane cached — so every twin probes
-    and each gets its OWN state-plane verdict; no EffectBehaviorCache row exists."""
+    """Three EIP-1967 proxies share a kernel hash but DIVERGE in current state: A/B upgraded with a
+    non-zero impl (proven-now), C's impl currently zero (historical-only => unknown). A cached Tier-0
+    verdict would let C free-hit A's "upgradeable now" though C's own check never ran, so Tier-0 is
+    never code-plane cached: every twin probes and gets its OWN verdict; no EffectBehaviorCache row exists."""
     session = clean_effects
     jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B, CONTRACT_C])
 
@@ -278,7 +260,6 @@ def test_tier0_historical_verdict_never_transfers_across_twins(clean_effects, mo
     for job in jobs:
         _run(worker, session, job)
 
-    # Every twin re-probed (no free transfer); nothing landed in the code-plane cache.
     assert set(prober.runs) == set(fns.values())
     assert session.query(EffectBehaviorCache).count() == 0
 
@@ -328,8 +309,8 @@ def test_projection_not_transfer_across_surfaces(clean_effects, monkeypatch):
 
 @requires_postgres
 def test_tier2_folds_anvil_rss_into_peak(clean_effects, monkeypatch):
-    """A projection (tier-2) probe with a live fork present samples the fork's RSS
-    after each probe and records the max as ``peak_anvil_rss_mb`` (was a dead 0)."""
+    """A projection (tier-2) probe with a live fork samples the fork's RSS after each probe and
+    records the max as ``peak_anvil_rss_mb`` (was a dead 0)."""
     session = clean_effects
     pid, fns = _protocol_with_functions(session, [CONTRACT_A])
     job = _make_job(session, pid, "rss")
@@ -366,9 +347,9 @@ def test_tier2_folds_anvil_rss_into_peak(clean_effects, monkeypatch):
 
 @requires_postgres
 def test_self_audit_catches_hash_collision(clean_effects, monkeypatch):
-    """Two deployments share a kernel hash but their kernels actually DISAGREE
-    (an injected collision). The self-audit re-sims the second, sees the mismatch,
-    withholds (unknown + discrepancy), and never propagates the cached verdict."""
+    """Two deployments share a kernel hash but their kernels DISAGREE (an injected collision). The
+    self-audit re-sims the second, sees the mismatch, withholds (unknown + discrepancy), and never
+    propagates the cached verdict."""
     session = clean_effects
     jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B])
 
@@ -454,9 +435,8 @@ def test_section9_static_silent_sim_pos_files_idiom(clean_effects, monkeypatch, 
     with caplog.at_level(logging.INFO, logger="services.effects.discrepancies"):
         errors, metrics = _run(worker, session, job)
 
-    # Witness persisted (proven verdict). Direction 2 is an INFORMATIONAL
-    # vocabulary-growth signal: it must NOT file a degraded stage_error, and it
-    # is counted as a benign ``new_idiom_candidates`` metric (not a discrepancy).
+    # Witness persisted. Direction 2 is an INFORMATIONAL vocabulary-growth signal: no degraded
+    # stage_error, just the benign ``new_idiom_candidates`` metric.
     assert session.query(EffectVerdict).one().verdict == VERDICT_PROVEN
     degraded_idioms = [
         e for e in errors if e.context and e.context.get("discrepancy_kind", "").startswith("static_silent")
@@ -477,11 +457,9 @@ def test_section9_static_silent_sim_pos_files_idiom(clean_effects, monkeypatch, 
 # ---------------------------------------------------------------------------
 # 8. Transcript artifact names are collision-free across passes
 #
-# ``store_artifact`` upserts on (job_id, name), so the old positional counter was
-# only unique WITHIN one pass: a second pass over the same job (stale-lease
-# reclaim, requeue) restarted at 0 against a different probe order — because the
-# first pass turned some misses into hits — and overwrote the artifacts that
-# already-persisted ``transcript_ptr``s pointed at.
+# ``store_artifact`` upserts on (job_id, name), so the old positional counter was only unique WITHIN a
+# pass: a second pass (stale-lease reclaim, requeue) restarted at 0 against a different probe order
+# (the first pass turned misses into hits) and overwrote artifacts that persisted ``transcript_ptr``s pointed at.
 # ---------------------------------------------------------------------------
 
 
@@ -548,11 +526,10 @@ def test_select_scopes_to_the_jobs_own_contract(clean_effects):
 # ---------------------------------------------------------------------------
 # 10. The verdict REASON reaches the persisted witness
 #
-# Every unknown supply verdict carries the same ``{"observation": "executed"}``
-# details, so without the reason the withheld-on-contradiction verdict — the
-# strongest safety decision this stage makes — is byte-identical on the row to
-# "the call ran and supply did not move". Nothing downstream can count it, and a
-# regression that stopped withholding would be invisible in the data.
+# Every unknown supply verdict carries the same ``{"observation": "executed"}`` details, so without
+# the reason the withheld-on-contradiction verdict (the strongest safety decision this stage makes)
+# is byte-identical on the row to "the call ran and supply did not move", and a regression that
+# stopped withholding would be invisible in the data.
 # ---------------------------------------------------------------------------
 
 
@@ -614,13 +591,13 @@ def test_a_cached_reason_is_served_to_the_twin_that_hits_it(clean_effects, monke
 
 
 def test_a_zero_key_hit_is_corroborated_before_it_is_trusted(clean_effects, monkeypatch):
-    """SELF-AUDIT FLOOR. ``authority_change`` — 49 of 150 local cache rows — carries
-    no structural signature key at all, so the audit compared ``('unknown', None x5)``
-    with itself and passed unconditionally. A hit like that is no longer trusted on the
-    signature: the re-probe must agree on the row's actual assertion (verdict + reason).
+    """SELF-AUDIT FLOOR. ``authority_change`` (49 of 150 local cache rows) carries no structural
+    signature key, so the audit compared ``('unknown', None x5)`` with itself and always passed. Such
+    a hit is no longer trusted on the signature: the re-probe must agree on the row's actual assertion
+    (verdict + reason).
 
-    B agrees, so the row is stamped audited and C free-hits it. The twin that DISAGREES
-    (below) publishes its own verdict instead of inheriting one.
+    B agrees, so the row is stamped audited and C free-hits it; the twin that DISAGREES (below)
+    publishes its own verdict.
     """
     session = clean_effects
     jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B, CONTRACT_C])
@@ -650,11 +627,10 @@ def test_a_zero_key_hit_is_corroborated_before_it_is_trusted(clean_effects, monk
 
 
 def test_a_zero_key_hit_that_disagrees_publishes_its_own_verdict(clean_effects, monkeypatch):
-    """The discriminating half: with no structural key to compare, a DIFFERENT reason is
-    the only signal there is. The hitting deployment publishes what it re-simulated, and
-    the row is left UNAUDITED rather than AUDIT_FAILED — a reason legitimately varies
-    between two sightings of one behaviour, so poisoning the key would withhold from
-    every future sighting on the strength of a difference that proves nothing."""
+    """The discriminating half: with no structural key, a DIFFERENT reason is the only signal. The
+    hitting deployment publishes what it re-simulated and the row stays UNAUDITED, not AUDIT_FAILED
+    (a reason legitimately varies between sightings, so poisoning the key would withhold from every
+    future sighting on a difference that proves nothing)."""
     session = clean_effects
     jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B])
     hashes = {fns[a]: ("K1", f"s{a[-2:]}") for a in (CONTRACT_A, CONTRACT_B)}
@@ -683,14 +659,12 @@ def test_a_zero_key_hit_that_disagrees_publishes_its_own_verdict(clean_effects, 
 
 
 def test_two_identical_runs_differ_only_in_the_declared_non_identity_columns(clean_effects, monkeypatch):
-    """Pinned rather than papered over. This cache is written on READ
-    (``bump_hit`` / ``mark_audited``), so two identical runs over an unchanged chain do
-    NOT leave the DB byte-identical — replay determinism holds for this table only MODULO
-    ``REPLAY_IDENTITY_EXCLUDED_COLUMNS``.
+    """Pinned rather than papered over. This cache is written on READ (``bump_hit`` / ``mark_audited``),
+    so two identical runs over an unchanged chain do NOT leave the DB byte-identical: replay
+    determinism holds for this table only MODULO ``REPLAY_IDENTITY_EXCLUDED_COLUMNS``.
 
-    The test states the exact size of that gap: every other column is unchanged across a
-    second run, and the mutation is confined to the declared set. A new mutating column
-    added without declaring it turns this red."""
+    Every other column is unchanged across a second run and the mutation is confined to the declared
+    set; a new mutating column added without declaring it turns this red."""
     session = clean_effects
     jobs, fns = _twin_jobs(session, monkeypatch, [CONTRACT_A, CONTRACT_B])
     hashes = {fns[a]: ("KIDENT", f"s{a[-2:]}") for a in (CONTRACT_A, CONTRACT_B)}

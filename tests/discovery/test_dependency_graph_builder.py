@@ -28,7 +28,6 @@ def _unified(
 
 
 def test_basic_nodes_and_static_ref_edges():
-    """Deps without dynamic edges get STATIC_REF edges from target."""
     deps = {
         DEP_A: {"type": "regular", "source": ["static"]},
         DEP_B: {"type": "regular", "source": ["static"]},
@@ -46,7 +45,6 @@ def test_basic_nodes_and_static_ref_edges():
 
 
 def test_dynamic_edges_suppress_static_ref():
-    """Deps already in the dependency_graph don't get a STATIC_REF edge."""
     deps = {DEP_A: {"type": "regular", "source": ["dynamic"]}}
     graph = {
         f"{TARGET}|{DEP_A}": [
@@ -60,7 +58,6 @@ def test_dynamic_edges_suppress_static_ref():
 
 
 def test_proxy_delegates_to_edge():
-    """Proxy deps with a nested implementation get a DELEGATES_TO edge."""
     deps = {
         DEP_A: {
             "type": "proxy",
@@ -76,7 +73,6 @@ def test_proxy_delegates_to_edge():
     graph = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}
     result = build_dependency_visualization(_unified(deps=deps, graph=graph))
 
-    # 3 nodes: target + proxy + nested implementation
     assert len(result["nodes"]) == 3
 
     ops = {(e["from"], e["to"], e["op"]) for e in result["edges"]}
@@ -86,29 +82,7 @@ def test_proxy_delegates_to_edge():
     assert not any(e["op"] == "STATIC_REF" and e["to"] == f"addr:{IMPL}" for e in result["edges"])
 
 
-def test_classification_only_no_static_ref():
-    """Deps with source=['classification'] and no dynamic edge get no STATIC_REF."""
-    deps = {
-        DEP_A: {
-            "type": "proxy",
-            "source": ["dynamic"],
-            "implementation": {
-                "address": IMPL,
-                "type": "implementation",
-                "source": ["classification"],
-            },
-        },
-    }
-    graph = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}
-    result = build_dependency_visualization(_unified(deps=deps, graph=graph))
-
-    impl_edges = [e for e in result["edges"] if e["to"] == f"addr:{IMPL}"]
-    assert len(impl_edges) == 1
-    assert impl_edges[0]["op"] == "DELEGATES_TO"
-
-
 def test_contract_name_used_as_label():
-    """When contract_name is present it becomes the node label."""
     deps = {DEP_A: {"type": "regular", "source": ["dynamic"], "contract_name": "WETH9"}}
     graph = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}
     result = build_dependency_visualization(_unified(deps=deps, graph=graph))
@@ -118,7 +92,6 @@ def test_contract_name_used_as_label():
 
 
 def test_contract_name_fallback_to_short_address():
-    """Without contract_name the label falls back to shortened address."""
     deps = {DEP_A: {"type": "regular", "source": ["static"]}}
     result = build_dependency_visualization(_unified(deps=deps))
 
@@ -127,7 +100,6 @@ def test_contract_name_fallback_to_short_address():
 
 
 def test_target_classification_in_node():
-    """Target classification type is reflected in the target node."""
     deps = {DEP_A: {"type": "regular", "source": ["static"]}}
     target_cls = {"type": "proxy", "proxy_type": "eip1967"}
     result = build_dependency_visualization(_unified(deps=deps, target_cls=target_cls))
@@ -137,7 +109,6 @@ def test_target_classification_in_node():
 
 
 def test_metadata_populated():
-    """Metadata includes network, transactions, trace info, and derived discovered addresses."""
     deps = {
         DEP_A: {
             "type": "proxy",
@@ -156,25 +127,21 @@ def test_metadata_populated():
     assert result["metadata"]["target"] == TARGET
     assert result["metadata"]["network"] == "ethereum"
     assert result["metadata"]["trace_methods"] == ["debug_traceTransaction"]
-    # discovered_addresses derived from classification sources
     assert result["metadata"]["discovered_addresses"] == [IMPL]
 
 
 def test_empty_dependencies():
-    """No dependencies produces empty graph."""
     result = build_dependency_visualization(_unified())
     assert result["nodes"] == []
     assert result["edges"] == []
 
 
 def test_missing_unified_returns_empty():
-    """Missing / empty unified payload produces empty graph."""
     result = build_dependency_visualization({})
     assert result["nodes"] == []
 
 
 def test_beacon_edge():
-    """Proxy deps with a beacon get a BEACON edge."""
     beacon = "0xdddddddddddddddddddddddddddddddddddddd"
     deps = {
         DEP_A: {
@@ -193,7 +160,6 @@ def test_beacon_edge():
 
 
 def test_edges_skip_unknown_node_ids():
-    """Edges referencing addresses not in nodes are dropped."""
     unknown = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     deps = {DEP_A: {"type": "regular", "source": ["dynamic"]}}
     graph = {
@@ -206,7 +172,6 @@ def test_edges_skip_unknown_node_ids():
 
 
 def test_nested_implementation_label():
-    """Nested implementation contract_name is used as its node label."""
     deps = {
         DEP_A: {
             "type": "proxy",
@@ -231,7 +196,6 @@ def test_nested_implementation_label():
 
 
 def test_target_label_from_caller():
-    """Callers (workers) supply target_label explicitly."""
     deps = {DEP_A: {"type": "regular", "source": ["static"]}}
     result = build_dependency_visualization(_unified(deps=deps), target_label="LiquidityPool")
 

@@ -1,12 +1,8 @@
-"""Tests for data integrity after cache copy operations.
+"""Data integrity after cache copy: ``copy_static_cache`` preserves proxy fields, old
+jobs keep accessible Contract data, and /api/company and /api/analyses/{id} still
+return real data for old jobs.
 
-Validates that:
-  1. copy_static_cache preserves proxy fields on the Contract row
-  2. Old completed jobs retain accessible Contract data after cache copy
-  3. API /api/company endpoint returns correct data for old jobs after copy
-  4. API /api/analyses/{id} returns correct data for old jobs after copy
-
-These tests are designed to FAIL on the buggy code and PASS after fixes.
+Designed to FAIL on the buggy code and PASS after the fixes.
 """
 
 from __future__ import annotations
@@ -30,9 +26,6 @@ pytestmark = requires_postgres
 
 
 def test_copy_static_cache_preserves_proxy_fields(db_session):
-    """After copy_static_cache, the Contract row should retain its proxy
-    fields (is_proxy, proxy_type, implementation, beacon, admin) rather
-    than zeroing them out."""
     from db.models import Contract
     from db.queue import copy_static_cache, create_job
 
@@ -50,7 +43,6 @@ def test_copy_static_cache_preserves_proxy_fields(db_session):
 
     copy_static_cache(db_session, source_job.id, target_job.id)
 
-    # The Contract row (unique per address) should still have proxy fields set
     contract = (
         db_session.query(Contract)
         .filter(
@@ -67,8 +59,6 @@ def test_copy_static_cache_preserves_proxy_fields(db_session):
 
 
 def test_copy_static_cache_preserves_non_proxy_contract(db_session):
-    """For a non-proxy contract, copy_static_cache should not introduce
-    false proxy flags."""
     from db.models import Contract
     from db.queue import copy_static_cache, create_job
 
@@ -115,7 +105,6 @@ def test_old_job_contract_accessible_by_address_after_copy(db_session):
         implementation=IMPL_ADDR,
     )
 
-    # Verify the source job owns the Contract row before copy
     contract_before = (
         db_session.query(Contract)
         .filter(
@@ -129,9 +118,7 @@ def test_old_job_contract_accessible_by_address_after_copy(db_session):
     target_job = create_job(db_session, {"address": ADDR_A})
     copy_static_cache(db_session, source_job.id, target_job.id)
 
-    # After copy, job_id lookup for old job fails (row was reassigned).
-    # This is expected: the Contract row's job_id now points to target_job.
-    # But an address-based lookup MUST still work.
+    # The row's job_id now points to target_job, so job_id lookup fails; address lookup MUST work.
     contract_by_addr = (
         db_session.query(Contract)
         .filter(
@@ -140,11 +127,9 @@ def test_old_job_contract_accessible_by_address_after_copy(db_session):
         .first()
     )
     assert contract_by_addr is not None, "Contract must be findable by address"
-    # And it should have proxy fields preserved
     assert contract_by_addr.is_proxy is True, "Contract found by address should retain is_proxy"
     assert contract_by_addr.proxy_type == "eip1967"
 
-    # The summary should still be linked to this contract
     summary = (
         db_session.query(ContractSummary)
         .filter(
@@ -164,7 +149,6 @@ def test_old_job_contract_accessible_by_address_after_copy(db_session):
 def api_client(db_session, monkeypatch):
     """Create a FastAPI TestClient backed by the test db_session."""
 
-    # Make SessionLocal return our test session
     class _FakeSessionCtx:
         def __init__(self):
             pass
@@ -199,12 +183,10 @@ def _setup_company_with_proxy(db_session, monkeypatch):
 
     store = _sqlite_compatible_store_artifact
 
-    # Create protocol
     protocol = Protocol(name="TestProtocol")
     db_session.add(protocol)
     db_session.flush()
 
-    # Create a completed old job for a proxy contract
     old_job = create_job(
         db_session,
         {
@@ -311,12 +293,8 @@ def _setup_company_with_proxy(db_session, monkeypatch):
 
 
 def test_api_company_returns_data_for_old_proxy_job(db_session, api_client, monkeypatch):
-    """After copy_static_cache reassigns the Contract row, the /api/company
-    endpoint should still return meaningful data (not null) for the old job's
-    contract fields like control_model, is_proxy."""
     old_job, new_job, protocol = _setup_company_with_proxy(db_session, monkeypatch)
 
-    # Complete the new job so both show up as completed
     from db.models import JobStage, JobStatus
 
     new_job.status = JobStatus.completed
@@ -329,7 +307,6 @@ def test_api_company_returns_data_for_old_proxy_job(db_session, api_client, monk
     data = resp.json()
     contracts = data.get("contracts", [])
 
-    # There should be at least one contract with non-null data
     proxy_contract = next(
         (c for c in contracts if (c.get("address") or "").lower() == ADDR_A.lower()),
         None,
@@ -343,9 +320,6 @@ def test_api_company_returns_data_for_old_proxy_job(db_session, api_client, monk
 
 
 def test_api_analysis_detail_returns_data_for_old_job(db_session, api_client, monkeypatch):
-    """After copy_static_cache, loading an analysis detail for the OLD job
-    should still return contract data (deployer, effective_permissions, etc.)
-    rather than null."""
     old_job, new_job, protocol = _setup_company_with_proxy(db_session, monkeypatch)
 
     resp = api_client.get(f"/api/analyses/{old_job.id}")
@@ -365,8 +339,6 @@ def test_api_analysis_detail_returns_data_for_old_job(db_session, api_client, mo
 
 
 def test_repeated_copy_static_cache_preserves_proxy_fields(db_session):
-    """If copy_static_cache runs twice (e.g. two re-analyses of the same
-    address), proxy fields should still be preserved after both."""
     from db.models import Contract
     from db.queue import copy_static_cache, create_job
 
@@ -378,11 +350,9 @@ def test_repeated_copy_static_cache_preserves_proxy_fields(db_session):
         implementation=IMPL_ADDR,
     )
 
-    # First copy
     target1 = create_job(db_session, {"address": ADDR_A})
     copy_static_cache(db_session, source_job.id, target1.id)
 
-    # Second copy (simulates third analysis of the same address)
     target2 = create_job(db_session, {"address": ADDR_A})
     copy_static_cache(db_session, target1.id, target2.id)
 

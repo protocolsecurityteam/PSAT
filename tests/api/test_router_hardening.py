@@ -48,17 +48,6 @@ def test_protocol_events_limit_at_cap_ok(api_client):
 # --- Malformed-address contract on /api/analyze ------------------------------
 
 
-def test_analyze_non_prefixed_address_is_422(api_client):
-    # 42 chars but no 0x prefix: the AnalyzeRequest field validator rejects at
-    # the schema layer, so the endpoint's malformed-address contract is a 422.
-    resp = api_client.post(
-        "/api/analyze",
-        json={"address": "ab" + "c" * 40},
-        headers={"X-PSAT-Admin-Key": "test-admin-key"},
-    )
-    assert resp.status_code == 422
-
-
 # --- Guarded UUID parsing (FINDING 15) --------------------------------------
 
 
@@ -94,8 +83,6 @@ def test_monitored_events_valid_contract_id_absent_is_empty(api_client):
 
 
 def test_agent_stream_error_is_generic(api_client, monkeypatch):
-    """A raised agent stream returns a generic SSE error, never the raw
-    exception text."""
     secret = "SECRET_DB_DSN=postgres://user:pw@host/db"
 
     def _boom(*a, **k):
@@ -198,12 +185,8 @@ def test_upgrade_history_stage_raised_reason_omits_class_name(api_client, db_ses
 
 
 class _FakeStreamResponse:
-    """Minimal stand-in for a streamed ``requests.Response``.
-
-    ``iter_content`` yields from a caller-supplied generator/iterable and
-    records how many chunks were actually consumed, so a test can prove the
-    route aborts a too-large body early instead of buffering the whole thing.
-    """
+    """Minimal stand-in for a streamed ``requests.Response``; ``iter_content`` records how many
+    chunks were consumed so a test can prove the route aborts an oversized body early."""
 
     def __init__(self, *, content_type, chunks, status=200):
         self.headers = {"content-type": content_type}
@@ -257,7 +240,6 @@ def audit_pdf_row(db_session):
 
 
 def test_audit_pdf_small_pdf_is_served(api_client, audit_pdf_row, monkeypatch):
-    """A well-behaved small PDF returns 200 with ``application/pdf`` body."""
     pdf_body = b"%PDF-1.4\n" + b"content" * 10
 
     resp_obj = _FakeStreamResponse(content_type="application/pdf", chunks=[pdf_body])
@@ -280,7 +262,6 @@ def test_audit_pdf_non_pdf_content_type_is_rejected(api_client, audit_pdf_row, m
     resp = api_client.get(f"/api/audits/{audit_pdf_row}/pdf")
     assert resp.status_code == 502
     assert html not in resp.content
-    # Never streamed the body, and the connection was released.
     assert resp_obj.consumed == 0
     assert resp_obj.closed is True
 

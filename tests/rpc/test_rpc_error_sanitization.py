@@ -17,9 +17,7 @@ from services.clients import rpc as rpc_mod
 _ALCHEMY = "https://eth-mainnet.g.alchemy.com/v2/FAKE_ALCHEMY_KEY_FOR_TESTS"
 
 
-# ---------------------------------------------------------------------------
 # rpc_request: HTTPError branch
-# ---------------------------------------------------------------------------
 
 
 def _fake_session(response: MagicMock) -> MagicMock:
@@ -29,7 +27,6 @@ def _fake_session(response: MagicMock) -> MagicMock:
 
 
 def test_rpc_request_http_404_wraps_in_sanitized_runtime_error(monkeypatch):
-    """A non-retryable 4xx must surface as a RuntimeError without the URL."""
     resp = MagicMock()
     resp.status_code = 404
 
@@ -49,7 +46,6 @@ def test_rpc_request_http_404_wraps_in_sanitized_runtime_error(monkeypatch):
 
 
 def test_rpc_request_retries_exhausted_message_is_sanitized(monkeypatch):
-    """After retries exhausted on transient errors, the URL must be redacted."""
     resp = MagicMock()
     resp.status_code = 503  # retryable
     resp.raise_for_status.side_effect = requests.HTTPError("503")
@@ -65,7 +61,6 @@ def test_rpc_request_retries_exhausted_message_is_sanitized(monkeypatch):
 
 
 def test_rpc_request_connection_error_message_is_sanitized(monkeypatch):
-    """A transport-level failure echoes the URL via str(exc) — must be scrubbed."""
     session = MagicMock()
     session.post.side_effect = requests.ConnectionError(f"connection reset by peer for {_ALCHEMY}")
     monkeypatch.setattr(rpc_mod, "_get_session", lambda: session)
@@ -88,9 +83,8 @@ def test_rpc_request_connection_error_message_is_sanitized(monkeypatch):
     ],
 )
 def test_client_timeouts_surface_as_a_typed_subclass(monkeypatch, exc, expect_timeout):
-    """A timeout says this client stopped waiting; a connection error says the
-    transport failed. Callers that size their own windows need to tell them
-    apart, and the type — never the message — is what carries that. Both remain
+    """A timeout (client stopped waiting) vs a connection error (transport failed) must be
+    distinguishable by TYPE, never message, for callers sizing their own windows. Both remain
     RuntimeError so no existing handler changes."""
     session = MagicMock()
     session.post.side_effect = exc
@@ -104,9 +98,7 @@ def test_client_timeouts_surface_as_a_typed_subclass(monkeypatch, exc, expect_ti
     assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in str(excinfo.value)
 
 
-# ---------------------------------------------------------------------------
 # rpc_batch_request: HTTPError + transport-error branches
-# ---------------------------------------------------------------------------
 
 
 def test_rpc_batch_request_http_error_wraps_in_sanitized_runtime_error(monkeypatch):
@@ -139,13 +131,10 @@ def test_rpc_batch_request_transport_error_wraps_in_sanitized_runtime_error(monk
     assert "<redacted>" in msg
 
 
-# ---------------------------------------------------------------------------
 # protocol_monitor.main: the rpc URL is sanitized before logging
-# ---------------------------------------------------------------------------
 
 
 def test_protocol_monitor_logs_redacted_rpc_url(monkeypatch):
-    """Driving ``main()`` with ``--rpc-url=<Alchemy URL>`` must not log the raw URL."""
     import importlib
     import logging
 
@@ -153,8 +142,7 @@ def test_protocol_monitor_logs_redacted_rpc_url(monkeypatch):
 
     monkeypatch.setattr(sys, "argv", ["protocol_monitor", "--rpc-url", _ALCHEMY])
 
-    # Stub out signal handlers (they call sys.exit on SIGTERM in real prod) and
-    # the loop entry points so no real scan/poll/TVL work runs.
+    # Stub signal handlers (they sys.exit on SIGTERM in prod) and the loop entry points so no real work runs.
     monkeypatch.setattr(pm.signal, "signal", lambda *a, **kw: None)
 
     fake_unified = MagicMock()
@@ -169,10 +157,8 @@ def test_protocol_monitor_logs_redacted_rpc_url(monkeypatch):
     fake_tvl.run_tvl_loop = MagicMock()
     monkeypatch.setitem(sys.modules, "services.monitoring.tvl", fake_tvl)
 
-    # Default mode builds a Supervisor and blocks in run_forever() forever. The
-    # sanitization contract lives in the startup log + how the loops are wired,
-    # not in the blocking loop itself, so drive each supervised loop once
-    # synchronously (stop event pre-set so nothing sleeps) and return.
+    # Default mode blocks in Supervisor.run_forever(). The sanitization contract lives in the
+    # startup log + loop wiring, so drive each supervised loop once (stop event pre-set) and return.
     def run_once(self):
         stop = threading.Event()
         stop.set()
@@ -181,9 +167,8 @@ def test_protocol_monitor_logs_redacted_rpc_url(monkeypatch):
 
     monkeypatch.setattr(pm.Supervisor, "run_forever", run_once)
 
-    # Capture on the module logger directly rather than via caplog: main() calls
-    # configure_logging(), which clears the root handlers on its first
-    # per-process call and would drop caplog's handler when this test runs first.
+    # Capture on the module logger, not caplog: main() calls configure_logging(), which clears
+    # root handlers on its first per-process call and would drop caplog's handler.
     records: list[str] = []
 
     class _Capture(logging.Handler):
@@ -202,8 +187,7 @@ def test_protocol_monitor_logs_redacted_rpc_url(monkeypatch):
     assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in combined
     # The host is preserved so operators can still see which provider is in use.
     assert "eth-mainnet.g.alchemy.com" in combined
-    # And the underlying run_scan_loop received the unredacted URL (workers
-    # need the real key to make requests).
+    # The underlying run_scan_loop received the unredacted URL (workers need the real key).
     fake_unified.run_scan_loop.assert_called_once()
     args, _kwargs = fake_unified.run_scan_loop.call_args
     assert args[0] == _ALCHEMY

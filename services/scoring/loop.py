@@ -52,7 +52,6 @@ from sqlalchemy.orm import Session
 from db.queue import HEARTBEAT_PROTOCOL_SCORE, record_heartbeat
 from services.monitoring import emit_monitor_cycle
 from services.scoring.dirty import SCORE_DIRTY_STALENESS_SWEEP
-from services.scoring.distill import ProtocolUniverse
 from services.scoring.fold import compute_protocol_score
 from services.scoring.persist import persist_score_document
 from services.scoring.schema import ScoreDocument
@@ -345,7 +344,7 @@ def _flow_pricing(confidence: dict[str, Any]) -> tuple[int | None, int | None]:
     return decidable, seen
 
 
-def document_summary(document: ScoreDocument, universe: ProtocolUniverse | None) -> dict[str, Any]:
+def document_summary(document: ScoreDocument) -> dict[str, Any]:
     """The fields the one summary INFO carries, all read off the finished document.
 
     Nothing is recomputed here: the fold's own counters are the record, and a
@@ -408,9 +407,6 @@ def document_summary(document: ScoreDocument, universe: ProtocolUniverse | None)
         "flow_pricing_decidable": priced_decidable,
         "flow_pricing_seen": priced_seen,
         "tracked_total_usd": coverage.get("tracked_total_usd"),
-        # ``None`` is the fail-closed universe and disposes nothing; the count is
-        # what separates it from a universe that is merely small.
-        "universe_addresses": len(universe.addresses) if universe is not None else None,
         # An absent census is the earned zero at this model version (see
         # ``ScoreDocument.execution_evidence_faults``), and this document was just
         # folded by this build — so the census provably ran. A census PRESENT
@@ -430,14 +426,12 @@ def score_protocol(session: Session, due: DueProtocol) -> Any:
     """
     computed_at = session.execute(select(func.clock_timestamp())).scalar_one()
     durations: dict[str, int] = {}
-    universe = None  # Delivery classification no longer participates in scoring.
     with log_timed_phase(logger, "fold", durations_ms=durations, protocol_id=due.protocol_id):
         document = compute_protocol_score(
             session,
             due.protocol_id,
             trigger=due.trigger,
             computed_at=computed_at,
-            universe=universe,
         )
     faults = document.execution_evidence_faults
     if faults is not None:
@@ -498,7 +492,7 @@ def score_protocol(session: Session, due: DueProtocol) -> Any:
         )
         # The index over the documents: a pricing regression is a step change
         # between two of these lines rather than a document diff nobody runs.
-        logger.info("score document summary", extra=document_summary(document, universe))
+        logger.info("score document summary", extra=document_summary(document))
     except Exception:
         logger.warning("score summary emit failed", exc_info=True, extra={"protocol_id": due.protocol_id})
     return row

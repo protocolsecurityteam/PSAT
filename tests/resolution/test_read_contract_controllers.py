@@ -1,7 +1,7 @@
-"""Wire helper: read a plain contract's controlling addresses via canonical
-control getters. Probes owner()/authority()/admin() every call
-and returns the DISTINCT nonzero set so the walk can fail closed on parallel
-control planes. Stubs the eth_call layer, never the transport."""
+"""Wire helper: read a plain contract's controlling addresses via canonical control getters.
+
+Probes owner()/authority()/admin() every call and returns the DISTINCT nonzero set so the
+walk can fail closed on parallel control planes. Stubs the eth_call layer, never the transport."""
 
 from __future__ import annotations
 
@@ -20,16 +20,11 @@ def _word(address: str) -> str:
 
 
 def _stub(monkeypatch, answers):
-    """Map signature -> the getter's outcome, at the ``eth_call`` layer (never
-    the transport). A value may be:
+    """Map signature -> the getter's outcome at the ``eth_call`` layer.
 
-      * an address string  -> a successful read
-      * ``"revert"``       -> the EVM answered: this getter is not a control
-                              plane (the shape a contract without ``authority()``
-                              produces, and the case that used to be
-                              indistinguishable from a transport failure)
-      * ``"transport"``    -> the read did not happen: indeterminate
-      * absent             -> ``revert`` (a missing selector reverts on chain)
+    A value is an address string (successful read), ``"revert"`` (the EVM answered: not a
+    control plane, distinct from a transport failure), ``"transport"`` (the read did not
+    happen: indeterminate), or absent (== ``revert``; a missing selector reverts on chain).
     """
 
     def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
@@ -61,8 +56,7 @@ def test_reads_authority_when_owner_absent(monkeypatch):
 
 
 def test_both_owner_and_authority_distinct_returns_both_in_order(monkeypatch):
-    # Parallel control planes (Solmate/Solady Auth): both are witnessed, in
-    # owner/authority precedence order.
+    # Parallel control planes (Solmate/Solady Auth): both witnessed, owner/authority order.
     _stub(monkeypatch, {"owner()": OWNER, "authority()": AUTHORITY})
     assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER, AUTHORITY]
 
@@ -106,28 +100,24 @@ def test_whole_batch_failure_returns_none(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# A REVERT is the EVM answering ("not a control plane"); a
-# TRANSPORT failure is the read not happening. Every failure used to be the
-# single ``_PROBE_ERROR``, so a contract with no ``authority()`` — which is most
-# of them — tripped the incomplete-witness guard and the WHOLE plane set came
-# back None. Measured: terminal_principal.status was ``unknown_unfetched`` on
-# 180/180 armed rows and 5 of the 6 statuses had never fired.
+# A REVERT is the EVM answering ("not a control plane"); a TRANSPORT failure is the read
+# not happening. Every failure used to be one ``_PROBE_ERROR``, so a contract with no
+# ``authority()`` (most of them) tripped the incomplete-witness guard and the WHOLE plane
+# set came back None: terminal_principal.status was ``unknown_unfetched`` on 180/180 armed
+# rows and 5 of the 6 statuses had never fired.
 # ---------------------------------------------------------------------------
 
 
 def test_reverting_getter_is_not_a_control_plane_not_an_error(monkeypatch):
-    # The overwhelmingly common real shape: owner() answers, authority() and
-    # admin() revert because the contract does not declare them.
+    # The common real shape: owner() answers; authority()/admin() revert (undeclared).
     _stub(monkeypatch, {"owner()": OWNER, "authority()": "revert", "admin()": "revert"})
     assert read_contract_controllers("http://rpc", CONTRACT) == [OWNER]
 
 
 def test_all_getters_reverting_is_canonical_getter_silence(monkeypatch):
-    # Every getter reverting is the EVM answering "these three getters name
-    # nothing" — probe-set SILENCE, distinct from a transport failure but NOT
-    # proof of no controller: an ownerless DepositContract and a
-    # kernel()/unpauser()-governed contract produce the identical []. The walk
-    # publishes it as ``controllers_not_determined`` with this basis.
+    # All three reverting is probe-set SILENCE, NOT proof of no controller: an ownerless
+    # DepositContract and a kernel()/unpauser()-governed contract give the identical [].
+    # The walk publishes it as ``controllers_not_determined`` with this basis.
     _stub(monkeypatch, {"owner()": "revert", "authority()": "revert", "admin()": "revert"})
     assert read_contract_controllers("http://rpc", CONTRACT) == []
 
@@ -152,12 +142,10 @@ def test_unrecognised_failure_stays_indeterminate(monkeypatch):
 
 
 def test_answers_every_selector_is_indeterminate_not_a_plane_set(monkeypatch):
-    # INVERTED from `test_undecodable_success_is_not_a_plane_and_not_an_error`
-    # (which pinned []): an address that answers EVERY call — including the
-    # negative-control selector — is a catch-all fallback, so none of its
-    # getter answers is a witnessed plane and the set is not dispositively
-    # readable. None, never [] (the [] token belongs to canonical-getter
-    # silence on an honestly-dispatching contract).
+    # INVERTED from `test_undecodable_success_is_not_a_plane_and_not_an_error` (which pinned []):
+    # an address answering EVERY call, including the negative-control selector, is a catch-all
+    # fallback, so the set is not dispositively readable. None, never [] (that token is for
+    # canonical-getter silence on an honestly-dispatching contract).
     def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
         return [EthCallResult(True, "0x1234", None, None) for _ in calls]
 
@@ -166,9 +154,8 @@ def test_answers_every_selector_is_indeterminate_not_a_plane_set(monkeypatch):
 
 
 def test_undecodable_success_with_honest_control_is_not_a_plane(monkeypatch):
-    # The original arm, preserved with an honest negative control: getters
-    # answer garbage but the nonsense selector reverts → the reads happened,
-    # nothing decodes as an address → canonical-getter silence ([]).
+    # Original arm with an honest negative control: getters answer garbage but the nonsense
+    # selector reverts -> reads happened, nothing decodes -> canonical-getter silence ([]).
     def _fake(rpc_url, calls, block_tag="latest", *, chain_id=None, headers=None):
         control_selector = selector(tracking._NEGATIVE_CONTROL_SIG)
         out = []

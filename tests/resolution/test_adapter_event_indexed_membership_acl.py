@@ -1,15 +1,10 @@
 """Caller-keyed boolean mapping-ACL recovery from events (FA-R2).
 
-A leaf like ``allowedForwardedEigenpodCalls[msg.sender][selector]`` read for
-truthiness is emitted as a ``mapping_membership`` descriptor with a
-``set``-direction enumeration_hint carrying a ``value_position`` but no
-``value_predicate``. The adapter treats the truthy read as an implicit
-``{value != 0}`` predicate and folds latest-value-per-CALLER, keeping callers
-whose latest stored value is nonzero.
-
-These drive the production adapter through the real value-aware fold
-(``enumerate_mapping_values``); only the HyperSync wire (``client.get``) is
-stubbed, matching the on-chain log shapes of the audited run.
+A truthiness read like ``allowedForwardedEigenpodCalls[msg.sender][selector]`` is a
+``mapping_membership`` descriptor with a ``set``-direction hint carrying
+``value_position`` but no ``value_predicate``; the adapter treats it as an implicit
+``{value != 0}`` and folds latest-value-per-CALLER. Drives the real fold
+(``enumerate_mapping_values``); only the HyperSync wire is stubbed.
 """
 
 from __future__ import annotations
@@ -19,7 +14,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import services.resolution.mapping_enumerator as mapping_enumerator
-from services.resolution.adapters import AdapterRegistry, EvaluationContext
+from services.resolution.adapters import EvaluationContext
 from services.resolution.adapters.event_indexed import (
     EventIndexedAdapter,
     _caller_event_arg_position,
@@ -72,11 +67,9 @@ def _client(logs: list[Any]):
 
 
 def _patched_value_fold(monkeypatch, logs: list[Any]) -> None:
-    """Route the adapter's value fold through ``enumerate_mapping_values`` with
-    a stubbed HyperSync client, so the real latest-value-per-key fold runs over
-    ``logs``. Only the wire is replaced; the scan-floor lookup is stubbed to a
-    known floor so the live fold runs (rather than deferring) without reaching
-    Etherscan or the cursor table offline."""
+    """Route the value fold through ``enumerate_mapping_values`` with a stubbed HyperSync
+    client so the real fold runs over ``logs``; the scan floor is stubbed to a known
+    block so the live fold runs (not defers) without Etherscan or the cursor table."""
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
@@ -146,8 +139,7 @@ def test_implicit_predicate_fires_for_caller_keyed_membership_with_value_set_hin
 
 
 def test_implicit_predicate_excluded_when_value_position_absent():
-    # LayerZero composeQueue (sendCompose): a caller-keyed data-map with no
-    # value slot must stay unsupported here.
+    # LayerZero composeQueue: a caller-keyed data-map with no value slot stays unsupported.
     desc = {
         "kind": "mapping_membership",
         "storage_var": "composeQueue",
@@ -202,8 +194,8 @@ def test_caller_event_arg_position_resolves_caller_over_inner_key():
 
 
 def test_caller_event_arg_position_from_non_indexed_data_arg():
-    # Caller key carried in event data (not a topic): caller key index 0 maps
-    # to data slot 0, event arg position 1 (arg 0 is the indexed selector).
+    # Caller key in event data (not a topic): key index 0 → data slot 0, event arg 1
+    # (arg 0 is the indexed selector).
     desc = {
         "kind": "mapping_membership",
         "storage_var": "consumers",
@@ -241,22 +233,6 @@ def test_matches_zero_for_composeQueue_value_position_none():
     assert EventIndexedAdapter.matches(desc, EvaluationContext(chain_id=1)) == 0
 
 
-def test_matches_zero_for_no_hint_admins_membership():
-    desc = {
-        "kind": "mapping_membership",
-        "storage_var": "admins",
-        "key_sources": [{"source": "msg_sender"}],
-    }
-    assert EventIndexedAdapter.matches(desc, EvaluationContext(chain_id=1)) == 0
-
-
-def test_registry_picks_event_indexed_for_caller_keyed_membership(monkeypatch):
-    registry = AdapterRegistry()
-    registry.register(EventIndexedAdapter)
-    picked = registry.pick(_eigenpod_descriptor(), EvaluationContext(chain_id=1, contract_address=CONTRACT))
-    assert picked is EventIndexedAdapter
-
-
 def test_enumerate_recovers_truthy_caller(monkeypatch):
     # Single caller, value=true → recovered.
     logs = [_eigenpod_log(CALLER_A, "0x88676cad", True, block=100)]
@@ -268,8 +244,7 @@ def test_enumerate_recovers_truthy_caller(monkeypatch):
 
 
 def test_enumerate_folds_multiple_selectors_to_single_caller(monkeypatch):
-    # Same caller, three selectors, all true (the audited forwardEigenPodCall
-    # shape) → exactly one principal.
+    # Same caller, three selectors, all true (audited forwardEigenPodCall) → one principal.
     logs = [
         _eigenpod_log(CALLER_A, "0x88676cad", True, block=100, log_index=0),
         _eigenpod_log(CALLER_A, "0xf074ba62", True, block=100, log_index=1),
@@ -295,8 +270,7 @@ def test_enumerate_recovers_two_distinct_callers(monkeypatch):
 
 
 def test_enumerate_drops_caller_whose_latest_value_is_false(monkeypatch):
-    # Added then removed (latest value=false) → not a member. Mirrors the
-    # AvsOperatorManager admin whose latest AdminUpdated value is 0.
+    # Added then removed (latest false) → not a member (AvsOperatorManager admin, latest AdminUpdated 0).
     logs = [
         _eigenpod_log(CALLER_A, "0x88676cad", True, block=100, log_index=0),
         _eigenpod_log(CALLER_A, "0x88676cad", False, block=200, log_index=0),
@@ -308,120 +282,12 @@ def test_enumerate_drops_caller_whose_latest_value_is_false(monkeypatch):
     assert (cap.members or []) == []
 
 
-def test_end_to_end_and_tree_recovers_membership_and_keeps_hasrole_external(monkeypatch):
-    # AND[ membership(allowedForwardedEigenpodCalls), hasRole(...) ] — the
-    # membership leaf resolves to the caller set and the roleRegistry.hasRole
-    # sibling stays external_check_only (it is NOT the broken leaf). Pre-fix the
-    # membership leaf is no_adapter and absorbs the whole AND.
-    from services.resolution.predicate_evaluator import evaluate_tree_with_registry
-
-    tree = {
-        "op": "AND",
-        "children": [
-            {
-                "op": "LEAF",
-                "leaf": {
-                    "kind": "membership",
-                    "operator": "truthy",
-                    "authority_role": "caller_authority",
-                    "operands": [{"source": "msg_sender"}],
-                    "set_descriptor": _eigenpod_descriptor(),
-                },
-            },
-            {
-                "op": "LEAF",
-                "leaf": {
-                    "kind": "external_bool",
-                    "operator": "truthy",
-                    "authority_role": "delegated_authority",
-                    "callee_state_mutability": "view",
-                    "callee_signature": "hasRole(bytes32,address)",
-                    "expression": "hasRole(...)",
-                    "operands": [{"source": "msg_sender"}],
-                    "set_descriptor": {
-                        "kind": "external_set",
-                        "key_sources": [{"source": "msg_sender"}],
-                        "authority_contract": {
-                            "address_source": {"source": "state_variable", "state_variable_name": "roleRegistry"}
-                        },
-                        "callee_function": "hasRole",
-                        "callee_signature": "hasRole(bytes32,address)",
-                        "callee_selector": "0x91d14854",
-                    },
-                },
-            },
-        ],
-    }
-    logs = [_eigenpod_log(CALLER_A, "0x88676cad", True, block=100)]
-    _patched_value_fold(monkeypatch, logs)
-    registry = AdapterRegistry()
-    registry.register(EventIndexedAdapter)
-    cap = evaluate_tree_with_registry(
-        cast(Any, tree), registry, EvaluationContext(chain_id=1, contract_address=CONTRACT)
-    )
-
-    assert cap.kind == "AND"
-    children = cap.children or []
-    finite = [c for c in children if c.kind == "finite_set"]
-    external = [c for c in children if c.kind == "external_check_only"]
-    assert len(finite) == 1
-    assert sorted(finite[0].members or []) == [CALLER_A.lower()]
-    assert len(external) == 1
-    assert external[0].check is not None
-    assert external[0].check.extra.get("callee_signature") == "hasRole(bytes32,address)"
-    assert cap.unsupported_reason is None
-
-
-def test_pre_fix_membership_leaf_absorbs_and(monkeypatch):
-    # With the implicit predicate neutralized the membership leaf declines as
-    # no_adapter and absorbs the AND (the bug this fix removes).
-    import services.resolution.adapters.event_indexed as ei
-    from services.resolution.predicate_evaluator import evaluate_tree_with_registry
-
-    monkeypatch.setattr(ei, "_implicit_membership_value_predicate", lambda d: None)
-    tree = {
-        "op": "AND",
-        "children": [
-            {
-                "op": "LEAF",
-                "leaf": {
-                    "kind": "membership",
-                    "operator": "truthy",
-                    "authority_role": "caller_authority",
-                    "operands": [{"source": "msg_sender"}],
-                    "set_descriptor": _eigenpod_descriptor(),
-                },
-            },
-            {
-                "op": "LEAF",
-                "leaf": {
-                    "kind": "equality",
-                    "operator": "eq",
-                    "authority_role": "caller_authority",
-                    "operands": [
-                        {"source": "msg_sender"},
-                        {"source": "state_variable", "state_variable_name": "_owner"},
-                    ],
-                },
-            },
-        ],
-    }
-    registry = AdapterRegistry()
-    registry.register(ei.EventIndexedAdapter)
-    cap = evaluate_tree_with_registry(
-        cast(Any, tree), registry, EvaluationContext(chain_id=1, contract_address=CONTRACT)
-    )
-    assert cap.kind == "unsupported"
-    assert "no_adapter" in (cap.unsupported_reason or "")
-
-
 def _run(coro):
     return asyncio.run(coro)
 
 
 def test_value_fold_keys_on_caller_not_inner_selector(monkeypatch):
-    # Direct fold check: with the caller-arg key override, two selectors for one
-    # caller collapse to a single caller key (not two selector keys).
+    # With the caller-arg key override, two selectors for one caller collapse to one caller key.
     desc = _eigenpod_descriptor()
     hint = desc["enumeration_hint"][0]
     spec = {

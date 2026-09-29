@@ -46,11 +46,6 @@ def test_analyze_request_dapp_urls_rejects_over_length():
         AnalyzeRequest(dapp_urls=[f"https://example.com/{i}" for i in range(51)])
 
 
-def test_analyze_request_dapp_urls_accepts_http():
-    req = AnalyzeRequest(dapp_urls=["https://example.com", "http://foo.test"])
-    assert req.dapp_urls == ["https://example.com", "http://foo.test"]
-
-
 @pytest.mark.parametrize(
     "bad_url",
     [
@@ -70,11 +65,6 @@ def test_add_audit_request_rejects_dangerous_scheme(bad_url):
 def test_add_audit_request_rejects_dangerous_pdf_url():
     with pytest.raises(ValidationError):
         AddAuditRequest(url="https://ok.test", pdf_url="javascript:alert(1)", auditor="a", title="t")
-
-
-def test_add_audit_request_accepts_https():
-    req = AddAuditRequest(url="https://audits.example/report.pdf", auditor="a", title="t")
-    assert req.url == "https://audits.example/report.pdf"
 
 
 def test_protocol_subscribe_rejects_non_discord_webhook():

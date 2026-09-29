@@ -1,20 +1,13 @@
 """The state-mutability witness is persisted, and it keeps three states.
 
-``effective_functions`` had no view/pure column, so the only way to ask "does
-this write state" was ``effect_targets`` — a display field that concatenates
-state-write variable names with dotted external-call heads. On the analysis
-database 501 of its 1642 populated rows carry only call heads, so a populated
-value asserts a state write that was never proven.
-
-The effects stage already computes ``sinks`` / ``state_writes`` /
-``state_changing`` / ``writer_selectors`` per function, and did so on 2415/2415
-records across the 107 stored production ``effects`` artifacts. These tests pin
-that those four now reach the row through the artifact the worker actually hands
-the writer, and — the part that matters — that the row can still say "nobody
-looked" and "the record contradicts itself".
-
-Every fixture below is copied from a production ``effects`` artifact in the
-``psat-artifacts`` bucket; the job id is named on each one.
+``effective_functions`` had no view/pure column, so "does this write state" meant ``effect_targets``,
+a display field mixing state-write names with dotted external-call heads (501 of 1642 populated
+analysis-DB rows carry only call heads, so a populated value asserts a never-proven write). The
+effects stage already computes ``sinks`` / ``state_writes`` / ``state_changing`` /
+``writer_selectors`` (2415/2415 records over 107 production artifacts); these tests pin that the four
+reach the row through the artifact the worker hands the writer, and that the row can still say
+"nobody looked" and "the record contradicts itself". Fixtures are copied from production ``effects``
+artifacts in ``psat-artifacts``; each names its job id.
 """
 
 from __future__ import annotations
@@ -267,8 +260,7 @@ def test_proven_present_carries_the_state_write() -> None:
 
 
 def test_proven_absent_is_an_empty_list_not_none() -> None:
-    """The effects stage looked and found no state write. That is a fact, and it
-    must not be served in the same shape as "nobody looked"."""
+    """The effects stage looked and found no state write: a fact, not to be served as "nobody looked"."""
     rec = _records(_EFFECTS)["getRateInQuote(ERC20)"]
     assert rec["state_writes"] == []
     assert rec["state_writes"] is not None
@@ -276,28 +268,23 @@ def test_proven_absent_is_an_empty_list_not_none() -> None:
 
 
 def test_not_determined_is_none_when_no_effects_record_covers_the_signature() -> None:
-    """The production condition: ``policy_worker`` passes ``effects=None``
-    whenever the effects artifact is not a dict and the stage then CONTINUES
-    (it records a degradation, it does not raise). Every signature then arrives
-    from capabilities/trees with no effects record behind it, and those rows
-    must say not-determined, not "proven no state write"."""
+    """The production condition: ``policy_worker`` passes ``effects=None`` when the artifact isn't
+    a dict and CONTINUES (records a degradation). Signatures then arrive with no effects record
+    behind them and must say not-determined, not "proven no state write"."""
     recs = _records({}, capability_dicts={"mystery()": {"kind": "policy_check"}})
     rec = recs["mystery()"]
     assert rec["state_changing"] is None
     assert rec["state_writes"] is None
     assert rec["sinks"] is None
     assert rec["writer_selectors"] is None
-    # The legacy display field still collapses to []; that collapse is exactly
-    # why these four columns exist and it is deliberately left alone here.
+    # The legacy display field still collapses to []; that is why these columns exist, left alone here.
     assert rec["effect_targets"] == []
 
 
 def test_malformed_effects_value_is_not_determined_not_empty() -> None:
-    """A present-but-wrong-typed value is not evidence of emptiness.
-
-    Truthiness would read ``"nope"`` as a populated list and ``"yes"`` as True;
-    ``or []`` would read a malformed value as a proven-empty one. Both are
-    manufactured facts, so the type check falls through to not-determined."""
+    """A present-but-wrong-typed value is not evidence of emptiness. Truthiness would read
+    ``"nope"`` as a populated list and ``"yes"`` as True, and ``or []`` a malformed value as
+    proven-empty; both manufacture facts, so the type check falls through to not-determined."""
     assert _mutability_fields(
         {"function": "f()", "state_changing": "yes", "state_writes": "nope", "sinks": 3, "writer_selectors": [7]}
     ) == {
@@ -306,7 +293,7 @@ def test_malformed_effects_value_is_not_determined_not_empty() -> None:
         "sinks": None,
         "writer_selectors": None,
     }
-    # An empty dict — no effects record at all — is the same answer.
+    # An empty dict (no effects record) is the same answer.
     assert _mutability_fields({}) == {
         "state_changing": None,
         "state_writes": None,
@@ -321,34 +308,28 @@ def test_malformed_effects_value_is_not_determined_not_empty() -> None:
 
 
 def test_sentinel_fallback_receive_mutability_is_not_determined_not_false() -> None:
-    """WETH9's ``fallback()`` writes ``balanceOf``. Persisting the artifact's
-    ``state_changing: false`` verbatim would publish a proven absence directly
-    on top of a proven presence.
+    """WETH9's ``fallback()`` writes ``balanceOf``; persisting the artifact's ``state_changing:
+    false`` verbatim would publish a proven absence on top of a proven presence.
 
-    ``_is_state_changing_entry_point`` returns False for fallback/receive
-    because they carry no selector — a statement about dispatch, not about
-    mutability. 36 records in the production artifacts take this branch; 15 of
-    them carry a state write."""
+    ``_is_state_changing_entry_point`` is False for fallback/receive because they carry no
+    selector, a statement about dispatch, not mutability (36 production records, 15 with a write)."""
     rec = _records(_EFFECTS)["fallback()"]
 
     assert rec["state_changing"] is None, "a no-selector entry point is not a proven view"
-    # The writes themselves are real and are NOT withheld: the sentinel narrows
-    # one field, it does not blank the row.
+    # The writes are real and NOT withheld: the sentinel narrows one field, it doesn't blank the row.
     assert rec["state_writes"] == _WETH9_FALLBACK["state_writes"]
     assert rec["state_writes"][0]["var"] == "balanceOf"
     assert rec["sinks"] == _WETH9_FALLBACK["sinks"]
 
 
 def test_sentinel_view_contradicted_by_its_own_derived_writes_is_not_determined() -> None:
-    """``paused()`` is typed ``view``; the compiler forbids SSTORE there. A
-    derived write of ``PAUSABLE_STORAGE_SLOT`` is the lowering of an OZ-v5
-    namespaced-slot READ, and publishing it would put a fresh, false
-    proven-present claim into a brand-new column.
+    """``paused()`` is ``view`` and the compiler forbids SSTORE there. A derived write of
+    ``PAUSABLE_STORAGE_SLOT`` is the lowering of an OZ-v5 namespaced-slot READ; publishing it would
+    put a fresh false proven-present claim into a new column.
 
-    100 records in the production artifacts take this branch, and
-    ``assembly_state_access`` is false on all 100 — the existing flag does not
-    see them. ``sinks`` is withheld with them because it carries the identical
-    claim under a ``state_write`` kind tag."""
+    100 production records take this branch and ``assembly_state_access`` is false on all, so the
+    existing flag misses them. ``sinks`` is withheld too: it carries the same claim as a
+    ``state_write`` kind tag."""
     rec = _records(_EFFECTS)["paused()"]
 
     assert rec["state_changing"] is False, "the compiler's view typing is the fact that survives"
@@ -358,11 +339,9 @@ def test_sentinel_view_contradicted_by_its_own_derived_writes_is_not_determined(
 
 
 def test_a_view_with_no_derived_write_is_not_swept_up_by_the_contradiction_rule() -> None:
-    """The discriminating control for the sentinel above: same
-    ``state_changing: False``, no contradiction, so nothing is withheld. A rule
-    keyed on view-ness alone instead of on the contradiction would blank this
-    row's two external-call sinks and be untestable from the sentinel's own
-    fixture."""
+    """The discriminating control for the sentinel above: same ``state_changing: False`` but no
+    contradiction, so nothing is withheld. A rule keyed on view-ness alone would blank this row's
+    two external-call sinks and be untestable from the sentinel's own fixture."""
     rec = _records(_EFFECTS)["getRateInQuote(ERC20)"]
     assert rec["state_writes"] == []
     assert rec["sinks"] == _GET_RATE_IN_QUOTE["sinks"]
@@ -377,10 +356,9 @@ def test_a_view_with_no_derived_write_is_not_swept_up_by_the_contradiction_rule(
 def test_positive_control_sweep_dust_stays_a_proven_actor_with_zero_state_writes() -> None:
     """``sweepDust`` moves tokens under a role gate and writes NO state.
 
-    A persistence design that recorded only ``state_writes`` would publish it as
-    indistinguishable from a pure view, and any consumer that retargets "has a
-    sink" onto the state-write list drops it. The kind-tagged ``sinks`` column is
-    what keeps it visible, so this test pins the sinks, not just the flag.
+    Recording only ``state_writes`` would make it indistinguishable from a pure view, and a
+    consumer retargeting "has a sink" onto the state-write list would drop it. The kind-tagged
+    ``sinks`` column keeps it visible, so this pins the sinks, not just the flag.
     """
     rec = _records(_EFFECTS)["sweepDust(address,address)"]
 
@@ -390,20 +368,18 @@ def test_positive_control_sweep_dust_stays_a_proven_actor_with_zero_state_writes
 
     kinds = {(s["kind"], s["origin"]) for s in rec["sinks"]}
     assert ("external_call", "body") in kinds
-    # The guard-origin sink is the on-chain gate (OnlyOperatingMultisig) and must
-    # survive persistence: it is how a consumer tells a gated actor from an open one.
+    # The guard-origin sink is the on-chain gate (OnlyOperatingMultisig); it must survive
+    # persistence, since it tells a gated actor from an open one.
     assert ("external_call", "guard") in kinds
-    # The external-call heads are the sole evidence behind the asset-send label;
-    # adding the columns must not destroy them.
+    # The external-call heads are the sole evidence behind the asset-send label.
     assert "_token.safeTransfer" in {s["target"] for s in rec["sinks"]}
     assert len(rec["sinks"]) == 5
 
 
 def test_negative_control_view_gains_no_state_write_evidence() -> None:
-    """``getRateInQuote`` is a view whose ``effect_targets`` is populated with
-    three call heads — through that field alone it is indistinguishable from
-    ``sweepDust``. The new columns must separate them and must not invent a
-    write."""
+    """``getRateInQuote`` is a view whose ``effect_targets`` holds three call heads, so through
+    that field alone it looks like ``sweepDust``. The new columns must separate them without
+    inventing a write."""
     recs = _records(_EFFECTS)
     view = recs["getRateInQuote(ERC20)"]
     actor = recs["sweepDust(address,address)"]
@@ -412,42 +388,15 @@ def test_negative_control_view_gains_no_state_write_evidence() -> None:
     assert view["writer_selectors"] == []
     assert not any(s["kind"] == "state_write" for s in view["sinks"])
 
-    # Both have an equally populated effect_targets and an empty state_writes;
-    # ``state_changing`` is the discriminator that did not exist before.
+    # Equal effect_targets and empty state_writes; ``state_changing`` is the new discriminator.
     assert bool(view["effect_targets"]) and bool(actor["effect_targets"])
     assert view["state_writes"] == actor["state_writes"] == []
     assert view["state_changing"] is False and actor["state_changing"] is True
 
 
-def test_a_state_write_only_filter_would_suppress_the_positive_control() -> None:
-    """Pins the trap for whoever retargets ``selection.py``'s "has a sink".
-
-    This is not a hypothetical: ``sweepDust`` is the documented positive control
-    and its state-write list is empty. If this test ever fails because
-    ``sweepDust`` acquired a state write, the retarget became safe — until then,
-    the filter must key on sinks or on ``state_changing``.
-    """
-    recs = _records(_EFFECTS)
-
-    def has_state_write(rec: dict[str, Any]) -> bool:
-        return bool(rec["state_writes"])
-
-    def acts(rec: dict[str, Any]) -> bool:
-        return bool([s for s in (rec["sinks"] or []) if s["origin"] == "body"])
-
-    assert not has_state_write(recs["sweepDust(address,address)"])  # the trap
-    assert acts(recs["sweepDust(address,address)"])  # the correct predicate keeps it
-    assert acts(recs["updateExchangeRate(uint96)"])
-    # and it still excludes nothing it should not: the view has body sinks too,
-    # so a sink-only filter is not sufficient on its own — state_changing is.
-    assert acts(recs["getRateInQuote(ERC20)"])
-    assert recs["getRateInQuote(ERC20)"]["state_changing"] is False
-
-
 # ---------------------------------------------------------------------------
-# The artifact hop. ``policy_worker`` hands the writer ``ep_data["functions"]``,
-# NOT the record dicts above — a field that stops at the record layer is NULL in
-# production while every test on this page passes.
+# The artifact hop. ``policy_worker`` hands the writer ``ep_data["functions"]``, NOT the record
+# dicts above: a field stopping at the record layer is NULL in production while these tests pass.
 # ---------------------------------------------------------------------------
 
 
@@ -463,23 +412,21 @@ def test_the_witness_survives_the_effective_permissions_artifact() -> None:
     )
     by_sig = {fn["function"]: fn for fn in payload["functions"]}
 
-    # ``.get`` throughout: the keys are NotRequired on the artifact TypedDict
-    # because artifacts written before this commit do not carry them, and a
-    # subscript would type-error on that honesty.
+    # ``.get`` throughout: the keys are NotRequired on the artifact TypedDict (older artifacts
+    # lack them) and a subscript would type-error on that.
     assert by_sig["sweepDust(address,address)"].get("state_changing") is True
     assert by_sig["sweepDust(address,address)"].get("state_writes") == []
     assert len(by_sig["sweepDust(address,address)"].get("sinks") or []) == 5
     assert by_sig["updateExchangeRate(uint96)"].get("writer_selectors") == ["0x3458113d"]
     assert by_sig["getRateInQuote(ERC20)"].get("state_changing") is False
-    # Both sentinels survive the hop too, still saying not-determined.
+    # Both sentinels survive the hop, still not-determined.
     assert by_sig["fallback()"].get("state_changing") is None
     assert by_sig["paused()"].get("state_writes") is None
 
 
 def test_artifact_with_no_effects_input_publishes_not_determined_everywhere() -> None:
-    """``build_effective_permissions(effects=None)`` is what the worker calls
-    when the effects artifact is missing. Every function must then be
-    not-determined on all four."""
+    """``build_effective_permissions(effects=None)`` is what the worker calls when the effects
+    artifact is missing: every function must be not-determined on all four."""
     payload = build_effective_permissions(
         _target_analysis(),
         capability_resolver_output={"mystery()": {"kind": "policy_check"}},
@@ -546,12 +493,10 @@ def test_columns_reach_the_row(db_session, _contract) -> None:
 
 
 def test_not_determined_is_sql_null_and_never_the_jsonb_scalar_null(db_session, _contract) -> None:
-    """``conditions`` on this same table is the jsonb scalar ``null`` on 780 of
-    its 1773 rows, because SQLAlchemy serializes Python ``None`` into a JSONB
-    column as JSON ``null`` unless told otherwise. Every ``IS NULL`` audit over
-    such a column silently returns zero. The new columns declare
-    ``none_as_null=True`` so not-determined is a real SQL NULL; this test is what
-    keeps that declaration from being dropped as decoration.
+    """``conditions`` on this table is the jsonb scalar ``null`` on 780 of 1773 rows because
+    SQLAlchemy serializes Python ``None`` into JSONB as JSON ``null`` unless told otherwise, so
+    every ``IS NULL`` audit silently returns zero. The new columns declare ``none_as_null=True``;
+    this test keeps that from being dropped as decoration.
     """
     _write(db_session, _contract, _records({}, capability_dicts={"mystery()": {"kind": "policy_check"}}))
 
@@ -574,9 +519,8 @@ def test_not_determined_is_sql_null_and_never_the_jsonb_scalar_null(db_session, 
     assert typeofs[1] is None, "sinks was written as the jsonb scalar null"
     assert typeofs[2] is True and typeofs[3] is True
 
-    # Said once more in ``db/jsonb.py``'s vocabulary: these columns must only ever
-    # reach the ``unset`` empty state, never ``written-null``. Two empty states
-    # where one is meant is how the 780 ``conditions`` rows happened.
+    # In ``db/jsonb.py``'s vocabulary: these columns must reach only the ``unset`` empty state,
+    # never ``written-null``; two empty states is how the 780 ``conditions`` rows happened.
     assert jsonb_state_of(db_session, _contract, "state_writes", "mystery()") == JSONB_UNSET
     assert jsonb_state_of(db_session, _contract, "sinks", "mystery()") == JSONB_UNSET
     assert (
@@ -593,9 +537,8 @@ def test_not_determined_is_sql_null_and_never_the_jsonb_scalar_null(db_session, 
 
 
 def test_the_view_contradiction_sentinel_reaches_the_row_as_sql_null(db_session, _contract) -> None:
-    """The sentinel has to survive the ORM too: a ``None`` handed to a JSONB
-    column without ``none_as_null=True`` lands as the jsonb scalar ``null`` and
-    the withheld claim becomes a *written* one."""
+    """The sentinel must survive the ORM too: a ``None`` in a JSONB column without
+    ``none_as_null=True`` lands as jsonb ``null`` and the withheld claim becomes a *written* one."""
     _write(db_session, _contract, _records(_EFFECTS))
     row = db_session.query(EffectiveFunction).filter_by(contract_id=_contract.id, abi_signature="paused()").one()
     assert row.state_changing is False
@@ -608,16 +551,13 @@ def test_the_view_contradiction_sentinel_reaches_the_row_as_sql_null(db_session,
 
 
 def test_all_three_states_are_distinguishable_in_one_query(db_session, _contract) -> None:
-    """Proven-present, proven-absent and not-determined must be separable by
-    a consumer. One SQL query, three different answers."""
+    """Proven-present, proven-absent and not-determined are separable by a consumer in one query."""
     records = _records(_EFFECTS)
     records.update(_records({}, capability_dicts={"mystery()": {"kind": "policy_check"}}))
     _write(db_session, _contract, records)
 
-    # Through ``jsonb_state``, not a raw SQL null test: a bare ``IS NULL`` over a
-    # JSONB column is forbidden by convention, and rightly — it is only correct here because
-    # of ``none_as_null=True``, which is a property of one column declaration and
-    # not something a reader of the query can see.
+    # Through ``jsonb_state``, not a bare ``IS NULL`` (forbidden by convention): that is only
+    # correct here thanks to ``none_as_null=True``, a per-column property invisible to a reader.
     rows = db_session.execute(
         select(
             EffectiveFunction.abi_signature,

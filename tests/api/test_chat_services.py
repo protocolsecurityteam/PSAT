@@ -1,18 +1,12 @@
 """Offline coverage for services/chat/* and utils/llm.tool_chat.
 
-These modules ship the company-page agent and were previously only
-exercised by ``tests/live/test_agent_live.py`` (which is excluded from
-CI's ``-m "not live"`` run). The diff-cover gate at 70% kept rejecting
-the PR until we covered them with real-DB unit tests + a stubbed LLM
-stream.
+These modules ship the company-page agent and were only exercised by the CI-excluded
+``tests/live/test_agent_live.py``, so the 70% diff-cover gate kept rejecting the PR; covered here
+with real-DB unit tests + a stubbed LLM stream.
 
-The fixture ``seeded_protocol`` builds one protocol with:
-  - 3 contracts (a proxy/timelock, a plain contract, an impl)
-  - control_graph_nodes for a Safe (4-of-7), an EOA, and the Timelock
-  - one UpgradeEvent + one AuditReport with live findings
-  - one EffectiveFunction + FunctionPrincipal so role_holders has
-    something to roll up
-  - one SourceFile with inline content so search_source can grep
+``seeded_protocol`` builds one protocol: proxy/timelock, plain contract and impl; Safe (4-of-7),
+EOA and Timelock control-graph nodes; an UpgradeEvent; an AuditReport with live findings; an
+EffectiveFunction + FunctionPrincipal (for role_holders); an inline SourceFile (for search_source).
 """
 
 from __future__ import annotations
@@ -45,11 +39,9 @@ from services.chat import tools as chat_tools
 from services.chat.agent import AgentContext, run_agent_stream
 from utils import llm as llm_mod
 
-# db_session teardown clears Protocol-scoped rows but contracts (with
-# ondelete="SET NULL") survive across tests, so reusing the same address
-# across invocations hits uq_contract_address_chain. Generate a new
-# address suite per test instead. PROTO_NAME / addresses are populated
-# lazily in the fixture; the names here exist for type checkers.
+# db_session teardown clears Protocol-scoped rows but contracts (ondelete="SET NULL") survive, so
+# reusing an address hits uq_contract_address_chain; addresses are generated per test instead.
+# PROTO_NAME / addresses are populated lazily in the fixture; names here exist for type checkers.
 PROTO_NAME = ""
 SAFE_ADDR = ""
 EOA_ADDR = ""
@@ -62,10 +54,8 @@ PLAIN_ADDR = ""
 def _addr(prefix: str) -> str:
     """Random 20-byte address with a recognizable prefix nibble.
 
-    ``uuid.uuid4().hex`` is only 32 chars, but a real address is 40 hex
-    chars after ``0x`` — concatenate two uuids to get enough entropy.
-    The ``ADDR_RE`` in services.chat.agent insists on 40 hex chars, so
-    short addresses silently fail to match and break highlight tests.
+    ``ADDR_RE`` in services.chat.agent needs 40 hex chars after ``0x`` (one uuid4 hex is only 32),
+    else highlight tests silently fail to match, so concatenate two uuids.
     """
     pad = (uuid.uuid4().hex + uuid.uuid4().hex)[: 40 - len(prefix)]
     return "0x" + prefix + pad
@@ -81,8 +71,6 @@ def _stub_etherscan_source_fallback(monkeypatch):
 
 @pytest.fixture()
 def seeded_protocol(db_session: Session):
-    """Create a self-contained protocol with the entities the agent
-    needs to exercise every chat-services code path."""
     global PROTO_NAME, SAFE_ADDR, EOA_ADDR, TIMELOCK_ADDR, PROXY_ADDR, IMPL_ADDR, PLAIN_ADDR
     PROTO_NAME = f"chat-test-{uuid.uuid4().hex[:8]}"
     SAFE_ADDR = _addr("cd")
@@ -155,7 +143,6 @@ def seeded_protocol(db_session: Session):
 
     db_session.add(ContractSummary(contract_id=proxy.id, control_model="proxy"))
 
-    # Source file the agent can grep.
     db_session.add(
         SourceFile(
             job_id=plain_job.id,
@@ -242,11 +229,8 @@ def seeded_protocol(db_session: Session):
         function_name="pauseContract",
         selector="0xabcd0001",
         authority_public=False,
-        # The shape the producer actually emits: the grant names the role AND its
-        # members. (This fixture used to name the role with no members and carry
-        # the role name in ``FunctionPrincipal.origin`` instead — a shape
-        # ``capability_surface`` cannot produce: ``origin`` is the single constant
-        # ``semantic_capability:finite_set`` on 1132/1132 real rows.)
+        # The shape the producer emits: the grant names the role AND its members. (``origin`` is
+        # the constant ``semantic_capability:finite_set`` on 1132/1132 real rows, never a role name.)
         authority_roles=[{"role": "PROTOCOL_PAUSER", "principals": [{"address": EOA_ADDR}, {"address": SAFE_ADDR}]}],
     )
     db_session.add(ef)
@@ -290,11 +274,9 @@ def _ctx(selected: str | None = None) -> AgentContext:
 
 
 def _patch_session_local(monkeypatch, db_session: Session) -> None:
-    """``services.chat.agent`` opens its own ``SessionLocal()`` from
-    ``db.models``, which binds to ``DATABASE_URL`` at import time — that
-    can be the dev DB while tests write to ``TEST_DATABASE_URL``. Bind
-    it to the test engine for the duration of one test so the agent's
-    queries actually see the seeded fixture."""
+    """``services.chat.agent`` opens its own ``SessionLocal()``, bound to ``DATABASE_URL`` at
+    import (possibly the dev DB while tests write to ``TEST_DATABASE_URL``); rebind to the test
+    engine so its queries see the seeded fixture."""
     test_engine = db_session.get_bind()
     TestSession = sessionmaker(bind=test_engine, expire_on_commit=False)
     monkeypatch.setattr(agent_mod, "SessionLocal", TestSession)
@@ -340,7 +322,6 @@ def test_resolve_contract_alias_and_chain_filter(db_session, seeded_protocol):
     # Alias hit (mainnet → ethereum).
     c = chat_data._resolve_contract(db_session, PROXY_ADDR, "mainnet")
     assert c is not None
-    # Unknown address.
     assert chat_data._resolve_contract(db_session, "0x" + "0" * 40, None) is None
     assert chat_data._resolve_contract(db_session, "", None) is None
 
@@ -373,7 +354,6 @@ def test_live_findings_filters_fixed_and_resolves_company(db_session, seeded_pro
     addr_findings = chat_data.live_findings(db_session, address=IMPL_ADDR)
     assert any(f["title"] == "Missing pause" for f in addr_findings["findings"])
 
-    # Unknown company → empty.
     assert chat_data.live_findings(db_session, company="nope")["findings"] == []
 
 
@@ -467,7 +447,6 @@ def test_get_contract_source_serves_indexed_body(db_session, seeded_protocol):
     assert any(f["name"] == "src/Pauser.sol" for f in res["files"])
     assert "error" in chat_tools._get_contract_source(db_session, ctx)  # no addr
 
-    # Specific file requested.
     res2 = chat_tools._get_contract_source(db_session, ctx, address=PLAIN_ADDR, file="src/Pauser.sol")
     assert res2["requested"] == "src/Pauser.sol"
     res3 = chat_tools._get_contract_source(db_session, ctx, address=PLAIN_ADDR, file="missing.sol")
@@ -498,9 +477,7 @@ def test_truncate_caps_and_run_tool_dispatches(db_session, seeded_protocol):
 
 
 def _scripted_iter(events):
-    """Build a fake openrouter.tool_chat: returns a function that yields
-    pre-canned event lists per call. Each call to tool_chat consumes
-    one element of the outer list."""
+    """Fake openrouter.tool_chat yielding one pre-canned event list per call."""
     state = {"calls": list(events)}
 
     def fake_tool_chat(messages, tools, model=None, **_kw):
@@ -514,8 +491,6 @@ def _scripted_iter(events):
 
 
 def test_run_agent_stream_plain_text(monkeypatch, db_session, seeded_protocol):
-    """Plain assistant turn (no tool calls) emits token + done events
-    and produces highlights when an in-scope address appears."""
     _patch_session_local(monkeypatch, db_session)
     monkeypatch.setattr(
         llm_mod.openrouter,
@@ -540,15 +515,12 @@ def test_run_agent_stream_plain_text(monkeypatch, db_session, seeded_protocol):
 
 
 def test_run_agent_stream_tool_call_then_answer(monkeypatch, db_session, seeded_protocol):
-    """Two-iteration loop: model calls a tool, agent runs it, then model
-    emits the final answer."""
     _patch_session_local(monkeypatch, db_session)
     monkeypatch.setattr(
         llm_mod.openrouter,
         "tool_chat",
         _scripted_iter(
             [
-                # Iteration 1: tool call only, no text.
                 [
                     {
                         "type": "tool_calls",
@@ -556,7 +528,6 @@ def test_run_agent_stream_tool_call_then_answer(monkeypatch, db_session, seeded_
                     },
                     {"type": "finish", "reason": "tool_calls"},
                 ],
-                # Iteration 2: plain answer.
                 [
                     {"type": "token", "text": "ok"},
                     {"type": "finish", "reason": "stop"},
@@ -600,8 +571,6 @@ def test_run_agent_stream_unknown_tool_surfaces_error(monkeypatch, db_session, s
 
 
 def test_run_agent_stream_init_failure_emits_error(monkeypatch, db_session, seeded_protocol):
-    """If tool_chat raises before the loop, the agent surfaces an error
-    event and stops cleanly."""
     _patch_session_local(monkeypatch, db_session)
 
     def boom(*_a, **_kw):
@@ -628,9 +597,8 @@ class _FakeResponse:
 
 
 def test_tool_chat_parses_tokens_reasoning_and_tool_calls(monkeypatch):
-    """Drive the SSE parser end-to-end on a realistic OpenRouter trace:
-    a reasoning chunk, two text tokens, a tool-call delta split across
-    two chunks (id+name first, then arguments), and a finish_reason."""
+    """Drive the SSE parser on a realistic OpenRouter trace: reasoning chunk, text tokens, a
+    tool-call delta split across chunks, and a finish_reason."""
     monkeypatch.setenv("OPEN_ROUTER_KEY", "test-key")
     chunks = [
         json.dumps({"choices": [{"delta": {"reasoning": "let me think"}}]}),
@@ -693,9 +661,7 @@ def test_tool_chat_handles_malformed_args_and_unknown_chunks(monkeypatch):
         ]
     }
     chunks = [
-        # malformed JSON line — parser should skip
         "data: not json",
-        # tool call with non-JSON arguments
         f"data: {json.dumps(bad_call)}",
         "data: [DONE]",
     ]

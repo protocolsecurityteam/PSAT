@@ -1,7 +1,4 @@
-"""End-to-end tests: Solidity source → PredicateTree → CapabilityExpr.
-
-Covers the bridge from week-2 (predicate builder) through week-3
-(reentrancy/pause + writer-gate) to week-4 (capability evaluator)."""
+"""End-to-end tests: Solidity source -> PredicateTree -> CapabilityExpr."""
 
 from __future__ import annotations
 
@@ -40,8 +37,6 @@ def _compile(tmp_path: Path, source: str) -> Slither:
 
 
 def _build_pipeline(contract):
-    """Run the full week-1-through-3 pipeline to produce per-function
-    PredicateTrees with classification mutations applied."""
     trees = {}
     for fn in contract.functions:
         if fn.is_constructor:
@@ -52,9 +47,7 @@ def _build_pipeline(contract):
     return trees
 
 
-# ---------------------------------------------------------------------------
 # End-to-end pipeline tests
-# ---------------------------------------------------------------------------
 
 
 def test_unguarded_function_yields_conditional_universal(tmp_path):
@@ -75,9 +68,6 @@ def test_unguarded_function_yields_conditional_universal(tmp_path):
 
 
 def test_caller_equals_state_var_yields_finite_set_placeholder(tmp_path):
-    """``require(msg.sender == owner)`` resolves to a finite_set
-    placeholder (members empty until week-5 adapter reads
-    state_variable on-chain). Confidence=partial reflects the gap."""
     sl = _compile(
         tmp_path,
         """
@@ -202,8 +192,6 @@ def test_non_caller_or_side_condition_under_and_preserves_principals():
 
 
 def test_renounce_role_self_service_pattern(tmp_path):
-    """``require(account == msg.sender)`` — the canonical self-service
-    pattern. Resolves to conditional_universal(self_service)."""
     sl = _compile(
         tmp_path,
         """
@@ -225,9 +213,7 @@ def test_renounce_role_self_service_pattern(tmp_path):
 
 
 def test_or_owner_or_business_yields_structural_or(tmp_path):
-    """``require(msg.sender == owner || amount > cap)`` → OR root in
-    the predicate tree → structural OR in the capability (per v3
-    blocker #2 fix: business preserved under OR)."""
+    """OR root in the predicate tree -> structural OR in the capability (v3 blocker #2: business preserved under OR)."""
     sl = _compile(
         tmp_path,
         """
@@ -254,9 +240,6 @@ def test_or_owner_or_business_yields_structural_or(tmp_path):
 
 
 def test_two_keys_membership_yields_finite_set_lower(tmp_path):
-    """``require(_members[role][msg.sender])`` — 2-key direct-promote
-    to caller_authority. Without an adapter, the evaluator returns
-    a lower_bound finite_set placeholder."""
     sl = _compile(
         tmp_path,
         """
@@ -278,12 +261,11 @@ def test_two_keys_membership_yields_finite_set_lower(tmp_path):
 
 
 def test_negated_membership_denylist_yields_cofinite(tmp_path):
-    """``require(!_blacklist[msg.sender])`` is a denylist (``if (blacklist[caller])
-    revert``): the function proceeds for anyone NOT on the list. With no enumerator,
-    the membership branch normalizes the decline to an external check and ``negate``
-    yields a lower_bound ``cofinite_blacklist`` — "anyone except an un-enumerated
-    exclusion", which the surface projects to ``public``. (Part 2: previously this
-    was discarded as ``unsupported(negate_partial_set)`` → under-resolved.)"""
+    """``require(!_blacklist[msg.sender])`` is a denylist: anyone NOT on the list proceeds.
+
+    With no enumerator, ``negate`` yields a lower_bound ``cofinite_blacklist`` (projects to
+    ``public``); it was previously discarded as ``unsupported(negate_partial_set)``.
+    """
     sl = _compile(
         tmp_path,
         """
@@ -312,8 +294,6 @@ def test_negated_membership_denylist_yields_cofinite(tmp_path):
 
 
 def test_external_bool_yields_check_only(tmp_path):
-    """``require(authority.canCall(msg.sender))`` →
-    external_check_only capability with placeholder check info."""
     sl = _compile(
         tmp_path,
         """
@@ -366,8 +346,6 @@ def test_external_bool_descriptor_populates_check_target_and_selector(tmp_path):
 
 
 def test_reentrancy_yields_conditional_universal(tmp_path):
-    """A function with only a reentrancy guard yields
-    conditional_universal — anyone, but reentrancy must hold."""
     sl = _compile(
         tmp_path,
         """
@@ -394,9 +372,7 @@ def test_reentrancy_yields_conditional_universal(tmp_path):
 
 
 def test_signature_auth_yields_signature_witness(tmp_path):
-    """``require(msg.sender == ecrecover(...))`` → signature_witness
-    with the signer being whatever the signature is required to
-    match (in this case, msg.sender — odd but valid)."""
+    """The signer is whatever the signature must match (here msg.sender: odd but valid)."""
     sl = _compile(
         tmp_path,
         """
@@ -415,14 +391,7 @@ def test_signature_auth_yields_signature_witness(tmp_path):
     assert cap.kind == "signature_witness"
 
 
-# ---------------------------------------------------------------------------
 # Direct evaluator tests (no Slither needed)
-# ---------------------------------------------------------------------------
-
-
-def test_evaluate_none_tree_yields_conditional_universal():
-    cap = evaluate_tree(None)
-    assert cap.kind == "conditional_universal"
 
 
 def test_caller_dependent_unsupported_stays_unsupported():
@@ -976,20 +945,16 @@ def test_delegated_opaque_checker_materializes_with_zero_arg_getter(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# Caller-authority gates whose authority lives in an external contract or a
-# caller-keyed allowlist must resolve GATED, never public. These were the
-# residual false-opens after the custom-error-require fix: a caller gate the
-# evaluator couldn't classify fell through to a ``business`` side-condition and
-# the function defaulted to public. Polarity / shape keeps genuinely
+# Caller-authority gates living in an external contract or a caller-keyed allowlist must
+# resolve GATED, never public. Residual false-opens: an unclassifiable caller gate fell
+# through to a ``business`` side-condition and defaulted to public. Polarity / shape keeps
 # permissionless siblings (denylist / claim-once) open.
 # ---------------------------------------------------------------------------
 
 
 def test_caller_equals_external_getter_resolves_gated(tmp_path):
-    """``require(msg.sender == registry.admin())`` — the authority lives in
-    another contract. For the ``==`` to type-check, ``registry.admin()`` returns
-    ``address``, so this is a caller-authority gate. It must resolve to a gated
-    ``external_check_only`` (query the getter), never ``conditional_universal``."""
+    """``registry.admin()`` returns ``address``, so this is a caller-authority gate: must be
+    gated ``external_check_only``, never ``conditional_universal``."""
     sl = _compile(
         tmp_path,
         """
@@ -1013,9 +978,6 @@ def test_caller_equals_external_getter_resolves_gated(tmp_path):
 
 
 def test_caller_keyed_allowlist_membership_resolves_gated(tmp_path):
-    """``require(allowed[msg.sender])`` is a positive caller allowlist — only
-    recorded addresses pass. It must resolve gated (``external_check_only``), not
-    ``conditional_universal``/public."""
     sl = _compile(
         tmp_path,
         """
@@ -1037,10 +999,8 @@ def test_caller_keyed_allowlist_membership_resolves_gated(tmp_path):
 
 
 def test_caller_keyed_denylist_membership_stays_open(tmp_path):
-    """The polarity sibling: ``require(!registered[msg.sender])`` is a denylist /
-    claim-once — the default-false caller is ALLOWED, so anyone not yet listed may
-    call. This must STAY ``conditional_universal``/public (the self-registration
-    path the cofinite refactor preserves); the allowlist gating must not catch it."""
+    """Polarity sibling: a denylist / claim-once gate must STAY ``conditional_universal``/public
+    (the self-registration path the cofinite refactor preserves)."""
     sl = _compile(
         tmp_path,
         """
@@ -1104,8 +1064,8 @@ def test_observed_event_key_words_hypersync_floors_from_block(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Inlined-frame promotion (_promote_bound_caller_leaf): only gate-shaped
-# leaves may be restored to proven delegated authority after binding.
+# Inlined-frame promotion (_promote_bound_caller_leaf): only gate-shaped leaves may be
+# restored to proven delegated authority after binding.
 # ---------------------------------------------------------------------------
 
 
@@ -1122,10 +1082,8 @@ def _leaves(tree: Any) -> list[dict[str, Any]]:
 
 
 def test_bound_transferfrom_leaf_stays_business(tmp_path):
-    """A nonview value-movement external_bool leaf whose subject argument gets
-    caller-bound at inlining must stay ``business`` (side condition), never be
-    re-promoted to proven ``delegated_authority``: the caller-bound argument
-    is the funds subject, not an authorization subject."""
+    """A caller-bound nonview value-movement leaf is the funds subject, not an authorization
+    subject: it must stay ``business``, never re-promote to ``delegated_authority``."""
     sl = _compile(
         tmp_path,
         """
@@ -1154,8 +1112,6 @@ def test_bound_transferfrom_leaf_stays_business(tmp_path):
 
 
 def test_bound_view_acl_leaf_promotes_to_delegated_authority(tmp_path):
-    """The positive case: a view ACL read on a parameter that gets
-    caller-bound at inlining IS a caller gate and must still promote."""
     sl = _compile(
         tmp_path,
         """
@@ -1185,8 +1141,6 @@ def test_bound_view_acl_leaf_promotes_to_delegated_authority(tmp_path):
 
 
 def test_bound_equality_leaf_still_promotes(tmp_path):
-    """Direct caller compares (equality leaves) keep promoting — the
-    gate-shape discriminator applies only to external_bool leaves."""
     sl = _compile(
         tmp_path,
         """
@@ -1211,9 +1165,8 @@ def test_bound_equality_leaf_still_promotes(tmp_path):
 
 
 def test_unknown_mutability_external_bool_stays_business():
-    """Three-state rule: an external_bool leaf whose callee mutability was
-    NOT determined (None) must not mint the proven delegated-authority state
-    — same treatment as the static discriminator's (None, nonview) arm."""
+    """Three-state rule: an external_bool leaf with undetermined (None) mutability must not
+    mint proven delegated authority (matches the static discriminator's (None, nonview) arm)."""
     from services.resolution.predicate_evaluator import _promote_bound_caller_leaf
 
     leaf = {

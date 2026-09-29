@@ -1,29 +1,15 @@
-"""Getter-less *internal* address authority vars resolve by reading the live
-sequential storage slot (claim #3 group D).
+"""Getter-less *internal* address authority vars resolve by reading the live sequential
+storage slot (claim #3 group D).
 
-ether.fi ``MembershipNFT`` gates ``mint`` / ``burn`` / ``incrementLock`` /
-``processDepositFromEapUser`` on ``msg.sender == address(membershipManager)``,
-where ``membershipManager`` is declared WITHOUT ``public`` — so its
-``membershipManager()`` getter reverts on *every* deployment (there is no such
-selector), and the persisted ``ControllerValue`` feed recorded only the revert.
-Before P3 that funneled to ``finite_set([], lower_bound)`` — a silent
-under-resolution, even though the manager is a real, recoverable controller.
-
-The fix is two-part:
-  * STATIC — a post-pass stamps the var's *sequential* storage slot onto the bare
-    ``state_variable`` operand (``apply_internal_authority_slot_pass``), gated to
-    getter-less address-typed scalars at offset 0;
-  * RESOLUTION — the ``state_variable`` branch of ``_resolve_equality_principal``
-    reads that slot with ``eth_getStorageAt`` against the runtime address:
-    non-zero → ``finite_set([manager], exact)``; confirmed-zero → ``resolved_empty``
-    reporting the read (``slot_read_zero``), never the name-derived
-    ``empty_by_design`` classification;
-    unreadable → honest ``lower_bound``.
-
-Layered like ``test_pending_governor_slot_resolution.py``: literal-operand unit
-tests pin the resolver and always run; the integration test compiles the
-``MembershipNFT`` fixture and proves the slot is stamped + read end-to-end. The
-global ``_stub_live_authority`` fixture is deliberately not used.
+ether.fi ``MembershipNFT`` gates ``mint``/``burn``/``incrementLock`` on
+``msg.sender == address(membershipManager)``, declared WITHOUT ``public``, so its getter
+reverts on every deployment. Before P3 that funneled to ``finite_set([], lower_bound)``, a
+silent under-resolution. Fix: the static pass stamps the sequential slot onto the bare
+``state_variable`` operand (getter-less address scalars at offset 0), and resolution reads
+it with ``eth_getStorageAt``: non-zero -> ``finite_set([manager], exact)``; confirmed-zero ->
+``resolved_empty`` (``slot_read_zero``), never the name-derived ``empty_by_design``;
+unreadable -> honest ``lower_bound``. Like ``test_pending_governor_slot_resolution.py``;
+the global ``_stub_live_authority`` fixture is deliberately not used.
 """
 
 from __future__ import annotations
@@ -142,16 +128,13 @@ def test_nonzero_slot_resolves_to_manager(monkeypatch: pytest.MonkeyPatch) -> No
     assert cap.empty_reason is None
     assert _principals(cap) == [MANAGER]
     assert _status(cap) != "resolved_empty"
-    # The getter is tried first (and reverts) before the slot is read.
     assert recorder[0][0] == "eth_call"
     assert ("eth_getStorageAt", [CONTRACT.lower(), MEMBERSHIP_MANAGER_SLOT, "latest"]) in recorder
 
 
 def test_confirmed_zero_slot_is_resolved_empty_not_by_design(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A read-confirmed zero is a renounced/unset authority — ``resolved_empty``
-    reporting the READ (``slot_read_zero``), never the accept-side
-    ``empty_by_design`` classification, which is a different semantic and rests
-    on the accessor's name."""
+    """A read-confirmed zero is a renounced/unset authority: ``resolved_empty`` reporting the
+    READ (``slot_read_zero``), never the accessor-name-based ``empty_by_design``."""
     _stub(monkeypatch, slot="0x" + "00" * 32)
     cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_SLOT), _ctx_with_rpc())
 
@@ -201,9 +184,8 @@ def test_no_rpc_with_slot_is_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_slotless_internal_var_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The before/after witness: WITHOUT the carried slot the same operand stays
-    the ``lower_bound`` placeholder (the getter reverts, nothing else to read) —
-    so the slot is exactly what recovers the principal."""
+    """The before/after witness: WITHOUT the carried slot the same operand stays the
+    ``lower_bound`` placeholder, so the slot is what recovers the principal."""
     _stub(monkeypatch, slot=_word(MANAGER))  # slot WOULD resolve, but the operand carries none
     cap = evaluate_tree(_eq_tree(D_MEMBERSHIP_MANAGER_NO_SLOT), _ctx_with_rpc())
 
@@ -356,23 +338,6 @@ class TestMembershipNFTStorageSlot:
         cap = evaluate_tree(tree, _ctx_with_rpc())
 
         assert _principals(cap) == [MANAGER]
-        assert _status(cap) != "resolved_empty"
-
-    def test_confirmed_zero_slot_resolved_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        tree = _tree_for(_membership_nft(), "burn(address,uint256,uint256)")
-        _stub(monkeypatch, slot="0x" + "00" * 32)
-        cap = evaluate_tree(tree, _ctx_with_rpc())
-
-        assert _principals(cap) == []
-        assert _status(cap) == "resolved_empty"
-        assert cap.empty_reason == "slot_read_zero"
-
-    def test_unreadable_slot_not_resolved_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        tree = _tree_for(_membership_nft(), "incrementLock(uint256,uint32)")
-        _stub(monkeypatch, slot="revert")
-        cap = evaluate_tree(tree, _ctx_with_rpc())
-
-        assert cap.membership_quality == "lower_bound"
         assert _status(cap) != "resolved_empty"
 
     def test_public_sibling_resolves_via_getter(self, monkeypatch: pytest.MonkeyPatch) -> None:

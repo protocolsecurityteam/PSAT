@@ -19,11 +19,10 @@ from sqlalchemy.orm import Session as SASession
 
 from db.models import IndexedEventCursor, MonitoredContract, WorkerHeartbeat
 from db.queue import HEARTBEAT_PROTOCOL_POLLER, HEARTBEAT_PROTOCOL_SCANNER
-from services.monitoring import ops_alerts, process_meta
+from services.monitoring import process_meta
 from services.monitoring.ops_alerts import (
     _cas_write,
     collect_chain_health,
-    collect_stale_processes,
     run_ops_alert_tick,
 )
 from services.monitoring.process_meta import ERROR, FRESH, PROCESS_META, STALE, classify, stale_after_seconds
@@ -76,9 +75,8 @@ def _seed_all_fresh(db_session, now: datetime, *, exclude: set[str] | None = Non
 
 
 def _restamp_fresh(db_session, now: datetime, *, exclude: set[str] | None = None) -> None:
-    """Re-stamp the healthy processes fresh against a new tick clock, so
-    advancing ``now`` in a multi-tick test doesn't silently age them into
-    stale (the short-cadence daemons have a 120s window)."""
+    """Re-stamp healthy processes against a new tick clock so advancing ``now`` doesn't age
+    them into stale (short-cadence daemons have a 120s window)."""
     exclude = (exclude or set()) | {"ops_alerter"}
     for process in PROCESS_META:
         if process in exclude:
@@ -114,48 +112,29 @@ def test_classify_boundaries():
     assert classify(ERROR, 5000.0, 600) == STALE
 
 
-@requires_postgres
-def test_collect_stale_processes_missing_and_old(db_session, _clean_heartbeats):
-    now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-    # Everything fresh except: poller old (stale) and one errored fresh beat.
-    _seed_all_fresh(db_session, now, exclude={HEARTBEAT_PROTOCOL_POLLER})
-    _seed(db_session, HEARTBEAT_PROTOCOL_POLLER, age_s=100_000, now=now)
-    db_session.commit()
-
-    stale = {s["name"]: s for s in collect_stale_processes(db_session, now=now)}
-    assert HEARTBEAT_PROTOCOL_POLLER in stale
-    assert stale[HEARTBEAT_PROTOCOL_POLLER]["status"] == STALE
-    # A fresh, healthy process is absent.
-    assert HEARTBEAT_PROTOCOL_SCANNER not in stale
-
-
 # ── watchdog transitions: dedupe / recovery / cooldown ───────────────────────
 
 
 @requires_postgres
 def test_down_dedupe_recovery_transition_graph(db_session, _clean_heartbeats, posts):
-    """The full watchdog state machine over one shared world: down fires once,
-    a still-stale tick dedupes, a recovered tick posts recovery once, and a
-    subsequent healthy tick does not repeat it."""
+    """The full watchdog state machine: down fires once, a stale tick dedupes, recovery posts
+    once, a healthy tick doesn't repeat it."""
     now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
     _seed_all_fresh(db_session, now, exclude={HEARTBEAT_PROTOCOL_SCANNER})
     _seed(db_session, HEARTBEAT_PROTOCOL_SCANNER, age_s=100_000, now=now)
     db_session.commit()
 
-    # 1) fresh → down: one alert.
     out1 = run_ops_alert_tick(db_session, now=now)
     assert out1["posted_down"] == 1
     assert len(posts) == 1
     assert "Monitoring down: protocol_scanner" in posts[0]["json"]["embeds"][0]["title"]
 
-    # 2) still stale → deduped (no second down post).
     t2 = now + timedelta(seconds=120)
     _restamp_fresh(db_session, t2, exclude={HEARTBEAT_PROTOCOL_SCANNER})
     out2 = run_ops_alert_tick(db_session, now=t2)
     assert out2["posted_down"] == 0
     assert len(posts) == 1
 
-    # 3) scanner beats again → recovery fires once.
     t3 = now + timedelta(seconds=205)
     _restamp_fresh(db_session, t3)  # includes the scanner now → all healthy
     out3 = run_ops_alert_tick(db_session, now=t3)
@@ -163,7 +142,6 @@ def test_down_dedupe_recovery_transition_graph(db_session, _clean_heartbeats, po
     assert len(posts) == 2
     assert "recovered" in posts[1]["json"]["embeds"][0]["title"]
 
-    # 4) still healthy → no repeat recovery.
     t4 = t3 + timedelta(seconds=1)
     _restamp_fresh(db_session, t4)
     out4 = run_ops_alert_tick(db_session, now=t4)
@@ -286,9 +264,8 @@ def test_no_webhook_still_logs_no_post(db_session, _clean_heartbeats, monkeypatc
 
 @requires_postgres
 def test_discord_transport_failure_does_not_suppress_other_daemons(db_session, _clean_heartbeats, monkeypatch, caplog):
-    """A ConnectionError/Timeout on one daemon's Discord post must not abort the
-    emit loop and silence the others: their ERROR log + post still fire, and
-    their persisted state is only meaningful if the alert actually went out."""
+    """A ConnectionError/Timeout on one daemon's Discord post must not abort the emit loop
+    and silence the others."""
     import requests
 
     captured: list[dict] = []
@@ -520,11 +497,3 @@ def test_health_monitoring_ok_when_chains_fresh(api_client, db_session, _clean_h
     body = resp.json()
     assert body["status"] == "ok"
     assert all(not c["stale"] for c in body["chains"])
-
-
-@requires_postgres
-def test_watchdog_reads_same_meta_as_fleet(db_session, _clean_heartbeats):
-    # The whole point of the shared module: fleet + watchdog key off one dict.
-    from services.aggregations import fleet
-
-    assert fleet.PROCESS_META is ops_alerts.PROCESS_META

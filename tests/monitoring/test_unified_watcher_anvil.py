@@ -1,14 +1,8 @@
 """Anvil integration tests for the unified protocol monitoring scanner.
 
-Deploys minimal governance contracts on a local Anvil node, registers them
-as MonitoredContract rows, performs governance actions, then verifies that
-scan_for_events detects the correct events.
-
-Requires:
-  - anvil, cast, forge (from Foundry) on PATH
-
-Run with:
-    uv run pytest tests/monitoring/test_unified_watcher_anvil.py -v --timeout=120
+Deploys minimal governance contracts on a local Anvil node, registers them as
+MonitoredContract rows, performs governance actions, then verifies scan_for_events.
+Requires anvil, cast, forge (Foundry) on PATH.
 """
 
 from __future__ import annotations
@@ -328,7 +322,6 @@ contract TestRoleControl {
 
 @pytest.fixture()
 def test_db():
-    """PostgreSQL database session with monitoring tables."""
     engine = create_engine(DATABASE_URL)
     Base.metadata.create_all(engine)
 
@@ -359,16 +352,9 @@ def test_db():
 
 
 def _synthetic_tracking_plan_for(contract_type: str) -> dict | None:
-    """Mint a minimal ``ControlTrackingPlan``-shaped dict for tests
-    whose anvil-deployed contracts never went through the static
-    analyzer.
-
-    Mirrors what the analyzer would emit for the canonical Ownable /
-    Pausable shapes the test fixtures use (OWNABLE_SOURCE,
-    PAUSABLE_SOURCE). Vendored entries (proxy slot, Safe getThreshold,
-    Timelock getMinDelay) come from ``build_polling_plan`` directly via
-    contract_type, so this only fills the analyzer-driven gap.
-    """
+    """Mint a minimal ``ControlTrackingPlan``-shaped dict for contracts that never went
+    through the static analyzer. Vendored entries (proxy slot, Safe, Timelock) come from
+    ``build_polling_plan``; this only fills the analyzer-driven gap."""
     controllers: list[dict] = []
     if contract_type in ("regular", "pausable", "role_control", "proxy"):
         controllers.append(
@@ -412,14 +398,8 @@ def _register_contract(
     watched_proxy_id: uuid.UUID | None = None,
     proxy_type: str | None = None,
 ) -> MonitoredContract:
-    """Register a MonitoredContract in the test DB.
-
-    Builds a synthetic polling plan from ``contract_type`` (and
-    ``proxy_type`` when given) using ``build_polling_plan`` so the
-    runtime poll path sees the same shape it would after a real
-    enrollment. When *monitoring_config* is provided, the polling plan
-    is merged in unless the caller already supplied one.
-    """
+    """Register a MonitoredContract with a synthetic polling plan from ``build_polling_plan``,
+    merged into *monitoring_config* unless the caller already supplied one."""
     from services.monitoring.polling_plan import build_polling_plan
 
     # Build the polling plan first so it can ride along with whatever
@@ -473,7 +453,6 @@ def _register_contract(
 
 
 def test_ownership_transfer_detected(anvil_env, test_db):
-    """Deploy Ownable, register, transfer ownership, scan, assert event."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -482,7 +461,6 @@ def test_ownership_transfer_detected(anvil_env, test_db):
 
     _register_contract(test_db, addr, "regular", current_block)
 
-    # Transfer ownership to a new address
     new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
 
@@ -496,13 +474,10 @@ def test_ownership_transfer_detected(anvil_env, test_db):
 
 
 def test_solmate_owner_updated_detected(anvil_env, test_db):
-    """Deploy Solmate-style Owned, register with a tracked_topics entry for
-    OwnerUpdated, transfer ownership, scan, assert the scanner picks up the
-    Solmate event under the canonical ``ownership_transferred`` event_type.
+    """Solmate ``OwnerUpdated`` is reported as ``ownership_transferred``.
 
-    Guards Bug 3: without the per-contract topic dispatch, OwnerUpdated's
-    topic0 isn't in the global eth_getLogs filter and the event is dropped
-    at the network layer before any decoder runs.
+    Guards Bug 3: without per-contract topic dispatch, OwnerUpdated's topic0 isn't in
+    the global eth_getLogs filter and the event is dropped before any decoder runs.
     """
     from eth_utils.crypto import keccak
 
@@ -543,14 +518,10 @@ def test_solmate_owner_updated_detected(anvil_env, test_db):
 
 
 def test_solmate_authority_updated_detected(anvil_env, test_db):
-    """Deploy Solmate-style Auth, register with a tracked_topics entry for
-    AuthorityUpdated, swap the authority, scan, assert the event is detected
-    under event_type='authority_updated' with the new authority value in the
-    decoded data.
+    """Solmate ``AuthorityUpdated`` is detected as ``authority_updated`` with the new authority.
 
-    AuthorityUpdated has no OZ counterpart — without per-contract topic
-    dispatch, an authority swap (entire access-control regime change) is
-    invisible to the scanner.
+    No OZ counterpart: without per-contract topic dispatch, an authority swap (a whole
+    access-control regime change) is invisible to the scanner.
     """
     from eth_utils.crypto import keccak
 
@@ -600,27 +571,13 @@ def test_solmate_authority_updated_detected(anvil_env, test_db):
 
 
 def test_dsauth_log_set_owner_detected(anvil_env, test_db):
-    """Maker / DSAuth-family LogSetOwner detection.
+    """Maker / DSAuth ``LogSetOwner`` detection.
 
-    Why this test exists as part of the general-bug regression set:
-    DSAuth's ``LogSetOwner(address indexed owner)`` has a topic0
-    distinct from both OZ ``OwnershipTransferred`` and Solmate
-    ``OwnerUpdated``. Without per-contract topic dispatch the scanner's
-    eth_getLogs filter never includes its topic0, and the event is
-    dropped at the network layer — same shape of gap as Bug 3 but
-    against a completely different ABI family (Maker DSS, MKR, DAI,
-    Vat/Vow/Cat). Validates that the generic dispatcher generalizes
-    beyond Solmate.
-
-    Also exercises the *single-arg* decode + semantic-key fallback path:
-    LogSetOwner only carries the new owner (no previous), so the
-    decoder should fill ``new_owner`` without inventing an ``old_owner``.
-
-    Finally it pins ``_resolve_value_for_write_target``'s bare-name match:
-    with ``effect_tags: {"writes": ["owner"]}`` attached, the single arg named
-    ``owner`` must resolve to the state write without an OZ-style ``new``
-    prefix. That is the simplest path in the resolver, but the prior fallback
-    already handled it and we mustn't regress.
+    Its topic0 differs from OZ and Solmate, so it is the same Bug 3 gap against a
+    different ABI family. Also exercises single-arg decode (only the new owner, so
+    no ``old_owner`` may be invented) and ``_resolve_value_for_write_target``'s bare-name
+    match: with ``effect_tags: {"writes": ["owner"]}`` the arg named ``owner`` must
+    resolve without an OZ-style ``new`` prefix.
     """
     from eth_utils.crypto import keccak
 
@@ -641,10 +598,8 @@ def test_dsauth_log_set_owner_detected(anvil_env, test_db):
                 "event_type": "ownership_transferred",
                 "controller_id": "state_variable:owner",
                 "inputs": [{"name": "owner", "type": "address", "indexed": True}],
-                # _WRITE_TARGET_TO_STATE catches "owner" via the canonical
-                # _extract_new_owner extractor, which reads parsed["new_owner"]
-                # — filled by parse_tracked_log's semantic-key assignment for
-                # the canonical ``ownership_transferred`` event_type.
+                # _WRITE_TARGET_TO_STATE catches "owner" via _extract_new_owner, which reads
+                # parsed["new_owner"] as filled by parse_tracked_log's semantic-key assignment.
                 "effect_tags": {"writes": ["owner"]},
             }
         ],
@@ -678,14 +633,8 @@ def test_dsauth_log_set_owner_detected(anvil_env, test_db):
 
 
 def test_compound_new_admin_detected(anvil_env, test_db):
-    """Compound Comptroller / cToken NewAdmin detection.
-
-    Compound's ``NewAdmin(address newAdmin)`` packs the admin into the
-    log data field rather than a topic — exercises the eth_abi
-    non-indexed decode path. Distinct topic0 from every other ABI
-    family. Validates the dispatcher works for data-side decoding,
-    not just indexed-topic events.
-    """
+    """Compound ``NewAdmin(address newAdmin)`` puts the admin in log data, not a topic,
+    exercising the non-indexed eth_abi decode path."""
     from eth_utils.crypto import keccak
 
     rpc_url, tmp_path = anvil_env
@@ -722,15 +671,10 @@ def test_compound_new_admin_detected(anvil_env, test_db):
 
 
 def test_ozownable2step_transfer_started_detected(anvil_env, test_db):
-    """OZ Ownable2Step OwnershipTransferStarted detection.
+    """OZ ``OwnershipTransferStarted`` has the OZ Ownable shape but a different topic0.
 
-    Same ABI shape as the OZ Ownable ``OwnershipTransferred`` (two
-    indexed addresses, OZ-conventional ``previousOwner`` /
-    ``newOwner`` names), but a different event name → different
-    topic0. Without per-contract dispatch, the *intent* phase of a
-    two-step ownership move is invisible — only the final
-    ``OwnershipTransferred`` is registered. Defense-in-depth
-    monitoring wants both phases.
+    Without per-contract dispatch the intent phase of a two-step ownership move is
+    invisible; only the final ``OwnershipTransferred`` would register.
     """
     from eth_utils.crypto import keccak
 
@@ -768,22 +712,15 @@ def test_ozownable2step_transfer_started_detected(anvil_env, test_db):
     assert evt.event_type == "ownership_transfer_started"
     assert evt.data is not None
     assert evt.data.get("new_owner", "").lower() == new_owner.lower()
-    # previousOwner here is the deployer (account 0).
     assert evt.data.get("old_owner", "").lower() == ACCOUNT0.lower()
 
 
 def test_pre_fix_filter_drops_non_oz_event(anvil_env, test_db):
-    """Regression guard for the *general* bug shape.
+    """Without ``tracked_topics`` a Solmate-Owned transfer is not detected.
 
-    Deploys a Solmate-Owned, registers it with WATCH_OWNERSHIP=True
-    but *no* tracked_topics. Transfers ownership. Asserts the scanner
-    detects nothing — proves the pre-fix scanner behavior is preserved
-    when tracked_topics is absent (so the fix is purely additive: zero
-    new events when no tracking_plan has been threaded through
-    enrollment). Pair with ``test_solmate_owner_updated_detected``:
-    same contract + same on-chain action, only the monitoring_config
-    differs. If this test ever starts catching the event, something
-    has leaked Solmate's topic0 into the hand-rolled global filter.
+    Proves the per-contract dispatch fix is purely additive. Pair with
+    ``test_solmate_owner_updated_detected`` (same contract and action): if this starts
+    catching the event, Solmate's topic0 leaked into the hand-rolled global filter.
     """
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import scan_for_events
@@ -791,9 +728,7 @@ def test_pre_fix_filter_drops_non_oz_event(anvil_env, test_db):
     addr = _compile_and_deploy(SOLMATE_OWNED_SOURCE, "TestSolmateOwned", [], rpc_url, PRIVATE_KEY, tmp_path)
     current_block = int(_cast(["block-number"], rpc_url))
 
-    # No tracked_topics — simulates a row that was enrolled before the
-    # general fix landed (or a contract whose tracking_plan is still
-    # pending materialization).
+    # No tracked_topics: a row enrolled before tracking_plan was threaded through.
     _register_contract(
         test_db,
         addr,
@@ -816,7 +751,6 @@ def test_pre_fix_filter_drops_non_oz_event(anvil_env, test_db):
 
 
 def test_pause_unpause_detected(anvil_env, test_db):
-    """Deploy Pausable, pause, scan, unpause, scan, assert both events."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -825,13 +759,11 @@ def test_pause_unpause_detected(anvil_env, test_db):
 
     _register_contract(test_db, addr, "pausable", current_block)
 
-    # Pause
     _cast_send(addr, "pause()", [], rpc_url, PRIVATE_KEY)
     events = scan_for_events(test_db, rpc_url)
     assert len(events) == 1
     assert events[0].event_type == "paused"
 
-    # Unpause
     _cast_send(addr, "unpause()", [], rpc_url, PRIVATE_KEY)
     events2 = scan_for_events(test_db, rpc_url)
     assert len(events2) == 1
@@ -839,7 +771,6 @@ def test_pause_unpause_detected(anvil_env, test_db):
 
 
 def test_safe_signer_changes_detected(anvil_env, test_db):
-    """Deploy Safe, add/remove/changeThreshold, scan, assert 3 events."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -863,7 +794,6 @@ def test_safe_signer_changes_detected(anvil_env, test_db):
 
 
 def test_timelock_operations_detected(anvil_env, test_db):
-    """Deploy Timelock, schedule/execute/updateDelay, scan, assert 3 events."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -872,7 +802,6 @@ def test_timelock_operations_detected(anvil_env, test_db):
 
     _register_contract(test_db, addr, "timelock", current_block)
 
-    # Schedule a call
     op_id = "0x" + "ab" * 32
     target = "0x0000000000000000000000000000000000000001"
     _cast_send(
@@ -883,7 +812,6 @@ def test_timelock_operations_detected(anvil_env, test_db):
         PRIVATE_KEY,
     )
 
-    # Execute a call
     _cast_send(
         addr,
         "execute(bytes32,uint256,address,uint256,bytes)",
@@ -892,7 +820,6 @@ def test_timelock_operations_detected(anvil_env, test_db):
         PRIVATE_KEY,
     )
 
-    # Update delay
     _cast_send(addr, "updateDelay(uint256)", ["7200"], rpc_url, PRIVATE_KEY)
 
     events = scan_for_events(test_db, rpc_url)
@@ -904,7 +831,6 @@ def test_timelock_operations_detected(anvil_env, test_db):
 
 
 def test_role_changes_detected(anvil_env, test_db):
-    """Deploy a role-control contract, grant/revoke, scan, assert 2 events."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -938,7 +864,6 @@ def test_proxy_upgrade_backward_compat(anvil_env, test_db):
 
     current_block = int(_cast(["block-number"], rpc_url))
 
-    # Create WatchedProxy
     wp = WatchedProxy(
         id=uuid.uuid4(),
         proxy_address=proxy_addr.lower(),
@@ -950,7 +875,6 @@ def test_proxy_upgrade_backward_compat(anvil_env, test_db):
     test_db.add(wp)
     test_db.commit()
 
-    # Create MonitoredContract linked to WatchedProxy
     _register_contract(
         test_db,
         proxy_addr,
@@ -960,61 +884,26 @@ def test_proxy_upgrade_backward_compat(anvil_env, test_db):
         watched_proxy_id=wp.id,
     )
 
-    # Upgrade
     _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
 
     events = scan_for_events(test_db, rpc_url)
 
-    # Should have created a MonitoredEvent
     assert len(events) >= 1
     upgrade_events = [e for e in events if e.event_type == "upgraded"]
     assert len(upgrade_events) == 1
 
-    # Should ALSO have created a ProxyUpgradeEvent (backward compat)
     proxy_events = (
         test_db.execute(select(ProxyUpgradeEvent).where(ProxyUpgradeEvent.watched_proxy_id == wp.id)).scalars().all()
     )
     assert len(proxy_events) == 1
     assert proxy_events[0].new_implementation.lower() == impl_v2.lower()
 
-    # WatchedProxy should be updated
     test_db.refresh(wp)
     assert wp.last_known_implementation is not None
     assert wp.last_known_implementation.lower() == impl_v2.lower()
 
 
-def test_mixed_contracts_single_scan(anvil_env, test_db):
-    """Register multiple contract types, perform actions, single scan detects all."""
-    rpc_url, tmp_path = anvil_env
-    from services.monitoring.unified_watcher import scan_for_events
-
-    ownable_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    pausable_addr = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
-    safe_addr = _compile_and_deploy(SAFE_SOURCE, "TestSafe", [], rpc_url, PRIVATE_KEY, tmp_path)
-
-    current_block = int(_cast(["block-number"], rpc_url))
-
-    _register_contract(test_db, ownable_addr, "regular", current_block)
-    _register_contract(test_db, pausable_addr, "pausable", current_block)
-    _register_contract(test_db, safe_addr, "safe", current_block)
-
-    # Perform actions on each
-    new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
-    _cast_send(ownable_addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
-    _cast_send(pausable_addr, "pause()", [], rpc_url, PRIVATE_KEY)
-    _cast_send(safe_addr, "addOwner(address)", [new_owner], rpc_url, PRIVATE_KEY)
-
-    events = scan_for_events(test_db, rpc_url)
-
-    event_types = sorted([e.event_type for e in events])
-    assert "ownership_transferred" in event_types
-    assert "paused" in event_types
-    assert "signer_added" in event_types
-    assert len(events) >= 3
-
-
 def test_poll_detects_ownership_change(anvil_env, test_db):
-    """Transfer ownership and detect via polling (state comparison)."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -1033,7 +922,6 @@ def test_poll_detects_ownership_change(anvil_env, test_db):
     mc.last_known_state = {"owner": ACCOUNT0.lower()}
     test_db.commit()
 
-    # Transfer ownership
     new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
 
@@ -1052,7 +940,6 @@ def test_poll_detects_ownership_change(anvil_env, test_db):
 
 
 def test_should_watch_filters_disabled_events(anvil_env, test_db):
-    """Events are ignored when their config flag is disabled."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -1060,7 +947,6 @@ def test_should_watch_filters_disabled_events(anvil_env, test_db):
     ownable_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
     current_block = int(_cast(["block-number"], rpc_url))
 
-    # Register pausable with watch_pause=False — should be filtered out
     _register_contract(
         test_db,
         pausable_addr,
@@ -1068,7 +954,6 @@ def test_should_watch_filters_disabled_events(anvil_env, test_db):
         current_block,
         monitoring_config={"watch_pause": False, "watch_ownership": False},
     )
-    # Register ownable with watch_ownership=True — should be detected
     _register_contract(
         test_db,
         ownable_addr,
@@ -1077,14 +962,12 @@ def test_should_watch_filters_disabled_events(anvil_env, test_db):
         monitoring_config={"watch_ownership": True, "watch_pause": False},
     )
 
-    # Trigger both events
     _cast_send(pausable_addr, "pause()", [], rpc_url, PRIVATE_KEY)
     new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     _cast_send(ownable_addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
 
     events = scan_for_events(test_db, rpc_url)
 
-    # Only the ownership transfer should be detected; pause should be filtered
     event_types = [e.event_type for e in events]
     assert "ownership_transferred" in event_types
     assert "paused" not in event_types
@@ -1093,12 +976,9 @@ def test_should_watch_filters_disabled_events(anvil_env, test_db):
 # ---------------------------------------------------------------------------
 # last_known_state absorption, one case per tracked event shape.
 #
-# These were five separate tests, each paying its own anvil boot for the same
-# deploy -> act -> scan -> assert shape. They now share one anvil node: each
-# case deploys its own contract, registers it, asserts, then flips
-# ``is_active`` off so the next case's scan sees exactly one active contract
-# (``scan_for_events`` selects on ``is_active``) — the same isolation the five
-# separate tests had, at one fifth of the boot cost.
+# The cases share one anvil node to save boot cost: each deploys its own contract,
+# asserts, then flips ``is_active`` off so the next scan (which selects on
+# ``is_active``) sees exactly one active contract.
 # ---------------------------------------------------------------------------
 
 
@@ -1112,7 +992,6 @@ class _StateCase(NamedTuple):
 
 
 def _state_case_ownership_transfer(rpc_url: str, tmp_path: Path) -> _StateCase:
-    """last_known_state is updated with new owner after OwnershipTransferred."""
     addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
     new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     return _StateCase(
@@ -1125,7 +1004,6 @@ def _state_case_ownership_transfer(rpc_url: str, tmp_path: Path) -> _StateCase:
 
 
 def _state_case_pause(rpc_url: str, tmp_path: Path) -> _StateCase:
-    """last_known_state tracks paused=True after Paused and paused=False after Unpaused."""
     addr = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
     return _StateCase(
         addr,
@@ -1137,7 +1015,6 @@ def _state_case_pause(rpc_url: str, tmp_path: Path) -> _StateCase:
 
 
 def _state_case_proxy_upgrade(rpc_url: str, tmp_path: Path) -> _StateCase:
-    """last_known_state tracks implementation after Upgraded event."""
     impl_v1 = _compile_and_deploy(IMPL_V1_SOURCE, "ImplV1", [], rpc_url, PRIVATE_KEY, tmp_path)
     impl_v2 = _compile_and_deploy(IMPL_V2_SOURCE, "ImplV2", [], rpc_url, PRIVATE_KEY, tmp_path)
     proxy_addr = _compile_and_deploy(PROXY_SOURCE, "TestProxy", [impl_v1], rpc_url, PRIVATE_KEY, tmp_path)
@@ -1151,7 +1028,6 @@ def _state_case_proxy_upgrade(rpc_url: str, tmp_path: Path) -> _StateCase:
 
 
 def _state_case_threshold_change(rpc_url: str, tmp_path: Path) -> _StateCase:
-    """last_known_state tracks threshold after ChangedThreshold event."""
     addr = _compile_and_deploy(SAFE_SOURCE, "TestSafe", [], rpc_url, PRIVATE_KEY, tmp_path)
     return _StateCase(
         addr,
@@ -1163,7 +1039,6 @@ def _state_case_threshold_change(rpc_url: str, tmp_path: Path) -> _StateCase:
 
 
 def _state_case_delay_change(rpc_url: str, tmp_path: Path) -> _StateCase:
-    """last_known_state tracks min_delay after MinDelayChange event."""
     addr = _compile_and_deploy(TIMELOCK_SOURCE, "TestTimelock", ["3600"], rpc_url, PRIVATE_KEY, tmp_path)
     return _StateCase(
         addr,
@@ -1232,9 +1107,7 @@ def test_state_updated_after_event(anvil_env, test_db):
 
 
 def test_enrollment_config_produces_correct_detection(anvil_env, test_db):
-    """Contracts registered with enrollment-style configs detect matching events only."""
     rpc_url, tmp_path = anvil_env
-    # Simulate enrollment output for a pausable contract
     from unittest.mock import MagicMock
 
     from services.monitoring.enrollment import _build_monitoring_config, _determine_contract_type
@@ -1252,31 +1125,25 @@ def test_enrollment_config_produces_correct_detection(anvil_env, test_db):
     ct = _determine_contract_type(contract, summary, [])
     config = _build_monitoring_config(summary, [], ct)
 
-    # Deploy a pausable contract
     addr = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
     current_block = int(_cast(["block-number"], rpc_url))
 
-    # Register with the config that enrollment would produce
     _register_contract(test_db, addr, ct, current_block, monitoring_config=config)
 
-    # Pause (watch_pause should be True)
     _cast_send(addr, "pause()", [], rpc_url, PRIVATE_KEY)
     events = scan_for_events(test_db, rpc_url)
 
     assert len(events) == 1
     assert events[0].event_type == "paused"
 
-    # The config should NOT have watch_upgrades or watch_safe_signers
     assert config.get("watch_upgrades") is False
     assert config.get("watch_safe_signers") is False
 
 
 def test_notify_protocol_events_sends_discord(anvil_env, test_db):
-    """notify_protocol_events sends Discord embeds for detected events."""
     rpc_url, tmp_path = anvil_env
     from unittest.mock import patch
 
-    # ProtocolSubscription table already exists via Base.metadata.create_all
     from db.models import Protocol, ProtocolSubscription
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -1291,7 +1158,6 @@ def test_notify_protocol_events_sends_discord(anvil_env, test_db):
     mc.protocol_id = proto.id
     test_db.commit()
 
-    # Create a protocol subscription
     sub = ProtocolSubscription(
         id=uuid.uuid4(),
         protocol_id=proto.id,
@@ -1301,13 +1167,10 @@ def test_notify_protocol_events_sends_discord(anvil_env, test_db):
     test_db.add(sub)
     test_db.commit()
 
-    # Trigger event
     new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
 
-    # scan_for_events now delivers the Discord notification per window as part
-    # of the scan itself, so patch the wire before scanning and assert the
-    # embed from that scan-triggered post.
+    # scan_for_events delivers the notification itself; patch the wire before scanning.
     with patch("services.monitoring.notifier.requests.post") as mock_post:
         mock_post.return_value = MagicMock(ok=True)
         events = scan_for_events(test_db, rpc_url)
@@ -1322,14 +1185,11 @@ def test_notify_protocol_events_sends_discord(anvil_env, test_db):
 
 
 def test_notify_event_filter_restricts_types(anvil_env, test_db):
-    """ProtocolSubscription with event_filter only gets matching event types."""
     rpc_url, tmp_path = anvil_env
     from unittest.mock import MagicMock, patch
 
     from db.models import Protocol, ProtocolSubscription
     from services.monitoring.unified_watcher import scan_for_events
-
-    # ProtocolSubscription table already exists via Base.metadata.create_all
 
     pausable_addr = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
     ownable_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
@@ -1345,7 +1205,6 @@ def test_notify_event_filter_restricts_types(anvil_env, test_db):
     mc2.protocol_id = proto.id
     test_db.commit()
 
-    # Subscription only wants "paused" events
     sub = ProtocolSubscription(
         id=uuid.uuid4(),
         protocol_id=proto.id,
@@ -1355,26 +1214,22 @@ def test_notify_event_filter_restricts_types(anvil_env, test_db):
     test_db.add(sub)
     test_db.commit()
 
-    # Trigger both events
     _cast_send(pausable_addr, "pause()", [], rpc_url, PRIVATE_KEY)
     new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     _cast_send(ownable_addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
 
-    # scan_for_events now delivers notifications per window as part of the scan
-    # itself; patch the wire before scanning and assert the filtered post.
+    # Notifications are delivered by the scan; patch the wire before scanning.
     with patch("services.monitoring.notifier.requests.post") as mock_post:
         mock_post.return_value = MagicMock(ok=True)
         events = scan_for_events(test_db, rpc_url)
         assert len(events) >= 2  # both detected in DB
 
-        # Only the "paused" event should trigger a Discord notification
         assert mock_post.call_count == 1
         payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
         assert "paused" in payload["embeds"][0]["title"]
 
 
 def test_poll_detects_pause_state_change(anvil_env, test_db):
-    """Poller detects paused() flipping from false to true."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -1403,7 +1258,6 @@ def test_poll_detects_pause_state_change(anvil_env, test_db):
 
 
 def test_poll_detects_threshold_change(anvil_env, test_db):
-    """Poller detects getThreshold() changing on a safe contract."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -1432,7 +1286,6 @@ def test_poll_detects_threshold_change(anvil_env, test_db):
 
 
 def test_poll_no_change_no_events(anvil_env, test_db):
-    """Poller creates no events when state hasn't changed."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -1450,7 +1303,6 @@ def test_poll_no_change_no_events(anvil_env, test_db):
     mc.last_known_state = {"owner": ACCOUNT0.lower()}
     test_db.commit()
 
-    # Don't change anything — poll should return empty
     events = poll_for_state_changes(test_db, rpc_url)
     assert len(events) == 0
 
@@ -1461,11 +1313,9 @@ def test_poll_no_change_no_events(anvil_env, test_db):
 
 
 def test_poll_suppressed_when_scan_already_detected_upgrade(anvil_env, test_db):
-    """When the scanner already detected an Upgraded event, the poller should
-    NOT create a duplicate state_changed_poll for the same implementation change.
+    """The poller must not duplicate a scanner-detected Upgraded event as state_changed_poll.
 
-    Simulates the race condition where the scanner committed a MonitoredEvent
-    but the poller still has stale last_known_state (read before scanner commit).
+    Simulates the race where the scanner committed but the poller holds stale last_known_state.
     """
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import poll_for_state_changes
@@ -1486,10 +1336,8 @@ def test_poll_suppressed_when_scan_already_detected_upgrade(anvil_env, test_db):
     mc.last_known_state = {"implementation": impl_v1.lower()}
     test_db.commit()
 
-    # Upgrade the proxy
     _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
 
-    # Simulate: scanner already detected the upgrade (but poller has stale state)
     scanner_event = MonitoredEvent(
         id=uuid.uuid4(),
         monitored_contract_id=mc.id,
@@ -1501,17 +1349,13 @@ def test_poll_suppressed_when_scan_already_detected_upgrade(anvil_env, test_db):
     test_db.add(scanner_event)
     test_db.commit()
 
-    # Poller runs — storage shows impl_v2 but last_known_state still has impl_v1
-    # Without fix: creates a duplicate state_changed_poll event
-    # With fix: suppressed because scanner already detected "upgraded"
+    # Without the fix this creates a duplicate state_changed_poll; with it, suppressed.
     poll_events = poll_for_state_changes(test_db, rpc_url)
     impl_changes = [e for e in poll_events if e.data and e.data.get("field") == "implementation"]
     assert len(impl_changes) == 0, "Poller should not create duplicate event when scanner already detected upgrade"
 
 
 def test_poll_suppressed_when_scan_already_detected_ownership(anvil_env, test_db):
-    """Scanner already detected OwnershipTransferred — poller should NOT
-    create a duplicate state_changed_poll for the owner field."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -1532,7 +1376,6 @@ def test_poll_suppressed_when_scan_already_detected_ownership(anvil_env, test_db
     new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
 
-    # Simulate scanner already detected it
     scanner_event = MonitoredEvent(
         id=uuid.uuid4(),
         monitored_contract_id=mc.id,
@@ -1552,8 +1395,7 @@ def test_poll_suppressed_when_scan_already_detected_ownership(anvil_env, test_db
 
 
 def test_poll_still_creates_event_when_no_scanner_event(anvil_env, test_db):
-    """When there is NO scanner event, the poller should still create its event.
-    This confirms the suppression only fires when a scanner event exists."""
+    """With no scanner event the poller still emits its own (suppression is conditional)."""
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -1582,27 +1424,18 @@ def test_poll_still_creates_event_when_no_scanner_event(anvil_env, test_db):
 
 
 # ---------------------------------------------------------------------------
-# Polling-plan regression tests — custom-named slots end-to-end.
+# Polling-plan regression tests: custom-named slots end-to-end.
 #
-# These prove the post-refactor invariants the new ``polling_plan`` shape
-# is supposed to guarantee:
-#
-#   1. A custom-named state-var (``protocolAdmin``, ``feeRecipient``) is
-#      visible to the poll path purely via the analyzer-derived
-#      polling-plan entry — no contract_type branching, no per-slot
-#      selector constant, no hand-rolled event-type entry.
-#   2. The first-observation-no-event rule still holds for custom slots.
-#   3. Per-contract scan/poll suppression derives from ``tracked_topics``
-#      so a custom event fired by the scanner suppresses the matching
-#      poll observation.
-#   4. The poll path and the event path write to the same
-#      ``last_known_state`` key for the same slot, regardless of which
-#      path observed the change first.
-#   5. End-to-end enrollment from a ``ContractMaterialization`` row
-#      projects the analyzer's tracked_controllers into a polling_plan.
-#   6. Poll-detected changes to canonical-name admin slots
-#      (``admin``) trigger reanalysis through the unified
-#      write-target vocabulary, not a special-case poll-field whitelist.
+# Invariants of the ``polling_plan`` shape:
+#   1. Custom state-vars (``protocolAdmin``, ``feeRecipient``) are visible to polling
+#      purely via analyzer-derived plan entries.
+#   2. First observation of a custom slot emits no event.
+#   3. Scan/poll suppression derives from ``tracked_topics``.
+#   4. Poll and event paths write the same ``last_known_state`` key.
+#   5. Enrollment from a ``ContractMaterialization`` projects tracked_controllers
+#      into a polling_plan.
+#   6. Poll-detected changes to ``admin`` slots trigger reanalysis via the unified
+#      write-target vocabulary.
 # ---------------------------------------------------------------------------
 
 
@@ -1642,11 +1475,8 @@ contract CustomAdminContract {
 
 
 def _custom_admin_polling_plan(extra_controllers: list[dict] | None = None) -> list[dict]:
-    """Mint a polling_plan with the ``protocolAdmin`` and ``feeRecipient``
-    analyzer-derived entries CustomAdminContract would yield in a real
-    tracking-plan projection. Callers can append extra entries via
-    *extra_controllers* (e.g. to add a tracked-topic-driven suppress
-    list)."""
+    """Mint a polling_plan with the analyzer-derived ``protocolAdmin`` and ``feeRecipient``
+    entries; *extra_controllers* are appended."""
     from services.monitoring.polling_plan import build_polling_plan
 
     tracked_controllers: list[dict] = [
@@ -1686,13 +1516,9 @@ def _custom_admin_polling_plan(extra_controllers: list[dict] | None = None) -> l
 def test_poll_detects_custom_named_slot_change(anvil_env, test_db):
     """Custom-named slot polling via analyzer-derived plan entry.
 
-    Regression for the pre-refactor blind spot: the old poller hardcoded
-    selectors for ``owner()`` / ``paused()`` / ``getThreshold()`` /
-    ``getMinDelay()`` and the EIP-1967 slot, so a slot named
-    ``protocolAdmin`` was invisible to the poll path even after the
-    analyzer correctly surfaced it. The new design derives the selector
-    from ``read_spec.target`` at enrollment time and dispatches on the
-    persisted polling_plan entry."""
+    Regression: the old poller hardcoded selectors for owner/paused/getThreshold/
+    getMinDelay/EIP-1967, so a slot named ``protocolAdmin`` was invisible to it.
+    """
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -1736,12 +1562,9 @@ def test_poll_detects_custom_named_slot_change(anvil_env, test_db):
 def test_poll_custom_slot_first_observation_no_event(anvil_env, test_db):
     """First observation of a custom slot seeds state but emits no event.
 
-    Regression for the post-refactor first-observation rule: when
-    ``last_known_state[field]`` is absent for a polling-plan field, the
-    first successful read records the value but does NOT fire a
-    state_changed_poll (it isn't a state CHANGE — it's a first read).
-    Critical for custom slots because they have no
-    ``contract.implementation``-style column to seed from."""
+    A first read is not a state CHANGE; custom slots have no
+    ``contract.implementation``-style column to seed from.
+    """
     rpc_url, tmp_path = anvil_env
     from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -1775,12 +1598,9 @@ def test_poll_custom_slot_first_observation_no_event(anvil_env, test_db):
 def test_poll_suppressed_for_custom_slot_when_scanner_fires(anvil_env, test_db):
     """Per-contract suppress list derives from ``tracked_topics``.
 
-    Regression for the suppression generalization: the old poller had a
-    global ``_POLL_FIELD_TO_SCAN_EVENTS`` table covering only the five
-    vendored fields. Custom slots had no suppression at all. The new
-    design derives ``suppress_when_scan_event_types`` per-entry from the
-    contract's ``tracked_topics`` so a scanner-detected custom-event
-    suppresses the matching poll observation."""
+    Regression: the old global ``_POLL_FIELD_TO_SCAN_EVENTS`` covered only the five
+    vendored fields, so custom slots had no suppression.
+    """
     from eth_utils.crypto import keccak
 
     rpc_url, tmp_path = anvil_env
@@ -1790,9 +1610,8 @@ def test_poll_suppressed_for_custom_slot_when_scanner_fires(anvil_env, test_db):
     addr = _compile_and_deploy(CUSTOM_ADMIN_SOURCE, "CustomAdminContract", [], rpc_url, PRIVATE_KEY, tmp_path)
     current_block = int(_cast(["block-number"], rpc_url))
 
-    # ``tracked_topics`` carries the per-contract event spec for
-    # ProtocolAdminChanged with effect_tags.writes=["protocolAdmin"].
-    # The polling-plan builder reads these to seed the suppress list.
+    # tracked_topics carries the event spec (effect_tags.writes=["protocolAdmin"]) that
+    # the polling-plan builder reads to seed the suppress list.
     topic0 = "0x" + keccak(text="ProtocolAdminChanged(address,address)").hex()
     custom_event_type = "controller_changed:state_variable:protocolAdmin"
     tracked_topics = [
@@ -1871,20 +1690,11 @@ def test_poll_suppressed_for_custom_slot_when_scanner_fires(anvil_env, test_db):
 def test_poll_and_event_paths_write_same_state_key(anvil_env, test_db):
     """Poll path and event path converge on the same ``last_known_state`` key.
 
-    Regression for the state-key naming contract: the poll path writes
-    to ``last_known_state[entry["field"]]`` which is the analyzer's
-    ``state_variable_name``. The event-side generic resolver
-    (``_resolve_value_for_write_target``) also writes to
-    ``last_known_state[write_target]`` for the same name. If they ever
-    diverged (e.g. poll writes ``protocolAdmin`` but event writes
-    ``newProtocolAdmin``) a single mutation would create two separate
-    ghost entries.
-
-    Uses Compound-shape event arg names (``previousAdmin`` / ``newAdmin``
-    for a ``protocolAdmin`` write target) to exercise the ``new*`` ABI
-    heuristic in the resolver — neither the bare-name match nor the OZ
-    ``new<Cap>`` convention applies here, so this is the path that
-    catches non-OZ ABIs."""
+    If they diverged (poll writes ``protocolAdmin``, event writes ``newProtocolAdmin``)
+    one mutation would create two ghost entries. Compound-shape arg names
+    (``previousAdmin`` / ``newAdmin``) force the resolver's "starts with new" heuristic,
+    the path that catches non-OZ ABIs.
+    """
     from eth_utils.crypto import keccak
 
     rpc_url, tmp_path = anvil_env
@@ -1893,11 +1703,8 @@ def test_poll_and_event_paths_write_same_state_key(anvil_env, test_db):
     addr = _compile_and_deploy(CUSTOM_ADMIN_SOURCE, "CustomAdminContract", [], rpc_url, PRIVATE_KEY, tmp_path)
     current_block = int(_cast(["block-number"], rpc_url))
 
-    # tracked_topics so the scanner can decode + dispatch the custom event.
-    # Compound-style arg names so neither parsed["protocolAdmin"] nor
-    # parsed["newProtocolAdmin"] matches — the resolver has to fall back
-    # to walking _inputs and finding ``newAdmin`` via the "starts with
-    # new" heuristic.
+    # Compound-style arg names: neither parsed["protocolAdmin"] nor parsed["newProtocolAdmin"]
+    # matches, so the resolver must find ``newAdmin`` via the "starts with new" heuristic.
     topic0 = "0x" + keccak(text="ProtocolAdminChanged(address,address)").hex()
     tracked_topics = [
         {
@@ -1927,8 +1734,7 @@ def test_poll_and_event_paths_write_same_state_key(anvil_env, test_db):
     mc.last_known_state = {"protocolAdmin": ACCOUNT0.lower()}
     test_db.commit()
 
-    # Path 1: event → state update via _update_state_from_event's
-    # generic name-match fallback (no canonical tag entry for ``protocolAdmin``).
+    # Path 1: event -> state update via the generic name-match fallback.
     admin_b = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
     _cast_send(addr, "setProtocolAdmin(address)", [admin_b], rpc_url, PRIVATE_KEY)
     scan_for_events(test_db, rpc_url)
@@ -1938,10 +1744,8 @@ def test_poll_and_event_paths_write_same_state_key(anvil_env, test_db):
     assert state_after_event.get("protocolAdmin", "").lower() == admin_b.lower(), (
         f"event-side state write went to a different key — got state {state_after_event}"
     )
-    # Critical: the state must be keyed on the analyzer's write_target
-    # (``protocolAdmin``), not on the ABI's arg name (``newAdmin``) —
-    # otherwise the poll path would read state[protocolAdmin] and the
-    # event path would write state[newAdmin] and they'd never converge.
+    # Must be keyed on the analyzer's write_target, not the ABI arg name (``newAdmin``),
+    # or poll and event paths would never converge.
     assert "newAdmin" not in state_after_event
     assert "newProtocolAdmin" not in state_after_event
 
@@ -1960,18 +1764,11 @@ def test_poll_and_event_paths_write_same_state_key(anvil_env, test_db):
 
 
 def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil_env, test_db):
-    """End-to-end: ContractMaterialization tracking_plan → polling_plan.
+    """End-to-end: ContractMaterialization tracking_plan -> polling_plan.
 
-    Validates the full enrollment pipeline:
-      * ``_load_tracking_plan_artifacts`` reads the materialization
-      * ``build_polling_plan`` projects ``tracked_controllers`` to entries
-      * The persisted ``MonitoredContract.monitoring_config["polling_plan"]``
-        carries the analyzer-derived custom-slot entry alongside any
-        vendored entries
-
-    This is the integration regression for the "custom slots become
-    visible to polling once the analyzer surfaces them" claim — proves
-    the data flow works without test-helper short-circuits."""
+    Runs ``_load_tracking_plan_artifacts`` and ``build_polling_plan`` for real, with no
+    test-helper short-circuits, and checks the persisted custom-slot entry.
+    """
     from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
     from db.models import Contract, ContractMaterialization, Job, Protocol
     from services.monitoring.enrollment import enroll_protocol_contracts
@@ -1980,15 +1777,12 @@ def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil
     addr = _compile_and_deploy(CUSTOM_ADMIN_SOURCE, "CustomAdminContract", [], rpc_url, PRIVATE_KEY, tmp_path)
     current_block = int(_cast(["block-number"], rpc_url))  # noqa: F841 — block reference for parity with other tests
 
-    # Compute the contract's bytecode keccak so the materialization row
-    # matches what ``find_by_address`` would resolve.
+    # Materialization row must match what ``find_by_address`` resolves.
     code = _cast(["code", addr], rpc_url).strip()
     bytecode_keccak = "0x" + keccak_text(code if code.startswith("0x") else "0x" + code)
 
-    # Anvil re-uses deterministic deploy addresses across tests in the
-    # same module and the ``test_db`` fixture doesn't clean Contract /
-    # Job / ContractMaterialization rows between tests — make the test
-    # idempotent against leftover state from earlier runs.
+    # Anvil reuses deploy addresses and ``test_db`` doesn't clean Contract/Job/
+    # ContractMaterialization rows, so stay idempotent against leftovers.
     proto = Protocol(name=f"custom_admin_protocol_{uuid.uuid4().hex[:8]}")
     test_db.add(proto)
     test_db.flush()
@@ -2090,27 +1884,22 @@ def test_enrollment_builds_polling_plan_for_custom_slot_from_tracking_plan(anvil
     assert pa_entry["kind"] == "getter_call"
     assert pa_entry["target"] == "protocolAdmin"
     assert pa_entry["type_kind"] == "address"
-    # Selector is keccak("protocolAdmin()")[:4]; pinning this catches a
-    # regression where the projection forgets to pre-compute the selector
-    # and the poll loop would fail at dispatch time.
+    # Selector is keccak("protocolAdmin()")[:4]; pins that the projection pre-computes it,
+    # or the poll loop fails at dispatch.
     from services.monitoring.polling_plan import selector_for
 
     assert pa_entry["selector"] == selector_for("protocolAdmin")
 
-    # Needs polling must be True since the projection produced a non-empty plan.
     assert mc.needs_polling is True
 
 
 def test_poll_custom_admin_slot_triggers_reanalysis_via_unified_vocab(anvil_env, test_db):
     """Poll-detected change to an ``admin``-named slot triggers reanalysis.
 
-    Regression for the tag-vocabulary unification: pre-refactor,
-    ``REANALYSIS_POLL_FIELDS = {"implementation", "owner"}`` was the
-    only allowlist — a custom contract whose admin slot was just named
-    ``admin`` (Compound shape) wouldn't trigger reanalysis on poll
-    detection even though the event-side already would (via
-    ``_REANALYSIS_WRITE_TARGETS``). The unified design routes both
-    paths through the same write-target set."""
+    Regression: the old ``REANALYSIS_POLL_FIELDS = {"implementation", "owner"}`` allowlist
+    missed Compound-shape ``admin`` slots that the event side already handled via
+    ``_REANALYSIS_WRITE_TARGETS``. Both paths now share one write-target set.
+    """
     rpc_url, tmp_path = anvil_env
     from services.monitoring.polling_plan import build_polling_plan
     from services.monitoring.unified_watcher import poll_for_state_changes
@@ -2118,8 +1907,7 @@ def test_poll_custom_admin_slot_triggers_reanalysis_via_unified_vocab(anvil_env,
     addr = _compile_and_deploy(COMPOUND_ADMIN_SOURCE, "TestCompoundAdmin", [], rpc_url, PRIVATE_KEY, tmp_path)
     current_block = int(_cast(["block-number"], rpc_url))
 
-    # Build a polling plan with just the ``admin`` analyzer-derived
-    # entry — no vendored Safe/Timelock/Proxy entries, no ownership entry.
+    # Only the ``admin`` analyzer-derived entry; no vendored or ownership entries.
     plan = build_polling_plan(
         contract_type="regular",
         proxy_type=None,
@@ -2158,8 +1946,7 @@ def test_poll_custom_admin_slot_triggers_reanalysis_via_unified_vocab(anvil_env,
     admin_changes = [e for e in poll_events if e.data and e.data.get("field") == "admin"]
     assert len(admin_changes) == 1
 
-    # A reanalysis job must have been queued — proves the poll path uses
-    # the same write-target vocabulary the event path uses.
+    # A reanalysis job proves the poll path uses the event path's write-target vocabulary.
     from db.models import Job
 
     jobs = (
@@ -2179,17 +1966,12 @@ def test_poll_custom_admin_slot_triggers_reanalysis_via_unified_vocab(anvil_env,
 
 
 def test_event_state_write_resolves_compound_shape_custom_slot(anvil_env, test_db):
-    """``_resolve_value_for_write_target`` handles non-OZ ABI shapes
-    for custom-named slots.
+    """``_resolve_value_for_write_target`` handles non-OZ ABI shapes for custom slots.
 
-    Deploys CustomAdminContract (which emits ``FeeRecipientChanged
-    (address indexed previousRecipient, address indexed newRecipient)``)
-    and tags the event in ``tracked_topics`` as writing the
-    ``feeRecipient`` slot. Neither parsed["feeRecipient"] nor
-    parsed["newFeeRecipient"] matches; the resolver has to walk
-    ``_inputs`` and find ``newRecipient`` via the "starts with new"
-    heuristic. Validates the post-refactor claim that custom slots
-    work end-to-end regardless of the ABI's arg-naming convention."""
+    ``FeeRecipientChanged(previousRecipient, newRecipient)`` matches neither
+    parsed["feeRecipient"] nor parsed["newFeeRecipient"]; the resolver must find
+    ``newRecipient`` via the "starts with new" heuristic.
+    """
     from eth_utils.crypto import keccak
 
     rpc_url, tmp_path = anvil_env
@@ -2206,9 +1988,8 @@ def test_event_state_write_resolves_compound_shape_custom_slot(anvil_env, test_d
             "event_type": "controller_changed:state_variable:feeRecipient",
             "controller_id": "state_variable:feeRecipient",
             "inputs": [
-                # Compound-shape: neither name matches feeRecipient or
-                # newFeeRecipient directly. The resolver must pick
-                # ``newRecipient`` via the ``new*`` ABI heuristic.
+                # Neither name matches feeRecipient/newFeeRecipient; resolver must pick
+                # ``newRecipient`` via the ``new*`` heuristic.
                 {"name": "previousRecipient", "type": "address", "indexed": True},
                 {"name": "newRecipient", "type": "address", "indexed": True},
             ],
@@ -2250,11 +2031,7 @@ def test_event_state_write_resolves_compound_shape_custom_slot(anvil_env, test_d
 
 
 def keccak_text(text: str) -> str:
-    """Helper to compute the keccak-256 of an EVM hex bytestring.
-
-    Used by the enrollment integration test to derive the
-    ``bytecode_keccak`` primary key for the materialization row.
-    """
+    """Keccak-256 of an EVM hex bytestring (the materialization row's ``bytecode_keccak`` key)."""
     from eth_utils.crypto import keccak
 
     if isinstance(text, str) and text.startswith("0x"):

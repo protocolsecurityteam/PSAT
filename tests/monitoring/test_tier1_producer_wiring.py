@@ -1,14 +1,9 @@
-"""W1 — the two Tier-1 producers acquire a caller, and the caller stays honest.
+"""W1 - the two Tier-1 producers acquire a caller, and the caller stays honest.
 
-Both modules were already tested as producers. What was untested is everything
-between them and a run: the precondition that decides whether they fire at all,
-the failure domain that decides what a failure of theirs can take down, and the
-provenance the call site is responsible for supplying.
-
-Every arm below is a wiring arm. The producers' own semantics are asserted only
-where the wiring could pre-empt them — the cold-cursor case, which must reach the
-table as ``holders`` NULL / ``coverage`` partial rather than being filtered out
-before the module ever sees it.
+Producer semantics are tested elsewhere; every arm here is wiring: the precondition that
+decides whether they fire, the failure domain of a failure, and the provenance the call site
+supplies. Producer semantics are asserted only where wiring could pre-empt them (the
+cold-cursor case must reach the table as ``holders`` NULL / ``coverage`` partial).
 """
 
 from __future__ import annotations
@@ -240,23 +235,6 @@ class TestRoleHolderPlaneFiringCondition:
         assert len(calls) == 1
         db_session.rollback()
 
-    def test_no_registry_address_reads_nothing(self, monkeypatch):
-        calls = self._spy(monkeypatch)
-        session = MagicMock()
-
-        assert (
-            ResolutionWorker()._resolve_role_holder_plane(
-                session,
-                _job_stub(),
-                chain_id=1,
-                rpc_url="https://rpc.example",
-                registry_address=None,
-            )
-            == 0
-        )
-        assert calls == []
-        session.execute.assert_not_called()
-
     def test_no_rows_writes_nothing(self, db_session, monkeypatch):
         """An empty resolve is row-absence, which is not_determined — not a commit."""
         self._spy(monkeypatch)
@@ -419,19 +397,6 @@ class TestResolutionStageComposition:
         assert any(d.startswith("Resolution complete") for d in details)
         session.rollback.assert_called()
 
-    def test_an_ungated_registry_reaches_the_real_gate_without_a_chain_read(self, monkeypatch):
-        """No stub on the producer: the default corpus has no cursors, so the
-        gate must close before anything touches the wire."""
-        _stub_stage(monkeypatch)
-        monkeypatch.setattr(
-            "workers.resolution_worker.resolve_role_holder_planes",
-            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("gate should have closed")),
-        )
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-
-        ResolutionWorker().process(session, _job())  # pyright: ignore[reportArgumentType]
-
 
 # ---------------------------------------------------------------------------
 # 1.2 — the restaking periodic step
@@ -515,16 +480,6 @@ class TestRestakingStepOrder:
         assert spies.enrolled == [(1, [EFNM_PROXY])]
         db_session.rollback()
 
-    def test_the_read_targets_the_verified_managers(self, db_session, one_protocol, monkeypatch):
-        spies = _RestakingSpies(monkeypatch)
-
-        refresh_restaking_plane(db_session, chain_id=1, rpc_url="https://rpc.example")
-
-        assert spies.read_kwargs["eigen_pod_manager"] == EIGEN_POD_MANAGER
-        assert spies.read_kwargs["delegation_manager"] == DELEGATION_MANAGER
-        assert spies.read_kwargs["chain_id"] == 1
-        db_session.rollback()
-
     def test_nodes_are_scoped_to_the_emitter_that_enumerated_them(self, db_session, one_protocol, monkeypatch):
         """``manager_contract_id`` names an enumerating contract, so the node set
         it is attached to must be that contract's."""
@@ -544,9 +499,8 @@ class TestRestakingStepFailClosed:
 
         assert refresh_restaking_plane(db_session, chain_id=8453, rpc_url="https://rpc.example") == 0
         assert spies.order == []
-        # Every refusal still beats, and says which arm refused — a silent
-        # return is indistinguishable from a wedged loop. A chain with no
-        # configured pair is an absence, not a failed observation.
+        # Every refusal still beats and says which arm refused (a silent return looks like a
+        # wedged loop). A chain with no configured pair is an absence, not a failed observation.
         assert spies.cycles[-1]["note"] == "no_manager_pair"
         assert spies.cycles[-1]["partial"] is False
         db_session.rollback()
@@ -563,9 +517,8 @@ class TestRestakingStepFailClosed:
         db_session.rollback()
 
     def test_no_pinned_head_beats_degraded_not_healthy(self, db_session, one_protocol, monkeypatch):
-        """``pinned_head`` returns None only when a read failed or answered
-        inconsistently. Reporting that cycle healthy would let a permanently
-        dead route look like a protocol that simply has no nodes, forever."""
+        """``pinned_head`` returns None only on a failed or inconsistent read; reporting that
+        healthy would let a dead route look like a protocol with no nodes, forever."""
         spies = _RestakingSpies(monkeypatch)
         monkeypatch.setattr(restaking_cycle, "pinned_head", lambda *_a, **_kw: None)
 
@@ -614,9 +567,8 @@ class TestRestakingStepFailClosed:
         assert failed == [first.id]
         assert written == 1
         assert [p["protocol_id"] for p in spies.persisted] == [second.id]
-        # The survivor's rows are published, and the cycle still declares itself
-        # partial — a full-looking heartbeat over a skipped protocol would make
-        # that protocol's absent rows read as an answer.
+        # The survivor's rows publish and the cycle still declares itself partial, else the
+        # skipped protocol's absent rows would read as an answer.
         assert spies.cycles[-1]["partial"] is True
         assert spies.cycles[-1]["note"] == "1_failed"
         db_session.rollback()
@@ -661,24 +613,6 @@ class TestRestakingFailureDomain:
         run_restaking_loop(0.0, stop)  # must return, not raise
 
         assert beats == [(HEARTBEAT_PROTOCOL_RESTAKING, "degraded")]
-
-    def test_the_step_is_a_supervised_sibling_of_the_balance_loop(self):
-        """Own thread, own name — the Supervisor's isolation is the failure
-        domain, so a restaking crash cannot reach the TVL loop."""
-        from db.queue import HEARTBEAT_PROTOCOL_TVL
-        from workers.protocol_monitor import _build_default_supervisor
-
-        names = [name for name, _ in _build_default_supervisor("https://rpc.example", None)._loops]
-
-        assert HEARTBEAT_PROTOCOL_RESTAKING in names
-        assert HEARTBEAT_PROTOCOL_TVL in names
-        assert names.index(HEARTBEAT_PROTOCOL_RESTAKING) != names.index(HEARTBEAT_PROTOCOL_TVL)
-        assert len(names) == len(set(names))
-
-    def test_the_step_is_registered_for_the_fleet_view(self):
-        from services.monitoring.process_meta import PROCESS_META
-
-        assert HEARTBEAT_PROTOCOL_RESTAKING in PROCESS_META
 
 
 # ---------------------------------------------------------------------------

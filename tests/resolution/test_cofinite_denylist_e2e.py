@@ -1,28 +1,15 @@
 """End-to-end resolution of the Part-2 cofinite/denylist opening, on 100% real data.
 
-Drives the REAL resolver (``resolve_contract_capabilities`` → AdapterRegistry →
-cross-contract inline → capability algebra → CapabilitySurface) against snapshots of the
-prod etherfi contracts (real ``predicate_trees`` + ``state_var_values`` pulled from the
-analysis artifacts by ``tests/fixtures/cofinite/generate.py``). Seeds Job +
-predicate_trees artifact + Contract/ControllerValue the production path reads, then
-asserts at the surface/status level — so a revert at any layer (negate, membership
-normalization, projection) is caught.
-
-Pins, end-to-end, the Part-2 safety contract:
-  * ``BoringVault.transfer``/``transferFrom`` — gated ONLY by the inlined Teller
-    ``beforeTransfer`` denylist hook → resolve **public** (a ``cofinite_blacklist`` with
-    the denylist + share-lock surfaced as conditions). The headline opening.
-  * ``WeETH.recoverERC20/721/ETH`` (``if(!hasRole(...)) revert``, truthy) → stay **gated**
-    (never public) — the polarity boundary the negate change must not cross.
-  * ``RolesAuthority.setUserRole`` + ``Accountant`` admin (Solmate ``requiresAuth``) →
-    stay **gated**, never public — the canaries the provisional "open-on-ambiguity" fix
-    erased (93 authorities); this opening must erase 0.
-  * ``NodeOperatorManager.registerNodeOperator`` (``require(!registered[caller])``) →
-    **public** (the already-cofinite P1/P2 case, projected through the same seam).
-
-Hermetic: consumes only the committed fixture JSON; ``generate.py`` (manual, prod-read)
-is the network-touching step. RPC is stubbed dead so authority resolution degrades to its
-event/state-var paths — all these fixtures need.
+Drives the REAL resolver against snapshots of prod etherfi contracts (real
+``predicate_trees`` + ``state_var_values`` from ``tests/fixtures/cofinite/generate.py``)
+and asserts at the surface/status level, so a revert at any layer is caught. Pins:
+  * ``BoringVault.transfer``/``transferFrom`` (inlined Teller denylist hook) -> **public**.
+  * ``WeETH.recoverERC20/721/ETH`` (truthy ``hasRole`` gate) -> stay **gated**.
+  * ``RolesAuthority.setUserRole`` + ``Accountant`` admin (Solmate ``requiresAuth``) ->
+    stay **gated**: canaries the provisional "open-on-ambiguity" fix erased (93 authorities).
+  * ``NodeOperatorManager.registerNodeOperator`` (``require(!registered[caller])``) -> **public**.
+Hermetic (committed fixture JSON); RPC is stubbed dead so authority resolution degrades to
+its event/state-var paths.
 """
 
 from __future__ import annotations
@@ -66,7 +53,6 @@ def _wipe(sess):
     ).delete(synchronize_session=False)
     sess.query(Contract).filter(Contract.address.in_(addrs)).delete(synchronize_session=False)
     sess.query(Job).filter(Job.address.in_(addrs)).delete(synchronize_session=False)
-    # Protocols this test created carry a 'cofinite_e2e_' name prefix.
     sess.execute(text("delete from protocols where name like 'cofinite_e2e_%'"))
     sess.commit()
 
@@ -184,7 +170,6 @@ def test_boring_vault_transfer_opens_via_inlined_denylist(session):
     teller = _fixture("teller")
     vault = _fixture("boring_vault")
 
-    # Seed the Teller (the inline callee) so beforeTransfer is the resolvable hook.
     teller_job = _seed_job_with_trees(session, address=_TELLER, artifact=teller)
     _seed_contract(
         session,
@@ -197,8 +182,7 @@ def test_boring_vault_transfer_opens_via_inlined_denylist(session):
         },
     )
 
-    # Seed the BoringVault; its ``hook`` state var points at the Teller so transfer inlines
-    # beforeTransfer (the denylist) into a bound frame.
+    # ``hook`` points at the Teller so transfer inlines the beforeTransfer denylist.
     vault_job = _seed_job_with_trees(session, address=_BORING_VAULT, artifact=vault)
     _seed_contract(
         session,
@@ -220,7 +204,6 @@ def test_boring_vault_transfer_opens_via_inlined_denylist(session):
             f"got kind={cap.get('kind')}"
         )
         assert _status(cap) == "public", f"{sig} (denylist-only gate) must project public; got {_status(cap)}"
-        # The denylist must be surfaced as a side-condition, never silently dropped.
         assert cap.get("conditions"), f"{sig} cofinite must carry the denylist/share-lock as conditions"
 
 
@@ -264,7 +247,6 @@ def test_roles_authority_setuserrole_stays_gated(session):
 
 @requires_postgres
 def test_accountant_admin_stays_gated(session):
-    # Solmate ``requiresAuth`` admin surface — a canary the provisional fix erased.
     out = _seed_canary(
         session,
         "accountant",
@@ -285,8 +267,7 @@ def test_accountant_admin_stays_gated(session):
 
 @requires_postgres
 def test_node_operator_register_resolves_public(session):
-    # ``require(!registered[msg.sender])`` is an exact-finite denylist → cofinite →
-    # public (permissionless self-registration, whenNotPaused). Rides the same projection.
+    # exact-finite denylist -> cofinite -> public (self-registration).
     out = _seed_canary(session, "node_operator_manager", _NODE_OP_MANAGER)
     cap = out["registerNodeOperator(bytes,uint64)"]
     assert _status(cap) == "public", (

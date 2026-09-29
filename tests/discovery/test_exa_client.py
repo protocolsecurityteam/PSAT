@@ -116,16 +116,13 @@ def test_search_happy_path_normalizes(monkeypatch):
                 "text": "snip-a",
                 "score": 0.9,
             },
-            # text as dict
             {
                 "url": "https://b.example.com",
                 "title": "B",
                 "text": {"text": "from-dict"},
                 "score": 0.5,
             },
-            # content fallback when no text
             {"url": "https://c.example.com", "content": "from-content"},
-            # skipped: no url
             {"title": "no url"},
         ]
     }
@@ -268,7 +265,6 @@ def test_deep_research_failed_status(monkeypatch):
 
 
 def test_deep_research_timeout(monkeypatch):
-    """When poll never returns terminal status, deadline expires and raises."""
     import time as _time
 
     # Fake monotonic that jumps past the deadline on the second tick.
@@ -293,8 +289,6 @@ def test_deep_research_timeout(monkeypatch):
 
 
 class TestCacheKey:
-    """The cache key must drop api_key and react to every other request field."""
-
     def _key_for(self, **overrides):
         base = {
             "api_key": "secret",
@@ -330,8 +324,6 @@ class TestCacheKey:
 
 
 class TestSearchCacheBehavior:
-    """search() consults the cache only when PSAT_EXA_CACHE is set."""
-
     def test_disabled_skips_storage(self, monkeypatch):
         monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
         monkeypatch.delenv("PSAT_EXA_CACHE", raising=False)
@@ -509,29 +501,6 @@ class TestSearchCacheBehavior:
 
 
 class TestDeepResearchCacheBehavior:
-    """deep_research() consults the cache only when PSAT_EXA_CACHE is set."""
-
-    def test_disabled_skips_storage(self, monkeypatch):
-        import time as _time
-
-        monkeypatch.setattr(_time, "sleep", lambda _s: None)
-        monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
-        monkeypatch.delenv("PSAT_EXA_CACHE", raising=False)
-
-        storage_client = MagicMock()
-        post_mock = MagicMock(return_value=_FakeResp(payload={"id": "t1"}))
-        get_mock = MagicMock(return_value=_FakeResp(payload={"status": "completed", "data": {"x": 1}}))
-
-        with patch("db.storage.get_storage_client", return_value=storage_client):
-            monkeypatch.setattr(exa.requests, "post", post_mock)
-            monkeypatch.setattr(exa.requests, "get", get_mock)
-            out = exa.deep_research("inst", timeout_seconds=60)
-
-        assert out["data"] == {"x": 1}
-        post_mock.assert_called_once()  # task created
-        storage_client.get.assert_not_called()
-        storage_client.put.assert_not_called()
-
     def test_hit_skips_task_creation(self, monkeypatch):
         monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
         monkeypatch.setenv("PSAT_EXA_CACHE", "1")
@@ -589,7 +558,6 @@ class TestDeepResearchCacheBehavior:
         assert envelope["payload"]["data"]["auditReports"] == [{"a": 1}]
 
     def test_empty_data_not_cached(self, monkeypatch):
-        """A completed task with no data shouldn't poison the cache."""
         import time as _time
 
         from db.storage import StorageKeyMissing

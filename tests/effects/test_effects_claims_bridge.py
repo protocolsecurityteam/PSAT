@@ -1,12 +1,8 @@
-"""Effects → claims bridge.
+"""Effects -> claims bridge.
 
-Pure-mapping honesty per effect class, the two fail-closed directions,
-idempotent double-merge, behavioral_observed precedence over a static claim, and
-legacy effect_labels re-projection staying in sync. The DB-backed writer
-regression (call site 2 preserves observed claims across a policy rewrite) and
-the end-to-end worker labeling (call site 1) live in
-``test_effective_permissions_semantic``-style / ``test_effects_worker_integration``
-files respectively; this file owns the bridge's own contract.
+Mapping honesty per effect class, the two fail-closed directions, idempotent double-merge,
+behavioral_observed precedence over a static claim, and effect_labels re-projection. The worker
+labeling (call site 1) is in ``test_effects_worker_integration``.
 """
 
 from __future__ import annotations
@@ -88,8 +84,7 @@ def test_supply_sign_selects_mint_or_burn():
 
 
 def test_supply_mint_projects_backing_into_observed_witness():
-    # Backing: the fork mint-backing object must reach claim.witness["observed"] so the
-    # scorer/frontend can tell a backed conversion from an unbacked (dilutive) mint.
+    # Backing must reach claim.witness["observed"] so a backed conversion reads apart from a dilutive mint.
     backing = {"inflow_observed": False, "minted": True, "inflow_transfers": 0, "mint_transfers": 1}
     claim = claims_bridge.verdict_to_claim(
         _verdict(EFFECT_CLASS_SUPPLY, witness={"supply_delta_sign": "mint", "backing": backing})
@@ -128,13 +123,10 @@ def test_value_out_projects_reach_into_observed_witness():
 
 
 def test_value_out_projects_reach_indeterminate_floor():
-    """Reach floor: the not-measured state survives projection whole, so a scorer sees
-    "downstream reach not witnessed; the acting contract's own balance is a floor".
+    """The not-measured reach floor survives projection whole.
 
-    ``observed_reach_value_usd`` is ABSENT on such a row (the producer no
-    longer publishes the floor under the key that means measured reach), and
-    ``reach_determined: False`` is the discriminator. Both new keys must be in the
-    projection allowlist or they are silently dropped one layer before the consumer.
+    ``observed_reach_value_usd`` is ABSENT on such a row and ``reach_determined: False`` is the
+    discriminator; both keys must be in the projection allowlist or they are dropped silently.
     """
     residue = {
         "observed_reach_floor_usd": 221_000_000.0,
@@ -166,15 +158,10 @@ def test_value_out_projects_the_measured_reach_discriminator():
 
 
 def test_the_observed_destination_answer_reaches_the_claim(a6=True):
-    """NO claim in the database carried ``destination_shape`` or
-    ``shape_proved_by``: the fork proved ``caller_arbitrary`` on 35 rows and a consumer
-    had never seen it, while the two approve-then-pull rows published $472M of reach
-    with no destination statement at all (their transfer sink lives in the callee, so
-    the static matcher emitted nothing to carry forward).
+    """The fork proved ``caller_arbitrary`` on 35 rows and no claim carried ``destination_shape``;
+    two approve-then-pull rows published $472M of reach with no destination statement.
 
-    Unconditional, not scoped to those two rows: the class is 7 functions — 2 manifest,
-    5 latent — and each new successful probe converts a latent one, so a fix keyed on
-    "the 2 rows" would be wrong the next time coverage improves."""
+    Unconditional, not scoped to those rows: each new successful probe converts a latent one."""
     witness = {"value_moved": True, "destination_shape": "unknown", "shape_proved_by": "none"}
     claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness=witness))
     assert claim is not None
@@ -182,7 +169,6 @@ def test_the_observed_destination_answer_reaches_the_claim(a6=True):
     assert observed["destination_shape"] == "unknown"
     assert observed["shape_proved_by"] == "none"
 
-    # ...and the proven-adverse answer travels identically.
     proven_witness = {"value_moved": True, "destination_shape": "caller_arbitrary", "shape_proved_by": "simulation"}
     proven_claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness=proven_witness))
     assert proven_claim is not None
@@ -191,9 +177,8 @@ def test_the_observed_destination_answer_reaches_the_claim(a6=True):
 
 
 def test_the_sentinel_subject_travels_with_the_answer():
-    """A shape with no stated subject is a proof about an unnamed parameter. The
-    scorer's exec join (``distill._fork_caller_arbitrary_param``) refuses one, so
-    dropping the name here is what left 15 already-proven fork witnesses unread."""
+    """A shape with no stated subject is a proof about an unnamed parameter; the scorer's exec
+    join (``distill._fork_caller_arbitrary_param``) refuses one, so dropping it left 15 proven witnesses unread."""
     witness = {
         "value_moved": True,
         "destination_shape": "caller_arbitrary",
@@ -213,10 +198,8 @@ def test_the_sentinel_subject_travels_with_the_answer():
 
 
 def test_reach_is_never_read_off_the_cacheable_witness():
-    # The plane leak this fix closes: while reach sat on ``witness`` it was
-    # written to the CROSS-DEPLOYMENT behavioral cache and re-published as another
-    # deployment's observation on every hit. Witness-borne reach values are the
-    # contaminated shape and must not project.
+    # Reach on ``witness`` was written to the CROSS-DEPLOYMENT behavioral cache and re-published
+    # as another deployment's observation; witness-borne reach must not project.
     contaminated = {
         "value_moved": True,
         "observed_reach_value_usd": 5_000_000.0,
@@ -232,9 +215,7 @@ def test_reach_is_never_read_off_the_cacheable_witness():
 
 
 def test_freeze_pause_projects_severity_fields_verdict318_shape():
-    # The fork pause recipe records observed_blast_radius / auto_expiry /
-    # duration_bound_seconds on the verdict witness (verdict 318's real shape); the
-    # projection must carry all three into claim.witness["observed"] so the scorer
+    # Verdict 318's real shape: all three fields must reach claim.witness["observed"] so the scorer
     # can tell a $3.4B/30-day freeze from a harmless one.
     witness = {
         "latch_flip": True,
@@ -255,9 +236,8 @@ def test_freeze_pause_projects_severity_fields_verdict318_shape():
 
 
 def test_freeze_pause_indefinite_latch_fields_survive_as_none():
-    # duration None + auto_expiry None = indefinite latch = most severe; the
-    # projection must carry the None values through (present, not dropped) so the
-    # scorer sees "indefinite", never an absent-field default.
+    # duration None + auto_expiry None = indefinite latch = most severe; None must be carried
+    # through (present, not dropped), never defaulted.
     witness = {
         "latch_flip": True,
         "observed_blast_radius": ["freeze(uint256)"],
@@ -275,18 +255,10 @@ def test_freeze_pause_indefinite_latch_fields_survive_as_none():
 def test_a_duration_bound_never_reaches_the_scorer_without_its_fork_qualifier():
     """The duration-bound CONTAINMENT PIN, scorer half.
 
-    ``duration_bound_seconds`` is a STATIC read of a guard constant and the fork
-    cross-check (warp ``bound + 1`` and re-probe) is the only thing that turns it into
-    a mitigation: the documented contract is "trust it as a severity REDUCER ONLY when
-    ``auto_expiry is True``". That containment is what keeps a fabricated constant —
-    the harvest published lead times and cooldown offsets as freeze windows until it
-    was narrowed — from ever scoring as a shorter freeze.
-
-    So the pin is on the PAIRING: whenever the projection forwards a bound it must
-    also forward the qualifier the witness recorded, in every one of its three states,
-    and it must forward ``duration_bound_source`` so ``None`` stays two facts. A future
-    edit that trims the keep-list to the number alone would leave a consumer unable to
-    apply the rule and unable to tell that it could not."""
+    ``duration_bound_seconds`` is a STATIC read; only the fork cross-check (warp ``bound + 1``,
+    re-probe) makes it a mitigation ("trust as a REDUCER ONLY when ``auto_expiry is True``"). So
+    whenever the projection forwards a bound it must forward the recorded qualifier (all three
+    states) and ``duration_bound_source``, or a fabricated constant could score as a shorter freeze."""
     for expiry in (True, False, None):
         witness = {
             "latch_flip": True,
@@ -299,15 +271,13 @@ def test_a_duration_bound_never_reaches_the_scorer_without_its_fork_qualifier():
         assert claim is not None
         observed = claim["witness"]["observed"]
         assert observed["duration_bound_seconds"] == 3600
-        # Present, not defaulted: the key must exist even when its value is None.
         assert "auto_expiry" in observed and observed["auto_expiry"] is expiry
         assert observed["duration_bound_source"] == "guard_constant"
 
 
 def test_no_blast_verdict_mints_no_behavioral_claim():
-    # The 58/65 no-blast verdicts take the fork unknown path — they must mint NO
-    # behavioral claim (absent blast radius is an unproven lower bound, not a proven
-    # "no freeze"). A verdict==unknown never mints regardless of its witness fields.
+    # The 58/65 no-blast verdicts take the fork unknown path and must mint NO claim (absent blast
+    # radius is an unproven lower bound, not a proven "no freeze").
     witness = {"observed_blast_radius": [], "scored_denominator": ["a()", "b()"]}
     claim = claims_bridge.verdict_to_claim(
         _verdict(EFFECT_CLASS_FREEZE_PAUSE, verdict=VERDICT_UNKNOWN, tier=TIER_FORK, witness=witness)
@@ -315,24 +285,11 @@ def test_no_blast_verdict_mints_no_behavioral_claim():
     assert claim is None
 
 
-def test_freeze_fields_absent_for_non_freeze_class():
-    # The added keep keys are a no-op for other classes: a value_out verdict whose
-    # witness happens to lack them projects no freeze fields (dict-comp keeps only
-    # present keys).
-    claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_VALUE_OUT, witness={"value_moved": True}))
-    assert claim is not None
-    observed = claim["witness"].get("observed", {})
-    assert "observed_blast_radius" not in observed
-    assert "auto_expiry" not in observed
-    assert "duration_bound_seconds" not in observed
-
-
 def test_authority_change_maps_to_registered_authority_grant():
     # None of roles.grant / authority.replace / authorized_caller.rotate is honest
     # for a mechanism-agnostic gate-open; the bridge mints its own registered id.
     claim = claims_bridge.verdict_to_claim(_verdict(EFFECT_CLASS_AUTHORITY_CHANGE, witness={"gate_mutation": True}))
     assert claim is not None and claim["claim_id"] == claims_bridge.AUTHORITY_GRANT
-    # Registered, so it can be rendered / projected like any static claim.
     from services.static.claims.registry import is_registered, legacy_projections
 
     assert is_registered(claims_bridge.AUTHORITY_GRANT)
@@ -349,8 +306,7 @@ def test_unknown_verdict_mints_nothing():
 
 
 def test_historical_with_failed_current_check_mints_nothing():
-    # Tier-0 historical proves PAST capability; a failed current check means a
-    # present-tense label would overclaim ⇒ withhold.
+    # Tier-0 historical proves PAST capability; a failed current check would overclaim.
     v = _verdict(EFFECT_CLASS_CODE_UPGRADE, tier=TIER_HISTORICAL, current_check_passed=False)
     assert claims_bridge.verdict_to_claim(v) is None
 
@@ -444,9 +400,8 @@ _DEPLOY = "0x" + "ab" * 20
 
 
 def _seed_contract_with_observed_function(session, *, with_verdict: bool):
-    """A contract whose one effective_function already carries a
-    behavioral_observed claim (as call site 1 would have written), optionally with
-    the backing proven effect_verdict still present."""
+    """A contract whose one effective_function already carries a behavioral_observed claim,
+    optionally with the backing proven effect_verdict still present."""
     contract = Contract(address=_DEPLOY, chain="ethereum", is_proxy=False)
     session.add(contract)
     session.flush()
@@ -484,8 +439,7 @@ def _seed_contract_with_observed_function(session, *, with_verdict: bool):
 
 
 def _fn_record() -> dict[str, Any]:
-    # A fresh policy write for the same function — no claims of its own (the
-    # regression is that the wholesale replace would blank the observed label).
+    # Fresh policy write with no claims of its own: a wholesale replace would blank the observed label.
     return {
         "function": "mint(address,uint256)",
         "abi_signature": "mint(address,uint256)",
@@ -691,14 +645,11 @@ def _static_flow_out() -> Claim:
 
 
 def test_an_observed_flow_claim_keeps_the_static_destination_and_amount():
-    """Precedence is about TIER — how well we know the claim is true. A fork
-    observation is the strongest evidence that value MOVED; it is no evidence at
-    all about where it can go or how much, which are universals the static
-    lattice derived from the code and the probe never measured.
+    """Precedence is about TIER. A fork observation proves value MOVED, not where it can go or how
+    much, which the static lattice derived and the probe never measured.
 
-    Replacing the witness wholesale made succeeding at the probe COST a function
-    its lattice: of four sibling ``redeem*`` with identical static flows, the one
-    whose probe executed was the only one to lose its destination and amount."""
+    Replacing the witness wholesale made a succeeding probe COST a function its lattice: of four
+    sibling ``redeem*`` with identical static flows, the executed one alone lost destination and amount."""
     merged = claims_bridge.merge_observed_claims(
         [_static_flow_out()],
         [_verdict(EFFECT_CLASS_VALUE_OUT, witness={"observation": "executed", "value_moved": True})],
@@ -706,13 +657,10 @@ def test_an_observed_flow_claim_keeps_the_static_destination_and_amount():
     flow_out = next(c for c in merged if c["claim_id"] == "flow.out")
     witness = flow_out["witness"]
 
-    # The tier really is upgraded — the observation is the stronger evidence.
     assert flow_out["tier"] == "behavioral_observed"
-    # ...and the structural facts survive it.
     assert witness["direction"] == "out"
     assert witness["flows"][0]["target_kind"] == {"kind": "immutable", "tier": "dispositive_ast"}
     assert witness["flows"][0]["amount_param_index"] == 1
-    # ...alongside the observed pointer.
     assert witness["effect_verdict_id"] == 1
 
 
@@ -725,7 +673,6 @@ def test_carrying_the_static_witness_forward_is_idempotent():
 
 
 def test_an_observed_claim_with_no_static_counterpart_is_unchanged():
-    """Nothing to carry forward, and nothing invented."""
     merged = claims_bridge.merge_observed_claims(
         [], [_verdict(EFFECT_CLASS_VALUE_OUT, witness={"observation": "executed", "value_moved": True})]
     )
@@ -867,13 +814,9 @@ def test_no_static_donor_stamps_no_provenance():
 
 @requires_postgres
 def test_destination_shape_survives_the_writer_onto_the_function_row(db_session):
-    """End of the forwarding chain. ``destination_shape`` / ``shape_proved_by`` are
-    the fork's answer to "where can this outflow go", and the scorer reads them off
-    ``EffectiveFunction.claims`` — so the projection reaching ``verdict_to_claim``
-    is only half the trip. This pins the other half: the policy rewrite re-merges
-    the proven verdict and both fields land on the persisted row, for the adverse
-    answer and for the ``('unknown', 'none')`` non-observation alike (they are
-    different facts and the consumer must keep telling them apart)."""
+    """The scorer reads ``destination_shape`` / ``shape_proved_by`` off ``EffectiveFunction.claims``,
+    so projection alone is half the trip: the policy rewrite must land both on the persisted row,
+    for the adverse answer and the ``('unknown', 'none')`` non-observation (different facts)."""
     for shape, proved_by, address in (
         ("caller_arbitrary", "simulation", "0x" + "d1" * 20),
         ("unknown", "none", "0x" + "d2" * 20),

@@ -9,10 +9,7 @@ to the sequential version.
 
 ``parallel_map`` is the generic per-item fan-out (one task = one item).
 ``RpcExecutor`` is the process-wide thread pool every site shares so we don't
-spawn a new pool per call. ``parallel_rpc_calls`` chunks a JSON-RPC batch and
-submits each chunk through the pool — the chunking already exists in
-``rpc_batch_request_with_status``, but it runs serially; here we parallelize
-across chunks so a 2000-call batch finishes in roughly the time of one chunk.
+spawn a new pool per call.
 """
 
 from __future__ import annotations
@@ -21,11 +18,10 @@ import contextvars
 import logging
 import os
 import threading
-from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from collections.abc import Callable, Iterable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Any, TypeVar
 
-from services.clients.rpc import MAX_BATCH_SIZE, rpc_batch_request_with_status
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -179,20 +175,6 @@ def _is_lease_lost(exc: BaseException) -> bool:
     return isinstance(exc, LeaseLost)
 
 
-def unwrap_results(results: Sequence[tuple[T, R | BaseException]]) -> list[R]:
-    """Convenience: flatten ``parallel_map`` output, raising the first exception encountered.
-
-    Use this when the call site has no per-item recovery story and would have
-    raised on the first failure in a serial loop anyway.
-    """
-    out: list[R] = []
-    for item, result in results:
-        if isinstance(result, BaseException):
-            raise result
-        out.append(result)
-    return out
-
-
 class RpcExecutor:
     """Process-wide ``ThreadPoolExecutor`` shared across every fan-out site.
 
@@ -236,58 +218,8 @@ def submit_rpc(fn: Callable[..., R], *args: Any, **kwargs: Any) -> Future[R]:
     return RpcExecutor.submit(fn, *args, **kwargs)
 
 
-def parallel_rpc_calls(
-    rpc_url: str,
-    calls: list[tuple[str, list[Any]]],
-) -> list[tuple[Any, bool]]:
-    """Drop-in replacement for ``rpc_batch_request_with_status`` that parallelizes across chunks.
-
-    For ``len(calls) <= MAX_BATCH_SIZE`` this just delegates — there is no
-    second chunk to stack. For larger batches each chunk is submitted to the
-    shared executor and the results are reassembled in input order. The
-    return shape (``[(result, had_error)]``) is identical so call sites are
-    drop-in.
-    """
-    if not calls:
-        return []
-    if len(calls) <= MAX_BATCH_SIZE:
-        return rpc_batch_request_with_status(rpc_url, calls)
-
-    chunks: list[tuple[int, list[tuple[str, list[Any]]]]] = []
-    for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
-        chunks.append((chunk_start, calls[chunk_start : chunk_start + MAX_BATCH_SIZE]))
-
-    results: list[tuple[Any, bool]] = [(None, True)] * len(calls)
-    futures: dict[Future[Any], int] = {}
-    for offset, chunk in chunks:
-        # Per-chunk context copy — see ``parallel_map`` above for why a
-        # shared ``Context`` object cannot be concurrently entered.
-        ctx = contextvars.copy_context()
-        futures[RpcExecutor.submit(ctx.run, rpc_batch_request_with_status, rpc_url, chunk)] = offset
-
-    for fut in as_completed(futures):
-        offset = futures[fut]
-        try:
-            chunk_results = fut.result()
-        except Exception as exc:
-            # Swallowed-continue: this chunk's slots keep their (None, True)
-            # error default and the remaining chunks proceed, so it is
-            # degraded-but-continuing (WARNING + exc_type), not a job ERROR.
-            logger.warning(
-                "parallel_rpc_calls: chunk failed wholesale — continuing",
-                extra={"chunk_start": offset, "exc_type": type(exc).__name__},
-            )
-            record_degraded(phase="parallel_rpc_chunk", exc=exc, context={"chunk_start": offset})
-            continue
-        for i, item in enumerate(chunk_results):
-            results[offset + i] = item
-    return results
-
-
 __all__ = [
     "RpcExecutor",
     "parallel_map",
-    "parallel_rpc_calls",
     "submit_rpc",
-    "unwrap_results",
 ]

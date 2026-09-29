@@ -1,14 +1,11 @@
 """Cross-protocol admission (candidacy for A must not block membership in B).
 
-The nomination slot is first-wins recall provenance; admission is
-evidence-keyed: the fixpoint may evaluate a candidate for protocol P whenever
-P's own stored facts (P's member edge, P's registry row, P's witness rows)
-admit it — regardless of which protocol claimed the slot first. Promotion to P
-aligns ``nominated_protocol_id`` to P (proof supersedes provenance); the
-first-nominator's tag stays in ``discovery_sources``. Determinism rule: the
-nominated slot's protocol is attempted first, then every other
-evidence-bearing protocol in ascending protocol id; the first valid admission
-wins and a contract holds ONE ``protocol_id``.
+The nomination slot is first-wins recall provenance; admission is evidence-keyed: the fixpoint may evaluate a
+candidate for protocol P whenever P's own stored facts admit it, regardless of who claimed the slot. Promotion
+to P aligns ``nominated_protocol_id`` to P (proof supersedes provenance); the first nominator's tag stays in
+``discovery_sources``. Determinism: the nominated slot's protocol is attempted first, then other
+evidence-bearing protocols by ascending id; the first valid admission wins and a contract holds ONE
+``protocol_id``.
 """
 
 from __future__ import annotations

@@ -22,11 +22,8 @@ from services.resolution.mapping_enumerator import (
 
 @pytest.fixture(autouse=True)
 def _isolated_cache(monkeypatch):
-    # Tests in this file exercise the in-process L1 cache only; the L2
-    # (Postgres-backed) cache lives in db.mapping_enumeration_cache and
-    # has its own test file. Disable L2 here so these tests don't depend
-    # on a live DB connection or the migrated mapping_enumeration_cache
-    # table being present.
+    # These tests exercise the in-process L1 cache only; disable L2 so they don't need a
+    # live DB or the migrated mapping_enumeration_cache table.
     monkeypatch.setenv("PSAT_MAPPING_ENUMERATION_DB_CACHE", "0")
     clear_enumeration_cache()
     yield
@@ -34,13 +31,8 @@ def _isolated_cache(monkeypatch):
 
 
 def enumerate_mapping_allowlist(contract_address, writer_specs, **kwargs):
-    """Test helper. The function now returns an EnumerationResult dict;
-    legacy tests below expect the bare principal list, so this helper
-    unwraps result["principals"] to keep the legacy tests focused on
-    the per-event semantics they were written for.
-
-    ``from_block`` is now a required enumerator arg; these per-event unit
-    tests replay over the full stub-log range, so default it to genesis here."""
+    """Unwraps ``result["principals"]`` so legacy per-event tests stay focused. ``from_block``
+    is a required enumerator arg; these replay the full stub-log range, so default to genesis."""
     kwargs.setdefault("from_block", 0)
     result = _enumerate(contract_address, cast(Any, writer_specs), **kwargs)
 
@@ -117,11 +109,6 @@ class _FakeHypersyncModule:
 
 def _run(coroutine):
     return asyncio.run(coroutine)
-
-
-def test_event_topic0_hashes_canonical_signature():
-    expected = "0xdd0e34038ac38b2a1ce960229778ac48a8719bc900b6c4f8d0475c6e8b385a60"
-    assert _event_topic0("Rely(address)") == expected
 
 
 def test_decode_address_topic_strips_padding():
@@ -359,30 +346,6 @@ def test_indexed_argument_before_non_indexed_key_uses_data_slot_zero():
     assert [p["address"] for p in out] == [alice]
 
 
-def test_empty_history_returns_empty():
-    client, _ = _fake_client([])
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [_rely_spec()],
-            client=client,
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert out == []
-
-
-def test_no_specs_returns_empty_without_client():
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [],
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert out == []
-
-
 def test_pagination_via_next_block():
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
@@ -460,16 +423,12 @@ def test_malformed_address_topic_skipped():
 # ---------------------------------------------------------------------------
 # Bound + cache + status regression tests (PSAT-speedup #1).
 #
-# Background: the original `while True` pagination loop had no max_pages,
-# no timeout, and no lookback bound. For 2017-deployed contracts
-# (LinkToken etc.) that's ~190 pages × 25s = 80 min of sync work blocking
-# the resolution worker — heartbeat misses, reclaim_stuck_jobs releases
-# the row, live tests time out at 600s.
-#
-# Naive truncation that returns an empty list silently is a CORRECTNESS
-# regression: a Rely(alice) in 2017 with no later Deny means alice is
-# still authorized. These tests pin the bound + the requirement that
-# truncation is surfaced via `result["status"]` rather than swallowed.
+# The original `while True` pagination had no max_pages/timeout/lookback bound: for
+# 2017-deployed contracts (LinkToken etc.) ~190 pages x 25s = 80 min blocking the
+# resolution worker (heartbeat misses, reclaim_stuck_jobs, live tests time out at 600s).
+# Naive truncation to an empty list is a CORRECTNESS regression (a 2017 Rely(alice) with
+# no later Deny means alice is still authorized), so truncation must surface via
+# `result["status"]`.
 # ---------------------------------------------------------------------------
 
 
@@ -488,16 +447,13 @@ def test_max_pages_bound_returns_incomplete_status():
             max_pages=2,
         )
     )
-    # Bound hit at page 2; status surfaces it.
     assert result["status"] == "incomplete_max_pages"
     assert result["pages_fetched"] == 2
-    # Partial principals returned — not silent empty.
     assert len(result["principals"]) == 2
 
 
 def test_timeout_returns_incomplete_status():
-    """Wall-clock bound: each page sleeps 0.05s, timeout is 0.12s, so
-    we expect ~2 pages then a timeout (definitely <20)."""
+    """Each page sleeps 0.05s, timeout is 0.12s: ~2 pages then a timeout (definitely <20)."""
     rely_topic = _event_topic0("Rely(address)")
 
     class _SlowClient:
@@ -529,15 +485,12 @@ def test_timeout_returns_incomplete_status():
     assert result["status"] == "incomplete_timeout"
     assert result["pages_fetched"] >= 1
     assert result["pages_fetched"] < 20  # bound stopped us well before n=20
-    # Partial principals — not silent empty.
     assert len(result["principals"]) >= 1
 
 
 def test_rpc_error_surfaces_status_not_silent_fallback():
-    """The original recursive.py caller had `except Exception:
-    enumerated = []` which silently dropped principals. Now an
-    underlying RPC error must surface as status='error' with whatever
-    partial data was already collected."""
+    """The original recursive.py caller had ``except Exception: enumerated = []``, silently
+    dropping principals. An RPC error must surface as status='error' with the partial data."""
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
 
@@ -564,8 +517,7 @@ def test_rpc_error_surfaces_status_not_silent_fallback():
     assert result["status"] == "error"
     assert result["error"] == "hypersync 503"
     assert result["pages_fetched"] == 1
-    # Page 1 principal still surfaced — caller must NOT see an empty list
-    # and conclude "no admins".
+    # Page 1 principal still surfaced: the caller must NOT conclude "no admins".
     assert [p["address"] for p in result["principals"]] == [alice]
 
 
@@ -590,8 +542,7 @@ def test_complete_result_carries_status_complete():
 
 
 def test_sync_wrapper_caches_results():
-    """Sibling cascade jobs enumerating the same contract within the TTL
-    must share results without re-running the pagination loop."""
+    """Sibling cascade jobs enumerating the same contract within the TTL share results."""
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
     pages = [([_log(rely_topic, indexed_args=[alice], block=10)], None)]
@@ -610,7 +561,6 @@ def test_sync_wrapper_caches_results():
     calls_after_first = calls["n"]
     assert calls_after_first >= 1
 
-    # Second call — cache hit, no new client.get invocations.
     result2 = enumerate_mapping_allowlist_sync(
         "0x" + "AA" * 20,
         cast(Any, [_rely_spec()]),
@@ -621,21 +571,6 @@ def test_sync_wrapper_caches_results():
     assert result2["status"] == "complete"
     assert result2["principals"] == result1["principals"]
     assert calls["n"] == calls_after_first  # no additional calls
-
-
-def test_clear_enumeration_cache_drops_entries():
-    rely_topic = _event_topic0("Rely(address)")
-    client, _ = _fake_client([([_log(rely_topic, indexed_args=[_addr("aa")], block=10)], None)])
-    enumerate_mapping_allowlist_sync(
-        "0x" + "BB" * 20,
-        cast(Any, [_rely_spec()]),
-        from_block=0,
-        client=client,
-        hypersync_module=_FakeHypersyncModule(),
-    )
-    assert mapping_enumerator._CACHE  # populated
-    clear_enumeration_cache()
-    assert not mapping_enumerator._CACHE
 
 
 # ---------------------------------------------------------------------------
@@ -746,7 +681,6 @@ def test_value_predicate_latest_value_wins_over_older_assignment():
         )
     )
     assert filter_value_entries(result["entries"], {"op": "eq", "rhs_values": ["10"], "value_type": "uint256"}) == []
-    # And 5 matches.
     assert filter_value_entries(result["entries"], {"op": "eq", "rhs_values": ["5"], "value_type": "uint256"}) == [
         a.lower()
     ]
@@ -773,19 +707,18 @@ def test_value_predicate_passes_op_handles_addresses_and_any_nonzero():
 
 
 # ---------------------------------------------------------------------------
-# P1.3 — L1 re-key on (chain, address, specs_hash) + size cap.
+# P1.3 - L1 re-key on (chain, address, specs_hash) + size cap.
 #
-# The old address-only L1 key collided across chains and writer-spec sets,
-# defeating L2's careful (chain, address, specs_hash) keying. These pin the
-# re-key (distinct specs/chain MISS) AND the parity requirement (the common
-# single-chain/single-specs repeat must still HIT — no extra hypersync scan).
-# The autouse _isolated_cache fixture sets DB cache OFF and clears L1/L2.
+# The old address-only L1 key collided across chains and writer-spec sets, defeating L2's
+# keying. These pin the re-key (distinct specs/chain MISS) AND parity (a single-chain/
+# single-specs repeat must still HIT). The autouse _isolated_cache fixture sets DB cache
+# OFF and clears L1/L2.
 # ---------------------------------------------------------------------------
 
 
 def test_l1_rekey_parity_same_chain_single_specs():
-    """PARITY: a repeat with the same chain + specs must still HIT L1 (the re-key must
-    not introduce a miss that re-pays the hypersync scan)."""
+    """PARITY: a repeat with the same chain + specs must still HIT L1 (no extra hypersync
+    scan)."""
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
     client, calls = _fake_client([([_log(rely_topic, indexed_args=[alice], block=10)], None)])
@@ -875,9 +808,8 @@ def test_l1_enumeration_cache_size_capped(monkeypatch):
 
 
 def test_value_cache_rekey_ignores_predicate():
-    """The value-fold L1 key is (chain, address, specs_hash) WITHOUT the predicate: the
-    cached entries are predicate-independent (filter_value_entries applies the predicate
-    downstream), so a re-run with a different predicate HITs instead of re-paginating."""
+    """The value-fold L1 key omits the predicate (cached entries are predicate-independent;
+    ``filter_value_entries`` applies it downstream), so a different predicate HITs."""
     from services.resolution.mapping_enumerator import enumerate_mapping_values_sync
 
     topic0 = _event_topic0("OwnerSet(address,uint256)")

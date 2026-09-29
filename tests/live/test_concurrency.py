@@ -47,16 +47,9 @@ def test_concurrent_analyses_all_complete(live_base_url: str, live_admin_key: st
 def test_concurrent_analyses_parallelism(live_base_url: str, live_admin_key: str):
     """The worker pool runs concurrent submissions in parallel, not serially.
 
-    The slowest single job is the floor for wall time. If wall ≈ slowest, every
-    other job ran *inside* its window (parallel). If wall ≈ sum, the pool
-    serialized. 1.5× slack absorbs queueing jitter at the static→resolution
-    handoff (PSAT_STATIC_WORKERS=3 + PSAT_RESOLUTION_WORKERS=2 in fly.toml).
-
-    The previous metric (sum/wall > 1.5) was bounded above by sum/max, so a
-    single heavy contract — LINK or DAI occasionally hit 100–150s under
-    shared-cpu-2x while others stayed <10s — collapsed the achievable ceiling
-    below the threshold and failed the test on weight variance, not pool
-    health.
+    Wall time ≈ slowest job means parallel; ≈ sum means serialized. 1.5× slack absorbs queueing jitter at the
+    static→resolution handoff (PSAT_STATIC_WORKERS=3, PSAT_RESOLUTION_WORKERS=2 in fly.toml). A sum/wall metric
+    failed on weight variance (LINK/DAI occasionally 100-150s), not pool health.
     """
     jobs: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=len(PARALLEL_ADDRESSES)) as pool:

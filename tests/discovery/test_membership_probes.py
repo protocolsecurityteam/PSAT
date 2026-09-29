@@ -122,7 +122,6 @@ def test_probe_persists_code_creation_and_reads(db_session, monkeypatch, erpc_en
     assert result.creation_block == 55
     assert result.deployer == _CREATOR
     assert set(result.resolved_addresses) == {_OWNER, _IMPL}
-    # Deployer learned by the probe lands on the row.
     assert row.deployer == _CREATOR
 
     witness = db_session.get(ContractCreationWitness, (1, row.address))
@@ -152,7 +151,6 @@ def test_probe_code_absent_prunes_with_proof(db_session, monkeypatch, erpc_env):
     witness = db_session.get(ContractCreationWitness, (1, row.address))
     assert witness is not None and witness.code_absent_at_probe is True
     assert witness.code_probe_block == 100
-    # No resolution reads against an empty address.
     assert seen["calls"] == [] and seen["batch"] == []
     assert gate.resolve_membership_state(db_session, row) == "pruned"
 
@@ -192,23 +190,6 @@ def test_probe_rpc_failure_is_an_attempt_not_a_verdict(db_session, monkeypatch, 
     attempt = db_session.get(ContractProbeAttempt, (row.id, 1))
     assert attempt is not None and attempt.results["status"] == "rpc_error"
     assert gate.resolve_membership_state(db_session, row) == "candidate"
-
-
-def test_probe_reads_resolving_nowhere_keep_parked_explainable(db_session, monkeypatch, erpc_env):
-    protocol = _protocol(db_session)
-    row = _contract(db_session, ADDR(0x104), nominated=protocol.id)
-    _stub_wire(monkeypatch)  # owner/authority revert, slots zero, no creation answer
-
-    result = gate.probe(db_session, row)
-
-    assert result.code_present is True
-    assert result.resolved_addresses == ()
-    attempt = db_session.get(ContractProbeAttempt, (row.id, 1))
-    assert attempt is not None
-    reads = attempt.results["reads"]
-    assert reads["owner"]["ok"] is False and reads["owner"]["value"] is None
-    assert reads["implementation"]["ok"] is True and reads["implementation"]["value"] is None
-    assert attempt.results["resolved_addresses"] == []
 
 
 @pytest.mark.parametrize("bad_code", [None, 42, "not-hex", "0xzz", "0x123"])

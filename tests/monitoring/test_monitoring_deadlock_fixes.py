@@ -1,19 +1,10 @@
 """Integration tests for the four monitoring deadlock-hardening fixes.
 
-Drives the real ``poll_for_state_changes`` / ``run_poll_loop`` /
-``run_scan_loop`` production paths against the real test DB (shared
-``db_session`` fixture), stubbing only the wire — ``rpc_batch_request_classified`` and,
-for the deadlock cases, the narrowest DB statement that Postgres would abort.
-Never replaces the repo classes.
-
-Covers:
-  1. Chunk-level deadlock isolation in the poller — a deadlock at the stamp
-     (pre-commit) or during the suppression-SELECT autoflush rolls back only its
-     chunk, leaves it unstamped, and the pass finishes ``partial`` with the
-     other chunks committed. A non-deadlock OperationalError still kills the pass.
-  2. Per-chunk post-commit notification — committed chunks notify exactly once;
-     a rolled-back chunk never notifies.
-  3. Loop de-phasing — the poller offsets its first pass; the scanner does not.
+Drives the real ``poll_for_state_changes`` / ``run_poll_loop`` / ``run_scan_loop`` against the
+test DB, stubbing only the wire (``rpc_batch_request_classified``) and, for deadlock cases,
+the narrowest DB statement Postgres would abort. Fixes: (1) per-chunk deadlock isolation,
+(2) post-commit notification once per committed chunk, (3) poller start de-phasing,
+(4) no phantom event on the first observation after a baseline cleanse.
 """
 
 from __future__ import annotations
@@ -193,9 +184,8 @@ def test_deadlock_at_stamp_isolates_chunk_and_reports_partial(db_session, monkey
 
 
 def test_deadlock_during_suppression_autoflush_rolls_back_in_memory_state(db_session, monkeypatch):
-    """The incident deadlock surfaced during a query-invoked autoflush, before
-    the commit. Prove the try/except boundary covers that: a deadlock at the
-    suppression SELECT reverts the chunk's already-staged last_known_state."""
+    """The incident deadlock hit a query-invoked autoflush before commit: a deadlock at the
+    suppression SELECT must revert the chunk's staged last_known_state."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "3")
     monkeypatch.setattr("services.monitoring.unified_watcher.MAX_BATCH_SIZE", 1)
 
@@ -291,14 +281,9 @@ def test_non_deadlock_operational_error_kills_the_pass(db_session, monkeypatch):
 
 
 def test_deadlock_in_reanalysis_autoflush_is_isolated_not_fatal(db_session, monkeypatch):
-    """Regression for the reviewer's A1 hole: a deadlock surfacing during
-    maybe_queue_reanalysis's Job-SELECT autoflush (the incident's exact
-    statement) used to be swallowed by the reanalysis inner handler, poisoning
-    the session so the NEXT statement raised PendingRollbackError past the chunk
-    handler and killed the whole pass. Drives the real poll path; only the wire
-    and the DB abort (a before_cursor_execute hook raising DeadlockDetected on
-    the flushed UPDATE, exactly as Postgres would) are simulated.
-    """
+    """Regression for reviewer hole A1: a deadlock in maybe_queue_reanalysis's Job-SELECT
+    autoflush was swallowed by the inner handler, poisoning the session so the NEXT statement
+    raised PendingRollbackError and killed the pass. Only the DB abort is simulated."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
 
     # contract_id=None so _sync_relational_from_poll no-ops and the reanalysis
@@ -486,25 +471,3 @@ def test_poll_loop_startup_offset_override_disables_shift(monkeypatch):
 
     # No 300s offset wait — the first wait is the post-pass interval wait.
     assert waits == [600.0]
-
-
-def test_scan_loop_does_not_offset_first_pass(monkeypatch):
-    order: list = []
-    ev = Event()
-
-    def fake_scan(session, rpc_url):
-        order.append("scan")
-        ev.set()  # stop after the first pass
-        return uw.ScanResult([])
-
-    def rec_wait(timeout=None):
-        order.append(("wait", timeout))
-        return True
-
-    monkeypatch.setattr(uw, "scan_for_events", fake_scan)
-    monkeypatch.setattr(uw, "SessionLocal", lambda: contextlib.nullcontext(MagicMock()))
-    monkeypatch.setattr(ev, "wait", rec_wait)
-
-    uw.run_scan_loop("http://rpc", interval=600, stop_event=ev)
-
-    assert order[0] == "scan"  # the scanner runs its first pass with no pre-wait

@@ -1,31 +1,16 @@
 """Regression pin: OZ v5 (ERC-7201 namespaced-storage) AccessControl role gates.
 
-Mode B of the etherfi controller-recall audit (CumulativeMerkleDrop). The
-static pipeline makes a role-gated function's caller set *enumerable* by
-discovering its writer event (``_roles[role][account] = true; emit
-RoleGranted(role, account, …)``) and attaching it to the gate's
-``mapping_membership`` descriptor as an ``enumeration_hint`` — the event-indexed
-adapter then enumerates the holders, which become ``FunctionPrincipal`` rows and
-ultimately a surfaced controller.
+Mode B of the etherfi controller-recall audit (CumulativeMerkleDrop). A role-gated
+function's caller set is *enumerable* when its writer event (``emit RoleGranted``)
+attaches to the gate's ``mapping_membership`` descriptor as an ``enumeration_hint``.
+OZ v5 reaches roles through an inline-assembly storage pointer (``$._roles[role]``);
+both ``mapping_events.discover_mapping_writer_events`` and
+``predicates._find_index_base`` used to trace the ``REF_*`` temp instead of the
+logical ``_roles`` mapping, so no hint attached, the adapter returned
+``unsupported(no_adapter)`` and the role holders were never surfaced.
 
-OpenZeppelin v5 stores roles in ERC-7201 *namespaced* storage, reached through
-an inline-assembly storage pointer::
-
-    AccessControlStorage storage $ = _getAccessControlStorage();
-    return $._roles[role].hasRole[account];
-
-Previously both the writer-event discovery (``mapping_events.discover_mapping_writer_events``)
-and the gate's ``storage_var`` resolution (``predicates._find_index_base``) traced through
-the assembly storage-pointer local (a ``REF_*`` temp) instead of the logical ``_roles``
-mapping. So no writer event was bound, no ``enumeration_hint`` attached, the adapter
-returned ``unsupported(no_adapter)``, and the role holders (e.g. CumulativeMerkleDrop's
-3/7 admin Safe) were never surfaced. Both walkers now resolve the ``Member`` field back to
-the logical mapping name, and ``discover_mapping_writer_events`` gates on the index-write
-signal (not the contract-level state-var pre-filter that namespaced storage defeats).
-
-The v4 (direct state-variable) and v5 (ERC-7201 namespaced storage) cases are both passing
-regression guards — proving the pipeline resolves role enumeration through either storage
-layout.
+The v4 (direct state variable) and v5 (namespaced) cases are both guards that role
+enumeration resolves through either storage layout.
 """
 
 from __future__ import annotations
@@ -49,9 +34,7 @@ from services.static.contract_analysis_pipeline.predicate_types import Predicate
 from services.static.contract_analysis_pipeline.predicates import build_predicate_tree
 from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass
 
-# Same role storage shape, differing only in HOW `_roles` is reached:
-# v4 declares it as a state variable; v5 reaches it through an ERC-7201
-# assembly storage pointer. Both expose the canonical RoleGranted writer.
+# Same role storage shape, differing only in HOW `_roles` is reached (v4 state var vs v5 ERC-7201 pointer).
 _V4_SRC = """
 pragma solidity ^0.8.20;
 contract AccessV4 {
@@ -124,8 +107,6 @@ def _first_leaf(node: Any) -> dict[str, Any] | None:
 
 
 def _run_pipeline(tmp_path: Path, source: str, gate_fn: str) -> tuple[list[Any], dict[str, Any]]:
-    """Compile *source*, run the static role-resolution passes, and return
-    ``(writer_specs, gate_descriptor)`` for the ``Drop.<gate_fn>`` gate."""
     sol = tmp_path / "C.sol"
     sol.write_text(textwrap.dedent(source).strip() + "\n")
     contract = next(c for c in Slither(str(sol)).contracts if c.name == "Drop")
@@ -156,14 +137,9 @@ def test_v4_state_var_access_control_role_gate_is_enumerable(tmp_path: Path) -> 
 
 
 def test_v5_namespaced_access_control_role_gate_is_enumerable(tmp_path: Path) -> None:
-    """Same role logic via ERC-7201 namespaced storage is equally enumerable.
-
-    The static pipeline now resolves the assembly storage-pointer write/read
-    (``$._roles[role][account]``) back to the logical ``_roles`` mapping, so the
-    RoleGranted writer is discovered and the gate's ``storage_var`` resolves to
-    ``_roles`` and carries the enumeration hint — closing the
-    CumulativeMerkleDrop (Mode B) recall gap. Regression guard against the
-    assembly storage-pointer resolution in mapping_events + predicates."""
+    """Same role logic via ERC-7201 namespaced storage is equally enumerable: the
+    assembly storage-pointer access resolves back to ``_roles``, closing the
+    CumulativeMerkleDrop (Mode B) recall gap."""
     specs, descriptor = _run_pipeline(tmp_path, _V5_SRC, "setMerkleRoot(bytes32)")
 
     assert any(str(s.get("event_signature", "")).startswith("RoleGranted") for s in specs), specs

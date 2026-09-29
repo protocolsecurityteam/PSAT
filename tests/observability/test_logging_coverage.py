@@ -1,13 +1,8 @@
-"""Offline logging/observability tests for the coverage verify path.
+"""Offline logging tests for the coverage verify path (Backlog #13).
 
-Locks in the Backlog #13 behavior: the source-equivalence verdict and its
-identity fields live in ``extra={}`` (queryable JSON), a benign rebuild
-race is labeled ``row_vanished`` rather than ``github_fetch_failed``, and a
-pass dominated by ``hash_mismatch`` raises a single WARNING with the rate in
-``extra`` plus a heartbeat-detail rollup.
-
-No DB / network: the methods under test are pure log/derivation helpers;
-``record_heartbeat`` is stubbed.
+The source-equivalence verdict and identity fields live in queryable ``extra={}``, a benign
+rebuild race is ``row_vanished`` not ``github_fetch_failed``, and a pass dominated by
+``hash_mismatch`` raises one WARNING plus a heartbeat rollup. Pure log helpers; no DB or network.
 """
 
 from __future__ import annotations
@@ -22,8 +17,7 @@ LOGGER_NAME = "workers.coverage_verify"
 
 
 def _worker() -> cv.CoverageVerifyWorker:
-    # Bypass __init__ so we don't register signal handlers / reconfigure
-    # logging — these helpers only touch the module logger + globals.
+    # Bypass __init__ to avoid registering signal handlers / reconfiguring logging.
     w = cv.CoverageVerifyWorker.__new__(cv.CoverageVerifyWorker)
     w.worker_id = "CoverageVerify-test"
     return w

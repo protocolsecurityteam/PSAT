@@ -138,7 +138,7 @@ def _scan_hypersync_url_for_chain(chain: str | int | None) -> str | None:
     chain. Mainnet resolves to its registry URL — byte-identical to the old
     ``DEFAULT_HYPERSYNC_URL`` default, so mainnet scans are unchanged.
     """
-    from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
+    from services.resolution.hypersync_bound import hypersync_url_for_chain
     from utils.chains import require_chain
 
     if isinstance(chain, int) or (isinstance(chain, str) and chain.strip().isdigit()):
@@ -147,7 +147,7 @@ def _scan_hypersync_url_for_chain(chain: str | int | None) -> str | None:
         info = require_chain(
             chain=chain if isinstance(chain, str) else None, context="mapping enumeration hypersync url"
         )
-    return _hypersync_url_for_chain(info.chain_id)
+    return hypersync_url_for_chain(info.chain_id)
 
 
 def _l1_specs_hash(specs_as_dicts: list[dict[str, Any]]) -> str:

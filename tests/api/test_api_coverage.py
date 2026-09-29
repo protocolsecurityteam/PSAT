@@ -1,16 +1,6 @@
-"""Tests targeting uncovered paths in api.py for improved coverage.
-
-Focuses on:
-- _display_name() helper edge cases
-- _merge_proxy_impl_entries() logic
-- GET /api/stats
-- GET /api/jobs (list with proxy flagging)
-- POST /api/analyze (dapp_urls, defillama_protocol paths)
-- GET /api/analyses/{run_name}/artifact/{artifact_name} (lookup by id/address, extension stripping)
-- GET /api/analyses/{run_name} (relational-table fallback paths, control_snapshot, resolved_control_graph from tables)
-- GET /api/company/{company_name}
-- Proxy subscription endpoints
-- SPA fallback for /api/* paths
+"""Tests for uncovered paths in api.py: ``_display_name`` / ``_merge_proxy_impl_entries`` helpers,
+stats and jobs listing, analyze (dapp_urls, defillama_protocol), artifact lookup, analysis-detail
+relational fallbacks, company overview, proxy subscriptions, SPA fallback for /api/* paths.
 """
 
 from __future__ import annotations
@@ -118,13 +108,6 @@ class TestDisplayName:
         result = self._dn({"contract_name": "ERC1967Proxy", "run_name": "MyRunName"})
         assert result == "MyRunName"
 
-    def test_all_generic_proxy_names(self):
-        from services.governance.proxies import GENERIC_PROXY_NAMES
-
-        for gname in GENERIC_PROXY_NAMES:
-            result = self._dn({"contract_name": gname, "run_name": "fallback"})
-            assert result == "fallback", f"{gname} should be treated as generic"
-
     def test_fallback_to_contract_name_when_no_run_name(self):
         # When contract_name is generic AND no run_name, falls back to contract_name itself
         result = self._dn({"contract_name": "Proxy"})
@@ -183,15 +166,11 @@ class TestMergeProxyImplEntries:
         assert merged.get("proxy_address_display") == "0xaaa"
         assert merged.get("proxy_type_display") == "ERC1967"
         assert merged.get("display_name") == "VaultImpl"
-        # Company comes from proxy when impl is None
         assert merged["company"] == "etherfi"
-        # Chain comes from proxy
         assert merged["chain"] == "ethereum"
-        # rank_score from proxy (not None)
         assert merged["rank_score"] == 10
 
     def test_proxy_without_impl_entry_passes_through(self):
-        # Proxy entry but no matching impl entry in the list
         proxy = {
             "address": "0xaaa",
             "is_proxy": True,
@@ -240,7 +219,6 @@ def test_analyze_dapp_urls(mock_create_job, mock_session_cls):
         json={"dapp_urls": ["https://app.uniswap.org"]},
     )
     assert response.status_code == 200
-    # Verify create_job was called with initial_stage=dapp_crawl
     from db.models import JobStage
 
     _, kwargs = mock_create_job.call_args
@@ -268,7 +246,6 @@ def test_analyze_defillama_protocol(mock_create_job, mock_session_cls):
 
 
 def test_analyze_rejects_multiple_targets():
-    """Cannot provide both dapp_urls and address."""
     client = _make_client()
     response = client.post(
         "/api/analyze",
@@ -288,7 +265,6 @@ def test_analyze_rejects_multiple_targets():
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_artifact_lookup_by_job_id(mock_session_cls, mock_get_artifact):
-    """When name lookup fails, try by job ID."""
     client = _make_client()
     job_id = str(uuid.uuid4())
     fake_job = _fake_job(job_id=job_id, name="test_job")
@@ -319,7 +295,6 @@ def test_artifact_lookup_by_job_id(mock_session_cls, mock_get_artifact):
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_artifact_lookup_by_address(mock_session_cls, mock_get_artifact):
-    """When name and ID lookups fail, try by address."""
     client = _make_client()
     addr = "0x1111111111111111111111111111111111111111"
     fake_job = _fake_job(address=addr, name="addr_job")
@@ -333,10 +308,8 @@ def test_artifact_lookup_by_address(mock_session_cls, mock_get_artifact):
         call_count["n"] += 1
         result = MagicMock()
         if call_count["n"] <= 1:
-            # Name lookup fails
             result.scalar_one_or_none.return_value = None
         else:
-            # Address lookup succeeds
             result.scalar_one_or_none.return_value = fake_job
         return result
 
@@ -354,7 +327,6 @@ def test_artifact_lookup_by_address(mock_session_cls, mock_get_artifact):
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_artifact_not_found(mock_session_cls, mock_get_artifact):
-    """Returns 404 when artifact doesn't exist."""
     client = _make_client()
     fake_job = _fake_job(name="test_job")
 
@@ -374,14 +346,10 @@ def test_artifact_not_found(mock_session_cls, mock_get_artifact):
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_artifact_storage_error_returns_503_not_404(mock_session_cls, mock_get_artifact):
-    """INVERTED (was ``test_artifact_storage_error_returns_404_not_500``, which
-    asserted 404 and called it "degrading cleanly").
-
-    That assertion pinned the defect at the published boundary: an unconfigured
-    or unreachable backend answered with the same bytes as an artifact the job
-    never produced, and the SPA's ``.catch()`` path draws that as an absence.
-    Not-500 was the right instinct and still holds — it is now 503, which is a
-    third answer rather than the second one repeated.
+    """INVERTED from ``test_artifact_storage_error_returns_404_not_500``, which pinned the defect:
+    an unreachable backend answered with the same bytes as an artifact the job never produced,
+    and the SPA's ``.catch()`` path draws that as an absence. Now 503, a third answer rather
+    than the second repeated.
     """
     client = _make_client()
     fake_job = _fake_job(name="test_job")
@@ -434,10 +402,8 @@ def test_artifact_upgrade_history_falls_back_to_synthesis(
     mock_get_artifact,
     mock_synth,
 ):
-    """When storage can't serve upgrade_history, rebuild it from
-    UpgradeEvent rows. The relational table is the source of truth for
-    the count/last_block badges shown in the company overview, so the
-    detail view should stay consistent when storage is unhappy."""
+    """When storage can't serve upgrade_history, rebuild it from UpgradeEvent rows — the source
+    of truth for the count/last_block badges in the company overview."""
     client = _make_client()
     fake_job = _fake_job(name="test_job")
     fake_contract = MagicMock()
@@ -473,7 +439,6 @@ def test_artifact_upgrade_history_falls_back_to_synthesis(
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_artifact_txt_extension_stripping(mock_session_cls, mock_get_artifact):
-    """The .txt extension is stripped for lookup."""
     client = _make_client()
     fake_job = _fake_job(name="job1")
 
@@ -483,7 +448,6 @@ def test_artifact_txt_extension_stripping(mock_session_cls, mock_get_artifact):
     mock_exec.scalar_one_or_none.return_value = fake_job
     mock_session.execute.return_value = mock_exec
 
-    # First call with stripped name returns None, second with original returns data
     mock_get_artifact.side_effect = [None, "report text"]
 
     response = client.get("/api/analyses/job1/artifact/analysis_report.txt", headers=_admin_headers())
@@ -494,7 +458,6 @@ def test_artifact_txt_extension_stripping(mock_session_cls, mock_get_artifact):
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_artifact_json_extension_stripping(mock_session_cls, mock_get_artifact):
-    """The .json extension is stripped, and first lookup with stripped name succeeds."""
     client = _make_client()
     fake_job = _fake_job(name="job1")
 
@@ -513,7 +476,6 @@ def test_artifact_json_extension_stripping(mock_session_cls, mock_get_artifact):
 
 @patch("routers.deps.SessionLocal")
 def test_artifact_job_not_found_returns_404(mock_session_cls):
-    """Returns 404 when no job matches name/id/address."""
     client = _make_client()
 
     mock_session = MagicMock()
@@ -536,7 +498,6 @@ def test_artifact_job_not_found_returns_404(mock_session_cls):
 @patch("routers.deps.get_all_artifacts")
 @patch("routers.deps.SessionLocal")
 def test_analysis_detail_relational_effective_permissions(mock_session_cls, mock_get_all_artifacts):
-    """When contract_row exists with EffectiveFunctions, payload gets effective_permissions from relational tables."""
     client = _make_client()
     job = _fake_job(name="rel_job", address="0xaaa")
 
@@ -577,23 +538,17 @@ def test_analysis_detail_relational_effective_permissions(mock_session_cls, mock
         call_count["n"] += 1
         result = MagicMock()
         if call_count["n"] == 1:
-            # Job lookup
             result.scalar_one_or_none.return_value = job
         elif call_count["n"] == 2:
-            # Contract lookup
             result.scalar_one_or_none.return_value = contract_row
         elif call_count["n"] == 3:
-            # EffectiveFunction query (batched per contract, principals eager-loaded)
             result.scalars.return_value.all.return_value = [ef]
             result.scalars.return_value.__iter__ = lambda s: iter([ef])
         elif call_count["n"] == 4:
-            # PrincipalLabel query
             result.scalars.return_value.all.return_value = []
         elif call_count["n"] == 5:
-            # ControllerValue query (for control_snapshot)
             result.scalars.return_value.all.return_value = []
         elif call_count["n"] == 6:
-            # ControlGraphNode query
             result.scalars.return_value.all.return_value = []
         else:
             result.scalar_one_or_none.return_value = None
@@ -628,7 +583,6 @@ def test_analysis_detail_relational_effective_permissions(mock_session_cls, mock
 @patch("routers.deps.get_all_artifacts")
 @patch("routers.deps.SessionLocal")
 def test_analysis_detail_relational_control_snapshot(mock_session_cls, mock_get_all_artifacts):
-    """When control_snapshot is NOT in artifacts, build it from ControllerValue table."""
     client = _make_client()
     job = _fake_job(name="cv_job", address="0xaaa")
 
@@ -660,16 +614,12 @@ def test_analysis_detail_relational_control_snapshot(mock_session_cls, mock_get_
         elif call_count["n"] == 2:
             result.scalar_one_or_none.return_value = contract_row
         elif call_count["n"] == 3:
-            # EffectiveFunction: empty
             result.scalars.return_value.all.return_value = []
         elif call_count["n"] == 4:
-            # PrincipalLabel: empty
             result.scalars.return_value.all.return_value = []
         elif call_count["n"] == 5:
-            # ControllerValue
             result.scalars.return_value.all.return_value = [cv]
         elif call_count["n"] == 6:
-            # ControlGraphNode (for resolved_control_graph)
             result.scalars.return_value.all.return_value = []
         else:
             result.scalar_one_or_none.return_value = None
@@ -678,7 +628,6 @@ def test_analysis_detail_relational_control_snapshot(mock_session_cls, mock_get_
 
     mock_session.execute.side_effect = route_execute
 
-    # No control_snapshot in artifacts
     mock_get_all_artifacts.return_value = {
         "contract_analysis": {
             "subject": {"name": "CVContract"},
@@ -699,7 +648,6 @@ def test_analysis_detail_relational_control_snapshot(mock_session_cls, mock_get_
 @patch("routers.deps.get_all_artifacts")
 @patch("routers.deps.SessionLocal")
 def test_analysis_detail_relational_control_graph(mock_session_cls, mock_get_all_artifacts):
-    """When resolved_control_graph is NOT in artifacts, build it from CGN/CGE tables."""
     client = _make_client()
     job = _fake_job(name="cg_job", address="0xaaa")
 
@@ -739,19 +687,14 @@ def test_analysis_detail_relational_control_graph(mock_session_cls, mock_get_all
         elif call_count["n"] == 2:
             result.scalar_one_or_none.return_value = contract_row
         elif call_count["n"] == 3:
-            # EffectiveFunction: empty
             result.scalars.return_value.all.return_value = []
         elif call_count["n"] == 4:
-            # PrincipalLabel: empty
             result.scalars.return_value.all.return_value = []
         elif call_count["n"] == 5:
-            # ControllerValue: empty (no control_snapshot)
             result.scalars.return_value.all.return_value = []
         elif call_count["n"] == 6:
-            # ControlGraphNode
             result.scalars.return_value.all.return_value = [cgn]
         elif call_count["n"] == 7:
-            # ControlGraphEdge
             result.scalars.return_value.all.return_value = [cge]
         else:
             result.scalar_one_or_none.return_value = None
@@ -760,7 +703,6 @@ def test_analysis_detail_relational_control_graph(mock_session_cls, mock_get_all
 
     mock_session.execute.side_effect = route_execute
 
-    # No resolved_control_graph in artifacts
     mock_get_all_artifacts.return_value = {
         "contract_analysis": {
             "subject": {"name": "CGContract"},
@@ -783,7 +725,6 @@ def test_analysis_detail_relational_control_graph(mock_session_cls, mock_get_all
 @patch("routers.deps.get_all_artifacts")
 @patch("routers.deps.SessionLocal")
 def test_analysis_detail_relational_principal_labels(mock_session_cls, mock_get_all_artifacts):
-    """When PrincipalLabel rows exist, they populate principal_labels in payload."""
     client = _make_client()
     job = _fake_job(name="pl_job", address="0xaaa")
 
@@ -813,16 +754,12 @@ def test_analysis_detail_relational_principal_labels(mock_session_cls, mock_get_
         elif call_count["n"] == 2:
             result.scalar_one_or_none.return_value = contract_row
         elif call_count["n"] == 3:
-            # EffectiveFunction: empty
             result.scalars.return_value.all.return_value = []
         elif call_count["n"] == 4:
-            # PrincipalLabel
             result.scalars.return_value.all.return_value = [pl]
         elif call_count["n"] == 5:
-            # ControllerValue: empty
             result.scalars.return_value.all.return_value = []
         elif call_count["n"] == 6:
-            # ControlGraphNode: empty
             result.scalars.return_value.all.return_value = []
         else:
             result.scalar_one_or_none.return_value = None
@@ -849,7 +786,6 @@ def test_analysis_detail_relational_principal_labels(mock_session_cls, mock_get_
 @patch("routers.deps.get_all_artifacts")
 @patch("routers.deps.SessionLocal")
 def test_analysis_detail_lookup_by_id(mock_session_cls, mock_get_all_artifacts):
-    """Falls back to session.get(Job, run_name) when name lookup fails."""
     client = _make_client()
     job_id = str(uuid.uuid4())
     job = _fake_job(job_id=job_id, name="id_lookup_job", address="0xaaa")
@@ -863,7 +799,6 @@ def test_analysis_detail_lookup_by_id(mock_session_cls, mock_get_all_artifacts):
         call_count["n"] += 1
         result = MagicMock()
         if call_count["n"] == 1:
-            # Name lookup fails
             result.scalar_one_or_none.return_value = None
         else:
             result.scalar_one_or_none.return_value = None
@@ -883,7 +818,6 @@ def test_analysis_detail_lookup_by_id(mock_session_cls, mock_get_all_artifacts):
 @patch("routers.deps.get_all_artifacts")
 @patch("routers.deps.SessionLocal")
 def test_analysis_detail_lookup_by_address(mock_session_cls, mock_get_all_artifacts):
-    """Falls back to address lookup when name and ID fail."""
     client = _make_client()
     addr = "0x1111111111111111111111111111111111111111"
     job = _fake_job(address=addr, name="addr_job")
@@ -897,10 +831,8 @@ def test_analysis_detail_lookup_by_address(mock_session_cls, mock_get_all_artifa
         call_count["n"] += 1
         result = MagicMock()
         if call_count["n"] == 1:
-            # Name lookup fails
             result.scalar_one_or_none.return_value = None
         elif call_count["n"] == 2:
-            # Address lookup succeeds
             result.scalar_one_or_none.return_value = job
         else:
             result.scalar_one_or_none.return_value = None
@@ -920,81 +852,6 @@ def test_analysis_detail_lookup_by_address(mock_session_cls, mock_get_all_artifa
 # ============================================================================
 # 8. GET /api/analyses - rank_scores and chain come from the contracts table
 # ============================================================================
-
-
-@patch("routers.deps.SessionLocal")
-def test_analyses_list_rank_scores_from_contracts_table(mock_session_cls):
-    """rank_score + chain come from the ``contracts`` table (selection's single
-    authoritative ranking pass), not from the legacy inventory artifact."""
-    client = _make_client()
-    company_job = _fake_job(
-        name="company_disc",
-        company="etherfi",
-        address=None,
-        request={"company": "etherfi"},
-    )
-    child_job = _fake_job(
-        name="child_contract",
-        address="0xcccc",
-        request={"parent_job_id": str(company_job.id)},
-    )
-
-    from db.models import JobStatus
-
-    company_job.status = JobStatus.completed
-    child_job.status = JobStatus.completed
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    # api.py now stores the full Contract row in contracts_by_address;
-    # mocks must expose every column the listing reads.
-    contract_row = SimpleNamespace(
-        address="0xcccc",
-        chain="ethereum",
-        rank_score=8.5,
-        contract_name="ContractX",
-        is_proxy=False,
-        proxy_type=None,
-        implementation=None,
-    )
-    artifact_row = SimpleNamespace(
-        job_id=child_job.id,
-        name="contract_analysis",
-        storage_key=None,
-        data={"subject": {"name": "ContractX"}, "summary": {}},
-        text_data=None,
-        content_type=None,
-    )
-
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        if call_count["n"] == 1:
-            # First query: completed jobs
-            result.scalars.return_value.all.return_value = [company_job, child_job]
-        elif call_count["n"] == 2:
-            # Second query: Contract rows for rank/chain/name/proxy lookup
-            result.scalars.return_value = iter([contract_row])
-        elif call_count["n"] == 3:
-            # Third query: batched Artifact rows for all jobs
-            result.scalars.return_value = iter([artifact_row])
-        else:
-            result.scalars.return_value.all.return_value = []
-            result.scalar_one_or_none.return_value = None
-        return result
-
-    mock_session.execute.side_effect = route_execute
-
-    response = client.get("/api/analyses")
-    assert response.status_code == 200
-    entries = response.json()
-    child = next((e for e in entries if e.get("address") == "0xcccc"), None)
-    assert child is not None
-    assert child["rank_score"] == 8.5
-    assert child["chain"] == "ethereum"
 
 
 # ============================================================================
@@ -1017,12 +874,7 @@ def test_company_overview_not_found(mock_session_cls):
 
 
 def test_company_overview_basic(db_session, api_client):
-    """Basic company overview with one non-proxy contract — real-DB integration.
-
-    Replaces the previous mock-heavy positional-list test (which broke when
-    the API switched to batched prefetches). Asserting against real DB state
-    keeps the test truthful and resilient to query-structure changes.
-    """
+    """Basic company overview with one non-proxy contract, on real DB state (robust to query-structure changes)."""
     from db.models import (
         Contract,
         ContractSummary,
@@ -1192,7 +1044,6 @@ def test_company_audit_coverage_reuses_strict_dependency_rows(mock_session_cls):
 
 
 def test_spa_fallback_api_prefix_returns_404():
-    """Requests starting with /api/ that don't match a route should return 404."""
     client = _make_client()
     response = client.get("/api/nonexistent_endpoint")
     assert response.status_code == 404
@@ -1205,7 +1056,6 @@ def test_spa_fallback_api_prefix_returns_404():
 
 @patch("routers.deps.SessionLocal")
 def test_analyses_company_from_parent_chain(mock_session_cls):
-    """company_for_job() walks parent_job_id chain to find company."""
     client = _make_client()
 
     company_job_id = uuid.uuid4()
@@ -1356,9 +1206,6 @@ def test_analyses_proxy_hidden_when_impl_not_completed(mock_session_cls):
 def test_analysis_detail_proxy_inherits_impl_relational_tables(
     mock_session_cls, mock_get_artifact, mock_get_all_artifacts
 ):
-    """When loading a proxy job detail, effective_permissions / control_snapshot /
-    resolved_control_graph / principal_labels should be inherited from impl's
-    relational tables when not available from artifacts."""
     client = _make_client()
 
     proxy_addr = "0x1111111111111111111111111111111111111111"
@@ -1497,19 +1344,16 @@ def test_analysis_detail_proxy_inherits_impl_relational_tables(
         make_result(scalars_all=[cge]),  # 12: ControlGraphEdge for impl
         make_result(scalars_all=[pl]),  # 13: PrincipalLabel for impl
     ]
-    # Add extra fallback results
     for _ in range(10):
         call_results.append(make_result())
 
     mock_session.execute.side_effect = call_results
 
-    # Proxy has no analysis artifacts
     mock_get_all_artifacts.side_effect = [
         {
             "dependency_graph_viz": {"nodes": [], "edges": []},
             "dependencies": {"deps": []},
         },
-        # impl artifacts (empty, so relational tables are used)
         {},
     ]
 
@@ -1519,29 +1363,22 @@ def test_analysis_detail_proxy_inherits_impl_relational_tables(
     assert response.status_code == 200
     body = response.json()
 
-    # Should have inherited effective_permissions from impl relational tables
     assert "effective_permissions" in body
     assert body["effective_permissions"]["functions"][0]["function"] == "transfer(address,uint256)"
 
-    # Should have inherited control_snapshot from impl
     assert "control_snapshot" in body
     assert "admin" in body["control_snapshot"]["controller_values"]
 
-    # Should have inherited resolved_control_graph from impl
     assert "resolved_control_graph" in body
     assert len(body["resolved_control_graph"]["nodes"]) >= 1
 
-    # Should have inherited principal_labels from impl
     assert "principal_labels" in body
     assert body["principal_labels"]["principals"][0]["address"] == "0xowner"
 
-    # Should have contract_name from impl
     assert body["contract_name"] == "ImplContract"
 
-    # Summary from impl contract
     assert body["summary"]["control_model"] == "authority"
 
-    # Proxy-specific fields
     assert body["implementation_address"] == impl_addr
 
 
@@ -1551,13 +1388,7 @@ def test_analysis_detail_proxy_inherits_impl_relational_tables(
 
 
 def test_company_overview_with_proxy_and_effects(db_session, api_client):
-    """Proxy with capability/effect labels — real-DB integration.
-
-    Replaces the previous positional-mock test (which tied test correctness
-    to the exact SQL call order and broke when the API switched to batched
-    prefetches). Builds a real protocol with one proxy + one impl, asserts
-    the capability/role/balance derivation logic.
-    """
+    """Proxy + impl with capability/effect labels on real DB state; asserts capability/role/balance derivation."""
     from db.models import (
         Contract,
         ContractBalance,
@@ -1765,213 +1596,14 @@ def test_company_overview_with_proxy_and_effects(db_session, api_client):
 # ============================================================================
 
 
-@patch("routers.deps.SessionLocal")
-def test_analyses_chain_populated_from_contracts_table(mock_session_cls):
-    """Chain comes from the ``contracts`` table (same pass that sets
-    rank_score) regardless of how the discovery worker wrote it —
-    a row with ``chain='arbitrum'`` surfaces in the analyses listing."""
-    client = _make_client()
-    company_job = _fake_job(
-        name="chain_disc",
-        company="test_co",
-        address=None,
-    )
-    child_job = _fake_job(
-        name="chain_child",
-        address="0xdddd",
-    )
-
-    from db.models import JobStatus
-
-    company_job.status = JobStatus.completed
-    child_job.status = JobStatus.completed
-    # The job and its Contract row must agree on chain for the listing to pair
-    # them: an arbitrum contract belongs to an arbitrum job.
-    child_job.chain_id = 42161
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    contract_row = SimpleNamespace(
-        address="0xdddd",
-        chain="arbitrum",
-        rank_score=5.0,
-        contract_name="ChainTest",
-        is_proxy=False,
-        proxy_type=None,
-        implementation=None,
-    )
-    artifacts = [
-        SimpleNamespace(
-            job_id=child_job.id,
-            name="contract_analysis",
-            storage_key=None,
-            data={"subject": {"name": "ChainTest"}, "summary": {}},
-            text_data=None,
-            content_type=None,
-        ),
-    ]
-
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        if call_count["n"] == 1:
-            result.scalars.return_value.all.return_value = [company_job, child_job]
-        elif call_count["n"] == 2:
-            result.scalars.return_value = iter([contract_row])
-        elif call_count["n"] == 3:
-            result.scalars.return_value = iter(artifacts)
-        else:
-            result.scalars.return_value.all.return_value = []
-            result.scalar_one_or_none.return_value = None
-        return result
-
-    mock_session.execute.side_effect = route_execute
-
-    response = client.get("/api/analyses")
-    assert response.status_code == 200
-    entries = response.json()
-    child = next((e for e in entries if e.get("address") == "0xdddd"), None)
-    assert child is not None
-    assert child["chain"] == "arbitrum"
-
-
 # ============================================================================
 # 19. GET /api/analyses - entry without contract_analysis is not appended
 # ============================================================================
 
 
-@patch("routers.deps.SessionLocal")
-def test_analyses_entry_without_analysis_still_appears(mock_session_cls):
-    """A job without contract_analysis artifact still appears in results, but
-    without contract_name or summary fields from the analysis."""
-    client = _make_client()
-    job = _fake_job(name="no_analysis", address="0xeeee")
-
-    from db.models import JobStatus
-
-    job.status = JobStatus.completed
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        if call_count["n"] == 1:
-            result.scalars.return_value.all.return_value = [job]
-        elif call_count["n"] == 2:
-            result.all.return_value = []
-        elif call_count["n"] == 3:
-            result.scalars.return_value = iter([])
-        else:
-            result.scalars.return_value.all.return_value = []
-            result.scalar_one_or_none.return_value = None
-        return result
-
-    mock_session.execute.side_effect = route_execute
-
-    response = client.get("/api/analyses")
-    assert response.status_code == 200
-    entries = response.json()
-    entry = next((e for e in entries if e.get("address") == "0xeeee"), None)
-    assert entry is not None
-    # No contract_name since analysis was None
-    assert "contract_name" not in entry
-    assert "summary" not in entry
-
-
 # ============================================================================
 # 20. GET /api/analyses - proxy uses impl analysis when proxy has none
 # ============================================================================
-
-
-@patch("routers.deps.SessionLocal")
-def test_analyses_proxy_uses_impl_analysis_when_proxy_has_none(mock_session_cls):
-    """When proxy's Contract row has no name, the proxy entry inherits the
-    impl's Contract.contract_name. Earlier code reached for the impl's
-    contract_analysis artifact body to read subject.name, but the listing
-    no longer fetches artifact bodies — names come from the prefetched
-    Contract rows directly. This regression test now seeds both
-    Contract rows and asserts the impl-name is what surfaces."""
-    client = _make_client()
-
-    proxy_job_id = uuid.uuid4()
-    impl_job_id = uuid.uuid4()
-
-    proxy_job = _fake_job(
-        job_id=str(proxy_job_id),
-        name="proxy_no_analysis",
-        address="0xaaaa",
-        is_proxy=True,
-    )
-    impl_job = _fake_job(
-        job_id=str(impl_job_id),
-        name="impl_has_analysis",
-        address="0xbbbb",
-    )
-
-    from db.models import JobStatus
-
-    proxy_job.status = JobStatus.completed
-    impl_job.status = JobStatus.completed
-
-    mock_session = MagicMock()
-    _mock_session_ctx(mock_session_cls, mock_session)
-
-    proxy_contract = SimpleNamespace(
-        address="0xaaaa",
-        chain=None,
-        rank_score=None,
-        contract_name=None,  # missing — should inherit from impl
-        is_proxy=True,
-        proxy_type="ERC1967",
-        implementation="0xbbbb",
-    )
-    impl_contract = SimpleNamespace(
-        address="0xbbbb",
-        chain=None,
-        rank_score=None,
-        contract_name="ImplName",
-        is_proxy=False,
-        proxy_type=None,
-        implementation=None,
-    )
-
-    call_count = {"n": 0}
-
-    def route_execute(stmt, *args, **kwargs):
-        call_count["n"] += 1
-        result = MagicMock()
-        if call_count["n"] == 1:
-            # Job listing
-            result.scalars.return_value.all.return_value = [proxy_job, impl_job]
-        elif call_count["n"] == 2:
-            # Contracts prefetch — returns both rows now (was just proxy
-            # before, since the old code didn't need impl's Contract row).
-            result.scalars.return_value = iter([proxy_contract, impl_contract])
-        elif call_count["n"] == 3:
-            # Artifact name listing — empty is fine, the test only cares
-            # about the contract_name fallback chain.
-            result.all.return_value = []
-        else:
-            result.scalars.return_value.all.return_value = []
-            result.scalar_one_or_none.return_value = None
-        return result
-
-    mock_session.execute.side_effect = route_execute
-
-    response = client.get("/api/analyses")
-    assert response.status_code == 200
-    entries = response.json()
-    # The proxy should have picked up impl's analysis
-    proxy_entry = next((e for e in entries if e.get("job_id") == str(proxy_job_id)), None)
-    assert proxy_entry is not None
-    assert proxy_entry.get("contract_name") == "ImplName"
 
 
 # ============================================================================

@@ -470,6 +470,82 @@ def _assert_url_chain_id(rpc_url: str, chain_id: int | None) -> None:
     )
 
 
+# Live-test replay: ``PSAT_PIN_BLOCKS=1:20850000,8453:...`` makes every eRPC read
+# ask for that finalized height instead of a moving tag, so eRPC's forever-cache
+# serves repeat runs and results stop drifting with chain state. Local/explicit
+# URLs (Anvil forks) are never rewritten: their "latest" is the fork's own head.
+PIN_BLOCKS_ENV = "PSAT_PIN_BLOCKS"
+# eRPC labels metrics by User-Agent, so pinned runs get their own series even
+# while unpinned previews share the proxy. Avoid "python"/"go/"/"rust": eRPC
+# collapses those substrings to generic agent names.
+PINNED_USER_AGENT = "psat-pinned/1"
+_MOVING_BLOCK_TAGS = frozenset({"latest", "pending", "safe", "finalized"})
+_BLOCK_PARAM_INDEX = {
+    "eth_call": 1,
+    "eth_estimateGas": 1,
+    "eth_createAccessList": 1,
+    "eth_simulateV1": 1,
+    "debug_traceCall": 1,
+    "eth_getBalance": 1,
+    "eth_getCode": 1,
+    "eth_getTransactionCount": 1,
+    "eth_getStorageAt": 2,
+    "eth_getProof": 2,
+    "eth_getBlockByNumber": 0,
+}
+
+
+def pinned_block(rpc_url: str) -> int | None:
+    """The ``PSAT_PIN_BLOCKS`` height for *rpc_url*'s chain, or None when unset,
+    the chain has no pin, or the URL is not a configured-eRPC route."""
+    raw = os.getenv(PIN_BLOCKS_ENV, "").strip()
+    if not raw:
+        return None
+    chain_id = _erpc_chain_id_from_url(rpc_url)
+    if chain_id is None:
+        return None
+    for entry in raw.split(","):
+        key, _, value = entry.partition(":")
+        if key.strip() == str(chain_id):
+            return int(value.strip())
+    return None
+
+
+def _is_moving_tag(value: Any) -> bool:
+    return isinstance(value, str) and value in _MOVING_BLOCK_TAGS
+
+
+def pin_params(method: str, params: list[Any], block: int) -> list[Any]:
+    """Rewrite moving block tags (and an omitted optional block) in *params* to *block*."""
+    tag = hex(block)
+    if method == "eth_getLogs":
+        if not params or not isinstance(params[0], Mapping) or "blockHash" in params[0]:
+            return params
+        flt = dict(params[0])
+        for key in ("fromBlock", "toBlock"):
+            value = flt.get(key)
+            if value is None or _is_moving_tag(value):
+                flt[key] = tag
+            elif isinstance(value, str) and value.startswith("0x") and int(value, 16) > block:
+                flt[key] = tag
+        return [flt, *params[1:]]
+    index = _BLOCK_PARAM_INDEX.get(method)
+    if index is None:
+        return params
+    if len(params) == index:
+        return [*params, tag]
+    if len(params) > index and _is_moving_tag(params[index]):
+        return [*params[:index], tag, *params[index + 1 :]]
+    return params
+
+
+def _pin_calls(rpc_url: str, calls: list[tuple[str, list[Any]]]) -> list[tuple[str, list[Any]]]:
+    block = pinned_block(rpc_url)
+    if block is None:
+        return calls
+    return [(method, pin_params(method, params, block)) for method, params in calls]
+
+
 def rpc_headers(rpc_url: str, extra_headers: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return JSON-RPC headers, adding eRPC auth only for configured eRPC URLs."""
     headers = {"Content-Type": "application/json"}
@@ -479,6 +555,8 @@ def rpc_headers(rpc_url: str, extra_headers: Mapping[str, str] | None = None) ->
             headers[ERPC_SECRET_HEADER] = secret
     if extra_headers:
         headers.update({str(key): str(value) for key, value in extra_headers.items()})
+    if os.getenv(PIN_BLOCKS_ENV) and _is_configured_erpc_url(rpc_url):
+        headers["User-Agent"] = PINNED_USER_AGENT
     return headers
 
 
@@ -527,6 +605,11 @@ def rpc_request(
     its initial call. An exception from it cancels before another HTTP attempt.
     """
     _assert_url_chain_id(rpc_url, chain_id)
+    block = pinned_block(rpc_url)
+    if block is not None:
+        if method == "eth_blockNumber":
+            return hex(block)
+        params = pin_params(method, params, block)
     session = _get_session()
     effective_timeout = JSON_RPC_TIMEOUT_SECONDS if timeout is None else timeout
     for attempt in range(retries + 1):
@@ -573,50 +656,6 @@ def rpc_request(
     from utils.secrets import sanitize_url
 
     raise RuntimeError(f"RPC request failed for {sanitize_url(rpc_url)}: all {retries + 1} attempts exhausted")
-
-
-def get_transaction_receipt(
-    rpc_url: str,
-    tx_hash: str,
-    *,
-    chain_id: int | None = None,
-    retries: int = 1,
-    timeout: float | None = None,
-) -> dict | None:
-    """One ``eth_getTransactionReceipt``. The receipt dict, or ``None``.
-
-    ``None`` IS NOT AN EMPTY LOG SET, and a caller that reads it as one is
-    wrong. It means the receipt could not be read — transport failure, an
-    upstream error, a pending or pruned transaction, a payload that was not a
-    receipt — and every one of those leaves the transaction's log set unknown.
-    Counting it as zero logs would turn an unread receipt into a measurement,
-    so a caller must carry it as not_determined all the way to whatever it
-    publishes.
-
-    Reorg note: this method takes no block parameter, so unlike most chain reads
-    it cannot be pinned by parameter. The receipt carries ``blockHash`` and
-    ``blockNumber``, so a caller that stores either can DETECT a reorg later
-    rather than having to trust this observation.
-    """
-    try:
-        receipt = rpc_request(
-            rpc_url,
-            "eth_getTransactionReceipt",
-            [tx_hash],
-            retries=retries,
-            chain_id=chain_id,
-            timeout=timeout,
-        )
-    except Exception as exc:
-        # Stays DEBUG: this is a per-call hot path, and an unread receipt is a
-        # not_determined the CALLER must count — the disposition cycle folds
-        # these into its per-cycle summary (``receipts_unreadable``).
-        logger.debug(
-            "receipt fetch failed",
-            extra={"tx_hash": tx_hash, "chain_id": chain_id, "exc_type": type(exc).__name__, "error": str(exc)},
-        )
-        return None
-    return receipt if isinstance(receipt, dict) else None
 
 
 def get_code(rpc_url: str, address: str, *, chain_id: int | None = None) -> str:
@@ -790,6 +829,7 @@ def rpc_batch_request(
         return []
 
     _assert_url_chain_id(rpc_url, chain_id)
+    calls = _pin_calls(rpc_url, calls)
 
     results: list[Any] = [None] * len(calls)
 
@@ -852,6 +892,7 @@ def rpc_batch_request_classified(
         return []
 
     _assert_url_chain_id(rpc_url, chain_id)
+    calls = _pin_calls(rpc_url, calls)
 
     # Default to "transport" so any slot the wire never answers stays
     # marked unobserved rather than inheriting an earned-looking error.
@@ -1008,6 +1049,9 @@ def eth_call_batch(
         return []
 
     _assert_url_chain_id(rpc_url, chain_id)
+    block = pinned_block(rpc_url)
+    if block is not None and _is_moving_tag(block_tag):
+        block_tag = hex(block)
     results: list[EthCallResult] = [EthCallResult(False, "0x", None, "no_response")] * len(calls)
     for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
         chunk = calls[chunk_start : chunk_start + MAX_BATCH_SIZE]

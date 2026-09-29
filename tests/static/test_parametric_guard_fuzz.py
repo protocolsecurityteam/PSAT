@@ -1,71 +1,28 @@
 """Fuzzing-style regression tests for parametric-guard predicate extraction.
 
-Background
-----------
-The pipeline can recognize "guarded" for many concrete shapes (owner
-check, constant-role check, mapping-keyed-on-msg.sender). What it does
-NOT yet do is capture the *predicate* that gates a function plus the
-*runtime parameter(s)* the predicate depends on, in a single structured
-object the resolver can route on. Without that, parametric guards
-(grantRole / renounceRole / Maker-style ``wards`` lookups / external
-``canCall`` policies / ERC-721 ``ownerOf`` ownership checks) admit but
-resolve to zero principals, and the UI renders 'Unresolved'.
+The pipeline recognizes "guarded" for many concrete shapes but does not yet capture
+the *predicate* gating a function plus the *runtime parameter(s)* it depends on in
+one structured object the resolver can route on; so parametric guards (grantRole /
+renounceRole / Maker ``wards`` / external ``canCall`` / ERC-721 ``ownerOf``) admit
+but resolve to zero principals and the UI renders 'Unresolved'.
 
-Why we fuzz across seven shapes
--------------------------------
-Codex enumerated seven distinct parametric shapes seen in the wild:
+Seven shapes (codex): caller_equals_argument, role_member_dynamic_arg,
+dynamic_role_admin, mapping_member_dynamic_scope, external_policy_dynamic,
+caller_equals_external_owner, disjunction. The names only seed generators and label
+test IDs; the *assertion* is shape-agnostic (no ``kind == "<shape-name>"`` check,
+which would be name matching one level up): a generic structured predicate
+referencing msg.sender and depending on a runtime parameter, however labeled.
 
-  1. caller_equals_argument           ``account == msg.sender`` (renounceRole)
-  2. role_member_dynamic_arg          ``hasRole(roleArg, msg.sender)``
-  3. dynamic_role_admin               ``hasRole(getRoleAdmin(roleArg), msg.sender)``
-  4. mapping_member_dynamic_scope     ``wards[scopeArg][msg.sender]`` (Maker)
-  5. external_policy_dynamic          ``authority.canCall(msg.sender, target, sel)``
-  6. caller_equals_external_owner     ``msg.sender == nft.ownerOf(tokenId)``
-  7. disjunction                      ``a == msg.sender || hasRole(...)``
+Identifiers are gibberish and any candidate containing a ``BANNED_SUBSTRINGS`` entry
+is rejected, so whatever the analyzer detects must come from IR analysis. Shapes
+common enough for a canonical-name fixture (``ownerOf``, ``canCall``) are paired with
+a renamed method of the same IR shape, so the test cannot pass via ABI-name matching.
 
-These names live in the test ONLY to give generators distinct seeds and
-to label test IDs. The *assertion* is shape-agnostic: it does not
-expect any ``kind == "<shape-name>"`` field — that would be name-shape
-matching dressed up one level. Instead it asserts the pipeline emits a
-generic structured predicate referencing msg.sender and depending on at
-least one runtime function parameter, *however* labeled.
-
-Why fuzz with gibberish identifiers
------------------------------------
-The pipeline must not depend on substring-name matching. If the test
-bodies used standard-flavored names, a passing result might come from
-identifier text rather than IR-shape detection. The fuzzer generates
-pure-gibberish identifiers and rejects any candidate containing
-substrings from ``BANNED_SUBSTRINGS``.
-Anything the analyzer detects despite that has to be coming from
-structural / IR analysis.
-
-Standard-ABI coverage
----------------------
-Some shapes are common enough to deserve a canonical-name fixture, such
-as ERC-721's ``ownerOf(uint256)`` or MakerDAO's
-``canCall(address,address,bytes4)``. Those fixtures are paired with a
-renamed method that has the same IR shape. Both variants should resolve
-equivalently; the renamed variant keeps the test from passing through
-ABI-name matching alone.
-
-Test layout
------------
-``test_fuzz_fixtures_are_valid`` (NOT xfailed): every generated source
-is run through the analyzer to confirm fixtures are healthy — compiles,
-identifiers obey the substring ban, generator-returned signatures
-correspond to real declared functions (anti-vacuity), and the unguarded
-twin does NOT admit (precision). This test passing today is a
-pre-condition for the typed-predicate test below to be measuring the
-right thing.
-
-``test_parametric_guard_emits_predicate_signal`` (xfail strict): for
-every generated source, asserts the semantic function entry carries
-a structured predicate (any plausible field name) that references
-msg.sender AND has at least one parameter-binding field. Marked
-``xfail(strict=True)`` so when the implementation lands, every variant
-flips to passing in one go and pytest forces removal of the xfail
-decorator — ratcheting against silent regression.
+``test_fuzz_fixtures_are_valid`` (NOT xfailed) proves fixtures are healthy (compile,
+substring ban, real declared signatures, unguarded twin not admitted).
+``test_parametric_guard_emits_predicate_signal`` is ``xfail(strict=True)`` so that
+when the implementation lands every variant flips at once and pytest forces removal
+of the decorator, ratcheting against silent regression.
 """
 
 from __future__ import annotations
@@ -82,10 +39,8 @@ from tests.support.foundry_project import write_foundry_project
 
 pytestmark = pytest.mark.compile
 
-# Reserved substrings from legacy classifier terms. Any generated
-# identifier containing one is rejected, so a detected result cannot be
-# explained by a substring match. Keep broad coverage for governance,
-# timelock/lifecycle, and external-policy words.
+# Reserved substrings from legacy classifier terms. A generated identifier containing
+# one is rejected, so a detected result cannot be explained by a substring match.
 BANNED_SUBSTRINGS = (
     # Authority / role family
     "auth",
@@ -142,10 +97,9 @@ BANNED_SUBSTRINGS = (
     "merkle",
 )
 
-# Standard ABI names that genuinely identify a pattern. A test
-# explicitly using one of these is an integration check, not a
-# structural check; the test parameterization carries a ``stdname``
-# flag to make that distinction explicit.
+# Standard ABI names that genuinely identify a pattern. A test using one is an
+# integration check, not a structural one; parameterization carries a ``stdname``
+# flag to say so.
 STANDARD_ABI_NAMES = ("ownerOf", "canCall")
 
 
@@ -155,8 +109,7 @@ def _is_clean_identifier(name: str) -> bool:
 
 
 def _gen_identifier(rng: random.Random, prefix: str = "") -> str:
-    """Pure-gibberish identifier guaranteed clean of every banned substring.
-    Stable per-seed for reproducibility on failure."""
+    """Pure-gibberish identifier clean of every banned substring; stable per-seed."""
     consonants = "bcdfghjklmnpqrstvwxz"
     vowels = "aeiouy"
     while True:
@@ -175,37 +128,21 @@ def _semantic_entry(analysis: Any, signature: str) -> dict | None:
 
 
 def _has_parametric_guard_signal(entry: dict | None) -> bool:
-    """Label-free check: does the semantic function entry carry a
-    structured predicate that depends on at least one runtime function
-    parameter and references msg.sender?
+    """Label-free check: does the entry carry a structured predicate that references
+    msg.sender and depends on at least one runtime function parameter?
 
-    The point of this rewrite is that the test should not enumerate the
-    seven shapes from codex's taxonomy — that taxonomy is for choosing
-    diverse fuzz fixtures, not for the pipeline to pattern-match by
-    label. A genuinely generic implementation extracts ONE thing
-    (a predicate object with parameter-binding metadata) and the
-    downstream resolver pattern-matches the IR locally. So the assertion
-    here is uniform across all shapes: was the parametric structure
-    captured at all?
+    The seven-shape taxonomy only picks diverse fixtures; a generic implementation
+    extracts ONE thing (a predicate object with parameter-binding metadata), so the
+    assertion is uniform across shapes.
 
-    A candidate qualifies when it is a dict that:
-      • has at least one structural reference to msg.sender — via any
-        of: ``msg_sender_in_predicate`` / ``references_msg_sender`` /
-        a ``basis``/``operands`` list containing 'msg.sender' /
-        a ``predicate`` string mentioning ``msg.sender``, AND
-      • carries at least one parameter-binding field signaling the
-        guard depends on a runtime arg (so it is parametric, not
-        constant-role) — any of:
-          * ``parameter_indices`` non-empty
-          * ``argument_index`` / ``argument_name`` present
-          * ``role_param`` / ``role_param_index`` / ``scope_param`` present
-          * ``conditional_principals`` non-empty (per-arg resolution)
-
-    Candidates are searched in any of: ``parametric_guards`` (list),
-    ``predicates`` (list), ``guard_shape`` / ``parametric_guard``
-    (dict or list), and typed entries inside ``sinks`` (list). Field
-    names are still permissive because the implementation hasn't picked
-    one yet — the *contract* is on payload, not naming.
+    A candidate is a dict with a structural msg.sender reference (``msg_sender_in_predicate``
+    / ``references_msg_sender`` / ``basis``/``operands`` containing 'msg.sender' / a
+    ``predicate`` string mentioning it) AND a parameter-binding field
+    (``parameter_indices``, ``argument_index``/``argument_name``, ``role_param``/
+    ``role_param_index``/``scope_param``, or ``conditional_principals``). Candidates
+    are searched in ``parametric_guards``, ``predicates``, ``guard_shape`` /
+    ``parametric_guard`` and typed ``sinks``. Field names stay permissive because the
+    implementation hasn't picked one yet; the contract is on payload, not naming.
     """
     if entry is None:
         return False
@@ -261,16 +198,13 @@ def _has_parametric_guard_signal(entry: dict | None) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Solidity templates per shape. Each generator returns
-# (source_code, function_signature, *also* an "unguarded twin" that drops
-# the check. The unguarded twin is the precision check — a structural
-# fix MUST NOT admit it as a parametric guard).
+# Solidity templates per shape. Each generator returns the guarded source and an
+# "unguarded twin" that drops the check; the twin is the precision check (a
+# structural fix MUST NOT admit it as a parametric guard).
 # ---------------------------------------------------------------------------
 
 
 def _shape_caller_equals_argument(rng: random.Random) -> tuple[str, str, str, str]:
-    """``account == msg.sender`` — renounceRole-style."""
     fn = _gen_identifier(rng)
     arg = _gen_identifier(rng)
     state = _gen_identifier(rng, prefix="_")
@@ -298,7 +232,6 @@ contract C {{
 
 
 def _shape_role_member_dynamic_arg(rng: random.Random) -> tuple[str, str, str, str]:
-    """``mapping[runtimeRole][msg.sender]`` — direct membership check."""
     fn = _gen_identifier(rng)
     map_name = _gen_identifier(rng, prefix="_")
     state = _gen_identifier(rng, prefix="_")
@@ -329,10 +262,9 @@ contract C {{
 
 
 def _shape_dynamic_role_admin(rng: random.Random) -> tuple[str, str, str, str]:
-    """``hasRole(getRoleAdmin(roleArg), msg.sender)`` shape, with a
-    getter-helper sandwiched in. Earlier fuzz template inlined
-    ``admin_map[r]`` directly, which could miss the real two-hop
-    indirection."""
+    """``hasRole(getRoleAdmin(roleArg), msg.sender)`` with a getter-helper
+    sandwiched in; an earlier template inlined ``admin_map[r]`` and could miss the
+    real two-hop indirection."""
     fn = _gen_identifier(rng)
     membership_check = _gen_identifier(rng, prefix="_")
     admin_lookup = _gen_identifier(rng, prefix="_")
@@ -378,10 +310,8 @@ contract C {{
 
 
 def _shape_mapping_member_dynamic_scope(rng: random.Random) -> tuple[str, str, str, str]:
-    """MakerDAO-style ``wards[ilk][user] == 1``. Same shape as
-    role_member_dynamic_arg but the value is a uint flag rather than a
-    bool — kept as a separate shape because the predicate ``== 1`` is
-    a distinct routing case."""
+    """MakerDAO-style ``wards[ilk][user] == 1``: like role_member_dynamic_arg but a
+    uint flag, kept separate because ``== 1`` is a distinct routing case."""
     fn = _gen_identifier(rng)
     scope_map = _gen_identifier(rng, prefix="_")
     state = _gen_identifier(rng, prefix="_")
@@ -412,11 +342,8 @@ contract C {{
 
 
 def _shape_external_policy_dynamic(rng: random.Random, *, stdname: bool) -> tuple[str, str, str, str]:
-    """``policy.<bool fn>(msg.sender, target, selector)``.
-
-    ``stdname=True`` keeps coverage for a widely used ABI spelling.
-    ``stdname=False`` uses a renamed boolean-returning method with the same
-    call shape, which should resolve through structural detection."""
+    """``policy.<bool fn>(msg.sender, target, selector)``. ``stdname=False`` uses a
+    renamed method of the same call shape, resolved via structural detection."""
     fn = _gen_identifier(rng)
     auth_field = _gen_identifier(rng, prefix="_")
     iface = _gen_identifier(rng, prefix="I").capitalize()
@@ -455,11 +382,8 @@ contract C {{
 
 
 def _shape_caller_equals_external_owner(rng: random.Random, *, stdname: bool) -> tuple[str, str, str, str]:
-    """``msg.sender == external.<address-returning view>(arg)``.
-
-    Standard-ABI variant uses ``ownerOf(uint256)`` (ERC-721). Renamed
-    variant uses a fuzzed address-returning view to prove structural
-    detection."""
+    """``msg.sender == external.<address-returning view>(arg)``; the renamed variant
+    uses a fuzzed view to prove structural detection (standard: ``ownerOf``)."""
     fn = _gen_identifier(rng)
     nft_field = _gen_identifier(rng, prefix="_")
     iface = _gen_identifier(rng, prefix="I").capitalize()
@@ -499,7 +423,6 @@ contract C {{
 
 
 def _shape_disjunction(rng: random.Random) -> tuple[str, str, str, str]:
-    """``account == msg.sender || mapping[role][msg.sender]`` — combined."""
     fn = _gen_identifier(rng)
     map_name = _gen_identifier(rng, prefix="_")
     state = _gen_identifier(rng, prefix="_")
@@ -530,7 +453,6 @@ contract C {{
 
 
 def _gen_for_shape(shape_name: str, rng: random.Random):
-    """Per-shape dispatcher returning (guarded, unguarded, sig_g, sig_u, stdname?)."""
     if shape_name == "caller_equals_argument":
         return (*_shape_caller_equals_argument(rng), False)
     if shape_name == "role_member_dynamic_arg":
@@ -552,16 +474,11 @@ def _gen_for_shape(shape_name: str, rng: random.Random):
     raise ValueError(shape_name)
 
 
-# Shape name → fuzz-variant count. The shape names live here only to give
-# generators distinct seeds and to label test IDs for diagnostics; the
-# *assertion* itself is shape-agnostic — it does not branch on the name.
-#
-# One variant per shape. Each variant is a cold Foundry/solc compile in a fresh
-# ``tmp_path`` (no build-cache reuse), so the former 5-per-shape sweep cost ~120
-# compiles per offline run. Every variant is still gibberish-identifier
-# generated, so the substring ban this file exists to enforce is unchanged;
-# only the per-shape repetition is gone. Raise a count locally to re-run the
-# wider sweep when touching the generators.
+# Shape name -> fuzz-variant count (names only seed generators and label test IDs).
+# One variant per shape: each is a cold solc compile in a fresh ``tmp_path``, and the
+# former 5-per-shape sweep cost ~120 compiles per offline run. Every variant is still
+# gibberish-generated, so the substring ban is unchanged. Raise a count locally for
+# the wider sweep when touching the generators.
 SHAPES: dict[str, int] = {
     "caller_equals_argument": 1,
     "role_member_dynamic_arg": 1,
@@ -574,9 +491,8 @@ SHAPES: dict[str, int] = {
     "disjunction": 1,
 }
 
-# The strict-xfail arm below ratchets: one variant flipping to XPASS is enough
-# to fail the suite and force the decorator's removal, so it does not need the
-# full shape sweep.
+# The strict-xfail arm ratchets on one variant flipping to XPASS, so it does not need
+# the full shape sweep.
 XFAIL_RATCHET_CASE = ("caller_equals_argument", 0)
 
 TOP_SEED = 0xC0DE_BABE
@@ -587,10 +503,8 @@ def _rng(shape: str, variant: int) -> random.Random:
 
 
 def _strip_solidity_comments(source: str) -> str:
-    """Remove ``//`` line comments so hygiene check ignores explanatory prose
-    (which is allowed to use words like 'check' / 'guard'). Slither sees the
-    same with comments stripped, so this matches what the IR will see.
-    Block comments not used in our templates."""
+    """Remove ``//`` line comments so hygiene ignores explanatory prose (which may use
+    words like 'check'); Slither sees the same. Block comments aren't used."""
     lines = []
     for line in source.splitlines():
         idx = line.find("//")
@@ -599,14 +513,12 @@ def _strip_solidity_comments(source: str) -> str:
 
 
 def _check_substring_hygiene(source: str, *, allow_standard_abi: bool) -> str | None:
-    """Returns an error message if a banned substring leaked, None if clean.
+    """Error message if a banned substring leaked, else None.
 
-    ``allow_standard_abi=True`` lets through the canonical names listed in
-    ``STANDARD_ABI_NAMES`` (e.g. ``ownerOf``, ``canCall``); those are
-    the *whole point* of the integration variants and aren't fuzz fodder.
+    ``allow_standard_abi=True`` lets ``STANDARD_ABI_NAMES`` (``ownerOf``, ``canCall``)
+    through: they are the point of the integration variants.
     """
-    # Tokens that are part of the Solidity language or types we use —
-    # not user-chosen identifiers.
+    # Solidity language/type tokens, not user-chosen identifiers.
     primitives = {
         "pragma",
         "solidity",
@@ -658,8 +570,7 @@ def _check_substring_hygiene(source: str, *, allow_standard_abi: bool) -> str | 
         "a",
         "who",
     }
-    # Split member calls into identifier tokens so the standard-ABI exception
-    # applies only to exact whitelisted method names.
+    # Split member calls so the standard-ABI exception applies only to exact method names.
     leaks = []
     stripped = _strip_solidity_comments(source)
     for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", stripped):
@@ -677,17 +588,11 @@ def _check_substring_hygiene(source: str, *, allow_standard_abi: bool) -> str | 
 def _extract_function_signatures(source: str) -> set[str]:
     """Pull ``name(type1,type2)`` shapes out of a Solidity source string.
 
-    Codex finding: ``test_fuzz_fixtures_are_valid`` previously asserted
-    `_semantic_entry(analysis, sig_u) is None` — but if the generator
-    returned the wrong signature, that assertion would pass vacuously
-    (the signature is missing not because the function isn't admitted,
-    but because it doesn't exist under that name). This helper extracts
-    actual signatures from the source so the test can prove ``sig_u``
-    really is a function the analyzer would have seen, before claiming
-    its absence from semantic_functions is meaningful.
+    Codex finding: asserting ``_semantic_entry(analysis, sig_u) is None`` passes
+    vacuously if the generator returned a signature that does not exist; this lets
+    the test prove ``sig_u`` is a real declared function first.
     """
     sigs: set[str] = set()
-    # Greedy on params is fine — we don't have nested parens in our templates.
     for m in re.finditer(r"\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)", source):
         name = m.group(1)
         raw = m.group(2).strip()
@@ -704,10 +609,7 @@ def _extract_function_signatures(source: str) -> set[str]:
     return sigs
 
 
-# ---------------------------------------------------------------------------
-# Fixture-validity test (NOT xfailed). Catches generator bugs that an
-# xfail decorator would otherwise mask. Runs first (alphabetically) so a
-# generator regression surfaces before the typed-predicate xfails.
+# Fixture-validity test (NOT xfailed): catches generator bugs an xfail would mask.
 # ---------------------------------------------------------------------------
 
 
@@ -717,34 +619,27 @@ def _extract_function_signatures(source: str) -> set[str]:
     ids=lambda x: str(x),
 )
 def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
-    """Every generated source must:
-      • compile cleanly (collect_contract_analysis runs without exception)
-      • pass the banned-substring hygiene check (modulo standard-ABI exceptions)
-      • generator-returned ``sig_u`` is a real function declared in the
-        unguarded source (anti-vacuity check on the negative control)
-      • NOT admit the unguarded twin (precision: a future fix MUST NOT regress here)
+    """Every generated source must compile, pass the banned-substring hygiene check
+    (modulo standard-ABI exceptions), declare ``sig_u`` for real (anti-vacuity on the
+    negative control), and NOT admit the unguarded twin (precision).
 
-    Positive-side admission of the *guarded* variant is intentionally
-    not asserted here. The strict-xfailed typed-shape test owns the full
-    "admit + emit typed predicate" ratchet in one bundled assertion;
-    splitting "admits today" out as its own non-xfail green test would
-    flip to passing whenever admission lands even if the typed predicate
-    doesn't, weakening the ratchet.
+    Positive-side admission of the *guarded* variant is intentionally not asserted:
+    the strict-xfailed test owns "admit + emit typed predicate" as one bundled
+    assertion, and a separate "admits today" test would flip green when admission
+    lands without the typed predicate, weakening the ratchet.
     """
     rng = _rng(shape_name, variant)
     gen = _gen_for_shape(shape_name, rng)
     guarded_src, unguarded_src, sig_u, is_stdname = gen[0], gen[1], gen[3], gen[4]
 
-    # 1. Hygiene — comments stripped, then no banned substring in any token.
+    # 1. Hygiene: comments stripped, no banned substring in any token.
     msg = _check_substring_hygiene(guarded_src, allow_standard_abi=is_stdname)
     assert msg is None, f"[{shape_name} v{variant}] guarded: {msg}\n{guarded_src}"
     msg = _check_substring_hygiene(unguarded_src, allow_standard_abi=is_stdname)
     assert msg is None, f"[{shape_name} v{variant}] unguarded: {msg}\n{unguarded_src}"
 
-    # 2. Anti-vacuity: prove sig_u actually corresponds to a function the
-    # source declares. Otherwise the negative-control assertion below
-    # could pass for the wrong reason (function doesn't exist under that
-    # name → also not in semantic_functions → green for free).
+    # 2. Anti-vacuity: sig_u must be a function the source declares, or the
+    # negative-control assertion below would pass for free.
     declared = _extract_function_signatures(unguarded_src)
     assert sig_u in declared, (
         f"[{shape_name} v{variant}] generator returned sig_u={sig_u!r} but unguarded "
@@ -752,18 +647,12 @@ def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
         f"check would have passed vacuously.\n{unguarded_src}"
     )
 
-    # 3. Compilation: analysis pipeline must not throw on either source.
     project_g = write_foundry_project(tmp_path / "g", "C", guarded_src)
     collect_contract_analysis(project_g)  # exception → fixture broken
 
-    # 3. Negative control: unguarded twin must NOT carry a caller-authority
-    # leaf in its predicate tree.
-    #
-    # The summary inclusion rule is "caller/delegated authority leaf OR
-    # sensitive sink". Functions with state writes (every fuzz-generated
-    # unguarded twin has them) are included even without a gate, so the
-    # negative control is "no caller_authority / delegated_authority leaf
-    # in the predicate tree", not "absent from semantic_functions".
+    # 3. Negative control: the unguarded twin must NOT carry a caller-authority leaf.
+    # Functions with state writes (every unguarded twin) are included in
+    # semantic_functions even without a gate, so the check is on the predicate tree.
     project_u = write_foundry_project(tmp_path / "u", "C", unguarded_src)
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
@@ -787,9 +676,8 @@ def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
     )
 
 
-# ---------------------------------------------------------------------------
-# Typed-predicate emission test. This is what the planned fix unlocks.
-# Marked xfail(strict=True) so it ratchets when typed predicates land.
+# Typed-predicate emission test, xfail(strict=True) so it ratchets when typed
+# predicates land.
 # ---------------------------------------------------------------------------
 
 
@@ -815,11 +703,8 @@ def test_fuzz_fixtures_are_valid(shape_name: str, variant: int, tmp_path: Path):
     strict=True,
 )
 def test_parametric_guard_emits_predicate_signal(shape_name: str, variant: int, tmp_path: Path):
-    """Label-free: assert the entry carries a structured predicate that
-    references msg.sender AND depends on a runtime parameter. Does not
-    care which of the seven taxonomy shapes the source represents — that
-    enumeration is a fuzz-input concern, not a pipeline-output concern.
-    """
+    """Label-free: the entry carries a structured predicate that references msg.sender
+    AND depends on a runtime parameter, whichever of the seven shapes it is."""
     rng = _rng(shape_name, variant)
     gen = _gen_for_shape(shape_name, rng)
     guarded_src, sig_g = gen[0], gen[2]

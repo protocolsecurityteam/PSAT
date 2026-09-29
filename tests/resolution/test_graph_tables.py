@@ -1,13 +1,11 @@
-"""``services.resolution.graph_tables.replace_control_graph_rows`` — the one
-writer both the resolution stage and the policy-stage graph refresh share.
+"""``services.resolution.graph_tables.replace_control_graph_rows``: the one writer the
+resolution stage and the policy-stage graph refresh share.
 
-What these tests pin (the N3 divergence): the policy refresh projects
-``role_principal`` edges (they need effective_permissions, absent at resolution
-time), and rewriting only the artifact left them structurally unreachable in
-``control_graph_edges`` while every row still asserted the walk's
-``graph_max_depth``. The shared writer must (a) persist the refreshed graph's
-role edges, (b) replace idempotently under the (contract, deployment) scope,
-and (c) leave other deployments' and other contracts' rows alone.
+Pins the N3 divergence: the policy refresh projects ``role_principal`` edges (they need
+effective_permissions), and rewriting only the artifact left them unreachable in
+``control_graph_edges`` while every row still asserted the walk's ``graph_max_depth``. The
+writer must persist the refreshed role edges, replace idempotently under the
+(contract, deployment) scope, and leave other deployments'/contracts' rows alone.
 """
 
 from __future__ import annotations
@@ -126,10 +124,8 @@ def _rows(session, contract_id: int):
 
 
 def test_refresh_rewrite_persists_role_principal_edges_and_converges(pg_session):
-    """Resolution write, then policy-refresh write: the table plane must end
-    equal to the refreshed graph — role_principal edge included — and a
-    re-run of the same write must change nothing (idempotent replace, no
-    duplicate rows)."""
+    """Resolution write, then policy-refresh write: the table plane must equal the refreshed
+    graph (role_principal edge included), and a re-run must change nothing."""
     from services.resolution.graph_tables import replace_control_graph_rows
 
     contract = _contract(pg_session, ROOT)
@@ -158,7 +154,6 @@ def test_refresh_rewrite_persists_role_principal_edges_and_converges(pg_session)
     assert principal_node.resolved_type == "eoa"
     assert principal_node.analysis_state == "not_analyzable"
 
-    # Idempotence: same write again -> same row population, no dupes.
     replace_control_graph_rows(
         pg_session, contract_id=contract.id, deployment_address=None, resolved_graph=_refreshed_graph()
     )
@@ -171,26 +166,21 @@ def test_refresh_rewrite_persists_role_principal_edges_and_converges(pg_session)
 
 
 def test_replace_is_scoped_to_contract_and_deployment(pg_session):
-    """The delete half of the replace touches ONLY the (contract, deployment)
-    being rewritten: a sibling deployment's rows and another contract's rows
-    survive byte-identical."""
+    """The delete half touches ONLY the (contract, deployment) being rewritten."""
     from services.resolution.graph_tables import replace_control_graph_rows
 
     contract = _contract(pg_session, ROOT)
     other_contract = _contract(pg_session, "0x" + "22" * 20)
     proxy_a = "0x" + "aa" * 20
 
-    # Same contract, deployment-scoped rows (impl analyzed in proxy context).
     replace_control_graph_rows(
         pg_session, contract_id=contract.id, deployment_address=proxy_a, resolved_graph=_resolution_graph()
     )
-    # Another contract entirely.
     replace_control_graph_rows(
         pg_session, contract_id=other_contract.id, deployment_address=None, resolved_graph=_resolution_graph()
     )
     pg_session.commit()
 
-    # Rewrite the NULL-deployment scope of `contract`.
     replace_control_graph_rows(
         pg_session, contract_id=contract.id, deployment_address=None, resolved_graph=_refreshed_graph()
     )
@@ -226,10 +216,9 @@ def test_replace_is_scoped_to_contract_and_deployment(pg_session):
 
 
 def test_persisted_role_edges_reach_the_authority_closure_relations(pg_session):
-    """The point of persisting: a written role_principal edge satisfies the
-    exact predicate the effects value closure selects on
-    (``relation.in_(CONTROL_EDGE_RELATIONS)``) — before the policy-stage
-    rewrite these edges could not exist in the table at all."""
+    """A written role_principal edge satisfies the predicate the effects value closure
+    selects on (``relation.in_(CONTROL_EDGE_RELATIONS)``); before the policy-stage rewrite
+    these edges could not exist in the table."""
     from db.models import CONTROL_EDGE_RELATIONS, ControlGraphEdge
     from services.resolution.graph_tables import replace_control_graph_rows
 

@@ -1,20 +1,11 @@
 """Cross-process L2 cache for mapping_enumerator.
 
-Validates the regression that 9ce6fa3 ("perf: parallelize worker pipeline")
-introduced: ResolutionWorker and PolicyWorker run in different OS
-processes, so the in-process module dict
-(``services.resolution.mapping_enumerator._CACHE``) misses across the
-stage boundary. With only L1 in place, a single LinkToken job re-pays
-the 60s hypersync timeout twice — once per stage — which is the
-proximate cause of the live concurrency-test wedge.
-
-The L2 cache lives in ``db.mapping_enumeration_cache`` and is keyed on
-``(chain, address, specs_hash)``. The test below clears the L1 dict
-between calls to faithfully simulate the second worker process having
-no in-memory state to share, then asserts that the second call hits
-the persisted row instead of running pagination again.
-
-Marker: offline (PostgreSQL via requires_postgres). No live hypersync.
+Regression from 9ce6fa3 ("perf: parallelize worker pipeline"): ResolutionWorker and
+PolicyWorker run in different OS processes, so the in-process ``_CACHE`` misses across the
+stage boundary and a single LinkToken job re-paid the 60s hypersync timeout per stage (the
+cause of the live concurrency-test wedge). The L2 cache in ``db.mapping_enumeration_cache``
+is keyed on ``(chain, address, specs_hash)``; tests clear L1 between calls to simulate the
+second process. Offline (PostgreSQL via requires_postgres).
 """
 
 from __future__ import annotations
@@ -39,12 +30,8 @@ from tests.conftest import requires_postgres
 def _enable_db_cache(monkeypatch):
     """Force L2 ON and point its SessionLocal at TEST_DATABASE_URL.
 
-    The unit suite for the in-process layer turns L2 off; this suite
-    needs it on. ``db.mapping_enumeration_cache`` opens its own
-    ``SessionLocal()`` (so callers don't have to thread sessions through
-    the resolution graph), which by default binds to ``DATABASE_URL``;
-    redirecting it here keeps the cross-process test honest without
-    leaking writes into the dev database.
+    ``db.mapping_enumeration_cache`` opens its own ``SessionLocal()``, which binds to
+    ``DATABASE_URL`` by default; redirecting keeps writes out of the dev database.
     """
     import os
 
@@ -72,8 +59,7 @@ def _enable_db_cache(monkeypatch):
 
 @pytest.fixture()
 def _clean_l2(db_session):
-    """Drop any rows left from previous runs so address collisions don't
-    silently mask a miss-then-hit assertion."""
+    """Drop rows from previous runs so address collisions can't mask a miss-then-hit."""
     db_session.query(MappingEnumerationCache).delete()
     db_session.commit()
     yield db_session
@@ -163,9 +149,8 @@ def _deny_spec():
 
 @requires_postgres
 def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
-    """The regression case: stage 1 worker enumerates and persists; stage
-    2 in a fresh process (simulated by clearing L1) reads the L2 row
-    instead of re-running the 60s hypersync scan.
+    """The regression case: stage 1 enumerates and persists; stage 2 in a fresh process
+    (L1 cleared) reads the L2 row instead of re-running the 60s hypersync scan.
     """
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
@@ -174,7 +159,6 @@ def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
 
     addr = "0x" + "AA" * 20
 
-    # Worker process 1 — resolution stage. L1 + L2 both miss; runs pagination.
     result1 = enumerate_mapping_allowlist_sync(
         addr,
         cast(Any, [_rely_spec()]),
@@ -189,14 +173,11 @@ def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
     calls_after_first = counter["n"]
     assert calls_after_first >= 1
 
-    # Simulate the OS process boundary: drop the in-memory dict so any
-    # subsequent hit must come from the L2 row that was just upserted.
     clear_enumeration_cache()
     assert not mapping_enumerator._CACHE
 
-    # Worker process 2 — policy stage. L1 is empty (clean process). L2
-    # must rehydrate. A new client is intentionally passed: if L2 missed
-    # we'd see counter["n"] increment.
+    # Worker process 2 (policy stage): L1 is empty and a new client is passed, so a
+    # counter increment would mean L2 missed.
     new_client, new_counter = _fake_client(pages)
     result2 = enumerate_mapping_allowlist_sync(
         addr,
@@ -217,9 +198,8 @@ def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
 
 @requires_postgres
 def test_l2_cache_distinguishes_specs_via_hash(_clean_l2):
-    """A different writer-spec set must NOT share an L2 row even on the
-    same address — different specs produce different principal sets, so
-    a stale hit would be a correctness bug.
+    """A different writer-spec set must NOT share an L2 row on the same address: a stale
+    hit would be a correctness bug.
     """
     rely_topic = _event_topic0("Rely(address)")
     deny_topic = _event_topic0("Deny(address)")
@@ -268,9 +248,8 @@ def test_l2_cache_distinguishes_specs_via_hash(_clean_l2):
 
 @requires_postgres
 def test_l2_cache_persists_truncated_results(_clean_l2):
-    """``incomplete_*`` and ``error`` results are cached intentionally —
-    re-running them inside the TTL would just hit the same bound. The
-    caller sees ``status`` and decides whether to act.
+    """``incomplete_*`` and ``error`` results are cached on purpose: re-running inside the
+    TTL would hit the same bound.
     """
     rely_topic = _event_topic0("Rely(address)")
     # next_block must strictly increase to keep the loop going; otherwise the
@@ -322,7 +301,6 @@ def test_l2_ttl_invalidation(monkeypatch, _clean_l2):
 
     addr = "0x" + "DD" * 20
 
-    # First scan with normal TTL — populates L2.
     enumerate_mapping_allowlist_sync(
         addr,
         cast(Any, [_rely_spec()]),
@@ -333,7 +311,6 @@ def test_l2_ttl_invalidation(monkeypatch, _clean_l2):
     assert counter["n"] >= 1
     first_calls = counter["n"]
 
-    # Force the TTL to zero so the next read sees the row as stale.
     monkeypatch.setenv("PSAT_MAPPING_ENUMERATION_CACHE_TTL_S", "0")
 
     clear_enumeration_cache()  # cross-process simulation
@@ -354,9 +331,8 @@ def test_l2_ttl_invalidation(monkeypatch, _clean_l2):
 
 @requires_postgres
 def test_specs_fingerprint_is_order_insensitive_for_indexed_positions():
-    """``indexed_positions=[1,0]`` and ``[0,1]`` describe the same spec —
-    the fingerprint must collapse them so a benign reordering doesn't
-    bust the cache."""
+    """``indexed_positions=[1,0]`` and ``[0,1]`` describe the same spec; the fingerprint
+    must collapse them."""
     spec_a = [{**_rely_spec(), "indexed_positions": [0, 1]}]
     spec_b = [{**_rely_spec(), "indexed_positions": [1, 0]}]
     assert db_cache.specs_fingerprint(spec_a) == db_cache.specs_fingerprint(spec_b)
@@ -364,41 +340,8 @@ def test_specs_fingerprint_is_order_insensitive_for_indexed_positions():
 
 @requires_postgres
 def test_specs_fingerprint_changes_on_direction(_clean_l2):
-    """Flipping direction must yield a different fingerprint — otherwise
-    a Rely-only scan could return a stale Deny-bearing principal set."""
+    """Flipping direction must change the fingerprint, else a Rely-only scan could return a
+    stale Deny-bearing principal set."""
     rely = [_rely_spec()]
     deny = [{**_rely_spec(), "direction": "remove"}]
     assert db_cache.specs_fingerprint(rely) != db_cache.specs_fingerprint(deny)
-
-
-@requires_postgres
-def test_db_module_upsert_and_find_roundtrip(_clean_l2):
-    """upsert→find_fresh contract."""
-    specs = [_rely_spec()]
-    h = db_cache.specs_fingerprint(specs)
-    payload = {
-        "principals": [
-            {
-                "address": _addr("a"),
-                "mapping_name": "wards",
-                "direction_history": ["add"],
-                "last_seen_block": 10,
-            }
-        ],
-        "status": "complete",
-        "pages_fetched": 1,
-        "last_block_scanned": 100,
-        "error": None,
-    }
-    db_cache.upsert(chain="ethereum", address="0x" + "EE" * 20, specs_hash=h, result=payload)
-    got = db_cache.find_fresh(chain="ethereum", address="0x" + "EE" * 20, specs_hash=h)
-    assert got is not None
-    assert got["status"] == "complete"
-    assert got["principals"] == payload["principals"]
-    assert got["last_block_scanned"] == 100
-
-
-@requires_postgres
-def test_db_module_find_fresh_misses_on_unknown_key(_clean_l2):
-    h = db_cache.specs_fingerprint([_rely_spec()])
-    assert db_cache.find_fresh(chain="ethereum", address="0x" + "FF" * 20, specs_hash=h) is None

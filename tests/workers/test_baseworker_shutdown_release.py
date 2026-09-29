@@ -54,8 +54,7 @@ def test_sigterm_preserves_live_leases(mock_session, _signal):
 @patch("workers.base.requeue_job")
 @patch("workers.base.store_artifact")
 def test_execute_job_registers_and_deregisters_on_success(_store, _requeue, _fail_terminal, _advance, _mock_signal):
-    """Successful completion clears tracking so later drains cannot treat a
-    completed claim as live, and long-running workers do not leak entries."""
+    """Later drains must not treat a completed claim as live; workers must not leak entries."""
     w = _Worker()
     w.process = lambda *_a, **_kw: None
 

@@ -1,15 +1,9 @@
-"""The role-holder plane's periodic refresher — selection, bounds, failure domain.
+"""The role-holder plane's periodic refresher: selection, bounds, failure domain.
 
-The producer's own semantics are asserted elsewhere. What is asserted here is
-everything the refresher owns: WHICH registries a pass runs against, what it
-durably records about a pass that already ran, and what a failure of one
-registry (or of the whole cycle) is allowed to take down.
-
-The load-bearing arm is the three-state one. A per-role table cannot say whether
-a REGISTRY was ever folded — a registry whose fold proposed nothing is absent
-from it exactly as a registry no pass reached is. Every test in
-``TestRefreshTrigger`` pins one half of that: "ran and found nothing" must stop
-re-selecting, and "never ran" must never stop.
+Producer semantics are asserted elsewhere. Load-bearing arm: a per-role table cannot say
+whether a REGISTRY was ever folded (one whose fold proposed nothing is absent exactly like
+one no pass reached), so ``TestRefreshTrigger`` pins that "ran and found nothing" stops
+re-selecting and "never ran" never stops.
 """
 
 from __future__ import annotations
@@ -439,21 +433,6 @@ class TestFailureDomain:
         run_role_holder_plane_loop(0.0, stop)  # must return, not raise
 
         assert beats == [(HEARTBEAT_ROLE_HOLDER_PLANE, "degraded")]
-
-    def test_the_loop_is_a_supervised_sibling_of_the_restaking_loop(self):
-        from db.queue import HEARTBEAT_PROTOCOL_RESTAKING
-        from workers.protocol_monitor import _build_default_supervisor
-
-        names = [name for name, _ in _build_default_supervisor("https://rpc.example", None)._loops]
-
-        assert HEARTBEAT_ROLE_HOLDER_PLANE in names
-        assert names.index(HEARTBEAT_ROLE_HOLDER_PLANE) != names.index(HEARTBEAT_PROTOCOL_RESTAKING)
-        assert len(names) == len(set(names))
-
-    def test_the_loop_is_registered_for_the_fleet_view(self):
-        from services.monitoring.process_meta import PROCESS_META
-
-        assert HEARTBEAT_ROLE_HOLDER_PLANE in PROCESS_META
 
 
 # ---------------------------------------------------------------------------

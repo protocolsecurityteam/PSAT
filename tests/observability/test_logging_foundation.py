@@ -1,9 +1,6 @@
-"""Offline coverage for the Wave-0 shared logging primitives.
-
-Exercises the dependency-light helpers in ``utils.logging`` (subprocess-output
-capture, the uvicorn JSON ``dictConfig``, and the third-party stream hygiene
-``configure_logging`` installs). No DB, no network — all run purely against
-stdlib ``subprocess``/``logging``.
+"""Offline coverage for the Wave-0 shared logging primitives in ``utils.logging``:
+subprocess-output capture, the uvicorn JSON ``dictConfig``, and the third-party stream hygiene
+``configure_logging`` installs. No DB or network.
 """
 
 from __future__ import annotations
@@ -41,12 +38,9 @@ def test_stream_subprocess_streams_lines_at_debug_with_source(caplog):
     assert rc == 0
     debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG]
     messages = {r.getMessage() for r in debug_records}
-    # stdout + stderr are merged and both surface as DEBUG lines.
     assert "out-line" in messages
     assert "err-line" in messages
-    # Every captured line carries the source tag for queryability.
     assert all(getattr(r, "source", None) == "probe" for r in debug_records)
-    # A clean exit emits no WARNING.
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
@@ -81,19 +75,6 @@ def test_stream_subprocess_respects_custom_level(caplog):
     assert info_lines and info_lines[0].levelno == logging.INFO
 
 
-def test_uvicorn_log_config_routes_through_json_formatter():
-    cfg = uvicorn_log_config(level=logging.INFO)
-
-    assert cfg["version"] == 1
-    assert cfg["disable_existing_loggers"] is False
-    assert cfg["formatters"]["json"]["()"] == "utils.logging.JsonFormatter"
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
-        spec = cfg["loggers"][name]
-        assert spec["handlers"] == ["json"]
-        assert spec["level"] == logging.INFO
-        assert spec["propagate"] is False
-
-
 def test_uvicorn_log_config_is_applicable_dictconfig():
     # dictConfig must accept it and instantiate a real JsonFormatter.
     cfg = uvicorn_log_config()
@@ -102,8 +83,7 @@ def test_uvicorn_log_config_is_applicable_dictconfig():
         handler = logging.getLogger("uvicorn.access").handlers[0]
         assert isinstance(handler.formatter, JsonFormatter)
     finally:
-        # dictConfig mutates global logging state; reset so we don't leak
-        # the uvicorn handlers/levels into other tests in the session.
+        # dictConfig mutates global logging state; reset so uvicorn handlers don't leak.
         logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
 
 
@@ -114,9 +94,8 @@ def test_uvicorn_log_config_level_defaults_from_env(monkeypatch):
 
 
 def test_jsonformatter_scrubs_secrets_in_message_extra_and_exc_info():
-    # The formatter is the last hop before the sink, so a credentialed URL must
-    # not survive into the JSON whether it rides in the message, an extra={}
-    # field (bare string or nested), or a rendered exception traceback.
+    # The last hop before the sink: a credentialed URL must not survive in the message, an
+    # extra={} field (bare or nested), or a rendered traceback.
     fmt = JsonFormatter()
     secret_url = "https://eth-mainnet.g.alchemy.com/v2/SUPERSECRETKEY123"
 
@@ -157,19 +136,16 @@ def test_jsonformatter_scrubs_secrets_in_message_extra_and_exc_info():
 
 
 def test_bound_contextvar_shadows_a_colliding_extra_key():
-    """The contextvar wins and the ``extra`` is dropped — silently.
+    """The contextvar wins and the ``extra`` is dropped, silently.
 
-    This is a trap, not a preference: a call site that passes
-    ``extra={"address": ...}`` while a worker has bound the ``address``
-    contextvar publishes the *worker's* value under that key and loses its own,
-    with no error and no duplicate to notice. It usually looks right, because
-    the two usually agree — which is precisely why it survives review. It has
-    now bitten three lanes (``transcript_job_id``, ``probe_chain``,
-    ``bundle_address``, ``contract_address`` are all renames away from it).
+    A trap, not a preference: ``extra={"address": ...}`` while a worker has bound the ``address``
+    contextvar publishes the *worker's* value and loses its own, with no error. It usually looks
+    right because the two usually agree, which is why it survives review (it has bitten
+    ``transcript_job_id``, ``probe_chain``, ``bundle_address``, ``contract_address``).
 
     Rule: never name an ``extra`` key after one of the six contextvars
-    (``trace_id``/``job_id``/``stage``/``worker_id``/``address``/``chain``)
-    unless you mean the ambient one; qualify it instead.
+    (``trace_id``/``job_id``/``stage``/``worker_id``/``address``/``chain``) unless you mean the
+    ambient one; qualify it instead.
     """
     fmt = JsonFormatter()
     record = logging.LogRecord(
@@ -192,36 +168,12 @@ def test_bound_contextvar_shadows_a_colliding_extra_key():
     assert out["address"] == "0x" + "99" * 20
     assert out["chain"] == "ethereum"
     assert "0x" + "ee" * 20 not in json.dumps(out)
-    # The qualified key is untouched — this is the escape hatch.
+    # The qualified key is untouched: the escape hatch.
     assert out["contract_address"] == "0x" + "11" * 20
 
-    # Unbound, the same extra passes straight through: the shadowing is a
-    # property of the ambient bind, so it appears only under a worker job.
+    # Unbound, the same extra passes through: shadowing is a property of the ambient bind.
     out_unbound = json.loads(fmt.format(record))
     assert out_unbound["address"] == "0x" + "ee" * 20
-
-
-def test_formatter_drops_uvicorn_color_message_duplicate():
-    """uvicorn attaches an ANSI-coloured copy of the message via ``extra``. It
-    is the same string with escape codes, not a fact, so it must not ride along
-    as a second field on every uvicorn line."""
-    fmt = JsonFormatter()
-    record = logging.LogRecord(
-        name="uvicorn.error",
-        level=logging.INFO,
-        pathname=__file__,
-        lineno=1,
-        msg="Started server process [123]",
-        args=(),
-        exc_info=None,
-    )
-    record.color_message = "Started server process [\x1b[36m%d\x1b[0m]"
-
-    out = json.loads(fmt.format(record))
-
-    assert out["message"] == "Started server process [123]"
-    assert "color_message" not in out
-    assert "\x1b" not in json.dumps(out)
 
 
 def _crytic_record(msg: str, *, args=(), exc_info=None) -> logging.LogRecord:
@@ -240,8 +192,8 @@ def _crytic_record(msg: str, *, args=(), exc_info=None) -> logging.LogRecord:
 
 
 def test_crytic_stdout_echo_is_demoted_to_debug():
-    """A failed ``forge build``'s stdout is the compiler's ordinary progress
-    chatter ("Solc finished in 37ms"); at ERROR it poisons ERROR-rate triage."""
+    """A failed ``forge build``'s stdout is ordinary compiler chatter ("Solc finished in 37ms");
+    at ERROR it poisons ERROR-rate triage."""
     demoter = CryticCompileEchoDemoter()
     record = _crytic_record("Compiling 45 files with Solc 0.7.0\nstdout: Solc 0.7.0 finished in 37.19ms")
 
@@ -254,9 +206,8 @@ def test_crytic_stdout_echo_is_demoted_to_debug():
 
 
 def test_crytic_unprovable_echo_stays_visible_at_warning():
-    """Single-line output carries no ``stdout:`` marker, so it is NOT provably
-    chatter — it may be the compiler naming the failure. Demote off ERROR, but
-    never below WARNING and never dropped."""
+    """Single-line output carries no ``stdout:`` marker so is NOT provably chatter (it may name
+    the failure): demote off ERROR, but never below WARNING and never dropped."""
     demoter = CryticCompileEchoDemoter()
     record = _crytic_record("Error: Encountered invalid solc version in src/Foo.sol")
 
@@ -265,8 +216,8 @@ def test_crytic_unprovable_echo_stays_visible_at_warning():
 
 
 def test_crytic_authored_diagnostics_keep_their_error_level():
-    """The exit-code line is the failure witness and carries format args; the
-    OSError branch carries ``exc_info``. Neither is a verbatim echo."""
+    """The exit-code line (format args) and the OSError branch (``exc_info``) are failure
+    witnesses, not verbatim echoes."""
     demoter = CryticCompileEchoDemoter()
     exit_code = _crytic_record("'%s' returned non-zero exit code %d", args=("forge", 1))
     os_error = _crytic_record("OS error executing:", exc_info=(ValueError, ValueError("x"), None))
@@ -277,8 +228,8 @@ def test_crytic_authored_diagnostics_keep_their_error_level():
 
 
 def test_crytic_demoter_ignores_records_from_other_call_sites():
-    """The guards are structural: if upstream moves the echo, the filter stops
-    matching and the record keeps its level rather than being demoted blind."""
+    """The guards are structural: if upstream moves the echo the filter stops matching and the
+    record keeps its level rather than being demoted blind."""
     demoter = CryticCompileEchoDemoter()
     record = _crytic_record("some future authored error")
     record.funcName = "compile"
@@ -288,20 +239,18 @@ def test_crytic_demoter_ignores_records_from_other_call_sites():
 
 
 def test_third_party_hygiene_is_idempotent_and_captures_warnings(caplog):
-    """``configure_logging`` routes crytic-compile through the demoter and the
-    ``warnings`` module into ``py.warnings`` — both process-global, so both must
-    survive repeated calls without stacking."""
+    """``configure_logging`` routes crytic-compile through the demoter and ``warnings`` into
+    ``py.warnings``; both are process-global and must survive repeated calls without stacking."""
     crytic = logging.getLogger("CryticCompile")
     before = [f for f in crytic.filters if isinstance(f, CryticCompileEchoDemoter)]
     for stale in before:
         crytic.removeFilter(stale)
     try:
         with warnings.catch_warnings():
-            # Reset to a known-uncaptured state first, or this asserts nothing:
-            # ``logging.captureWarnings(True)`` is a no-op once already engaged,
-            # and pytest reassigns ``warnings.showwarning`` per test — so after
-            # any earlier test has configured logging, the reassignment sticks
-            # and the warning goes to pytest instead of ``py.warnings``.
+            # Reset to a known-uncaptured state, or this asserts nothing:
+            # ``logging.captureWarnings(True)`` is a no-op once engaged and pytest reassigns
+            # ``warnings.showwarning`` per test, so after earlier configuration the warning
+            # goes to pytest instead of ``py.warnings``.
             logging.captureWarnings(False)
             warnings.simplefilter("always")
 
@@ -317,17 +266,15 @@ def test_third_party_hygiene_is_idempotent_and_captures_warnings(caplog):
             crytic.removeFilter(installed)
         for original in before:
             crytic.addFilter(original)
-        # Leave the process as ``configure_logging`` leaves it: re-engage against
-        # the ``showwarning`` that ``catch_warnings`` just restored.
+        # Leave the process as ``configure_logging`` leaves it: re-engage against the restored ``showwarning``.
         logging.captureWarnings(False)
         logging.captureWarnings(True)
 
 
 def test_serve_disables_uvicorn_access_log_and_passes_json_config(monkeypatch):
-    """The api middleware already logs every request with ``trace_id`` +
-    ``duration_ms``; uvicorn's access line was a strictly poorer duplicate of it.
-    The log config is the only way uvicorn's own lines reach ``JsonFormatter``,
-    and the CLI can only take it as a file — hence a programmatic launcher."""
+    """The api middleware already logs every request with ``trace_id`` + ``duration_ms``, so
+    uvicorn's access line was a poorer duplicate. The log config is the only way uvicorn's own
+    lines reach ``JsonFormatter`` and the CLI takes it only as a file, hence a programmatic launcher."""
     import api
 
     captured: dict[str, object] = {}

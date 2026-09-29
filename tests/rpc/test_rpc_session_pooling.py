@@ -1,21 +1,10 @@
-"""Regression tests for the per-thread ``requests.Session`` introduced
-in ``services/clients/rpc.py``.
+"""Regression tests for the per-thread ``requests.Session`` in ``services/clients/rpc.py``.
 
-Bare ``requests.post()`` opens a new socket per call. Per-thread Sessions
-let the underlying urllib3 connection pool reuse TCP/TLS sockets across
-calls — relevant for RPC-heavy stages (resolution recursive walk) where
-TLS handshake latency dominates the cost of an individual eth_call.
-
-What we pin here:
-1. The same Session is returned on repeated calls within one thread (the
-   whole point — reuse).
-2. Different threads get *different* Session objects (requests.Session
-   is not thread-safe, so a global one would race).
-3. ``rpc_request`` actually calls through the cached Session, not
-   ``requests.post`` directly — a refactor that silently reverts to
-   bare ``requests.post`` would re-introduce the per-call handshake.
-4. The retry path still works after the Session swap (regression guard
-   for the error-handling branch, which sits inside the Session call).
+Bare ``requests.post()`` opens a socket per call; per-thread Sessions let urllib3 reuse
+TCP/TLS sockets, which matters for RPC-heavy stages where handshake latency dominates.
+Pinned: same Session within a thread; different Sessions across threads (``requests.Session``
+is not thread-safe); ``rpc_request`` goes through the cached Session, not bare
+``requests.post`` (a silent revert re-introduces the per-call handshake); retries still work.
 """
 
 from __future__ import annotations
@@ -28,7 +17,6 @@ from services.clients import rpc
 
 
 def _reset_thread_session():
-    """Clear the per-thread Session cache so a test starts fresh."""
     if hasattr(rpc._session_local, "session"):
         del rpc._session_local.session
 
@@ -41,10 +29,8 @@ def test_same_thread_reuses_session():
 
 
 def test_different_threads_get_different_sessions():
-    """requests.Session is not thread-safe across calls. If two threads
-    ever shared one, we'd get sporadic socket-state corruption under
-    load. Keep this guard tight — it's invisible in single-threaded
-    bench runs but burns prod."""
+    """requests.Session is not thread-safe across calls; sharing one would corrupt socket state
+    under load, invisibly in single-threaded bench runs."""
     _reset_thread_session()
     main_session = rpc._get_session()
     other_session: list[Any] = []
@@ -61,9 +47,7 @@ def test_different_threads_get_different_sessions():
 
 
 def test_rpc_request_routes_through_session():
-    """If a future refactor reverts to bare ``requests.post`` we lose
-    pooling silently — bench wouldn't catch it for weeks. Pin the
-    Session.post call site."""
+    """A revert to bare ``requests.post`` would lose pooling silently (bench wouldn't catch it for weeks)."""
     _reset_thread_session()
     fake_response = MagicMock()
     fake_response.status_code = 200
@@ -77,8 +61,6 @@ def test_rpc_request_routes_through_session():
 
 
 def test_rpc_request_retries_on_retryable_status():
-    """The retry loop must still work after the Session swap. We hit the
-    retry branch by returning a 503 once, then a 200."""
     _reset_thread_session()
 
     failing = MagicMock()
@@ -100,7 +82,6 @@ def test_rpc_request_retries_on_retryable_status():
 
 
 def test_rpc_batch_request_routes_through_session():
-    """Same regression guard as above, but for the batch path."""
     _reset_thread_session()
     fake_response = MagicMock()
     fake_response.status_code = 200

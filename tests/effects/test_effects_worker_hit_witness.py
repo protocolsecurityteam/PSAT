@@ -1,15 +1,10 @@
 """Cache-hit witness integrity at the worker seam (``_resolve_item``).
 
-The self-hit clobber, replayed at the layer that armed it: the code-plane cache
-stores a payload ``code_plane_details`` stripped of every deployment-plane
-qualifier, and each hit path used to hand that stripped payload straight to
-``record_effect_verdict`` — which overwrote the producing verdict's own witness
-with it. Absence of ``input_seeded`` contractually means "no seeding was
-needed" (``claims_bridge._observed_summary``), so the realized row (PR-161
-``effect_verdicts`` id 146, eETH ``burnShares``) published a proven unseeded
-live burn while its own transcript records ``input_seeded: true`` and the
-unseeded probe reverting.
-
+The self-hit clobber: the code-plane cache stores a payload stripped of every deployment-plane
+qualifier, and each hit path handed it to ``record_effect_verdict``, overwriting the producing
+verdict's own witness. Absent ``input_seeded`` means "no seeding needed"
+(``claims_bridge._observed_summary``), so PR-161 ``effect_verdicts`` id 146 (eETH ``burnShares``)
+published a proven unseeded burn while its transcript recorded ``input_seeded: true``.
 DB-backed (real Postgres), offline-safe.
 """
 
@@ -113,9 +108,8 @@ def _resolve(session, it: _Item):
 
 @requires_postgres
 def test_audited_hit_reattaches_the_fresh_probes_seed_qualifiers(clean_effects):
-    """The verdict-146 replay: the audit re-simulated THIS deployment and its
-    probe seeded again — the served details must carry that measurement, not the
-    cache's structural absence."""
+    """The verdict-146 replay: the audit re-simulated THIS deployment and seeded again, so the
+    served details must carry that measurement, not the cache's structural absence."""
     session = clean_effects
     cached = _cache_row(session, details=effect_cache.code_plane_details(dict(FRESH_DETAILS)))
     fresh = ObservedEffect(
@@ -159,12 +153,10 @@ def test_audited_hit_with_an_unseeded_fresh_probe_publishes_absence(clean_effect
 
 @requires_postgres
 def test_audited_hit_attaches_the_fresh_probes_auto_expiry(clean_effects):
-    """The rendered freeze pair must come from ONE observation. ``auto_expiry``
-    is a subset predicate over this fork's own blast radius, and it is the sole
-    gate on rendering the duration bound as a severity reducer
-    (``claimsVocab.pauseQualifier``) — so the audited hit's published witness
-    must carry the fresh probe's answer next to the fresh probe's freeze scope,
-    never the cache's answer beside an enlarged scope it was not measured on."""
+    """The rendered freeze pair must come from ONE observation. ``auto_expiry`` is a subset
+    predicate over this fork's own blast radius and the sole gate on rendering the duration bound as
+    a severity reducer (``claimsVocab.pauseQualifier``), so the audited hit must carry the fresh
+    probe's answer next to its freeze scope, never the cache's answer beside an enlarged scope."""
     session = clean_effects
     cold = {
         "observation": "executed",

@@ -1,9 +1,6 @@
-"""Unit tests for services.discovery.audit_enrichment.
-
-Split out of ``tests/discovery/test_run_discovery_orchestrator.py``: every test
-here drives ``audit_enrichment`` — PDF/commit extraction from a report page and
-the corroboration rules that decide when a repo-hosted PDF may be adopted as a
-report's document. The orchestrator half never imports this module.
+"""Unit tests for services.discovery.audit_enrichment (split out of test_run_discovery_orchestrator.py):
+PDF/commit extraction from a report page and the corroboration rules deciding when a repo-hosted PDF
+may be adopted as a report's document.
 """
 
 from __future__ import annotations

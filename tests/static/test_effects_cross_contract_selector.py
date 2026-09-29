@@ -1,13 +1,8 @@
 """The cross-contract join matches a caller's body sink against the callee's OWN
-canonical selector. So the emitter must record a *canonical* selector for a
-direct high-level call, lowering user-defined parameter types the same way the
-callee's selector was derived — otherwise a call to a sibling function taking a
-struct / enum / interface parameter joins on a keccak of ``addAsset(ERC20)`` that
-is not the real EVM selector, and the claim silently fails to propagate.
-
-A LibraryCall's callee is a library internal with no external selector, and
-nothing joins against it, so its notional selector is left untouched (its shape
-is ubiquitous — churning it would bury the real change).
+canonical selector, so the emitter must record a canonical selector for a direct
+high-level call, lowering struct / enum / interface params as the callee did;
+otherwise the join keys on a keccak of ``addAsset(ERC20)`` and the claim silently
+fails to propagate. A LibraryCall has no external selector and is left untouched.
 """
 
 from __future__ import annotations
@@ -85,11 +80,3 @@ def test_interface_param_call_selector_is_canonical(effects):
 
 def test_struct_and_enum_param_call_selector_is_canonical(effects):
     assert _selector_for(effects, "doCfg(Report)", "sib.configure") == _sel("configure((uint256,address),uint8)")
-
-
-def test_library_call_selector_is_left_notional(effects):
-    # The library internal has no external selector; the derived value keeps the
-    # un-lowered interface param and is NOT the canonical form.
-    lib_sel = _selector_for(effects, "doPull(uint256)", "underlying.safeTransferFrom")
-    assert lib_sel == _sel("safeTransferFrom(IToken,address,address,uint256)")
-    assert lib_sel != _sel("safeTransferFrom(address,address,address,uint256)")

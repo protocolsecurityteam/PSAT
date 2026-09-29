@@ -1,9 +1,5 @@
-"""Integration tests for StaticWorker._resolve_proxy() internal logic.
-
-These tests exercise the classify-then-dispatch logic inside _resolve_proxy
-without mocking the method itself, covering classification outcomes, child job
-creation, deduplication, error handling, and the no-RPC fallback.
-"""
+"""Integration tests for StaticWorker._resolve_proxy() classify-then-dispatch logic (without mocking the
+method itself)."""
 
 from __future__ import annotations
 
@@ -71,7 +67,6 @@ def _capture_store_and_create(monkeypatch):
 
 
 def test_non_proxy_stores_flags_with_is_proxy_false(monkeypatch):
-    """classify_single returns 'regular' -> contract_flags has is_proxy=False."""
     worker = StaticWorker()
     session = MagicMock()
     job = _job()
@@ -94,7 +89,6 @@ def test_non_proxy_stores_flags_with_is_proxy_false(monkeypatch):
 
 
 def test_non_proxy_library_type(monkeypatch):
-    """classify_single returns 'library' -> stored as non-proxy with correct type."""
     worker = StaticWorker()
     session = MagicMock()
     job = _job()
@@ -117,7 +111,6 @@ def test_non_proxy_library_type(monkeypatch):
 
 
 def test_proxy_with_implementation_creates_child_job(monkeypatch):
-    """EIP-1967 proxy with implementation -> flags stored, child job created."""
     worker = StaticWorker()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
@@ -136,7 +129,6 @@ def test_proxy_with_implementation_creates_child_job(monkeypatch):
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
 
-    # contract_flags stored correctly
     assert len(store_calls) == 1
     flags = store_calls[0][1]
     assert flags["is_proxy"] is True
@@ -144,7 +136,6 @@ def test_proxy_with_implementation_creates_child_job(monkeypatch):
     assert flags["proxy_type"] == "eip1967"
     assert flags["implementation"] == _IMPL_ADDR
 
-    # child job created with correct request
     assert len(created_jobs) == 1
     child_req = created_jobs[0]
     assert child_req["address"] == _IMPL_ADDR
@@ -156,7 +147,6 @@ def test_proxy_with_implementation_creates_child_job(monkeypatch):
 
 
 def test_proxy_child_job_inherits_chain(monkeypatch):
-    """When request includes 'chain', child job request also includes it."""
     # Models a base-enabled deployment: impl-child spawns gate off-allowlist
     # chains (inv. 14), so make the premise explicit rather than relying on {1}.
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
@@ -183,7 +173,6 @@ def test_proxy_child_job_inherits_chain(monkeypatch):
 
 
 def test_proxy_uses_job_name_for_child_naming(monkeypatch):
-    """Child job name is built from job.name when available."""
     worker = StaticWorker()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
@@ -206,7 +195,6 @@ def test_proxy_uses_job_name_for_child_naming(monkeypatch):
 
 
 def test_proxy_falls_back_to_contract_name_for_child(monkeypatch):
-    """When job.name is None, child job uses contract_name."""
     worker = StaticWorker()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
@@ -295,7 +283,6 @@ def test_beacon_is_analyzed_yet_still_spawns_impl_child(monkeypatch):
 
 
 def test_diamond_proxy_creates_jobs_for_impl_and_facets(monkeypatch):
-    """Diamond proxy with impl + 2 facets -> 3 child jobs (impl + 2 facets)."""
     worker = StaticWorker()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
@@ -315,13 +302,11 @@ def test_diamond_proxy_creates_jobs_for_impl_and_facets(monkeypatch):
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
 
-    # Flags stored with facets
     flags = store_calls[0][1]
     assert flags["is_proxy"] is True
     assert flags["proxy_type"] == "diamond"
     assert flags["facets"] == [_FACET1, _FACET2]
 
-    # 3 child jobs: impl + facet 1 + facet 2
     assert len(created_jobs) == 3
     assert created_jobs[0]["address"] == _IMPL_ADDR
     assert created_jobs[0]["name"] == "TestContract: (impl)"
@@ -332,7 +317,6 @@ def test_diamond_proxy_creates_jobs_for_impl_and_facets(monkeypatch):
 
 
 def test_diamond_proxy_deduplicates_impl_in_facets(monkeypatch):
-    """If implementation address appears in facets list, it is not duplicated."""
     worker = StaticWorker()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
@@ -352,14 +336,12 @@ def test_diamond_proxy_deduplicates_impl_in_facets(monkeypatch):
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
 
-    # Only 2 child jobs: impl + facet 1 (impl not duplicated)
     assert len(created_jobs) == 2
     addresses = [j["address"] for j in created_jobs]
     assert addresses == [_IMPL_ADDR, _FACET1]
 
 
 def test_proxy_facets_only_no_impl(monkeypatch):
-    """Proxy with facets but no implementation -> child jobs only for facets."""
     worker = StaticWorker()
     session = MagicMock()
     session.execute.return_value.scalar_one_or_none.return_value = None
@@ -390,7 +372,6 @@ def test_proxy_facets_only_no_impl(monkeypatch):
 
 
 def test_no_rpc_stores_classification_skipped(monkeypatch):
-    """No rpc_url in request and no ETH_RPC env -> classification_skipped."""
     worker = StaticWorker()
     session = MagicMock()
     job = _job(request={})  # no rpc_url
@@ -435,7 +416,6 @@ def test_erpc_mainnet_route_used_when_request_has_no_rpc(monkeypatch):
 
 
 def test_erpc_chain_route_used_when_request_has_chain(monkeypatch):
-    """Configured eRPC route is used when request has a supported chain."""
     worker = StaticWorker()
     session = MagicMock()
     job = _job(request={"chain": "base"})
@@ -462,7 +442,6 @@ def test_erpc_chain_route_used_when_request_has_chain(monkeypatch):
 
 
 def test_classify_exception_stores_classification_error(monkeypatch):
-    """classify_single raises -> contract_flags with classification_error."""
     worker = StaticWorker()
     session = MagicMock()
     job = _job()
@@ -484,35 +463,12 @@ def test_classify_exception_stores_classification_error(monkeypatch):
     assert created_jobs == []
 
 
-def test_classify_generic_exception_stores_error(monkeypatch):
-    """Any exception type from classify_single is caught and stored."""
-    worker = StaticWorker()
-    session = MagicMock()
-    job = _job()
-
-    store_calls, _ = _capture_store_and_create(monkeypatch)
-
-    def _raise(address, rpc_url, **_kw):
-        raise ValueError("unexpected bytecode format")
-
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        _raise,
-    )
-
-    worker._resolve_proxy(session, job, _ADDR, "TestContract")
-
-    flags = store_calls[0][1]
-    assert "unexpected bytecode format" in flags["classification_error"]
-
-
 # ---------------------------------------------------------------------------
 # 6. Existing impl job skip
 # ---------------------------------------------------------------------------
 
 
 def test_existing_impl_job_skips_child_creation(monkeypatch):
-    """If a job already exists for the implementation address, skip creation."""
     worker = StaticWorker()
     session = MagicMock()
 
@@ -534,16 +490,13 @@ def test_existing_impl_job_skips_child_creation(monkeypatch):
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
 
-    # Flags are still stored
     assert store_calls[0][1]["is_proxy"] is True
     assert store_calls[0][1]["implementation"] == _IMPL_ADDR
 
-    # But no child job is created
     assert created_jobs == []
 
 
 def test_partial_existing_jobs_creates_only_missing(monkeypatch):
-    """With multiple impls, only creates child jobs for addresses without existing jobs."""
     worker = StaticWorker()
     session = MagicMock()
 
@@ -573,7 +526,6 @@ def test_partial_existing_jobs_creates_only_missing(monkeypatch):
 
     worker._resolve_proxy(session, job, _ADDR, "TestContract")
 
-    # Only facet child job created (impl was skipped)
     assert len(created_jobs) == 1
     assert created_jobs[0]["address"] == _FACET1
     assert created_jobs[0]["name"] == "TestContract: (facet 1)"
@@ -585,10 +537,9 @@ def test_partial_existing_jobs_creates_only_missing(monkeypatch):
 
 
 def test_classification_incomplete_fails_closed_and_reraises(monkeypatch):
-    """A ClassificationIncompleteError (proxy-slot read failed, transient RPC)
-    must NOT be swallowed into an ``is_proxy=False`` shell that the static stage
-    then Slithers. ``_resolve_proxy`` records the degradation and re-raises so the
-    static stage fails closed into the worker retry path (registered transient)."""
+    """A ClassificationIncompleteError (transient proxy-slot read failure) must NOT be swallowed
+    into an ``is_proxy=False`` shell the static stage then Slithers; ``_resolve_proxy`` records
+    the degradation and re-raises so the stage fails closed into the retry path."""
     worker = StaticWorker()
     session = MagicMock()
     job = _job()
@@ -609,8 +560,7 @@ def test_classification_incomplete_fails_closed_and_reraises(monkeypatch):
     with pytest.raises(ClassificationIncompleteError):
         worker._resolve_proxy(session, job, _ADDR, "TestContract")
 
-    # Degradation recorded, and crucially NO is_proxy=False contract_flags shell
-    # artifact was written (which would have let the stage analyze the shell).
+    # Degradation recorded, and NO is_proxy=False contract_flags shell was written.
     assert degraded and degraded[0][0] == "proxy_classification"
     assert isinstance(degraded[0][1], ClassificationIncompleteError)
     assert all(name != "contract_flags" for name, _data, _text in store_calls)

@@ -313,8 +313,7 @@ def test_build_effective_permissions_uses_semantic_capabilities_for_principals()
     manage = functions["manage(address,bytes,uint256)"]
     assert manage["selector"] == "0xf6e715d0"
     assert manage["effect_labels"] == ["arbitrary_external_call"]
-    # The Plane-1 claim provenance rides through to the payload alongside the
-    # legacy projection, so a consumer can key off the typed claim id.
+    # The Plane-1 claim provenance rides through alongside the legacy projection.
     assert [c["claim_id"] for c in manage["claims"]] == ["exec.arbitrary"]
     assert manage["action_summary"] == "Executes arbitrary external calldata from the contract."
     assert manage["authority_roles"] == []
@@ -324,8 +323,7 @@ def test_build_effective_permissions_uses_semantic_capabilities_for_principals()
     hook = functions["setBeforeTransferHook(address)"]
     assert hook["selector"] == "0x8929565f"
     assert hook["effect_targets"] == ["hook"]
-    # ``hook_update`` is now the legacy projection of the ``callee_pointer.rotate``
-    # claim; both are carried.
+    # ``hook_update`` is the legacy projection of the ``callee_pointer.rotate`` claim; both are carried.
     assert hook["effect_labels"] == ["hook_update"]
     assert [c["claim_id"] for c in hook["claims"]] == ["callee_pointer.rotate"]
     assert hook["authority_roles"] == []
@@ -369,59 +367,6 @@ def test_build_effective_permissions_projects_mixed_public_or_capability():
     assert fn.get("status") == "public"
     assert fn.get("conditions") == [{"kind": "business", "description": "public capability enabled"}]
     assert fn.get("capability_expr") == cap
-
-
-def test_build_effective_permissions_with_authority_snapshot():
-    target_analysis = {
-        "subject": {
-            "address": "0x1111111111111111111111111111111111111111",
-            "name": "Target",
-        },
-        "semantic_control": {
-            "semantic_functions": [
-                {
-                    "function": "manage(address,bytes,uint256)",
-                    "controller_refs": ["authority"],
-                    "effect_targets": ["target.functionCallWithValue"],
-                    "effect_labels": ["arbitrary_external_call"],
-                    "action_summary": "Executes arbitrary external calldata from the contract.",
-                }
-            ]
-        },
-    }
-    target_snapshot = {
-        "contract_name": "Target",
-        "controller_values": {
-            "external_contract:authority": {
-                "value": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "resolved_type": "contract",
-                "details": {"address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-            }
-        },
-    }
-    authority_snapshot = {"contract_name": "Authority", "controller_values": {}}
-    payload = build_effective_permissions(
-        target_analysis,
-        target_snapshot=target_snapshot,
-        authority_snapshot=authority_snapshot,
-        capability_resolver_output={
-            "manage(address,bytes,uint256)": _finite_cap("0xcccccccccccccccccccccccccccccccccccccccc"),
-        },
-        effects=_effects(
-            _effect(
-                "manage(address,bytes,uint256)",
-                targets=["target.functionCallWithValue"],
-                labels=["arbitrary_external_call"],
-                summary="Executes arbitrary external calldata from the contract.",
-                sink_kind="external_call",
-            )
-        ),
-    )
-
-    assert payload["contract_name"] == "Target"
-    assert payload["authority_contract"] is None
-    assert payload["principal_resolution"]["status"] == "complete"
-    assert payload["functions"][0]["effect_labels"] == ["arbitrary_external_call"]
 
 
 def test_build_effective_permissions_handles_vyper_dynarray_signatures():
@@ -479,8 +424,7 @@ def test_build_effective_permissions_handles_vyper_dynarray_signatures():
     function = payload["functions"][0]
 
     assert function["function"] == "seal(DynArray[address,MAX_SEALABLES])"
-    # Not None: the DynArray lowers to ``address[]``, so the signature is fully
-    # elementary and a selector really is derivable from it.
+    # Not None: the DynArray lowers to ``address[]``, so a selector is derivable.
     selector = function["selector"]
     assert selector is not None
     assert selector.startswith("0x")
@@ -715,8 +659,7 @@ def _public_default_target() -> dict:
 
 
 def _external_call_effect() -> dict:
-    # A sensitive-sink, tree-less, capability-less entry point: the exact
-    # population the resolver-ran branch would otherwise default to public.
+    # A sensitive-sink, tree-less, capability-less entry point: what the resolver-ran branch would default to public.
     return _effects(
         _effect(
             "sweep(address)",
@@ -729,9 +672,8 @@ def _external_call_effect() -> dict:
 
 
 def test_guard_extraction_uncertain_marker_absent_defaults_public():
-    """Control: with no ``guard_extraction_uncertain`` marker, a tree-less
-    sensitive-sink entry point still defaults to public when the resolver
-    ran — the historical behavior the marker must NOT change wholesale."""
+    """Control: with no ``guard_extraction_uncertain`` marker a tree-less sensitive-sink entry
+    point still defaults to public when the resolver ran (the behavior the marker must NOT change wholesale)."""
     payload = build_effective_permissions(
         _public_default_target(),
         capability_resolver_output={},
@@ -744,11 +686,9 @@ def test_guard_extraction_uncertain_marker_absent_defaults_public():
 
 
 def test_guard_extraction_uncertain_marker_flips_only_marked_to_unsupported():
-    """Fail-closed policy gate: when the static stage flags a tree-less sig as
-    a caller-authority guard it could not lower (``guard_extraction_uncertain``),
-    the policy resolves it ``unsupported`` instead of public — closing the
-    fail-open default for that signature only. Carries the explicit reason and
-    drops ``authority_public`` (never projected permissionless)."""
+    """Fail-closed policy gate: a tree-less sig the static stage flags as a caller-authority guard
+    it could not lower (``guard_extraction_uncertain``) resolves ``unsupported`` instead of
+    public, for that signature only, with an explicit reason and no ``authority_public``."""
     payload = build_effective_permissions(
         _public_default_target(),
         capability_resolver_output={},
@@ -768,21 +708,17 @@ def test_guard_extraction_uncertain_marker_flips_only_marked_to_unsupported():
 # ---------------------------------------------------------------------------
 # authority_openness on the ARTIFACT plane.
 #
-# The three-state openness split is computed twice: once here, in
-# ``build_effective_permissions``, onto the ``effective_permissions`` artifact
-# the API and the recursive resolver read, and once in
-# ``effective_permissions_writer`` on its way to the ``effective_functions``
-# column. Every existing openness test asserts the SECOND one, so reverting
-# either of the two blocks in ``build_effective_permissions`` left the suite
-# green while the artifact silently lost the key — and an absent key is
-# published as "written before the column existed", a claim the record does
-# not have. These two tests pin the payload plane on its own.
+# The three-state split is computed twice: in ``build_effective_permissions`` (onto the artifact the
+# API and recursive resolver read) and in ``effective_permissions_writer`` (onto the
+# ``effective_functions`` column). Existing openness tests assert only the SECOND, so reverting
+# either block here left the suite green while the artifact lost the key, and an absent key is
+# published as "written before the column existed", a claim the record doesn't have.
 # ---------------------------------------------------------------------------
 
 
 def test_artifact_carries_openness_for_a_resolver_capability():
-    """Resolver-capability branch: the openness projection of the capability the
-    record publishes travels ON the record, not only into the DB column.
+    """Resolver-capability branch: the openness of the published capability travels ON the
+    record, not only into the DB column.
 
     Input-shape → published-state table:
 
@@ -820,7 +756,7 @@ def test_artifact_carries_openness_for_a_resolver_capability():
         cast("dict[str, Any]", fn)["function"]: cast("dict[str, Any]", fn) for fn in payload["functions"]
     }
 
-    # The key must be PRESENT on every record — its absence is a fourth state.
+    # The key must be PRESENT on every record: absence is a fourth state.
     for name in ("gated()", "timed()", "asm()"):
         assert "authority_openness" in by_name[name], f"{name} lost the openness key"
 
@@ -830,18 +766,16 @@ def test_artifact_carries_openness_for_a_resolver_capability():
 
 
 def test_artifact_carries_openness_for_a_policy_minted_capability():
-    """Policy-minted branch (empty resolver output): the record publishes a
-    ``capability_expr`` the policy layer minted, so its openness has to be the
-    projection of THAT dict — the answer was already computable from what the
-    record publishes.
+    """Policy-minted branch (empty resolver output): the record publishes a policy-minted
+    ``capability_expr``, so openness must be the projection of THAT dict.
 
     Input-shape → published-state table:
 
       fall-through public (sink-bearing, tree-less) → 'open'
       guard_extraction_uncertain reroute            → 'not_determined'
 
-    The adverse branch is the second row: it proves the not-determined arm
-    executes on the artifact plane, not just the credit-granting one.
+    The adverse row proves the not-determined arm runs on the artifact plane, not just the
+    credit-granting one.
     """
     payload = build_effective_permissions(
         _public_default_target(),

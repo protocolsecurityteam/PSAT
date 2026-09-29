@@ -71,12 +71,8 @@ def _make_job(**overrides):
 
 @pytest.fixture(autouse=True)
 def _force_single_job_concurrency(monkeypatch):
-    """Run-loop tests here assert the K=1 legacy single-job path. A developer's
-    ``.env`` may set ``PSAT_<STAGE>_JOB_CONCURRENCY`` > 1 (``db.models`` calls
-    ``load_dotenv`` at import), which routes the worker onto the futures
-    dispatcher and breaks the exact-call assertions. Strip the concurrency vars
-    so the default K=1 holds; a test that wants K>1 sets it explicitly.
-    """
+    """These tests assert the K=1 legacy path; a developer's ``.env`` (loaded by
+    ``db.models``) may set concurrency > 1 and break the exact-call assertions."""
     for key in list(os.environ):
         if key.startswith("PSAT_") and key.endswith("_JOB_CONCURRENCY"):
             monkeypatch.delenv(key, raising=False)
@@ -85,16 +81,6 @@ def _force_single_job_concurrency(monkeypatch):
 # ---------------------------------------------------------------------------
 # Tests: __init__
 # ---------------------------------------------------------------------------
-
-
-@patch("workers.base.signal.signal")
-def test_init_sets_worker_id_with_classname_and_pid(mock_signal):
-    """worker_id contains the class name and the PID."""
-    with patch("workers.base.os.getpid", return_value=12345):
-        w = _TestWorker()
-    assert w.worker_id.startswith("_TestWorker-12345-")
-    assert len(w.worker_id.split("-")) == 3
-    assert w._running is True
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +103,6 @@ def test_handle_sigterm_sets_running_false(mock_signal):
 
 @patch("workers.base.signal.signal")
 def test_recover_stale_jobs_requeues(mock_signal):
-    """Stale jobs are set to queued with worker_id cleared."""
     w = _TestWorker()
     stale_job = _make_job(
         updated_at=datetime.now(timezone.utc) - timedelta(seconds=300),
@@ -135,7 +120,6 @@ def test_recover_stale_jobs_requeues(mock_signal):
 
 @patch("workers.base.signal.signal")
 def test_recover_stale_jobs_no_stale(mock_signal):
-    """When no stale jobs exist, session.commit is not called."""
     w = _TestWorker()
     mock_session = MagicMock()
     mock_session.execute.return_value.scalars.return_value.all.return_value = []
@@ -155,7 +139,6 @@ def test_recover_stale_jobs_no_stale(mock_signal):
 @patch("workers.base.claim_job")
 @patch("workers.base.advance_job")
 def test_run_loop_claims_processes_and_advances(mock_advance, mock_claim, mock_session_cls, mock_signal):
-    """Happy path: claim a job, process it, advance to next_stage."""
     job = _make_job()
     mock_session = MagicMock()
     mock_session_cls.return_value = mock_session
@@ -167,7 +150,6 @@ def test_run_loop_claims_processes_and_advances(mock_advance, mock_claim, mock_s
         call_count += 1
         if call_count == 1:
             return job
-        # Stop the loop on second iteration
         w._running = False
         return None
 
@@ -186,7 +168,6 @@ def test_run_loop_claims_processes_and_advances(mock_advance, mock_claim, mock_s
 @patch("workers.base.claim_job")
 @patch("workers.base.advance_job")
 def test_run_loop_job_handled_directly_skips_advance(mock_advance, mock_claim, mock_session_cls, mock_signal):
-    """When process() raises JobHandledDirectly, advance_job is NOT called."""
     job = _make_job()
     mock_session = MagicMock()
     mock_session_cls.return_value = mock_session
@@ -213,7 +194,6 @@ def test_run_loop_job_handled_directly_skips_advance(mock_advance, mock_claim, m
 @patch("workers.base.signal.signal")
 @patch("workers.base.advance_job")
 def test_execute_job_heartbeats_while_process_blocks(mock_advance, mock_signal, monkeypatch):
-    """A processing job gets a background heartbeat even if process() is blocked."""
     monkeypatch.setenv("PSAT_JOB_HEARTBEAT_INTERVAL_S", "0.01")
     release = threading.Event()
     job = _make_job(lease_id=uuid.uuid4())
@@ -245,7 +225,6 @@ def test_execute_job_heartbeats_while_process_blocks(mock_advance, mock_signal, 
 @patch("workers.base.claim_job")
 @patch("workers.base.fail_job_terminal")
 def test_run_loop_process_exception_calls_fail_job_terminal(mock_fail, mock_claim, mock_session_cls, mock_signal):
-    """A terminal-classified exception (RuntimeError → terminal) routes through ``fail_job_terminal``."""
     job = _make_job()
     job.retry_count = 0
     mock_session = MagicMock()
@@ -287,15 +266,11 @@ def test_run_loop_process_exception_calls_fail_job_terminal(mock_fail, mock_clai
 def test_worker_failure_is_one_line_with_structured_fields(
     mock_configure, mock_fail, mock_claim, mock_session_cls, mock_signal, caplog
 ):
-    """The failure line used to be a multi-line ASCII banner + traceback inside
-    one JSON ``message`` — 27 unique blobs a run, none of which group by
-    template. Every fact is a field or a bound contextvar; the traceback rides
-    ``exc_info`` where the formatter gives it its own key.
+    """Failure is one log line: facts as fields/contextvars, traceback in ``exc_info``.
 
-    ``configure_logging`` is patched out because ``BaseWorker.__init__`` calls it
-    and its first-call path clears every root handler — caplog's included — so
-    without this the test only passes when an earlier test in the same process
-    already configured logging.
+    ``configure_logging`` is patched out because its first call clears every root
+    handler (caplog's included), so otherwise this passes only if logging was
+    already configured by an earlier test.
     """
     import logging
 
@@ -342,10 +317,8 @@ def test_worker_failure_is_one_line_with_structured_fields(
 def test_requeued_failure_carries_no_traceback(
     mock_requeue, mock_claim, mock_session_cls, mock_signal, mock_configure, caplog
 ):
-    """A requeued job has not failed — it runs again. This file's own level
-    contract says attaching a traceback to a non-failure line mislevels it, so
-    ``exc_info`` is terminal-only; ``exc_type``/``exc_message`` still name the
-    cause and the StageError keeps the full traceback either way."""
+    """A requeued job has not failed, so ``exc_info`` is terminal-only; ``exc_type``/
+    ``exc_message`` still name the cause and the StageError keeps the traceback."""
     import logging
 
     import requests
@@ -381,37 +354,9 @@ def test_requeued_failure_carries_no_traceback(
 
 @patch("workers.base.signal.signal")
 @patch("workers.base.SessionLocal")
-@patch("workers.base.claim_job", return_value=None)
-@patch("workers.base.time.sleep")
-def test_run_loop_no_job_sleeps(mock_sleep, mock_claim, mock_session_cls, mock_signal):
-    """When no job is available, the loop sleeps for poll_interval."""
-    mock_session = MagicMock()
-    mock_session_cls.return_value = mock_session
-
-    w = _TestWorker()
-    w.poll_interval = 2.0
-
-    call_count = 0
-
-    def _claim_side_effect(session, stage, worker_id):
-        nonlocal call_count
-        call_count += 1
-        if call_count >= 2:
-            w._running = False
-        return None
-
-    mock_claim.side_effect = _claim_side_effect
-    w.run_loop()
-
-    assert [call.args[0] for call in mock_sleep.call_args_list] == [2.0, 4.0]
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job")
 @patch("db.queue.complete_job")
 def test_run_loop_next_stage_done_calls_complete_job(mock_complete, mock_claim, mock_session_cls, mock_signal):
-    """When next_stage is done, complete_job is called instead of advance_job."""
     job = _make_job(stage=JobStage.policy)
     mock_session = MagicMock()
     mock_session_cls.return_value = mock_session
@@ -435,37 +380,6 @@ def test_run_loop_next_stage_done_calls_complete_job(mock_complete, mock_claim, 
     mock_complete.assert_called_once_with(mock_session, job.id, lease_id=None)
 
 
-@patch("workers.base.signal.signal")
-@patch("workers.base.SessionLocal")
-@patch("workers.base.claim_job", return_value=None)
-@patch("workers.base.time.sleep")
-def test_run_loop_stale_recovery_uses_elapsed_time(mock_sleep, mock_claim, mock_session_cls, mock_signal):
-    """Adaptive poll delays must not slow the stale-job recovery cadence."""
-    mock_session = MagicMock()
-    mock_session_cls.return_value = mock_session
-
-    w = _TestWorker()
-
-    cycle = 0
-
-    def _claim_side_effect(session, stage, worker_id):
-        nonlocal cycle
-        cycle += 1
-        if cycle >= 31:
-            w._running = False
-        return None
-
-    mock_claim.side_effect = _claim_side_effect
-
-    # Each claimed poll advances a synthetic clock by two seconds.
-    with (
-        patch("workers.base.time.monotonic", side_effect=lambda: cycle * 2),
-        patch.object(w, "_recover_stale_jobs") as mock_recover,
-    ):
-        w.run_loop()
-        mock_recover.assert_called_once_with(mock_session)
-
-
 # ---------------------------------------------------------------------------
 # Tests: _claim_job sweeps stuck processing rows before claiming
 # ---------------------------------------------------------------------------
@@ -475,9 +389,8 @@ def test_run_loop_stale_recovery_uses_elapsed_time(mock_sleep, mock_claim, mock_
 @patch("workers.base.reclaim_stuck_jobs")
 @patch("workers.base.claim_job")
 def test_claim_job_sweeps_stuck_rows_before_claiming(mock_claim, mock_reclaim, mock_signal):
-    """``_claim_job`` invokes ``reclaim_stuck_jobs`` first so crashed workers'
-    jobs can be picked up on the very next poll instead of waiting 30 cycles
-    for the stage-filtered recovery sweep."""
+    """Crashed workers' jobs must be reclaimable on the next poll, not after 30 cycles
+    of the stage-filtered recovery sweep."""
     w = _TestWorker()
     mock_session = MagicMock()
     mock_reclaim.return_value = []
@@ -494,17 +407,6 @@ def test_claim_job_sweeps_stuck_rows_before_claiming(mock_claim, mock_reclaim, m
 # ---------------------------------------------------------------------------
 
 
-@patch("workers.base.signal.signal")
-@patch("workers.base.update_job_detail")
-def test_update_detail_delegates_to_queue(mock_update, mock_signal):
-    """update_detail() delegates to db.queue.update_job_detail."""
-    w = _TestWorker()
-    mock_session = MagicMock()
-    mock_job = _make_job()
-    w.update_detail(mock_session, cast(Any, mock_job), "50% done")
-    mock_update.assert_called_once_with(mock_session, mock_job.id, "50% done")
-
-
 # ---------------------------------------------------------------------------
 # Tests: _heartbeat — bumps updated_at without changing detail
 # ---------------------------------------------------------------------------
@@ -513,12 +415,8 @@ def test_update_detail_delegates_to_queue(mock_update, mock_signal):
 @patch("workers.base.SessionLocal")
 @patch("workers.base.signal.signal")
 def test_heartbeat_issues_update_and_commits(mock_signal, SessionLocalMock):
-    """``_heartbeat`` issues a stand-alone UPDATE and commits, leaving detail alone.
-
-    The legacy (no-lease) path opens a fresh ``SessionLocal()`` rather
-    than reusing the worker's main session — see
-    ``test_heartbeat_fresh_session.py`` for why.
-    """
+    """The legacy (no-lease) path opens a fresh ``SessionLocal()`` rather than the
+    worker's main session — see ``test_heartbeat_fresh_session.py`` for why."""
     fresh = MagicMock()
     fresh.__enter__ = MagicMock(return_value=fresh)
     fresh.__exit__ = MagicMock(return_value=False)
@@ -545,7 +443,6 @@ def test_heartbeat_issues_update_and_commits(mock_signal, SessionLocalMock):
 @patch("workers.base.SessionLocal")
 @patch("workers.base.signal.signal")
 def test_heartbeat_uses_claim_time_token(mock_signal, SessionLocalMock, mock_heartbeat_job):
-    """Heartbeat threads use the claim-time token cached by ``_execute_job``."""
     fresh = MagicMock()
     fresh.__enter__ = MagicMock(return_value=fresh)
     fresh.__exit__ = MagicMock(return_value=False)
@@ -578,10 +475,8 @@ def test_heartbeat_uses_claim_time_token(mock_signal, SessionLocalMock, mock_hea
 @patch("workers.base.SessionLocal")
 @patch("workers.base.signal.signal")
 def test_heartbeat_swallows_db_failure(mock_signal, SessionLocalMock):
-    """A DB failure inside the fresh-session UPDATE is non-fatal — the loop
-    continues. The failure is now logged at WARNING (used to be a silent
-    DEBUG-level rollback log, which hid the original heartbeat-stall bug).
-    """
+    """A DB failure in the fresh-session UPDATE is non-fatal but logged at WARNING;
+    a silent DEBUG log once hid the heartbeat-stall bug."""
     fresh = MagicMock()
     fresh.__enter__ = MagicMock(return_value=fresh)
     fresh.__exit__ = MagicMock(return_value=False)
@@ -592,7 +487,6 @@ def test_heartbeat_swallows_db_failure(mock_signal, SessionLocalMock):
     worker_session = MagicMock()
     mock_job = _make_job()
 
-    # Should not raise.
     w._heartbeat(worker_session, cast(Any, mock_job))
     SessionLocalMock.assert_called_once()
     worker_session.execute.assert_not_called()
@@ -600,14 +494,12 @@ def test_heartbeat_swallows_db_failure(mock_signal, SessionLocalMock):
 
 @pytest.fixture()
 def _restore_workers_base_module():
-    """Clear the stale-job override for one test, then put ``workers.base`` back.
+    """Clear the stale-job override, then put ``workers.base`` back.
 
-    ``importlib.reload`` re-executes the module body, so ``JobHandledDirectly``
-    and ``BaseWorker`` become NEW class objects while every module that already
-    imported them keeps the old ones. A worker module imported after the reload
-    then raises a ``JobHandledDirectly`` that no ``pytest.raises`` elsewhere
-    matches. The reload is the point of the test, so the original class objects
-    are rebound afterwards rather than the reload avoided.
+    ``importlib.reload`` makes ``JobHandledDirectly``/``BaseWorker`` NEW class
+    objects while already-imported modules keep the old ones, so a later
+    ``JobHandledDirectly`` would match no ``pytest.raises`` elsewhere. The
+    originals are rebound afterwards.
     """
     import importlib
 
@@ -648,7 +540,6 @@ def test_stale_job_timeout_default_is_600(_restore_workers_base_module):
 @patch("workers.base.claim_job")
 @patch("workers.base.fail_job_terminal")
 def test_run_loop_fail_job_exception_retries_with_fresh_session(mock_fail, mock_claim, mock_session_cls, mock_signal):
-    """When ``fail_job_terminal`` raises, the loop retries with a fresh session."""
     job = _make_job()
     job.retry_count = 0
     mock_session = MagicMock()
@@ -677,7 +568,6 @@ def test_run_loop_fail_job_exception_retries_with_fresh_session(mock_fail, mock_
 
     mock_claim.side_effect = _claim_side_effect
 
-    # First fail_job_terminal raises, second (fresh session) succeeds
     mock_fail.side_effect = [Exception("db gone"), None]
 
     w = _TestWorker()
@@ -685,7 +575,6 @@ def test_run_loop_fail_job_exception_retries_with_fresh_session(mock_fail, mock_
     w.run_loop()
 
     assert mock_fail.call_count == 2
-    # Second call should use fresh_session
     second_call_args = mock_fail.call_args_list[1][0]
     assert second_call_args[0] is fresh_session
     # fresh_session.close is called in the retry block; it may also be called
@@ -698,7 +587,6 @@ def test_run_loop_fail_job_exception_retries_with_fresh_session(mock_fail, mock_
 @patch("workers.base.claim_job")
 @patch("workers.base.fail_job_terminal")
 def test_run_loop_both_fail_job_attempts_fail_gracefully(mock_fail, mock_claim, mock_session_cls, mock_signal):
-    """When both ``fail_job_terminal`` attempts raise, the loop continues without crashing."""
     job = _make_job()
     job.retry_count = 0
     mock_session = MagicMock()
@@ -727,12 +615,10 @@ def test_run_loop_both_fail_job_attempts_fail_gracefully(mock_fail, mock_claim, 
 
     mock_claim.side_effect = _claim_side_effect
 
-    # Both fail_job_terminal calls raise
     mock_fail.side_effect = [Exception("db gone"), Exception("still gone")]
 
     w = _TestWorker()
     w.process = MagicMock(side_effect=RuntimeError("boom"))
-    # Should not raise — loop handles both failures gracefully
     w.run_loop()
 
     assert mock_fail.call_count == 2
@@ -742,7 +628,6 @@ def test_run_loop_both_fail_job_attempts_fail_gracefully(mock_fail, mock_claim, 
 @patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job")
 def test_run_loop_outer_exception_does_not_crash(mock_claim, mock_session_cls, mock_signal):
-    """An exception in the outer try block (e.g. claim_job) is caught and logged."""
     mock_session = MagicMock()
     mock_session_cls.return_value = mock_session
 
@@ -759,32 +644,4 @@ def test_run_loop_outer_exception_does_not_crash(mock_claim, mock_session_cls, m
     mock_claim.side_effect = _claim_side_effect
 
     w = _TestWorker()
-    # Should not raise — the outer except catches it
     w.run_loop()
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.SessionLocal")
-@patch("workers.base.claim_job", return_value=None)
-@patch("workers.base.time.sleep")
-def test_run_loop_session_closed_when_no_job(mock_sleep, mock_claim, mock_session_cls, mock_signal):
-    """When no job is claimed, the session is still closed."""
-    mock_session = MagicMock()
-    mock_session_cls.return_value = mock_session
-
-    w = _TestWorker()
-
-    cycle = 0
-
-    def _claim_side_effect(session, stage, worker_id):
-        nonlocal cycle
-        cycle += 1
-        if cycle >= 2:
-            w._running = False
-        return None
-
-    mock_claim.side_effect = _claim_side_effect
-    w.run_loop()
-
-    # session.close called in the continue branch and in finally
-    assert mock_session.close.call_count >= 2

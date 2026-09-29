@@ -1,22 +1,13 @@
 """The selection stage's omission ledger (C2).
 
-`contracts.id=11` (0xcd425f44…, a live 2-day OZ TimelockController holding
-authority over 53 `function_principals` rows across 16 contracts) has no
-analysis job. The cause was not a bug: it ranked 0.3836 and sat at queue
-positions 42-57 while `analyze_limit` was 2, so the budget cut it — and the cut
-left **no record**. A dropped candidate that is indistinguishable from a
-candidate that never existed is the defect; the targeted fix is one job plus a
-ledger, never a raised threshold.
+`contracts.id=11` (0xcd425f44…, an OZ TimelockController with authority over 53
+`function_principals` rows) has no analysis job: it ranked 0.3836 at queue
+position 42 while `analyze_limit` was 2, and the budget cut left **no record**.
+The fix is one job plus a ledger, never a raised threshold.
 
-Two ledgers, because two different populations get dropped:
-
-* ``not_selected`` — RANKED candidates that lost the budget or deduped away;
-* ``pre_rank_excluded`` — rows removed BEFORE ranking (sub-threshold
-  confidence, superseded-impl anchors), which never competed at all.
-
-Only both being empty proves nothing was dropped. ``not_selected == []`` alone
-does not: the pre-rank filters run upstream of it, and one of them used to exist
-solely as a ``record_stage_metric`` count.
+Two ledgers: ``not_selected`` (ranked candidates that lost the budget or
+deduped) and ``pre_rank_excluded`` (rows removed BEFORE ranking: sub-threshold,
+superseded-impl anchors). Only both being empty proves nothing was dropped.
 """
 
 from __future__ import annotations
@@ -128,14 +119,9 @@ def _summary(session, job_id) -> dict:
 
 
 def test_pre_rank_exclusions_are_enumerated_not_counted(db_session, worker, seed):
-    """FALSIFIER (A1): three rows, one sub-threshold, one superseded-impl
-    anchor, one selected. ``not_selected`` is empty — nothing lost the budget —
-    yet two rows were dropped upstream, and each is named with its reason.
-
-    Before this, the sub-threshold row survived only as ``record_stage_metric
-    ("dropped", n)`` and the anchor was removed in SQL, so an empty
-    ``not_selected`` would have read as "nothing was dropped" on both counts.
-    """
+    """FALSIFIER (A1): three rows, one sub-threshold, one superseded-impl anchor,
+    one selected. ``not_selected`` is empty yet two rows were dropped upstream;
+    each must be named with its reason."""
     protocol_id, company, address_factory = seed
     low = address_factory()
     anchor = address_factory()
@@ -165,8 +151,7 @@ def test_pre_rank_exclusions_are_enumerated_not_counted(db_session, worker, seed
     # The anchor never competed, so it carries no confidence verdict.
     assert "effective_confidence" not in by_addr[anchor]
 
-    # The one eligible row won the budget, so the ranked-population ledger is
-    # legitimately empty — which is exactly why it alone proves nothing.
+    # Empty because the one eligible row won — which is why it alone proves nothing.
     assert summary["not_selected"] == []
     assert summary["analyzed_count"] == 1
 
@@ -211,8 +196,6 @@ def test_budget_exhausted_records_every_ranked_loser(db_session, worker, seed):
     for record in summary["not_selected"]:
         assert record["reason"] == "budget_exhausted"
         assert record["chain"] == "ethereum"
-        # The rank is what makes the record actionable: it says how far off the
-        # cut the candidate was, which is the whole content of "0.3836 at 42".
         assert isinstance(record["rank_score"], (int, float))
 
     selected = {c["address"] for c in summary["child_jobs"]}
@@ -222,10 +205,9 @@ def test_budget_exhausted_records_every_ranked_loser(db_session, worker, seed):
 
 
 def test_prefilled_budget_enumerates_instead_of_returning_empty(db_session, worker, seed):
-    """FALSIFIER (A2): the early-return path. With the budget already spent by
-    prior children, ``_queue_top_n`` used to ``return []`` BEFORE the loop, so
-    every ranked candidate was dropped without a record — the C2 defect
-    reproduced inside its own fix. All four must be enumerated."""
+    """FALSIFIER (A2): with the budget already spent by prior children,
+    ``_queue_top_n`` used to ``return []`` BEFORE the loop, dropping every ranked
+    candidate unrecorded. All four must be enumerated."""
     from db.models import Job, JobStage, JobStatus
 
     protocol_id, company, address_factory = seed
@@ -235,7 +217,6 @@ def test_prefilled_budget_enumerates_instead_of_returning_empty(db_session, work
 
     job = _add_selection_job(db_session, protocol_id=protocol_id, company=company, analyze_limit=2)
     root_job_id = str(job.id)
-    # Two analysis children already exist under this root: the budget is full.
     for _ in range(2):
         child = Job(
             company=company,
@@ -288,15 +269,10 @@ def test_chain_disabled_candidate_is_recorded_and_consumes_no_budget(db_session,
 
 
 def test_below_cut_chain_disabled_reports_the_gate_not_the_budget(db_session, worker, seed, monkeypatch):
-    """FALSIFIER (ordering). A chain-disabled candidate ranked BELOW the cut must
-    report ``chain_not_enabled``, not ``budget_exhausted``.
-
-    With the budget checked first, every below-the-cut candidate read
-    `budget_exhausted` regardless of why it was really ineligible. Nothing was
-    dropped silently — but the recorded cause was wrong, and the cause is the
-    entire value of the ledger. Here the disabled row ranks LAST, so the budget
-    would have rejected it first if the order were wrong.
-    """
+    """FALSIFIER (ordering): a chain-disabled candidate ranked BELOW the cut must
+    report ``chain_not_enabled``, not ``budget_exhausted`` — the recorded cause
+    is the ledger's value. The disabled row ranks LAST, so a wrong check order
+    would reject it on budget first."""
     protocol_id, company, address_factory = seed
     top, disabled = address_factory(), address_factory()
     _add_contract(db_session, protocol_id=protocol_id, address=top, sources=["inventory"], confidence=0.95)

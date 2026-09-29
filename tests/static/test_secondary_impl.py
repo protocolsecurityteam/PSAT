@@ -1,20 +1,11 @@
 """Regression tests for split-proxy *secondary implementation* handling (1A).
 
-The real ether.fi LRTSquared shape: a UUPSProxy whose EIP-1967 impl
-(``LRTSquaredCore``) has a ``fallback`` that ``sload``s an unstructured constant
-slot and delegatecalls it, pointing at a second logic contract
-(``LRTSquaredAdmin``). Before the fix that admin impl was analysed standalone
-against its own empty storage and rendered as an ownerless orphan.
-
-  * ``test_pipeline_detects_real_lrtsquared_secondary_impl`` drives the ACTUAL
-    on-chain LRTSquaredCore verified source (a repo-owned fixture pulled from
-    Etherscan) through the production static pipeline and asserts the
-    secondary-impl pointer is recovered at the real on-chain slot;
-  * the remaining detection tests use small synthetic fixtures to cover edge
-    shapes (named-address-var, indirected fallback, keccak / ``-1`` slot idioms)
-    and the substring false-positive guard;
-  * the resolver + queue + cache-hit tests cover reading the pointer against the
-    PROXY (stubbed ``rpc_request``) and the proxy-child spawn.
+The real ether.fi LRTSquared shape: a UUPSProxy whose EIP-1967 impl (``LRTSquaredCore``) has a
+``fallback`` that ``sload``s an unstructured slot and delegatecalls a second logic contract
+(``LRTSquaredAdmin``). Before the fix that admin impl was analysed against its own empty storage
+and rendered as an ownerless orphan. One test drives the ACTUAL verified source (repo-owned
+fixture) through the production pipeline; the rest use synthetic fixtures for edge shapes, plus
+resolver / queue / cache-hit tests that read the pointer against the PROXY (stubbed RPC).
 """
 
 from __future__ import annotations
@@ -53,9 +44,7 @@ _LRT_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / 
 
 
 def _analyze_real_contract(tmp_path, fixture: dict):
-    """Scaffold the saved verified source into a Foundry project and run the
-    PRODUCTION static pipeline (``collect_contract_analysis_with_artifacts``,
-    the same entry point ``StaticWorker`` uses) over the real contract."""
+    """Scaffold the saved verified source and run the PRODUCTION static pipeline over it."""
     import json as _json
 
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
@@ -103,12 +92,9 @@ def real_lrtsquared(tmp_path_factory):
 
 
 def test_pipeline_detects_real_lrtsquared_secondary_impl(real_lrtsquared):
-    """The ACTUAL on-chain ether.fi LRTSquaredCore verified source, driven through
-    the production static pipeline, must surface its split-proxy secondary-impl
-    pointer (``adminImplPosition``) at the real on-chain slot. This is the pattern
-    the first implementation missed entirely — the impl reads the admin logic
-    address from an unstructured constant slot via assembly ``sload``, not a plain
-    ``address`` state var. Real contract data, real pipeline, no replica."""
+    """The ACTUAL LRTSquaredCore source must surface its secondary-impl pointer
+    (``adminImplPosition``) at the real slot. The first implementation missed it: the admin
+    address comes from an unstructured constant slot via assembly ``sload``, not an ``address`` var."""
     fixture, analysis = real_lrtsquared
     pointers = analysis.get("secondary_impl_pointers") or []
     by_name = {p["name"]: p for p in pointers}
@@ -164,10 +150,8 @@ def inline_var_contract(tmp_path_factory):
 
 
 def test_detect_named_address_var_pointer(inline_var_contract):
-    """Synthetic variant: a fallback that delegatecalls a plain ``address`` state
-    var directly (inline assembly). The var is found at its layout slot, and a
-    ``governor`` read by a modifier (never delegatecalled) is NOT mistaken for a
-    pointer."""
+    """A fallback delegatecalling a plain ``address`` state var is found at its layout slot; a
+    ``governor`` read by a modifier (never delegatecalled) is NOT mistaken for a pointer."""
     from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
 
     pointers = detect_secondary_impl_pointers(inline_var_contract)
@@ -193,7 +177,6 @@ contract Plain { address public owner; function f() external {} }
 
 
 def test_detect_eip1967_style_minus_one_slot(tmp_path):
-    """The ``bytes32(uint256(keccak256("…")) - 1)`` slot idiom resolves correctly."""
     from eth_utils.crypto import keccak
 
     from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
@@ -214,9 +197,8 @@ contract Core {
 
 
 def test_detect_indirected_fallback(tmp_path):
-    """A fallback that forwards through an internal helper
-    (``fallback() -> _delegate(adminImpl)``) is still detected via the transitive
-    IR walk — the standard OZ-style indirection the first implementation missed."""
+    """``fallback() -> _delegate(adminImpl)`` is detected via the transitive IR walk (OZ-style
+    indirection the first implementation missed)."""
     from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
 
     c = _compile(
@@ -260,15 +242,12 @@ contract C {
 
 def test_address_from_storage_word_offsets():
     admin = "0x" + "ab" * 20
-    # offset 0: address occupies the low 20 bytes (standard, unpacked slot).
     assert _address_from_storage_word("0x" + "00" * 12 + admin[2:], 0) == admin
-    # the zero address resolves to None (unset pointer).
     assert _address_from_storage_word("0x" + "00" * 32, 0) is None
     # packed at byte offset 8: 4 high bytes | 20-byte address | 8 low bytes.
     packed = "22" * 4 + admin[2:] + "11" * 8
     assert len(packed) == 64
     assert _address_from_storage_word("0x" + packed, 8) == admin
-    # garbage / empty inputs are tolerated.
     assert _address_from_storage_word(None, 0) is None
     assert _address_from_storage_word("0x", 0) is None
 
@@ -313,7 +292,6 @@ def test_resolve_secondary_impl_addresses_reads_proxy_storage(monkeypatch):
         implementation=impl,
     )
     assert addrs == [admin]
-    # Every slot is read against the PROXY, never the impl.
     assert set(storage_targets) == {proxy}
 
 
@@ -398,7 +376,6 @@ def test_queue_secondary_impl_jobs_records_and_spawns(db_session):
     db_session.refresh(proxy_contract)
     assert admin in (proxy_contract.secondary_implementations or [])
 
-    # Idempotent within the cascade: a second call finds the existing job.
     again = queue_secondary_impl_jobs(
         db_session,
         proxy_contract=proxy_contract,
@@ -424,12 +401,9 @@ def test_queue_secondary_impl_jobs_records_and_spawns(db_session):
 
 @requires_postgres
 def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch):
-    """#1: an impl re-seen in proxy context whose static artifacts are CACHED
-    (a normal, non-force incremental run) must still resolve + queue its
-    split-proxy secondary impls — the cache-hit branch previously skipped this,
-    leaving the admin impl an ownerless orphan. Drives the real
-    ``StaticWorker.process`` through the cache branch.
-    """
+    """#1: an impl re-seen in proxy context whose static artifacts are CACHED (non-force
+    incremental run) must still resolve + queue its secondary impls; the cache-hit branch used
+    to skip this, leaving the admin impl an orphan. Drives the real ``StaticWorker.process``."""
     from db.models import Contract, Job, JobStage, JobStatus
     from db.queue import store_artifact
     from workers.static_worker import StaticWorker

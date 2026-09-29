@@ -86,3 +86,50 @@ def build_hypersync_client(
         # shared semaphore still bounds concurrency.
         config = hypersync_module.ClientConfig(url=url, bearer_token=bearer_token)
     return hypersync_module.HypersyncClient(config)
+
+
+def hypersync_url_for_chain(chain_id: int) -> str | None:
+    """Per-chain HyperSync endpoint from the registry.
+
+    ``None`` means the chain has no proven HyperSync coverage — the repo is
+    unavailable there (the same class as a missing token: a partial result, never
+    a silent mainnet fallback). Unknown chain ids resolve to ``None`` too;
+    failing loud on an unregistered chain is a caller's job, not this lookup's.
+    """
+    from utils.chains import UnknownChainError, chain_by_id
+
+    try:
+        return chain_by_id(chain_id).hypersync_url
+    except UnknownChainError:
+        return None
+
+
+def logs_from_response(response: Any) -> list[Any]:
+    data = getattr(response, "data", None)
+    if data is not None and hasattr(data, "logs"):
+        return list(getattr(data, "logs", None) or [])
+    if isinstance(data, list):
+        return data
+    return list(getattr(response, "logs", None) or [])
+
+
+def topics_from_log(log: Any) -> list[str]:
+    topics = getattr(log, "topics", None)
+    if isinstance(topics, (list, tuple)):
+        return [str(topic).lower() for topic in topics if isinstance(topic, str) and topic.startswith("0x")]
+    out: list[str] = []
+    for attr in ("topic0", "topic1", "topic2", "topic3"):
+        value = getattr(log, attr, None)
+        if isinstance(value, str) and value.startswith("0x") and value not in {"0x", "0x0"}:
+            out.append(value.lower())
+    return out
+
+
+def data_words_from_log(log: Any) -> list[str]:
+    raw = getattr(log, "data", "0x") or "0x"
+    if not isinstance(raw, str) or not raw.startswith("0x"):
+        return []
+    body = raw[2:]
+    if len(body) % 64 != 0:
+        return []
+    return ["0x" + body[i : i + 64].lower() for i in range(0, len(body), 64)]

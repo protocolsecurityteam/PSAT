@@ -1,19 +1,13 @@
-"""A bare caller gate admits nobody (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.2
-invariant 6, ``W3_D2_SOURCES``).
+"""A bare caller gate admits nobody (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.2 invariant 6, ``W3_D2_SOURCES``).
 
-``ControllerValue.authority_provenance='caller_gate'`` records a proven fact —
-this address is checked against ``msg.sender`` on some entry point — and that
-is what monitoring and scoring read it for. It is NOT a governance derivation:
-LayerZero's ``if (msg.sender != endpoint) revert`` on the delivery entry point
-lowers to exactly the same leaf as ``msg.sender != _owner``, so admitting the
-D2 controller off that row admits an integration counterparty (EndpointV2, and
-through its owner slot the OneSig multisig behind it) as readily as an
-authority.
+``authority_provenance='caller_gate'`` records a proven fact (address checked against ``msg.sender``) for
+monitoring and scoring, but is NOT a governance derivation: LayerZero's ``if (msg.sender != endpoint) revert``
+lowers to the same leaf as ``msg.sender != _owner``, so admitting off it admits an integration counterparty
+(EndpointV2, and via its owner slot the OneSig multisig) as readily as an authority.
 
-Pinned here: the EndpointV2/OneSig shape earns ZERO witnesses on both chains
-and demotes on re-earn, the caller-gate rows survive untouched, and the
-governance derivations (probed ``owner()``/``authority()`` reads, resolved
-proxy-admin slots, authority-derived principals) keep admitting.
+Pinned: the EndpointV2/OneSig shape earns ZERO witnesses on both chains and demotes on re-earn, the caller-gate
+rows survive untouched, and real governance derivations (probed ``owner()``/``authority()``, proxy-admin
+slots, authority-derived principals) keep admitting.
 """
 
 from __future__ import annotations
@@ -206,8 +200,6 @@ def test_caller_gate_member_demotes_on_re_earn(db_session):
 
 
 def test_caller_gate_controller_facts_stay_recorded(db_session):
-    """The rows are real facts for monitoring and scoring — refusing to admit
-    on them must not delete or rewrite them."""
     protocol = _protocol(db_session)
     oapp = _member(db_session, protocol, _addr(0xE20))
     endpoint = _contract(db_session, ENDPOINT_V2, nominated_protocol_id=protocol.id)
@@ -223,8 +215,7 @@ def test_caller_gate_controller_facts_stay_recorded(db_session):
 
 
 def test_probed_owner_read_still_admits_the_controller(db_session):
-    """Positive control: a governance derivation — the §3.5 probe's
-    ``owner()`` read on a member — keeps admitting its controller under D2."""
+    """Positive control: a governance derivation (the §3.5 probe's ``owner()`` read) still admits under D2."""
     protocol = _protocol(db_session)
     member = _member(db_session, protocol, _addr(0xE30))
     controller = _contract(db_session, _addr(0xE31), nominated_protocol_id=protocol.id)

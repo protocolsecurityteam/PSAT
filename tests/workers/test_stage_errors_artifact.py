@@ -1,8 +1,6 @@
-"""Integration tests for the ``stage_errors`` artifact written by ``BaseWorker``.
+"""Integration tests for the ``stage_errors`` artifact written by ``BaseWorker`` (real Postgres).
 
-Hits a real Postgres DB so the artifact is round-tripped via ``store_artifact``
-and the legacy ``Artifact`` row layout. Object storage is intentionally not
-configured here — inline JSONB is the offline path.
+Object storage is intentionally not configured — inline JSONB is the offline path.
 """
 
 from __future__ import annotations
@@ -22,13 +20,8 @@ from workers.base import BaseWorker
 
 @pytest.fixture()
 def test_session_local(monkeypatch):
-    """Point ``workers.base.SessionLocal`` at the test database.
-
-    ``BaseWorker._persist_stage_errors`` opens a fresh ``SessionLocal()``
-    so the artifact write survives a broken primary transaction. In tests
-    that's the test DB (``TEST_DATABASE_URL``), not the prod default
-    (``DATABASE_URL``).
-    """
+    """``_persist_stage_errors`` opens a fresh ``SessionLocal()`` (to survive a broken
+    primary transaction); point it at ``TEST_DATABASE_URL``, not prod."""
     test_url = os.environ.get("TEST_DATABASE_URL")
     if not test_url:
         pytest.skip("TEST_DATABASE_URL not set")
@@ -60,7 +53,6 @@ class _FailingWorker(BaseWorker):
 
 
 def _read_stage_errors(session, job_id):
-    """Read the stage_errors artifact directly via the Artifact row."""
     art = session.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == "stage_errors").one_or_none()
     if art is None:
         return None
@@ -71,13 +63,10 @@ def _read_stage_errors(session, job_id):
 
 @requires_postgres
 def test_failing_process_writes_stage_errors_with_severity_error(db_session, test_session_local):
-    """A worker whose process() raises produces one stage_errors artifact
-    with a single entry (severity=error)."""
     job = create_job(db_session, {"address": "0xabc", "name": "stage-err-1"})
     db_session.commit()
 
     worker = _FailingWorker(raise_after_degraded=True, n_degraded=0)
-    # Worker uses session.rollback() in the failure path, so a real session works.
     worker._execute_job(db_session, job)
 
     db_session.expire_all()
@@ -98,13 +87,10 @@ def test_failing_process_writes_stage_errors_with_severity_error(db_session, tes
 
 @requires_postgres
 def test_successful_process_with_degraded_records_writes_artifact(db_session, test_session_local):
-    """When process() returns successfully but recorded degraded events,
-    those land in stage_errors with severity=degraded."""
     job = create_job(db_session, {"address": "0xabc", "name": "stage-err-2"})
     db_session.commit()
 
     worker = _FailingWorker(raise_after_degraded=False, n_degraded=2)
-    # Patch the advance-on-success path so we don't need a real next-stage row.
     import workers.base as base
 
     advances: list = []
@@ -136,8 +122,6 @@ def test_successful_process_with_degraded_records_writes_artifact(db_session, te
 
 @requires_postgres
 def test_combined_degraded_and_error_produce_one_artifact(db_session, test_session_local):
-    """A worker that records 2 degraded events then raises produces one
-    artifact with 3 entries: two degraded plus one error."""
     job = create_job(db_session, {"address": "0xabc", "name": "stage-err-3"})
     db_session.commit()
 
@@ -151,17 +135,14 @@ def test_combined_degraded_and_error_produce_one_artifact(db_session, test_sessi
     assert len(errors) == 3
     severities = [e["severity"] for e in errors]
     assert severities == ["degraded", "degraded", "error"]
-    # Final entry's traceback always populated.
     assert errors[-1]["traceback"] is not None
     assert "boom" in errors[-1]["message"]
 
 
 @requires_postgres
 def test_fresh_session_fail_path_persists_artifact(db_session, test_session_local):
-    """If the primary session is broken before the failure-path runs,
-    ``_persist_stage_errors`` opens a fresh session and the artifact still
-    lands. Simulated here by closing the session right before the raise so
-    the rollback inside the exception handler fails too."""
+    """The artifact must land even if the primary session is broken; simulated by closing
+    the session before the raise so the handler's rollback fails too."""
     job = create_job(db_session, {"address": "0xabc", "name": "stage-err-4"})
     db_session.commit()
     job_id = job.id  # capture before close
@@ -195,7 +176,6 @@ def test_fresh_session_fail_path_persists_artifact(db_session, test_session_loca
 
 @requires_postgres
 def test_successful_process_without_degraded_writes_no_artifact(db_session, test_session_local):
-    """Happy path with no degraded events must NOT write a stage_errors artifact."""
     job = create_job(db_session, {"address": "0xabc", "name": "stage-err-5"})
     db_session.commit()
 

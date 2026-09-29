@@ -1,15 +1,11 @@
-"""Cross-chain code-plane reuse (invariant 1) + chain-token normalization
-(invariant 11) for ``contract_materializations``.
+"""Cross-chain code-plane reuse (invariant 1) + chain-token normalization (invariant 11) for
+``contract_materializations``.
 
-The ``(chain, bytecode_keccak)`` key reuses a bundle only across byte-identical
-deployments. Per-chain immutables make the same source compile to different
-bytecode, so a genuine cross-chain deployment misses on keccak. The
-``source_content_hash`` reuse path closes that gap: the analysis /
-tracking_plan / predicate_trees bundle is a pure function of the verified
-source, so a ready row for the same source hash on any chain is copied into the
-new deployment's row instead of paying the forge+Slither build again. State
-(owner/roles/proxy impl/balances) is never shared — it stays per
-``(chain, address)`` and is resolved separately.
+The ``(chain, bytecode_keccak)`` key reuses a bundle only across byte-identical deployments, but
+per-chain immutables make one source compile to different bytecode. The ``source_content_hash``
+path closes that gap: the analysis / tracking_plan / predicate_trees bundle is a pure function of
+the verified source, so a ready row for the same hash on any chain is copied instead of rebuilt.
+State (owner/roles/proxy impl/balances) is never shared; it stays per ``(chain, address)``.
 """
 
 from __future__ import annotations
@@ -112,8 +108,6 @@ def test_source_hash_changes_with_source_and_compiler_inputs():
 
 
 def test_source_hash_ignores_non_code_fields():
-    """Deployment-specific metadata that is not a source-pipeline input must not
-    change the hash — otherwise cross-chain reuse would never fire."""
     r = _flat_result()
     r2 = dict(r)
     r2["ContractCreationCode"] = "0xdeadbeef"  # constructor/immutable bytecode
@@ -151,8 +145,7 @@ def test_cross_chain_reuse_copies_bundle_and_skips_builder(_route_to_test_db, _c
     def build2() -> dict[str, Any]:
         raise AssertionError("cross-chain reuse must skip the forge+Slither build")
 
-    # Same source, Base deployment: different bytecode_keccak (immutables), so
-    # keccak misses — reuse must fire off the source hash.
+    # Same source, Base deployment: different bytecode_keccak (immutables), so reuse must fire off the source hash.
     row2 = cm.materialize_or_wait(
         chain="base",
         address=ADDR_BASE,
@@ -176,8 +169,7 @@ def test_cross_chain_reuse_copies_bundle_and_skips_builder(_route_to_test_db, _c
 
 @requires_postgres
 def test_reuse_ignores_old_schema_version_donor(_route_to_test_db, _clean_cm):
-    """A ready row with the same source hash but an OLDER analysis_schema_version
-    is not a reuse donor — the bundle shape may have changed, so we rebuild."""
+    """An OLDER-analysis_schema_version row is not a reuse donor (the bundle shape may have changed)."""
     src_hash = "0x" + "ee" * 32
     stale = ContractMaterialization(
         chain="1",
@@ -231,9 +223,6 @@ def test_find_reusable_only_returns_ready(_route_to_test_db, _clean_cm):
 
 @requires_postgres
 def test_no_source_hash_fn_preserves_keccak_only_behaviour(_route_to_test_db, _clean_cm):
-    """Without source_hash_fn (or when it returns None) the layer is the
-    pre-reuse keccak cache: the row carries a NULL source hash and no
-    cross-key reuse happens."""
     row = cm.materialize_or_wait(
         chain="ethereum",
         address=ADDR_MAINNET,

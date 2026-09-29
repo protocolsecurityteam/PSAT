@@ -1,11 +1,9 @@
-"""Regression tests for the generic guard extensions (codex F1–F4).
+"""Regression tests for the generic guard extensions (codex F1-F4).
 
-Each test compiles a real-world auth pattern — Diamond ACL storage, a
-bitwise role flag, a custom M-of-N threshold, EIP-1271, a hashed
-composite key — and asserts the *generic* predicate pipeline classifies
-it structurally, with no per-protocol adapter. Every one of these
-landed; each test's docstring records the production path that carries
-it, so a regression names the mechanism it broke.
+Each test compiles a real-world auth pattern (Diamond ACL storage, bitwise role
+flag, M-of-N threshold, EIP-1271, hashed composite key) and asserts the *generic*
+predicate pipeline classifies it structurally, with no per-protocol adapter. Each
+docstring records the production path that carries it.
 """
 
 from __future__ import annotations
@@ -54,27 +52,17 @@ def _all_leaves(tree):
     return out
 
 
-# ---------------------------------------------------------------------------
 # 1. Diamond ACL — storage at hashed slot via assembly
-# ---------------------------------------------------------------------------
 
 
 def test_diamond_acl_membership_classifies_caller_authority(tmp_path):
-    """SURPRISE PASS: the existing pipeline handles Diamond ACL
-    structurally via internal-call recursion + Member/Index chaining.
-    Slither models ``LibDiamond.aclStorage()`` as a library function
-    returning a storage pointer; ProvenanceEngine recurses into the
-    library (within internal_call_depth), the subsequent
-    ``.members[role][msg.sender]`` chain produces a 2-key membership
-    leaf with caller as one key, and AuthorityClassifier promotes it
-    to caller_authority. No assembly-slot detection needed.
+    """SURPRISE PASS: handled structurally via internal-call recursion + Member/Index
+    chaining; no assembly-slot detection needed.
 
-    Caveat: the membership leaf's set_descriptor.storage_var is the
-    Slither SSA reference (e.g. "REF_1"), not the underlying mapping
-    name. This means the writer-gate pass-2 won't find writers
-    keyed to "REF_1". For now: the read-side classification is
-    correct; the writer-gate enrichment for Diamond requires
-    follow-up to map SSA references back to library-storage slots.
+    Caveat: the membership leaf's ``set_descriptor.storage_var`` is the Slither SSA
+    reference (e.g. "REF_1"), not the mapping name, so writer-gate pass-2 won't find
+    its writers. Read-side classification is correct; writer-gate enrichment needs
+    to map SSA references back to library-storage slots.
     """
 
     sl = _compile(
@@ -111,28 +99,17 @@ def test_diamond_acl_membership_classifies_caller_authority(tmp_path):
     assert leaf["authority_role"] == "caller_authority"
 
 
-# ---------------------------------------------------------------------------
 # 2. Bitwise role flags — (roles[msg.sender] & FLAG) != 0
-# ---------------------------------------------------------------------------
 
 
 def test_bitwise_flag_membership_classifies_caller_authority(tmp_path):
-    """LANDED (codex F1): bitwise role flag check
-    ``(roles[msg.sender] & FLAG) != 0`` recognized as a value-
-    predicate membership. The bitwise AND between an Index lvalue
-    and a constant mask folds into the descriptor's truthy_value;
-    the outer != 0 yields operator=falsy (canonical "value not
-    masked-out"). Mask operand accepts both literal Constants and
-    state-level `constant`/`immutable` declarations — both are
-    fixed structurally, so the value-predicate adapter can fold
-    the mask in at enumeration time. Mutable state vars are
-    excluded.
+    """LANDED (codex F1): ``(roles[msg.sender] & FLAG) != 0`` is a value-predicate
+    membership. Mask operands may be literals or ``constant``/``immutable`` (fixed
+    structurally); mutable state vars are excluded.
 
-    Implementation: predicates.py:_find_index_value_pair extended
-    to recognize ``Binary(AND, Index_lvalue, Constant_or_immutable)``
-    as the same shape as plain ``Index_lvalue == const``. Writer-
-    gate rule b.i then promotes to caller_authority when the
-    underlying mapping is admin-written."""
+    Path: predicates.py:_find_index_value_pair treats ``Binary(AND, Index_lvalue,
+    Constant_or_immutable)`` like ``Index_lvalue == const``; writer-gate rule b.i
+    then promotes to caller_authority when the mapping is admin-written."""
     sl = _compile(
         tmp_path,
         """
@@ -160,35 +137,19 @@ def test_bitwise_flag_membership_classifies_caller_authority(tmp_path):
     assert leaf["authority_role"] == "caller_authority"
 
 
-# ---------------------------------------------------------------------------
 # 3. Custom M-of-N — counter map + threshold compare
-# ---------------------------------------------------------------------------
 
 
 def test_custom_m_of_n_classifies_threshold_group(tmp_path):
-    """LANDED (codex F2 + fixed-point writer-gate): authority-derived
-    state inference. ``approvals[txHash] >= THRESHOLD`` promotes to
-    caller_authority when:
-      1. The counter is incremented additively (``map[k] += N``)
-      2. The incrementing function is itself authority-gated
-      3. The increment key sources from a parameter (M-of-N
-         object), NOT msg.sender (which would be a cooldown)
-      4. No unguarded settable writers exist (admin-reset risk)
+    """LANDED (codex F2 + fixed-point writer-gate): ``approvals[txHash] >= THRESHOLD``
+    promotes to caller_authority when the counter is incremented additively, the
+    incrementing function is itself authority-gated, the increment key is a
+    parameter (M-of-N object, NOT msg.sender, which would be a cooldown), and no
+    unguarded settable writers exist (admin-reset risk).
 
-    Implementation:
-      - predicates.py:_try_threshold_membership emits a comparison
-        leaf with set_descriptor populated for ``Index_lvalue [op]
-        constant`` with op ∈ gt/gte/lt/lte
-      - writer_gate.py:_is_authority_derived_counter walks writers,
-        finds additive sites via _additive_write_sites (Binary ADD
-        whose lvalue equals one operand — Slither's compound-assign
-        IR shape), checks parameter-keyed writes, requires writer's
-        predicate to have caller_authority/delegated_authority
-      - apply_writer_gate_pass now iterates to fixed point so
-        chained promotions (isOwner promotes via b.i, then approve's
-        predicate gains caller_authority, then execute's threshold
-        check promotes) all converge
-    """
+    Path: predicates.py:_try_threshold_membership; writer_gate.py:
+    _is_authority_derived_counter; ``apply_writer_gate_pass`` iterates to a fixed
+    point so chained promotions (isOwner -> approve -> execute) converge."""
     sl = _compile(
         tmp_path,
         """
@@ -217,38 +178,23 @@ def test_custom_m_of_n_classifies_threshold_group(tmp_path):
     leaves = _all_leaves(trees["execute(bytes32)"])
     assert len(leaves) == 1
     leaf = leaves[0]
-    # After the fix, the leaf should be a typed threshold-membership
-    # leaf with authority_role=caller_authority. The capability
-    # evaluator turns it into a threshold_group on the resolver side.
+    # A typed threshold-membership leaf with authority_role=caller_authority.
     assert leaf["authority_role"] == "caller_authority", (
         f"expected caller_authority for M-of-N execute gate, got {leaf['authority_role']}"
     )
 
 
-# ---------------------------------------------------------------------------
 # 4. EIP-1271 contract signatures — should classify as signature_auth
-# ---------------------------------------------------------------------------
 
 
 def test_eip1271_classifies_signature_auth(tmp_path):
-    """LANDED (codex F3): EIP-1271 magic-value comparison
-    ``call_result == 0x1626ba7e`` recognized as signature_auth.
-    Detection is purely structural — by the magic value (which is
-    a structural protocol fingerprint), not by function-name match.
+    """LANDED (codex F3): ``call_result == 0x1626ba7e`` is signature_auth, detected by
+    the magic value (a structural fingerprint), not by function name.
 
-    Implementation: predicates.py:_try_external_auth_oracle
-    detects ``Binary(EQ, external_call_result, constant)``. When
-    the constant matches 0x1626ba7e (in any representation: hex
-    string, decimal int, decimal string, bytes), emit
-    signature_auth leaf with caller_authority. For other constants
-    (generic external-auth oracle), require the call args to
-    include msg.sender / signature_recovery — otherwise it's not
-    an authentication predicate.
-
-    Codex's broader generalization preserved: this is the
-    'external-auth oracle' pattern; EIP-1271 is one specialization.
-    Aragon canPerform / AccessManager canCall would surface here
-    too once those structural shapes are exercised in tests."""
+    Path: predicates.py:_try_external_auth_oracle matches the constant in any
+    representation. Other constants (generic external-auth oracle) need
+    msg.sender / signature_recovery among the call args, or it is not an
+    authentication predicate."""
     sl = _compile(
         tmp_path,
         """
@@ -273,24 +219,16 @@ def test_eip1271_classifies_signature_auth(tmp_path):
     assert leaf["authority_role"] == "caller_authority"
 
 
-# ---------------------------------------------------------------------------
 # 5. Computed-key membership — _members[keccak(role,msg.sender)]
-# ---------------------------------------------------------------------------
 
 
 def test_hashed_key_membership_classifies_caller_authority(tmp_path):
-    """LANDED (codex F4): hashed-key membership unwrapped via
-    symbolic-tuple-key recognition. ``_authorized[keccak256(
-    abi.encode(role, msg.sender))]`` now produces a 2-key
-    membership leaf where the key_sources are ``[parameter(role),
-    msg_sender]`` instead of a single ``computed`` source. Multi-key
-    rule then promotes to caller_authority directly.
+    """LANDED (codex F4): ``_authorized[keccak256(abi.encode(role, msg.sender))]``
+    yields a 2-key membership leaf (key_sources ``[parameter(role), msg_sender]``)
+    instead of one ``computed`` source; the multi-key rule then promotes it.
 
-    Implementation: predicates.py:_expand_key_operand walks back
-    through hash and abi.encode calls and returns one Operand per
-    ultimate input. Detection is by Solidity built-in signature
-    (``keccak256(bytes)``, ``abi.encode()``, etc.) — structural
-    metadata, not user-identifier-name matching."""
+    Path: predicates.py:_expand_key_operand walks back through hash/abi.encode
+    calls by Solidity built-in signature, not identifier names."""
     sl = _compile(
         tmp_path,
         """

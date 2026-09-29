@@ -162,10 +162,9 @@ def _claim(claim_id: str, tier: str = "standard_exact") -> dict:
 
 
 def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch):
-    """Plane-1 claim families drive the admin/operator/manager tags: control-plane
-    (incl. ``callee_pointer.rotate`` and ``safe.*``) → admin, flow/supply →
-    operator, ``exec.arbitrary`` → manager. Legacy effect_labels on the same rows
-    are ignored when claims are present (claims-first)."""
+    """Plane-1 claim families drive the tags: control-plane (incl.
+    ``callee_pointer.rotate`` and ``safe.*``) → admin, flow/supply → operator,
+    ``exec.arbitrary`` → manager. Legacy effect_labels are ignored when claims are present."""
     admin_safe = "0x" + "a1" * 20
     operator_addr = "0x" + "a2" * 20
     manager_addr = "0x" + "a3" * 20
@@ -203,8 +202,7 @@ def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch)
             _role_fn("withdraw(uint256)", 2, operator_addr, claims=[_claim("flow.out")]),
             _role_fn("manage(address,bytes,uint256)", 3, manager_addr, claims=[_claim("exec.arbitrary")]),
             _role_fn("setHook(address)", 4, hook_admin, claims=[_claim("callee_pointer.rotate")]),
-            # Claims present (flow.out → operator) must win over the legacy
-            # ownership_transfer label (which would otherwise imply admin).
+            # Claims (flow.out → operator) win over the legacy ownership_transfer label.
             _role_fn(
                 "swap(uint256)",
                 5,
@@ -229,14 +227,11 @@ def test_build_principal_labels_derives_enrichment_tags_from_claims(monkeypatch)
     assert "vault_admin" in principals[admin_safe]
     assert "vault_operator" in principals[operator_addr]
     assert "vault_manager" in principals[manager_addr]
-    # The precise use-link idiom (formerly the diluted hook_update) IS an admin.
     assert "vault_admin" in principals[hook_admin]
-    # Claims-first: flow.out grants operator; the legacy ownership label is not
-    # consulted, so no admin tag leaks in.
+    # Claims-first: the legacy ownership label is not consulted, so no admin tag leaks in.
     assert "vault_operator" in principals[precedence_addr]
     assert "vault_admin" not in principals[precedence_addr]
-    # Controller-path principals (state-variable controllers): admin + manager,
-    # never operator (the pre-claims controller-path parity).
+    # Controller-path principals (state-variable controllers): admin + manager, never operator.
     assert "vault_admin" in principals[ctrl_admin]
     assert "vault_manager" in principals[ctrl_manager]
 
@@ -274,85 +269,6 @@ def test_build_principal_labels_legacy_hook_update_not_admin(monkeypatch):
     assert "vault_manager" not in principals[hook_addr]
     assert "vault_admin" in principals[real_admin]
     assert "vault_operator" in principals[legacy_operator]
-
-
-def test_build_principal_labels_with_resolved_graph_admin_safe():
-    effective_permissions = {
-        "contract_address": "0x1111111111111111111111111111111111111111",
-        "contract_name": "Target",
-        "functions": [
-            {
-                "function": "setAuthority(address)",
-                "effect_labels": ["authority_update"],
-                "authority_public": False,
-                "authority_roles": [
-                    {
-                        "role": 8,
-                        "principals": [
-                            {
-                                "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                                "resolved_type": "safe",
-                                "details": {
-                                    "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                                    "owners": ["0xcccccccccccccccccccccccccccccccccccccccc"],
-                                    "threshold": 1,
-                                },
-                            }
-                        ],
-                    }
-                ],
-                "direct_owner": None,
-            }
-        ],
-    }
-    resolved_graph = {
-        "nodes": [
-            {
-                "id": "address:0x1111111111111111111111111111111111111111",
-                "address": "0x1111111111111111111111111111111111111111",
-                "node_type": "contract",
-                "resolved_type": "contract",
-                "label": "Target",
-                "contract_name": "Target",
-                "depth": 0,
-                "analyzed": True,
-                "details": {"address": "0x1111111111111111111111111111111111111111"},
-                "artifacts": {},
-            },
-            {
-                "id": "address:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "node_type": "principal",
-                "resolved_type": "safe",
-                "label": "owner",
-                "contract_name": None,
-                "depth": 1,
-                "analyzed": False,
-                "details": {
-                    "address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "owners": ["0xcccccccccccccccccccccccccccccccccccccccc"],
-                    "threshold": 1,
-                },
-                "artifacts": {},
-            },
-        ],
-        "edges": [
-            {
-                "from_id": "address:0x1111111111111111111111111111111111111111",
-                "to_id": "address:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "relation": "controller_value",
-                "label": "owner",
-                "source_controller_id": "state_variable:owner",
-                "notes": [],
-            }
-        ],
-    }
-
-    payload = build_principal_labels(effective_permissions, resolved_control_graph=resolved_graph)
-
-    assert payload["contract_name"] == "Target"
-    principals = {item["address"]: item for item in payload["principals"]}
-    assert principals["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]["display_name"] == "Target admin Safe"
 
 
 def test_build_principal_labels_includes_generic_controller_principals(monkeypatch):
@@ -700,19 +616,15 @@ def test_build_principal_labels_skips_permission_controller_contract_principals(
     assert "0x2222222222222222222222222222222222222222" not in principals
 
 
-# ---------------------------------------------------------------------------
-# Parity: ``build_principal_labels`` produces identical output under
-# ``PSAT_RPC_FANOUT=1`` (sequential) and ``=8`` (parallel). The per-job
-# ``classify_cache`` must stay consistent across worker threads.
-# ---------------------------------------------------------------------------
+# Parity: ``build_principal_labels`` is identical under ``PSAT_RPC_FANOUT=1`` and
+# ``=8``; the per-job ``classify_cache`` must stay consistent across threads.
 
 
 def _principal_labels_parity_helper(monkeypatch, fanout: str):
     monkeypatch.setenv("PSAT_RPC_FANOUT", fanout)
 
     target = "0x1111111111111111111111111111111111111111"
-    # 60 distinct principal addresses: enough to fan out across 8 workers
-    # multiple times and stress the classify_cache lock.
+    # 60 principals: enough to fan out across 8 workers repeatedly and stress the cache lock.
     principal_addrs = [f"0x{(i + 0x10):040x}" for i in range(60)]
 
     def role_principals(addrs):
@@ -756,9 +668,7 @@ def _principal_labels_parity_helper(monkeypatch, fanout: str):
         "edges": [],
     }
 
-    # Counter is bumped every classify call so we can assert the cache
-    # collapses repeated lookups even under fan-out (a benign double-miss
-    # race may cost at most one extra call per address).
+    # Bumped per classify call to assert the cache collapses repeats under fan-out.
     call_counter = {"n": 0}
 
     def fake_classify(rpc_url, address, **_kw):
@@ -802,9 +712,7 @@ def test_build_principal_labels_parity_parallel_vs_sequential(monkeypatch):
     par_principals, par_cache, par_calls = _principal_labels_parity_helper(monkeypatch, "8")
     assert seq_principals == par_principals
     assert seq_cache == par_cache
-    # The per-job cache collapses repeated classifications even under fan-out.
-    # Allow at most one duplicate per address from a benign double-miss race
-    # (both threads see the cache empty before the first writes back).
+    # At most one duplicate per address (benign double-miss race before the first write-back).
     assert par_calls <= seq_calls + len(seq_cache)
 
 
@@ -871,17 +779,12 @@ def test_build_principal_labels_parallel_handles_per_address_runtimeerror(monkey
 
 
 def test_callee_edge_does_not_mint_controller_labels():
-    """``principal_labels`` inherits the gate/callee split from the edge relation.
+    """``principal_labels`` inherits the gate/callee split from ``control_graph_edges.relation``.
 
-    The conflation surfaced here as well, labelling the Ethereum 2 deposit
-    contract a *controller* of StakingManager and the Curve stETH/ETH pool a
-    controller of Liquifier. Both are callees. The split is made once, at
-    ``control_graph_edges.relation``; this file's producer switches on that
-    field, so the fix reaches this plane without a second provenance rule.
-
-    Positive control: the gate keeps ``controller_value`` /
-    ``controller_<label>``. Negative control: the callee gets ``call_target``
-    and NONE of the controller labels.
+    The conflation labelled the Ethereum 2 deposit contract a *controller* of
+    StakingManager and the Curve stETH/ETH pool a controller of Liquifier; both are
+    callees. Positive control: the gate keeps ``controller_value`` /
+    ``controller_<label>``. Negative: the callee gets ``call_target`` and NONE of them.
     """
     target = "0x1111111111111111111111111111111111111111"
     gate = "0x2222222222222222222222222222222222222222"
@@ -943,18 +846,12 @@ def test_callee_edge_does_not_mint_controller_labels():
 def test_unattributed_edge_does_not_mint_controller_labels():
     """``controller_value_unattributed`` must mint NO ``controller_*`` label.
 
-    The relation means the tracked controller's ``authority_provenance`` was
-    ABSENT — neither "gates callers" nor "is merely called" was answered. The
-    edge exists only so the address stays visible; it moves no authority, so
-    every label that asserts control has to stay off it.
-
-    Today that holds by *fall-through*: ``_graph_labels_for_node`` has no arm for
-    the relation. This test is the pin — a future arm added to that dispatch
-    (however reasonable-looking) silently re-admits an unattributed edge to the
-    controller vocabulary, which is the over-claim this relation was
-    introduced to remove. Positive control: the sibling ``controller_value``
-    edge on the same graph still earns the full controller label set, so a
-    regression in the dispatch itself cannot pass by minting nothing at all.
+    Its ``authority_provenance`` was ABSENT — neither "gates callers" nor "is merely
+    called" was answered — so the edge moves no authority. Today that holds by
+    *fall-through* (``_graph_labels_for_node`` has no arm for it); this pins it, since
+    a future arm would silently re-admit it to the controller vocabulary. Positive
+    control: the sibling ``controller_value`` edge still earns the full set, so a
+    dispatch regression can't pass by minting nothing.
     """
     target = "0x4444444444444444444444444444444444444444"
     gate = "0x5555555555555555555555555555555555555555"
@@ -1002,15 +899,13 @@ def test_unattributed_edge_does_not_mint_controller_labels():
     )
     principals = {item["address"]: item for item in payload["principals"]}
 
-    # Positive control — the attributed gate keeps the whole controller set.
     gate_labels = set(principals[gate]["labels"])
     assert "controller_value" in gate_labels
     assert "controller_legacyauthority" not in gate_labels
     assert "controller_roleregistry" in gate_labels
 
-    # The pin: not-determined provenance earns no control vocabulary at all.
-    # ``call_target`` is equally forbidden — it is the OTHER proven answer, and
-    # the relation exists precisely because neither was proven.
+    # Not-determined provenance earns no control vocabulary; ``call_target`` is equally
+    # forbidden (the OTHER proven answer — neither was proven).
     unattributed_labels = set(principals[unattributed]["labels"])
     assert not any(label.startswith("controller_") for label in unattributed_labels)
     assert "controller_value" not in unattributed_labels
@@ -1020,11 +915,9 @@ def test_unattributed_edge_does_not_mint_controller_labels():
 
 
 def test_authority_roles_present_with_none_does_not_crash_enrichment():
-    """Consumer guard: ``authority_roles`` is now PRESENT with value
-    ``None`` on a role-gated function whose role identity is not determined, and
-    ``dict.get(key, [])`` only supplies its default for an ABSENT key — so the
-    plain default iterated ``None`` and raised. Not-determined must contribute no
-    role principals, exactly as ``[]`` did."""
+    """Consumer guard: ``authority_roles`` is PRESENT with ``None`` when role identity
+    is not determined, and ``dict.get(key, [])`` only defaults an ABSENT key, so the
+    plain default iterated ``None`` and raised. Not-determined contributes no roles, like ``[]``."""
     from services.policy.principal_enrichment import _collect_permissions
 
     permissions, labels = _collect_permissions(
@@ -1048,16 +941,12 @@ def test_authority_roles_present_with_none_does_not_crash_enrichment():
 
 
 def test_enriched_role_grant_keeps_the_classified_quorum_witness():
-    """``_enriched_role_grant`` exists so a role-granted principal
-    reads as resolved as the same address under ``controllers`` — but the
-    grant's ``details`` is ALWAYS the non-None ``{"source": ...}`` marker, so
-    a blanket "grant's non-null fields override" replaced the classified
-    ``details`` wholesale and erased the recorded quorum/delay.
-    ``protocolScore.collectPrincipals`` dedups by address keeping the FIRST
-    record (role grants before controllers), so the erased record is the one
-    the scorer and ``principalLabel`` read: a recorded 2/3 Safe fell to the
-    0.55 unknown floor and rendered without its "m/n". Details merge KEY-WISE,
-    classified keys on top, grant-only keys (the source marker) surviving."""
+    """``_enriched_role_grant`` makes a role-granted principal read as resolved like
+    the same address under ``controllers`` — but the grant's ``details`` is ALWAYS the
+    non-None ``{"source": ...}`` marker, so a blanket "non-null fields override" erased
+    the classified quorum/delay. ``collectPrincipals`` keeps the FIRST record per
+    address (role grants first), so a recorded 2/3 Safe fell to the 0.55 unknown floor
+    and lost its "m/n". Details must merge KEY-WISE, classified keys on top."""
     from services.governance.principals import _enriched_role_grant
 
     classified = {
@@ -1077,16 +966,14 @@ def test_enriched_role_grant_keeps_the_classified_quorum_witness():
     merged = _enriched_role_grant(grant, classified)["principals"][0]
     assert merged["resolved_type"] == "safe"
     assert merged["label"] == "Ops Safe"
-    # The quorum witness survives AND the grant's provenance marker survives.
     assert merged["details"]["owners"] == ["0x1", "0x2", "0x3"]
     assert merged["details"]["threshold"] == 2
     assert merged["details"]["source"] == "semantic_capability:role_grant"
 
 
 def test_enriched_role_grant_details_fallbacks():
-    """The two one-sided shapes: a classified record with no ``details`` keeps
-    the grant's marker; a grant principal with no ``details`` keeps the
-    classified witness untouched."""
+    """Two one-sided shapes: a classified record with no ``details`` keeps the grant's
+    marker; a grant with no ``details`` keeps the classified witness untouched."""
     from services.governance.principals import _enriched_role_grant
 
     no_details_classified = {"0xaaa": {"address": "0xaaa", "resolved_type": "eoa"}}

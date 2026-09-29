@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -83,9 +83,6 @@ from utils.scoring_status import (
     VALUE_STATE_PROVEN_REACH,
 )
 
-if TYPE_CHECKING:
-    from services.scoring.distill import ProtocolUniverse
-
 
 def compute_protocol_score(
     session: Session,
@@ -95,7 +92,6 @@ def compute_protocol_score(
     trigger: str = SCORE_TRIGGER_MANUAL,
     trigger_job_id: Any | None = None,
     computed_at: datetime | None = None,
-    universe: ProtocolUniverse | None = None,
 ) -> ScoreDocument:
     """The protocol's score document, folded over its current signal rows.
 
@@ -104,9 +100,6 @@ def compute_protocol_score(
     population order :func:`order_signals` pins. Left unset — every persisted
     path — the population comes from the one pinned query and from nowhere else,
     so no caller can hand the fold a filtered or re-ordered population.
-
-    ``universe`` is a legacy compatibility argument; delivery classification
-    no longer participates in the balance input.
     """
     row_faults: list[dict[str, Any]] = []
     if signals is None:
@@ -116,7 +109,7 @@ def compute_protocol_score(
         # score over one bad column.
         signals, row_faults = current_signals_with_faults(session, protocol_id)
 
-    value_plane = P.load_value_plane(session, protocol_id, universe=universe)
+    value_plane = P.load_value_plane(session, protocol_id)
     closure = P.load_control_closure(session, protocol_id)
     conditions = P.load_condition_plane(session, protocol_id)
     conferral = P.load_conferral_plane(session, protocol_id)

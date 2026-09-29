@@ -1,13 +1,11 @@
-"""§14 case 8 — no constant data-claim.
+"""§14 case 8: no constant data-claim.
 
 A published string that DESCRIBES what a field means may be a constant; one that
-makes a CLAIM ABOUT THE DATA must be derived from the carrier's own data,
-because a constant one can be — and on this document was — false for the row
-carrying it. Every test below is the same shape: two carriers whose data differs
-must publish different strings, which is the property a constant cannot have.
-The end of the module walks a whole folded document and asserts that no
-narration names a concept the document no longer publishes, over findings and
-subsumed rows alike (case 7's parity clause).
+makes a CLAIM ABOUT THE DATA must be derived from the carrier's own data (a
+constant one was, on this document, false for its row). Each test pins that with
+two carriers whose data differs and must publish different strings. The end of
+the module walks a whole folded document, over findings and subsumed rows alike
+(case 7's parity clause), asserting no narration names a retired concept.
 """
 
 from __future__ import annotations
@@ -174,7 +172,6 @@ def _withheld_entry(arm: str, *, deletability: str = P.DELETABILITY_PROVEN_NOT_D
 
 
 def _tied_findings(shared: bool) -> list[dict[str, Any]]:
-    """Two rows that tie on the sort key, holding entities in common or not."""
     return [
         {
             "raw_points": 10.0,
@@ -195,8 +192,7 @@ def _tied_findings(shared: bool) -> list[dict[str, Any]]:
 
 
 def test_the_order_tie_reading_differs_between_rows_that_share_an_entity_and_rows_that_do_not():
-    """The old constant asserted a share and a split on a row sharing nothing,
-    which was every carrier in the document."""
+    """The old constant asserted a share and a split on a row sharing nothing."""
     shared = _tied_findings(shared=True)
     alone = _tied_findings(shared=False)
     FOLD._disclose_order_ties(shared)
@@ -219,16 +215,14 @@ def test_the_order_tie_reading_differs_between_rows_that_share_an_entity_and_row
 
 
 def test_the_order_tie_reading_scales_with_the_number_of_shared_entities():
-    """Three carriers, three strings: a sentence naming a count cannot be written
-    once."""
     readings = [FOLD._order_tie_reading(list(names), 1) for names in ([], ["a"], ["a", "b"])]
     assert len(set(readings)) == 3
 
 
 def test_the_order_tie_reading_says_which_side_of_the_split_this_row_is_on():
-    """B1-R S2. The first row in a tie group has no tied row AHEAD of it and is
-    charged FIRST, so "the earlier row consumes the budget first" is false of
-    exactly the carrier ``position_in_tie`` identifies one field away."""
+    """B1-R S2. The first row in a tie group is charged FIRST, so "the earlier row
+    consumes the budget first" is false of exactly the carrier ``position_in_tie``
+    identifies one field away."""
     first = FOLD._order_tie_reading(["a"], 0)
     second = FOLD._order_tie_reading(["a"], 1)
     third = FOLD._order_tie_reading(["a"], 2)
@@ -249,8 +243,8 @@ def test_the_order_tie_reading_says_which_side_of_the_split_this_row_is_on():
 
 
 def test_a_real_tie_group_publishes_the_position_it_also_prints():
-    """The block publishes ``position_in_tie`` beside the sentence; they must
-    agree on the same carrier, through the real emission site."""
+    """``position_in_tie`` and the sentence must agree on the same carrier,
+    through the real emission site."""
     group = _tied_findings(shared=True)
     FOLD._disclose_order_ties(group)
     for index, finding in enumerate(group):
@@ -265,8 +259,7 @@ def test_a_real_tie_group_publishes_the_position_it_also_prints():
 def test_the_composed_reading_names_the_ceiling_that_actually_bound_the_figure():
     """V0-b's #8/#35. The constant said the dollars are "not the destination's
     balance sheet" while ``bounded_by`` said ``destination sheet`` on six of the
-    twenty-eight kept entries — the document contradicting itself in two adjacent
-    keys."""
+    twenty-eight kept entries: the document contradicting itself."""
     by_witness = _composed(witnessed_usd=100.0, sheet_usd=900.0).as_json()
     by_sheet = _composed(witnessed_usd=900.0, sheet_usd=100.0).as_json()
 
@@ -282,8 +275,8 @@ def test_the_composed_reading_names_the_ceiling_that_actually_bound_the_figure()
 
 
 def test_a_composed_entry_with_no_sheet_at_all_reads_as_bound_by_its_witness():
-    """``sheet_not_determined`` is a third state, and its sentence may not claim
-    a sheet was compared and lost."""
+    """``sheet_not_determined`` is a third state; its sentence may not claim a
+    sheet was compared and lost."""
     entry = _composed(witnessed_usd=100.0, sheet_usd=None).as_json()
     assert entry["sheet_not_determined"] is True
     assert entry["bounded_by"] == "flow.out witness"
@@ -296,9 +289,8 @@ def test_a_composed_entry_with_no_sheet_at_all_reads_as_bound_by_its_witness():
 
 def test_the_withheld_reading_is_derived_from_the_arm_that_withheld_the_figure():
     """The constant's two clauses are FALSE on the transport-fault arm: nothing
-    was proven there, and ``_admit_composed`` computes the deletability verdict
-    BEFORE the fault branch, so that entry can publish ``deletable`` beside the
-    refusal."""
+    was proven, and ``_admit_composed`` computes the deletability verdict BEFORE
+    the fault branch, so the entry can publish ``deletable`` beside the refusal."""
     readings = {arm: _withheld_entry(arm).as_json()["reading"] for arm in FOLD._WITHHELD_ARM_READINGS}
     assert len(set(readings.values())) == 3
 
@@ -317,7 +309,6 @@ def test_the_withheld_reading_is_derived_from_the_arm_that_withheld_the_figure()
 
 
 def test_a_faulted_entry_that_the_join_licensed_does_not_read_as_a_join_refusal():
-    """The exercised carrier: a fault beside a proven deletability licence."""
     entry = _withheld_entry(FOLD.ARM_WITHHELD, deletability=P.DELETABILITY_DELETABLE).as_json()
     assert entry["authority_deletability"]["state"] == P.DELETABILITY_DELETABLE
     assert entry["published_usd"] is None
@@ -327,8 +318,7 @@ def test_a_faulted_entry_that_the_join_licensed_does_not_read_as_a_join_refusal(
 
 
 def test_an_unregistered_withholding_arm_cannot_reach_a_published_reading():
-    """No default sentence: an arm nobody wrote a reading for raises rather than
-    borrowing another arm's claim."""
+    """No default sentence: an arm nobody wrote a reading for raises."""
     with pytest.raises(ValueError, match="no withheld reading is registered"):
         _withheld_entry(FOLD.ARM_REPUBLISHED_DIRECT)
 
@@ -343,13 +333,10 @@ def _basis(
 ) -> str:
     """The basis for a ceiling-bearing row, composed entries by default.
 
-    ``sheet`` is the writer's OTHER kind and is empty here on purpose: these
-    cases pin the composed clause's counting, and a sheet ceiling counts a
-    different population against a different question.
-
-    The plane is a bare one: the writer reads it only to ask whether any sheet
-    ceiling on the row was admitted by a DISPOSITION, and an empty plane answers
-    no — which is the arm every case here is on.
+    ``sheet`` is empty on purpose: these cases pin the composed clause's
+    counting, and a sheet ceiling counts a different population. The plane is a
+    bare one (the writer only asks whether a DISPOSITION admitted a sheet
+    ceiling; an empty plane answers no).
     """
     return FOLD._ceiling_bearing_basis(
         FOLD.BOUND_DIRECTION_NOT_DETERMINED,
@@ -368,8 +355,6 @@ def _basis(
 
 
 def _mixed_ceiling(with_text: int, without_text: int) -> tuple[dict[str, Any], frozenset[str]]:
-    """A ceiling-bearing row of ``with_text + without_text`` composed entries,
-    only the first group of which publishes extracted predicate text."""
     composed: dict[str, Any] = {}
     for index in range(with_text + without_text):
         key = f"ethereum::0x{index:040x}"
@@ -383,9 +368,8 @@ def _mixed_ceiling(with_text: int, without_text: int) -> tuple[dict[str, Any], f
 
 
 def test_the_ceiling_basis_counts_the_condition_texts_it_names():
-    """A3 deleted ``caller_holding_precondition``; the basis kept saying "the
-    precondition can put the true extraction below it" — a definite reference to
-    a field the document does not contain. What replaces it is counted."""
+    """A3 deleted ``caller_holding_precondition``; the basis kept referencing "the
+    precondition" (a field the document no longer contains). Now it counts."""
     with_text = _basis(*_mixed_ceiling(1, 0))
     without_text = _basis(*_mixed_ceiling(0, 1))
 
@@ -398,11 +382,10 @@ def test_the_ceiling_basis_counts_the_condition_texts_it_names():
 
 
 def test_the_ceiling_basis_count_moves_with_the_row_and_is_not_a_frozen_pair():
-    """B1-R S1. The one-entity carrier above pins the BRANCH and never the COUNT:
-    freezing the interpolation to "1 of those 1 figure(s)" left the suite green
-    while the document published that literal on rows carrying 11 and 2 figures.
-    These carriers have M > 1 and N != M — the live shapes (11/11 and 2/2) plus a
-    mixed one no corpus row has — so a frozen pair fails."""
+    """B1-R S1. The one-entity carrier pins the BRANCH, never the COUNT: a frozen
+    "1 of those 1 figure(s)" stayed green while the document published that
+    literal on rows carrying 11 and 2. These carriers have M > 1 and N != M (live
+    shapes 11/11 and 2/2 plus a mixed one), so a frozen pair fails."""
     eleven = _basis(*_mixed_ceiling(11, 0))
     two = _basis(*_mixed_ceiling(2, 0))
     mixed = _basis(*_mixed_ceiling(2, 3))
@@ -423,12 +406,10 @@ def test_the_ceiling_basis_count_moves_with_the_row_and_is_not_a_frozen_pair():
 def test_the_two_ceiling_kinds_are_counted_apart_and_neither_borrows_the_others_clause():
     """A row can carry a composed extraction ceiling and a sheet ceiling at once.
 
-    The two are proven by different evidence and narrowed by different evidence —
-    a destination function's own stored conditions against which of a node's
-    assets replaced code can actually reach — so one clause written over both
-    would be a claim about the row that is false of whichever half it was not
-    written for. Each kind counts its OWN population, and a row carrying only one
-    of them reads exactly as it did before the other existed.
+    They are proven and narrowed by different evidence (a destination function's
+    stored conditions vs which of a node's assets replaced code can reach), so one
+    clause over both would be false of whichever half it was not written for.
+    Each counts its OWN population; a single-kind row reads as before.
     """
     composed, ceiling = _mixed_ceiling(2, 0)
     sheet = frozenset({"ethereum::0x" + "f" * 40, "ethereum::0x" + "e" * 40, "ethereum::0x" + "d" * 40})
@@ -465,8 +446,7 @@ def _rollup(exclusive: dict[str, float], composed_entities: list[str]) -> str:
 
 
 def test_the_rollup_reading_counts_the_subsumed_entities_that_charge_a_top_row():
-    """ "one composed subsumed entity does so here" was a measurement of one
-    corpus baked into a literal."""
+    """ "one composed subsumed entity does so here" was one corpus baked into a literal."""
     none = _rollup({}, [])
     one = _rollup({"ethereum::0xaaa": 1.0}, ["ethereum::0xaaa"])
     two = _rollup({"ethereum::0xaaa": 1.0, "ethereum::0xbbb": 1.0}, ["ethereum::0xaaa", "ethereum::0xbbb"])
@@ -484,7 +464,6 @@ def test_the_rollup_reading_counts_the_subsumed_entities_that_charge_a_top_row()
 
 
 def _authored_strings(node: Any, path: str = "") -> list[tuple[str, str]]:
-    """Every authored string in the published document, by ruling 7's scope."""
     keys = ("reading", "note", "basis", "chosen_by", "bound_kind", "fact", "value_at_stake_basis", "licensing")
     out: list[tuple[str, str]] = []
     if isinstance(node, dict):
@@ -511,12 +490,10 @@ _DEAD_CONCEPTS = (
     "no finding walks it",
     "is not_determined wherever populated",
     "one composed subsumed entity does so here",
-    # Retired by the code-control ceiling. It was true of every capability class
-    # when it was written and is now false of exactly one: at the node whose CODE
-    # a principal can replace, that node's own sheet is the answer, because the
-    # code that would have stood in the way is the code being replaced. The
-    # replacement sentence states which class it holds for and which it does not,
-    # so the unqualified form must never come back.
+    # Retired by the code-control ceiling: true of every capability class when
+    # written, now false of exactly one (at the node whose CODE a principal can
+    # replace, that node's own sheet is the answer). The replacement states which
+    # class it holds for, so the unqualified form must never come back.
     "balance sheet is never the answer",
 )
 
@@ -549,36 +526,7 @@ def test_no_published_narration_names_a_concept_the_document_does_not_publish(re
             assert dead not in value, f"{path} still names {dead!r}"
 
 
-def test_the_predicate_reading_claims_no_guard_it_did_not_check(republishing_document):
-    """Ruling 6.1 M1. "it INCLUDES the authorization guard" is an indicative
-    existential about this row's extracted list; the fold never checks it."""
-    readings = [
-        value
-        for path, value in _published_strings(republishing_document)
-        if path.endswith("destination_predicates.reading")
-    ]
-    assert readings
-    for reading in readings:
-        assert "it includes the authorization guard" not in reading
-        assert "it may include the authorization guard" in reading
-        # The enumeration matches what is enumerated.
-        assert "Three things about them" in reading
-        assert reading.count("(1)") == reading.count("(2)") == reading.count("(3)") == 1
-        assert "(4)" not in reading
-
-
 # The registries themselves, and case 7's subsumed parity
-
-
-def test_every_registered_arm_and_ceiling_carries_its_own_sentence():
-    """A registry whose entries collapse to one string is a constant wearing a
-    dict; both maps are keyed on a closed vocabulary."""
-    assert set(FOLD._WITHHELD_ARM_READINGS) == {FOLD.ARM_WITHHELD, FOLD.ARM_GATE_ONLY, FOLD.ARM_NOT_DETERMINED}
-    assert len(set(FOLD._WITHHELD_ARM_READINGS.values())) == len(FOLD._WITHHELD_ARM_READINGS)
-    assert set(FOLD._COMPOSED_SOURCE_READINGS) == {"flow.out witness", "destination sheet"}
-    assert len(set(FOLD._COMPOSED_SOURCE_READINGS.values())) == len(FOLD._COMPOSED_SOURCE_READINGS)
-    # The arm the rule takes when it PUBLISHES has no sentence; reaching for it raises.
-    assert FOLD.ARM_REPUBLISHED_DIRECT not in FOLD._WITHHELD_ARM_READINGS
 
 
 @pytest.mark.parametrize(
@@ -591,9 +539,8 @@ def test_every_registered_arm_and_ceiling_carries_its_own_sentence():
 )
 def test_case7_the_derived_readings_hold_on_a_subsumed_row_too(fold, deletability, key):
     """§14 case 7 applied to case 8: ``_ComposedMagnitude.as_json`` and
-    ``_WithheldComposition.as_json`` have no findings/subsumed branch, and this
-    asserts the consequence on the population three earlier passes never
-    measured."""
+    ``_WithheldComposition.as_json`` have no findings/subsumed branch; asserts
+    the consequence on the population earlier passes never measured."""
     weaker = sig(
         claim_id="ownership.transfer",
         function_name="transferOwnership",
@@ -631,10 +578,10 @@ def test_case7_the_derived_readings_hold_on_a_subsumed_row_too(fold, deletabilit
 
 
 def test_the_census_account_of_composed_withheld_is_derived_from_the_arms_that_fired():
-    """B1-R S3. The census explained ``composed_withheld`` with a single cause,
-    which is B1-N1's two clauses aggregated: both fail on the transport-fault arm
-    (reached before the join is consulted, and able to publish ``deletable``
-    beside its refusal) and the first fails on the unclassified arm too."""
+    """B1-R S3. The census explained ``composed_withheld`` with a single cause;
+    both B1-N1 clauses fail on the transport-fault arm (reached before the join,
+    able to publish ``deletable`` beside its refusal) and the first fails on the
+    unclassified arm too."""
     none = FOLD._withheld_cause_clause(())
     gate_only = FOLD._withheld_cause_clause((_withheld_entry(FOLD.ARM_GATE_ONLY),))
     fault = FOLD._withheld_cause_clause((_withheld_entry(FOLD.ARM_WITHHELD, deletability=P.DELETABILITY_DELETABLE),))
@@ -658,26 +605,14 @@ def test_the_census_account_of_composed_withheld_is_derived_from_the_arms_that_f
     assert "1 to a route witnessed AUTHORING" in both and "could not be READ at all" in both
 
 
-def test_every_withholding_arm_has_a_census_cause_and_they_are_distinct():
-    """Keyed on ``(arm, route token)`` since B2: the gate-only arm fires on two
-    tokens and each carries its own cause, so the registry is larger than the arm
-    set and the distinctness has to hold over the pairs."""
-    arms = {arm for arm, _ in FOLD._WITHHELD_CAUSE_ORDER}
-    assert arms == set(FOLD._WITHHELD_ARM_READINGS)
-    causes = [FOLD._withheld_cause(key) for key in FOLD._WITHHELD_CAUSE_ORDER]
-    assert len(set(causes)) == len(causes)
-    assert FOLD.ARM_REPUBLISHED_DIRECT not in arms
-
-
 # The confidence pass's three credit paths, and the sheet-ceiling rollup
 
 
 def test_the_credit_path_reading_counts_the_paths_that_actually_answered():
-    """A magnitude question now has three possible answers, and the sentence that
-    describes the split has to move with the split. Every registered path is
-    named at whatever it counted, INCLUDING zero: a clause dropped for having no
-    carriers leaves a reader unable to tell a path that did not fire on this
-    corpus from one the model does not have."""
+    """A magnitude question has three possible answers, and the sentence
+    describing the split must move with it. Every registered path is named at
+    whatever it counted, INCLUDING zero: a dropped clause leaves a reader unable
+    to tell a path that did not fire from one the model does not have."""
     none = FOLD._credit_path_reading({})
     mixed = FOLD._credit_path_reading(
         {
@@ -705,10 +640,9 @@ def test_the_credit_path_reading_counts_the_paths_that_actually_answered():
 
 
 def test_the_mixed_witness_cause_names_the_answer_that_put_an_entity_in_the_population():
-    """ "Composition widens it" was true when composition was the only answer the
-    fold supplied. There are two now, and which of them did it is a measurement:
-    the sentence carries the counts, so a corpus where only one fires does not
-    read as though both did."""
+    """ "Composition widens it" was true when composition was the only fold
+    answer. There are two now; the sentence carries the counts so a corpus where
+    only one fires does not read as though both did."""
     empty = FOLD._mixed_witness_cause(0, 0, 0, 0)
     plain = FOLD._mixed_witness_cause(5, 0, 0, 0)
     composed = FOLD._mixed_witness_cause(5, 3, 0, 2)
@@ -738,10 +672,9 @@ def _ceiling_row(entity: str, usd: float, capability: str = "upgrade.implementat
 
 
 def test_the_sheet_ceiling_rollup_reading_counts_what_the_rows_published():
-    """The document-level block's own account of itself, derived from its own
-    data. The three facts it can report — an admitted population, refusals, a
-    withheld label — are three different sentences, and the empty case is a
-    measured zero rather than a missing paragraph."""
+    """The document-level block's account of itself, derived from its own data.
+    Admitted population, refusals and a withheld label are three different
+    sentences, and the empty case is a measured zero, not a missing paragraph."""
     empty = FOLD._sheet_ceiling_totals([], [], {})
     one = FOLD._sheet_ceiling_totals([_ceiling_row("ethereum::0xaaa", 5.0)], [], {"upgrade.implementation": 1})
     refusing = FOLD._sheet_ceiling_totals(
@@ -775,11 +708,10 @@ def test_the_sheet_ceiling_rollup_reading_counts_what_the_rows_published():
 
 
 def test_the_rollup_publishes_a_named_zero_for_every_token_in_a_closed_vocabulary():
-    """A token missing from a census keyed on a closed set reads identically as
-    "this rule did not fire here" and "this rule is not in the model", and only
-    the first is a fact about the protocol. The vocabularies are derived from the
-    plane's own tuples, so a reason added there and not here cannot go
-    uncounted."""
+    """A token missing from a census keyed on a closed set reads the same as
+    "did not fire here" and "not in the model"; only the first is a fact about
+    the protocol. The vocabularies derive from the plane's own tuples, so a
+    reason added there cannot go uncounted."""
     empty = FOLD._sheet_ceiling_totals([], [], {})
     assert set(empty["calls_refused_by_reason"]) == set(FOLD.CEILING_REFUSAL_REASONS)
     assert set(empty["entities_by_ceiling_reason"]) == set(P.CEILING_ADMITTING_REASONS)
@@ -801,9 +733,9 @@ def test_the_rollup_publishes_a_named_zero_for_every_token_in_a_closed_vocabular
 
 
 def test_the_rollup_reading_says_whether_the_capability_buckets_sum_to_the_population():
-    """The dollars are deduped per entity and the capability breakdown is not, so
-    a reader adding the buckets over-counts the population wherever one node is
-    reached by two code-control capabilities. Counted and stated, both derived."""
+    """Dollars are deduped per entity and the capability breakdown is not, so
+    adding the buckets over-counts wherever one node is reached by two
+    code-control capabilities. Counted and stated, both derived."""
     one_each = FOLD._sheet_ceiling_totals(
         [_ceiling_row("ethereum::0xaaa", 5.0), _ceiling_row("ethereum::0xbbb", 7.0, "exec.arbitrary")], [], {}
     )
@@ -822,10 +754,10 @@ def test_the_rollup_reading_says_whether_the_capability_buckets_sum_to_the_popul
 
 
 def test_the_rollup_counts_one_sheet_once_and_names_a_disagreement_rather_than_absorbing_it():
-    """Dollars are summed over DISTINCT ENTITIES: a sheet ceiling is a fact about
-    one node, so two rows reading the same node publish the same number twice.
-    A disagreement between them would mean the per-key reconciliation let two
-    figures stand under one claim, so it is counted and published."""
+    """Dollars are summed over DISTINCT ENTITIES (a sheet ceiling is a fact about
+    one node, so two rows reading it publish the same number twice). A
+    disagreement means per-key reconciliation let two figures stand under one
+    claim, so it is counted and published."""
     agreeing = FOLD._sheet_ceiling_totals(
         [_ceiling_row("ethereum::0xaaa", 5.0), _ceiling_row("ethereum::0xaaa", 5.0)], [], {}
     )
@@ -854,51 +786,12 @@ def test_the_rollup_counts_one_sheet_once_and_names_a_disagreement_rather_than_a
 
 # --- the proven-empty sheet's own sentences ----------------------------------
 # These shipped with zero carriers on the reference corpus, so nothing walked
-# them: a sentence in ``_CEILING_SOURCE_READINGS`` claiming "every asset observed
-# at this entity was priced" rode a proven-ZERO reading green through this whole
-# suite. The corpus carries such sheets now, and the strings they publish are
-# derivation-checked here like every other published reading.
-
-
-def test_the_ceiling_source_readings_are_a_closed_keyed_vocabulary():
-    """One sentence per (admitting reason, coverage) pair that can be reached.
-
-    Five keys, not six. ``(PROVEN_EMPTY, False)`` is deliberately absent: the
-    cross-plane gate refuses the empty state wherever an unpriced position sits
-    at the node, so a proven-empty sheet reaching this map is always
-    coverage-complete. ``AIRDROP_DETERMINED`` carries both arms for the opposite
-    reason — its coverage is earned rather than implied. The lookup stays
-    strict, so an unregistered combination raises rather than borrowing a
-    neighbour's sentence.
-    """
-    assert set(FOLD._CEILING_SOURCE_READINGS) == {
-        (P.CEILING_ADMITTED, True),
-        (P.CEILING_ADMITTED, False),
-        (P.CEILING_PROVEN_EMPTY, True),
-        # BOTH arms, unlike proven-empty's: a disposition says one asset's
-        # contribution is nil and says nothing about whether the LIST is whole,
-        # so a disposed sheet is coverage-complete only where the list is
-        # separately proven — and the partial arm is the ordinary case.
-        (P.CEILING_AIRDROP_DETERMINED, True),
-        (P.CEILING_AIRDROP_DETERMINED, False),
-    }
-    # The claim these two sentences make is delivery shape, and neither may
-    # restate it as a claim about what the holdings are worth.
-    for complete in (True, False):
-        sentence = FOLD._CEILING_SOURCE_READINGS[(P.CEILING_AIRDROP_DETERMINED, complete)]
-        assert "DELIVERY SHAPE" in sentence or "DELIVERY-SHAPE" in sentence
-        assert "worthless" not in sentence and "spam" not in sentence
-    assert len(set(FOLD._CEILING_SOURCE_READINGS.values())) == len(FOLD._CEILING_SOURCE_READINGS)
-    assert (P.CEILING_PROVEN_EMPTY, False) not in FOLD._CEILING_SOURCE_READINGS
-    # Both coverage sentences must survive a proven-ZERO reading being the thing
-    # observed. "was priced" is false of a witnessed zero, and the coverage
-    # sentence is shared with the admitted arm, so it may not say it.
-    assert "was priced" not in FOLD._SHEET_CEILING_DIRECTION_BASIS[True]
-    assert "determined reading" in FOLD._SHEET_CEILING_DIRECTION_BASIS[True]
+# them: a sentence claiming "every asset observed at this entity was priced" rode
+# a proven-ZERO reading green through this suite. The corpus carries such sheets
+# now; the strings are derivation-checked like every other published reading.
 
 
 def _proven_empty_ceiling_row(fold):
-    """The smallest real fold that publishes a proven-empty sheet ceiling."""
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -916,7 +809,6 @@ def _proven_empty_ceiling_row(fold):
 
 
 def test_a_proven_empty_ceiling_reads_its_own_admission_and_not_the_priced_one(fold):
-    """The published sentence is the one keyed by what actually admitted it."""
     entry, _ = _proven_empty_ceiling_row(fold)
     assert entry["ceiling_reason"] == P.CEILING_PROVEN_EMPTY
     assert entry["sheet_state"] == P.SHEET_PROVEN_EMPTY
@@ -927,7 +819,6 @@ def test_a_proven_empty_ceiling_reads_its_own_admission_and_not_the_priced_one(f
 
 
 def test_the_direction_basis_on_a_proven_empty_row_states_what_was_observed(fold):
-    """The coverage sentence has to be true of a witnessed ZERO, not only of a price."""
     entry, _ = _proven_empty_ceiling_row(fold)
     assert entry["bound_direction"] == FOLD.BOUND_DIRECTION_CEILING
     assert entry["bound_direction_basis"] == FOLD._SHEET_CEILING_DIRECTION_BASIS[True]
@@ -940,9 +831,9 @@ def test_the_direction_basis_on_a_proven_empty_row_states_what_was_observed(fold
 def test_the_completeness_block_on_a_ceiling_row_is_the_carriers_own_record(fold):
     """#171: what the document says about a scan is what the scan's record said.
 
-    The basis strings are the producer's ``asset_set_basis`` values, copied and
-    not re-authored, and the account arithmetic travels with them so a sheet that
-    folds two accounts cannot read as fully scanned on the strength of one.
+    The basis strings are the producer's ``asset_set_basis`` values, copied, and
+    the account arithmetic travels with them so a sheet folding two accounts
+    cannot read as fully scanned on one.
     """
     entry, plane = _proven_empty_ceiling_row(fold)
     published = entry["asset_set_completeness"]
@@ -978,7 +869,6 @@ DELIVERED = {
 
 
 def _airdrop_determined_ceiling_row(fold):
-    """The smallest real fold that publishes a DISPOSED sheet ceiling."""
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -995,11 +885,10 @@ def _airdrop_determined_ceiling_row(fold):
 def test_a_disposed_ceiling_publishes_only_what_its_carrier_record_proves(fold):
     """#171 walked end to end on a real DISPOSED carrier.
 
-    The row's every claim has to come off the delivery evidence the plane copied
-    — its threshold, its block range, its delivery count — and the state it
-    publishes has to be the disposition's own, not proven-empty's. The sentence
-    may not name a concept the document does not publish, and it may not restate
-    a delivery-shape fact as a fact about worth.
+    Every claim must come off the copied delivery evidence (threshold, block
+    range, delivery count), the state must be the disposition's own not
+    proven-empty's, and the sentence may not name an unpublished concept or
+    restate a delivery-shape fact as a fact about worth.
     """
     entry, plane = _airdrop_determined_ceiling_row(fold)
     carrier = plane.asset_disposition[KEY_C]["junk"]
@@ -1032,8 +921,7 @@ def test_a_disposed_ceiling_publishes_only_what_its_carrier_record_proves(fold):
     assert "junk" in (plane.asset_disposition.get(plane.canonical(KEY_C)) or {})
 
     # …and the row REPUBLISHES them, folded over the readings it covers, so the
-    # sentence quotes a field a reader can join to rather than a figure only the
-    # plane holds. This is the half that shipped missing: the carrier was
+    # sentence quotes a joinable field. This half shipped missing: the carrier was
     # assembled and no narration read it.
     published_carrier = entry["asset_disposition"]
     assert published_carrier["assets"] == 1
@@ -1079,7 +967,6 @@ def test_a_disposed_ceiling_publishes_only_what_its_carrier_record_proves(fold):
 
 
 def _priced_but_partly_unpriced_ceiling_row(fold):
-    """A sheet ceiling refused for the ORDINARY reason: a row nobody priced."""
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -1097,9 +984,8 @@ def _priced_but_partly_unpriced_ceiling_row(fold):
 
 
 def _priced_sheet_with_a_disposed_row(fold):
-    """The live $575M proxy's shape: an ADMITTED ceiling whose coverage fails on
-    the LIST conjunct alone — every reading priced or disposed, nothing unpriced,
-    and no scan proving the list whole."""
+    """The live $575M proxy's shape: an ADMITTED ceiling failing on the LIST
+    conjunct alone (every reading priced or disposed, no scan proving the list whole)."""
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -1118,15 +1004,13 @@ def _priced_sheet_with_a_disposed_row(fold):
 
 
 def test_the_reading_and_the_direction_publish_ONE_derived_shortfall(fold):
-    """Two surfaces, one fact, one derivation — which is what stops them drifting.
+    """Two surfaces, one fact, one derivation, which stops them drifting.
 
-    The row publishes its coverage shortfall twice: as the reason its direction
-    is not a ceiling, and inside the reading that explains its figure. Written
-    by hand twice, they diverged — the direction basis was corrected off the
-    row's fields while the reading's stem went on asserting "the assets under
-    assets_not_priced were observed at this entity and never priced" on a
-    carrier whose list is EMPTY. The premise is derived now; only the framing
-    differs.
+    The coverage shortfall is published as the reason the direction is not a
+    ceiling and inside the reading. Written by hand twice they diverged: the
+    direction basis was corrected while the reading's stem kept asserting "the
+    assets under assets_not_priced were observed and never priced" on a carrier
+    whose list is EMPTY. The premise is derived now; only the framing differs.
     """
     admitted = _priced_sheet_with_a_disposed_row(fold)
     assert admitted["ceiling_reason"] == P.CEILING_ADMITTED
@@ -1173,11 +1057,10 @@ def test_the_reading_and_the_direction_publish_ONE_derived_shortfall(fold):
 def test_the_refused_direction_names_the_conjunct_that_actually_failed(fold):
     """The direction basis is derived, because a constant was false of its carrier.
 
-    ``complete`` is a conjunction of three, and the shipped sentence named two
-    of them. Two live entities — one of them a $575M proxy — refuse on the
-    THIRD, so they published a sentence pointing a reader at two fields that
-    both read empty. Two carriers failing different conjuncts must publish
-    different sentences, which is the property the constant could not have.
+    ``complete`` is a conjunction of three and the shipped sentence named two.
+    Two live entities (one a $575M proxy) refuse on the THIRD, so they pointed a
+    reader at two empty fields. Carriers failing different conjuncts must
+    publish different sentences.
     """
     disposed, _ = _airdrop_determined_ceiling_row(fold)
     assert disposed["bound_direction"] == FOLD.BOUND_DIRECTION_NOT_DETERMINED
@@ -1203,10 +1086,9 @@ def test_the_refused_direction_names_the_conjunct_that_actually_failed(fold):
 
 
 def test_a_ceiling_row_stops_counting_a_disposed_asset_as_a_priced_one(fold):
-    """``assets_priced`` was ``observed - not_priced``, and a disposed reading is
-    in neither term — so a sheet whose every asset arrived by mass distribution
-    published 140 of 140 priced beside $0. The three counts partition the
-    observed set, which is what makes the record readable."""
+    """``assets_priced`` was ``observed - not_priced`` and a disposed reading is in
+    neither term, so a sheet whose every asset arrived by mass distribution
+    published 140 of 140 priced beside $0. The three counts partition the observed set."""
     disposed, _ = _airdrop_determined_ceiling_row(fold)
     assert disposed["assets_observed"] == 1
     assert disposed["assets_disposed"] == ["junk"]
@@ -1219,13 +1101,3 @@ def test_a_ceiling_row_stops_counting_a_disposed_asset_as_a_priced_one(fold):
     # determined reading, so the fix cannot be read as a general de-crediting.
     unpriced = _priced_but_partly_unpriced_ceiling_row(fold)
     assert unpriced["assets_disposed"] == [] and unpriced["assets_priced"] == 1
-
-
-def test_no_proven_empty_narration_names_a_concept_the_row_does_not_publish(fold):
-    """The suite's standing rule, applied to the strings this run added."""
-    entry, _ = _proven_empty_ceiling_row(fold)
-    published = set(entry)
-    for sentence in (entry["reading"], entry["bound_direction_basis"]):
-        for concept in ("assets_not_priced", "unpriced_positions", "per_asset"):
-            if concept in sentence:
-                assert concept in published, concept

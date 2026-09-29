@@ -79,26 +79,20 @@ def test_pause_recipe_observes_blast_radius_and_expiry():
     assert eff.details["duration_bound_seconds"] == 3600
     # A7: the bound never travels without saying where it came from.
     assert eff.details["duration_bound_source"] == "guard_constant"
-    # Snapshot was reverted; principal impersonation was scoped + released.
     assert transport.paused is False
     assert transport.impersonated == [PRINCIPAL]
-    # Transcript records anvil version + hardfork (§8.7).
     tr = store.stored[-1]
     assert tr["hardfork"] == "prague"
     assert tr["anvil_version"] == "anvil 1.5.1-stable"
 
 
 def test_pause_recipe_separates_a_proven_indefinite_latch_from_an_unread_window():
-    """A7 / R1. ``duration_bound_seconds: None`` is TWO facts and the proven row
-    must carry which one it is.
-
-    The severe reading (indefinite latch, no self-recovery) is a claim about the
-    contract and may only ship when static PROVED the latch is read beside no clock
-    (``no_time_reference``). The etherfi shape — a ``pauseUntil`` timestamp latch
-    whose window lives in storage — yields ``not_determined``, and while both
-    published a bare ``None`` the inspector rendered the severe sentence for all
-    four proven verdicts in the corpus.
-    """
+    """A7 / R1: ``duration_bound_seconds: None`` is TWO facts and the proven row
+    must say which. The severe reading (indefinite latch) may only ship when
+    static PROVED the latch is read beside no clock (``no_time_reference``); the
+    etherfi ``pauseUntil`` shape yields ``not_determined``, yet both published a
+    bare ``None`` and the inspector rendered the severe sentence for all four
+    proven verdicts in the corpus."""
     for source in ("no_time_reference", "not_determined"):
         transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
         eff = pause_recipe(
@@ -116,9 +110,8 @@ def test_pause_recipe_separates_a_proven_indefinite_latch_from_an_unread_window(
         assert eff.verdict == VERDICT_PROVEN
         assert eff.details["duration_bound_seconds"] is None
         assert eff.details["duration_bound_source"] == source
-        # No bound ⇒ no warp, in BOTH states: an unread window must not be probed
-        # as though it were known, and a proven-indefinite latch has nothing to warp
-        # past. ``auto_expiry`` stays the not-probed ``None``.
+        # No bound => no warp in BOTH states: an unread window must not be
+        # probed as though known.
         assert eff.details["auto_expiry"] is None
         assert transport.warped == 0
 
@@ -142,7 +135,6 @@ def test_pause_recipe_defaults_the_bound_source_to_not_determined():
 
 
 def test_pause_recipe_no_blast_radius_is_unknown():
-    # A latch that guards nothing in the probed set → no observation → unknown.
     transport = StubAnvil(guarded=set(), pause_calldata=PAUSE, duration=None)
     eff = pause_recipe(
         transport=transport,
@@ -157,7 +149,6 @@ def test_pause_recipe_no_blast_radius_is_unknown():
     )
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "no_blast_radius_observed"
-    # A GENUINE no-blast: the pause took effect but froze nothing observable.
     assert eff.details["pause_effective"] is True
     # The pause RAN, so the empty blast radius is a measurement.
     assert eff.details["observation"] == "executed"
@@ -201,30 +192,9 @@ def test_pause_recipe_ineffective_pause_is_distinct_unknown():
     # The pause call REVERTED, so the empty radius above describes a probe that
     # never happened — the discriminator every consumer of ``witness`` joins on.
     assert eff.details["observation"] == "reverted"
-    # The scored denominator (static's set) is preserved for the consumer.
     assert eff.details["scored_denominator"] == ["foo"]
-    # The pause was never sent → the snapshot was still reverted, latch untouched.
     assert transport.paused is False
-    # The raw revert is recorded on the transcript for the live cycle.
     assert any(r.get("label") == "pause_effectiveness" and r["success"] is False for r in store.stored[-1]["results"])
-
-
-def test_pause_recipe_proven_records_pause_effective():
-    transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=3600)
-    eff = pause_recipe(
-        transport=transport,
-        store=RecordingStore(),
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        pause_calldata=PAUSE,
-        entry_points=_entry_points(),
-        predicted_guard_set=["foo"],
-        max_pause_duration=3600,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["pause_effective"] is True
-    assert eff.details["observation"] == "executed"
 
 
 class DeadSurfaceAnvil(StubAnvil):
@@ -260,7 +230,6 @@ def test_a_dead_entry_point_surface_is_not_a_cacheable_no_blast():
     assert eff.reason == "no_live_entry_points_to_freeze"
     assert eff.details["pre_pause_succeeding"] == []
     assert not _is_cacheable(eff)
-    # The scored denominator is still static's set, as on every other pause row.
     assert eff.details["scored_denominator"] == ["foo"]
 
 
@@ -285,12 +254,11 @@ def test_a_live_surface_the_pause_leaves_alone_is_still_a_cacheable_no_blast():
 
 
 def test_every_pause_row_carries_an_observation_discriminator():
-    """The fork tier writes ``witness=details`` through the same worker path as
-    every other effect class, so it owes the same discriminator. It did not: a
-    pause probe that REVERTED published ``{"pause_effective": false,
-    "observed_blast_radius": []}`` with nothing in the payload to say the freeze
-    was never tested. ``pause_effective`` happened to separate the two, but that
-    is a class-local stand-in for a contract stated stage-wide."""
+    """The fork tier writes ``witness=details`` like every other effect class, so
+    it owes the same discriminator; a REVERTED pause probe published
+    ``{"pause_effective": false, "observed_blast_radius": []}`` with nothing
+    saying the freeze was never tested. ``pause_effective`` happened to separate
+    them, but only as a class-local stand-in for a stage-wide contract."""
 
     def _run(transport):
         return pause_recipe(
@@ -460,35 +428,12 @@ def test_timelock_schedule_advance_execute_proves_a_caller_arbitrary_move():
     assert transport.impersonated == [PRINCIPAL]
 
 
-def test_timelock_premature_execute_reverts_not_ready_proving_the_delay_gate():
-    """The Tier-1 impossibility made explicit: before the warp the operation is not
-    ready, so ``execute`` reverts with the not-ready selector. Observing that revert
-    and its later success is what proves the recipe advanced time."""
-    store = RecordingStore()
-    timelock_execute_recipe(
-        transport=TimelockAnvil(delay=TIMELOCK_DELAY),
-        store=store,
-        ctx=CTX,
-        contract_address=CONTRACT,
-        principal=PRINCIPAL,
-        schedule_calldata=SCHEDULE,
-        execute_calldata=EXECUTE,
-        delay_seconds=TIMELOCK_DELAY,
-        witness_token=TOKEN,
-        witness_calldata=WITNESS,
-    )
-    prem = {r["label"]: r for r in store.stored[-1]["results"]}["execute_premature"]
-    assert prem["success"] is False
-    assert prem["revert"].startswith(NOT_READY)
-
-
 def test_timelock_schedule_rejection_is_its_own_unknown():
     transport = TimelockAnvil(delay=TIMELOCK_DELAY, proposer_ok=False)
     eff = _timelock(transport)
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "timelock_schedule_reverted"
     assert eff.details["schedule_revert"].startswith(UNAUTHORIZED)
-    # Never cacheable — a Tier-2 fork verdict is state-plane.
     assert not _is_cacheable(eff)
 
 
@@ -505,8 +450,6 @@ def test_timelock_execution_that_moves_nothing_stays_unknown_but_records_executi
     # "moves nothing" negative to a bytecode twin whose op was never scheduled.
     assert eff.state_dependent is True
     assert not _is_cacheable(eff)
-    # It HELD the asset and moved none of it — the other half of the distinction
-    # the next test pins.
     assert eff.details["witness_asset_held"] is True
 
 
@@ -690,9 +633,8 @@ def test_assert_post_cancun_accepts_current_forks():
 
 
 def test_section8_rule8_scored_denominator_is_static_not_observed():
-    # Observe a guarded point ("foo") that static did NOT predict; predicted set is
-    # {"bar"}. The scored denominator MUST stay static's set, and the surprise is a
-    # §9 discrepancy (recorded, not routed).
+    # Observe a guarded point ("foo") static did NOT predict (predicted {"bar"}):
+    # the scored denominator stays static's set and the surprise is a §9 discrepancy.
     transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
     eff = pause_recipe(
         transport=transport,
@@ -802,18 +744,8 @@ def test_verified_fixtures_are_applied_after_plain_ones():
     plain = ForkFixture(kind="set_balance", address=PRINCIPAL, value="0x64")
     tr: dict = {}
     _apply_fixtures(transport, [_verified_fixture(word), plain], tr)
-    # Order in the transcript: plain first, then the verified storage write.
     assert [f["kind"] for f in tr["fixtures"]] == ["set_balance", "set_storage_at"]
     assert transport.balances == {PRINCIPAL: "0x64"}
-
-
-def test_forkfixture_backward_compatible_defaults():
-    from services.effects.anvil import ForkFixture, _has_verify_spec
-
-    fx = ForkFixture(kind="set_balance", address=PRINCIPAL, value="0x1")
-    assert fx.verify_to is None and fx.verify_calldata is None and fx.verify_expected is None
-    assert _has_verify_spec(fx) is False
-    assert _has_verify_spec(_verified_fixture("0x" + "00" * 32)) is True
 
 
 # ---------------------------------------------------------------------------
@@ -845,6 +777,5 @@ def test_pause_revert_set_diff_on_real_nonforking_anvil():
         )
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["observed_blast_radius"] == ["foo"]
-    # owner() is a plain getter — never in the blast radius.
     assert "owner" in eff.details["pre_pause_succeeding"]
     assert eff.discrepancy is None

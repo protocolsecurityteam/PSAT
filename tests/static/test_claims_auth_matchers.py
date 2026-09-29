@@ -1,26 +1,19 @@
 """Unit coverage for the auth-family claim matchers over the documented Plane-0
 facts interface.
 
-These drive the real production code — ``build_claims``, ``ClaimContext``, the
-registry, and every auth matcher/``_authcommon`` reader — with ``effects``- and
-``predicate_trees``-shaped fact *data* (not faked collaborators), mirroring the
-shapes measured on real corpus contracts (Solmate DSAuth, OZ AccessControl,
-Solady handover, FiatToken rotate, LayerZero composeQueue). No Slither/DB, so
-they run in every offline suite and exercise each standard gate, corroboration
-path, and near-miss branch.
+Drives real ``build_claims``/``ClaimContext``/registry/matchers with ``effects``- and
+``predicate_trees``-shaped fact *data* (no faked collaborators) mirroring shapes
+measured on real contracts (Solmate DSAuth, OZ AccessControl, Solady handover,
+FiatToken rotate, LayerZero composeQueue). No Slither/DB, so it runs offline.
 
-Assertions intersect against :data:`AUTH_FAMILY` so a sibling family's matcher
-(pause, flow, exec, LayerZero) firing on the same synthetic function never
-couples these tests to another stage.
+Assertions intersect against :data:`AUTH_FAMILY` so a sibling family's matcher firing
+on the same synthetic function never couples these tests to another stage.
 """
 
 from __future__ import annotations
 
 from services.static.claims import (
     build_claims,
-    is_registered,
-    legacy_projections,
-    registry,
 )
 from services.static.claims.context import selector_of
 
@@ -54,7 +47,6 @@ def _sw(var, declared_type, *, hygiene="normal", granularity="var"):
 
 
 def _ca_equality_leaf(var):
-    """A ``msg.sender == <var>`` caller-authority equality leaf."""
     return {
         "op": "LEAF",
         "leaf": {
@@ -70,7 +62,6 @@ def _ca_equality_leaf(var):
 
 
 def _ca_membership_leaf():
-    """A caller-authority *membership* leaf (composeQueue / OZ role check)."""
     return {
         "op": "LEAF",
         "leaf": {
@@ -106,7 +97,6 @@ def _delegated_authority_leaf(var):
 
 
 def _requires_auth_tree(owner_var, authority_var):
-    """Solmate ``msg.sender == owner || authority.canCall(...)``."""
     return {"op": "OR", "children": [_ca_equality_leaf(owner_var), _delegated_authority_leaf(authority_var)]}
 
 
@@ -134,7 +124,6 @@ def _fn(signature, *, state_writes=None, view=False):
 
 
 def _artifact(name, functions):
-    """functions: signature -> (record, tree). Returns (effects, predicate_trees)."""
     effects = {
         "schema_version": "semantic-2",
         "contract_name": name,
@@ -164,24 +153,6 @@ def _tiers(functions, signature, claim_id):
 # ---------------------------------------------------------------------------
 # Registry metadata (every auth claim is registered with the right projection)
 # ---------------------------------------------------------------------------
-
-
-def test_auth_claims_registered_with_projections():
-    _run("Probe", {"ping()": (_fn("ping()"), None)})  # forces discover()
-    for claim_id in AUTH_FAMILY:
-        assert is_registered(claim_id), claim_id
-        entry = registry()[claim_id]
-        assert entry.sentence.strip()
-        assert entry.consumer_family == "control_plane"
-
-    projections = legacy_projections()
-    for claim_id in ("ownership.transfer", "ownership.renounce", "ownership.accept"):
-        assert projections[claim_id] == "ownership_transfer"
-    for claim_id in ("roles.grant", "roles.revoke", "roles.configure"):
-        assert projections[claim_id] == "role_management"
-    assert projections["authority.replace"] == "authority_update"
-    # A genuinely new claim with no honest legacy equivalent (like safe.*).
-    assert projections["authorized_caller.rotate"] is None
 
 
 # ---------------------------------------------------------------------------

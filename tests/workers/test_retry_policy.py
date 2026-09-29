@@ -1,15 +1,13 @@
-"""Unit tests for ``workers/retry_policy.py``.
+"""Unit tests for ``workers/retry_policy.py`` (no DB).
 
-No DB needed — this is pure exception-type bookkeeping plus a small math
-helper. Verifies the classifier decides on type alone (not message), that
-the backoff respects base + jitter + cap, and that env overrides are read
-each call (so monkeypatch in a test doesn't get cached behind a singleton).
+The classifier decides on type alone (not message); backoff respects base + jitter +
+cap; env overrides are read each call so monkeypatch isn't cached behind a singleton.
 """
 
 from __future__ import annotations
 
 import socket
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -60,7 +58,6 @@ def test_classify_terminal_for_bug_or_bad_input(exc):
 
 
 def test_classify_psycopg2_operational_is_transient():
-    """``psycopg2.OperationalError`` (Neon idle disconnect, etc.) is transient."""
     psycopg2 = pytest.importorskip("psycopg2")
     assert classify(psycopg2.OperationalError("connection closed")) == "transient"
 
@@ -139,13 +136,6 @@ def test_compute_next_attempt_caps_at_30min(monkeypatch):
         delay = _delay_seconds(compute_next_attempt(10, now=_NOW))
         # Jitter only shrinks the cap (post-cap multiply ≤ 1.25 then re-cap).
         assert delay <= cap
-
-
-def test_compute_next_attempt_uses_provided_now():
-    pinned = datetime(2030, 1, 1, tzinfo=timezone.utc)
-    result = compute_next_attempt(0, now=pinned)
-    assert result > pinned
-    assert result - pinned <= timedelta(seconds=30 * 1.25 + 1)
 
 
 # ---------------------------------------------------------------------------

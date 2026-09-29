@@ -83,9 +83,5 @@ EXPECTED_TABLES = [
 ]
 
 
-def test_metadata_table_count_matches_pre_split_module():
-    assert len(Base.metadata.tables) == EXPECTED_TABLE_COUNT
-
-
 def test_metadata_table_names_match_pre_split_snapshot():
     assert sorted(Base.metadata.tables) == EXPECTED_TABLES

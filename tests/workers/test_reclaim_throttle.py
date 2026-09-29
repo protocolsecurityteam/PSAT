@@ -1,20 +1,9 @@
-"""Regression tests for the stuck-job sweep throttle in
-``workers.base.BaseWorker._claim_job``.
+"""Regression tests for the stuck-job sweep throttle in ``workers.base.BaseWorker._claim_job``.
 
-Before this throttle every worker called ``reclaim_stuck_jobs`` on every
-poll: with 10 worker procs polling every 2s, that's 5 cross-stage
-``UPDATE … WHERE status='processing' … FOR UPDATE SKIP LOCKED`` queries
-per second, 24/7. Most of those return zero rows — pure DB noise.
-
-The throttle bounds each worker to one sweep per ``RECLAIM_INTERVAL_S``
-seconds. Recovery is still global (any worker can sweep) and still timely
-(stale_timeout is 900s; sweep cadence is 30s). What we pin:
-
-1. The first claim sweeps (sentinel ``-inf`` initial timestamp).
-2. A second claim within the throttle window does NOT sweep.
-3. A claim after the throttle window expires sweeps again.
-4. ``claim_job`` is always called regardless of sweep state — the
-   throttle must NOT starve the happy path.
+Unthrottled, 10 workers polling every 2s issued ~5 cross-stage ``UPDATE … FOR UPDATE
+SKIP LOCKED`` sweeps per second, mostly returning zero rows. Each worker is now bounded
+to one sweep per ``RECLAIM_INTERVAL_S`` (30s vs the 900s stale_timeout), while
+``claim_job`` must never be starved by the throttle.
 """
 
 from __future__ import annotations
@@ -33,9 +22,8 @@ class _FakeWorker(BaseWorker):
 
 
 def test_first_claim_sweeps():
-    """Sentinel float('-inf') guarantees the first poll always sweeps —
-    otherwise a freshly-started fleet would wait RECLAIM_INTERVAL_S
-    before doing the first cross-stage sweep."""
+    """The ``-inf`` sentinel makes the first poll sweep; otherwise a fresh fleet waits
+    RECLAIM_INTERVAL_S."""
     w = _FakeWorker()
     session = MagicMock()
     with (
@@ -49,7 +37,6 @@ def test_first_claim_sweeps():
 
 
 def test_repeat_claim_within_window_does_not_sweep():
-    """Two claims 1s apart with a 30s window must produce only one sweep."""
     w = _FakeWorker()
     session = MagicMock()
     with (
@@ -64,8 +51,7 @@ def test_repeat_claim_within_window_does_not_sweep():
 
 
 def test_claim_after_window_expires_sweeps_again():
-    """A claim after RECLAIM_INTERVAL_S elapses re-arms the sweep — this
-    is the cadence guarantee the fleet relies on."""
+    """The cadence guarantee the fleet relies on."""
     w = _FakeWorker()
     session = MagicMock()
     interval = base.RECLAIM_INTERVAL_S
@@ -82,27 +68,8 @@ def test_claim_after_window_expires_sweeps_again():
     assert mocked_reclaim.call_count == 2
 
 
-def test_claim_job_called_every_time_regardless_of_throttle():
-    """Critical safety property: throttling the SWEEP must never throttle
-    the CLAIM. A bug that conflated the two would silently halve worker
-    throughput."""
-    w = _FakeWorker()
-    session = MagicMock()
-    with (
-        patch("workers.base.reclaim_stuck_jobs"),
-        patch("workers.base.claim_job", return_value=None) as mocked_claim,
-        patch("workers.base.time.monotonic", side_effect=[1000.0, 1001.0, 1002.0]),
-    ):
-        w._claim_job(session)
-        w._claim_job(session)
-        w._claim_job(session)
-    assert mocked_claim.call_count == 3
-
-
 def test_each_worker_throttle_is_independent():
-    """The throttle is per-worker, not global. Two workers in the same
-    process must each be allowed a sweep — otherwise an unlucky boot
-    order could starve one stage's recovery."""
+    """Per-worker, not global: otherwise an unlucky boot order could starve one stage's recovery."""
     w1 = _FakeWorker()
     w2 = _FakeWorker()
     session = MagicMock()

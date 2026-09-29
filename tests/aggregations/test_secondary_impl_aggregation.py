@@ -1,25 +1,16 @@
-"""Aggregation regression tests for split-proxy secondary impls (1A) + the
-deterministic impl-job pick (1C).
+"""Aggregation regression tests for split-proxy secondary impls (1A) + the deterministic
+impl-job pick (1C).
 
-Mirrors the real ether.fi LRTSquared shape on a real test Postgres: a UUPSProxy
-whose EIP-1967 impl is ``LRTSquaredCore`` and whose split-proxy *secondary* impl
-is ``LRTSquaredAdmin`` (recorded in ``Contract.secondary_implementations``). The
-admin impl holds ``setPauser`` gated by a governor Safe.
-
-Before the fix the admin impl rendered as a standalone ownerless node and its
-functions never attributed to the proxy. After the fix the proxy node absorbs
-the admin impl: no standalone node, both impls' functions surface on the proxy,
-and the governor Safe resolves as the proxy's controller.
+Mirrors the ether.fi LRTSquared shape: a UUPSProxy whose EIP-1967 impl is ``LRTSquaredCore`` and
+whose split-proxy *secondary* impl ``LRTSquaredAdmin`` (``Contract.secondary_implementations``)
+holds ``setPauser`` gated by a governor Safe. Before the fix the admin impl rendered as a
+standalone ownerless node and its functions never attributed to the proxy.
 """
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from db.models import ControlGraphNode, EffectiveFunction, FunctionPrincipal
 from services.aggregations.company_overview import (
@@ -138,19 +129,17 @@ def test_secondary_impl_absorbed_into_proxy(db_session):
 
 
 def test_secondary_impl_fp_all_addrs_folds_into_primary_gate(db_session):
-    """A governor that gates only the SECONDARY impl's functions, carried on a
-    FunctionPrincipal row with resolved_type NULL, must still surface as a
-    principal of the proxy.
+    """A governor that gates only the SECONDARY impl's functions, via a FunctionPrincipal row
+    with resolved_type NULL, must still surface as a principal of the proxy.
 
-    resolved_type=NULL is deliberate and load-bearing: a ``safe`` FP row would
-    surface vacuously through the third-pass ``fp_governance`` backstop (which
-    filters resolved_type at query time), masking the gate. With NULL, the only
-    path to the surface is the second-pass CGN gate at
-    ``_build_flows_and_principals`` (``node_addr in fp_all_addrs_by_cid[primary]``)
-    — which admits the address only once the secondary impl's ``fp_all_addrs`` is
-    folded into the primary-impl bucket. The safe-typed identity comes from a
-    ControlGraphNode on the PRIMARY impl (cgn_by_cid is not folded). Reverting
-    the fold drops the principal, so this pins the fold, not the backstop."""
+    resolved_type=NULL is load-bearing: a ``safe`` FP row would surface vacuously through the
+    third-pass ``fp_governance`` backstop (which filters resolved_type at query time), masking
+    the gate. With NULL the only path is the second-pass CGN gate in
+    ``_build_flows_and_principals`` (``node_addr in fp_all_addrs_by_cid[primary]``), which admits
+    the address only once the secondary impl's ``fp_all_addrs`` is folded into the primary-impl
+    bucket. The safe-typed identity comes from a ControlGraphNode on the PRIMARY impl
+    (cgn_by_cid is not folded). Reverting the fold drops the principal: this pins the fold,
+    not the backstop."""
     s = db_session
     p = _add_protocol(s, f"fpfold-{uuid.uuid4().hex[:8]}")
     proxy_addr = _addr("px")

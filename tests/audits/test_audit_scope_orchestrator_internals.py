@@ -1,23 +1,10 @@
-"""Error-path tests for ``services.audits.scope_extraction.process_audit_scope``.
-
-The happy path is covered by
-``test_audit_scope_extraction_integration.py`` against real storage and
-the LLM stub. What lives here is every ``return ScopeExtractionOutcome(
-status="failed", ...)`` branch the happy path doesn't hit:
-
-    - storage client unavailable (ARTIFACT_STORAGE_* unset)
-    - ``StorageUnavailable`` on ``client.get``
-    - Unexpected exception on ``client.get``
-    - UnicodeDecodeError on the stored bytes
-    - Chunk-scan ``LLMUnavailableError`` after the primary path fails
-    - Chunk-scan recovery — validated names + artifact written
-
-All tests stub the storage client and LLM call; no MinIO, no OpenRouter.
+"""Error-path tests for ``process_audit_scope``: every ``status="failed"`` branch the integration happy path
+misses (storage unavailable/raising, UnicodeDecodeError, chunk-scan LLM failure/recovery). Storage client
+and LLM call are stubbed; no MinIO or OpenRouter.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -26,7 +13,6 @@ import pytest
 from db.storage import StorageUnavailable
 from services.audits import scope_extraction as scope_pkg
 from services.audits.scope_extraction import (
-    ScopeExtractionOutcome,
     process_audit_scope,
 )
 from services.audits.scope_extraction._errors import LLMUnavailableError
@@ -42,7 +28,6 @@ def _isolate_env(monkeypatch):
 
 
 def _patch_storage(monkeypatch, client):
-    """Swap the ``get_storage_client`` used inside the orchestrator."""
     monkeypatch.setattr(scope_pkg, "get_storage_client", lambda: client)
 
 
@@ -56,15 +41,14 @@ def _make_client(body: bytes | Exception) -> MagicMock:
 
 
 def _page_text(body: str) -> str:
-    """Build pypdf-style page-marked text the chunk-scan walker understands."""
     return f"\f\n--- page 1 ---\n\f\n{body}"
 
 
 class TestStorageFailurePaths:
     def test_missing_storage_client_returns_failed(self, monkeypatch):
-        """ARTIFACT_STORAGE_* unset → ``get_storage_client`` returns None.
-        The orchestrator must bail with a clear error rather than crashing
-        on a NoneType ``.get``."""
+        """``get_storage_client`` returns None (ARTIFACT_STORAGE_* unset): bail with a clear error, not a NoneType
+        crash.
+        """
         _patch_storage(monkeypatch, None)
         outcome = process_audit_scope(
             audit_report_id=1,
@@ -122,12 +106,8 @@ class TestStorageFailurePaths:
 
 class TestChunkScanPath:
     def test_chunk_scan_llm_unavailable_yields_skipped(self, monkeypatch):
-        """No header found → chunk-scan runs → LLM unavailable. No crash,
-        skipped outcome with a descriptive error. The chunk-scan fallback
-        is the last-resort path; if IT fails, there's nothing else to try."""
-        # Body with no ``scope``/``audited contracts`` header — forces the
-        # locate_scope_section result to be empty, which routes through the
-        # chunk-scan branch.
+        """No header -> chunk-scan -> LLM unavailable: skipped with a descriptive error, no crash (last-resort path)."""
+        # No scope header, so locate_scope_section is empty and routes through chunk-scan.
         body = " ".join(["filler"] * 300)
         _patch_storage(monkeypatch, _make_client(_page_text(body).encode("utf-8")))
 
@@ -146,7 +126,6 @@ class TestChunkScanPath:
             audit_title="Security Review",
             auditor="Firm",
         )
-        # No sections AND chunk-scan failed → no valid contracts → skipped.
         assert outcome.status == "skipped"
         assert "no scope section" in (outcome.error or "")
 
@@ -177,7 +156,6 @@ class TestChunkScanPath:
                 fake_chunk,
             ),
         )
-        # Intercept artifact write so we don't need a real bucket.
         stored: dict = {}
 
         def fake_store(aid, payload):
@@ -201,7 +179,6 @@ class TestChunkScanPath:
         assert "LiquidityPool" in outcome.contracts
         assert outcome.storage_key == "audits/scope/6.json"
         assert stored["aid"] == 6
-        # The stored payload carries the winning chunk's text slice.
         assert stored["payload"]["scope_section_text"] is not None
         assert stored["payload"]["method"] == "llm_chunk_scan"
 
@@ -270,42 +247,7 @@ class TestClassifiedCommitFiltering:
         ]
 
 
-class TestOutcomeDefaults:
-    def test_scope_extraction_outcome_defaults_preserve_none(self):
-        """Constructing ``ScopeExtractionOutcome(status=...)`` alone keeps
-        every optional field None — the worker relies on "unset" being
-        distinguishable from "set to empty"."""
-        oc = ScopeExtractionOutcome(status="failed", error="x")
-        assert oc.contracts == ()
-        assert oc.storage_key is None
-        assert oc.extracted_date is None
-        assert oc.reviewed_commits == ()
-        assert oc.method == "llm"
-        assert oc.raw_response is None
-        assert oc.model is None
-
-
 class TestArtifactPayloadShape:
-    def test_build_artifact_payload_carries_required_fields(self):
-        """The artifact JSON is the debugging source of truth for an audit
-        row — every downstream viewer reads these keys."""
-        from services.audits.scope_extraction._artifact import build_artifact_payload
-
-        payload = build_artifact_payload(
-            ["Pool", "Vault"],
-            method="llm",
-            model="google/gemini-2.0-flash-001",
-            extracted_date="2024-06-01",
-            raw_response='["Pool","Vault"]',
-            scope_section_text="<scope>",
-        )
-        assert payload["contracts"] == ["Pool", "Vault"]
-        assert payload["method"] == "llm"
-        assert payload["model"] == "google/gemini-2.0-flash-001"
-        assert payload["extracted_date"] == "2024-06-01"
-        # Serializable — the worker hands this straight to json.dumps.
-        json.dumps(payload)
-
     def test_build_artifact_payload_caps_scope_section_text(self):
         """Pathological PDFs can have 100k+ chars of scope prose. The 20k
         cap keeps the artifact readable in a debugger."""

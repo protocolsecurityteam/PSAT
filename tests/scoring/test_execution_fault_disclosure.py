@@ -1,17 +1,13 @@
 """A transport fault must be LOUD in the document it moved.
 
-The composition rule's ``withheld`` arm fires on the four reasons in
-``EX.FAULT_REASONS`` BEFORE the authority-deletability join is consulted, so a
-document folded while the artifact store cannot answer publishes fewer composed
-figures than the same database state otherwise yields — measured on the
-reference corpus, a total fault takes lambda from 73.2508 to 84.0166. Undisclosed
-that is indistinguishable from a code regression, so these cases pin the
-disclosure itself: the census, the counts it reads off the rows, and its
-absence where the fold walked every record and found none.
+The composition rule's ``withheld`` arm fires on the four ``EX.FAULT_REASONS``
+BEFORE the deletability join, so a document folded while the artifact store
+cannot answer publishes fewer composed figures than the same DB state otherwise
+yields (reference corpus, total fault: lambda 73.2508 -> 84.0166). Undisclosed,
+that looks like a code regression; these cases pin the disclosure itself.
 
-The arms themselves live in ``tests/scoring/test_three_arm_composition.py`` and the
-record's own shape in ``tests/scoring/test_execution_record.py``; nothing here re-tests
-either.
+Arms: ``tests/scoring/test_three_arm_composition.py``; record shape:
+``tests/scoring/test_execution_record.py``. Neither is re-tested here.
 """
 
 from __future__ import annotations
@@ -37,7 +33,6 @@ _WARNING = "execution_evidence_unreadable"
 
 
 def _faulted_signals(reason: str = EX.REASON_FETCH_FAILED) -> list[Any]:
-    """The composing case with the destination's execution unreadable."""
     signals = _composing_signals()
     destination = signals[-1]
     payload = Tri.proven(
@@ -49,7 +44,6 @@ def _faulted_signals(reason: str = EX.REASON_FETCH_FAILED) -> list[Any]:
 
 
 def _carrier(reason: str | None, entity: str = KEY_V) -> dict[str, Any]:
-    """One published entry in the shape the fold emits, at the given reason."""
     return {
         "entity": entity,
         EX.PROVING_EXECUTION_KEY: EX.not_determined(reason or EX.REASON_NOT_PERSISTED).as_json(),
@@ -82,8 +76,6 @@ def _fault_warnings(document: Any) -> list[dict[str, Any]]:
 
 
 def test_a_faulted_execution_is_announced_at_the_documents_top_level(fold):
-    """A reader must not have to open forty execution blocks to learn the grade
-    was computed over evidence that could not be read."""
     document = CA.composed_document(fold, signals=_faulted_signals(), deletability=CA.deletability_plane())
 
     census = document.execution_evidence_faults
@@ -104,8 +96,6 @@ def test_a_faulted_execution_is_announced_at_the_documents_top_level(fold):
 
 
 def test_the_warning_names_the_count_and_every_distinct_reason(fold):
-    """The warnings list is the loud channel, and a reader scanning it must get
-    the number, the reasons and the comparison ban without following a link."""
     document = CA.composed_document(fold, signals=_faulted_signals(), deletability=CA.deletability_plane())
 
     warning = _fault_warnings(document)[0]
@@ -139,8 +129,7 @@ def test_the_grade_stays_computed_and_the_marker_is_not_a_grade_state(fold):
 
 @pytest.mark.parametrize("faulted", [1, 2, 5])
 def test_the_published_count_follows_the_number_of_faulted_records(faulted: int) -> None:
-    """Mutating how many records carry a fault moves the published number — a
-    census that only proved its branch fired would pass at any count."""
+    """A census that only proved its branch fired would pass at any count."""
     findings = [_row(*(_carrier(EX.REASON_FETCH_FAILED) for _ in range(faulted)))]
     census = FOLD._execution_fault_census(findings, [])
 
@@ -151,8 +140,8 @@ def test_the_published_count_follows_the_number_of_faulted_records(faulted: int)
 
 
 def test_each_distinct_reason_keeps_its_own_count() -> None:
-    """A transcript that was never stored and a fetch that did not return are
-    different facts, and bucketing them would hide which one is happening."""
+    """A transcript never stored and a fetch that did not return are different
+    facts; bucketing them would hide which is happening."""
     findings = [
         _row(
             _carrier(EX.REASON_FETCH_FAILED),
@@ -168,9 +157,8 @@ def test_each_distinct_reason_keeps_its_own_count() -> None:
 
 
 def test_both_populations_are_walked_and_counted_apart() -> None:
-    """Subsumed rows carry execution blocks too, and a census that read only the
-    findings would report a fault-free document while a third of the records
-    could not be read."""
+    """Subsumed rows carry execution blocks too; reading only findings would
+    report a fault-free document while a third of the records were unreadable."""
     census = FOLD._execution_fault_census(
         [_row(_carrier(EX.REASON_FETCH_FAILED))],
         [_row(_carrier(EX.REASON_STORAGE_KEY_MISSING), _carrier(EX.REASON_STORAGE_KEY_MISSING))],
@@ -193,8 +181,6 @@ def test_a_reason_outside_the_fault_set_is_examined_and_never_counted() -> None:
 
 
 def test_the_denominator_counts_every_record_the_walk_saw() -> None:
-    """One unreadable block in forty and forty in forty are different situations,
-    and the census must not publish a numerator alone."""
     findings = [_row(_carrier(EX.REASON_FETCH_FAILED), _carrier(EX.REASON_NOT_PERSISTED))]
     census = FOLD._execution_fault_census(findings, [_row(_carrier(EX.REASON_NOT_PERSISTED))])
 
@@ -209,8 +195,7 @@ def test_the_denominator_counts_every_record_the_walk_saw() -> None:
 
 
 def test_a_fault_free_document_publishes_no_field_and_no_warning(fold):
-    """The byte-identity invariant, as a test rather than as a diff somebody ran
-    once: a fold that found no fault adds NOTHING to the document."""
+    """The byte-identity invariant: a fold that found no fault adds NOTHING to the document."""
     document = CA.composed_document(fold, deletability=CA.deletability_plane())
 
     assert _published_fault_count(document) == 0

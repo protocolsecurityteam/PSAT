@@ -1,19 +1,12 @@
 """PoC regression pins for the Veda RolesAuthority cold-start race.
 
-When a Solmate ``requiresAuth`` function is resolved *before* its authority's role
-events are durably indexed, ``SolmateRolesAuthorityAdapter`` fails closed to
-``external_check_only`` tagged ``check.extra.deferred_pending_index`` — the marker
-``deferred_reconciler`` keys on to re-resolve the function exactly once the index
-catches up. The bug these tests pin: the ``external_set`` branch of the predicate
-evaluator overwrote that tagged deferral with the inline cross-contract probe /
-event-candidate materializer (a non-self-healing heuristic), dropping the marker. The
-cold result then stuck forever — every Veda Teller/Accountant admin gate surfaced as a
-``lower_bound`` live probe or a role-less ``external_check_only`` (→ OR, 0 principals)
-and never converged even after the authority backfilled.
-
-These drive the REAL adapter registry + REAL predicate evaluator + REAL reconciler
-walker; only the event-log backend (the Postgres "wire") is replaced with an in-memory
-cold/warm stub. No DB required, so they run in the offline suite.
+When a Solmate ``requiresAuth`` function resolves *before* its authority's role events are
+indexed, ``SolmateRolesAuthorityAdapter`` fails closed to ``external_check_only`` tagged
+``check.extra.deferred_pending_index`` (the marker ``deferred_reconciler`` re-resolves on).
+The bug: the predicate evaluator's ``external_set`` branch overwrote that deferral with the
+inline probe / event-candidate materializer, dropping the marker, so the cold result stuck
+forever. Real adapter registry, evaluator and reconciler walker; only the event-log
+backend is an in-memory cold/warm stub (no DB).
 """
 
 from __future__ import annotations
@@ -50,10 +43,8 @@ class _Row:
 
 
 class _ColdRepo:
-    """The authority's role events are NOT backfilled yet: no rows, no cursor. This is the
-    state the first contract to reference a fresh RolesAuthority sees (resolution runs
-    during the job; the index is populated after). The adapter must defer, not assert an
-    empty/under-confident set."""
+    """No rows, no cursor: the state the first contract to reference a fresh RolesAuthority
+    sees. The adapter must defer, not assert an empty/under-confident set."""
 
     def iter_event_rows(self, *, chain_id, event_address, topic0s, block=None):
         return []
@@ -63,9 +54,8 @@ class _ColdRepo:
 
 
 class _WarmEmptyRepo:
-    """Backfilled to head (cursor complete) but no role enables the (target, selector)
-    under test — the genuine ``nobody`` answer. Used to prove the fix doesn't strand a
-    real warm resolution as a deferral."""
+    """Backfilled to head but no role enables the (target, selector): the genuine ``nobody``
+    answer, proving the fix doesn't strand a real warm resolution as a deferral."""
 
     def __init__(self) -> None:
         user_role_topic = _ROLE_TOPICS[2]
@@ -84,12 +74,9 @@ class _WarmEmptyRepo:
 
 
 class _PartialColdRepo:
-    """Sub-state B of the cold-start race: SOME matching role rows are already indexed (so a
-    fold finds members) but the authority's cursor is NOT yet ``backfill_complete``
-    (``min_indexed_block`` is ``None``). The partial fold is not trustworthy as a final
-    answer — more grants may be in the un-indexed tail — and, crucially, a bare
-    ``lower_bound`` set here carries no self-heal marker, so it would freeze and never
-    converge to the exact set once backfill completes. The adapter must DEFER instead."""
+    """Sub-state B: SOME role rows are indexed but the cursor is not ``backfill_complete``.
+    The partial fold may miss un-indexed grants and a bare ``lower_bound`` carries no
+    self-heal marker, so it would freeze. The adapter must DEFER."""
 
     def __init__(self, target: str, selector: str, holder: str) -> None:
         role_cap, _pub, user_role = _ROLE_TOPICS
@@ -111,9 +98,6 @@ class _PartialColdRepo:
 
 
 class _BytecodeStub:
-    """Confirms the authority is a Solmate RolesAuthority so ``matches()`` scores it at
-    full confidence without touching the network."""
-
     def has_selector(self, *, chain_id, contract_address, selector):
         return True
 
@@ -168,11 +152,8 @@ def test_cold_index_canCall_deferral_persists_marker(fixture):
 
 
 def test_cold_index_gate_is_a_deferred_external_check_not_a_populated_set(fixture):
-    # Post-fix shape pin: the cold gate must surface as a DEFERRED external_check_only (the
-    # marker present), and it must mint ZERO concrete members. The deferred-marker assertion
-    # is the load-bearing, fix-dependent half — pre-fix the inline/materializer overwrite
-    # emits a plain external_check with no marker, so this fails. The no-members assertion is
-    # the no-phantom/no-under-confident-set guard alongside it.
+    # The deferred marker is the load-bearing, fix-dependent half (pre-fix the overwrite
+    # emits a plain external_check); no members guards against phantom sets.
     cap = evaluate_tree_with_registry(_deny_all_tree(fixture), _registry(), _ctx(_ColdRepo(), fixture))
     cap_dict = capability_to_dict(cap)
 
@@ -193,8 +174,6 @@ def test_cold_index_gate_is_a_deferred_external_check_not_a_populated_set(fixtur
 
 
 def test_warm_resolution_does_not_spuriously_defer(fixture):
-    # Guardrail: a warm authority with no matching role resolves to the exact `nobody`
-    # set, NOT a deferral — the fix must only change the cold path.
     cap = evaluate_tree_with_registry(_deny_all_tree(fixture), _registry(), _ctx(_WarmEmptyRepo(), fixture))
     cap_dict = capability_to_dict(cap)
 
@@ -204,12 +183,8 @@ def test_warm_resolution_does_not_spuriously_defer(fixture):
 
 
 def test_partial_cold_index_defers_instead_of_freezing_lower_bound(fixture):
-    # Sub-state B: matching role rows are already indexed but the cursor is not yet
-    # backfill_complete. The adapter must DEFER (a marked external_check_only that
-    # deferred_reconciler re-resolves to the exact set once warm), NOT freeze the partial
-    # fold as a markerless `lower_bound` finite_set that can never converge. Without the
-    # adapter fix this returns `finite_set([holder], lower_bound)` — no marker, never
-    # self-heals — so both assertions below fail.
+    # Sub-state B: without the adapter fix this returns a markerless
+    # `finite_set([holder], lower_bound)` that never self-heals, so both assertions fail.
     holder = "0x" + "cd" * 20
     selector = _sel("denyAll(address)")
     repo = _PartialColdRepo(fixture["teller_address"].lower(), selector, holder)

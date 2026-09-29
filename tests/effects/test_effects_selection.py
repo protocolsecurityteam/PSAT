@@ -1,16 +1,12 @@
 """Tests for services.effects.selection — the candidate cascade + value-at-stake ordering.
 
-Synthetic fixtures drive the always-run assertions (cascade correctness,
-transitive-vs-direct ordering, dropped-work logging). One optional test
-reproduces the real-protocol funnel against the dev ``psat`` DB when present and
-skips cleanly otherwise, so CI (which starts from a fresh empty DB) never
-depends on dev data.
+Synthetic fixtures drive the always-run assertions. One optional test reproduces the real-protocol
+funnel against the dev ``psat`` DB and skips when absent, so CI (fresh empty DB) never depends on dev data.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -69,12 +65,11 @@ def _token_balance(
     *,
     fetch: Any = None,
 ) -> None:
-    """One ``contract_balances`` row. ``usd=None`` is the UNPRICED shape (the producer
-    writes ``price_usd = 0`` and leaves ``usd_value`` NULL on 1001 of 1376 local rows).
+    """One ``contract_balances`` row. ``usd=None`` is the UNPRICED shape (``price_usd = 0``,
+    ``usd_value`` NULL on 1001 of 1376 local rows).
 
-    ``fetch`` links the row to a recorded read. Left off, the row is the LEGACY shape
-    (``fetch_id IS NULL``) that predates the fetch-provenance plane and carries no
-    status and no observed address of its own."""
+    ``fetch`` links the row to a recorded read; left off it is the LEGACY shape (``fetch_id IS NULL``)
+    with no status and no observed address of its own."""
     session.add(
         ContractBalance(
             contract_id=contract_id,
@@ -114,15 +109,10 @@ def _edge(
 def test_cascade_filters_sink_claim_and_public(db_session):
     """Proven-inert dropped; claim-present dropped; public dropped; blank-gated kept.
 
-    The blank predicate MUST key on ``claims``, not ``effect_labels``: a row
-    with a populated ``effect_labels`` but empty ``claims`` is still blank and
-    must survive.
-
-    Filter (a) reads the mutability evidence plane, so "dropped for having nothing to
-    simulate" now requires the writer to have LOOKED: a compiler-typed view with
-    ``state_writes = []`` and ``sinks = []``. The two arms this test used to pin —
-    ``effect_targets`` NULL and ``[]`` with no evidence written at all — are
-    INVERTED below (``unmeasured``): they are not-determined and are kept.
+    The blank predicate MUST key on ``claims``, not ``effect_labels``: populated labels with empty
+    claims is still blank. Filter (a) needs the writer to have LOOKED (a compiler-typed view with
+    ``state_writes = []`` and ``sinks = []``); rows with no evidence written are ``unmeasured``,
+    not-determined, and KEPT (inverted below).
     """
     p = _protocol(db_session, "cascade-proto")
     c = _contract(db_session, p.id, ADDR(0x1000))
@@ -150,9 +140,7 @@ def test_cascade_filters_sink_claim_and_public(db_session):
         sinks=[],
         writer_selectors=[],
     )
-    # (a) INVERTED: the evidence plane was never written for this row (every row
-    # predating the mutability columns) -> not determined -> KEPT. This row used to be
-    # dropped for the absence of a display field.
+    # (a) INVERTED: evidence plane never written (every row predating the mutability columns) -> not determined -> KEPT.
     unmeasured = _fn(db_session, c.id, name="view2", selector="0xaaaa0003", effect_targets=[])
     # (b) confident claim present -> dropped
     claimed = _fn(
@@ -189,22 +177,17 @@ def test_cascade_filters_sink_claim_and_public(db_session):
 
 
 def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
-    """The input-shape → candidacy table of ``_has_effect_evidence``, row by row.
+    """The input-shape -> candidacy table of ``_has_effect_evidence``, row by row.
 
-    Filter (a) used to read ``effect_targets``, a DISPLAY field concatenating
-    state-write variable names with dotted external-call heads: 501 of its 1,642
-    populated rows carry only call heads, so a populated value asserted a write
-    nothing had proven, and an empty one dropped the function on an absence of
-    measurement. Each arm below is a shape that decision got wrong, or must keep
-    getting right.
+    Filter (a) used to read ``effect_targets``, a DISPLAY field: 501 of 1,642 populated rows carry
+    only call heads, so a populated value asserted a write nothing proved and an empty one dropped
+    the function on an absence of measurement.
 
-    One arm per DISJUNCT, not one per narrative: the predicate is an ``or_`` of
-    six, and an arm only pins the disjunct that is the SOLE admitter of its shape.
-    The two ``_evidence_proven_present`` disjuncts are why ``sink_only_view`` and
-    ``write_only_view`` exist below — every other arm here is admitted by
-    ``state_changing IS TRUE`` or by not-determined, so with the sink/write ground
-    deleted this test would still pass and the projected plane would silently lose
-    116 filter-(a) rows and one gated candidate.
+    One arm per DISJUNCT: the predicate is an ``or_`` of six and an arm pins only the disjunct that is
+    the SOLE admitter of its shape. The two ``_evidence_proven_present`` disjuncts are why
+    ``sink_only_view`` and ``write_only_view`` exist; every other arm is admitted by
+    ``state_changing IS TRUE`` or not-determined, so deleting the sink/write ground would still pass
+    and silently lose 116 filter-(a) rows and one gated candidate.
     """
     p = _protocol(db_session, "evidence-plane")
     c = _contract(db_session, p.id, ADDR(0x1100))
@@ -222,12 +205,9 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         state_writes=sw,
         sinks=[{"kind": "state_write", "target": "balanceOf", "origin": "guard"}],
     )
-    # The 156-function class as it MEASURES on the projected plane: gated,
-    # populated ``effect_targets``, not one proven state write, and
-    # ``state_changing = TRUE`` (147 of the 156; 8 are NULL, 1 is FALSE). It keeps
-    # its candidate slot, and the disjunct that keeps it is the ABI-mutability one
-    # — NOT the sink evidence. This arm therefore pins nothing about sinks; see
-    # ``sink_only_view`` for the 1-of-156 shape that does.
+    # The 156-function class as it MEASURES on the projected plane: gated, populated
+    # ``effect_targets``, no proven write, ``state_changing = TRUE`` (147 of 156). Kept by the
+    # ABI-mutability disjunct, NOT sink evidence; see ``sink_only_view`` for the shape that pins sinks.
     external_call_only = _fn(
         db_session,
         c.id,
@@ -252,17 +232,11 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         sinks=[],
         writer_selectors=[],
     )
-    # SOLE PIN for ``_evidence_proven_present(sinks)``. A compiler-typed view with
-    # a PROVEN ``external_call`` sink and a proven-empty write list: every other
-    # disjunct votes no (``state_changing`` is FALSE, both lists are arrays), so
-    # only the sink ground admits it. Modelled on a real row —
-    # ``shouldSubmitReport(address)`` (function_id 2344 locally, gated, one
-    # ``etherFiAdmin.lastHandledReportRefSlot`` call) — and that row is the ONE
-    # candidate the projected plane loses if this ground is deleted, out of 116
-    # filter-(a) rows of this exact shape (the other 115 are public and (c) drops
-    # them). Deleting it would mean "the compiler says no write, therefore there is
-    # nothing to observe", and a gated view whose answer moves protocol money is
-    # exactly the claim a probe falsifies.
+    # SOLE PIN for ``_evidence_proven_present(sinks)``: a PROVEN ``external_call`` sink and a
+    # proven-empty write list; every other disjunct votes no. Modelled on ``shouldSubmitReport(address)``
+    # (function_id 2344 locally), the ONE candidate lost if this ground is deleted out of 116
+    # filter-(a) rows of this shape. Deleting it would read "compiler says no write" as "nothing to
+    # observe", exactly the claim a probe falsifies for a gated view that moves protocol money.
     sink_only_view = _fn(
         db_session,
         c.id,
@@ -274,17 +248,11 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         sinks=[{"kind": "external_call", "target": "etherFiAdmin.lastHandledReportRefSlot", "origin": "body"}],
         writer_selectors=[],
     )
-    # SOLE PIN for ``_evidence_proven_present(state_writes)``: a proven write
-    # beside a ``view`` ABI flag. Zero realised rows on the local slice and no
-    # producer path through ``_mutability_fields`` today, because the
-    # view-contradiction rule nulls exactly this shape (state_changing FALSE +
-    # non-empty writes -> writes, sinks and selectors all withheld), which is why
-    # the ``withheld`` arm below is what the plane actually carries. Kept anyway,
-    # and asserted ADMITTED: the reachable writers that bypass that rule are
-    # ``db/effect_cache.py`` and hand backfills, and a proven
-    # write is proven whatever a second witness says — the disagreement is the
-    # reason to probe, never the reason to drop. Honest lower bound, not a
-    # firing proof.
+    # SOLE PIN for ``_evidence_proven_present(state_writes)``: a proven write beside a ``view`` ABI
+    # flag. No realised rows and no producer path today (the view-contradiction rule nulls this shape,
+    # so the ``withheld`` arm below is what the plane carries), but writers that bypass it exist
+    # (``db/effect_cache.py``, hand backfills) and a proven write is proven whatever a second witness
+    # says: disagreement is the reason to probe, never to drop. Honest lower bound, not a firing proof.
     write_only_view = _fn(
         db_session,
         c.id,
@@ -296,14 +264,10 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
         sinks=[],
         writer_selectors=[],
     )
-    # SOLE PIN for ``state_changing IS NULL``. The fallback/receive shape:
-    # ``_mutability_fields`` withholds the ABI flag to NULL for unselectored
-    # entry points (no selector is not a proof of purity — WETH9's fallback()
-    # writes balanceOf) while both evidence lists are proven-empty arrays — so
-    # every other disjunct votes no and only the withheld-mutability ground
-    # admits it. Deleting that disjunct reads "the ABI question was never
-    # answered" as "proven inert", the exact collapse this filter exists to
-    # prevent.
+    # SOLE PIN for ``state_changing IS NULL``: ``_mutability_fields`` withholds the ABI flag for
+    # unselectored entry points (WETH9's fallback() writes balanceOf) while both evidence lists are
+    # proven-empty, so only the withheld-mutability ground admits it. Deleting it reads "ABI question
+    # never answered" as "proven inert".
     mutability_withheld = _fn(
         db_session,
         c.id,
@@ -371,16 +335,12 @@ def test_filter_a_keeps_the_three_evidence_states_apart(db_session):
 
 
 def test_filter_a_is_total_over_every_persisted_jsonb_shape(db_session):
-    """A non-array in ``state_writes`` / ``sinks`` reads as not-determined, and
-    cannot abort the query.
+    """A non-array in ``state_writes`` / ``sinks`` reads as not-determined and cannot abort the query.
 
-    ``jsonb_array_length`` RAISES on a scalar, and one such row would kill
-    candidate selection for the whole protocol — the same trap
-    ``_carries_public_admission_claim`` documents. Both shapes are reachable
-    today: the jsonb scalar ``null`` from any writer that bypasses
-    ``none_as_null`` (``db/effect_cache.py:462`` is a live instance of that class),
-    and a malformed payload from a hand-written backfill. Neither is
-    evidence of emptiness, so both must ADMIT rather than raise or drop.
+    ``jsonb_array_length`` RAISES on a scalar, and one such row would kill candidate selection for
+    the whole protocol. Both shapes are reachable: the jsonb scalar ``null`` from writers bypassing
+    ``none_as_null`` (``db/effect_cache.py:462``) and malformed hand-written backfills. Neither is
+    evidence of emptiness, so both must ADMIT.
     """
     p = _protocol(db_session, "jsonb-shapes")
     c = _contract(db_session, p.id, ADDR(0x1200))
@@ -410,11 +370,8 @@ def test_filter_a_is_total_over_every_persisted_jsonb_shape(db_session):
     ).scalar_one()
     assert admitted == 2
 
-    # The length guard is asserted on its OWN, not through the ``and_`` in
-    # ``_evidence_proven_present``: SQL does not promise to short-circuit an AND,
-    # so a cascade that only passes because the planner happened to evaluate the
-    # cheap ``jsonb_typeof`` test first is not a proof of totality. Unguarded,
-    # this SELECT raises ``cannot get array length of a scalar``.
+    # The length guard is asserted on its OWN, not via the ``and_`` in ``_evidence_proven_present``:
+    # SQL doesn't promise to short-circuit an AND. Unguarded, this raises ``cannot get array length of a scalar``.
     lengths = db_session.execute(
         select(
             EffectiveFunction.id,
@@ -428,17 +385,12 @@ def test_filter_a_is_total_over_every_persisted_jsonb_shape(db_session):
 
 
 def test_a_public_payout_or_mint_is_admitted_to_the_candidate_set(db_session):
-    """The narrow-open, at the seam that actually decides it.
+    """The narrow-open, at the seam that decides it.
 
-    ``authority_public = false`` used to be an unconditional filter, on the
-    reasoning that a public function has no principal to resolve. That is true of
-    the PRINCIPAL and false of the EFFECT: a permissionless payout or mint is the
-    shape where "anyone can call this" IS the finding. Such a function is probed
-    from an arbitrary non-zero identity, which is valid precisely because no gate
-    has to be satisfied.
-
-    Public functions that merely take money IN, or that route it through another
-    contract, stay out: probing them corroborates nothing and spends fork budget.
+    ``authority_public = false`` was an unconditional filter (a public function has no principal to
+    resolve), but a permissionless payout or mint is where "anyone can call this" IS the finding, so
+    it is probed from an arbitrary non-zero identity. Public functions that only take money IN, or
+    route it through another contract, stay out (probing corroborates nothing and spends fork budget).
     """
     p = _protocol(db_session, "public-admission-proto")
     c = _contract(db_session, p.id, ADDR(0x7000))
@@ -483,10 +435,8 @@ def test_a_public_payout_or_mint_is_admitted_to_the_candidate_set(db_session):
 
 
 def test_the_public_admission_predicate_survives_every_claims_shape(db_session):
-    """``claims`` is not always an array. ``_enrolled_families`` documents that
-    SQL NULL, ``[]`` and JSON-``null`` all occur and all read as blank — and a
-    set-returning ``jsonb_array_elements`` raises "cannot extract elements from a
-    scalar" on the last of those. One such row would abort candidate selection for
+    """``claims`` is not always an array (SQL NULL, ``[]`` and JSON-``null`` all occur and read as
+    blank), and ``jsonb_array_elements`` raises on a scalar. One such row would abort selection for
     the WHOLE protocol, so the predicate has to be total over the column."""
     p = _protocol(db_session, "claims-shape-proto")
     c = _contract(db_session, p.id, ADDR(0x7200))
@@ -518,10 +468,8 @@ def test_the_public_admission_predicate_survives_every_claims_shape(db_session):
 
 
 def test_a_public_payout_reaches_a_synthesized_probe(db_session):
-    """The claim that matters is not "the filter admits the row" but "a public
-    value-mover gets probed". Asserted end to end across the two seams, because a
-    previous fix satisfied the synthesizer alone and was dead code: selection
-    never handed it a public candidate to act on."""
+    """A public value-mover must actually get probed. Asserted across both seams because an earlier
+    fix satisfied the synthesizer alone and was dead code: selection never handed it a public candidate."""
     from services.effects.calldata import NEUTRAL_CALLER, FunctionFacts, synthesize_value_out
 
     p = _protocol(db_session, "public-probe-proto")
@@ -611,20 +559,14 @@ def test_gate_lift_enrolls_flow_and_supply_claims_scoped(db_session):
 def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session):
     """A zero-weight FACT must never remove a function from evidence-gathering.
 
-    ``rate_limit.consume`` records a fact at zero severity weight and
-    ``delegatecall.execute`` names where foreign code comes from — neither
-    EXPLAINS the function's value/supply behaviour, so neither may flip a blank
-    row from ``None`` (full synthesis) to the empty frozenset (dropped as
-    "already explained").
+    ``rate_limit.consume`` and ``delegatecall.execute`` don't EXPLAIN a function's value/supply
+    behaviour, so neither may flip a blank row from ``None`` (full synthesis) to the empty
+    frozenset (dropped as "already explained").
 
-    This pins the 13 measured local-DB rows that would silently leave the
-    candidate set the moment the claims plane mints the new ids (all gated,
-    ``effect_targets`` non-empty, zero other claims — i.e. exactly the
-    ``rate_only`` shape below): LRTSquaredAdmin.depositToStrategy 0xaf76d4bd
-    (delegatecall.execute) and the 12 EtherFiNodesManager rate-limited rows —
-    queueETHWithdrawal 0x03f49be8/0xc3a9e20e, queueWithdrawals
-    0x0031e778/0xeea43aba, requestConsolidation 0x6691954e,
-    requestExecutionLayerTriggeredWithdrawal 0xc390d8f5 among them.
+    Pins the 13 measured local-DB rows that would silently leave the candidate set once the claims
+    plane mints these ids (all gated, non-empty ``effect_targets``, no other claims, the
+    ``rate_only`` shape below): LRTSquaredAdmin.depositToStrategy 0xaf76d4bd and 12 EtherFiNodesManager
+    rate-limited rows.
     """
     p = _protocol(db_session, "fact-transparency-proto")
     c = _contract(db_session, p.id, ADDR(0x7300))
@@ -656,9 +598,8 @@ def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session
             {"claim_id": "delegatecall.execute", "tier": "idiom_structural"},
         ],
     )
-    # Transparency must not LAUNDER either: alongside a flow claim the family
-    # scoping still applies, and alongside an explanatory claim the row is
-    # still explained and dropped.
+    # Transparency must not LAUNDER: alongside a flow claim the family scoping still applies;
+    # alongside an explanatory claim the row is still dropped.
     fact_and_flow = _fn(
         db_session,
         c.id,
@@ -693,9 +634,8 @@ def test_a_fact_claim_never_removes_a_function_from_the_candidate_set(db_session
 
 
 def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
-    """Candidates carry the protocol's witnessed value-holder set (positive
-    on-chain balances) and the acting deployment's own balance floor — the inputs
-    the fork value-reach probe measures against."""
+    """Candidates carry the protocol's witnessed value-holder set (positive balances) and the acting
+    deployment's own balance floor, the inputs the fork value-reach probe measures against."""
     p = _protocol(db_session, "reach-inputs-proto")
     acting = _contract(db_session, p.id, ADDR(0x9001))
     lp = _contract(db_session, p.id, ADDR(0x9002))
@@ -714,9 +654,8 @@ def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
     native = NATIVE_ASSET_LOG_EMITTER
     assert holders[(ADDR(0x9001).lower(), native)] == pytest.approx(221_000_000.0)
     assert holders[(ADDR(0x9002).lower(), native)] == pytest.approx(55_200_000.0)
-    # A holding priced at exactly ZERO is KEPT, where the old per-holder set dropped
-    # it: a measured zero is evidence, and dropping it made "this holder moved an
-    # asset worth nothing" indistinguishable from "this holder moved nothing".
+    # A holding priced at exactly ZERO is KEPT (the old per-holder set dropped it): a measured zero is
+    # evidence, and dropping it made "moved an asset worth nothing" look like "moved nothing".
     assert holders[(ADDR(0x9003).lower(), native)] == pytest.approx(0.0)
     # Acting floor is this deployment's own balance.
     assert cand.acting_balance_usd == pytest.approx(221_000_000.0)
@@ -724,11 +663,9 @@ def test_candidate_carries_witnessed_value_holders_and_acting_floor(db_session):
 
 @requires_postgres
 def test_the_tvl_ceiling_reads_defillama_tvl_and_never_total_usd(db_session):
-    """The reach ceiling's input. ``tvl_snapshots.total_usd`` and ``contract_breakdown``
-    are NULL on EVERY row of this table locally, so a ceiling written against them
-    could never fire — a dead sentinel. Reading ``defillama_tvl`` is the whole
-    point, and a row that has only ``total_usd`` must read as NO ceiling (skipped),
-    not as a ceiling of zero or of that number."""
+    """The reach ceiling's input. ``tvl_snapshots.total_usd`` and ``contract_breakdown`` are NULL on
+    EVERY local row, so a ceiling built on them is a dead sentinel; ``defillama_tvl`` is the point.
+    A row with only ``total_usd`` must read as NO ceiling (skipped), not zero or that number."""
     from datetime import datetime, timedelta, timezone
 
     from db.models import TvlSnapshot
@@ -758,18 +695,12 @@ def test_the_tvl_ceiling_reads_defillama_tvl_and_never_total_usd(db_session):
 def test_holdings_the_fetch_recorded_at_the_page_cap_are_marked_incomplete(db_session):
     """The witness is the FETCH's ``asset_set_status``, and nothing else.
 
-    An at-cap holder is marked ``at_page_cap`` so the reach probe names it as the
-    reason an asset could not be valued instead of quietly skipping it.
-
-    THE LENGTH ARM IS GONE (§9.5-addendum B.1). The fetch now pages the endpoint to
-    exhaustion, so a stored list longer than ``TOKEN_BALANCE_PAGE_SIZE`` is a routine
-    COMPLETE list; comparing a count to the cap announced every large sheet as
-    possibly incomplete. ``not_determined`` is still the below-cap answer — there is
-    no ``complete`` state — but the long holder here reaches it on the merits.
-
-    ARMED POPULATION, honestly: ``at_page_cap`` fires on ZERO local holders today
-    (U2's de-capping retired every truncated list), so this is reachable by
-    construction and covered here rather than measured on the corpus."""
+    An at-cap holder is marked ``at_page_cap`` so the reach probe names it as the reason an asset
+    could not be valued. THE LENGTH ARM IS GONE (§9.5-addendum B.1): the fetch pages to exhaustion,
+    so a list longer than ``TOKEN_BALANCE_PAGE_SIZE`` is a routine COMPLETE list and comparing a
+    count to the cap flagged every large sheet. ``not_determined`` is still the below-cap answer
+    (there is no ``complete`` state). ``at_page_cap`` fires on ZERO local holders (U2 de-capping
+    retired every truncated list), so it is covered here by construction, not measured."""
     from services.clients.etherscan import TOKEN_BALANCE_PAGE_SIZE
 
     p = _protocol(db_session, "holdings-cap")
@@ -819,17 +750,13 @@ def test_holdings_the_fetch_recorded_at_the_page_cap_are_marked_incomplete(db_se
 
 @requires_postgres
 def test_value_holders_are_per_asset_with_native_keyed_on_the_log_emitter(db_session):
-    """The per-asset input fix. The reach probe used to receive ONE summed figure per holder and
-    match any ``Transfer`` out of it against the whole sum — so a synthetic native move
-    out of the weETH proxy claimed a sheet that is 99.99% eETH ($3.489B).
-
-    Three properties, all load-bearing:
-      * the native row is keyed on the emitter ``eth_simulateV1``'s ``traceTransfers``
-        actually uses (measured live), so a native move can match it at all;
-      * an UNPRICED holding survives as ``usd_value=None`` rather than being dropped or
-        zeroed — it is what makes a reach total not-determined;
-      * a holding is keyed on the DEPLOYMENT (the only address a Transfer log can
-        name), and two implementation rows behind one proxy do not double-count it.
+    """The per-asset input fix. The reach probe used to get ONE summed figure per holder and match
+    any ``Transfer`` out of it against the whole sum, so a synthetic native move out of the weETH
+    proxy claimed a sheet that is 99.99% eETH ($3.489B). Load-bearing properties:
+      * the native row is keyed on the emitter ``eth_simulateV1``'s ``traceTransfers`` uses (measured live);
+      * an UNPRICED holding survives as ``usd_value=None`` (it makes a reach total not-determined);
+      * a holding is keyed on the DEPLOYMENT (the only address a Transfer log names), so two
+        implementation rows behind one proxy don't double-count it.
     """
     p = _protocol(db_session, "per-asset-holdings")
     deployment = ADDR(0x8800)
@@ -863,15 +790,12 @@ def test_value_holders_are_per_asset_with_native_keyed_on_the_log_emitter(db_ses
 
 
 def test_principal_addresses_are_totally_ordered_so_the_probe_identity_is_the_datas(db_session):
-    """``principal_addresses[0]`` IS the identity every fork probe
-    impersonates (``calldata`` :1395/:1437/:1720/:2312 and the code-upgrade plan),
-    so an unordered read left WHO we simulate as — and therefore which gate the
-    probe passes and what the witness records — to the query plan.
+    """``principal_addresses[0]`` IS the identity every fork probe impersonates (``calldata``
+    :1395/:1437/:1720/:2312 and the code-upgrade plan), so an unordered read left WHO we simulate as,
+    and therefore which gate passes, to the query plan.
 
-    A third determinism class: pinning PYTHONHASHSEED and pinning allocation order
-    both fix the PROCESS, and neither can see a plan-order dependency. The rows are
-    inserted in DESCENDING address order on purpose, so a plan that hands back heap
-    order (what dropping the ORDER BY produces here) fails this assertion.
+    Pinning PYTHONHASHSEED or allocation order fixes the PROCESS but can't see a plan-order
+    dependency. Rows are inserted in DESCENDING address order so heap order (no ORDER BY) fails.
     """
     p = _protocol(db_session, "principal-order-proto")
     c = _contract(db_session, p.id, ADDR(0x7100))
@@ -883,8 +807,7 @@ def test_principal_addresses_are_totally_ordered_so_the_probe_identity_is_the_da
 
     cand = {x.function_id: x for x in select_candidates(db_session, p.id)}[f.id]
     assert list(cand.principal_addresses) == sorted(a.lower() for a in holders)
-    # The load-bearing element, stated as its own assertion because it is the one a
-    # probe actually consumes.
+    # The element a probe actually consumes.
     assert cand.principal_addresses[0] == ADDR(0x7101).lower()
 
 
@@ -978,22 +901,13 @@ def test_authority_graph_closure_is_transitive(db_session):
 
 
 def test_traversal_terminates_on_a_hand_built_cycle(db_session):
-    """DEFENSIVE ONLY: given a mutual control pair, the walk must terminate and
-    count each balance once.
+    """DEFENSIVE ONLY: given a mutual control pair, the walk must terminate and count each balance once.
 
-    This test used to be named ``test_authority_graph_handles_cycles`` and was
-    the codebase's only statement about mutual control pairs — which read as
-    "a mutual control pair is a legitimate cycle". It is not. At most one of
-    "A controls B" / "B controls A" can be true, and 66 directed edge pairs
-    asserted both, because ``tracking.py:851`` unioned "gates the caller" with
-    "gets called" (see ``test_callee_edges_move_no_authority`` below, which is
-    the assertion this file was missing).
-
-    The rows here are hand-built, not writer-produced. Cycle-safety is still a
-    property the traversal must have — a genuine cycle is constructible
-    on-chain and a stale graph can hold one — so the guard stays, relabelled so
-    it stops standing in for a correctness claim it never made.
-    """
+    This was ``test_authority_graph_handles_cycles``, which read as "a mutual pair is a legitimate
+    cycle". It is not: at most one of "A controls B" / "B controls A" is true, and 66 directed edge
+    pairs asserted both because ``tracking.py:851`` unioned "gates the caller" with "gets called"
+    (see ``test_callee_edges_move_no_authority``). Rows are hand-built; cycle-safety is still needed
+    (a genuine on-chain cycle or a stale graph can hold one), so the guard stays, relabelled."""
     p = _protocol(db_session, "cycle-proto")
     a = _contract(db_session, p.id, ADDR(0x0AA1))
     b = _contract(db_session, p.id, ADDR(0x0BB2))
@@ -1010,12 +924,9 @@ def test_traversal_terminates_on_a_hand_built_cycle(db_session):
 def test_callee_edges_move_no_authority(db_session):
     """A slot the contract only CALLS must not move value into its reach.
 
-    The positive half of the split: A genuinely controls B, so A's reach
-    includes B's balance. The negative half: B merely calls A (``eETH``,
-    ``lido``, ``liquidityPool`` shape), which is recorded as
-    ``external_call_target`` and must leave B's reach at its own balance. The
-    pre-split writer stored that second edge as ``controller_value`` too, which
-    is exactly how a mutual pair was minted.
+    A genuinely controls B, so A's reach includes B's balance. B merely calls A (``eETH``, ``lido``,
+    ``liquidityPool`` shape; recorded as ``external_call_target``), so B's reach stays its own balance.
+    The pre-split writer stored that second edge as ``controller_value`` too, minting a mutual pair.
     """
     p = _protocol(db_session, "callee-proto")
     a = _contract(db_session, p.id, ADDR(0x0CC1))
@@ -1049,13 +960,10 @@ def test_callee_edges_move_no_authority(db_session):
 # ---------------------------------------------------------------------------
 # Cross-process determinism of the ordering value
 #
-# The class: `reachable_value` folds balances over a `set`, and set iteration
-# order over strings varies with PYTHONHASHSEED. In binary float the fold is
-# therefore order-dependent in its low bits. A within-process test cannot see
-# this — one process has one seed — which is why the defect survived a suite
-# that ran these very functions. Every test below either runs REAL CHILD
-# PROCESSES under different seeds, or pins exactness against a fixture proven
-# to be order-sensitive in float.
+# `reachable_value` folds balances over a `set`, whose string iteration order varies with
+# PYTHONHASHSEED, so the float fold is order-dependent in its low bits. A within-process test can't
+# see that (one process, one seed). Every test below runs REAL CHILD PROCESSES under different seeds
+# or pins exactness against a fixture proven order-sensitive in float.
 # ---------------------------------------------------------------------------
 
 # Three real balances from the local corpus: the weETH deployment's eETH, the
@@ -1066,12 +974,8 @@ _ORDER_SENSITIVE_EXACT = Decimal("4018185859.25")
 
 
 def test_order_sensitive_fixture_really_is_order_sensitive():
-    """Guard the guard: if float addition of these three terms ever became
-    order-invariant, the tests below would still pass while proving nothing.
-
-    This is the corpus rule applied to a unit fixture — a green result means
-    something only if the fixture contains a shape a wrong implementation
-    would get wrong."""
+    """Guard the guard: if float addition of these terms became order-invariant, the tests below
+    would pass while proving nothing (a fixture must contain a shape a wrong implementation gets wrong)."""
     import itertools
 
     sums = {sum(p) for p in itertools.permutations([float(x) for x in _ORDER_SENSITIVE_USD])}
@@ -1098,12 +1002,9 @@ def test_reachable_value_is_exact_over_an_order_sensitive_closure(db_session):
 
 
 def test_equal_reach_orders_by_function_id_not_by_rounding(db_session):
-    """The POSITIVE case for the `function_id` tiebreak, not just its presence.
-
-    Two functions that reach the SAME money must compare exactly equal, because
-    the tiebreak fires on equality alone — under a float fold, one ulp between
-    two candidates holding identical balances routes them around it and orders
-    the probe queue by rounding noise instead of by id."""
+    """The POSITIVE case for the `function_id` tiebreak. It fires on equality alone, so two functions
+    reaching the SAME money must compare exactly equal; under a float fold one ulp routes them
+    around it and orders the probe queue by rounding noise."""
     p = _protocol(db_session, "tiebreak-proto")
     holders = [_contract(db_session, p.id, ADDR(0xE001 + i)) for i in range(3)]
     for c, usd in zip(holders, _ORDER_SENSITIVE_USD):
@@ -1128,40 +1029,6 @@ def test_equal_reach_orders_by_function_id_not_by_rounding(db_session):
     assert ordered.index(f_right.id) < ordered.index(f_left.id)
 
 
-def test_reachable_value_is_identical_across_processes():
-    """The one shape a same-process test cannot express: DIFFERENT seeds.
-
-    Runs the real `AuthorityGraph` in child processes under four
-    PYTHONHASHSEED values and compares `repr()` of the result. Under the float
-    fold this returned up to three distinct values for one graph."""
-    import subprocess
-    import sys
-
-    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    prog = (
-        "import sys; sys.path.insert(0, %r)\n"
-        "from services.effects.selection import AuthorityGraph\n"
-        "from decimal import Decimal\n"
-        "usd = %r\n"
-        # Many nodes so the closure `set` is large enough for seed-dependent
-        # iteration order to be expressed.
-        "addrs = ['0x%%040x' %% (i + 1) for i in range(len(usd) * 40)]\n"
-        "g = AuthorityGraph()\n"
-        "g.balance = {a: Decimal(usd[i %% len(usd)]) for i, a in enumerate(addrs)}\n"
-        "g.controls = {'0x%%040x' %% 0xF00D: set(addrs)}\n"
-        "print(repr(g.reachable_value({'0x%%040x' %% 0xF00D})))\n"
-    ) % (repo, _ORDER_SENSITIVE_USD)
-
-    seen = set()
-    for seed in ("0", "1", "2", "3"):
-        env = dict(os.environ, PYTHONHASHSEED=seed)
-        out = subprocess.run(
-            [sys.executable, "-c", prog], capture_output=True, text=True, env=env, timeout=120, check=True
-        )
-        seen.add(out.stdout.strip())
-    assert len(seen) == 1, f"reachable_value varies with PYTHONHASHSEED: {sorted(seen)}"
-
-
 def test_token_holdings_order_is_total_under_a_value_tie(db_session):
     """`usd_value DESC` alone leaves tied holdings to the query plan, and which
     ones survive the limit is then not a function of the data."""
@@ -1181,15 +1048,10 @@ def test_token_holdings_order_is_total_under_a_value_tie(db_session):
 def test_a_crumb_holding_is_kept_out_of_the_probe_input_by_the_threshold(db_session):
     """The probe's input is positions, and a crumb is excluded by RULE.
 
-    $0.004 is a real figure on a real quantity. It used to be excluded because
-    ``usd_value`` was ``numeric(20,2)`` and stored it as 0.00, which the
-    ``> 0`` filter then rejected — so the exclusion lived in the column's scale
-    and nowhere else. The column now holds ``0.004000000000000000`` (asserted
-    below off Postgres, so the crumb under test is a STORED one), and the row
-    stays out because the threshold says a position starts at a cent.
-
-    The boundary is on the keep side: $0.01 exactly is a position, which is the
-    side the old cent-scaled column put it on.
+    $0.004 used to be excluded only because ``usd_value`` was ``numeric(20,2)`` and stored 0.00,
+    which the ``> 0`` filter rejected, so the exclusion lived in the column's scale. The column now
+    holds ``0.004000000000000000`` (asserted below off Postgres, so the crumb is a STORED one) and
+    the threshold keeps it out because a position starts at a cent. $0.01 exactly is a position.
     """
     p = _protocol(db_session, "crumb-proto")
     c = _contract(db_session, p.id, ADDR(0xB1B1))
@@ -1246,18 +1108,6 @@ def test_resource_cap_logs_exactly_what_it_dropped(db_session, caplog):
     assert keep.id not in {e["function_id"] for e in rec.dropped_sample}
 
 
-def test_value_never_gates_without_cap(db_session):
-    """With no cap, EVERY blank-gated behavior is selected regardless of value."""
-    p = _protocol(db_session, "nogate-proto")
-    c = _contract(db_session, p.id, ADDR(0x0E00))
-    # No balances anywhere -> all value_at_stake == 0, but nothing is dropped.
-    fns = [_fn(db_session, c.id, name=f"f{i}", selector=f"0xfeed000{i}", effect_targets=["S"]) for i in range(4)]
-    db_session.commit()
-
-    got = {cand.function_id for cand in select_candidates(db_session, p.id)}
-    assert got == {f.id for f in fns}
-
-
 # ---------------------------------------------------------------------------
 # Probe target (proxy vs implementation)
 # ---------------------------------------------------------------------------
@@ -1310,11 +1160,8 @@ def _job(session: Session, protocol_id: int | None, address: str, *, chain_id: i
 
 
 def _ran_effects(session: Session, job: Job, *, status: str = "success") -> None:
-    """Mark a job as having finished the effects stage the way BaseWorker does.
-
-    ``status`` mirrors ``_record_stage_timing``: ``"success"`` on the success
-    path, ``"failed"`` on the failure path — the SAME artifact name either way.
-    """
+    """Mark a job as having finished the effects stage the way BaseWorker does. ``status`` mirrors
+    ``_record_stage_timing`` ("success" or "failed", the SAME artifact name either way)."""
     session.add(
         Artifact(job_id=job.id, name="stage_timing_effects", data={"stage": "effects", "status": status}),
     )
@@ -1551,11 +1398,9 @@ def test_no_scope_keeps_protocol_wide_behavior(db_session):
 # ---------------------------------------------------------------------------
 # Ownership rule 4 — the empty-planning marker.
 #
-# Rules 1-3 all leave a trace only when SOMETHING happened: a job exists, a
-# stage artifact was written, a verdict landed. A contract that is swept and
-# whose candidates yield no plans at all leaves none of those, so it stays
-# unowned and every later job re-sweeps it. These cover both directions: the
-# marker must stop the re-sweep, and it must never make a contract look covered.
+# Rules 1-3 leave a trace only when SOMETHING happened (a job, a stage artifact, a verdict). A contract
+# swept with no plans leaves none, so it stays unowned and is re-swept. These cover both directions:
+# the marker must stop the re-sweep and must never make a contract look covered.
 # ---------------------------------------------------------------------------
 
 
@@ -1727,14 +1572,9 @@ def test_marker_union_still_covers_the_protocol(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Ownership under FAILURE — rules 1 and 2 are the two that can claim a contract
-# NOBODY ends up planning.
-#
-# ``BaseWorker`` writes the SAME ``stage_timing_effects`` artifact whether the
-# stage succeeded or blew up, and the effects stage fail-forwards (the terminal
-# finalizer advances the job to ``coverage`` instead of failing it), so a stage
-# that failed never runs again. Reading either the artifact alone or "in flight"
-# alone as ownership therefore drops a contract silently and permanently.
+# ``BaseWorker`` writes the SAME ``stage_timing_effects`` artifact whether the stage succeeded or
+# failed, and the effects stage fail-forwards (job advances to ``coverage``), so a failed stage never
+# reruns. Reading the artifact alone, or "in flight" alone, as ownership drops a contract permanently.
 # ---------------------------------------------------------------------------
 
 
@@ -1751,11 +1591,9 @@ def _pair(session: Session, name: str, *, a: int = 0x8801, b: int = 0x8802):
 
 
 def test_failed_effects_stage_is_not_ownership(db_session):
-    """Defect 1. B's job ran the effects stage and it FAILED; the fail-forward
-    finalizer advanced the job to coverage, so the stage will never run again.
-    Before the fix the mere existence of ``stage_timing_effects`` marked B owned,
-    and neither B's own job nor any sibling ever planned it — silent, permanent
-    coverage loss that reads as a perf win."""
+    """Defect 1. B's effects stage FAILED and the fail-forward finalizer advanced the job, so it
+    never runs again. The mere existence of ``stage_timing_effects`` used to mark B owned, so nobody
+    planned it: silent, permanent coverage loss that reads as a perf win."""
     proto, a_addr, b_addr, fns = _pair(db_session, "fail-rule2")
     _job(db_session, proto.id, a_addr)
     b_job = _job(db_session, proto.id, b_addr)
@@ -2034,10 +1872,9 @@ def test_shape4_failed_contract_is_covered_by_its_own_job_too(db_session):
 def test_the_page_cap_signal_is_read_off_the_response_not_the_filtered_rows(monkeypatch):
     """The truncation discriminator's INPUT must not be a list a filter already thinned.
 
-    ``get_token_balances`` keeps an entry only when ``raw_balance > 0``, and the page-cap
-    check used to be evaluated on that filtered list — so a FULL page containing any
-    zero-balance entry read as "not truncated", one line below the filter that destroyed
-    the signal. The check now asks how many entries the ENDPOINT returned.
+    ``get_token_balances_page`` keeps entries with ``raw_balance > 0`` and the page-cap check used to run
+    on that filtered list, so a FULL page with any zero-balance entry read as "not truncated". The
+    check now asks how many entries the ENDPOINT returned.
     """
     from services.clients import etherscan
 
@@ -2059,16 +1896,15 @@ def test_the_page_cap_signal_is_read_off_the_response_not_the_filtered_rows(monk
     warnings: list[str] = []
     monkeypatch.setattr(etherscan.logger, "warning", lambda msg, *a: warnings.append(msg % a))
 
-    rows = etherscan.get_token_balances("0x" + "ab" * 20, 1)
+    rows = etherscan.get_token_balances_page("0x" + "ab" * 20, chain_id=1).rows
 
     assert len(rows) == cap - 1, "the zero-balance entry is still filtered out of the stored rows"
-    # The stub re-serves page 1 for every request, so paging cannot reach a short
-    # page and the list stays a declared PREFIX — which is the same fail-closed
-    # answer a full first page always produced, reported in the paged wording.
+    # The stub re-serves page 1 for every request, so paging never reaches a short page and the list
+    # stays a declared PREFIX (fail-closed, as a full first page always was).
     assert any("PREFIX" in w for w in warnings), "a full page went unreported because the filter shrank the list"
     assert any(f"({cap} entries over 2 page(s), {cap - 1} with a balance)" in w for w in warnings)
     # NEGATIVE CONTROL: a genuinely short page reports nothing.
     monkeypatch.setattr(etherscan, "get", lambda *a, **k: {"result": page[:3]})
     warnings.clear()
-    etherscan.get_token_balances("0x" + "ac" * 20, 1)
+    etherscan.get_token_balances_page("0x" + "ac" * 20, chain_id=1)
     assert not [w for w in warnings if "FULL page" in w]
