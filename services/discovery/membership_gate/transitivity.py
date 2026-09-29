@@ -79,26 +79,6 @@ class TransitivityProof:
     principal_fact: dict[str, Any] | None = None
 
 
-def _via_is_transitive(
-    session: Session,
-    *,
-    protocol_id: int,
-    via_address: str,
-    chain_key: str,
-    exclude_contract_id: int | None = None,
-) -> bool:
-    return (
-        _via_transitivity(
-            session,
-            protocol_id=protocol_id,
-            via_address=via_address,
-            chain_key=chain_key,
-            exclude_contract_id=exclude_contract_id,
-        )
-        is not None
-    )
-
-
 def _via_transitivity(
     session: Session,
     *,

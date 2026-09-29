@@ -1,7 +1,7 @@
 """Unit tests for services/concurrency primitives.
 
 Covers ordering, exception capture, heartbeat invocation, RpcExecutor
-singleton semantics, and parallel_rpc_calls chunk routing. Every parallel
+singleton semantics. Every parallel
 fan-out elsewhere in the codebase relies on these guarantees, so this file
 is the safety net for the helper itself.
 """
@@ -13,13 +13,10 @@ from concurrent.futures import Future
 
 import pytest
 
-from services import concurrency
 from services.concurrency import (
     RpcExecutor,
     parallel_map,
-    parallel_rpc_calls,
     submit_rpc,
-    unwrap_results,
 )
 
 
@@ -203,17 +200,6 @@ def test_parallel_map_respects_psat_rpc_fanout_env(monkeypatch):
     assert len(set(seen_threads)) == 1
 
 
-def test_unwrap_results_raises_first_exception():
-    results = [(1, "a"), (2, ValueError("oops")), (3, "c")]
-    with pytest.raises(ValueError, match="oops"):
-        unwrap_results(results)
-
-
-def test_unwrap_results_returns_values_when_no_errors():
-    results = [(1, "a"), (2, "b"), (3, "c")]
-    assert unwrap_results(results) == ["a", "b", "c"]
-
-
 # ---------------------------------------------------------------------------
 # RpcExecutor singleton
 # ---------------------------------------------------------------------------
@@ -236,83 +222,3 @@ def test_rpc_executor_reset_drops_singleton():
     RpcExecutor.reset_for_tests()
     b = RpcExecutor.get()
     assert a is not b
-
-
-# ---------------------------------------------------------------------------
-# parallel_rpc_calls chunking
-# ---------------------------------------------------------------------------
-
-
-def test_parallel_rpc_calls_empty_returns_empty():
-    assert parallel_rpc_calls("https://example.invalid", []) == []
-
-
-def test_parallel_rpc_calls_under_max_batch_delegates(monkeypatch):
-    """When N <= MAX_BATCH_SIZE the helper delegates without chunking."""
-    captured = []
-
-    def fake_batch(rpc_url, calls):
-        captured.append((rpc_url, list(calls)))
-        return [(idx, False) for idx, _ in enumerate(calls)]
-
-    monkeypatch.setattr(concurrency, "rpc_batch_request_with_status", fake_batch)
-    calls = [("eth_chainId", []) for _ in range(10)]
-    out = parallel_rpc_calls("https://rpc.example", calls)
-    assert len(captured) == 1
-    assert captured[0][0] == "https://rpc.example"
-    assert len(captured[0][1]) == 10
-    assert out == [(idx, False) for idx in range(10)]
-
-
-def test_parallel_rpc_calls_chunks_when_above_max_batch(monkeypatch):
-    """N > MAX_BATCH_SIZE is split into ceil(N / MAX_BATCH_SIZE) chunks dispatched in parallel."""
-    captured_chunks: list[int] = []
-
-    def fake_batch(rpc_url, calls):
-        captured_chunks.append(len(calls))
-        return [(f"chunk_{idx}", False) for idx in range(len(calls))]
-
-    monkeypatch.setattr(concurrency, "rpc_batch_request_with_status", fake_batch)
-    monkeypatch.setattr(concurrency, "MAX_BATCH_SIZE", 100)
-    calls = [("eth_chainId", []) for _ in range(250)]
-    out = parallel_rpc_calls("https://rpc.example", calls)
-
-    assert len(captured_chunks) == 3
-    assert sorted(captured_chunks) == [50, 100, 100]
-    assert len(out) == 250
-    assert all(item[0] is not None for item in out)
-
-
-def test_parallel_rpc_calls_preserves_order_across_chunks(monkeypatch):
-    """A 2-chunk batch must still return results indexed by original call position."""
-
-    def fake_batch(rpc_url, calls):
-        # tag each result with its method+arg position so we can verify order
-        return [(("done", method, params), False) for method, params in calls]
-
-    monkeypatch.setattr(concurrency, "rpc_batch_request_with_status", fake_batch)
-    monkeypatch.setattr(concurrency, "MAX_BATCH_SIZE", 5)
-
-    calls = [("eth_chainId", [i]) for i in range(12)]
-    out = parallel_rpc_calls("https://rpc.example", calls)
-    assert len(out) == 12
-    for i, (result, had_error) in enumerate(out):
-        assert had_error is False
-        assert result[2] == [i]
-
-
-def test_parallel_rpc_calls_chunk_failure_leaves_default_errored(monkeypatch):
-    """A chunk that raises wholesale leaves its slots flagged ``had_error=True``."""
-
-    def fake_batch(rpc_url, calls):
-        if calls and calls[0][1] == [0]:
-            raise RuntimeError("chunk 0 down")
-        return [(idx, False) for idx, _ in enumerate(calls)]
-
-    monkeypatch.setattr(concurrency, "rpc_batch_request_with_status", fake_batch)
-    monkeypatch.setattr(concurrency, "MAX_BATCH_SIZE", 5)
-
-    calls = [("eth_chainId", [i]) for i in range(10)]
-    out = parallel_rpc_calls("https://rpc.example", calls)
-    assert all(out[i] == (None, True) for i in range(5))
-    assert all(out[i][1] is False for i in range(5, 10))

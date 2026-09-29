@@ -150,42 +150,6 @@ def test_tvl_refresh_all_protocols_emits_cycle_on_empty():
 # --- the silent-collapse class: one alarm per cycle, then a count -------------
 
 
-def test_warn_degraded_once_warns_first_then_debugs(caplog):
-    counts: dict[str, int] = {}
-    with caplog.at_level(logging.DEBUG, logger="services.monitoring"):
-        for _ in range(4):
-            monitoring.warn_degraded_once(
-                monitoring.logger, counts, "balance_batch_failed", "batch did not answer", chain_id=1
-            )
-
-    records = [r for r in caplog.records if r.message == "batch did not answer"]
-    assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG, logging.DEBUG, logging.DEBUG]
-    # The count is what the cycle summary publishes; the level is only the alarm.
-    assert counts["balance_batch_failed"] == 4
-    assert records[0].degraded_kind == "balance_batch_failed"
-    assert records[-1].degraded_seen == 4
-
-
-def test_warn_degraded_once_alarms_per_scope_not_per_kind(caplog):
-    """One chain's outage must not demote the next chain's to DEBUG."""
-    counts: dict[str, int] = {}
-    with caplog.at_level(logging.DEBUG, logger="services.monitoring"):
-        for chain_id in (1, 1, 8453, 8453):
-            monitoring.warn_degraded_once(
-                monitoring.logger,
-                counts,
-                "head_read_failed",
-                "head read failed",
-                scope=chain_id,
-                chain_id=chain_id,
-            )
-
-    records = [r for r in caplog.records if r.message == "head read failed"]
-    assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG, logging.WARNING, logging.DEBUG]
-    # And the tally says WHICH unit degraded, not only how often something did.
-    assert counts == {"head_read_failed:1": 2, "head_read_failed:8453": 2}
-
-
 # --- disposition: the per-cycle outcome summary ------------------------------
 
 

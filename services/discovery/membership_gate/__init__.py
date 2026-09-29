@@ -186,7 +186,6 @@ from .transitivity import (
     _own_controller_links,
     _perimeter_anchor,
     _role_hash_anchors,
-    _via_is_transitive,
     _via_transitivity,
     _witness_fact_holds,
 )
@@ -301,7 +300,6 @@ __all__ = [
     "_target_candidates",
     "_utcnow",
     "_validate_evidence",
-    "_via_is_transitive",
     "_via_transitivity",
     "_vias_citing_evidence_address",
     "_w2_edge_holds",

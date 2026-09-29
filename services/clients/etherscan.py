@@ -646,36 +646,15 @@ _token_balance_last_call = 0.0
 # Lido, DAI, USDC, LINK, wstETH). The 7 are inside a scored perimeter, so a capped list
 # does reach consumers — ``planes.ValuePlane.asset_set_truncated`` carries the fact and
 # ``planes.ceiling_for`` refuses those sheets a ceiling under ``asset_list_truncated``;
-# see ``selection._holdings_completeness`` for the effects-side statement. Exported so a
-# consumer can ask whether a holdings count is at the cap
-# (:func:`token_balances_may_be_truncated`) instead of hardcoding 100 in a second place.
+# see ``selection._holdings_completeness`` for the effects-side statement.
 TOKEN_BALANCE_PAGE_SIZE = 100
-
-
-def token_balances_may_be_truncated(rows: "list[dict] | int") -> bool:
-    """Whether a holdings list may be missing assets because it hit the page cap.
-
-    Exactly-at-the-cap is NOT distinguishable from truncated without pagination, so
-    this answers "cannot rule truncation out" — the honest reading. Real pagination is
-    the actual fix and is deliberately not attempted here: it changes the request
-    count per contract against a live rate-limited API, which cannot be validated
-    inside this change's read budget.
-
-    ONE-DIRECTIONAL, and a caller must not invert it. ``True`` is a fact about the
-    page. ``False`` is not "the list is whole": pass it a count that a filter has
-    already thinned (a stored-row count, or ``results`` inside
-    :func:`get_token_balances`) and a full page reads as ``False``. Ask it about the
-    number of entries the ENDPOINT returned, or treat ``False`` as not-determined.
-    """
-    count = rows if isinstance(rows, int) else len(rows)
-    return count >= TOKEN_BALANCE_PAGE_SIZE
 
 
 @dataclass(frozen=True)
 class TokenBalancePage:
     """An ``addresstokenbalance`` read, with what the ENDPOINT actually said.
 
-    ``rows`` is the filtered holdings list :func:`get_token_balances` returns.
+    ``rows`` is the filtered holdings list (``raw_balance > 0``).
     ``page_length`` is the RAW entry count BEFORE the ``raw_balance > 0`` filter,
     summed (deduplicated by token) over EVERY page read — so once paging exists
     it is a whole-list length and routinely exceeds
@@ -701,36 +680,6 @@ class TokenBalancePage:
     status: str
     pages_read: int = 0
     basis: str = ""
-
-
-def get_token_balances(address: str, chain_id: int) -> list[dict]:
-    """Return this address's ERC-20 token balances — ONE page, cap
-    :data:`TOKEN_BALANCE_PAGE_SIZE`.
-
-    Uses Etherscan's ``addresstokenbalance`` endpoint. Hardcoded to 1 req/s
-    independent of the global rate limit since this endpoint is heavier.
-
-    Returns a list of dicts with ``token_address``, ``token_name``,
-    ``token_symbol``, ``decimals``, ``balance``, ``price_usd`` and ``usd_value``.
-
-    WHAT AN EMPTY LIST DOES NOT MEAN. It conflates three states — "holds no
-    tokens", "the fetch failed", and (with the cap above) "we saw only the first
-    page". The failure path is now recorded as degraded rather than returning ``[]``
-    in silence, so at least the second is visible in the operational record; a
-    consumer of the STORED rows must still treat absence as unknown, not as zero.
-
-    ``usd_value`` is ``None`` whenever it could not be computed from data Etherscan
-    actually returned — including when ``TokenDivisor`` is missing, because the scale
-    is then a guess and the error mode is a factor of 10^n on a money figure. It is
-    never 0 to mean "unknown": 0 means priced, and the product of the quantity and
-    the quote is zero. Nothing between here and the column rounds it — a sub-cent
-    holding arrives as the figure it is.
-
-    A caller that PERSISTS this list must use :func:`get_token_balances_page`
-    instead: this signature cannot distinguish the empty page from the failed
-    fetch, and writing rows from the latter publishes "holds nothing".
-    """
-    return get_token_balances_page(address, chain_id=chain_id).rows
 
 
 def token_balance_page_budget() -> int:
@@ -762,7 +711,7 @@ def _throttle_token_balance_call() -> None:
 
 
 def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
-    """:func:`get_token_balances`, plus what the endpoint said about the list.
+    """This address's ERC-20 token balances, plus what the endpoint said about the list.
 
     Pages until the endpoint answers a SHORT page, which is the only thing that
     witnesses the end of the list; one page is still one request for the
