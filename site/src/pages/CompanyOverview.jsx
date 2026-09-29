@@ -215,6 +215,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
                   on file" before the fetch has answered. */}
               {contracts.length} contracts mapped · {auditCoverage?.audit_count ?? "—"} reports on file
             </p>
+            <StaleBanner metas={Object.values(sectionMeta)} className="company-hero-subtitle" />
           </div>
           <div className="company-hero-stats">
             {isAdmin ? (
@@ -261,7 +262,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
         </div>
       </section>
 
-      <StaleBanner metas={Object.values(sectionMeta)} />
       {summaryError && <p role="alert">Company summary unavailable: {summaryError}</p>}
       <ScoreBand
         companyName={companyName}

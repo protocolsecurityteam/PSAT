@@ -595,7 +595,8 @@ function ProtocolSurface({
 
   return (
     <div className="ps-surface ps-surface-fullscreen">
-      <StaleBanner metas={sectionMetas} />
+      {/* Floats like the selection toast so the fullscreen layout keeps its height. */}
+      <StaleBanner metas={sectionMetas} className="company-select-toast" />
       <SurfaceFilterPanel
         machines={allMachines}
         principals={visiblePrincipals}
