@@ -21,11 +21,12 @@ assert spec is not None and spec.loader is not None
 sections = module_from_spec(spec)
 spec.loader.exec_module(sections)
 
-JOB_COLUMNS = sections.base.UPDATE_FIELDS["jobs"] + ", company"
+JOB_COLUMNS = "id, address, status, chain_id, request, name, is_proxy, created_at, updated_at, company"
 # Lease renewal rewrites updated_at on in-progress jobs; only a completed
 # job's updated_at orders anything a page publishes.
-QUIET_JOB_COLUMNS = JOB_COLUMNS.replace(
-    "updated_at", "CASE WHEN status = 'completed' THEN updated_at END AS updated_at"
+QUIET_JOB_COLUMNS = (
+    "id, address, status, chain_id, request, name, is_proxy, created_at, "
+    "CASE WHEN status = 'completed' THEN updated_at END AS updated_at, company"
 )
 MARKERS = (
     ("schema_version", sa.Integer()),

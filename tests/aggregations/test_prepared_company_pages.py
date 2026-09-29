@@ -203,7 +203,7 @@ def test_worker_is_single_flight_and_never_rebuilds_unchanged_data(prepared, mon
     assert worker.refresh_one(factory) == "prepared"
     session.execute(
         update(Page).values(
-            source_started_at=datetime.now(timezone.utc) - timedelta(hours=23),
+            source_started_at=datetime.now(timezone.utc) - timedelta(days=2),
             next_attempt_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         )
     )
@@ -290,6 +290,17 @@ def test_dirty_revision_rolls_back_with_producer(prepared):
     assert source(session, protocol.name) == "prepared-stale"
     session.rollback()
     assert source(session, protocol.name) == "prepared"
+
+
+def test_untracked_revisions_are_never_served_as_fresh(prepared):
+    session, protocol, factory = prepared
+    assert worker.refresh_one(factory) == "prepared"
+    session.execute(update(Page).values(source_revisions=None))
+    session.commit()
+    response = pages.read_response(session, request(), protocol.name)
+    assert response is not None
+    assert response.headers["x-psat-response-source"] == "prepared-stale"
+    assert response.headers["x-psat-stale-reason"] == "data"
 
 
 @pytest.mark.parametrize("encoding", ["gzip", "identity", "gzip;q=0", "*;q=1"])

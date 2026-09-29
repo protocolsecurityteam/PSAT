@@ -1,9 +1,9 @@
 """Prepared response IO; no ORM graphs or unbounded in-process cache.
 
-A section is servable while its schema, semantic epoch and chain set match and
-it is younger than the stale limit. Every origin read validates the revisions
-and builder digest and labels the response fresh or stale; the edge gets at
-most 60s from that validation.
+A section is servable while its schema, semantic epoch and chain set match,
+and it is either fresh or younger than the stale limit. Every origin read
+validates the revisions and builder digest and labels the response fresh or
+stale; the edge gets at most 60s from that validation.
 """
 
 from __future__ import annotations
@@ -52,12 +52,15 @@ def enabled() -> bool:
 
 def timing(section: str) -> tuple[int, int, int]:
     """Rebuild pacing in seconds for the section's group: (quiet, min interval, max wait)."""
-    group, defaults = ("SUMMARY", (0, 30, 60)) if section == "summary" else ("STRUCTURAL", (120, 300, 900))
-    quiet, interval, wait = (
-        int(os.getenv(f"PSAT_COMPANY_{group}_{name}_S", default))
-        for name, default in zip(("QUIET", "MIN_INTERVAL", "MAX_WAIT"), defaults)
+    if section == "summary":
+        group, quiet, interval, wait = "SUMMARY", "0", "30", "60"
+    else:
+        group, quiet, interval, wait = "STRUCTURAL", "120", "300", "900"
+    return (
+        int(os.getenv(f"PSAT_COMPANY_{group}_QUIET_S", quiet)),
+        int(os.getenv(f"PSAT_COMPANY_{group}_MIN_INTERVAL_S", interval)),
+        int(os.getenv(f"PSAT_COMPANY_{group}_MAX_WAIT_S", wait)),
     )
-    return quiet, interval, wait
 
 
 def stale_max_seconds() -> int:
@@ -174,8 +177,13 @@ def _within_stale_limit(section: str):
 
 
 def servable(section: str):
-    """SQL predicate; unbuilt or pre-marker sections are never servable."""
-    return func.coalesce(and_(_markers_current(section), _within_stale_limit(section)), False)
+    """SQL predicate; unbuilt or pre-marker sections are never servable.
+
+    The age limit bounds how long a stale build may stand in; a fresh build
+    never expires.
+    """
+    fresh = and_(section_columns(section).digest == builder_digest(), revisions_current(section))
+    return func.coalesce(and_(_markers_current(section), or_(fresh, _within_stale_limit(section))), False)
 
 
 def dependencies_for(protocol_id: int | None, section: str) -> set[str]:
@@ -264,7 +272,8 @@ def read_response(
     if row is None:
         return None
     body, source_at, now, within_limit, same_code, same_data = row
-    if not within_limit:
+    fresh = bool(same_code and same_data)
+    if not (fresh or within_limit):
         logger.error(
             "Prepared company page exceeded stale limit",
             extra={"company": name, "section": section, "prepared_at": source_at.isoformat()},
@@ -278,11 +287,11 @@ def read_response(
         "X-PSAT-Prepared-At": source_at.isoformat(),
         "X-PSAT-Payload-Schema": str(PAYLOAD_SCHEMA[section]),
         "X-PSAT-Validated-At": now.isoformat(),
-        "X-PSAT-Response-Source": "prepared" if same_code and same_data else "prepared-stale",
+        "X-PSAT-Response-Source": "prepared" if fresh else "prepared-stale",
         # Internal header consumed and stripped by the origin boundary.
         "X-PSAT-Fresh-Until": str(now.timestamp() + MAX_AGE_SECONDS),
     }
-    if not (same_code and same_data):
+    if not fresh:
         headers["X-PSAT-Stale-Reason"] = "code" if same_data else "data"
     if accepts_gzip(request.headers.get("accept-encoding", "")):
         headers["Content-Encoding"] = "gzip"

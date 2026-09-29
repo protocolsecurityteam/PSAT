@@ -89,12 +89,14 @@ def refresh_one(session_factory=SessionLocal) -> str:
                 ),
                 and_(columns.digest.is_distinct_from(builder_digest()), interval_elapsed),
             )
-            fresh[section] = and_(servable(section), columns.digest == builder_digest(), revisions_current(section))
+            fresh[section] = and_(
+                servable(section), ~renamed, columns.digest == builder_digest(), revisions_current(section)
+            )
         row = write.execute(
             select(
                 Page.cache_key,
                 Page.protocol_id,
-                func.coalesce(Protocol.name, Page.company_name),
+                func.coalesce(Protocol.name, Page.company_name).label("name"),
                 Page.company_name,
                 Page.attempts,
                 *(due[s].label("due_" + s) for s in SECTIONS),
@@ -116,15 +118,15 @@ def refresh_one(session_factory=SessionLocal) -> str:
         ).first()
         if row is None:
             return "idle"
-        cache_key, protocol_id, name, previous_name, attempts, *flags = row
-        is_due = dict(zip(SECTIONS, flags[: len(SECTIONS)]))
-        is_fresh = dict(zip(SECTIONS, flags[len(SECTIONS) :]))
-        units = [["summary"]] if is_due["summary"] else []
-        if is_due["overview"] or is_due["functions"]:
-            units.append([s for s in ("overview", "functions") if not is_fresh[s]])
+        cache_key, protocol_id, name, previous_name, attempts = row[:5]
+        flags = row._mapping
+        units = []
+        if flags["due_summary"]:
+            units.append((False, ["summary"]))
+        if flags["due_overview"] or flags["due_functions"]:
+            units.append((True, [s for s in ("overview", "functions") if not flags["fresh_" + s]]))
         failed = False
-        for sections in units:
-            structural = sections != ["summary"]
+        for structural, sections in units:
             try:
                 # Preserve the row lease if publication SQL fails; rollback the
                 # savepoint before recording backoff on the outer transaction.

@@ -76,19 +76,23 @@ def test_payload_skeleton_matches_golden_for_its_schema(prepared, section):
     )
 
 
-def test_section_past_stale_limit_is_refused_and_logged_once(prepared, monkeypatch, caplog):
+def test_only_a_stale_section_past_the_limit_is_refused_and_logged_once(prepared, monkeypatch, caplog):
     session, protocol, factory = prepared
     assert worker.refresh_one(factory) == "prepared"
     monkeypatch.setenv("PSAT_COMPANY_STALE_MAX_S", "60")
     session.execute(update(Page).values(source_started_at=datetime.now(timezone.utc) - timedelta(seconds=61)))
     session.commit()
     with caplog.at_level(logging.ERROR, logger="services.company_pages"):
+        # A fresh build never expires and is not rebuilt for age.
+        assert source(session, protocol.name) == "prepared"
+        assert worker.refresh_one(factory) == "idle"
+        session.execute(update(Contract).values(contract_name="changed"))
+        session.commit()
         response = pages.prepared_or_pending(session, request(), protocol.name)
     assert response.status_code == 503
     errors = [r for r in caplog.records if r.getMessage() == "Prepared company page exceeded stale limit"]
     assert len(errors) == 1
     assert (errors[0].company, errors[0].section) == (protocol.name, "overview")
-    assert source(session, protocol.name, "functions") == "prepared"
     assert worker.refresh_one(factory) == "prepared"
     assert source(session, protocol.name) == "prepared"
 
