@@ -24,7 +24,7 @@ from db.models import (
 )
 from services import company_pages as pages
 from tests.aggregations.test_prepared_company_pages import prepared as prepared
-from tests.aggregations.test_prepared_company_pages import request
+from tests.aggregations.test_prepared_company_pages import request, source
 from tests.conftest import requires_postgres
 from tests.support.overview_builders import _add_contract, _add_job, _add_protocol, _addr
 from workers import company_pages as worker
@@ -103,7 +103,7 @@ def test_irrelevant_or_identical_updates_leave_revision_tokens_unchanged(prepare
     session.commit()
     assert session.execute(select(Revision.key, Revision.token).order_by(Revision.key)).all() == tokens
     assert worker.refresh_one(factory) == "idle"
-    assert pages.read_response(session, request(), protocol.name) is not None
+    assert source(session, protocol.name) == "prepared"
 
 
 @pytest.mark.parametrize("operation", ["contract", "child", "completed_job", "signals"])
@@ -136,13 +136,13 @@ def test_independent_contract_writers_do_not_share_a_protocol_lock(prepared, ope
         else:
             independent.execute(update(Job).where(Job.id == job.id).values(name="Changed job"))
         independent.commit()  # Must finish while copying is still uncommitted.
-        assert pages.read_response(session, request(), protocol.name) is None
+        assert source(session, protocol.name) == "prepared-stale"
         copying.rollback()
     # The company check is a read-only digest, never a producer-written row.
     assert session.get(Revision, f"protocol:{protocol.id}") is None
     ready(session)
     assert worker.refresh_one(factory) == "prepared"
-    assert pages.read_response(session, request(), protocol.name) is not None
+    assert source(session, protocol.name) == "prepared"
 
 
 def test_new_member_committed_during_build_is_not_lost_from_protocol_fingerprint(prepared, monkeypatch):
@@ -160,11 +160,11 @@ def test_new_member_committed_during_build_is_not_lost_from_protocol_fingerprint
 
     monkeypatch.setattr(worker, "build_functions_for_protocol", build)
     assert worker.refresh_one(factory) == "prepared"
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert source(session, protocol.name) == "prepared-stale"
     monkeypatch.setattr(worker, "build_functions_for_protocol", original)
     ready(session)
     assert worker.refresh_one(factory) == "prepared"
-    assert pages.read_response(session, request(), protocol.name) is not None
+    assert source(session, protocol.name) == "prepared"
 
 
 def test_mixed_bulk_update_only_touches_actually_changed_rows(prepared):
@@ -192,7 +192,7 @@ def test_response_bearing_deployer_change_invalidates_and_rebuilds(prepared):
     deployer = _addr("new-deployer")
     contract.deployer = deployer
     session.commit()
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert source(session, protocol.name) == "prepared-stale"
     ready(session)
     assert worker.refresh_one(factory) == "prepared"
     response = pages.read_response(session, request(), protocol.name)
@@ -241,7 +241,7 @@ def test_bulk_updates_coalesce_and_unrelated_protocol_does_not_dirty(prepared, m
     address = _addr("other")
     job = _add_job(session, address=address, protocol_id=other.id)
     _add_contract(session, address=address, job=job, protocol_id=other.id)
-    assert pages.read_response(session, request(), protocol.name) is not None
+    assert source(session, protocol.name) == "prepared"
     key = f"protocol:{protocol.id}:contract:{root_contract(session, protocol).id}"
     before = session.get(Revision, key).token
     for i in range(20):
@@ -253,7 +253,7 @@ def test_bulk_updates_coalesce_and_unrelated_protocol_does_not_dirty(prepared, m
     session.execute(update(Contract).where(Contract.protocol_id == protocol.id).values(contract_name="Final"))
     assert session.execute(select(Revision.token).where(Revision.key == key)).scalar_one() == changed
     session.commit()
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert source(session, protocol.name) == "prepared-stale"
     # Prepare the unrelated company, then rebuild the one dirty company once.
     ready(session)
     builder = MagicMock(wraps=worker.build_company_overview)
@@ -280,7 +280,7 @@ def test_raw_sql_child_writes_invalidate_without_python_hooks(prepared, operatio
     }[operation]
     session.execute(text(sql), {"id": contract.id})
     session.commit()
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert source(session, protocol.name) == "prepared-stale"
 
 
 def test_borrowed_and_missing_implementations_invalidate_owner(prepared):
@@ -296,12 +296,12 @@ def test_borrowed_and_missing_implementations_invalidate_owner(prepared):
     other = _add_protocol(session, "implementation-owner")
     impl_job = _add_job(session, address=impl_address, protocol_id=other.id)
     impl = _add_contract(session, address=impl_address, job=impl_job, protocol_id=other.id)
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert source(session, protocol.name) == "prepared-stale"
     ready(session)
     assert worker.refresh_one(factory) == "prepared"
     session.add(ContractSummary(contract_id=impl.id, has_timelock=True))
     session.commit()
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert source(session, protocol.name) == "prepared-stale"
 
 
 def test_function_principal_changes_and_cascaded_deletes_invalidate(prepared):
@@ -316,12 +316,12 @@ def test_function_principal_changes_and_cascaded_deletes_invalidate(prepared):
     assert worker.refresh_one(factory) == "prepared"
     principal.resolved_type = "safe"
     session.commit()
-    assert pages.read_response(session, request(), protocol.name, functions=True) is None
+    assert source(session, protocol.name, "functions") == "prepared-stale"
     ready(session)
     assert worker.refresh_one(factory) == "prepared"
     session.execute(delete(EffectiveFunction).where(EffectiveFunction.id == function.id))
     session.commit()
-    assert pages.read_response(session, request(), protocol.name, functions=True) is None
+    assert source(session, protocol.name, "functions") == "prepared-stale"
 
 
 def test_tvl_and_pending_member_inventory_changes_invalidate(prepared):
@@ -329,13 +329,13 @@ def test_tvl_and_pending_member_inventory_changes_invalidate(prepared):
     assert worker.refresh_one(factory) == "prepared"
     session.add(TvlSnapshot(protocol_id=protocol.id, total_usd=123))
     session.commit()
-    assert pages.read_response(session, request(), protocol.name) is not None
-    assert pages.read_response(session, request(), protocol.name, section="summary") is None
+    assert source(session, protocol.name) == "prepared"
+    assert source(session, protocol.name, "summary") == "prepared-stale"
     ready(session)
     assert worker.refresh_one(factory) == "prepared"
     session.add(Contract(address=_addr("candidate"), nominated_protocol_id=protocol.id))
     session.commit()
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert source(session, protocol.name) == "prepared-stale"
 
 
 def test_balance_changes_only_dirty_overview(prepared):
@@ -345,14 +345,14 @@ def test_balance_changes_only_dirty_overview(prepared):
     balance = ContractBalance(contract_id=contract.id, token_address=_addr("token"), raw_balance="100")
     session.add(balance)
     session.commit()
-    assert pages.read_response(session, request(), protocol.name) is None
-    assert pages.read_response(session, request(), protocol.name, functions=True) is not None
+    assert source(session, protocol.name) == "prepared-stale"
+    assert source(session, protocol.name, "functions") == "prepared"
     ready(session)
     assert worker.refresh_one(factory) == "prepared"
     session.execute(delete(ContractBalance).where(ContractBalance.id == balance.id))
     session.commit()
-    assert pages.read_response(session, request(), protocol.name) is None
-    assert pages.read_response(session, request(), protocol.name, functions=True) is not None
+    assert source(session, protocol.name) == "prepared-stale"
+    assert source(session, protocol.name, "functions") == "prepared"
 
 
 def test_moving_a_member_invalidates_both_protocols(prepared):
@@ -366,8 +366,8 @@ def test_moving_a_member_invalidates_both_protocols(prepared):
     assert worker.refresh_one(factory) == "prepared"
     contract.protocol_id = other.id
     session.commit()
-    assert pages.read_response(session, request(), protocol.name) is None
-    assert pages.read_response(session, request(), other.name) is None
+    assert source(session, protocol.name) == "prepared-stale"
+    assert source(session, other.name) == "prepared-stale"
 
 
 def test_input_read_tables_have_transactional_triggers(prepared):

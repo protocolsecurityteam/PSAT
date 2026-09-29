@@ -100,12 +100,12 @@ def _log_endpoint(route: str, *, company: str, started: float, **extras: Any) ->
 def company_overview(company_name: str, response: Response, request: Request) -> CompanyOverviewResponse | Response:
     """Aggregated governance overview for all contracts in a company."""
     started = time.monotonic()
-    response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
-    response.headers["Cache-Tag"] = cache_tag(company_name)
     with deps.SessionLocal() as session:
         if enabled():
             return prepared_or_pending(session, request, company_name)
         response.headers["X-PSAT-Response-Source"] = "live"
+        response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
+        response.headers["Cache-Tag"] = cache_tag(company_name)
         try:
             # cast: assemble_company_payload provably builds exactly this
             # shape; the annotation belongs on the producer once

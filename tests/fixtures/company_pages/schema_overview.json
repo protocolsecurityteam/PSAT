@@ -1,0 +1,75 @@
+{
+  "payload_schema": 1,
+  "skeleton": {
+    "all_addresses_count": "int",
+    "company": "str",
+    "contract_count": "int",
+    "contracts": [
+      {
+        "address": "str",
+        "balances": [],
+        "capabilities": [],
+        "chain": "str",
+        "contract_id": "int",
+        "control_graph": {
+          "edges": [],
+          "nodes": []
+        },
+        "control_model": "NoneType",
+        "controllers": {},
+        "deployer": "NoneType",
+        "has_timelock": "NoneType",
+        "holdings_coverage": {
+          "page_cap": "int",
+          "rows": "int",
+          "scope": "str",
+          "state": "str",
+          "unvalued_rows": "int"
+        },
+        "impl_job_id": "NoneType",
+        "implementation": "NoneType",
+        "is_factory": "NoneType",
+        "is_pausable": "NoneType",
+        "is_proxy": "bool",
+        "job_id": "str",
+        "last_upgrade_block": "NoneType",
+        "last_upgrade_timestamp": "NoneType",
+        "name": "str",
+        "other_callers": [],
+        "owner": "NoneType",
+        "partial_balance_observations": [],
+        "proxy_type": "NoneType",
+        "role": "str",
+        "role_evidence": "str",
+        "secondary_implementations": [],
+        "source_verified": "NoneType",
+        "standards": [],
+        "summary_evidence": "str",
+        "total_usd": "NoneType",
+        "upgrade_count": "NoneType",
+        "upgrade_count_basis": "NoneType",
+        "value_effects": []
+      }
+    ],
+    "fund_flows": [],
+    "ownership_hierarchy": [
+      {
+        "contracts": [
+          {
+            "address": "str",
+            "name": "str"
+          }
+        ],
+        "owner": "NoneType",
+        "owner_is_contract": "bool",
+        "owner_name": "str"
+      }
+    ],
+    "principals": [],
+    "protocol_id": "int",
+    "reach": {
+      "entities": {},
+      "model": "str"
+    }
+  }
+}

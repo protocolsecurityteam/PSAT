@@ -1,8 +1,10 @@
 """Bounded company preparation, independently supervised alongside the web API.
 
 One replace-in-place row per company; unchanged revisions never rebuild.
-Database triggers invalidate all source write paths transactionally. Failed
-builds retain the previous sections, but origin reads refuse it while its inputs are dirty.
+Database triggers invalidate all source write paths transactionally. Dirty
+sections rebuild after a quiet period, no more often than a minimum interval,
+and within a maximum wait. Summary and structural sections publish separately;
+failed builds retain the previously published sections.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import signal
 from datetime import timedelta
 from threading import Event
 
-from sqlalchemy import delete, func, or_, select, text, update
+from sqlalchemy import and_, case, delete, func, not_, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from db.models import CompanyPageSnapshot as Page
@@ -24,14 +26,20 @@ from services.aggregations.company_overview.jobs import eligible_company_names
 from services.aggregations.company_overview.payload import build_company_summary
 from services.company_page_purge import enqueue_purge, purge_one
 from services.company_pages import (
+    PAYLOAD_SCHEMA,
     SECTIONS,
+    SEMANTIC_EPOCH,
+    builder_digest,
+    chain_set,
+    changed_within,
     dependencies_for,
     enabled,
     encode,
     revisions_current,
     section_columns,
+    servable,
     source_revisions,
-    version,
+    timing,
 )
 from utils.logging import configure_logging
 
@@ -64,10 +72,24 @@ def refresh_one(session_factory=SessionLocal) -> str:
             seed.execute(pg_insert(Page).values(missing).on_conflict_do_nothing())
         seed.commit()
     with session_factory() as write:
-        due = []
+        now = func.statement_timestamp()
+        renamed = Page.company_name.is_distinct_from(func.coalesce(Protocol.name, Page.company_name))
+        missing, due, fresh = {}, {}, {}
         for section in SECTIONS:
-            blob, _, source_at = section_columns(section)
-            due.append(or_(blob.is_(None), source_at.is_(None), ~revisions_current(section)))
+            columns = section_columns(section)
+            quiet, interval, wait = timing(section)
+            interval_elapsed = columns.started <= now - timedelta(seconds=interval)
+            missing[section] = or_(not_(servable(section)), renamed)
+            due[section] = or_(
+                missing[section],
+                and_(
+                    not_(revisions_current(section)),
+                    interval_elapsed,
+                    or_(not_(changed_within(section, quiet)), columns.started <= now - timedelta(seconds=wait)),
+                ),
+                and_(columns.digest.is_distinct_from(builder_digest()), interval_elapsed),
+            )
+            fresh[section] = and_(servable(section), columns.digest == builder_digest(), revisions_current(section))
         row = write.execute(
             select(
                 Page.cache_key,
@@ -75,87 +97,70 @@ def refresh_one(session_factory=SessionLocal) -> str:
                 func.coalesce(Protocol.name, Page.company_name),
                 Page.company_name,
                 Page.attempts,
-                Page.version,
-                *(predicate.label(section) for section, predicate in zip(SECTIONS, due)),
+                *(due[s].label("due_" + s) for s in SECTIONS),
+                *(fresh[s].label("fresh_" + s) for s in SECTIONS),
             )
             .outerjoin(Protocol, Protocol.id == Page.protocol_id)
             .where(
                 func.coalesce(Protocol.name, Page.company_name).in_(identities),
                 Page.next_attempt_at <= func.clock_timestamp(),
-                or_(
-                    Page.version.is_distinct_from(version()),
-                    Page.company_name.is_distinct_from(func.coalesce(Protocol.name, Page.company_name)),
-                    *due,
-                ),
+                or_(*due.values()),
             )
-            .order_by(Page.next_attempt_at, Page.company_name)
+            .order_by(
+                case((or_(*missing.values()), 0), else_=1),
+                func.least(*(case((due[s], section_columns(s).started)) for s in SECTIONS)),
+                Page.company_name,
+            )
             .with_for_update(skip_locked=True, of=Page)
             .limit(1)
         ).first()
         if row is None:
             return "idle"
-        cache_key, protocol_id, name, previous_name, attempts, previous_version, *dirty = row
-        sections = [
-            s
-            for s, changed in zip(SECTIONS, dirty)
-            if changed or previous_version != version() or previous_name != name
-        ]
-        try:
-            # Preserve the row lease if publication SQL fails; rollback the
-            # savepoint before recording backoff on the outer transaction.
-            with write.begin_nested():
-                values = {}
-                with session_factory() as source:
-                    source.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
-                    source.execute(text("SET LOCAL statement_timeout = '25s'"))
-                    started = source.execute(select(func.clock_timestamp())).scalar_one()
-                    snapshot = source.execute(text("SELECT pg_export_snapshot()")).scalar_one()
-                    source.info["company_page_snapshot"] = snapshot
-                    for section in sections:
-                        source.info["company_page_section"] = section
-                        source.info["company_page_dependencies"] = dependencies_for(protocol_id, section)
-                        if section == "overview":
-                            payload = build_company_overview(source, name)
-                        elif section == "functions":
-                            payload = {"functions": build_functions_for_protocol(source, name)}
-                        else:
-                            payload = build_company_summary(source, name)
-                        blob, revisions, source_at = section_columns(section)
-                        values[blob.key] = encode(payload)
-                        del payload  # Never retain all decoded sections at once.
-                        values[revisions.key] = source_revisions(source)
-                        values[source_at.key] = started
-                finished = write.execute(select(func.clock_timestamp())).scalar_one()
-                # Publish only tokens seen in the read snapshot. A producer writing
-                # during preparation leaves this result dirty for the next pass.
-                write.execute(
-                    update(Page)
-                    .where(Page.cache_key == cache_key)
-                    .values(
-                        **values,
-                        company_name=name,
-                        version=version(),
-                        published_at=finished,
-                        attempts=0,
-                        next_attempt_at=finished + timedelta(seconds=5),
+        cache_key, protocol_id, name, previous_name, attempts, *flags = row
+        is_due = dict(zip(SECTIONS, flags[: len(SECTIONS)]))
+        is_fresh = dict(zip(SECTIONS, flags[len(SECTIONS) :]))
+        units = [["summary"]] if is_due["summary"] else []
+        if is_due["overview"] or is_due["functions"]:
+            units.append([s for s in ("overview", "functions") if not is_fresh[s]])
+        failed = False
+        for sections in units:
+            structural = sections != ["summary"]
+            try:
+                # Preserve the row lease if publication SQL fails; rollback the
+                # savepoint before recording backoff on the outer transaction.
+                with write.begin_nested():
+                    values, started = _build(session_factory, protocol_id, name, sections)
+                    finished = write.execute(select(func.clock_timestamp())).scalar_one()
+                    # Publish only tokens seen in the read snapshot. A producer writing
+                    # during preparation leaves this result dirty for the next pass.
+                    # A rename lands with the structural sections that carry the name.
+                    write.execute(
+                        update(Page)
+                        .where(Page.cache_key == cache_key)
+                        .values(
+                            **values,
+                            **({"company_name": name} if structural else {}),
+                            published_at=finished,
+                            attempts=0,
+                            next_attempt_at=finished,
+                        )
                     )
+                    enqueue_purge(write, name)
+                    if structural and previous_name and previous_name != name:
+                        enqueue_purge(write, previous_name)
+                logger.info(
+                    "Prepared company page",
+                    extra={
+                        "company": name,
+                        "sections": sections,
+                        "duration_ms": int((finished - started).total_seconds() * 1000),
+                        "prepared_bytes": sum(len(v) for k, v in values.items() if k.endswith("_gzip")),
+                    },
                 )
-                enqueue_purge(write, name)
-                if previous_name and previous_name != name:
-                    enqueue_purge(write, previous_name)
-            write.commit()
-            logger.info(
-                "Prepared company page",
-                extra={
-                    "company": name,
-                    "sections": sections,
-                    "duration_ms": int((finished - started).total_seconds() * 1000),
-                    "prepared_bytes": sum(len(v) for k, v in values.items() if k.endswith("_gzip")),
-                },
-            )
-            return "prepared"
-        except Exception:
-            logger.exception("Company page preparation failed", extra={"company": name, "sections": sections})
+            except Exception:
+                failed = True
+                logger.exception("Company page preparation failed", extra={"company": name, "sections": sections})
+        if failed:
             write.execute(
                 update(Page)
                 .where(Page.cache_key == cache_key)
@@ -164,8 +169,37 @@ def refresh_one(session_factory=SessionLocal) -> str:
                     next_attempt_at=func.clock_timestamp() + timedelta(seconds=min(300, 5 * 2 ** min(attempts, 6))),
                 )
             )
-            write.commit()
-            return "failed"
+        write.commit()
+        return "failed" if failed else "prepared"
+
+
+def _build(session_factory, protocol_id, name, sections):
+    values = {}
+    with session_factory() as source:
+        source.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        source.execute(text("SET LOCAL statement_timeout = '25s'"))
+        started = source.execute(select(func.clock_timestamp())).scalar_one()
+        snapshot = source.execute(text("SELECT pg_export_snapshot()")).scalar_one()
+        source.info["company_page_snapshot"] = snapshot
+        for section in sections:
+            source.info["company_page_section"] = section
+            source.info["company_page_dependencies"] = dependencies_for(protocol_id, section)
+            if section == "overview":
+                payload = build_company_overview(source, name)
+            elif section == "functions":
+                payload = {"functions": build_functions_for_protocol(source, name)}
+            else:
+                payload = build_company_summary(source, name)
+            columns = section_columns(section)
+            values[columns.blob.key] = encode(payload)
+            del payload  # Never retain all decoded sections at once.
+            values[columns.revisions.key] = source_revisions(source)
+            values[columns.started.key] = started
+            values[columns.schema.key] = PAYLOAD_SCHEMA[section]
+            values[columns.epoch.key] = SEMANTIC_EPOCH
+            values[columns.chains.key] = chain_set()
+            values[columns.digest.key] = builder_digest()
+    return values, started
 
 
 def run(stop: Event | None = None) -> None:

@@ -15,7 +15,7 @@ from db.models import Contract, EffectiveFunction, PendingEffectsWork, TvlSnapsh
 from services import company_pages as pages
 from tests.aggregations.test_company_page_revisions import ready, root_contract
 from tests.aggregations.test_prepared_company_pages import prepared as prepared
-from tests.aggregations.test_prepared_company_pages import request
+from tests.aggregations.test_prepared_company_pages import request, source
 from tests.conftest import requires_postgres
 from tests.support.overview_builders import _add_contract, _add_job, _add_protocol, _addr
 from workers import company_pages as worker
@@ -61,8 +61,8 @@ def test_pending_effects_state_invalidates_summary_without_graph_work(prepared):
     )
     session.add(pending)
     ready(session)
-    assert pages.read_response(session, request(), protocol.name, section="summary") is None
-    assert pages.read_response(session, request(), protocol.name) is not None
+    assert source(session, protocol.name, "summary") == "prepared-stale"
+    assert source(session, protocol.name) == "prepared"
     assert worker.refresh_one(factory) == "prepared"
     response = pages.read_response(session, request(), protocol.name, section="summary")
     assert response is not None
@@ -150,22 +150,28 @@ def test_explicit_admin_refresh_is_authorized_and_uses_shared_builder(prepared, 
     assert client.post(path, headers={"X-PSAT-Admin-Key": "test-admin"}).status_code == 202
     session.rollback()
     for section in pages.SECTIONS:
-        assert pages.read_response(session, request(), protocol.name, section=section) is None
+        assert source(session, protocol.name, section) == "prepared-stale"
     ready(session)
     assert worker.refresh_one(factory) == "prepared"
     assert worker.refresh_one(factory) == "idle"
 
 
-def test_unrelated_deploys_reuse_but_builder_config_changes_invalidate(prepared, monkeypatch):
+def test_unrelated_deploys_reuse_but_builder_changes_serve_stale_until_rebuilt(prepared, monkeypatch):
     session, protocol, factory = prepared
     assert worker.refresh_one(factory) == "prepared"
     monkeypatch.setenv("GIT_SHA", "documentation-only-deploy")
     ready(session)
     assert worker.refresh_one(factory) == "idle"
-    assert pages.read_response(session, request(), protocol.name) is not None
-    monkeypatch.setenv("PSAT_COMPANY_BUILD_REVISION", "new-response-semantics")
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert source(session, protocol.name) == "prepared"
+    monkeypatch.setenv("PSAT_COMPANY_BUILD_REVISION", "new-builder")
+    for section in pages.SECTIONS:
+        response = pages.read_response(session, request(), protocol.name, section=section)
+        assert response is not None
+        assert response.headers["x-psat-response-source"] == "prepared-stale"
+        assert response.headers["x-psat-stale-reason"] == "code"
     assert worker.refresh_one(factory) == "prepared"
+    for section in pages.SECTIONS:
+        assert source(session, protocol.name, section) == "prepared"
 
 
 def test_legacy_company_is_prepared_and_new_descendants_invalidate(prepared):
@@ -188,7 +194,7 @@ def test_legacy_company_is_prepared_and_new_descendants_invalidate(prepared):
     child = _add_job(session, address=child_address, request={"parent_job_id": str(root.id)})
     _add_contract(session, address=child_address, job=child)
     ready(session)
-    assert pages.read_response(session, request(), name) is None
+    assert source(session, name) == "prepared-stale"
     assert worker.refresh_one(factory) == "prepared"
     response = pages.read_response(session, request(), name)
     assert response is not None
@@ -284,11 +290,11 @@ def test_upgrade_evidence_changes_only_invalidate_overview(prepared, evidence):
             )
         )
     ready(session)
-    assert pages.read_response(session, request(), protocol.name) is None
-    assert pages.read_response(session, request(), protocol.name, section="functions") is not None
-    assert pages.read_response(session, request(), protocol.name, section="summary") is not None
+    assert source(session, protocol.name) == "prepared-stale"
+    assert source(session, protocol.name, "functions") == "prepared"
+    assert source(session, protocol.name, "summary") == "prepared"
     assert worker.refresh_one(factory) == "prepared"
-    assert pages.read_response(session, request(), protocol.name) is not None
+    assert source(session, protocol.name) == "prepared"
 
 
 def test_renames_into_another_stale_cache_name_do_not_block_publication(prepared):

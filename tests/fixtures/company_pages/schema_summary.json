@@ -1,0 +1,10 @@
+{
+  "payload_schema": 1,
+  "skeleton": {
+    "analysis_pending_balance_effects": {
+      "degraded": "int",
+      "incomplete": "int"
+    },
+    "tvl": "NoneType"
+  }
+}

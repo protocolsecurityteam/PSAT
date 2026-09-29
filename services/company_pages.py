@@ -1,7 +1,9 @@
 """Prepared response IO; no ORM graphs or unbounded in-process cache.
 
-Unchanged source revisions permit reuse regardless of build age. Every origin
-read validates the revisions; the edge gets at most 60s from that validation.
+A section is servable while its schema, semantic epoch and chain set match and
+it is younger than the stale limit. Every origin read validates the revisions
+and builder digest and labels the response fresh or stale; the edge gets at
+most 60s from that validation.
 """
 
 from __future__ import annotations
@@ -12,9 +14,10 @@ import io
 import json
 import logging
 import os
+from datetime import timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastapi import Request, Response
 from fastapi.encoders import jsonable_encoder
@@ -24,12 +27,18 @@ from sqlalchemy.orm import Session
 
 from db.jsonb import jsonb_state
 from db.models import CompanyPageRevision, CompanyPageSnapshot, Protocol
+from utils.chains import supported_chain_ids
 from utils.compression import accepts_gzip
 
 logger = logging.getLogger(__name__)
 MAX_AGE_SECONDS = 60
 MAX_JSON_BYTES = 32 * 1024 * 1024
 MAX_GZIP_BYTES = 4 * 1024 * 1024
+# Bump a section when its response shape or field meaning changes; regenerate
+# tests/fixtures/company_pages/schema_<section>.json alongside.
+PAYLOAD_SCHEMA = {"overview": 1, "functions": 1, "summary": 1}
+# Bump when a fix withdraws previously published facts: a hard cutover, never stale.
+SEMANTIC_EPOCH = 1
 
 
 def cache_tag(name: str) -> str:
@@ -41,8 +50,26 @@ def enabled() -> bool:
     return os.getenv("PSAT_PREPARED_COMPANY_PAGES", "0") == "1"
 
 
+def timing(section: str) -> tuple[int, int, int]:
+    """Rebuild pacing in seconds for the section's group: (quiet, min interval, max wait)."""
+    group, defaults = ("SUMMARY", (0, 30, 60)) if section == "summary" else ("STRUCTURAL", (120, 300, 900))
+    quiet, interval, wait = (
+        int(os.getenv(f"PSAT_COMPANY_{group}_{name}_S", default))
+        for name, default in zip(("QUIET", "MIN_INTERVAL", "MAX_WAIT"), defaults)
+    )
+    return quiet, interval, wait
+
+
+def stale_max_seconds() -> int:
+    return int(os.getenv("PSAT_COMPANY_STALE_MAX_S", "86400"))
+
+
+def chain_set() -> str:
+    return ",".join(str(chain_id) for chain_id in sorted(supported_chain_ids()))
+
+
 @lru_cache(maxsize=1)
-def _builder_digest() -> str:
+def _code_digest() -> str:
     # Hash the shared implementation and dependency lock once per interpreter.
     # Documentation/frontend/CI-only deployments can reuse existing responses.
     root = Path(__file__).resolve().parents[1]
@@ -57,9 +84,10 @@ def _builder_digest() -> str:
     return digest.hexdigest()
 
 
-def version() -> str:
+def builder_digest() -> str:
+    """Decides whether to rebuild, never whether to serve."""
     config = os.getenv("PSAT_SUPPORTED_CHAIN_IDS", "") + ":" + os.getenv("PSAT_COMPANY_BUILD_REVISION", "")
-    return "4:" + hashlib.sha256((_builder_digest() + config).encode()).hexdigest()
+    return hashlib.sha256((_code_digest() + config).encode()).hexdigest()
 
 
 def encode(payload: Any) -> bytes:
@@ -98,15 +126,56 @@ def source_revisions(session: Session) -> dict[str, str | None]:
 SECTIONS = ("overview", "functions", "summary")
 
 
-def section_columns(section: str):
+class SectionColumns(NamedTuple):
+    blob: Any
+    revisions: Any
+    started: Any
+    schema: Any
+    epoch: Any
+    chains: Any
+    digest: Any
+
+
+def section_columns(section: str) -> SectionColumns:
     if section not in SECTIONS:
         raise ValueError("Unknown company section")
     page = CompanyPageSnapshot
-    return (
+    prefix = "" if section == "overview" else section + "_"
+    return SectionColumns(
         getattr(page, section + "_gzip"),
-        getattr(page, "source_revisions" if section == "overview" else section + "_source_revisions"),
-        getattr(page, "source_started_at" if section == "overview" else section + "_source_started_at"),
+        *(
+            getattr(page, prefix + name)
+            for name in (
+                "source_revisions",
+                "source_started_at",
+                "schema_version",
+                "semantic_epoch",
+                "chain_set",
+                "builder_digest",
+            )
+        ),
     )
+
+
+def _markers_current(section: str):
+    columns = section_columns(section)
+    return and_(
+        columns.blob.is_not(None),
+        columns.schema == PAYLOAD_SCHEMA[section],
+        columns.epoch == SEMANTIC_EPOCH,
+        columns.chains == chain_set(),
+        columns.started <= func.clock_timestamp(),
+    )
+
+
+def _within_stale_limit(section: str):
+    started = section_columns(section).started
+    return started >= func.statement_timestamp() - timedelta(seconds=stale_max_seconds())
+
+
+def servable(section: str):
+    """SQL predicate; unbuilt or pre-marker sections are never servable."""
+    return func.coalesce(and_(_markers_current(section), _within_stale_limit(section)), False)
 
 
 def dependencies_for(protocol_id: int | None, section: str) -> set[str]:
@@ -120,10 +189,8 @@ def dependencies_for(protocol_id: int | None, section: str) -> set[str]:
     return deps
 
 
-def revisions_current(section: str = "overview"):
-    """SQL predicate: a dirty response must never receive another cache TTL."""
-    page = CompanyPageSnapshot
-    _, revision_column, _ = section_columns(section)
+def _changed_dependencies(section: str):
+    revision_column = section_columns(section).revisions
     revisions = case((jsonb_state(revision_column) == "object", revision_column), else_=literal({}, type_=JSONB))
     entries = func.jsonb_each_text(revisions).table_valued("key", "value")
     changed = (
@@ -131,8 +198,26 @@ def revisions_current(section: str = "overview"):
         .select_from(entries)
         .outerjoin(CompanyPageRevision, CompanyPageRevision.key == entries.c.key)
         .where(entries.c.value.is_distinct_from(_revision_value(entries.c.key)))
-        .correlate(page)
+        .correlate(CompanyPageSnapshot)
     )
+    return revisions, entries, changed
+
+
+def changed_within(section: str, seconds: int):
+    """SQL predicate: a recorded dependency whose revision moved changed in the last ``seconds``.
+
+    Scheduling only. A late commit can carry an early change time, so this
+    never decides freshness; the tokens do.
+    """
+    _, entries, changed = _changed_dependencies(section)
+    window = func.statement_timestamp() - timedelta(seconds=seconds)
+    return exists(changed.where(func.psat_page_changed_at(entries.c.key) > window))
+
+
+def revisions_current(section: str = "overview"):
+    """SQL predicate: every recorded dependency token is unchanged."""
+    page = CompanyPageSnapshot
+    revisions, _, changed = _changed_dependencies(section)
     prefix = "summary:" if section == "summary" else ""
     required = [
         revisions.has_key(prefix + "all"),
@@ -153,9 +238,16 @@ def read_response(
     if not enabled():
         return None
     section = section or ("functions" if functions else "overview")
-    blob, _, source_column = section_columns(section)
+    columns = section_columns(section)
     row = session.execute(
-        select(blob, source_column, func.statement_timestamp())
+        select(
+            columns.blob,
+            columns.started,
+            func.statement_timestamp(),
+            _within_stale_limit(section),
+            columns.digest == builder_digest(),
+            revisions_current(section),
+        )
         .outerjoin(Protocol, Protocol.id == CompanyPageSnapshot.protocol_id)
         .where(
             or_(
@@ -166,26 +258,32 @@ def read_response(
                 ),
             ),
             CompanyPageSnapshot.company_name == name,
-            CompanyPageSnapshot.version == version(),
-            revisions_current(section),
-            source_column <= func.clock_timestamp(),
-            blob.is_not(None),
+            _markers_current(section),
         )
     ).first()
     if row is None:
         return None
-    body, source_at, now = row
+    body, source_at, now, within_limit, same_code, same_data = row
+    if not within_limit:
+        logger.error(
+            "Prepared company page exceeded stale limit",
+            extra={"company": name, "section": section, "prepared_at": source_at.isoformat()},
+        )
+        return None
     if len(body) > MAX_GZIP_BYTES:
         return None
     headers = {
         "Cache-Tag": cache_tag(name),
         "Vary": "Accept-Encoding",
         "X-PSAT-Prepared-At": source_at.isoformat(),
+        "X-PSAT-Payload-Schema": str(PAYLOAD_SCHEMA[section]),
         "X-PSAT-Validated-At": now.isoformat(),
-        "X-PSAT-Response-Source": "prepared",
+        "X-PSAT-Response-Source": "prepared" if same_code and same_data else "prepared-stale",
         # Internal header consumed and stripped by the origin boundary.
         "X-PSAT-Fresh-Until": str(now.timestamp() + MAX_AGE_SECONDS),
     }
+    if not (same_code and same_data):
+        headers["X-PSAT-Stale-Reason"] = "code" if same_data else "data"
     if accepts_gzip(request.headers.get("accept-encoding", "")):
         headers["Content-Encoding"] = "gzip"
     else:
@@ -204,8 +302,9 @@ def prepared_or_pending(session: Session, request: Request, name: str, *, sectio
     """Same read contract for public/operator requests, including cache revalidation.
 
     No-cache means validate the saved revision, not rebuild unchanged data.
-    Durable missing/dirty/version state is discovered by the builder without
-    reader writes or locks on an in-progress preparation.
+    Only an unservable section is refused; dirty or old-code snapshots are
+    served labelled stale. The builder discovers due work without reader
+    writes or locks on an in-progress preparation.
     """
     from fastapi import HTTPException
     from starlette.responses import JSONResponse

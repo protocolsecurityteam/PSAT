@@ -25,6 +25,10 @@ pytestmark = requires_postgres
 @pytest.fixture
 def prepared(db_session, monkeypatch):
     monkeypatch.setenv("PSAT_PREPARED_COMPANY_PAGES", "1")
+    # Rebuild dirty sections immediately; pacing tests restore real timings.
+    for group in ("STRUCTURAL", "SUMMARY"):
+        for setting in ("QUIET", "MIN_INTERVAL", "MAX_WAIT"):
+            monkeypatch.setenv(f"PSAT_COMPANY_{group}_{setting}_S", "0")
     protocol = _add_protocol(db_session, "prepared-example")
     address = _addr("prepared")
     job = _add_job(db_session, address=address, protocol_id=protocol.id)
@@ -44,6 +48,11 @@ def request(headers=None, query=b"", operator=False):
             "state": {"edge_operator": operator},
         }
     )
+
+
+def source(session, name, section="overview"):
+    response = pages.read_response(session, request(), name, section=section)
+    return response and response.headers["x-psat-response-source"]
 
 
 def bodies(session):
@@ -105,7 +114,7 @@ def test_explicit_fresh_reads_validate_and_reuse(prepared, headers, query, opera
     assert worker.refresh_one(factory) == "idle"
 
 
-@pytest.mark.parametrize("change", ["untracked", "future", "version", "rename", "missing", "disabled"])
+@pytest.mark.parametrize("change", ["future", "schema", "epoch", "rename", "missing", "disabled"])
 def test_invalid_preparations_fall_back(prepared, monkeypatch, change):
     session, protocol, factory = prepared
     assert worker.refresh_one(factory) == "prepared"
@@ -115,14 +124,32 @@ def test_invalid_preparations_fall_back(prepared, monkeypatch, change):
         session.execute(update(Protocol).where(Protocol.id == protocol.id).values(name="renamed"))
     else:
         values = {
-            "untracked": {"source_revisions": None},
             "future": {"source_started_at": datetime.now(timezone.utc) + timedelta(seconds=60)},
-            "version": {"version": "old-deploy"},
+            "schema": {"schema_version": pages.PAYLOAD_SCHEMA["overview"] + 1},
+            "epoch": {"semantic_epoch": pages.SEMANTIC_EPOCH - 1},
             "missing": {"overview_gzip": None},
         }[change]
         session.execute(update(Page).values(**values))
     session.commit()
     assert pages.read_response(session, request(), "prepared-example") is None
+
+
+@pytest.mark.parametrize("marker", ["schema", "epoch", "chain"])
+def test_unservable_marker_is_refused_as_preparing_and_rebuilt(prepared, monkeypatch, marker):
+    session, protocol, factory = prepared
+    assert worker.refresh_one(factory) == "prepared"
+    if marker == "chain":
+        for module in (pages, worker):
+            monkeypatch.setattr(module, "chain_set", lambda: "1,10")
+    else:
+        column = {"schema": Page.schema_version, "epoch": Page.semantic_epoch}[marker]
+        session.execute(update(Page).values({column: column + 1}))
+        session.commit()
+    response = pages.prepared_or_pending(session, request(), protocol.name)
+    assert response.status_code == 503
+    assert json.loads(bytes(response.body))["code"] == "company_preparing"
+    assert worker.refresh_one(factory) == "prepared"
+    assert source(session, protocol.name) == "prepared"
 
 
 def make_due(session):
@@ -163,7 +190,7 @@ def test_mark_during_build_survives_atomic_publication(prepared, monkeypatch):
 
     monkeypatch.setattr(worker, "build_functions_for_protocol", build)
     assert worker.refresh_one(factory) == "prepared"
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert source(session, protocol.name) == "prepared-stale"
 
 
 def test_worker_is_single_flight_and_never_rebuilds_unchanged_data(prepared, monkeypatch):
@@ -176,7 +203,7 @@ def test_worker_is_single_flight_and_never_rebuilds_unchanged_data(prepared, mon
     assert worker.refresh_one(factory) == "prepared"
     session.execute(
         update(Page).values(
-            source_started_at=datetime.now(timezone.utc) - timedelta(days=1),
+            source_started_at=datetime.now(timezone.utc) - timedelta(hours=23),
             next_attempt_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         )
     )
@@ -185,7 +212,7 @@ def test_worker_is_single_flight_and_never_rebuilds_unchanged_data(prepared, mon
     monkeypatch.setattr(worker, "build_company_overview", builder)
     for _ in range(30):
         assert worker.refresh_one(factory) == "idle"
-        assert pages.read_response(session, request(), protocol.name) is not None
+        assert source(session, protocol.name) == "prepared"
     builder.assert_not_called()
 
 
@@ -260,13 +287,13 @@ def test_dirty_revision_rolls_back_with_producer(prepared):
     session, protocol, factory = prepared
     assert worker.refresh_one(factory) == "prepared"
     session.execute(update(Contract).where(Contract.protocol_id == protocol.id).values(contract_name="Rolled back"))
-    assert pages.read_response(session, request(), protocol.name) is None
+    assert source(session, protocol.name) == "prepared-stale"
     session.rollback()
-    assert pages.read_response(session, request(), protocol.name) is not None
+    assert source(session, protocol.name) == "prepared"
 
 
 @pytest.mark.parametrize("encoding", ["gzip", "identity", "gzip;q=0", "*;q=1"])
-def test_full_api_serves_prepared_bytes_and_dirty_requests_never_build(prepared, monkeypatch, encoding):
+def test_full_api_serves_prepared_and_labelled_stale_bytes_without_building(prepared, monkeypatch, encoding):
     from fastapi.testclient import TestClient
 
     import api
@@ -294,6 +321,18 @@ def test_full_api_serves_prepared_bytes_and_dirty_requests_never_build(prepared,
     overview.assert_not_called()
     functions.assert_not_called()
     session.execute(update(Contract).where(Contract.protocol_id == protocol.id).values(contract_name="Dirty"))
+    session.commit()
+    response = client.get(f"/api/company/{protocol.name}")
+    assert response.status_code == 200
+    assert response.json() == expected[0]
+    assert response.headers["x-psat-response-source"] == "prepared-stale"
+    assert response.headers["x-psat-stale-reason"] == "data"
+    assert response.headers["x-psat-prepared-at"]
+    assert response.headers["x-psat-payload-schema"] == str(pages.PAYLOAD_SCHEMA["overview"])
+    assert "x-psat-fresh-until" not in response.headers
+    ttl = int(response.headers["cache-control"].split("s-maxage=")[1].split(",")[0])
+    assert 0 < ttl <= 60
+    session.execute(update(Page).values(schema_version=Page.schema_version + 1))
     session.commit()
     response = client.get(f"/api/company/{protocol.name}")
     assert response.status_code == 503
@@ -388,7 +427,7 @@ def test_scheduling_hints_alone_do_not_rebuild_unchanged_data(prepared):
     assert mark_protocol_score_dirty(session, protocol.id, "manual")
     mark_enrollment_dirty(session, protocol.id, "governance_rotation")
     session.commit()
-    assert pages.read_response(session, request(), protocol.name) is not None
+    assert source(session, protocol.name) == "prepared"
     assert worker.refresh_one(factory) == "idle"
 
 
