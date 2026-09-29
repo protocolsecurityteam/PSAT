@@ -880,5 +880,3 @@ def _verify_single_repo(
         status="candidate_path_missing",
         reason=f"commits exist; candidate paths ({candidate_paths}) not in repo",
     )
-
-
