@@ -126,10 +126,6 @@ contract TestSafe {
 }
 """
 
-# Stand-in delegating upgrade authority to a separate ``ProxyAdmin``-like address;
-# enrollment only cares about the CGN classification.
-ROLE_PRINCIPAL_HOST_SOURCE = OWNABLE_SOURCE
-
 
 SOLMATE_OWNED_SOURCE = """
 // SPDX-License-Identifier: MIT

@@ -116,8 +116,7 @@ def test_empty_reason_absent_on_populated_set(monkeypatch: pytest.MonkeyPatch) -
 
 
 # ==========================================================================
-# Claim-#3 characterization net (merged from
-# tests/test_underresolution_claim3_characterization.py).
+# Claim-#3 characterization net.
 #
 # Pins the lowering of the operand shapes behind the etherfi (protocol_id=1, run
 # ``1279e07382b24d32``) ``finite_set/lower_bound`` under-resolved functions. Operands are the

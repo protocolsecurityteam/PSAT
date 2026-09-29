@@ -285,12 +285,6 @@ def test_run_indeterminate_keeps_static():
 # bytes. See scripts/authority_audit/PHASE0_HANDPROBE.md.
 # ---------------------------------------------------------------------------
 
-_REAL_OWNABLE_REVERT = (
-    "0x08c379a000000000000000000000000000000000000000000000000000000000"
-    "00000020000000000000000000000000000000000000000000000000000000000"
-    "00000204f776e61626c653a2063616c6c6572206973206e6f7420746865206f776e6572"
-).replace(" ", "")
-
 
 def test_run_synthesis_miss_never_probes_and_keeps_static():
     wire = StubWire(lambda _tag, _frm: ok())

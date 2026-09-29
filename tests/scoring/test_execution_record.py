@@ -440,6 +440,14 @@ def test_case5_a_coverage_gap_over_an_attribution_derived_figure_earns_no_floor(
     assert finding["value_at_stake_usd"] == 5_000.0
 
 
+def test_case5_a_genuine_floor_under_the_same_gap_still_earns_it(fold):
+    """The other arm, so the test above cannot pass by never granting a floor."""
+    finding = _eoa_finding(fold, *_gapped_row(MAGNITUDE_STATE_PROVEN_FLOOR))
+    assert finding["value_at_stake_bound_direction"] == FOLD.BOUND_DIRECTION_FLOOR
+    assert finding["value_at_stake_is_floor"] is True
+    assert finding["value_band"].startswith(">= ")
+
+
 def test_case5_holds_on_a_subsumed_row_too(fold):
     """Case 7's parity clause: three investigation passes silently measured findings only."""
     common: dict[str, Any] = dict(

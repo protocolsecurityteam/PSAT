@@ -52,19 +52,6 @@ def _build_fake_async_playwright(page_factory):
     return MagicMock(side_effect=lambda: FakePlaywrightManager()), fake_context
 
 
-def _make_page(visit_log: list[tuple[str, asyncio.Event]]):
-    """Page that records its goto URL and waits for an event before closing.
-
-    The event is what lets the test gate concurrency: a page that hasn't
-    been ``set()`` is still 'open', and the semaphore won't release.
-    """
-    page = MagicMock()
-    page.goto = AsyncMock()
-    page.close = AsyncMock()
-    page.wait_for_timeout = AsyncMock()
-    return page
-
-
 def test_crawl_visits_every_url_concurrently(browser_module, monkeypatch):
     monkeypatch.setenv("PSAT_DAPP_PARALLEL", "2")
     # Re-import so the module-level constant picks up the env var.

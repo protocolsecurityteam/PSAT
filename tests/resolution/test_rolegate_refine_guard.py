@@ -759,25 +759,6 @@ def test_fixture11_transparent_denylist_public_cofinite(session, both_flags):
 
 # Section 4 — shape-level classification controls (both flags).
 
-# Transparent role-store (fixture 5): hasRole via an EXTERNAL RoleRegistry where
-# the account binding survives the helper boundary — the leaf stays a
-# caller-tainted external_bool and gates directly (no :1976 involvement).
-_TRANSPARENT_ROLE_STORE = """
-pragma solidity ^0.8.19;
-interface IRoleRegistry { function hasRole(bytes32 role, address account) external view returns (bool); }
-contract C {
-    bytes32 public constant OPERATION_MULTISIG_ROLE = keccak256("OP");
-    IRoleRegistry public roleRegistry;
-    uint256 public maxBid;
-    error Unauthorized();
-    function _checkRole(bytes32 role, address account) internal view {
-        if (!roleRegistry.hasRole(role, account)) revert Unauthorized();
-    }
-    function _checkRole(bytes32 role) internal view { _checkRole(role, msg.sender); }
-    function setMaxBidPrice(uint256 x) external { _checkRole(OPERATION_MULTISIG_ROLE); maxBid = x; }
-}
-"""
-
 
 # Effectful permissionless (fixture 6): require(token.transferFrom(msg.sender,…))
 # moves the caller's own assets — permissionless, stays open. Protects the 11.

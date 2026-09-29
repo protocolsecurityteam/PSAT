@@ -50,11 +50,6 @@ def _caller(fn_sig: str, sinks: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# The new claim id is registered (emit_claim would fail closed otherwise)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # build_callee_claim_map — only propagatable claims survive
 # ---------------------------------------------------------------------------
 
@@ -306,11 +301,6 @@ def test_provenance_does_not_override_static_standard_exact():
     merged = resolve_claim_precedence([static_claim, *out["upgradeTo(address)"]])
     assert len(merged) == 1
     assert merged[0]["tier"] == "standard_exact"
-
-
-# ---------------------------------------------------------------------------
-# The four derivations compose without clobbering each other
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------

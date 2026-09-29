@@ -209,6 +209,15 @@ def test_proven_caller_gate_target_keeps_the_controller_claim():
     assert topics[0]["event_type"] == "controller_changed:state_variable:pauser"
 
 
+def test_call_target_provenance_does_not_earn_the_controller_claim():
+    """DISCRIMINATING CONTROL: ``call_target`` is a PRESENT provenance
+    value that is not the gate proof — "called, and no gate was proven".
+    It must resolve exactly like an absent one."""
+    topics = extract_governance_topics(_plan(_erc20_balances_controller(authority_provenance="call_target")))
+
+    assert {t["event_type"] for t in topics} == {"state_changed:state_variable:_balances"}
+
+
 def test_absent_and_call_target_agree_but_caller_gate_differs():
     """The three states of ``authority_provenance`` off the resolver: only a proven gate mints
     the controller claim."""

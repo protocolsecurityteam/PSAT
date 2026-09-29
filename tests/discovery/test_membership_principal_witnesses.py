@@ -479,6 +479,23 @@ def test_principal_hosted_only_on_a_d2_member_is_refused(db_session, protocol):
     assert subject.protocol_id is None, "a D2-only member's principal must not license what it controls"
 
 
+def test_the_same_principals_admit_once_an_anchoring_member_hosts_them(db_session, protocol):
+    """Control for the refusal above: the fact, not the row, is what changes."""
+    anchor = _anchored_member(db_session, protocol, ADDR(0x3100))
+    endpoint = _d2_only_member(db_session, protocol, ADDR(0x3101), controls=anchor)
+    controller = _contract(db_session, ADDR(0x3102), nominated=protocol.id)
+    _principal(db_session, endpoint, controller.address, resolved_type="timelock")
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(controller.id,)))
+    db_session.flush()
+    assert controller.protocol_id is None
+
+    _principal(db_session, anchor, controller.address, resolved_type="timelock")
+    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(controller.id,)))
+    db_session.flush()
+    assert controller.protocol_id == protocol.id
+    assert _witness(db_session, controller, protocol, WITNESS_RULE_W3_CONTROL, "d2").via_address == anchor.address
+
+
 # ---------------------------------------------------------------------------
 # (d) Revocation — the hosting member's demotion cascades (invariant 8)
 # ---------------------------------------------------------------------------

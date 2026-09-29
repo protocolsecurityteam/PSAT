@@ -13,7 +13,6 @@ from services.static import collect_contract_analysis
 pytestmark = pytest.mark.compile
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts"
-FIXTURE_INDEX_PATH = FIXTURES_DIR / "index.json"
 
 
 def _write_project(tmp_path: Path, contract_name: str, source_code: str) -> Path:
@@ -615,8 +614,6 @@ def test_opaque_external_helper_is_controller_ref(tmp_path, project_name, source
 
 # ---------------------------------------------------------------------------
 # Classification: which of these fields can honestly be not-determined.
-# Preserved from tests/test_slither_detector_outage.py (deleted with the vestigial
-# detector-output reader); neither test depended on it.
 # ---------------------------------------------------------------------------
 
 

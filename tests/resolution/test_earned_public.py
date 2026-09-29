@@ -45,12 +45,6 @@ def earned_public(monkeypatch):
     monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", "1")
 
 
-@pytest.fixture
-def legacy_path(monkeypatch):
-    """The kill-switch side: the flag defaults ON, so legacy E3/E4 must be requested."""
-    monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", "0")
-
-
 def _compile(tmp_path: Path, source: str) -> Slither:
     src = textwrap.dedent(source).strip() + "\n"
     f = tmp_path / "C.sol"

@@ -29,8 +29,6 @@ def _isolated_classify_cache():
     tracking.clear_classify_cache()
 
 
-# Encoded constants used to build mock responses.
-ZERO_RESULT = "0x" + "0" * 64
 ADDR_OWNER = "0x" + "11" * 20  # an "owner" address used in several mocks
 
 

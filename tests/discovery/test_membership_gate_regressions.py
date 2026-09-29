@@ -22,9 +22,6 @@ from tests.conftest import requires_postgres
 # ---------------------------------------------------------------------------
 
 
-pytestmark_db = [requires_postgres]
-
-
 def _addr(n: int) -> str:
     return "0x" + hex(n)[2:].zfill(40)
 

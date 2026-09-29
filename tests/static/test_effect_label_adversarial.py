@@ -6,9 +6,8 @@ These test whether the detection works based on *what the code does*
 
 Randomization strengthens a *positive* assertion and weakens a *negative*
 one: for an assertion-of-absence, conventional naming is the adversarial
-input. So the file ends with conventional-name controls (merged from the
-former ``test_effect_label_weaknesses.py``) — the pairs are what make the
-earned negatives falsifiable in both directions.
+input. So the file ends with conventional-name controls — the pairs are what
+make the earned negatives falsifiable in both directions.
 """
 
 import random
@@ -61,9 +60,34 @@ def _get_function_labels(analysis: dict, function_name: str) -> set[str]:
 # 1. Randomized impl slot name + delegatecall fallback
 
 
+def test_random_impl_slot_with_delegatecall():
+    slot_name = f"_{_rand()}"
+    setter_name = _rand()
+    source = f"""
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+contract Target {{
+    address private {slot_name};
+    address public owner;
+    modifier onlyOwner() {{ require(msg.sender == owner); _; }}
+    function {setter_name}(address a) external onlyOwner {{ {slot_name} = a; }}
+    fallback() external payable {{
+        address t = {slot_name};
+        assembly {{ calldatacopy(0,0,calldatasize()) let r := delegatecall(gas(),t,0,calldatasize(),0,0) returndatacopy(0,0,returndatasize()) switch r case 0 {{ revert(0,returndatasize()) }} default {{ return(0,returndatasize()) }} }}
+    }}
+}}
+"""
+    analysis = _scaffold_and_analyze(source)
+    labels = _get_function_labels(analysis, setter_name)
+    # The bespoke same-contract impl-slot detector is retired; ``upgrade.*`` is
+    # standard-gated. The delegatecall stays a fact on the fallback.
+    assert "implementation_update" not in labels, (
+        f"Random impl slot '{slot_name}', setter '{setter_name}': expected NO implementation_update, got {labels}"
+    )
+    assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
+
+
 # 2. Randomized pause variable name (a bool gating a modifier, flipped by a function)
-
-
 def test_random_pause_variable():
     var_name = f"_{_rand()}"
     pause_fn = _rand()
@@ -260,7 +284,7 @@ contract Target {{
 # 9. Ownership transfer with randomized variable name
 
 
-# Conventional-name controls (merged from tests/test_effect_label_weaknesses.py):
+# Conventional-name controls:
 # the paired control for each randomized test above, so a label is proven to come
 # from what the code does in both directions.
 

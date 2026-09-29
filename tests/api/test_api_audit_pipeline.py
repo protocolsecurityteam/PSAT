@@ -316,11 +316,6 @@ def test_pipeline_caps_buckets_at_limit(db_session, api_client, seed_protocol):
 
 
 # ---------------------------------------------------------------------------
-# 7. Multi-protocol — company name is joined correctly per row
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # 8. Pending ordering — oldest discovered first so FIFO matches worker claim
 # ---------------------------------------------------------------------------
 
