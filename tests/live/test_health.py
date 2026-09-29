@@ -45,7 +45,6 @@ def test_spa_fallback_serves_frontend(live_base_url: str):
 
 
 def test_frontend_assets_served(live_base_url: str):
-    """Catch the case where SPA HTML loads but /assets is empty — shell-only deploy."""
     html = requests.get(live_base_url + "/", timeout=15).text
     m = re.search(r"/assets/([\w.\-]+\.js)", html)
     if not m:

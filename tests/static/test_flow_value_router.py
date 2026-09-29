@@ -1,27 +1,17 @@
 """Cross-contract value routing (``value_router`` flows + claim).
 
-A *router* function (``TellerWithMultiAssetSupport.deposit`` /
-``bulkWithdraw``) itself neither holds nor sends value: it CALLS an in-unit
-contract (``BoringVault.enter`` / ``exit``) whose body moves the value. The
-effect walk crosses the resolved ``HighLevelCall`` boundary, rebases its
-destination/self classification onto the callee's own contract, and tags the
-routed move ``direction: "value_router"`` — kept distinct from the entry's own
-``in``/``out`` so it never adds an asset-direction label to the router.
+A *router* (``TellerWithMultiAssetSupport.deposit`` / ``bulkWithdraw``) neither holds
+nor sends value: it CALLS an in-unit contract (``BoringVault.enter`` / ``exit``)
+whose body moves it. The effect walk crosses the ``HighLevelCall`` boundary, rebases
+destination/self classification onto the callee, and tags the move
+``direction: "value_router"``, distinct from the entry's own ``in``/``out``.
 
-Proven here on a self-contained Router→Vault→SafeTransferLib fixture (the
-real Teller/BoringVault shape, no external lib dependency):
+Proven on a self-contained Router->Vault->SafeTransferLib fixture: a routed pull
+resolves to ``self``; a routed send binds ``target_param_index`` to the ROUTER's
+caller parameter; a SAME-contract library transfer stays ``out`` (the crossing mints
+the router flow); the vault as its OWN entry keeps plain ``in``/``out``.
 
-  * a routed pull into the vault resolves the destination to ``self`` (the
-    money goes INTO the vault, not to the caller);
-  * a routed send back out binds the destination to the ROUTER's own caller
-    parameter (``target_param_index``) — the provable "caller can name the
-    payee" fact, recovered across the boundary WITHOUT over-claiming a wrong
-    slot;
-  * a SAME-contract library transfer stays ``out`` (never ``value_router``):
-    the boundary crossing, not the transfer, is what mints the router flow;
-  * the vault, analysed as its OWN entry point, keeps plain ``in``/``out``.
-
-Precedent: ``tests/static/test_flow_interproc.py`` (same compile-with-Slither harness).
+Precedent: ``test_flow_interproc.py`` (same compile-with-Slither harness).
 """
 
 from __future__ import annotations
@@ -39,10 +29,8 @@ from services.static.contract_analysis_pipeline.effects import build_effects  # 
 
 pytestmark = pytest.mark.compile
 
-# Router → Vault → token-first library transfer (SafeTransferLib idiom). The
-# library body does the real ERC-20 call, so the vault as a direct entry has
-# plain in/out flows — routing is the only thing that promotes them to
-# value_router on the caller.
+# Router -> Vault -> token-first library transfer (SafeTransferLib idiom): the vault
+# as a direct entry has plain in/out; routing alone promotes them to value_router.
 _SRC = """
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -216,7 +204,6 @@ def test_same_contract_library_transfer_is_not_routed(_unit):
     fns = _effects(_unit, "Router")
     info = fns["directSend(uint256,address)"]
     assert _router_flows(info) == []
-    # It is a plain out-flow, exactly as before this feature existed.
     assert any(f["direction"] == "out" for f in info["value_flows"])
 
 
@@ -382,13 +369,10 @@ def test_a_destination_guard_on_a_routed_function_blocks_the_negative_proof(tmp_
 
 
 # --- the sink -> flow join (fix 7) ------------------------------------------
-#
-# ONE witness, TWO identity regimes. ``router_ops`` carries declaration
-# identity; ``sink_receivers``/``sink_ids`` used to join sinks to flows by BARE
-# MOVE-SELECTOR. On a routed claim the flow's selector is by design the
-# CALLEE's inner transfer, so a same-selector DIRECT sink in the entry attached
-# its receiver to the routed claim while ``router_ops`` named a different
-# carrying op.
+# ``sink_receivers``/``sink_ids`` used to join sinks to flows by BARE MOVE-SELECTOR,
+# but a routed claim's flow selector is the CALLEE's inner transfer, so a
+# same-selector DIRECT sink in the entry attached its receiver to the routed claim
+# while ``router_ops`` named a different carrying op.
 
 
 def _witness(contract_name: str, signature: str, claim_id: str, _unit) -> dict:

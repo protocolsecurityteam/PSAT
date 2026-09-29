@@ -140,11 +140,8 @@ def _signal(**overrides: Any) -> FunctionSignal:
 
 
 def test_every_three_state_field_must_be_named():
-    """No dataclass default may supply a state — omitting one is a TypeError.
-
-    This is what makes ``not_determined`` un-defaultable: a distiller that never
-    decided a state cannot construct the row at all.
-    """
+    """No dataclass default may supply a state, so a distiller that never decided one
+    cannot construct the row at all."""
     with pytest.raises(TypeError):
         FunctionSignal(  # pyright: ignore[reportCallIssue]
             job_id=uuid.uuid4(),
@@ -246,9 +243,8 @@ def test_value_states_are_three_and_bounds_require_a_proven_reach():
 def test_destination_not_applicable_differs_from_not_determined():
     """``pause.set`` has no destination; an unread delegatecall has one.
 
-    Collapsing these makes the banned escalation representable again: an
-    unproven destination graded as an unconstrained one is the −30λ, F→C false
-    positive this schema exists to prevent.
+    Collapsing them makes the banned escalation representable: an unproven
+    destination graded as unconstrained is the −30λ, F→C false positive.
     """
     inapplicable = _signal(claim_id="pause.set", destination=Tri.proven(DESTINATION_STATE_NOT_APPLICABLE, "none"))
     unread = _signal(claim_id="delegatecall.execute")
@@ -328,10 +324,6 @@ def scoring_protocol(db_session):
     db_session.add(protocol)
     db_session.flush()
     jobs = [Job(id=uuid.uuid4(), protocol_id=protocol.id) for _ in range(2)]
-    # Two implementation contracts at their own addresses, both of whose
-    # functions are deployed behind ONE proxy — so their signals share a
-    # deployment_address. This is the split-proxy secondary-impl shape that is
-    # live on this corpus, and the identity key has to survive it.
     contracts = [
         Contract(address=f"0x{uuid.uuid4().hex[:40]}", chain="ethereum", protocol_id=protocol.id) for _ in range(2)
     ]
@@ -517,9 +509,8 @@ def test_undetermined_destination_cannot_carry_a_shape(db_session, scoring_proto
 def test_state_columns_have_no_default(db_session, scoring_protocol):
     """A raw INSERT omitting a discriminator raises instead of defaulting.
 
-    The whole convention rests on this: with a server default, a writer that
-    never determined the fact would record ``not_determined`` silently, which is
-    exactly an unread witness becoming a published one.
+    With a server default, a writer that never determined the fact would silently
+    record ``not_determined`` — an unread witness becoming a published one.
     """
     discriminators = [
         "severity_state",
@@ -571,9 +562,7 @@ def test_reanalysis_replaces_prior_jobs_signals_for_the_same_contract(db_session
     """The real currency case: a SECOND job distilling the same contract.
 
     Re-analysis mints a new job, so a job-scoped delete would leave the first
-    job's rows behind and the fold would count the contract twice. The delete is
-    contract-scoped precisely so the later distillation supersedes the earlier
-    one regardless of which job produced it.
+    job's rows behind and the fold would count the contract twice.
     """
     fx = scoring_protocol
     db_session.add_all([_row(fx, selector=f"0x0000000{n}") for n in (1, 2)])
@@ -611,9 +600,8 @@ def test_replace_does_not_touch_a_sibling_contract(db_session, scoring_protocol)
 def test_split_proxy_siblings_share_a_deployment_address_without_colliding(db_session, scoring_protocol):
     """Two contracts, one deployment_address, same selector and claim.
 
-    Live on this corpus: secondary implementations behind one proxy. Without
-    ``contract_id`` in the identity this is a unique-constraint violation and one
-    of the two contracts' signals can never be written at all.
+    Without ``contract_id`` in the identity this is a unique-constraint violation
+    and one contract's signals can never be written.
     """
     fx = scoring_protocol
     db_session.add_all([_row(fx), _row(fx, contract_id=fx.sibling.id)])
@@ -981,9 +969,8 @@ def test_value_entity_keys_reject_nulls(db_session, scoring_protocol):
 def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protocol):
     """S5: every field's three states survive the trip through Postgres.
 
-    Both directions are exercised, because the failure this guards against is a
-    state written to the wrong column — every individual value stays legal, so
-    no CHECK downstream would notice.
+    Both directions are exercised: a state written to the wrong column leaves every
+    value legal, so no CHECK downstream would notice.
     """
     fx = scoring_protocol
     originals = [
@@ -1036,7 +1023,6 @@ def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protoc
         assert back.gate_inputs == original.gate_inputs
         assert back.enters_grade == original.enters_grade
 
-    # The three states stayed three on the way back out.
     assert len({s.value_state for s in restored}) == 3
     assert restored[1].severity.require(SEVERITY_STATE_PROVEN) == 0.0
     assert restored[0].severity.value is None
@@ -1110,10 +1096,8 @@ def test_latest_view_correlates_per_protocol(db_session, scoring_protocol):
 def test_a_rejected_signal_leaves_the_original_set_fully_intact(db_session, scoring_protocol):
     """R2-B1: validation runs before the delete, so a bad list changes nothing.
 
-    The distillation call site is fail-forward, so it catches the raise and
-    commits anyway. If the delete had already run, that commit would persist a
-    partially replaced contract — charging a subset of its exposure with no
-    trace that the rest went missing.
+    The distillation call site is fail-forward and commits anyway; had the delete
+    run, that commit would persist a partially replaced contract.
     """
     fx = scoring_protocol
     db_session.add_all([_row(fx, selector=f"0x0000000{n}") for n in (1, 2)])
@@ -1229,8 +1213,7 @@ def test_replace_refuses_an_unknown_contract(db_session, scoring_protocol):
 def test_second_replace_of_one_contract_in_a_transaction_raises(db_session, scoring_protocol):
     """Item-4: grouping by (contract_id, deployment_address) must not truncate.
 
-    The second call's delete would drop the first call's rows, leaving the
-    contract carrying only its last deployment group — silent recall loss.
+    The second call's delete would drop the first call's rows — silent recall loss.
     """
     fx = scoring_protocol
     replace_contract_signals(

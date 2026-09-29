@@ -55,7 +55,6 @@ def _session_cm(fake_job: MagicMock) -> MagicMock:
 
 
 def test_ops_reads_require_admin_key(monkeypatch) -> None:
-    """Each ops/internal read is 401 without the key and 200 with it."""
     client = _client_without_bypass(monkeypatch)
     job_id = str(uuid.uuid4())
     cm = _session_cm(_fake_job(job_id))
@@ -111,7 +110,6 @@ def test_artifact_allowlist_gates_internal_names(monkeypatch) -> None:
 
 
 def test_analyses_list_does_not_enumerate_internal_artifacts(monkeypatch) -> None:
-    """The public listing strips internal artifact names from available_artifacts."""
     import api
     from routers import deps
 
@@ -161,7 +159,6 @@ def test_analyses_list_does_not_enumerate_internal_artifacts(monkeypatch) -> Non
 
 
 def test_health_pool_only_for_admin(monkeypatch) -> None:
-    """The status/db/storage booleans are public; the pool sub-object is admin-only."""
     from sqlalchemy.pool import QueuePool
 
     import api
@@ -203,7 +200,6 @@ def test_admin_key_valid_helper(monkeypatch) -> None:
 
 
 def test_subscriptions_redacts_webhook_token() -> None:
-    """The discord webhook token is never returned un-redacted."""
     import api
 
     sub = SimpleNamespace(

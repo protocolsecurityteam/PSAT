@@ -1,14 +1,8 @@
 """Tier-0 code-upgrade current-state check.
 
-An indexed UpgradeEvent proves only PAST capability; a present-tense "upgradeable
-now" claim requires the current capability be present NOW — impl slot still
-non-zero AND a resolved, non-renounced upgrade authority. A proxy that was
-upgraded historically but has since renounced its upgrade authority (impl slot
-stays non-zero — freezing does not zero it) must NOT mint a proven verdict.
-
-Off the wire: the current check is a static/DB read; these tests drive
-``_code_upgrade_plans`` against a stubbed session (a proxy Contract row + an
-UpgradeEvent) and execute the returned plan's ``run`` — no anvil, no RPC.
+An indexed UpgradeEvent proves only PAST capability; a present-tense claim also needs a non-zero
+impl slot AND a resolved, non-renounced upgrade authority (freezing does not zero the slot).
+Drives ``_code_upgrade_plans`` against a stubbed session; no anvil, no RPC.
 """
 
 from __future__ import annotations
@@ -72,8 +66,7 @@ def _candidate(principals: tuple[str, ...]) -> Candidate:
 
 
 def _ctx() -> ProbeContext:
-    # simulate is never touched on the Tier-0 path (it returns before any sim);
-    # a MagicMock that would raise if called guards that invariant.
+    # A MagicMock that raises if called: simulate must never be touched on the Tier-0 path.
     return ProbeContext(
         chain_id=1,
         block=21_000_000,
@@ -93,8 +86,6 @@ def _run_plan(principals: tuple[str, ...]):
 
 
 def test_impl_nonzero_with_resolved_principal_is_proven_now():
-    """impl non-zero + a resolved non-zero upgrade authority ⇒ present-tense
-    capability proven (current-state check passed)."""
     eff = _run_plan((PRINCIPAL,))
     assert eff.verdict == VERDICT_PROVEN
     assert eff.reason == "indexed_upgrade_plus_current_state"

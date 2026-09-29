@@ -1,27 +1,21 @@
 """The ``no_time_reference`` proof, gated against the PRODUCTION builder.
 
-``duration_bound_source = "no_time_reference"`` is documented as PROVEN indefinite —
-"the most severe freeze there is" (``effects/config.py``), "the MOST severe freeze"
-(``effects/claims_bridge.py``) — and it gates both frontend prose copies
-(``claimsVocab.js``: ``"(indefinite)"`` and ``"indefinite latch (no self-recovery
-bound)"``). It is a proof BY ABSENCE, so every precondition it rests on has to hold
-against real compiler output, not against a hand-built leaf.
+``duration_bound_source = "no_time_reference"`` is PROVEN indefinite, "the MOST
+severe freeze" (``effects/config.py``, ``effects/claims_bridge.py``), and gates the
+frontend copies in ``claimsVocab.js``. It is a proof BY ABSENCE, so every
+precondition must hold against real compiler output, not a hand-built leaf.
 
-Two earlier attempts were tested with hand-built leaves only, and both times the
-defect was a shape the compiler produces and the hand-built fixture did not:
+Two earlier attempts used hand-built leaves only and both missed a compiler shape:
+the first read one leaf, so a lowered ``||`` splitting latch from clock read as
+proven-indefinite; the second walked the whole tree for a ``block_context`` clock but
+kept OPACITY leaf-local with opaque set ``{computed, top}``, so
+``require(!frozen || _clock() > unpauseAt)`` (``_clock()`` an internal view returning
+``block.timestamp``, like Uniswap V3's ``_blockTimestamp()``) still published the
+proven state for a freeze that expires.
 
-* the first read one leaf, so a lowered ``||`` that split the latch from the clock
-  read as proven-indefinite;
-* the second walked the whole tree for a ``block_context`` clock but kept the
-  OPACITY test leaf-local and its opaque-source set at ``{computed, top}`` — so
-  ``require(!frozen || _clock() > unpauseAt)``, where ``_clock()`` is an internal view
-  returning ``block.timestamp`` (Uniswap V3's ``_blockTimestamp()``, OZ Governor's
-  ``clock()``), still published the proven state for a freeze that expires.
-
-So these cases compile Solidity and run ``build_predicate_artifacts`` — the same call
-the static stage makes, which is also what stamps the ``operand_absorption`` root
-marker the proof requires. Assertions on hand-built leaf shapes live in
-``test_effects_calldata.py``; this file exists to keep the gate on the compiler.
+Cases compile Solidity and run ``build_predicate_artifacts``, which also stamps the
+``operand_absorption`` root marker the proof requires. Hand-built-leaf assertions
+live in ``test_effects_calldata.py``.
 """
 
 from __future__ import annotations
@@ -265,22 +259,19 @@ def _clock_operands(facts: cd.ContractFacts) -> int:
     [("HelperClock", "view_call"), ("OracleClock", "external_call")],
 )
 def test_a_clock_behind_a_callee_denies_the_proven_indefinite_state(compiled, contract_name, opaque_source):
-    """``require(!frozen || <callee>() > unpauseAt)`` must not read as PROVEN indefinite.
+    """``require(!frozen || <callee>() > unpauseAt)`` must not read as PROVEN indefinite:
+    time alone lifts the freeze, so the honest answers are a resolved window or
+    ``not_determined``.
 
-    The freeze expires at ``unpauseAt`` and time alone lifts it, so the only honest
-    answers are a resolved window or ``not_determined``.
-
-    Both preconditions the whole-tree walk relies on are shown INERT here first, which
-    is why it was a false proof rather than a near miss: there is no
-    ``block_context`` operand anywhere in the tree (so the whole-tree clock walk
-    cannot see it), and the clock hides behind an operand that only NAMES a callee
-    the absorption recorder never enters."""
+    Both preconditions of the whole-tree walk are shown INERT first (that is why it
+    was a false proof, not a near miss): no ``block_context`` operand exists in the
+    tree, and the clock hides behind an operand that only NAMES a callee the
+    absorption recorder never enters."""
     facts = compiled[contract_name]
     assert facts.trees, contract_name
     assert _clock_operands(facts) == 0, "rule 1 cannot see this clock — that is the premise"
     assert opaque_source in _operand_sources(facts)
-    # The marker is present, so rule 2's known-completeness precondition is satisfied
-    # and cannot be what produces the answer.
+    # The marker is present, so rule 2's completeness precondition cannot be what produces the answer.
     assert all(cd._absorption_recorded(tree) for tree in facts.trees.values())
 
     assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "not_determined")
@@ -292,14 +283,12 @@ def test_a_clock_behind_a_callee_denies_the_proven_indefinite_state(compiled, co
 def test_the_proven_indefinite_state_is_still_reachable_from_compiled_source(compiled):
     """POSITIVE CONTROL for the demotion above: a discrimination, not a blanket refusal.
 
-    ``require(!frozen)`` compiles to a tree with one leaf, one operand, no callee and
-    no clock. Every precondition holds, so the proof stands and the frontend's
-    "indefinite latch (no self-recovery bound)" copy is still reachable.
+    ``require(!frozen)`` has one leaf, one operand, no callee and no clock, so the
+    proof stands and the "indefinite latch" copy stays reachable.
 
-    R2: this is the firing proof for the ``no_time_reference`` branch itself. It has
-    zero realised rows in the local database because no persisted tree carries the
-    ``operand_absorption`` marker yet (the static stage has not re-run since A7) — a
-    lower bound, not a dead branch."""
+    R2: the firing proof for the ``no_time_reference`` branch. It has zero realised
+    rows locally because no persisted tree carries the ``operand_absorption`` marker
+    yet (static stage not re-run since A7): a lower bound, not a dead branch."""
     facts = compiled["PlainLatch"]
     assert _operand_sources(facts) == {"state_variable"}
     assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "no_time_reference")
@@ -307,10 +296,9 @@ def test_the_proven_indefinite_state_is_still_reachable_from_compiled_source(com
 
 def test_a_block_number_clock_denies_the_proven_indefinite_state(compiled):
     """``require(!frozen || block.number > unpauseAtBlock)`` must not read as PROVEN
-    indefinite: the chain reaching ``unpauseAtBlock`` lifts the freeze with no
-    transaction. The static plane emits ``block_context_kind == "number"`` for it —
-    a clock spelling the demotion must count (its ``block.timestamp`` twin already
-    lands here via the same rule)."""
+    indefinite: the chain reaching the block lifts the freeze with no transaction.
+    ``block_context_kind == "number"`` is a clock spelling the demotion must count
+    (its ``block.timestamp`` twin lands here via the same rule)."""
     facts = compiled["NumberTwin"]
     assert facts.trees
     assert all(cd._absorption_recorded(tree) for tree in facts.trees.values())
@@ -318,11 +306,11 @@ def test_a_block_number_clock_denies_the_proven_indefinite_state(compiled):
 
 
 def test_a_block_count_window_is_never_published_as_seconds(compiled):
-    """The units trap on compiled source: ``require(block.number - pausedUntilBlock
-    < 216000)`` carries latch + clock + constant, but the constant is a block
-    count. ``duration_bound_seconds`` is consumed as a severity reducer in seconds;
-    publishing 216000 here would understate a ~30-day gate as 2.5 days. The
-    block-number clock demotes the proven state and nothing more."""
+    """The units trap: ``require(block.number - pausedUntilBlock < 216000)`` carries
+    latch + clock + constant, but the constant is a block count while
+    ``duration_bound_seconds`` is a severity reducer in seconds; publishing 216000
+    would understate a ~30-day gate as 2.5 days. The block clock only demotes the
+    proven state."""
     facts = compiled["BlockWindow"]
     assert facts.trees
     assert cd.read_max_pause_duration(facts, {"pausedUntilBlock"}) == (None, "not_determined")
@@ -332,21 +320,20 @@ def test_a_window_the_recorder_did_read_is_unaffected_by_either_precondition(com
     """``guard_constant`` returns before both checks, so widening them cannot cost a
     resolved window.
 
-    ``require(block.timestamp - pausedUntil < 2592000)`` puts all three facts —
-    clock, latch, offset — in one leaf's ``operands ∪ absorbed_operands``, which no
-    lossy list and no unentered callee can fake. This is the assertion that keeps the
-    two conservative rules from eating the reader's only positive answer."""
+    ``require(block.timestamp - pausedUntil < 2592000)`` puts clock, latch and offset
+    in one leaf's ``operands ∪ absorbed_operands``, which no lossy list or unentered
+    callee can fake; this keeps the conservative rules from eating the only positive
+    answer."""
     facts = compiled["AbsorbedWindow"]
     assert cd.read_max_pause_duration(facts, {"pausedUntil"}) == (2592000, "guard_constant")
 
 
 @pytest.mark.parametrize("contract_name", ["WindowLeft", "RemainingWindow"])
 def test_both_spellings_of_the_gap_ceiling_still_resolve(compiled, contract_name):
-    """POSITIVE CONTROLS for the side/operator awareness in the harvest: it is
-    narrowed to a shape, not to one spelling of it. ``2592000 >
-    block.timestamp - pausedUntil`` puts the constant on the LEFT under ``gt``, and
-    ``pausedUntil - block.timestamp < 2592000`` reverses the subtraction — both bound
-    the clock-to-latch gap by the same magnitude, and both must keep resolving."""
+    """POSITIVE CONTROLS for the side/operator awareness of the harvest: narrowed to a
+    shape, not one spelling. ``2592000 > block.timestamp - pausedUntil`` (constant on
+    the LEFT under ``gt``) and ``pausedUntil - block.timestamp < 2592000`` (reversed
+    subtraction) bound the gap by the same magnitude and must keep resolving."""
     assert cd.read_max_pause_duration(compiled[contract_name], {"pausedUntil"}) == (2592000, "guard_constant")
 
 
@@ -365,27 +352,23 @@ def test_both_spellings_of_the_gap_ceiling_still_resolve(compiled, contract_name
     ],
 )
 def test_a_constant_the_comparison_shape_does_not_make_a_window_is_not_published(compiled, contract_name, fabricated):
-    """On compiled source. Each of these guards puts a latch, a seconds clock and a
-    plausible constant into one leaf's ``operands ∪ absorbed_operands``, and the
-    side/operator-blind harvest published the constant as ``duration_bound_seconds``
-    — a lead time, a cooldown offset, a minimum-elapsed or a safety margin read as the
-    freeze window, in the severity-REDUCING direction (the bound is consumed as a
-    mitigation once the fork confirms it).
+    """On compiled source, each guard puts a latch, a seconds clock and a plausible
+    constant in one leaf's ``operands ∪ absorbed_operands``, and the side/operator-blind
+    harvest published the constant as ``duration_bound_seconds``: a lead time, cooldown
+    offset, minimum-elapsed or safety margin read as the freeze window, in the
+    severity-REDUCING direction.
 
-    ``fabricated`` is the number each shape used to publish, so the parametrisation
-    doubles as the record of what changed. The honest answer for all five is
-    ``not_determined``: the latch is compared against a clock (so the freeze is timed
-    and does expire) and the window itself is not in this comparison.
+    ``fabricated`` is what each shape used to publish. The honest answer for all five
+    is ``not_determined``: the freeze is timed but the window is not in this comparison.
 
-    ``LatchPlusWindow`` is the recall cost and is pinned here deliberately: its
-    constant IS the window, but the evidence is byte-identical to ``MinusWindow``'s
-    because ``predicates._stamp_absorbed_operands`` records neither the additive sign
-    nor the side. Stamping the sign in the static plane is what recovers it — this
-    assertion is the pin that makes that change visible."""
+    ``LatchPlusWindow`` is the recall cost, pinned deliberately: its constant IS the
+    window, but the evidence is byte-identical to ``MinusWindow``'s because
+    ``predicates._stamp_absorbed_operands`` records neither the additive sign nor the
+    side. Stamping the sign in the static plane recovers it; this pin makes that
+    change visible."""
     facts = compiled[contract_name]
     assert facts.trees, contract_name
-    # The premise: the constant really is in the leaf's union, so the refusal is a
-    # shape judgment and not a missing operand.
+    # The constant really is in the leaf's union, so the refusal is a shape judgment, not a missing operand.
     constants = {
         str(op.get("constant_value"))
         for tree in facts.trees.values()

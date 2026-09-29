@@ -1,15 +1,8 @@
 """The durable event-log queries must be index-sargable.
 
-``PostgresEventLogRepo`` filters ``indexed_event_logs`` / ``indexed_event_cursors``
-by ``(chain_id, event_address, topic0)``. Those columns are stored lowercase and
-``ix_indexed_event_logs_lookup`` covers the raw columns, so the queries compare the
-raw columns directly (the literals are lowercased by the caller). Wrapping a column
-in ``lower(...)`` would make the predicate non-sargable and force a sequential scan,
-so these tests assert (a) the compiled SQL never wraps an indexed column in
-``lower()`` and (b) on real seeded data the planner picks the lookup index.
-
-These drive the production repo + a real Postgres session; only the rows are
-seeded.
+Columns are stored lowercase and ``ix_indexed_event_logs_lookup`` covers the raw columns, so wrapping one in
+``lower(...)`` would force a sequential scan. Asserts (a) compiled SQL never wraps an indexed column in ``lower()``
+and (b) on real seeded data the planner picks the lookup index. Production repo + real Postgres; only rows seeded.
 """
 
 from __future__ import annotations
@@ -53,9 +46,7 @@ def _compiled(query) -> str:
 
 
 def test_fold_queries_do_not_wrap_indexed_columns_in_lower():
-    # The exact predicates the repo emits for the three lookups, compiled to SQL.
-    # None may wrap an indexed column in lower(): that would defeat the raw-column
-    # lookup index. The literals are already lowercase (asserted by the caller).
+    # None may wrap an indexed column in lower(); the literals are already lowercase.
     single = (
         select(IndexedEventLog)
         .where(IndexedEventLog.chain_id == 1)
@@ -163,10 +154,7 @@ def test_repo_returns_rows_with_raw_column_comparison(db_session):
 
 @pytest.mark.parametrize("table", ["indexed_event_logs", "indexed_event_cursors"])
 def test_no_mixed_case_rows_invariant_documented(db_session, table):
-    # The raw-column lookup relies on every stored event_address/topic0 being
-    # lowercase. Assert the invariant holds for any rows this suite seeds (the
-    # production indexer writes lowercase); a regression that stored mixed case
-    # would silently miss the raw-column predicate.
+    # A regression storing mixed case would silently miss the raw-column predicate.
     db_session.add(
         IndexedEventLog(
             chain_id=1,

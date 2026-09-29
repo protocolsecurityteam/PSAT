@@ -150,7 +150,6 @@ class TestBuildPayload:
 # ---------------------------------------------------------------------------
 
 
-# Helper to create a mock response object
 def _mock_response(status_code=200, json_data=None, text="", raise_on_json=False):
     resp = MagicMock(spec=requests.Response)
     resp.status_code = status_code
@@ -163,9 +162,6 @@ def _mock_response(status_code=200, json_data=None, text="", raise_on_json=False
 
 
 class TestSearch:
-    """Tests for the search() function."""
-
-    # 5a. empty query
     def test_empty_query_raises_value_error(self, monkeypatch):
         with pytest.raises(ValueError, match="query must not be empty"):
             search("", max_results=5)
@@ -174,7 +170,6 @@ class TestSearch:
         with pytest.raises(ValueError, match="query must not be empty"):
             search("   ", max_results=5)
 
-    # 5b. max_results < 1
     def test_max_results_zero_raises_value_error(self, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
         with pytest.raises(ValueError, match="max_results must be >= 1"):
@@ -185,7 +180,6 @@ class TestSearch:
         with pytest.raises(ValueError, match="max_results must be >= 1"):
             search("hello", max_results=-1)
 
-    # 6. successful response
     @patch("services.clients.tavily.load_dotenv")
     def test_success_returns_filtered_list(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
@@ -215,7 +209,6 @@ class TestSearch:
             result = search("query", max_results=5)
             assert result == [{"title": "A"}, {"title": "B"}]
 
-    # 7. HTTP 500 retries then raises
     @patch("services.clients.tavily.load_dotenv")
     @patch("services.clients.tavily.time.sleep")
     def test_http_500_retries_then_raises(self, mock_sleep, _mock_dotenv, monkeypatch):
@@ -226,10 +219,8 @@ class TestSearch:
             with pytest.raises(TavilyError, match="HTTP 500"):
                 search("query", max_results=3)
 
-        # Should have retried MAX_RETRIES times (2 sleeps for 3 total attempts)
         assert mock_sleep.call_count == 2
 
-    # 8. HTTP 400 does NOT retry
     @patch("services.clients.tavily.load_dotenv")
     @patch("services.clients.tavily.time.sleep")
     def test_http_400_no_retry(self, mock_sleep, _mock_dotenv, monkeypatch):
@@ -240,10 +231,8 @@ class TestSearch:
             with pytest.raises(TavilyError, match="HTTP 400"):
                 search("query", max_results=3)
 
-        # Should NOT have slept (no retries for 4xx except 429)
         mock_sleep.assert_not_called()
 
-    # 8b. HTTP 429 DOES retry
     @patch("services.clients.tavily.load_dotenv")
     @patch("services.clients.tavily.time.sleep")
     def test_http_429_retries(self, mock_sleep, _mock_dotenv, monkeypatch):
@@ -256,7 +245,6 @@ class TestSearch:
 
         assert mock_sleep.call_count == 2
 
-    # 9. timeout retries
     @patch("services.clients.tavily.load_dotenv")
     @patch("services.clients.tavily.time.sleep")
     def test_timeout_retries_then_raises(self, mock_sleep, _mock_dotenv, monkeypatch):
@@ -271,7 +259,6 @@ class TestSearch:
 
         assert mock_sleep.call_count == 2
 
-    # 9b. generic RequestException retries
     @patch("services.clients.tavily.load_dotenv")
     @patch("services.clients.tavily.time.sleep")
     def test_request_exception_retries_then_raises(self, mock_sleep, _mock_dotenv, monkeypatch):
@@ -286,7 +273,6 @@ class TestSearch:
 
         assert mock_sleep.call_count == 2
 
-    # 10. invalid JSON raises TavilyError (non-retryable)
     @patch("services.clients.tavily.load_dotenv")
     @patch("services.clients.tavily.time.sleep")
     def test_invalid_json_raises_no_retry(self, mock_sleep, _mock_dotenv, monkeypatch):
@@ -297,10 +283,8 @@ class TestSearch:
             with pytest.raises(TavilyError, match="Invalid JSON"):
                 search("query", max_results=3)
 
-        # Not retryable, so no sleep
         mock_sleep.assert_not_called()
 
-    # 11. results not a list raises TavilyError
     @patch("services.clients.tavily.load_dotenv")
     @patch("services.clients.tavily.time.sleep")
     def test_results_not_list_raises(self, mock_sleep, _mock_dotenv, monkeypatch):
@@ -313,7 +297,6 @@ class TestSearch:
 
         mock_sleep.assert_not_called()
 
-    # Edge: missing "results" key returns empty list
     @patch("services.clients.tavily.load_dotenv")
     def test_missing_results_key_returns_empty(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
@@ -323,7 +306,6 @@ class TestSearch:
             result = search("query", max_results=3)
             assert result == []
 
-    # Edge: HTTP 500 with empty body -> detail should be None
     @patch("services.clients.tavily.load_dotenv")
     @patch("services.clients.tavily.time.sleep")
     def test_http_500_empty_body_detail_none(self, mock_sleep, _mock_dotenv, monkeypatch):
@@ -336,7 +318,6 @@ class TestSearch:
 
         assert "detail" not in exc_info.value.error
 
-    # Edge: verify exponential backoff sleep values
     @patch("services.clients.tavily.load_dotenv")
     @patch("services.clients.tavily.time.sleep")
     def test_backoff_timing(self, mock_sleep, _mock_dotenv, monkeypatch):
@@ -351,7 +332,6 @@ class TestSearch:
         assert mock_sleep.call_args_list[0][0][0] == pytest.approx(0.75)
         assert mock_sleep.call_args_list[1][0][0] == pytest.approx(1.5)
 
-    # Edge: search strips whitespace from query
     @patch("services.clients.tavily.load_dotenv")
     def test_query_whitespace_stripped(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")
@@ -424,7 +404,6 @@ class TestCacheBehavior:
 
         assert result == [{"title": "A"}]
         mock_post.assert_called_once()
-        # No env var → cache helpers must not touch storage at all.
         storage_client.get.assert_not_called()
         storage_client.put.assert_not_called()
 
@@ -451,7 +430,6 @@ class TestCacheBehavior:
             result = search("q", max_results=3)
 
         assert result == [{"title": "from-cache", "url": "https://x"}]
-        # Cache hit → no HTTP, no cache write.
         mock_post.assert_not_called()
         storage_client.put.assert_not_called()
 

@@ -1,7 +1,6 @@
 """Unit tests for DiscoveryWorker._process_address() — mocked sessions, no Postgres.
 
-Covers: happy path, Vyper detection, EVM version fallback, source format detection.
-All tests are CI-friendly -- network calls are mocked via monkeypatch.
+Network calls are mocked via monkeypatch.
 """
 
 from __future__ import annotations
@@ -33,7 +32,6 @@ def _job(**overrides) -> Any:
 
 
 def _etherscan_result(**overrides):
-    """Return a realistic Etherscan getsource response dict."""
     base = {
         "ContractName": "TetherToken",
         "CompilerVersion": "v0.4.18+commit.9cf6e910",
@@ -48,10 +46,7 @@ def _etherscan_result(**overrides):
 
 
 def _patch_discovery(monkeypatch, etherscan_result):
-    """Monkeypatch fetch, store_source_files, store_artifact, and update_detail.
-
-    Returns (store_source_calls, store_artifact_calls) lists that tests can inspect.
-    """
+    """Monkeypatch fetch/store_*/update_detail; returns (source_calls, artifact_calls) for inspection."""
     monkeypatch.setattr(
         "workers.discovery.fetch",
         lambda _addr, **_kw: etherscan_result,
@@ -88,22 +83,18 @@ def test_happy_path_stores_sources_and_artifacts(monkeypatch):
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
 
     session = MagicMock()
-    # No existing contract row for this address
     session.execute.return_value.scalar_one_or_none.return_value = None
     job = _job()
 
     worker._process_address(session, job)
 
-    # store_source_files was called with parsed sources
     assert len(source_calls) == 1
     stored_job_id, stored_sources = source_calls[0]
     assert stored_job_id == "job-1"
     assert isinstance(stored_sources, dict)
     assert len(stored_sources) > 0
-    # Flat source should produce src/TetherToken.sol
     assert "src/TetherToken.sol" in stored_sources
 
-    # Verify Contract written via session.add
     session.add.assert_called_once()
     contract = session.add.call_args[0][0]
     assert contract.address == job.address.lower()
@@ -116,7 +107,6 @@ def test_happy_path_stores_sources_and_artifacts(monkeypatch):
     assert contract.license == "MIT"
     assert contract.source_file_count == 1
 
-    # job.name set correctly
     short = job.address[2:10]
     assert job.name == f"TetherToken_{short}"
     session.commit.assert_called()
@@ -282,13 +272,10 @@ def test_evm_version_defaults_when_key_missing(monkeypatch):
 
 
 def test_source_format_standard_json(monkeypatch):
-    """source_format is 'standard_json' when 'sources' appears within the first 10 chars.
+    """source_format is 'standard_json' when 'sources' is in the first 10 chars.
 
-    The detection in _process_address uses ``"sources" in str(SourceCode)[:10]``.
-    A single-brace JSON ``{"sources":...}`` puts 'sources' at index 2 (fits in 10).
-    The double-brace Etherscan format ``{{"sources":...}}`` pushes it to index 3,
-    which overflows the 10-char window.  We use a single-brace variant here to
-    exercise the 'standard_json' branch.
+    Single-brace ``{"sources":...}`` puts it at index 2; Etherscan's double-brace
+    format overflows the window, so this variant exercises the branch.
     """
     source_code = json.dumps(
         {
@@ -297,7 +284,6 @@ def test_source_format_standard_json(monkeypatch):
             "settings": {"optimizer": {"enabled": True, "runs": 200}, "remappings": []},
         }
     )
-    # Sanity: confirm the detection will fire
     assert "sources" in source_code[:10]
 
     result = _etherscan_result(SourceCode=source_code, ContractName="Token")
@@ -316,7 +302,6 @@ def test_source_format_standard_json(monkeypatch):
 
 
 def test_source_format_flat(monkeypatch):
-    """Plain Solidity source produces source_format 'flat'."""
     result = _etherscan_result(
         SourceCode="pragma solidity ^0.8.0; contract Flat {}",
         ContractName="Flat",
@@ -336,10 +321,8 @@ def test_source_format_flat(monkeypatch):
 
 
 def test_standard_json_multiple_files_parsed_correctly(monkeypatch):
-    """Standard-JSON (double-brace) with multiple source files: parse_sources
-    correctly extracts all files and remappings even though source_format
-    detection falls back to 'flat' due to the [:10] window.
-    """
+    """Double-brace standard-JSON: parse_sources still extracts all files and
+    remappings although source_format falls back to 'flat' (the [:10] window)."""
     inner = json.dumps(
         {
             "sources": {
@@ -353,8 +336,7 @@ def test_standard_json_multiple_files_parsed_correctly(monkeypatch):
             "settings": {"remappings": ["@openzeppelin/=node_modules/@openzeppelin/"]},
         }
     )
-    # Etherscan wraps standard-json by prepending one '{' and appending one '}'.
-    # json.dumps already produces '{...}', so adding one brace each side yields '{{...}}'.
+    # Etherscan wraps standard-json in one extra '{' / '}' on each side.
     source_code = "{" + inner + "}"
 
     result = _etherscan_result(SourceCode=source_code, ContractName="Token")
@@ -368,7 +350,6 @@ def test_standard_json_multiple_files_parsed_correctly(monkeypatch):
 
     worker._process_address(session, job)
 
-    # store_source_files received all 3 files (parse_sources works correctly)
     _, stored_sources = source_calls[0]
     assert len(stored_sources) == 3
     assert "contracts/Token.sol" in stored_sources
@@ -376,7 +357,6 @@ def test_standard_json_multiple_files_parsed_correctly(monkeypatch):
 
     contract = session.add.call_args[0][0]
     assert contract.source_file_count == 3
-    # Remappings should be extracted from the settings block
     assert "@openzeppelin/=node_modules/@openzeppelin/" in contract.remappings
 
 
@@ -386,7 +366,6 @@ def test_standard_json_multiple_files_parsed_correctly(monkeypatch):
 
 
 def test_optimization_disabled(monkeypatch):
-    """OptimizationUsed='0' results in optimization_used=False in build_settings."""
     result = _etherscan_result(OptimizationUsed="0")
     _, artifact_calls = _patch_discovery(monkeypatch, result)
 
@@ -404,7 +383,6 @@ def test_optimization_disabled(monkeypatch):
 
 
 def test_runs_custom_value(monkeypatch):
-    """Custom Runs value is preserved as int in build_settings."""
     result = _etherscan_result(Runs="10000")
     _, artifact_calls = _patch_discovery(monkeypatch, result)
 

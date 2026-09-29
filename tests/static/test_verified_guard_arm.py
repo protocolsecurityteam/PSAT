@@ -1,13 +1,9 @@
-"""W2's verified-guard satisfier — ``verified_guard_verdicts``.
+"""W2's verified-guard satisfier, ``verified_guard_verdicts``.
 
-The arm exists to close one fail-open: a reentrancy guard var declared on a
-contract must never license a function that does not carry the guard. Every
-refusal fixture below removes exactly one conjunct of the §2.4 proof and is
-paired with a positive sibling differing in that one construct, so a
-``not_determined`` cannot pass because the analysis never reached the code.
-
-Assertions are on the whole verdict dict — ``{"state": "not_determined", ...}``
-is as truthy as a proof.
+Closes one fail-open: a reentrancy guard var declared on a contract must never license a function
+that does not carry the guard. Each refusal fixture removes exactly one conjunct of the §2.4 proof
+and has a positive sibling differing in that one construct, so ``not_determined`` cannot pass
+because the analysis never reached the code. Assertions are on the whole verdict dict.
 """
 
 from __future__ import annotations
@@ -203,8 +199,7 @@ def test_a12_contract_guard_var_does_not_license_an_unguarded_function(tmp_path)
     contract = _contract(tmp_path, _A12_GUARD_VAR_BUT_NO_MODIFIER, "C")
     verdicts = verified_guard_verdicts(contract)
     assert verdicts["payout()"] == _refusal(W2_REASON_GUARD_NOT_APPLIED, "C.payout()")
-    # Paired positive: the sibling differs in exactly one construct — it carries
-    # the modifier — so the refusal is not the analysis failing to run.
+    # Paired positive: the sibling carries the modifier, so the refusal is not the analysis failing to run.
     assert verdicts["guardedWithdraw()"]["state"] == "proven"
     # And the guard var IS contract-scoped, which is precisely why the
     # per-function join is load-bearing.
@@ -243,7 +238,6 @@ def test_a13_set_restore_without_revert_refuses(tmp_path):
 
 
 def test_a13_sibling_adding_only_the_revert_is_proven(tmp_path):
-    """One added ``require`` — the removed conjunct — flips the same fixture."""
     verdicts = verified_guard_verdicts(_contract(tmp_path, _A13_SIBLING_WITH_REVERT, "C"))
     assert verdicts["payout()"]["state"] == "proven"
     assert verdicts["payout()"]["guard_vars"] == ["_status"]
@@ -271,10 +265,9 @@ contract C {
 
 
 def test_a14_name_only_guard_refuses(tmp_path):
-    """``_reentrancyLock`` under a modifier named ``reentrancyGuard`` — every
-    identifier says guard, and the post-placeholder write is missing, so there
-    is no placeholder split to prove. ``effects.py``'s name fallback would
-    admit this var; nothing on this arm can reach that fallback."""
+    """``_reentrancyLock`` under a modifier named ``reentrancyGuard``: every identifier says guard
+    but the post-placeholder write is missing. ``effects.py``'s name fallback would admit it;
+    nothing on this arm can reach that fallback."""
     verdicts = verified_guard_verdicts(_contract(tmp_path, _A14_NAME_ONLY_GUARD, "C"))
     assert verdicts["payout()"] == _refusal(W2_REASON_NO_VERIFIED_GUARD, "C.payout()")
 
@@ -322,16 +315,14 @@ contract C {
 
 
 def test_a15_transient_guard_refuses(tmp_path):
-    """``tstore``/``tload`` lower to ``SolidityCall`` IRs, not state-variable
-    writes, so the pre/post walk sees nothing. The guard is real and the verdict
-    is still ``not_determined`` — fail-closed on storage we cannot read."""
+    """``tstore``/``tload`` lower to ``SolidityCall`` IRs, not state writes, so the walk sees nothing:
+    the verdict stays ``not_determined`` (fail-closed on storage we cannot read)."""
     verdicts = verified_guard_verdicts(_contract(tmp_path, _A15_TRANSIENT_GUARD, "C"))
     assert verdicts["payout()"] == _refusal(W2_REASON_NO_VERIFIED_GUARD, "C.payout()")
 
 
 def test_a15_same_shape_in_persistent_storage_is_proven(tmp_path):
-    """Identical control flow written to a state variable instead of a transient
-    slot — the refusal above is about visibility, not about the shape."""
+    """Same control flow in a state variable: the refusal above is about visibility, not shape."""
     source = """
     pragma solidity ^0.8.24;
     contract C {
@@ -387,10 +378,9 @@ contract C is Mid {}
 
 
 def test_shadowed_base_declaration_does_not_publish_the_overrides_verdict(tmp_path):
-    """``C``'s live ``payout`` is ``Mid``'s, which dropped the guard; ``Base``'s
-    guarded body is still in ``contract.functions`` and must not answer for it.
-    Keying on the signature alone let whichever declaration Slither yielded last
-    win, and it yields the base last."""
+    """``C``'s live ``payout`` is ``Mid``'s (guard dropped); ``Base``'s guarded body is still in
+    ``contract.functions`` and must not answer for it. Signature-only keying let the last-yielded
+    declaration (the base) win."""
     contract = _contract(tmp_path, _SHADOWED_OVERRIDE, "C")
     verdicts = verified_guard_verdicts(contract)
     assert verdicts["payout()"] == _refusal(W2_REASON_GUARD_NOT_APPLIED, "Mid.payout()")
@@ -405,9 +395,6 @@ def test_shadowed_base_declaration_does_not_publish_the_overrides_verdict(tmp_pa
 
 
 def test_the_live_override_still_proves_when_it_keeps_the_guard(tmp_path):
-    """The paired positive: one added modifier on ``Mid.payout`` and the same
-    chain proves — so the refusal above is the shadowing rule, not a chain the
-    analysis cannot walk."""
     source = _SHADOWED_OVERRIDE.replace(
         "function payout() external virtual override {",
         "function payout() external virtual override nonReentrant {",
@@ -451,8 +438,6 @@ contract D is L, R {
 
 
 def test_diamond_join_reads_the_most_derived_body_not_the_three_guarded_ones(tmp_path):
-    """Three guarded ancestor declarations against one unguarded override — the
-    shape with the most room for an iteration-order answer."""
     contract = _contract(tmp_path, _DIAMOND, "D")
     verdicts = verified_guard_verdicts(contract)
     assert verdicts["payout()"] == _refusal(W2_REASON_GUARD_NOT_APPLIED, "D.payout()")
@@ -464,7 +449,6 @@ def test_diamond_join_reads_the_most_derived_body_not_the_three_guarded_ones(tmp
 
 
 def test_live_declarations_keeps_one_body_per_signature(tmp_path):
-    """The resolution the key rests on, asserted directly."""
     contract = _contract(tmp_path, _DIAMOND, "D")
     live = live_declarations(contract)
     assert [f.canonical_name for f in live["payout()"]] == ["D.payout()"]
@@ -487,10 +471,8 @@ class _Contract:
 
 
 def test_two_live_declarations_of_one_signature_refuse(tmp_path):
-    """Solidity will not compile this, so the arm is exercised on a stub rather
-    than left as an untested branch. It exists because ``is_shadowed`` going
-    missing or unset must surface as a refusal, never as a silent pick between
-    two bodies."""
+    """Solidity won't compile this, so it runs on a stub: ``is_shadowed`` missing or unset must
+    surface as a refusal, never a silent pick between two bodies."""
     contract = _Contract(
         [
             _Fn("A.payout()", "payout()", is_shadowed=False),
@@ -510,10 +492,8 @@ def test_two_live_declarations_of_one_signature_refuse(tmp_path):
 
 
 def test_verdicts_are_total_over_live_declarations(tmp_path):
-    """One verdict per live body — so a consumer never reads absence as a fact,
-    and a shadowed body never contributes a key of its own. Asserted on the
-    inheritance fixture, where a signature-keyed comparison would collapse the
-    two declarations it is supposed to tell apart."""
+    """One verdict per live body, so a consumer never reads absence as a fact and a shadowed body
+    never adds a key (asserted on the inheritance fixture, where signature keying would collapse them)."""
     contract = _contract(tmp_path, _SHADOWED_OVERRIDE, "C")
     live = [f for f in contract.functions if not f.is_constructor and not f.is_shadowed]
     shadowed = [f for f in contract.functions if not f.is_constructor and f.is_shadowed]
@@ -525,9 +505,8 @@ def test_verdicts_are_total_over_live_declarations(tmp_path):
 
 
 def test_refusal_reasons_separate_the_two_ways_a_guard_can_be_missing(tmp_path):
-    """``guard_modifier_not_applied`` (a proven guard exists elsewhere on the
-    contract) and ``no_verified_guard_modifier`` (none does) are different
-    findings for the consumer, and only the first is the fail-open shape."""
+    """``guard_modifier_not_applied`` (a proven guard exists elsewhere) vs ``no_verified_guard_modifier``
+    (none does): only the first is the fail-open shape."""
     guarded = verified_guard_verdicts(_contract(tmp_path, _A12_GUARD_VAR_BUT_NO_MODIFIER, "C"))
     unguarded = verified_guard_verdicts(_contract(tmp_path, _A13_FAKE_GUARD_NO_REVERT, "C"))
     assert guarded["payout()"]["reason"] == W2_REASON_GUARD_NOT_APPLIED
@@ -573,9 +552,8 @@ contract C {
 
 
 def test_a_modifier_holding_two_guard_vars_publishes_both(tmp_path):
-    """``run`` unions the proven set. Picking one — which is what iterating a
-    ``set`` and returning the first amounted to — made the published var depend
-    on the hash seed."""
+    """``run`` unions the proven set; picking one (first of a ``set``) made the published var depend on
+    the hash seed."""
     contract = _contract(tmp_path, _TWO_GUARD_VARS, "C")
     assert reentrancy_guard_modifiers(contract) == {id(contract.modifiers[0]): frozenset({"a", "b"})}
     assert ReentrancyAnalyzer(contract).run() == {"a", "b"}

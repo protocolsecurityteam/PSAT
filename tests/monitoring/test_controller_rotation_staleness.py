@@ -1,26 +1,11 @@
 """A rotated controller must not keep the OLD address's classification.
 
-``_update_controller_value_rows`` wrote exactly one column — ``cv.value`` —
-leaving ``resolved_type``, ``details``, ``block_number`` and ``observed_via``
-describing the address that was just replaced. Both call sites are
-unconditional (event-driven ``_sync_relational_tables``, poll-driven
-``_sync_relational_from_poll``).
-
-The consumer republishes that stale payload under the NEW address:
-``company_overview._record_principal_lookup`` keys on ``cv.value`` while
-merging ``cv.details``, and ``_principal_lookup_type`` promotes on ``details``
-alone via ``_has_timelock_delay``. So the worse half is the TIMELOCK case —
-a Timelock -> EOA rotation publishes a freshly-installed EOA as
-``resolved_type="timelock"`` carrying the old ``delay`` — a credit-bearing
-scoring input. That is a safety-inflating false credit, which ranks
-worse than a false adverse, on top of a false statement about a named
-individual's keys. The Safe -> Safe case (owners/threshold of the wrong Safe)
-is the milder half and is covered too.
-
-Armed population when this was written: 13 ``controller_values`` rows on
-enrolled + active contracts under a ``_GOVERNANCE_ROTATION_WRITE_TARGETS``
-controller_id — 8 ``safe`` + 5 ``timelock`` — and 23 enrolled+active rows
-carrying an ``owners`` or ``delay`` key at all. Lower bound: one protocol.
+``_update_controller_value_rows`` wrote only ``cv.value``, leaving ``resolved_type``, ``details``, ``block_number``
+and ``observed_via`` describing the replaced address. The consumer republishes that payload under the NEW address
+(``company_overview._record_principal_lookup``, ``_principal_lookup_type`` via ``_has_timelock_delay``), so a
+Timelock -> EOA rotation published a fresh EOA as ``resolved_type="timelock"`` with the old ``delay``: a
+safety-inflating false credit in a scoring input, worse than a false adverse. Safe -> Safe (wrong owners/threshold)
+is the milder half. Armed population at writing: 13 rows (8 ``safe`` + 5 ``timelock``); lower bound one protocol.
 """
 
 from __future__ import annotations
@@ -153,10 +138,8 @@ def test_event_rotation_from_timelock_to_eoa_drops_the_stale_delay(db_session, s
     # re-classify, so NULL — not determined — is the only honest answer.
     assert row.resolved_type is None
     assert row.details is None
-    # And it is SQL NULL, not the jsonb scalar ``null``. psycopg2 decodes both
-    # to Python None, so the distinction is only visible from SQL — and it
-    # matters because a written ``null`` is "the writer recorded an absence",
-    # which is evidence, while unset is not (db/jsonb.py).
+    # SQL NULL, not the jsonb scalar ``null`` (a written ``null`` is a recorded absence, i.e. evidence; db/jsonb.py);
+    # psycopg2 decodes both to None, so only SQL can tell them apart.
     state = db_session.execute(
         select(jsonb_state(ControllerValue.details)).where(ControllerValue.id == row.id)
     ).scalar_one()

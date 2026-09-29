@@ -1,16 +1,10 @@
 """M1.1 item 2 — per-chain HyperSync resolver.
 
-Proves the HyperSync-URL selection in the resolution repos is driven by the
-evaluation's chain (via the registry, inv. 5), not a hardcoded mainnet literal:
+URL selection in the resolution repos is driven by the evaluation's chain (registry, inv. 5), not a hardcoded
+mainnet literal: chain 1 still resolves to the mainnet endpoint; a chain with ``hypersync_url=None`` is
+UNAVAILABLE (scan skipped, never redirected to mainnet); per-chain URLs thread to the client builder.
 
-  * chain 1 still resolves to the mainnet endpoint (byte-identical);
-  * a chain the registry marks ``hypersync_url=None`` (no proven coverage, e.g.
-    Base/8453 today) is UNAVAILABLE — the scan is skipped, never silently
-    redirected to mainnet;
-  * a per-chain URL threads end-to-end to the client builder.
-
-The wire seam is ``build_hypersync_client`` (where every consumer constructs its
-client); we stub that and the registry lookup, never the repo classes.
+Wire seam is ``build_hypersync_client``; we stub it and the registry lookup, never the repo classes.
 """
 
 from __future__ import annotations
@@ -26,9 +20,8 @@ from services.resolution.hypersync_bound import hypersync_url_for_chain
 
 MAINNET_URL = "https://eth.hypersync.xyz"
 BASE_URL = "https://base.hypersync.xyz"
-# A registry chain still marked indexer-disabled (hypersync_url=None). Base used
-# to fill this role, but Phase 2 gave it a proven HyperSync URL — so the
-# "unavailable chain" example moves to arbitrum, which stays disabled for now.
+# Registry chain still marked indexer-disabled (hypersync_url=None): arbitrum, since Base gained a proven
+# HyperSync URL in Phase 2.
 UNAVAILABLE_CHAIN_ID = 42161  # arbitrum
 
 EVENT_ADDRESS = "0x00000000000000000000000000000000c0ffee19"
@@ -169,8 +162,7 @@ def test_observed_keys_unavailable_chain_skips_scan(monkeypatch, _capture_build_
 
 
 def test_observed_keys_meta_url_overrides_registry(monkeypatch, _capture_build_url):
-    """The meta override still wins (byte-identical precedence) — even on an
-    otherwise-unavailable chain an explicit endpoint is honored."""
+    """The meta override still wins (byte-identical precedence), even on an otherwise-unavailable chain."""
     import services.resolution.creation_block_floor as floor_mod
 
     monkeypatch.delenv("PSAT_HYPERSYNC_URL", raising=False)

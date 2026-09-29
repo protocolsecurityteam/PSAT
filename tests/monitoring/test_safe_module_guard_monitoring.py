@@ -1,15 +1,10 @@
-"""C1 monitor half: EnabledModule / DisabledModule / ChangedGuard topics and the
-two Safe storage-slot poll entries.
+"""C1 monitor half: EnabledModule / DisabledModule / ChangedGuard topics and the two Safe
+storage-slot poll entries.
 
-Before this, the pipeline could see a module EXECUTE
-(``ExecutionFromModule[Success|Failure]``) but not one being ENABLED, and no Safe
-address had a cursor on any of the three topics. The poll entries observe CHANGE
-in the head/guard words; membership itself is decided in the resolution plane
-(see tests/resolution/test_classify_safe_modules_guard.py), never here.
-
-``TestSafeExecutionEvents`` at the end holds the positive half of the same
-decoder — the ExecutionSuccess / ExecutionFailure / ExecutionFromModule* shapes
-it accepts — so one file shows both what the decoder reads and what it refuses.
+Before this the pipeline saw a module EXECUTE but not be ENABLED. The poll entries observe
+CHANGE only; membership is decided in the resolution plane
+(tests/resolution/test_classify_safe_modules_guard.py). ``TestSafeExecutionEvents`` holds the
+decoder's positive half, so one file shows what it reads and what it refuses.
 """
 
 from __future__ import annotations
@@ -257,12 +252,8 @@ def test_poll_entries_translate_to_pinned_storage_reads():
 
 
 class TestSafeExecutionEvents:
-    """GnosisSafe ExecutionSuccess / ExecutionFailure are emitted for
-    EVERY executed Safe tx — they're the on-chain breadcrumb you'd render
-    as 'recent activity' on a Safe principal card. Pin the topic→type
-    mapping and the field decode so a future regression that reorders
-    or drops these is caught.
-    """
+    """ExecutionSuccess / ExecutionFailure are emitted for EVERY executed Safe tx (the
+    'recent activity' breadcrumb). Pin the topic→type mapping and field decode."""
 
     def test_execution_success_decodes(self):
         from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
@@ -318,16 +309,11 @@ class TestSafeExecutionEvents:
         assert "payment" not in ev
 
     def test_indexed_txhash_variant_decodes(self):
-        """The 1.4.1 singleton indexes txHash: topics[1] carries the hash and the
-        body is payment alone.
-
-        Byte-for-byte the log at index 414 of mainnet tx
-        ``0xf047c068b4d7311344adfb02fc56310d7200d12799a9894675b3b66ff5f2b431``,
-        emitted by Safe ``0x607d0c7e3578802eb46d388cb86cfba8ff657306`` — one of
-        the four executions that decoded to neither field before this arm
-        existed (topic0 is identical to the non-indexed form, so nothing else
-        distinguished them).
-        """
+        """The 1.4.1 singleton indexes txHash: topics[1] carries the hash, the body is payment
+        alone. Byte-for-byte log 414 of mainnet tx
+        ``0xf047c068b4d7311344adfb02fc56310d7200d12799a9894675b3b66ff5f2b431`` (Safe
+        ``0x607d0c7e3578802eb46d388cb86cfba8ff657306``), one of four executions that decoded to
+        neither field before this arm (topic0 matches the non-indexed form)."""
         from services.monitoring.event_topics import EXECUTION_SUCCESS_TOPIC0, parse_governance_log
 
         log = {
@@ -412,10 +398,8 @@ class TestSafeExecutionEvents:
         assert ev["payment"] == 7
 
     def test_execution_from_module_success_decodes(self):
-        """Module-triggered Safe executions: address indexed in topics[1],
-        no SafeTx hash, no payment. Used when a pre-authorised module
-        (e.g. recovery, batch executor) calls into the Safe directly.
-        """
+        """Module-triggered execution: address indexed in topics[1], no SafeTx hash or payment
+        (pre-authorised modules such as recovery or a batch executor)."""
         from services.monitoring.event_topics import EXECUTION_FROM_MODULE_SUCCESS_TOPIC0, parse_governance_log
 
         module_addr = "0x" + "ee" * 20

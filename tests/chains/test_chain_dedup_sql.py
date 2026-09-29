@@ -1,15 +1,9 @@
-"""M0.2 item 2 — SQL-side chain-qualified dedup + the reconcile chain-nesting fix.
+"""M0.2 item 2 — SQL-side chain-qualified dedup + reconcile chain-nesting fix (invariant 1).
 
-Proves the ``db.queue`` dedup helpers and ``reconcile_impl_job_for_proxy`` filter
-by chain via the first-class ``jobs.chain_id`` column, so the same address on two
-chains yields two independent jobs and dedup never returns a cross-chain match
-(invariant 1). These complement the pre-existing ``(address, chain)`` tests in
-``tests/chains/test_chain_aware_cache.py`` (which cover the four helpers via
-Python-side filtering) and ``tests/resolution/test_deployment_scoping.py`` (reconcile).
-
-All jobs are created through ``create_job`` so the chain_id dual-write is
-exercised end-to-end — the SQL filter reads the same column the enqueue path
-writes.
+Same address on two chains yields two independent jobs; dedup never returns a cross-chain match.
+Complements ``test_chain_aware_cache.py`` (Python-side filtering) and
+``tests/resolution/test_deployment_scoping.py`` (reconcile). Jobs go through ``create_job`` so the
+chain_id dual-write is exercised end-to-end.
 """
 
 from __future__ import annotations
@@ -30,8 +24,6 @@ def _addr() -> str:
 
 @requires_postgres
 def test_existing_job_two_chains_are_two_jobs(db_session):
-    """The same address on Ethereum and Base is two distinct jobs, and the
-    dedup helper returns only the same-chain match for each."""
     from db.queue import create_job, find_existing_job_for_address
 
     addr = _addr()
@@ -51,8 +43,7 @@ def test_existing_job_two_chains_are_two_jobs(db_session):
 
 @requires_postgres
 def test_existing_job_other_chain_only_is_a_miss(db_session):
-    """An Ethereum job must not be returned for a Base lookup (no cross-chain
-    dedup that would suppress a legitimate second-chain job)."""
+    """An Ethereum job must not suppress a legitimate second-chain job for a Base lookup."""
     from db.queue import create_job, find_existing_job_for_address
 
     addr = _addr()
@@ -62,8 +53,7 @@ def test_existing_job_other_chain_only_is_a_miss(db_session):
 
 @requires_postgres
 def test_existing_job_chain_none_is_backward_compatible(db_session):
-    """chain=None keeps the pre-change behaviour: no chain predicate, any-chain
-    match returned."""
+    """chain=None keeps the pre-change behaviour: no chain predicate."""
     from db.queue import create_job, find_existing_job_for_address
 
     addr = _addr()
@@ -79,8 +69,7 @@ def test_existing_job_chain_none_is_backward_compatible(db_session):
 
 @requires_postgres
 def test_reconcile_root_none_respects_chain_same_proxy(db_session):
-    """With root_job_id=None, a same-(impl, proxy) job on a *different* chain
-    must not be treated as a duplicate (the :805 nesting bug)."""
+    """root_job_id=None: a same-(impl, proxy) job on another chain is not a duplicate (the :805 nesting bug)."""
     from db.queue import create_job, reconcile_impl_job_for_proxy
 
     impl, proxy = _addr(), _addr()
@@ -94,8 +83,6 @@ def test_reconcile_root_none_respects_chain_same_proxy(db_session):
 
 @requires_postgres
 def test_reconcile_root_none_respects_chain_standalone(db_session):
-    """A standalone (no-proxy) impl job on Ethereum must not be backpatched into
-    proxy context for a Base reconcile."""
     from db.queue import create_job, reconcile_impl_job_for_proxy
 
     impl, proxy = _addr(), _addr()
@@ -110,8 +97,6 @@ def test_reconcile_root_none_respects_chain_standalone(db_session):
 
 @requires_postgres
 def test_reconcile_root_scoped_and_chain_both_apply(db_session):
-    """When root_job_id is given, the chain predicate applies in that branch too,
-    and root scoping still narrows independently."""
     from db.queue import create_job, reconcile_impl_job_for_proxy
 
     impl, proxy, root = _addr(), _addr(), str(uuid.uuid4())

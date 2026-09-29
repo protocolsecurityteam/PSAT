@@ -1,22 +1,11 @@
 """Issue #119 regression suite — durable event-fold cursor coverage.
 
-These tests fail on the unfixed source (the fold minted ``enumerable``/``exact``
-gated only on ``backfill_complete``, never comparing the cursor to the evaluated
-height) and pin the complete fix:
+Fails on the unfixed source, where the fold minted ``enumerable``/``exact`` gated only on
+``backfill_complete``, never comparing the cursor to the evaluated height. A cursor that does not
+cover it (unpinned or past the cursor) demotes to ``partial``/``cursor_behind_block``, never a silent
+``exact``; the head pin must NOT strip an already-indexed denylist member (round-2 fail-open).
 
-  * a warm cursor that does NOT cover the evaluated height (unpinned ``block=None``
-    or ``block`` past the cursor) demotes to ``partial``/``cursor_behind_block`` →
-    adapter ``finite_set(lower_bound)`` — NEVER a silent ``exact``;
-  * a cursor that DOES cover the pinned finalized height stays ``enumerable``/exact;
-  * the resolver's deterministic finality-margin pin
-    (``_resolve_resolution_block`` = ``head - RESOLVER_FINALITY_MARGIN``) keeps a
-    keeping-up cursor exact and demotes a stalled one;
-  * the head pin can NOT strip an already-indexed denylist member: an address
-    blocked in ``(pin, cursor]`` stays in the negated cofinite blacklist (gated),
-    never reading PUBLIC (the round-2 fail-open the reviewer reproduced).
-
-Real ``psat_test`` Postgres + the production ``PostgresEventLogRepo`` /
-``EventIndexedAdapter`` (no monkeypatched fold); only rows are seeded.
+Real ``psat_test`` Postgres + production ``PostgresEventLogRepo`` / ``EventIndexedAdapter``; only rows are seeded.
 """
 
 from __future__ import annotations
@@ -136,15 +125,8 @@ def _allowlist_descriptor() -> dict[str, Any]:
     }
 
 
-# --------------------------------------------------------------------------- #
-# 1. Fold demotion (the core correctness gate)                                #
-# --------------------------------------------------------------------------- #
-
-
 def test_fold_event_writes_demotes_unpinned_head_to_lower_bound(db_session):
-    # Warm, backfill_complete cursor — pre-fix this minted enumerable/exact. An
-    # unpinned block=None ("evaluate at live head") cannot be covered by a cursor
-    # that structurally lags head, so the fold MUST demote.
+    # Pre-fix this minted enumerable/exact; a cursor that lags head cannot cover an unpinned block=None.
     _seed_cursor(db_session, last_indexed_block=1000)
     db_session.add(_grant_row(TOPIC_ADD, ADMIN_A, 900))
     db_session.add(_grant_row(TOPIC_ADD, ADMIN_B, 950))
@@ -210,11 +192,6 @@ def test_fold_event_values_demotes_unpinned_head(db_session):
     assert res_cov.partial_reason is None
 
 
-# --------------------------------------------------------------------------- #
-# 2. Adapter end-to-end: demotion → lower_bound, coverage → exact             #
-# --------------------------------------------------------------------------- #
-
-
 def test_adapter_unpinned_block_yields_lower_bound(db_session):
     _seed_cursor(db_session, last_indexed_block=1000)
     db_session.add(_grant_row(TOPIC_ADD, ADMIN_A, 900))
@@ -241,18 +218,9 @@ def test_adapter_covering_pin_stays_exact(db_session):
     assert cap.members == [ADMIN_A.lower()]
 
 
-# --------------------------------------------------------------------------- #
-# 3. Round-2 headline: the head pin must NOT strip an indexed denylist member  #
-# --------------------------------------------------------------------------- #
-
-
 def test_recently_blocked_indexed_address_stays_in_blacklist_under_head_pin(db_session):
-    # A ``falsy``/denylist leaf negates the event-indexed set into a cofinite
-    # blacklist ("anyone EXCEPT the blocked set"). cursor=1028 (>= pin), DENIED was
-    # blocked @1010 — already indexed, but inside (pin=976, cursor]. The finality
-    # pin governs only the exact gate; it must NOT truncate the row scan, or DENIED
-    # falls out of the EXACT blacklist and reads PUBLIC (fail-open). Pre-fix
-    # (block<=pin row truncation) this returned an empty exact blacklist.
+    # A denylist leaf negates the indexed set into a cofinite blacklist. DENIED (blocked @1010) sits inside
+    # (pin=976, cursor]; truncating the row scan at the pin dropped it and read PUBLIC (fail-open).
     head = 1040
     pin = head - RESOLVER_FINALITY_MARGIN  # 976
     cursor = 1028
@@ -275,11 +243,6 @@ def test_recently_blocked_indexed_address_stays_in_blacklist_under_head_pin(db_s
     assert allowed.kind == "cofinite_blacklist"
     assert DENIED.lower() in (allowed.blacklist or [])  # still excluded → gated, not public
     assert allowed.blacklist_quality == "exact"
-
-
-# --------------------------------------------------------------------------- #
-# 4. Resolver finality-margin pin                                             #
-# --------------------------------------------------------------------------- #
 
 
 def test_resolve_resolution_block_pins_head_minus_margin(monkeypatch):

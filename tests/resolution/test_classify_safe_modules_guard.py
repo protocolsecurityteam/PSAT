@@ -1,19 +1,12 @@
 """C1: the Safe module/guard protection probe on the resolution classifier.
 
-Two storage words plus ``VERSION()``, fired after an address classifies as a
-Safe. The register previously published "modules empty on all 9 Safes, so k/n is
-exact"; there are 19 Safe principals and one of them
-(``0x21f73d42eb58ba49ddb685dc29d3bf5c0f0373ca``) has an enabled module, so k/n is
-an upper bound on its protection.
+Two storage words plus ``VERSION()``, fired after an address classifies as a Safe. The
+register once published "modules empty on all 9 Safes, so k/n is exact", but one of 19
+Safes (``0x21f73d42...``) has an enabled module. Words were re-read at block 25643300.
 
-Every pinned word below was re-read at block 25643300 through ``services.clients.rpc``
-(eRPC) while writing these tests; both scenarios are real Safes from the
-``function_principals.resolved_type='safe'`` set.
-
-The load-bearing negative: the head word can prove the module list EMPTY (head ==
-sentinel) but can never enumerate it. A non-sentinel head is published as
-``module_set: not_determined`` + ``protection_is_upper_bound: true``, NOT as a
-one-element list — a two-module Safe would otherwise be published as having one.
+Load-bearing negative: the head word can prove the module list EMPTY (head == sentinel)
+but never enumerate it; a non-sentinel head is ``module_set: not_determined`` +
+``protection_is_upper_bound: true``, never a one-element list.
 """
 
 from __future__ import annotations
@@ -209,7 +202,6 @@ def test_module_bearing_safe_111_publishes_upper_bound_not_a_list(monkeypatch):
             "guard": "feature_absent",
         },
     }
-    # The refuted over-claim, pinned: no enumerated list anywhere in the payload.
     assert _protection(details)["module_set"] != [ENABLED_MODULE]
     assert "modules" not in _protection(details)
 
@@ -257,7 +249,6 @@ def test_unknown_version_leaves_guard_not_determined(monkeypatch):
         protection = _protection(details)
         assert protection["safe_version"] == version
         assert protection["guard"] == "not_determined"
-        # The module determination is version-independent and still lands.
         assert protection["module_set"] == []
 
 

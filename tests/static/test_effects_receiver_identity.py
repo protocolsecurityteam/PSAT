@@ -1,25 +1,15 @@
 """D2: an external call's RECEIVER must publish what it structurally is, and
 nothing the evidence does not carry.
 
-The sink's ``target`` string has always held the receiver's identifier. A name
-is not an identity: it does not say whether the CALLER chose the asset (in which
-case there is no single token to price against), whether it is this unit's
-storage, or how it could be read. Those are AST facts, dropped one line after
-being derived. These tests compile the shapes and drive production
-``build_effects`` / the production claims phase — nothing is faked.
+A sink ``target`` name is not an identity: it does not say whether the CALLER chose
+the asset, whether it is this unit's storage, or how it could be read. Tests
+compile the shapes and drive production ``build_effects`` and the claims phase.
 
-The three refusals are the point, and each has its own test:
-
-* ``visibility`` may not decide the binding — a Slither ``LocalVariable``
-  answers ``internal`` / ``is_immutable=False`` / ``is_constant=False``
-  identically to an internal state variable;
-* the auto-getter selector is licensed by the DECLARED TYPE, not the name — a
-  parameterised getter's selector is not ``name()``;
-* a formal of an internal helper is not an ABI slot of the entry point.
-
-Protocol-agnostic by construction (§0.0.6): the fixture models shapes — a
-library-wrapped send, a public immutable, an internal, a constant, a local
-copied out of storage, a collection-typed receiver — never a named protocol.
+Three refusals, one test each: ``visibility`` may not decide the binding (a
+``LocalVariable`` answers like an internal state variable); the auto-getter
+selector is licensed by the DECLARED TYPE, not the name; a formal of an internal
+helper is not an ABI slot of the entry point. Protocol-agnostic by construction
+(§0.0.6): shapes only, never a named protocol.
 """
 
 from __future__ import annotations

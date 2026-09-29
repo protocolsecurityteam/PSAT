@@ -1,33 +1,17 @@
 """End-to-end proof that the token-precondition seeding chain works on a real EVM.
 
-Every other token-slot test stops at one seam: the static tests derive slots from
-Slither, the anvil tests seed hand-written slots on a fork. This one closes the
-loop on the SAME Solidity source: it derives the base slots with the production
-Slither pass (``derive_token_slots``), deploys the bytecode compiled from that
-exact source to a local NON-FORKING anvil, seeds the derived slots through the
-production synthesizer helpers (``_token_seed_fixtures``), and runs the real
-``pause_recipe``. The generality claim — the slot the fork writes is the one the
-static pass derived, nothing hand-computed — only holds if Slither (parsing the
-source) and the EVM (running the bytecode) agree on the layout, which is exactly
-what deploying the compiled-from-source bytecode forces.
+Other token-slot tests stop at one seam (static slots from Slither, or hand-written slots on a
+fork). This closes the loop on the SAME Solidity source: derive base slots with the production
+Slither pass, deploy the bytecode compiled from that source to a local NON-FORKING anvil, seed via
+the production synthesizer helpers, and run the real ``pause_recipe``. The claim that nothing is
+hand-computed only holds if Slither and the EVM agree on layout, which deploying that bytecode forces.
 
-Matrix (each: derive -> seed -> read-back verify -> pause blast-radius diff):
+Matrix (derive -> seed -> read-back verify -> pause blast-radius diff): plain ERC-20; OZ-v5
+ERC-7201 namespaced (base+member offset); rebasing (computed ``balanceOf`` gets NO seed, ``shares``
+does); wrong-slot honesty (a corrupted slot fails read-back, drops the write, and can never mint a
+wrong label); ERC-721 ``ownerOf`` seeded at ``tokenId == ARG_AMOUNT``.
 
-  * plain ERC-20 (``storage_layout``): balanceOf public-mapping getter + a
-    handwritten ``allowance``; ``transferFrom`` is invisible pre-seed (no
-    balance/allowance) and witnessed post-seed;
-  * OZ-v5 ERC-7201 namespaced: the same outcome with balances/allowances inside a
-    namespaced struct — proves the base+member-offset arithmetic against a real
-    EVM;
-  * rebasing: a computed ``balanceOf`` gets NO seed, the direct ``shares`` mapping
-    does, and seeding shares is what lets ``transferFrom`` reach the pause gate;
-  * wrong-slot honesty: corrupting the derived slot makes the on-chain read-back
-    fail, drops the write, and keeps ``transferFrom`` out of the blast radius — a
-    wrong slot can never mint a wrong label;
-  * ERC-721 ``ownerOf``: owner mapping seeded at ``tokenId == ARG_AMOUNT``.
-
-Gated behind ``anvil_available`` + an installed 0.8.27 solc, so a clone without
-foundry / the compiler auto-skips. No live marker, no RPC, no forking anvil.
+Gated behind ``anvil_available`` + an installed 0.8.27 solc; auto-skips otherwise. No live marker, no RPC.
 """
 
 from __future__ import annotations
@@ -76,9 +60,8 @@ CTX = SimContext(chain_id=31337, block=1, hardfork="prague")
 
 
 def _solc_027() -> str | None:
-    """Path to the installed 0.8.27 solc — the exact compiler the fixture bytecode
-    was built with, so Slither's layout and the deployed bytecode agree bit for
-    bit. ``None`` (⇒ skip) when it is not installed."""
+    """Path to the installed 0.8.27 solc, the exact compiler the fixture bytecode was built with so
+    Slither's layout and the deployed bytecode agree. ``None`` (=> skip) when not installed."""
     try:
         from solc_select import solc_select as ss
     except Exception:
@@ -111,8 +94,7 @@ def _load_fixture(name: str) -> dict[str, Any]:
 
 
 def _derive_entries(fixture: dict[str, Any], tmp_path: Path) -> list[dict[str, Any]]:
-    """Run the production static pass over the fixture's embedded source with the
-    real Slither toolchain and return its ``token_slots`` entries."""
+    """Run the production static pass over the fixture's source with real Slither; return its ``token_slots``."""
     contract_name = fixture["contract"]
     src = tmp_path / f"{contract_name}.sol"
     src.write_text(fixture["source"])
@@ -128,9 +110,8 @@ def _by_role(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def _corrupt_slot(entry: dict[str, Any]) -> dict[str, Any]:
-    """A copy of ``entry`` with ``base_slot`` bumped by one — a plausible-looking
-    but wrong slot, exactly the residual-derivation-error the read-back is a net
-    against."""
+    """A copy of ``entry`` with ``base_slot`` bumped by one: a plausible but wrong slot, the residual
+    derivation error the read-back is a net against."""
     corrupted = dict(entry)
     corrupted["base_slot"] = "0x" + format(int(entry["base_slot"], 16) + 1, "064x")
     return corrupted
@@ -139,11 +120,9 @@ def _corrupt_slot(entry: dict[str, Any]) -> dict[str, Any]:
 def _transfer_from_entry_point(
     fixture: dict[str, Any], caller: str, param_names: tuple[str, str, str] = ("from", "to", "amount")
 ) -> EntryPoint:
-    """A ``transferFrom`` blast-radius probe built the same way the synthesizer
-    builds it: every address arg substituted to ``caller``, and the integer arg
-    filled through the production role classifier off the token's own declared
-    parameter names (so the seeded keys line up with the call), plus gas for the
-    caller so an out-of-gas revert can never masquerade as the pause."""
+    """A ``transferFrom`` blast-radius probe built as the synthesizer builds it: address args
+    substituted to ``caller``, the integer arg filled via the production role classifier off the
+    token's declared parameter names, plus gas so an out-of-gas revert can't masquerade as the pause."""
     sig = _TRANSFER_FROM
     selector = fixture["selectors"][sig]
     types = _parse_arg_types(sig)
@@ -172,8 +151,7 @@ def _transfer_from_entry_point(
 
 
 def _control_entry_point(fixture: dict[str, Any], caller: str) -> EntryPoint:
-    """A plain ``owner()`` getter — never gated, so it succeeds pre- and post-pause
-    and can never appear in the blast radius. Confirms the diff is specific."""
+    """A plain ``owner()`` getter, never gated, so it can never appear in the blast radius (the diff is specific)."""
     calldata = encode_calldata(fixture["selectors"][_OWNER], _OWNER)
     assert calldata is not None
     return EntryPoint(key="owner_getter", calldata=calldata, from_addr=caller)
@@ -185,9 +163,8 @@ def _run_pause(
     entries: list[dict[str, Any]],
     param_names: tuple[str, str, str] = ("from", "to", "amount"),
 ) -> tuple[Any, RecordingStore, str]:
-    """Deploy the fixture, seed the derived (or corrupted) entries for a neutral
-    caller, and run the real pause recipe with a ``transferFrom`` probe + an
-    ungated control. Returns ``(effect, store, deployed_address)``."""
+    """Deploy the fixture, seed the derived (or corrupted) entries for a neutral caller, and run the
+    real pause recipe. Returns ``(effect, store, deployed_address)``."""
     owner = anvil.accounts()[0]
     addr = anvil.deploy(owner, fixture["creation_bytecode"])
     caller = NEUTRAL_CALLER
@@ -228,7 +205,6 @@ def test_plain_erc20_pausable_e2e(tmp_path: Path) -> None:
     entries = _derive_entries(fixture, tmp_path)
     by_role = _by_role(entries)
 
-    # Derivation: balance + allowance, both plain storage_layout entries.
     assert by_role["balance"]["derivation"] == "storage_layout"
     assert by_role["balance"]["getter"] == "balanceOf(address)"
     assert by_role["balance"]["base_slot"] == "0x" + "0" * 63 + "1"  # owner+paused pack into slot 0
@@ -239,7 +215,6 @@ def test_plain_erc20_pausable_e2e(tmp_path: Path) -> None:
     with SubprocessAnvil(port=8551, hardfork_name="prague") as anvil:
         eff, store, _addr = _run_pause(anvil, fixture, entries)
 
-    # Every derived slot seeded onto the real deployment read its own getter back.
     assert _readbacks(store) == ["ok", "ok"]
     # The previously-invisible entry point is now witnessed by the diff.
     assert eff.verdict == VERDICT_PROVEN
@@ -324,16 +299,12 @@ def test_wrong_slot_never_mints_witness(tmp_path: Path) -> None:
         # On the real EVM every corrupted seed fails its getter read-back and is
         # dropped, so nothing is left seeded.
         assert _readbacks(store) == ["failed", "failed"]
-        # transferFrom never reaches the pause gate (no balance/allowance), so it
-        # is neither succeeding pre-pause nor in any observed radius: the recipe
-        # falls to the honest no-observation verdict.
+        # transferFrom never reaches the pause gate, so the recipe falls to the honest no-observation verdict.
         assert "transferFrom" not in eff.details["pre_pause_succeeding"]
         assert eff.verdict == VERDICT_UNKNOWN
         assert eff.reason == "no_blast_radius_observed"
 
-        # Independently, at the transport level: applying a corrupted verified
-        # fixture reverts its write, and the contract's own getter still returns a
-        # zero word — a wrong slot cannot even change what the getter reads.
+        # At the transport level too: a corrupted verified fixture reverts its write and the getter still returns zero.
         caller = NEUTRAL_CALLER
         bad_balance = _corrupt_slot(_by_role(entries)["balance"])
         seed = _token_seed_fixtures((bad_balance,), [caller], addr)[0]
@@ -368,8 +339,8 @@ def test_erc721_owner_seeded_e2e(tmp_path: Path) -> None:
         # fill it with the id filler the ownership seed is keyed at.
         eff, store, _addr = _run_pause(anvil, fixture, entries, ("from", "to", "tokenId"))
 
-    # The seeded owner word IS the prober: a read-back of "ok" means the derived
-    # uint256-keyed slot was live and ownerOf(ARG_AMOUNT) echoed the caller.
+    # The seeded owner word IS the prober: "ok" means the uint256-keyed slot was live and
+    # ownerOf(ARG_AMOUNT) echoed the caller.
     assert _readbacks(store) == ["ok"]
     assert eff.verdict == VERDICT_PROVEN
     assert "transferFrom" in eff.details["pre_pause_succeeding"]

@@ -79,11 +79,9 @@ def test_get_errors_returns_deserialized_artifact(db_session, api_client):
 
 @requires_postgres
 def test_get_errors_corrupt_artifact_does_not_500(db_session, api_client):
-    """A garbage artifact body is logged and surfaced as an empty list, not a 500."""
     job = create_job(db_session, {"address": "0xabc", "name": "endpoint-corrupt"})
     db_session.commit()
 
-    # Write something that doesn't match the StageErrors schema.
     store_artifact(db_session, job.id, "stage_errors", data={"not": "valid", "shape": [1, 2, 3]})
 
     response = api_client.get(f"/api/jobs/{job.id}/errors")

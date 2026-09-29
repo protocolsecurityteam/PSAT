@@ -32,12 +32,9 @@ from workers.resolution_worker import ResolutionWorker
 def _stub_etherscan_balances(monkeypatch):
     """Offline: ``_fetch_balances`` probes ETH + token balances via Etherscan.
 
-    Benign defaults (no balances); tests exercising specific balance behaviour
-    override these in-body (monkeypatch order lets the later setattr win).
-
-    The pinned native read is a second, non-Etherscan wire the same call makes,
-    and no test here exercises it — so the module takes the unpinned path its
-    expectations were written against.
+    Benign defaults (no balances); tests exercising balance behaviour override in-body. The
+    pinned native read is a second, non-Etherscan wire no test here exercises, so the module
+    takes the unpinned path its expectations were written against.
     """
     monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda addr, *a, **k: 0)
     monkeypatch.setattr("services.clients.etherscan.get_native_price", lambda *a, **k: 0.0)
@@ -74,8 +71,6 @@ def db_session_for_resolution():
 
 
 class TestProcessHappyPath:
-    """Snapshot built, graph resolved, artifacts stored."""
-
     def test_stores_snapshot_and_graph(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
@@ -98,8 +93,6 @@ class TestProcessHappyPath:
 
 
 class TestProxyAddressOverride:
-    """When proxy_address is in request, tracking plan and analysis use it."""
-
     def test_proxy_overrides_contract_address(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
@@ -128,8 +121,7 @@ def _added(session) -> list:
 
 
 def _balance_rows(session) -> int:
-    """HOLDINGS rows only. The fetch-provenance row is not a holding and must
-    never be counted as one — that separation is the whole point of the plane."""
+    """HOLDINGS rows only; the fetch-provenance row is not a holding and must never be counted as one."""
     return sum(1 for o in _added(session) if isinstance(o, ContractBalance))
 
 
@@ -148,8 +140,6 @@ def _fetch_rows(session) -> int:
 
 @requires_postgres
 class TestFetchBalancesHappyPath:
-    """ETH + token balances stored, price fetch failure handled gracefully."""
-
     def test_stores_eth_and_tokens(self, monkeypatch: pytest.MonkeyPatch, db_session) -> None:
         worker = ResolutionWorker()
         session = db_session
@@ -203,7 +193,6 @@ class TestFetchBalancesHappyPath:
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
-        # Should still add ETH balance even if price failed
         assert _balance_rows(session) == 1
         assert _fetch_rows(session) == 2
 
@@ -225,18 +214,15 @@ class TestFetchBalancesHappyPath:
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
-        # No holdings row on a failed read — the balance is not known, and the
-        # earlier code path recorded that only via ``record_degraded``, leaving
-        # the balance plane showing a plain absence. A provenance row now says
-        # the read was attempted and failed.
+        # No holdings row on a failed read (balance unknown); a provenance row records the
+        # attempt, where the balance plane previously showed a plain absence.
         assert _balance_rows(session) == 0
         fetches = sorted(_fetch_objects(session), key=lambda f: f.native_status == "unattempted")
         assert len(fetches) == 2
         assert fetches[0].native_status == NATIVE_STATUS_FETCH_FAILED
 
     def test_non_eth_native_chain_stores_native_symbol(self, monkeypatch: pytest.MonkeyPatch, db_session) -> None:
-        """A BSC job records its native gas balance under BNB at the BNB quote,
-        never an ETH label — the native asset comes from the chain registry."""
+        """A BSC job records native gas under BNB at the BNB quote (native asset from the chain registry)."""
         worker = ResolutionWorker()
         session = db_session
         fake_contract = Contract(address=TARGET_ADDRESS, chain="ethereum")
@@ -270,8 +256,6 @@ class TestFetchBalancesHappyPath:
 
 
 class TestFetchBalancesEarlyReturn:
-    """Returns early when address or contract_row is missing."""
-
     def test_no_address_returns_early(self) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
@@ -296,12 +280,9 @@ class TestFetchBalancesEarlyReturn:
 
 
 class TestQueueDiscoveredContracts:
-    """Creates child jobs for valid contract nodes, skips invalid ones."""
-
     def test_creates_child_job_for_analyzed_contract(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
-        # No existing job
         session.execute.return_value.scalar_one_or_none.return_value = None
 
         create_calls: list[dict] = []
@@ -311,9 +292,8 @@ class TestQueueDiscoveredContracts:
             return SimpleNamespace(id=uuid.uuid4(), company=None)
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
-        # The perimeter walk moved to services/discovery/perimeter; the resolution
-        # worker still imports create_job for its dependency-provider spawn, so both
-        # bindings are stubbed and the assertions below are unchanged.
+        # Perimeter walk moved to services/discovery/perimeter; create_job is still imported for the
+        # dependency-provider spawn, so both bindings are stubbed.
         monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(
@@ -364,8 +344,6 @@ class TestQueueDiscoveredContracts:
 
 
 class TestQueueDiscoveredContractsCompanyInheritance:
-    """Company is inherited from parent job chain when not set on current job."""
-
     def test_inherits_company_from_parent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
@@ -376,9 +354,6 @@ class TestQueueDiscoveredContractsCompanyInheritance:
             company="Acme Corp",
             request={},
         )
-
-        # First call (select Job where address=...) returns None (no existing job)
-        # session.get(Job, parent_id) returns parent_job
 
         def fake_execute(stmt):
             result = MagicMock()
@@ -396,9 +371,6 @@ class TestQueueDiscoveredContractsCompanyInheritance:
             return child_ns
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
-        # The perimeter walk moved to services/discovery/perimeter; the resolution
-        # worker still imports create_job for its dependency-provider spawn, so both
-        # bindings are stubbed and the assertions below are unchanged.
         monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
@@ -407,7 +379,6 @@ class TestQueueDiscoveredContractsCompanyInheritance:
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
 
         assert len(create_calls) == 1
-        # Company should be set on child job
         assert child_ns.company == "Acme Corp"
 
     def test_uses_job_company_directly(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -423,9 +394,6 @@ class TestQueueDiscoveredContractsCompanyInheritance:
             return child_ns
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
-        # The perimeter walk moved to services/discovery/perimeter; the resolution
-        # worker still imports create_job for its dependency-provider spawn, so both
-        # bindings are stubbed and the assertions below are unchanged.
         monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
@@ -443,8 +411,6 @@ class TestQueueDiscoveredContractsCompanyInheritance:
 
 
 class TestMissingArtifactsRaise:
-    """process() raises RuntimeError when required artifacts are missing."""
-
     def test_missing_tracking_plan_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
@@ -494,8 +460,6 @@ class TestMissingArtifactsRaise:
 
 @requires_postgres
 class TestFetchBalancesZeroEth:
-    """Zero ETH balance does not add an ETH row."""
-
     def test_zero_eth_no_row(self, monkeypatch: pytest.MonkeyPatch, db_session) -> None:
         worker = ResolutionWorker()
         session = db_session
@@ -510,11 +474,9 @@ class TestFetchBalancesZeroEth:
 
         cast(Any, worker)._fetch_balances(session, job, fake_contract, chain_id=1)
 
-        # No holdings row for a zero balance — a row here would be consumed as
-        # "this deployment holds the native asset". The zero itself is recorded
-        # on the fetch plane, and because this read came from the UNPINNED
-        # Etherscan path it is ``not_determined``, never ``proven_zero``: the
-        # answer carries no height, so it proves zero at no height.
+        # No holdings row for a zero balance (it would read as "holds the native asset"). The
+        # UNPINNED Etherscan read carries no height, so the fetch plane records ``not_determined``,
+        # never ``proven_zero``.
         assert _balance_rows(session) == 0
         fetches = sorted(_fetch_objects(session), key=lambda f: f.native_status == "unattempted")
         assert len(fetches) == 2
@@ -529,16 +491,12 @@ class TestFetchBalancesZeroEth:
 
 @requires_postgres
 class TestFetchBalancesProxyAddress:
-    """Which address is read, and which row the answer is filed against.
+    """Which address is read and which row the answer is filed against are ONE decision.
 
-    These are ONE decision now. Reading the proxy and filing the answer against
-    the implementation's row is what let a later read at the implementation's own
-    address win the native class wholesale and evict a real balance, so the row
-    that owns the address owns the fetch. When no contract row owns the requested
-    address, the read falls back to this row's OWN address rather than filing a
-    foreign address against it — the DB-backed arm in
-    ``test_contract_balance_provenance.py`` covers the case where the proxy does
-    have a row.
+    Reading the proxy but filing against the implementation's row let a later read at the
+    implementation's own address win the native class and evict a real balance. With no
+    contract row owning the requested address, the read falls back to this row's OWN address;
+    the DB-backed proxy-has-a-row arm is in ``test_contract_balance_provenance.py``.
     """
 
     def test_an_unowned_proxy_address_is_not_read_against_a_foreign_row(
@@ -572,10 +530,7 @@ class TestFetchBalancesProxyAddress:
 
 
 class TestQueueDiscoveredContractsParentChainEdgeCases:
-    """Edge cases in the parent chain walk for company inheritance."""
-
     def test_parent_not_found_breaks(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """When parent_job_id references a nonexistent job, walk stops."""
         worker = ResolutionWorker()
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
@@ -594,11 +549,9 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
         job = _job(company=None, request={"rpc_url": "https://rpc.example", "parent_job_id": str(uuid.uuid4())})
         worker._queue_discovered_contracts(session, cast(Any, job), graph, "https://rpc.example")
 
-        # Should still create the job, just no company
         assert len(create_calls) == 1
 
     def test_multi_level_parent_walk(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Walk through grandparent to find company."""
         worker = ResolutionWorker()
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
@@ -630,9 +583,6 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
             return child_ns
 
         monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
-        # The perimeter walk moved to services/discovery/perimeter; the resolution
-        # worker still imports create_job for its dependency-provider spawn, so both
-        # bindings are stubbed and the assertions below are unchanged.
         monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
 
         graph = _resolved_graph(nodes=[{"address": CHILD_ADDRESS, "node_type": "contract", "analyzed": True}])
@@ -645,8 +595,6 @@ class TestQueueDiscoveredContractsParentChainEdgeCases:
 
 @requires_postgres
 def test_dependency_emission_walks_check_trees(db_session_for_resolution):
-    """Authority providers used only by resolver-side check_trees still
-    need dependency gates."""
     from sqlalchemy import select
 
     from db.models import JobDependency, JobStage, JobStatus
@@ -723,8 +671,6 @@ def test_dependency_emission_walks_check_trees(db_session_for_resolution):
 
 
 def _authority_check_predicate_trees() -> dict:
-    """A minimal predicate_trees artifact whose only leaf delegates auth to an
-    external ``authority`` state variable — enough to emit one dependency edge."""
     return {
         "schema_version": "semantic",
         "contract_name": "Depender",
@@ -751,8 +697,6 @@ def _authority_check_predicate_trees() -> dict:
 
 
 def test_dependency_emission_records_pending_status_metrics(db_session_for_resolution):
-    """A provider with no policy artifacts yet → a 'pending' edge; the emitter
-    folds the per-status breakdown into the stage metrics."""
     from sqlalchemy import select
 
     from db.models import JobDependency, JobStage
@@ -788,9 +732,7 @@ def test_dependency_emission_records_pending_status_metrics(db_session_for_resol
 
 
 def test_dependency_emission_warns_and_records_on_cycle(db_session_for_resolution, caplog):
-    """A would-be cycle (B already depends on A; A now depends on B) is inserted
-    non-blocking as ``cycle_degraded`` — and must surface a WARNING + metric
-    instead of landing silently."""
+    """A would-be cycle is inserted non-blocking as ``cycle_degraded`` and must surface a WARNING + metric."""
     import logging as _logging
 
     from sqlalchemy import select
@@ -810,7 +752,6 @@ def test_dependency_emission_warns_and_records_on_cycle(db_session_for_resolutio
         session, {"address": b_addr, "chain": "ethereum", "name": "B"}, initial_stage=JobStage.resolution
     )
     session.commit()
-    # Pre-existing edge B → A; adding A → B closes the cycle.
     session.add(
         JobDependency(
             depender_job_id=job_b.id,
@@ -848,9 +789,8 @@ def test_dependency_emission_warns_and_records_on_cycle(db_session_for_resolutio
 
 
 def test_satisfy_dependencies_logs_flipped_count(db_session_for_resolution, caplog):
-    """Completing a provider flips its dependents to ``satisfied`` and logs the
-    count (was discarded by the caller, so the cross-contract unblock was
-    invisible)."""
+    """Completing a provider flips dependents to ``satisfied`` and logs the count (previously discarded, hiding the
+    unblock)."""
     import logging as _logging
 
     from sqlalchemy import select
@@ -897,20 +837,12 @@ def test_satisfy_dependencies_logs_flipped_count(db_session_for_resolution, capl
 
 
 class TestStructuralOwnershipPropagation:
-    """``_queue_discovered_contracts`` looks up the parent's stored
-    ``implementation`` / ``beacon`` fields plus its dep edges to decide
-    whether each cascade child inherits structural ownership. Mocks
-    fall short for this — multiple session.execute calls return
-    different result sets — so we use a real Postgres session.
+    """Real-Postgres tests (mocks can't serve the multiple result sets) for structural-ownership inheritance.
 
-    These tests pin the exact behaviour the PR-87 review surfaced as
-    correct: only edges whose recorded proxy/beacon fields actually
-    link parent and dep grant structural propagation. The Lido stETH
-    shape (member parent has a ``relationship_type='proxy'`` dep edge,
-    but the parent's ``implementation`` field doesn't point to the
-    dep) must NOT propagate ownership. Under the membership gate,
-    ``parent_is_member`` is derived from the parent's MEMBERSHIP
-    (``protocol_id`` set), never its source tags.
+    Pins the PR-87 review behavior: only edges whose recorded proxy/beacon fields actually link
+    parent and dep propagate. The Lido stETH shape (proxy dep edge, but the parent's
+    ``implementation`` doesn't point to the dep) must NOT propagate. ``parent_is_member`` comes
+    from MEMBERSHIP (``protocol_id`` set), never source tags.
     """
 
     @staticmethod
@@ -965,9 +897,8 @@ class TestStructuralOwnershipPropagation:
 
     @staticmethod
     def _make_proxy_orphan(db_session, *, addr: str, implementation: str | None = None, chain: str | None = None):
-        """Pre-seed the dep address as an existing Contract row whose
-        ``implementation`` points back at the parent — the proxy-direction
-        check requires the dep's row to exist with the back-link."""
+        """Pre-seed the dep as a Contract row whose ``implementation`` points back at the parent (proxy-direction
+        check)."""
         from db.models import Contract
 
         row = Contract(
@@ -984,9 +915,8 @@ class TestStructuralOwnershipPropagation:
 
     @staticmethod
     def _link_parent_to_real_job(db_session, parent) -> Any:
-        """Create a real Job row and attach the parent Contract to it.
-        ``_queue_discovered_contracts`` selects the parent via
-        ``Contract.job_id == job.id``; without a real Job the FK fails."""
+        """Create a real Job and attach the parent Contract (the parent lookup uses ``Contract.job_id``; the FK needs a
+        real Job)."""
         from db.models import Job, JobStage, JobStatus
 
         real_job = Job(
@@ -1005,11 +935,9 @@ class TestStructuralOwnershipPropagation:
     def test_implementation_edge_grants_structural_ownership(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Member parent + ``relationship_type='implementation'`` edge +
-        ``parent.implementation == dep_addr`` → child request carries
-        ``discovery_relationship='implementation'`` and
-        ``parent_is_member=True``. This is the strongest case for
-        propagation."""
+        """Member parent + ``implementation`` edge + ``parent.implementation == dep_addr`` is the
+        strongest propagation case: child carries ``discovery_relationship='implementation'``,
+        ``parent_is_member=True``."""
         session = db_session_for_resolution
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         parent = self._make_parent(
@@ -1020,8 +948,6 @@ class TestStructuralOwnershipPropagation:
         )
         self._make_dep_edge(session, parent=parent, dep_addr=dep_addr, relationship_type="implementation")
 
-        # Parent's Contract row is found via Contract.job_id == job.id, so
-        # create a real Job row to satisfy the FK and let the lookup hit.
         from db.models import Job, JobStage, JobStatus
 
         real_job = Job(
@@ -1056,8 +982,6 @@ class TestStructuralOwnershipPropagation:
     def test_beacon_edge_grants_structural_ownership(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Member parent + ``relationship_type='beacon'`` edge +
-        ``parent.beacon == dep_addr`` → child inherits."""
         session = db_session_for_resolution
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         parent = self._make_parent(
@@ -1090,10 +1014,8 @@ class TestStructuralOwnershipPropagation:
     def test_proxy_edge_grants_when_dep_implementation_back_links(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Proxy direction: parent is the impl, dep is a proxy whose
-        ``implementation`` is the parent. The structural check requires
-        a Contract row for the dep with that back-link — exercises the
-        batched dep-Contract lookup path in the worker."""
+        """Proxy direction: parent is the impl, dep is a proxy whose ``implementation`` is the parent
+        (needs a dep Contract row with that back-link; exercises the batched lookup)."""
         session = db_session_for_resolution
         parent_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
@@ -1109,7 +1031,6 @@ class TestStructuralOwnershipPropagation:
         )
         session.add(parent)
         session.commit()
-        # Dep is a proxy that points back at the parent impl.
         session.add(
             Contract(
                 address=dep_addr,
@@ -1129,9 +1050,8 @@ class TestStructuralOwnershipPropagation:
         )
         session.commit()
 
-        # The witness pass runs the event-1 probe for unprobed candidates;
-        # this test pins the W2 edge logic, so mark the dep already probed
-        # (chain is NULL here → the unresolvable-chain attempt key).
+        # This test pins the W2 edge logic, so mark the dep already probed (chain NULL -> the
+        # unresolvable-chain attempt key) to skip the witness pass's event-1 probe.
         from db.models import ContractProbeAttempt
         from services.discovery.probes import UNRESOLVABLE_CHAIN_ID
 
@@ -1171,9 +1091,8 @@ class TestStructuralOwnershipPropagation:
         assert create_calls[0]["discovery_relationship"] == "proxy"
         assert create_calls[0]["parent_is_member"] is True
 
-        # The perimeter is the W2 producer now: the back-linked dep row was
-        # nominated and earned a structural witness via the member parent —
-        # but no protocol_id stamp (W1 is still missing).
+        # The perimeter is the W2 producer: the back-linked dep earned a structural witness via
+        # the member parent, but no protocol_id stamp (W1 still missing).
         from db.models import WITNESS_RULE_W2_STRUCTURAL, ContractMembershipWitness
 
         dep_row = session.query(Contract).filter_by(address=dep_addr).one()
@@ -1192,9 +1111,8 @@ class TestStructuralOwnershipPropagation:
     def test_proxy_back_link_on_another_chain_does_not_propagate(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The dep's back-linking Contract row exists only on ANOTHER chain
-        (CREATE2 twin): the back-link is not evidence on the parent's chain,
-        so the child must not inherit (readiness §2.5)."""
+        """The back-linking row exists only on ANOTHER chain (CREATE2 twin): not evidence on the parent's chain
+        (readiness §2.5)."""
         session = db_session_for_resolution
         parent_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
@@ -1210,7 +1128,6 @@ class TestStructuralOwnershipPropagation:
         )
         session.add(parent)
         session.commit()
-        # The only row carrying the back-link is the same-address twin on base.
         session.add(
             Contract(
                 address=dep_addr,
@@ -1267,16 +1184,12 @@ class TestStructuralOwnershipPropagation:
     def test_relationship_type_alone_does_not_propagate(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Regression for the PR-87 review bug: member parent has an edge
-        with ``relationship_type='proxy'`` but the parent's stored
-        ``implementation`` does NOT equal the dep address (Lido stETH
-        shape — etherfi calls stETH, stETH is *a* proxy, but stETH is
-        not etherfi's proxy). The child must NOT receive
+        """Regression (PR-87 review): a ``relationship_type='proxy'`` edge whose parent
+        ``implementation`` != dep (Lido stETH shape: stETH is *a* proxy, not etherfi's) must NOT set
         ``discovery_relationship``."""
         session = db_session_for_resolution
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         unrelated_impl = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
-        # Parent has SOME implementation set but it's not dep_addr.
         parent = self._make_parent(
             session,
             protocol_id=self._member_protocol(session),
@@ -1309,10 +1222,8 @@ class TestStructuralOwnershipPropagation:
     def test_non_member_parent_blocks_propagation(
         self, db_session_for_resolution, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Parent is not a member (``protocol_id`` NULL) — its source tags are
-        irrelevant. Even with a perfect structural link, ``parent_is_member``
-        lands False and no witness can be produced: only a member's stored
-        resolution admits (spec §3.2 W2)."""
+        """A non-member parent (``protocol_id`` NULL): source tags are irrelevant, ``parent_is_member``
+        is False and no witness is produced (spec §3.2 W2)."""
         session = db_session_for_resolution
         dep_addr = ("0x" + uuid.uuid4().hex[:40].zfill(40)).lower()
         parent = self._make_parent(
@@ -1338,15 +1249,11 @@ class TestStructuralOwnershipPropagation:
         ResolutionWorker()._queue_discovered_contracts(session, cast(Any, job), graph, "rpc")
 
         assert len(create_calls) == 1
-        # The relationship is still passed (parent IS structurally linked),
-        # but parent_is_member is False — gate's structural branch will
-        # decline to adopt.
+        # Relationship still passed (structurally linked); parent_is_member False makes the gate decline to adopt.
         assert create_calls[0].get("parent_is_member") is False
 
 
 class TestResolvedGraphEmpty:
-    """When resolve_control_graph returns an empty graph the artifact is skipped."""
-
     def test_graph_empty_skips_store(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = ResolutionWorker()
         session = MagicMock()
@@ -1377,14 +1284,11 @@ class TestResolvedGraphEmpty:
 # ---------------------------------------------------------------------------
 # 10. The persistence boundary for the three-state columns.
 #
-# ``authority_provenance`` / ``analysis_state`` / ``graph_max_depth`` were added
-# with in-memory assertions only: every test stopped at the artifact dict. This
-# is the hop where "absent in the snapshot => SQL NULL" either holds or quietly
-# becomes a value, and where the jsonb-null trap lives (a Python ``None`` written
-# into a JSONB column lands as the jsonb scalar ``null``, which passes an
-# ``IS NULL`` test and is NOT the same as no value). Asserted through the real
-# ``ResolutionWorker.process`` writes, in SQL, with a present row and an absent
-# row in the SAME pass so neither state can be a fixture artifact.
+# ``authority_provenance`` / ``analysis_state`` / ``graph_max_depth`` were only asserted in
+# memory. This is the hop where "absent => SQL NULL" holds or quietly becomes a value, and
+# where the jsonb-null trap lives (Python ``None`` in a JSONB column lands as the jsonb scalar
+# ``null``, which passes ``IS NULL`` yet is NOT no value). Asserted in SQL through the real
+# ``process`` writes, with a present and an absent row in the SAME pass.
 # ---------------------------------------------------------------------------
 
 
@@ -1417,8 +1321,7 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
         "contract_address": TARGET_ADDRESS,
         "block_number": 100,
         "controller_values": {
-            # PROVEN: the tracked controller gates callers, and the read carried
-            # a details payload.
+            # PROVEN: the tracked controller gates callers and the read carried a details payload.
             "gate": {
                 "value": determined,
                 "resolved_type": "contract",
@@ -1426,9 +1329,7 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
                 "details": {"read": "getter_call"},
                 "authority_provenance": "caller_gate",
             },
-            # NOT DETERMINED: the plan carried no provenance for this slot and
-            # the read produced no details. Both must land SQL NULL — not the
-            # empty string, not the jsonb scalar null.
+            # NOT DETERMINED: no provenance and no read details. Both must land SQL NULL, not "" or jsonb null.
             "silent": {
                 "value": undetermined,
                 "resolved_type": "contract",
@@ -1477,9 +1378,8 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
     }
     # Proven-present round-trips verbatim; the details payload is a real object.
     assert cv_rows["gate"] == ("caller_gate", "object", False)
-    # Not-determined is SQL NULL on both columns. ``jsonb_typeof`` is the
-    # discriminator that an ``IS NULL`` test cannot make: the trap value would
-    # report typeof 'null' with ``details is null`` also true.
+    # Not-determined is SQL NULL on both columns. ``jsonb_typeof`` discriminates what ``IS NULL``
+    # cannot: the trap value reports typeof 'null' with ``details is null`` also true.
     assert cv_rows["silent"] == (None, None, True)
 
     node_rows = {
@@ -1494,8 +1394,7 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
     }
     # Proven-present, plus the walk's horizon that makes ``depth`` interpretable.
     assert node_rows[determined] == ("not_analyzable", 6, False)
-    # Absent in the graph => SQL NULL, never a guessed token. ``graph_max_depth``
-    # is a fact about the WALK, so it is present on every node of that walk.
+    # Absent => SQL NULL, never a guessed token; ``graph_max_depth`` is a fact about the WALK, present on every node.
     assert node_rows[undetermined] == (None, 6, False)
     assert (
         db_session.execute(
@@ -1508,9 +1407,8 @@ def test_three_state_columns_reach_postgres_and_absence_lands_sql_null(
 
 @requires_postgres
 def test_graph_without_max_depth_persists_sql_null_not_zero(db_session, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The adverse branch of ``graph_max_depth``: a graph that never recorded its
-    horizon must persist NULL. ``0`` would read as a real horizon and make every
-    node at depth >= 1 look deliberately cut off."""
+    """A graph that never recorded its horizon must persist NULL; ``0`` would make every node at depth >= 1 look cut
+    off."""
     from sqlalchemy import text
 
     from db.models import Contract, Job, JobStage, JobStatus

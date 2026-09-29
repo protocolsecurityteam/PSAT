@@ -1,19 +1,14 @@
 """Solmate ``RolesAuthority`` adapter — resolves ``canCall`` from REAL events.
 
-Fixture ``tests/fixtures/solmate/roles_authority_3994741a.json`` holds the
-actual ``RoleCapabilityUpdated`` / ``UserRoleUpdated`` /
-``PublicCapabilityUpdated`` logs of etherfi's RolesAuthority
-``0x3994741a…`` (the authority for ``TellerWithMultiAssetSupport``
-``0xe2acf9f8…``). Ground truth was verified on-chain via ``canCall``:
+Fixture ``tests/fixtures/solmate/roles_authority_3994741a.json`` holds the actual
+role/capability logs of etherfi's RolesAuthority ``0x3994741a…`` (authority for
+``TellerWithMultiAssetSupport`` ``0xe2acf9f8…``). Ground truth verified on-chain via ``canCall``:
 
     pause / unpause      -> role 9 -> 4/6 Safe 0xcea8039076…
     addAsset / removeAsset -> role 8 -> 4/6 Safe 0xcea8039076…
     setShareLockPeriod   -> no role + owner renounced -> genuinely empty
 
-Before this adapter these functions resolved to an empty ``finite_set`` /
-unresolved ``OR`` (no caller) — see RECALL/under-resolution audit. This
-test pins that the adapter now recovers the real controller and does not
-fall back to a heuristic.
+Pins that the adapter recovers the real controller, not a heuristic empty ``finite_set``.
 """
 
 from __future__ import annotations
@@ -115,8 +110,7 @@ def test_solmate_add_asset_resolves_to_governing_safe():
 
 
 def test_solmate_unroled_function_is_exact_empty_not_unknown():
-    # No role capability + renounced owner => genuinely callable by nobody.
-    # Must be an EXACT empty set (a true negative), not a heuristic miss.
+    # No role capability + renounced owner => callable by nobody: an EXACT empty set, not a heuristic miss.
     fixture = _load()
     cap = SolmateRolesAuthorityAdapter().enumerate(
         _descriptor(), _ctx(fixture, FixtureRepo(_rows(fixture)), SET_SHARE_LOCK)
@@ -127,8 +121,7 @@ def test_solmate_unroled_function_is_exact_empty_not_unknown():
 
 
 def test_solmate_unindexed_events_defer_to_probe_not_false_empty():
-    # When the authority's events aren't durably indexed, an empty result must
-    # NOT be reported as exact "nobody" — fall back to a probe.
+    # Events not durably indexed: an empty result must NOT be exact "nobody" — fall back to a probe.
     fixture = _load()
     cap = SolmateRolesAuthorityAdapter().enumerate(
         _descriptor(), _ctx(fixture, FixtureRepo(_rows(fixture), indexed_block=None), SET_SHARE_LOCK)
@@ -137,11 +130,9 @@ def test_solmate_unindexed_events_defer_to_probe_not_false_empty():
 
 
 def test_solmate_unconfirmed_authority_fails_closed_not_false_empty():
-    # The authority IS indexed (cursor present) but emitted NONE of the three
-    # RolesAuthority role events — e.g. a custom Authority exposing canCall with
-    # different internal logic. The adapter must not assert an exact-empty
-    # "nobody"; it can only be correct-by-construction for a confirmed
-    # RolesAuthority, so it fails closed to a probe.
+    # Indexed (cursor present) but NONE of the three RolesAuthority events emitted, e.g. a
+    # custom Authority exposing canCall: only a confirmed RolesAuthority may assert exact-empty,
+    # so it fails closed to a probe.
     fixture = _load()
 
     class IndexedButNoRoleEventsRepo:
@@ -158,12 +149,10 @@ def test_solmate_unconfirmed_authority_fails_closed_not_false_empty():
 
 
 def test_solmate_renounced_zero_authority_settles_not_deferred():
-    # A renounced/unset authority resolves to 0x0. The adapter must treat it as
-    # authority_unresolved (a SETTLED external check), never a cold-index deferral:
-    # there is no 0x0 event cursor to wait on (the indexer won't seed one), so a
-    # deferred_pending_index marker here would never clear. The repo reports NO
-    # cursor (min_indexed_block=None) to prove the 0x0 short-circuit fires BEFORE
-    # the index check — the pre-fix path would have marked this deferred.
+    # A renounced/unset authority resolves to 0x0 → authority_unresolved (a SETTLED external
+    # check), never a cold-index deferral: no 0x0 cursor will ever exist, so
+    # deferred_pending_index would never clear. NO cursor (min_indexed_block=None) proves the
+    # 0x0 short-circuit fires BEFORE the index check.
     fixture = _load()
     ctx = EvaluationContext(
         chain_id=1,
@@ -183,8 +172,7 @@ _AUTHORITY = "0x" + "a1" * 20
 
 
 class _FakeBytecode:
-    """BytecodeRepo whose has_selector is True only for the given selectors —
-    simulates a contract that declares exactly those functions."""
+    """BytecodeRepo whose has_selector is True only for the given selectors."""
 
     def __init__(self, *, selectors):
         self._selectors = {s.lower() for s in selectors}
@@ -216,15 +204,13 @@ def test_matches_scores_high_only_for_a_confirmed_rolesauthority():
 
 
 def test_matches_declines_a_different_cancall_standard():
-    # OZ AccessManager shares canCall's selector; Solmate must DECLINE (0) so the
-    # AccessManager adapter can win the tie rather than being starved.
+    # OZ AccessManager shares canCall's selector; Solmate must DECLINE (0) so that adapter can win the tie.
     bc = _FakeBytecode(selectors=_OTHER_CANCALL_STANDARD_SELECTORS)
     assert SolmateRolesAuthorityAdapter.matches(_descriptor_with_authority(), _ctx_for_matches(bc)) == 0
 
 
 def test_matches_provisional_when_authority_cannot_be_probed():
-    # No bytecode repo → can't confirm → provisional (< a confirmed adapter's 90)
-    # but > 0, so Solmate still handles canCall as the only such standard today.
+    # No bytecode repo → can't confirm → provisional (< a confirmed adapter's 90) but > 0.
     assert SolmateRolesAuthorityAdapter.matches(_descriptor_with_authority(), _ctx_for_matches(None)) == 40
 
 
@@ -237,9 +223,8 @@ def test_registry_prefers_confirmed_solmate_over_generic_event_adapter():
 
 
 def test_second_cancall_standard_not_starved_when_solmate_declines():
-    # The generalization fix (F1): although Solmate is registered FIRST, for an
-    # OZ AccessManager authority Solmate declines (0) and a confirmed AccessManager
-    # adapter wins — proving the registry can host two standards sharing canCall.
+    # F1: though registered FIRST, Solmate declines (0) for an OZ AccessManager authority and
+    # a confirmed AccessManager adapter wins — the registry can host two standards sharing canCall.
     class _ConfirmedAccessManagerAdapter:
         @classmethod
         def matches(cls, descriptor, ctx):

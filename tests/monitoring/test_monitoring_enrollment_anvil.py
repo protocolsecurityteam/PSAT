@@ -1,44 +1,19 @@
 """Anvil regression tests for the monitoring enrollment classifier.
 
-End-to-end coverage for the bugs fixed in the
-``protocol-monitoring-console`` branch:
+Deploys minimal Solidity stand-ins on a local Anvil node so assertions exercise real
+``rpc_request``/``eth_getLogs`` paths; DB governance evidence (Contract/Job/CGN/EF/FP) is
+built by hand since the analysis pipeline is out of scope. Regressions pinned:
 
-* **Bug 1** — a state-variable-destination Safe (e.g. a Safe stored in
-  ``accountantState.payoutAddress``) used to be enrolled as a fully
-  monitored governance multisig because the CGN walk only checked
-  ``resolved_type``. The fix gates controller enrollment on
-  ``FunctionPrincipal`` membership.
-* **Bug 5** — controllers enrolled in a prior run whose CGN evidence
-  disappeared in a later re-analysis (observed on prod-etherfi: 4 of 5
-  monitored timelocks were zombies) used to survive indefinitely.
-  ``_enroll_controller_addresses`` now demotes any active auto-enrolled
-  safe/timelock/proxy row whose address lacks current FP authority,
-  regardless of whether CGN still surfaces it.
-* **Bug 6** — CGN-discovered proxy admins were enrolled by Pass 1 then
-  immediately deactivated by the stale-detection pass because
-  ``'proxy'`` was missing from its "always keep" subset. Fixed by
-  mirroring the controller-type set the enrollment uses.
-* **initial_state owner whitelist** — ``_build_initial_state`` used
-  the same substring-match bug ``services/aggregations/company_overview``
-  had already fixed: ``"owner" in controller_id`` false-positives on
-  ``pendingOwner`` / ``previousOwner`` / ``roleOwner`` and last-write-
-  wins would latch the wrong slot into ``last_known_state.owner``.
+* Bug 1: a state-variable-destination Safe (e.g. ``accountantState.payoutAddress``) was
+  enrolled as a governance multisig; controller enrollment now gates on FP membership.
+* Bug 5: controllers whose CGN evidence vanished on re-analysis (prod-etherfi: 4 of 5
+  timelocks were zombies) survived forever; they are now demoted.
+* Bug 6: CGN-discovered proxy admins were deactivated by stale-detection ('proxy' missing
+  from its keep subset).
+* initial_state owner whitelist: ``"owner" in controller_id`` substring-matched
+  ``pendingOwner``/``previousOwner`` and last-write-wins latched the wrong slot.
 
-Each test deploys minimal Solidity stand-ins on a local Anvil node so
-the assertions exercise real ``rpc_request``/``eth_getLogs`` paths.
-The DB-side governance evidence (``Contract`` / ``Job`` /
-``ControlGraphNode`` / ``EffectiveFunction`` / ``FunctionPrincipal`` /
-``ControllerValue``) is built directly because the upstream analysis
-pipeline that normally produces it is out of scope for an enrollment
-unit test — what matters here is the enrollment+scanner classifier
-behavior given the canonical pipeline outputs.
-
-Requires ``anvil``, ``cast``, ``forge`` on ``PATH`` and
-``TEST_DATABASE_URL`` pointing at a Postgres instance with the
-PSAT schema applied.
-
-Run:
-    uv run pytest tests/monitoring/test_monitoring_enrollment_anvil.py -v
+Requires ``anvil``, ``cast``, ``forge`` on PATH and ``TEST_DATABASE_URL`` with the schema applied.
 """
 
 from __future__ import annotations
@@ -93,8 +68,7 @@ pytestmark = [
 
 ACCOUNT1 = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 
-# Distinct protocol name namespaces this test module's rows; teardown
-# cascade-deletes everything keyed off it. Picked to be cheap to grep.
+# Distinct protocol name namespaces this module's rows; teardown cascade-deletes on it.
 PROTO_NAME = "__test_enrollment_anvil__"
 
 
@@ -152,8 +126,7 @@ contract TestSafe {
 }
 """
 
-# Stand-in for a contract that delegates upgrade authority to a separate
-# ``ProxyAdmin``-like address. Doesn't need to be a real proxy shell —
+# Stand-in delegating upgrade authority to a separate ``ProxyAdmin``-like address;
 # enrollment only cares about the CGN classification.
 ROLE_PRINCIPAL_HOST_SOURCE = OWNABLE_SOURCE
 
@@ -190,10 +163,7 @@ contract TestSolmateOwned {
 
 @pytest.fixture()
 def test_db():
-    """Postgres session with the full schema. Cleans up rows tied to
-    :data:`PROTO_NAME` so this module never collides with other tests
-    sharing the same DB.
-    """
+    """Postgres session with the full schema; cleans up rows tied to :data:`PROTO_NAME`."""
     engine = create_engine(DATABASE_URL)
     Base.metadata.create_all(engine)
     session = SASession(engine, expire_on_commit=False)
@@ -220,10 +190,7 @@ def test_db():
             for c in session.execute(select(Contract).where(Contract.protocol_id == proto.id)).scalars():
                 session.delete(c)
             session.delete(proto)
-        # Force ORM session sync before commit so any cascade-pending
-        # deletes flush. The pre-existing ``filter(False).delete()`` no-op
-        # construct was both dead code and a pyright miss; a plain flush
-        # accomplishes the actual intent.
+        # Flush so cascade-pending deletes land before commit.
         session.flush()
         session.commit()
         session.close()
@@ -281,9 +248,7 @@ def _grant_authority(
     principal_address: str,
     function_name: str = "setOwner",
 ) -> None:
-    """Attach a FunctionPrincipal row so *principal_address* is treated
-    as having call authority on ``contract_id`` for the FP-gated
-    enrollment classifier."""
+    """Attach a FunctionPrincipal row giving *principal_address* call authority on ``contract_id``."""
     ef = EffectiveFunction(contract_id=contract_id, function_name=function_name, authority_public=False)
     session.add(ef)
     session.flush()
@@ -319,12 +284,9 @@ def _add_cgn(
 
 
 def test_bug1_state_variable_destination_safe_not_enrolled_and_not_scanned(anvil_env, test_db):
-    """Recreates the etherfi-dev shape: two Safes on a vault, one labeled
-    'owner' (real governor, has FP authority) and one labeled
-    'accountantState.payoutAddress' (fee destination, no FP authority).
-    Only the real Safe should land in monitored_contracts and have its
-    signer changes detected by the scanner.
-    """
+    """etherfi-dev shape: two Safes on a vault, 'owner' (FP authority) and
+    'accountantState.payoutAddress' (fee destination, none). Only the real one may be
+    enrolled and have its signer changes detected."""
     from services.monitoring.enrollment import enroll_protocol_contracts
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -336,8 +298,7 @@ def test_bug1_state_variable_destination_safe_not_enrolled_and_not_scanned(anvil
     proto = _make_protocol(test_db)
     vault_contract = _add_protocol_contract(test_db, proto.id, vault, contract_name="TestVault")
 
-    # CGN evidence: both Safes surface as resolved_type='safe', differentiated
-    # only by their label — the exact ambiguity the old code couldn't see past.
+    # CGN: both Safes are resolved_type='safe', differing only by label.
     _add_cgn(test_db, vault_contract.id, real_safe, resolved_type="safe", label="owner")
     _add_cgn(
         test_db,
@@ -397,10 +358,8 @@ def test_bug1_state_variable_destination_safe_not_enrolled_and_not_scanned(anvil
 
 
 def test_bug5_zombie_safe_demoted_and_skipped_by_scanner(anvil_env, test_db):
-    """A Safe legitimately enrolled in run 1 must be deactivated on run 2
-    when its CGN node and FP rows both disappear (re-analysis dropped
-    them). The scanner must not surface events for the demoted row.
-    """
+    """A Safe enrolled in run 1 must be deactivated on run 2 when its CGN node and FP rows
+    disappear; the scanner must not surface events for the demoted row."""
     from services.monitoring.enrollment import enroll_protocol_contracts
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -467,11 +426,8 @@ def test_bug5_zombie_safe_demoted_and_skipped_by_scanner(anvil_env, test_db):
 
 
 def test_bug6_proxy_admin_controller_survives_re_enrollment(anvil_env, test_db):
-    """A CGN-discovered ``proxy_admin`` becomes a MC row with
-    ``contract_type='proxy'``. Before the fix, the stale-detection pass
-    immediately set is_active=False on every re-enrollment. Now it
-    should stay active across N runs.
-    """
+    """A CGN-discovered ``proxy_admin`` (contract_type='proxy') must stay active across
+    re-enrollments; the stale-detection pass used to deactivate it every run."""
     from services.monitoring.enrollment import enroll_protocol_contracts
 
     rpc_url, tmp_path = anvil_env
@@ -491,8 +447,7 @@ def test_bug6_proxy_admin_controller_survives_re_enrollment(anvil_env, test_db):
     assert first.is_active is True
     assert first.enrollment_source == "auto"
 
-    # Re-enroll twice without changing any underlying evidence. The
-    # ping-pong this guards against would flip is_active on each run.
+    # Re-enroll twice with no evidence change; the guarded ping-pong flipped is_active each run.
     for _ in range(2):
         enroll_protocol_contracts(test_db, proto.id, rpc_url, "ethereum")
         test_db.expire_all()
@@ -512,12 +467,8 @@ def test_bug6_proxy_admin_controller_survives_re_enrollment(anvil_env, test_db):
 
 
 def test_substring_pending_owner_not_latched_into_initial_state(anvil_env, test_db):
-    """Mirrors the bug company_overview had already fixed. With both
-    ``state_variable:owner`` and ``state_variable:pendingOwner``
-    tracked, last-write-wins iteration under the old substring match
-    would latch ``pendingOwner`` and the scanner would false-positive
-    an OwnershipTransferred when ``owner()`` eventually changed.
-    """
+    """With ``owner`` and ``pendingOwner`` both tracked, the old substring match latched
+    ``pendingOwner`` (last-write-wins) and false-positived an OwnershipTransferred."""
     from services.monitoring.enrollment import enroll_protocol_contracts
 
     rpc_url, tmp_path = anvil_env
@@ -559,34 +510,17 @@ def test_substring_pending_owner_not_latched_into_initial_state(anvil_env, test_
     )
 
 
-# ---------------------------------------------------------------------------
-# In-flight sibling regression — a sibling job in queued/processing must
-# not silently block the policy trigger from enrolling completed
-# contracts. The historical in-flight gate skipped the trigger whenever
-# any sibling existed in those states, with no fallback. Combined with
-# terminal-failure siblings (which never transitioned out of queued/
-# processing observably), this produced the prod-etherfi "completed
-# contracts but missing monitored_contracts rows" symptom.
+# In-flight sibling regression: a queued/processing sibling job must not block the policy
+# trigger from enrolling completed contracts (prod-etherfi "completed contracts but
+# missing monitored_contracts rows").
 # ---------------------------------------------------------------------------
 
 
 def test_in_flight_sibling_job_does_not_block_enrollment(anvil_env, test_db):
-    """The policy trigger must enroll completed contracts even when a
-    sibling job is still queued or processing. Pre-fix shape: the
-    in-flight gate in ``maybe_enroll_protocol`` returned False as soon
-    as any ``Job.status IN (queued, processing)`` existed for the
-    protocol, and there was no automatic retry. A sibling that crashed
-    before transitioning out of queued / processing — observed on the
-    dev DB as a discovery-stage failure — would freeze the trigger and
-    require a manual ``POST /api/protocols/{id}/re-enroll`` to recover.
-
-    Today: the gate is gone. ``enroll_protocol_contracts`` is idempotent
-    so a partial enrollment from a trigger that fires while siblings are
-    still in flight is fine — subsequent triggers (or the reconciler)
-    upsert the remaining contracts when they finish. This test pins the
-    new behavior at the trigger boundary so a future "let's add the gate
-    back" reflex breaks it.
-    """
+    """The policy trigger must enroll completed contracts even when a sibling job is still
+    queued or processing. The old in-flight gate froze the trigger when a sibling crashed
+    without leaving those states, needing a manual re-enroll. ``enroll_protocol_contracts``
+    is idempotent, so the gate stays gone; this pins that at the trigger boundary."""
     from services.monitoring.enrollment import maybe_enroll_protocol
 
     rpc_url, tmp_path = anvil_env
@@ -595,9 +529,7 @@ def test_in_flight_sibling_job_does_not_block_enrollment(anvil_env, test_db):
     proto = _make_protocol(test_db)
     _add_protocol_contract(test_db, proto.id, completed_addr, contract_name="Completed")
 
-    # Sibling job stuck in 'queued'. Pre-fix this caused
-    # maybe_enroll_protocol to return False and skip the completed
-    # contract's enrollment with no retry path.
+    # Sibling stuck in 'queued'; the old gate skipped enrollment with no retry path.
     test_db.add(
         Job(
             address="0x" + "ab" * 20,
@@ -626,35 +558,13 @@ def test_in_flight_sibling_job_does_not_block_enrollment(anvil_env, test_db):
 
 
 def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
-    """End-to-end regression for the *general* bug fix.
+    """End-to-end for a non-OZ ABI: deploy Solmate-Owned on Anvil, seed a completed
+    contract with an inline ``tracking_plan`` listing ``OwnerUpdated``, enroll, assert
+    ``monitoring_config.tracked_topics`` came from the plan, trigger ``setOwner``, scan,
+    and require ``ownership_transferred`` with ``data.new_owner`` decoded.
 
-    Verifies the full enrollment → scan pipeline for a non-OZ ABI:
-
-      1. Deploy a Solmate-Owned contract on Anvil.
-      2. Seed Protocol + Contract + Job (completed) + ContractMaterialization
-         with an inline ``tracking_plan`` JSONB that lists the contract's
-         ``OwnerUpdated`` event (mirrors what the static analysis pipeline
-         persists for a real Solmate-derived protocol contract).
-      3. Call ``enroll_protocol_contracts`` and assert the resulting
-         MonitoredContract has ``monitoring_config.tracked_topics``
-         populated from the plan — i.e. enrollment did read the plan.
-      4. Trigger ``setOwner`` on the deployed contract.
-      5. Call ``scan_for_events`` and assert the event is detected with
-         ``event_type='ownership_transferred'`` and the new owner address
-         decoded into ``data.new_owner``.
-
-    Together this proves: the analysis pipeline's per-contract event
-    knowledge flows through enrollment into ``monitoring_config``,
-    through the scanner's union-topic filter onto the wire, and through
-    the generic decoder into a persisted ``MonitoredEvent``. None of
-    those hops worked end-to-end before the general-bug fix landed.
-
-    This test would fail under the pre-fix code on assertion (3) —
-    ``enroll_protocol_contracts`` did not look at
-    ``contract_materializations.tracking_plan`` and therefore wrote no
-    ``tracked_topics`` field; the scanner's filter then drops the
-    Solmate topic0 at the network layer and no MonitoredEvent is ever
-    created.
+    Pre-fix, enrollment ignored ``contract_materializations.tracking_plan``, so the
+    scanner's filter dropped the Solmate topic0 on the wire (fails at assertion 3).
     """
     from eth_utils.crypto import keccak
 
@@ -667,11 +577,8 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
 
     addr = _compile_and_deploy(SOLMATE_OWNED_SOURCE, "TestSolmateOwned", [], rpc_url, PRIVATE_KEY, tmp_path)
 
-    # ContractMaterialization isn't protocol-scoped, so the fixture's
-    # PROTO_NAME teardown doesn't reach it. anvil's CREATE address is
-    # deterministic (deployer + nonce 0) across runs, so a stale row
-    # from a prior pass would collide on the (chain, address) unique
-    # index. Clear it up front; re-clear in the trailing finally.
+    # ContractMaterialization isn't protocol-scoped, so PROTO_NAME teardown misses it, and
+    # anvil's CREATE address is deterministic; a stale row would collide on (chain, address).
     test_db.execute(
         delete(ContractMaterialization).where(
             ContractMaterialization.chain == "ethereum",
@@ -683,10 +590,7 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
     proto = _make_protocol(test_db)
     _add_protocol_contract(test_db, proto.id, addr, contract_name="TestSolmateOwned")
 
-    # Persist a tracking_plan that lists the Solmate OwnerUpdated event,
-    # exactly as the static analysis pipeline would for a real Solmate-
-    # derived contract. The bytecode_keccak is arbitrary here — find_by_address
-    # uses the (chain, address) unique index, not the keccak PK.
+    # bytecode_keccak is arbitrary: find_by_address uses the (chain, address) unique index.
     owner_updated_sig = "OwnerUpdated(address,address)"
     owner_updated_topic0 = "0x" + keccak(text=owner_updated_sig).hex()
     tracking_plan = {
@@ -777,8 +681,7 @@ def test_tracking_plan_drives_enrollment_and_scan_detection(anvil_env, test_db):
         assert evt.monitored_contract_id == mc.id
         assert (evt.data or {}).get("new_owner", "").lower() == new_owner.lower()
     finally:
-        # Cross-run cleanup: see leading comment for why the
-        # fixture's PROTO_NAME teardown can't reach this row.
+        # Cross-run cleanup: PROTO_NAME teardown can't reach this row.
         test_db.execute(
             delete(ContractMaterialization).where(
                 ContractMaterialization.chain == "ethereum",

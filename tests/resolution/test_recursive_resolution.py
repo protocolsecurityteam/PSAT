@@ -24,12 +24,9 @@ pytestmark = pytest.mark.usefixtures("_stub_rpc_bytecode", "_stub_classifier_rpc
 def _default_classify(monkeypatch):
     """Default the address classifier to the generic answer.
 
-    An analysed contract's node now takes its ``resolved_type`` from the
-    classifier instead of a hardcoded ``"contract"``, so every walk classifies
-    at least its root. Tests that care about a specific classification override
-    this in-body (monkeypatch inside the test wins over an autouse fixture);
-    this keeps the rest off the wire — without it the offline guard reports
-    blocked ``rpc.example`` calls.
+    Analysed nodes take ``resolved_type`` from the classifier, so every walk classifies its
+    root. Tests needing a specific classification override in-body; this keeps the rest off
+    the wire (otherwise the offline guard reports blocked ``rpc.example`` calls).
     """
     monkeypatch.setattr(
         "services.resolution.recursive.classify_resolved_address_with_status",
@@ -43,13 +40,11 @@ def _default_classify(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _stub_failed_node_name(monkeypatch):
-    """The failed-node name lookup fetches verified source from Etherscan; default
-    to None offline (tests that assert a specific name override this in-body)."""
+    """Failed-node name lookup hits Etherscan; default to None offline (tests asserting a name override in-body)."""
     monkeypatch.setattr("services.resolution.recursive._contract_name_for_address", lambda address, chain_id=1: None)
 
 
 def _bundle(address: str, contract_name: str, *, snapshot: dict, effective_permissions: dict | None = None) -> dict:
-    """Build an in-memory ``LoadedArtifacts`` for a contract."""
     plan = {
         "schema_version": "0.1",
         "contract_address": address,
@@ -222,13 +217,11 @@ def _membership_tree(*, operator="truthy", authority_role="caller_authority", co
 @pytest.mark.parametrize(
     "shape",
     [
-        # A business membership read (NodeOperatorManager's `registered`
-        # duplicate-enrolment guard) proves nothing about authority.
+        # A business membership read (NodeOperatorManager `registered` guard) proves nothing about authority.
         {"authority_role": "business", "operator": "falsy", "confidence": "low"},
         # Role gate alone: business + truthy is still not an authority leaf.
         {"authority_role": "business", "operator": "truthy"},
-        # Polarity gate alone: a falsy membership check is an anti-gate
-        # (denylist / already-enrolled) — its members are the blocked set.
+        # Polarity gate alone: a falsy check is an anti-gate (denylist / already-enrolled).
         {"authority_role": "caller_authority", "operator": "falsy"},
         # Explicit low confidence from the static plane disqualifies.
         {"authority_role": "caller_authority", "operator": "truthy", "confidence": "low"},
@@ -250,8 +243,7 @@ def test_mapping_writer_specs_keep_authority_leaf_with_explicit_confidence():
 
 
 def test_replay_mapping_principals_skips_self_membership(monkeypatch):
-    """A contract enumerated as a member of its own mapping (timelock granting
-    itself a `_roles` role) must not publish a degenerate X->X control edge."""
+    """A contract enumerated as a member of its own mapping must not publish a degenerate X->X control edge."""
     contract = "0x9f26d4c958fd811a1f59b01b86be7dffc9d20761"
     member = "0xcccccccccccccccccccccccccccccccccccccccc"
     monkeypatch.setenv("ENVIO_API_TOKEN", "test-token")
@@ -342,13 +334,9 @@ def test_resolve_control_graph_recurses_to_contract_and_safe(monkeypatch):
                     "observed_via": "eth_call",
                     "resolved_type": "contract",
                     "details": {"address": authority_address},
-                    # A real gating authority carries this from the static stage
-                    # (the gate/callee provenance split). The fixture predates it
-                    # and was relying on the old absent-means-controller_value
-                    # default, since replaced by the honest
-                    # ``controller_value_unattributed`` — so the gate this test
-                    # is about now has to say it is a gate. The recursion the
-                    # test exercises is relation-independent
+                    # A real gating authority carries this from the static stage; the fixture
+                    # relied on the old absent-means-controller_value default (now
+                    # ``controller_value_unattributed``). The recursion is relation-independent
                     # (``_maybe_queue_address`` keys on resolved_type).
                     "authority_provenance": "caller_gate",
                 },
@@ -438,7 +426,6 @@ def test_resolve_control_graph_recurses_to_contract_and_safe(monkeypatch):
         "safe_owner",
         "address:0xcccccccccccccccccccccccccccccccccccccccc",
     ) in edges
-    # Nested artifact for authority was materialized and returned.
     assert authority_address in nested
 
 
@@ -615,10 +602,8 @@ def test_resolve_control_graph_recurses_into_role_holder_contracts(monkeypatch):
     assert materialize_calls == [role_holder_address]
 
 
-# test_materialize_contract_artifacts_tolerates_slither_cli_failure was
-# deleted in commit 438a11c (Slither CLI subprocess rip-out). The
-# materialize path no longer invokes the CLI, so the failure-tolerance
-# test no longer has a code path to exercise.
+# test_materialize_contract_artifacts_tolerates_slither_cli_failure was deleted in
+# commit 438a11c (Slither CLI subprocess rip-out): no code path left to exercise.
 
 
 def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch):
@@ -685,16 +670,13 @@ def test_materialize_contract_artifacts_builds_effective_permissions(monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# #122 — no-impl proxy must fail closed (refuse to analyze the shell);
-# #121 coupling — the ClassificationIncompleteError raise must propagate here.
+# #122 — no-impl proxy must fail closed; #121 coupling — ClassificationIncompleteError propagates.
 # ---------------------------------------------------------------------------
 
 
 def test_materialize_contract_artifacts_no_impl_proxy_fails_closed(monkeypatch):
-    """#122: a proxy classification with NO resolvable implementation (eip2535
-    diamond) must raise UnresolvedProxyError — refusing to analyze the
-    delegatecall shell — instead of silently falling through and Slithering the
-    proxy stub (whose empty guard set downstream renders as permissionless)."""
+    """#122: a no-impl proxy (eip2535 diamond) must raise UnresolvedProxyError rather than
+    Slither the proxy stub (whose empty guard set downstream renders as permissionless)."""
     diamond = "0x" + "11" * 20
 
     monkeypatch.setattr(
@@ -712,11 +694,8 @@ def test_materialize_contract_artifacts_no_impl_proxy_fails_closed(monkeypatch):
 
 
 def test_materialize_contract_artifacts_propagates_classification_incomplete(monkeypatch):
-    """#121 coupling: a ClassificationIncompleteError from classify_single must
-    PROPAGATE out of _materialize_contract_artifacts (so the BFS records a
-    degraded, un-analyzed node), never be swallowed into an analyze-the-shell
-    fall-through. This is why the proxy decision lives OUTSIDE the classify
-    except block."""
+    """#121: ClassificationIncompleteError must PROPAGATE (so the BFS records a degraded node),
+    never fall through to analyzing the shell; hence the proxy decision lives OUTSIDE the classify except block."""
 
     def _raise(address, rpc_url, *, chain_id=None):
         raise ClassificationIncompleteError("proxy slots unread")
@@ -728,8 +707,7 @@ def test_materialize_contract_artifacts_propagates_classification_incomplete(mon
 
 
 def test_materialize_contract_artifacts_resolved_proxy_retargets_to_impl(monkeypatch):
-    """Control for #122: a proxy WITH a resolved implementation still retargets to
-    the impl (unchanged path). The fail-closed branch fires only for no-impl."""
+    """Control for #122: a proxy WITH a resolved implementation still retargets to the impl."""
     proxy = "0x" + "11" * 20
     impl = "0x" + "22" * 20
 
@@ -752,14 +730,12 @@ def test_materialize_contract_artifacts_resolved_proxy_retargets_to_impl(monkeyp
 
     loaded = _materialize_contract_artifacts(proxy, "http://rpc.example", workspace_prefix="t")
 
-    assert captured["effective_address"] == impl  # retargeted to the logic contract
+    assert captured["effective_address"] == impl
     assert loaded["analysis"]["subject"]["address"] == impl
 
 
 def test_materialize_contract_artifacts_swallows_generic_classify_error(monkeypatch):
-    """The restructure preserves the historical swallow: a *generic* classify
-    error (not ClassificationIncompleteError, not a no-impl proxy) degrades to
-    analyze-the-address-as-is and never propagates."""
+    """A *generic* classify error degrades to analyze-as-is and never propagates."""
     addr = "0x" + "33" * 20
 
     def _raise_generic(address, rpc_url, *, chain_id=None):
@@ -781,16 +757,13 @@ def test_materialize_contract_artifacts_swallows_generic_classify_error(monkeypa
 
     loaded = _materialize_contract_artifacts(addr, "http://rpc.example", workspace_prefix="t")
 
-    # Swallowed → analyze the address as-is (no retarget, no raise).
     assert captured["effective_address"] == addr
     assert loaded["analysis"]["subject"]["address"] == addr
 
 
 def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch):
-    """#122 end-to-end: a nested controller that classifies as a no-impl proxy
-    (eip2535 diamond) becomes a degraded analyzed=False node with a
-    materialize_error — the shell's empty guard set never enters nested_artifacts,
-    so nothing it would guard is reported permissionless."""
+    """#122 end-to-end: a no-impl-proxy controller becomes a degraded analyzed=False node; the
+    shell's empty guard set never enters nested_artifacts (else its guarded targets read permissionless)."""
     root_address = "0x1111111111111111111111111111111111111111"
     diamond_address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -815,8 +788,7 @@ def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch)
         },
     )
 
-    # The REAL _materialize_contract_artifacts runs; only classify_single is
-    # steered to report the nested controller as a no-impl diamond.
+    # The REAL _materialize_contract_artifacts runs; only classify_single is steered.
     def fake_classify(address, rpc_url, *, chain_id=None):
         if address.lower() == diamond_address:
             return {"address": address, "type": "proxy", "proxy_type": "eip2535", "facets": ["0x" + "bb" * 20]}
@@ -835,7 +807,7 @@ def test_resolve_control_graph_no_impl_proxy_controller_is_degraded(monkeypatch)
     assert nodes[diamond_address]["analyzed"] is False
     assert "materialize_error" in nodes[diamond_address]["details"]
     assert "implementation unresolved" in str(nodes[diamond_address]["details"]["materialize_error"])
-    assert diamond_address not in nested  # shell never entered the artifact map
+    assert diamond_address not in nested
 
 
 def test_resolve_control_graph_skips_failed_nested_materialization(monkeypatch):
@@ -1010,14 +982,10 @@ def test_resolve_control_graph_skips_self_referential_role_principal_edges(monke
     assert all(edge["from_id"] != edge["to_id"] for edge in graph["edges"])
 
 
-# ---------------------------------------------------------------------------
 # Level-parallel BFS parity: parallel + sequential produce identical graphs.
-# ---------------------------------------------------------------------------
 
 
 def _resolve_parity_helper(monkeypatch, fanout: str):
-    """Build a fixture with 2 same-depth nested contracts so the BFS level
-    has more than one item to materialize concurrently."""
     monkeypatch.setenv("PSAT_RPC_FANOUT", fanout)
     root_address = "0x1111111111111111111111111111111111111111"
     auth_a = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1104,20 +1072,16 @@ def _resolve_parity_helper(monkeypatch, fanout: str):
 
 
 def test_resolve_control_graph_level_parallel_parity(monkeypatch):
-    """Level-parallel BFS must produce the same nodes + edges as sequential."""
     seq_graph, seq_nested = _resolve_parity_helper(monkeypatch, "1")
     par_graph, par_nested = _resolve_parity_helper(monkeypatch, "8")
 
-    # Nodes/edges are sorted by ``resolve_control_graph`` before return —
-    # equality is meaningful even though materialization order differed.
+    # Nodes/edges are sorted before return, so equality holds despite materialization order.
     assert seq_graph["nodes"] == par_graph["nodes"]
     assert seq_graph["edges"] == par_graph["edges"]
     assert sorted(seq_nested.keys()) == sorted(par_nested.keys())
 
 
 def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monkeypatch):
-    """One nested materialize failure becomes an unanalyzed node; the other
-    sibling at the same depth still wires up cleanly."""
     monkeypatch.setenv("PSAT_RPC_FANOUT", "8")
     root_address = "0x1111111111111111111111111111111111111111"
     good_addr = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1188,8 +1152,7 @@ def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monk
     by_addr = {(node.get("details") or {}).get("address"): node for node in graph["nodes"]}
     assert good_addr in by_addr
     assert bad_addr in by_addr
-    # Failed sibling is recorded as unanalyzed with the materialize_error
-    # surfaced on details — same surface as the prior sequential code path.
+    # Failed sibling is recorded as unanalyzed with materialize_error on details.
     assert by_addr[bad_addr]["analyzed"] is False
     assert "materialize_error" in by_addr[bad_addr]["details"]
     assert by_addr[good_addr]["analyzed"] is True
@@ -1198,17 +1161,12 @@ def test_resolve_control_graph_parallel_handles_partial_materialize_failure(monk
 
 
 def test_unreadable_materialization_does_not_become_an_empty_analysis(monkeypatch):
-    """Not-determined must never be recorded as proven-absent, at
-    ``_materialize_with_cross_process_cache``.
+    """Not-determined must never be recorded as proven-absent in ``_materialize_with_cross_process_cache``.
 
-    ``hydrate_*`` returning ``None`` for an unreadable blob met ``or {}``
-    here, so a bucket outage produced a contract with no functions, no plan and
-    no predicate trees — and that state is what the effects probe is seeded
-    from and what gets cached under the witness schema version.
-
-    This pins only the raise. Whether it survives the BFS above is a separate
-    question with its own test below; asserting only here is how the previous
-    attempt shipped a safety property that did not exist in the running system.
+    ``hydrate_*`` returning ``None`` for an unreadable blob met ``or {}``, so a bucket outage
+    produced a contract with no functions/plan/predicate trees, seeding the effects probe and
+    the witness-schema cache. This pins only the raise; BFS propagation has its own test below
+    (asserting only here shipped a safety property that did not exist in the running system).
     """
     from db import contract_materializations as cm
     from db.storage import StorageContentNotDetermined
@@ -1231,7 +1189,6 @@ def test_unreadable_materialization_does_not_become_an_empty_analysis(monkeypatc
 
 
 def _two_child_root_bundle(root_address, first_addr, second_addr):
-    """Root snapshot pointing at two nested contracts, for the BFS tests."""
     return _bundle(
         root_address,
         "Root",
@@ -1257,18 +1214,13 @@ def _two_child_root_bundle(root_address, first_addr, second_addr):
 
 @pytest.mark.parametrize("fanout", ["1", "8"])
 def test_storage_not_determined_escapes_resolve_control_graph(monkeypatch, fanout):
-    """The unreadable-materialization failure must escape the BFS, at the
-    altitude where the BFS actually handles it.
+    """The unreadable-materialization failure must escape the BFS where it is actually handled.
 
-    ``_materialize_for_pending`` wraps every failure into ``(None, exc)``, and
-    the caller turns that into a node stamped ``analyzed=False`` and walks on —
-    so ``resolve_control_graph`` returned NORMALLY on an unreachable bucket and
-    no stage above it ever saw a failure to retry. A graph that returns
-    normally is a finished answer about the protocol's control chain, assembled
-    from contracts we could not read.
-
-    Parametrised over serial and fan-out because the two paths handle
-    exceptions differently inside ``parallel_map``.
+    ``_materialize_for_pending`` wraps failures into ``(None, exc)`` and the caller stamped
+    ``analyzed=False`` and walked on, so ``resolve_control_graph`` returned NORMALLY on an
+    unreachable bucket: a finished answer assembled from unreadable contracts, with nothing
+    upstream to retry. Parametrised over serial and fan-out (``parallel_map`` handles
+    exceptions differently).
     """
     from db.storage import StorageContentNotDetermined
 
@@ -1318,25 +1270,16 @@ def test_storage_not_determined_escapes_resolve_control_graph(monkeypatch, fanou
 
 
 def test_storage_not_determined_from_resolution_is_retryable():
-    """The other half. Escaping the BFS only helps if the worker
-    then re-runs the stage — ``classify`` fell through to ``terminal``, so
-    ``BaseWorker`` computed ``will_retry=False`` and the job died on attempt
-    one with the same 'we could not read it' state it started with.
+    """Escaping the BFS only helps if the worker re-runs the stage.
 
-    ``StorageKeyMissing`` / ``StorageContentAbsent`` stay terminal on purpose:
-    those are determined facts (the bucket was asked and answered), and retrying
-    re-asks an answered question. ``StorageContentAbsent`` is the collection-read
-    form of the first, and it exists because the collection reads used to raise
-    the *transient* class for a proven-absent object — the same key read directly
-    classified terminal, so the comment stating this invariant was false one
-    layer up.
+    ``classify`` fell through to ``terminal``, so ``BaseWorker`` computed ``will_retry=False``
+    and the job died on attempt one. ``StorageKeyMissing`` / ``StorageContentAbsent`` stay
+    terminal on purpose (determined facts: the bucket answered). ``StorageContentAbsent`` exists
+    because collection reads used to raise the *transient* class for a proven-absent object.
 
-    ``StorageKeyAbsent`` is transient with the other two not-determined classes.
-    It was terminal here while ``db/storage.py`` defined it as *not determined*;
-    the row records no key and holds no inline body, so nothing was ever asked
-    and only a re-run can produce the answer. The row is written by the inline
-    path when the backend is unconfigured — the same condition
-    ``StorageUnavailable`` already retried on, one row later.
+    ``StorageKeyAbsent`` is transient: the row records no key and no inline body, so nothing was
+    asked and only a re-run can answer (written by the inline path when the backend is
+    unconfigured, the same condition ``StorageUnavailable`` already retried on).
     """
     from db.storage import (
         StorageContentAbsent,
@@ -1352,18 +1295,15 @@ def test_storage_not_determined_from_resolution_is_retryable():
     assert classify(StorageKeyAbsent("row records no key")) == "transient"
     assert classify(StorageKeyMissing("artifacts/j/n")) == "terminal"
     assert classify(StorageContentAbsent("2/2 bodies proven absent")) == "terminal"
-    # The type hierarchy is the discriminator, so pin it: a consumer catching
-    # "we could not find out" must not silently absorb "we found out, it's gone".
+    # The type hierarchy is the discriminator: "could not find out" must not absorb "found out, it is gone".
     assert not isinstance(StorageContentAbsent("x"), StorageContentNotDetermined)
 
 
 def test_an_ordinary_materialize_failure_still_degrades_one_node(monkeypatch):
     """NEGATIVE CONTROL for the two tests above.
 
-    A compile/RPC/proxy failure is a fact about that one contract, and the walk
-    must still record it as an unanalyzed node and finish. If this went red,
-    the fix would have converted every per-contract hiccup into a whole-job
-    failure — the opposite over-correction.
+    A compile/RPC/proxy failure is a fact about one contract: still an unanalyzed node, walk
+    finishes. Red here means the fix over-corrected every hiccup into a whole-job failure.
     """
     monkeypatch.setenv("PSAT_RESOLUTION_MATERIALIZE_FANOUT", "2")
     root_address = "0x1111111111111111111111111111111111111111"
@@ -1415,20 +1355,15 @@ def test_callee_provenance_demotes_the_graph_edge(monkeypatch):
     """A controller value whose static provenance is ``call_target`` is wired as
     ``external_call_target``, not ``controller_value``.
 
-    Positive control (``roleRegistry``, ``caller_gate``) must stay a control
-    edge; negative control (``eETH``, ``call_target``) must not.
+    Positive control (``roleRegistry``, ``caller_gate``) stays a control edge; negative control
+    (``eETH``, ``call_target``) does not.
 
-    THIRD ARM AMENDED: a value with NO provenance
-    used to stay ``controller_value``, on the reading that not-determined must
-    not demote a real authority. That rule protects a proven authority from
-    being relabelled a mere callee — it does not license an authority CLAIM over
-    a target for which neither question was answered. Widening the predicate-tree
-    surface minted 37 such targets in one merge (pure constants like
-    HUNDRED_PERCENT_IN_BPS, non-authority mappings like ``_balances``), and each
-    would have persisted as a control edge feeding the authority closure. The
-    not-determined input now reaches the not-determined relation
-    ``controller_value_unattributed``: published (the address stays visible),
-    excluded from ``CONTROL_EDGE_RELATIONS`` (it moves no authority).
+    THIRD ARM AMENDED: a value with NO provenance used to stay ``controller_value``. That rule
+    protects a proven authority from being relabelled a callee; it does not license an authority
+    CLAIM where neither question was answered. Widening the predicate-tree surface minted 37 such
+    targets in one merge (constants like HUNDRED_PERCENT_IN_BPS, mappings like ``_balances``).
+    They now get ``controller_value_unattributed``: published, but excluded from
+    ``CONTROL_EDGE_RELATIONS``.
     """
     root_address = "0x1111111111111111111111111111111111111111"
     gate_address = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1485,22 +1420,18 @@ def test_callee_provenance_demotes_the_graph_edge(monkeypatch):
     assert relations[(f"address:{root_address}", f"address:{callee_address}")] == "external_call_target"
     assert relations[(f"address:{root_address}", f"address:{legacy_address}")] == "controller_value_unattributed"
 
-    # The provenance is stated on the row, including the not-determined case,
-    # so a reader of the persisted edge never has to infer it from the relation.
+    # Provenance is stated on the row (incl. not-determined) so readers never infer it from the relation.
     notes = {(edge["from_id"], edge["to_id"]): edge["notes"] for edge in graph["edges"]}
     assert "authority_provenance=caller_gate" in notes[(f"address:{root_address}", f"address:{gate_address}")]
     assert "authority_provenance=call_target" in notes[(f"address:{root_address}", f"address:{callee_address}")]
     assert "authority_provenance=not_determined" in notes[(f"address:{root_address}", f"address:{legacy_address}")]
 
-    # The callee is still a NODE — it is a real contract the subject calls.
-    # Demotion removes the control claim, not the address.
+    # The callee is still a NODE: demotion removes the control claim, not the address.
     assert any(node["address"] == callee_address for node in graph["nodes"])
-    # ...and so is the unattributed target: the edge is published, it just
-    # carries no authority.
+    # ...and so is the unattributed target: published, carries no authority.
     assert any(node["address"] == legacy_address for node in graph["nodes"])
 
-    # The authority-bearing set is the allowlist, so only the proven gate moves
-    # value through the closure.
+    # The allowlist is the authority-bearing set, so only the proven gate moves value through the closure.
     from db.models import CONTROL_EDGE_RELATIONS
 
     carries_authority = {edge["to_id"] for edge in graph["edges"] if edge["relation"] in CONTROL_EDGE_RELATIONS}
@@ -1512,15 +1443,10 @@ def test_callee_provenance_demotes_the_graph_edge(monkeypatch):
 def test_analyzed_timelock_keeps_its_type_and_delay(monkeypatch):
     """An analysed contract must not be stamped with the generic type.
 
-    ``_ensure_node`` was called with a hardcoded ``resolved_type="contract"``
-    for every analysed node, so a timelock's OWN node came back typed
-    ``contract`` with its ``delay`` missing. Whether the type survived depended
-    on walk order — it did only when the node was later re-ensured as a
-    controller of another contract.
-
-    Positive control: the timelock root keeps ``timelock`` + ``delay``.
-    Negative control: a plain contract analysed the same way stays
-    ``contract`` — the fix must not invent a type the classifier did not give.
+    ``_ensure_node`` hardcoded ``resolved_type="contract"``, so a timelock's OWN node lost its
+    type and ``delay`` unless later re-ensured as a controller (walk-order dependent).
+    Positive control: the timelock keeps ``timelock`` + ``delay``. Negative control: a plain
+    contract stays ``contract`` (the fix must not invent a type).
     """
     timelock_address = "0x1111111111111111111111111111111111111111"
     plain_address = "0x2222222222222222222222222222222222222222"
@@ -1585,8 +1511,8 @@ def test_analyzed_timelock_keeps_its_type_and_delay(monkeypatch):
 
 
 def test_generic_type_never_overwrites_a_specific_one():
-    """The rank fold, directly: ``contract`` is the generic answer and must not
-    replace a classification that says more. Equal ranks keep last-write-wins."""
+    """The rank fold: ``contract`` is generic and must not replace a more specific classification. Equal ranks keep
+    last-write-wins."""
     nodes: dict = {}
     address = "0x1111111111111111111111111111111111111111"
 
@@ -1598,8 +1524,7 @@ def test_generic_type_never_overwrites_a_specific_one():
     assert node["resolved_type"] == "timelock"
     assert node["analyzed"] is True
 
-    # unknown must not overwrite a real answer either, and a specific type may
-    # still replace the generic one (the direction that adds information).
+    # unknown must not overwrite a real answer; a specific type may still replace the generic one.
     recursive._ensure_node(nodes, address=address, resolved_type="unknown", label="TL", depth=1, node_type="contract")
     assert nodes[f"address:{address}"]["resolved_type"] == "timelock"
 
@@ -1612,16 +1537,11 @@ def test_generic_type_never_overwrites_a_specific_one():
 def test_analysis_state_splits_the_analyzed_bool():
     """``analyzed=False`` is four populations; ``analysis_state`` names which.
 
-    The counts quoted for this field
-    — 1,183 analyzed / 1,236 not_analyzable / 28 attempt_failed / 29
-    beyond_depth_horizon / 55 not-determined — are a RECOMPUTATION of
-    ``_analysis_state`` over the node dicts in the 107 stored
-    resolved_control_graph artifacts, not a census of persisted values. The field
-    itself is ABSENT on all 2,531 of those artifact nodes and SQL NULL on all
-    2,506 ``control_graph_nodes`` rows, because the column is newer than the last
-    analysis run. So the numbers say what the producer WOULD emit per branch, and
-    nothing about what any stored row currently holds. This test pins the mapping;
-    reachability of each branch on re-persisted rows binds the next real run.
+    The counts quoted for this field (1,183 analyzed / 1,236 not_analyzable / 28 attempt_failed /
+    29 beyond_depth_horizon / 55 not-determined) are a RECOMPUTATION of ``_analysis_state`` over
+    107 stored artifacts, not a census: the field is ABSENT on all 2,531 artifact nodes and NULL
+    on all 2,506 ``control_graph_nodes`` rows (the column is newer than the last run). This test
+    pins the mapping; reachability on re-persisted rows binds the next real run.
     """
     max_depth = 6
 
@@ -1642,24 +1562,18 @@ def test_analysis_state_splits_the_analyzed_bool():
         return cast(ResolvedGraphNode, base)
 
     assert recursive._analysis_state(node(analyzed=True), max_depth) == "analyzed"
-    # Not an ANALYZABLE type — analysis was never applicable, so its absence
-    # says nothing adverse. The token is ``not_analyzable``, never
-    # ``not_a_contract``. A ``safe`` is the discriminating case, because a Safe
-    # IS a contract (230 of the local corpus) — the old spelling asserted
-    # something literally false about it.
+    # Not an ANALYZABLE type: absence says nothing adverse. Token is ``not_analyzable``, never
+    # ``not_a_contract``; a ``safe`` is the discriminating case (a Safe IS a contract, 230 locally).
     assert recursive._analysis_state(node(resolved_type="eoa"), max_depth) == "not_analyzable"
     assert recursive._analysis_state(node(resolved_type="zero"), max_depth) == "not_analyzable"
     assert recursive._analysis_state(node(resolved_type="safe"), max_depth) == "not_analyzable"
     # A fact about the contract.
     assert recursive._analysis_state(node(details={"materialize_error": "boom"}), max_depth) == "attempt_failed"
-    # A fact about OUR walk, not the address. This is the one the bool could
-    # never express and the reason graph_max_depth is persisted alongside.
+    # A fact about OUR walk, not the address; the reason graph_max_depth is persisted alongside.
     assert recursive._analysis_state(node(depth=7), max_depth) == "beyond_depth_horizon"
     # Not determined: no classification, so none of the four can be asserted.
     assert recursive._analysis_state(node(resolved_type="unknown"), max_depth) is None
-    # An analyzable contract inside the horizon, unanalysed, with no recorded
-    # failure: also not determined. Inventing a value here is the exact error
-    # this field exists to remove.
+    # Analyzable, inside the horizon, unanalysed, no recorded failure: also not determined (never invent a value).
     assert recursive._analysis_state(node(depth=2), max_depth) is None
 
     # A failed materialization outranks the depth check: the walk DID reach it.
@@ -1667,15 +1581,12 @@ def test_analysis_state_splits_the_analyzed_bool():
         recursive._analysis_state(node(depth=7, details={"materialize_error": "boom"}), max_depth) == "attempt_failed"
     )
 
-    # Stated as the negation so a revert of the rename is caught even
-    # if some future arm re-introduces the spelling elsewhere: the producer must
-    # not mint the old token for ANY resolved_type outside ANALYZABLE_TYPES.
+    # Stated as a negation so a revert of the rename is caught: never mint the old token outside ANALYZABLE_TYPES.
     for outside in ("eoa", "zero", "safe", "off_chain_witness"):
         assert recursive._analysis_state(node(resolved_type=outside), max_depth) != "not_a_contract"
 
 
 def test_resolved_graph_stamps_analysis_state_on_every_node(monkeypatch):
-    """The state reaches the artifact, so the worker can persist it."""
     root_address = "0x1111111111111111111111111111111111111111"
     eoa_address = "0x2222222222222222222222222222222222222222"
 
@@ -1716,9 +1627,8 @@ def test_resolved_graph_stamps_analysis_state_on_every_node(monkeypatch):
 
 
 def _role_principal_bundle(root_address: str, principal_address: str, resolved_type) -> dict:
-    """Root bundle whose effective_permissions grant role 1 to *principal_address*
-    with the given ``resolved_type`` value PRESENT in the payload (the shape a
-    policy-stage refresh feeds back in)."""
+    """Root bundle granting role 1 to *principal_address* with ``resolved_type`` PRESENT in the
+    payload (the shape a policy-stage refresh feeds back in)."""
     return _bundle(
         root_address,
         "Vault",
@@ -1744,8 +1654,7 @@ def _role_principal_bundle(root_address: str, principal_address: str, resolved_t
                             "principals": [
                                 {
                                     "address": principal_address,
-                                    # Key PRESENT with the given value — a .get
-                                    # default never fires on this shape.
+                                    # Key PRESENT with the given value (a .get default never fires).
                                     "resolved_type": resolved_type,
                                     "details": {"address": principal_address},
                                 }
@@ -1759,11 +1668,9 @@ def _role_principal_bundle(root_address: str, principal_address: str, resolved_t
 
 
 def test_null_resolved_type_role_principal_is_not_determined_not_not_analyzable(monkeypatch):
-    """R1/R4 positive case for the ``str(None)`` -> ``"None"`` ->
-    ``not_analyzable`` fabrication: a principal whose ``resolved_type`` is
-    PRESENT with value ``None`` and whose classification does not answer must
-    publish the not-determined pair (``unknown``, ``analysis_state=None``) —
-    never the fabricated token, never the positive ``not_analyzable`` claim."""
+    """R1/R4: a principal whose ``resolved_type`` is PRESENT as ``None`` and unclassifiable must
+    publish the not-determined pair (``unknown``, ``analysis_state=None``), never the fabricated
+    ``str(None)`` -> ``"None"`` token or a positive ``not_analyzable`` claim."""
     root_address = "0x1111111111111111111111111111111111111111"
     principal_address = "0xcea8039076e35a825854c5c2f85659430b06ec96"
 
@@ -1792,9 +1699,7 @@ def test_null_resolved_type_role_principal_is_not_determined_not_not_analyzable(
     principal_node = nodes[principal_address]
     assert principal_node["resolved_type"] == "unknown"
     assert principal_node.get("analysis_state") is None
-    # The fabricated token appears nowhere in the published graph.
     assert all(node["resolved_type"] != "None" for node in graph["nodes"])
-    # The role edge itself is still published — the fix must not drop the edge.
     assert (
         f"address:{root_address}",
         "role_principal",
@@ -1803,11 +1708,9 @@ def test_null_resolved_type_role_principal_is_not_determined_not_not_analyzable(
 
 
 def test_null_resolved_type_role_principal_recovers_via_classification(monkeypatch):
-    """A present-but-null ``resolved_type`` used to mint ``"None"`` which,
-    being != "unknown", also BYPASSED classification. Coerced to ``unknown``
-    it now reaches the classifier; a determined non-analyzable answer (eoa)
-    then legitimately publishes ``not_analyzable`` — the proven-firing control
-    for the sentinel."""
+    """A present-but-null ``resolved_type`` used to mint ``"None"``, which also BYPASSED classification.
+    Coerced to ``unknown`` it reaches the classifier; a determined eoa then legitimately
+    publishes ``not_analyzable`` (the proven-firing control for the sentinel)."""
     root_address = "0x1111111111111111111111111111111111111111"
     principal_address = "0xcccccccccccccccccccccccccccccccccccccccc"
 
@@ -1839,11 +1742,8 @@ def test_null_resolved_type_role_principal_recovers_via_classification(monkeypat
 
 
 def test_analysis_state_treats_fabricated_none_token_as_undetermined():
-    """Defence in depth: a stored graph written before the producer fix can
-    still carry the literal ``"None"`` into the policy refresh's recompute.
-    ``_analysis_state`` must read it as undetermined, never as the positive
-    ``not_analyzable`` claim — while a genuinely determined non-analyzable
-    type still fires the sentinel."""
+    """Defence in depth: a graph stored before the producer fix may carry the literal ``"None"``;
+    ``_analysis_state`` must read it as undetermined while a genuine non-analyzable type still fires."""
     node_none = {"analyzed": False, "details": {}, "resolved_type": "None", "depth": 1}
     node_eoa = {"analyzed": False, "details": {}, "resolved_type": "eoa", "depth": 1}
     node_empty = {"analyzed": False, "details": {}, "resolved_type": "", "depth": 1}
@@ -1853,10 +1753,8 @@ def test_analysis_state_treats_fabricated_none_token_as_undetermined():
 
 
 def test_initial_graph_preseed_sanitizes_fabricated_none_type(monkeypatch):
-    """The refresh path pre-seeds from the persisted artifact; a pre-fix
-    artifact node carrying ``resolved_type="None"`` must come out of the walk
-    as the not-determined pair, and must not outrank a later concrete answer
-    (`"None"` would have ranked as a specific type)."""
+    """A pre-fix persisted node with ``resolved_type="None"`` must come out as the not-determined
+    pair and not outrank a later concrete answer (`"None"` would rank as a specific type)."""
     root_address = "0x1111111111111111111111111111111111111111"
     stale_address = "0xdddddddddddddddddddddddddddddddddddddddd"
 

@@ -1,25 +1,15 @@
 """The jsonb-null audit, as an enforced invariant rather than a one-off sweep.
 
-Two halves:
+1. :func:`test_no_sql_null_test_over_a_jsonb_column` re-runs the audit each commit. A SQL null
+   test over a JSONB column is true for the jsonb scalar ``null`` as well as a real payload, so a
+   "does this row carry evidence?" filter written that way is inflated (five offenders before
+   this module: ``deferred_reconciler``, ``company_overview``, ``coverage``).
+2. :func:`test_jsonb_state_separates_all_three_states` pins, against real Postgres, that the three
+   states exist, ``db.jsonb`` separates them, and the replaced predicate does not.
 
-1. :func:`test_no_sql_null_test_over_a_jsonb_column` re-runs the audit on every
-   commit. A SQL null test over a JSONB column is true for the jsonb scalar
-   ``null`` as well as for a real payload, so any "does this row carry
-   evidence?" filter written that way is inflated. Before this module landed the
-   scan reported five offenders (two in ``deferred_reconciler``, two in
-   ``company_overview``, one in ``coverage``).
-
-2. :func:`test_jsonb_state_separates_all_three_states` pins the behaviour the
-   fix depends on against a real Postgres round-trip: the three states exist,
-   ``db.jsonb`` separates them, and the predicate it replaces does not.
-
-Known limits of the scan, stated rather than papered over:
-
-* It resolves a column by *attribute name*, so ``col = Model.conditions``
-  followed by ``col.is_not(None)`` is invisible to it. The DB test below uses
-  exactly that form on purpose, to hold the naive predicate for comparison.
-* ``alembic/versions/`` is out of scope. Those files are applied history; a
-  migration's predicate described the database as it was on the day it ran.
+Known scan limits: it resolves a column by *attribute name*, so ``col = Model.conditions`` then
+``col.is_not(None)`` is invisible to it (the DB test uses that form on purpose to hold the naive
+predicate); ``alembic/versions/`` is out of scope (applied history).
 """
 
 from __future__ import annotations
@@ -46,11 +36,7 @@ NULL_TEST_METHODS = frozenset({"is_", "isnot", "is_not"})
 
 
 def _jsonb_column_names() -> frozenset[str]:
-    """Every JSONB column name in the schema, from the metadata.
-
-    Read off the mapper rather than hardcoded, so a new JSONB column is covered
-    the day it is added instead of the day someone remembers to list it.
-    """
+    """Every JSONB column name from the mapper metadata, so a new column is covered the day it is added."""
     names = {c.name for t in Base.metadata.tables.values() for c in t.columns if isinstance(c.type, JSON)}
     assert "conditions" in names and "witness" in names, "metadata scan found no known JSONB columns"
     return frozenset(names)
@@ -65,9 +51,7 @@ def _typeof_guarded(sql: str, column: str) -> bool:
     """Does this statement already discriminate the jsonb scalar null itself?
 
     ``x is null or jsonb_typeof(x) = 'null'`` is the correct long form of
-    :func:`db.jsonb.jsonb_has_payload`'s negation. Flagging it would train
-    readers to ignore the check.
-    """
+    :func:`db.jsonb.jsonb_has_payload`'s negation; flagging it would train readers to ignore the check."""
     return re.search(r"jsonb_typeof\(\s*(?:\w+\.)?" + column + r"\b", sql, re.IGNORECASE) is not None
 
 
@@ -137,10 +121,8 @@ def test_scan_detects_a_planted_offender(tmp_path: pathlib.Path, monkeypatch: py
 def _materializations(db_session: Session):
     """Three rows, one per state of a JSONB column, then clean up.
 
-    ``contract_materializations`` is the fixture table because production holds
-    all three states in it today (75 written-null, 6 unset, 1 payload) and
-    because it has no foreign keys, so the rows stand alone.
-    """
+    ``contract_materializations`` holds all three states in production (75 written-null, 6 unset,
+    1 payload) and has no foreign keys."""
     from sqlalchemy import null
 
     rows = [
@@ -184,7 +166,6 @@ def test_jsonb_state_separates_all_three_states(db_session: Session, _materializ
 
 
 def test_jsonb_has_payload_selects_the_payload_row(db_session: Session, _materializations: list[str]) -> None:
-    """The positive case: a row that really carries a tree stays selected."""
     scoped = ContractMaterialization.chain.in_(_materializations)
     selected = db_session.scalars(
         select(ContractMaterialization.chain).where(scoped, jsonb_has_payload(ContractMaterialization.analysis))
@@ -193,12 +174,8 @@ def test_jsonb_has_payload_selects_the_payload_row(db_session: Session, _materia
 
 
 def test_written_null_and_unset_are_separately_addressable(db_session: Session, _materializations: list[str]) -> None:
-    """R1: the two empty states are different facts and stay distinguishable.
-
-    "A writer ran and recorded no value" is evidence about the writer; "nothing
-    was ever written here" is not. Collapsing them is how an unpopulated column
-    reads as a proven absence.
-    """
+    """R1: "a writer ran and recorded no value" (evidence about the writer) and "nothing was ever
+    written" stay distinguishable; collapsing them reads an unpopulated column as a proven absence."""
     scoped = ContractMaterialization.chain.in_(_materializations)
     written_null = db_session.scalars(
         select(ContractMaterialization.chain).where(
@@ -215,11 +192,8 @@ def test_written_null_and_unset_are_separately_addressable(db_session: Session, 
 
 
 def test_the_replaced_predicate_over_counts(db_session: Session, _materializations: list[str]) -> None:
-    """The defect being fixed, pinned so a revert is loud.
-
-    Bound through a local name so the scan above does not flag this file; that
-    binding is also the scan's documented blind spot.
-    """
+    """The defect being fixed, pinned so a revert is loud. Bound through a local name so the scan
+    does not flag this file (also the scan's documented blind spot)."""
     column = ContractMaterialization.analysis
     scoped = ContractMaterialization.chain.in_(_materializations)
     naive = db_session.scalars(select(ContractMaterialization.chain).where(scoped, column.is_not(None))).all()

@@ -1,15 +1,10 @@
 """End-to-end Solmate resolution on 100% real data.
 
-Drives the actual resolver dispatch (``evaluate_tree_with_registry`` →
-``AdapterRegistry`` → ``SolmateRolesAuthorityAdapter``) using:
-  * the REAL predicate trees of ``TellerWithMultiAssetSupport`` 0xe2acf9f8…
-    (``tests/fixtures/solmate/teller_predicate_trees.json``), and
-  * the REAL RolesAuthority 0x3994741a… event logs
-    (``tests/fixtures/solmate/roles_authority_3994741a.json``).
-
-Pins the under-resolution fix end-to-end: ``pause`` (role-gated) resolves to
-the governing 4/6 Safe; ``setShareLockPeriod`` (no role, owner renounced) does
-not — a true negative, not a heuristic guess.
+Drives the real dispatch (``evaluate_tree_with_registry`` -> ``AdapterRegistry`` ->
+``SolmateRolesAuthorityAdapter``) with the REAL predicate trees of TellerWithMultiAssetSupport
+0xe2acf9f8… and the REAL RolesAuthority 0x3994741a… event logs (``tests/fixtures/solmate/``).
+Pins the under-resolution fix: ``pause`` (role-gated) resolves to the governing 4/6 Safe;
+``setShareLockPeriod`` (no role, owner renounced) does not: a true negative, not a guess.
 """
 
 from __future__ import annotations
@@ -77,7 +72,6 @@ def _members(cap: CapabilityExpr) -> set[str]:
 
 
 def _trace_selectors(cap: CapabilityExpr) -> set[str]:
-    """Every ``selector`` the Solmate adapter recorded it folded canCall against."""
     out: set[str] = set()
     for step in cap.trace or []:
         selector = step.get("selector") if isinstance(step, dict) else None
@@ -99,7 +93,6 @@ def _resolve(tree_key: str, selector: str) -> CapabilityExpr:
         chain_id=1,
         contract_address=data["contract"],
         meta={"event_log_repo": FixtureRepo(_event_rows())},
-        # authority resolved (RolesAuthority), owner renounced.
         state_var_values={"authority": "0x3994741a5b29c60d0ab318de1024f9256fe959dc", "owner": ZERO},
         call_frame=CallFrame.root(
             contract_address=data["contract"], function_signature=tree_key, function_selector=selector
@@ -109,13 +102,10 @@ def _resolve(tree_key: str, selector: str) -> CapabilityExpr:
 
 
 def _resolve_with_production_selector(tree_key: str) -> CapabilityExpr:
-    """Like ``_resolve`` but derives the root-frame selector from the tree key
-    the way ``resolve_contract_capabilities`` does in production —
-    ``_selector_for_signature(full_name)`` — instead of being handed the
-    canonical selector. The tree keys are Slither ``full_name`` signatures
-    (``addAsset(ERC20)``), so this is the path that must canonicalize the
-    contract-type param to ``address`` before the Solmate adapter folds canCall.
-    """
+    """Like ``_resolve`` but derives the root-frame selector from the tree key as production does
+    (``_selector_for_signature(full_name)``). Tree keys are Slither ``full_name`` signatures
+    (``addAsset(ERC20)``), so this is the path that must canonicalize the contract-type param
+    to ``address`` before the adapter folds canCall."""
     return _resolve(tree_key, _selector_for_signature(tree_key) or "")
 
 
@@ -127,25 +117,21 @@ def test_teller_pause_resolves_to_governing_safe_end_to_end():
 
 
 def test_teller_set_share_lock_period_is_not_attributed_to_safe():
-    # No role capability for this selector + owner renounced => the Safe must
-    # NOT be attributed as a caller (would be a false positive).
+    # No role capability + owner renounced => the Safe must NOT be attributed (false positive).
     cap = _resolve("setShareLockPeriod(uint64)", SET_SHARE_LOCK)
     assert SAFE_4_6 not in _members(cap)
 
 
 def test_contract_type_param_function_folds_cancall_against_canonical_selector():
-    # The tree is keyed ``addAsset(ERC20)`` (Slither full_name), but the EVM
-    # selector — and every RoleCapabilityUpdated event — is canonical
-    # ``addAsset(address)`` (0x298410e5). Driving the production selector path,
-    # the adapter must fold canCall against the canonical selector, NOT the
-    # non-canonical keccak("addAsset(ERC20)") (0x4fdd72aa). Folding the wrong
-    # selector was a false-negative on every contract-type-param function.
+    # The tree is keyed ``addAsset(ERC20)`` but the EVM selector (and every RoleCapabilityUpdated
+    # event) is canonical ``addAsset(address)`` (0x298410e5). The adapter must fold canCall against
+    # it, NOT keccak("addAsset(ERC20)") (0x4fdd72aa): the wrong selector was a false-negative on
+    # every contract-type-param function.
     assert _selector_for_signature("addAsset(ERC20)") == ADD_ASSET_CANONICAL
     cap = _resolve_with_production_selector("addAsset(ERC20)")
     selectors = _trace_selectors(cap)
     assert ADD_ASSET_CANONICAL in selectors
     assert ADD_ASSET_NONCANONICAL not in selectors
-    # role 8 grant in the fixture => the governing 4/6 Safe is the caller.
     assert SAFE_4_6 in _members(cap), (
         f"expected canonical-selector fold to recover the Safe, got kind={cap.kind} members={_members(cap)}"
     )

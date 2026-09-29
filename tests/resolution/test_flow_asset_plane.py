@@ -1,22 +1,15 @@
-"""Plane 2 — a flow sink's asset address, or nothing at all.
+"""Plane 2 - a flow sink's asset address, or nothing at all.
 
-Every test here pins one of the ways a resolved address could become a fiction:
+Every test pins one way a resolved address could become a fiction: an accessor borrowed
+from a same-named hand-written getter (the ``getTokenOut()`` trap, where ``tokenOut()``
+reverts); a short/whitespace-padded/non-canonical word decoded anyway; a revert or transport
+failure resolving to zero, ``null`` or a present-but-empty key; a real zero answer dropped
+or priced; an address without its read height; ``immutable`` published as a runtime
+invariant behind a proxy; a row keyed by NAME rather than the minted selector.
 
-  * an accessor borrowed from a same-named hand-written getter (the corpus's
-    ``getTokenOut()`` trap, where ``tokenOut()`` reverts);
-  * a short, whitespace-padded or non-canonical return word decoded anyway;
-  * a revert or transport failure resolving to the zero address, to ``null``, or
-    to a key that is present-but-empty;
-  * a real zero answer quietly dropped, or worse, priced;
-  * an address published without the height it was read at;
-  * ``immutable`` published as a runtime invariant behind a proxy;
-  * a row keyed by the variable NAME rather than the minted selector.
-
-The words asserted below were measured on chain at block 25643300 via eRPC and
-are reproduced verbatim (`0x…8f08b704…` for ``token()`` at the CumulativeMerkleDrop
-proxy, `0x…35fa1647…` for ``eETH()``/``eEth()``, `0x…ec53bf91…` for
-``rewardTokenAddress()``); ``tokenOut()`` at the SyncPool proxy reverted with no
-data at the same height while ``getTokenOut()`` answered.
+Words asserted were measured on chain at block 25643300 via eRPC and reproduced verbatim;
+``tokenOut()`` at the SyncPool proxy reverted with no data at that height while
+``getTokenOut()`` answered.
 """
 
 from __future__ import annotations
@@ -165,7 +158,6 @@ def test_resolved_payload_is_byte_exact(monkeypatch: pytest.MonkeyPatch) -> None
             }
         ],
     }
-    # One pinned call, at the runtime address, at an explicit height.
     assert seen == [("http://stub", [{"to": REWARDS_ROUTER, "data": SEL_REWARD_TOKEN}], hex(BLOCK), 1)]
 
 
@@ -259,7 +251,6 @@ def test_a_failed_read_publishes_no_address_and_no_block(
     row = payload["receivers"][0]
     assert row["asset_address_status"] == "not_determined"
     assert row["not_determined_reason"] == reason
-    # ABSENT — not null, not the zero address, not an empty string.
     assert "asset_address" not in row
     assert "observed_at_block" not in row
     assert "observed_block_hash" not in row
@@ -518,7 +509,6 @@ def test_no_row_is_keyed_by_a_variable_name(monkeypatch: pytest.MonkeyPatch) -> 
     effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token")))
     payload, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_KING, None, None)])
     row = payload["receivers"][0]
-    # The name is carried for display; it is not the key and never stands alone.
     assert row["receiver_variables"] == ["token"]
     assert row["asset_getter_selector"] == SEL_TOKEN
 

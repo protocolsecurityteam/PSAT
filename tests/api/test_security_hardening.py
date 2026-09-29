@@ -1,9 +1,4 @@
-"""Security-hardening middleware + validation coverage (offline).
-
-Covers findings 8, 9, 10, 12, 13: security headers, body-size cap, global
-per-IP rate limit, per-route capability rate limit, trace-id sanitization,
-and probe address regex.
-"""
+"""Security-hardening middleware + validation coverage (findings 8, 9, 10, 12, 13), offline."""
 
 from __future__ import annotations
 
@@ -104,7 +99,6 @@ def _drive_body_middleware(body_chunks: list[bytes], max_bytes: int):
 
     async def downstream(scope, receive, send):
         app_called["hit"] = True
-        # Drain the (replayed) body then answer 200.
         while True:
             msg = await receive()
             if msg["type"] == "http.disconnect" or not msg.get("more_body", False):
@@ -344,9 +338,7 @@ def test_sliding_window_limiter_basic():
     assert lim.hit("k", now=1.0) is None
     retry = lim.hit("k", now=2.0)
     assert retry is not None and retry >= 1
-    # Distinct key has its own budget.
     assert lim.hit("other", now=2.0) is None
-    # Window slides: the first hit ages out.
     assert lim.hit("k", now=101.5) is None
 
 
@@ -394,7 +386,6 @@ def test_sliding_window_flood_cannot_evict_active_key():
     from utils.ratelimit import SlidingWindowRateLimiter
 
     lim = SlidingWindowRateLimiter(limit=2, window_s=100, max_keys=10, sweep_every=4)
-    # Establish a legitimate client at its limit.
     assert lim.hit("victim", now=1.0) is None
     assert lim.hit("victim", now=1.0) is None
     assert lim.hit("victim", now=1.0) is not None  # at limit
@@ -405,7 +396,6 @@ def test_sliding_window_flood_cannot_evict_active_key():
             rejected += 1
     assert rejected > 0  # cap was reached and newcomers were turned away
     assert "victim" in lim._buckets  # incumbent never evicted
-    # The victim is still limited within its window -> not reset/bypassable.
     assert lim.hit("victim", now=1.0) is not None
 
 
@@ -419,6 +409,5 @@ def test_sliding_window_full_sweep_is_amortized_not_per_hit():
     hits = 1000
     for i in range(hits):
         lim.hit(("k", i), now=1.0)
-    # ~hits/sweep_every sweeps, with generous slack; must be << hits.
     assert lim._full_sweeps <= hits // 100 + 2
     assert lim._full_sweeps < hits

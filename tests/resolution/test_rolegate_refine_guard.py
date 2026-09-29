@@ -1,32 +1,22 @@
 """Delegated role-gate refine-only guard (ROLEGATE_FIX_SPEC.md §3.1 [AMENDED]).
 
-Cross-contract inlining may only *refine* a caller-tainted delegated gate,
-never un-gate it. When the un-inlined outer leaf would fail closed and the
-inline result projects public, the inline is discarded and the outer
-delegated check kept (``external_check_only`` + ``inline_refine_only_guard``).
-The single carve-out is a legitimate deny-by-exception denylist, which the
-companion emission types as a root-subject ``cofinite_blacklist`` so the
-guard's cofinite counterfactual spares it (stays public).
+Cross-contract inlining may only *refine* a caller-tainted delegated gate, never un-gate it.
+When the un-inlined outer leaf would fail closed and the inline result projects public, the
+inline is discarded and the outer delegated check kept (``external_check_only`` +
+``inline_refine_only_guard``). The one carve-out is a deny-by-exception denylist, typed as a
+root-subject ``cofinite_blacklist`` so the guard's cofinite counterfactual spares it.
 
-Two harness layers:
+Two harness layers: SHAPE-LEVEL (``evaluate_tree`` on one compiled unit; mirrors
+``test_earned_public.py``) and TWO-HOP DB (``resolve_contract_capabilities`` over a seeded
+caller + registry; the only path reaching the ``:1976`` guard inside
+``_maybe_inline_cross_contract_call``; mirrors ``test_capability_resolver.py``).
 
-  * SHAPE-LEVEL (``evaluate_tree`` on one compiled unit) — companion-2 leaf
-    emission, permissionless/pause classification, and the pure shape
-    discriminators. Mirrors ``tests/resolution/test_earned_public.py``.
-  * TWO-HOP DB (``resolve_contract_capabilities`` over a seeded caller +
-    registry) — the only path that reaches the ``:1976`` guard, since it
-    lives inside ``_maybe_inline_cross_contract_call``. Mirrors the
-    cross-contract inline tests in ``tests/resolution/test_capability_resolver.py``.
-
-The offline suite forces ``PSAT_DIFFERENTIAL_PROBE=0`` (tests/conftest.py),
-so the gated verdict is read directly, not re-opened by a live eth_call
-probe. The real registry's opaque ``onlyX`` leaf compiles to a
-``business/equality/truthy`` leaf with an erased ``view_call`` operand and an
-expression that does NOT start with ``return `` — that shape reaches
-``:1976``. A *minimal* Solady fixture instead folds to a ``computed`` operand
-/ ``return ok_1`` expression that routes through the materialization
-fallback (also gated, but not via the guard); FIXTURE 1 therefore seeds the
-faithful ``view_call`` callee tree directly (ROLEGATE_FIX_SPEC §1.2.2).
+The offline suite forces ``PSAT_DIFFERENTIAL_PROBE=0``, so the gated verdict is read directly.
+The real registry's opaque ``onlyX`` leaf compiles to a ``business/equality/truthy`` leaf with
+an erased ``view_call`` operand and an expression NOT starting with ``return `` (reaches
+``:1976``); a *minimal* Solady fixture folds to a ``computed`` / ``return ok_1`` leaf that takes
+the materialization fallback instead. FIXTURE 1 therefore seeds the faithful ``view_call``
+callee tree directly (ROLEGATE_FIX_SPEC §1.2.2).
 """
 
 from __future__ import annotations
@@ -101,9 +91,7 @@ def session():
         engine.dispose()
 
 
-# ---------------------------------------------------------------------------
 # Compile helpers (self-contained; mirror test_earned_public._compile).
-# ---------------------------------------------------------------------------
 
 
 def _compile(tmp_path: Path, source: str, contract_name: str = "C"):
@@ -133,9 +121,7 @@ def _iter_leaves(node):
             yield from _iter_leaves(child)
 
 
-# ---------------------------------------------------------------------------
 # Fixture sources (the CALLEE registry functions the caller delegates to).
-# ---------------------------------------------------------------------------
 
 # Transparent delegated DENYLIST (nonBlacklisted) — AMENDED fixture 11.
 _CALLEE_DENYLIST = """
@@ -197,9 +183,6 @@ contract Registry {
 
 
 def _caller_src(callee_call: str) -> str:
-    """A RolesLibrary-style caller whose modifier delegates to ``registry``.
-    ``callee_call`` is the exact registry call, e.g.
-    ``registry.onlyOperatingMultisig(msg.sender)``."""
     return f"""
 pragma solidity ^0.8.19;
 interface IReg {{
@@ -287,26 +270,18 @@ def _ormix_callee_tree(callee_sig: str) -> dict[str, Any]:
     }
 
 
-# AND-mix (adversarial, corpus-empty): a SINGLE callee that internally ANDs a
-# caller-keyed time-DENYLIST with an opaque erased authority leaf —
-# ``if (blacklistedUntil[account] > now) revert; if (!hasRoleOpaque(account)) revert;``.
-# The denylist arm emits a root ``cofinite_blacklist`` (companion 2) and the
-# opaque arm folds to ``conditional_universal``; the capability algebra folds
-# ``AND(cofinite, conditional_universal)`` into a single root cofinite that
-# ABSORBS the opaque authority as a mere business side-condition. The guard's
-# counterfactual then strips that root cofinite and does NOT fire, so the real
-# hasRole gate fails open (projects public). Adversarial finding (Stage-0
-# verifier): the cofinite carve-out is slightly wider than pure denylists.
+# AND-mix (adversarial, corpus-empty): ONE callee ANDs a caller-keyed time-DENYLIST with an
+# opaque erased authority leaf (``if (blacklistedUntil[account] > now) revert; if
+# (!hasRoleOpaque(account)) revert;``). AND(cofinite, conditional_universal) folds to a root
+# cofinite that ABSORBS the opaque authority as a business side-condition, so the guard's
+# counterfactual strips it and does NOT fire: the real hasRole gate fails open (Stage-0
+# verifier finding: the cofinite carve-out is slightly wider than pure denylists).
 #
-# NOT a regression — pre-fix this same shape resolves ``conditional_universal``
-# (also public); the amended guard neither fixes nor worsens it. NOT reachable
-# on the etherfi corpus: real denylist+authority mixes are SEPARATE modifiers
-# (separate outer leaves), each inlined independently — the authority modifier
-# gets its own ``external_check_only`` with the ``caller_tainted_authority_unresolved``
-# blocker tag and gates correctly (see ``test_fixture8`` machinery / the
-# multi-modifier corpus rows). xfail pins the DESIRED behavior so a future
-# tightening (or the Stage-2 adapter, which enumerates the authority arm) flips
-# it to xpass rather than silently leaving the gap.
+# NOT a regression (pre-fix also conditional_universal/public) and NOT reachable on the etherfi
+# corpus: real denylist+authority mixes are SEPARATE modifiers, each inlined independently, so
+# the authority modifier gets its own ``external_check_only`` with the
+# ``caller_tainted_authority_unresolved`` tag. xfail pins the DESIRED behavior so a future
+# tightening (or the Stage-2 adapter) flips it to xpass rather than silently leaving the gap.
 def _and_denylist_opaque_callee_tree(callee_sig: str) -> dict[str, Any]:
     return {
         callee_sig: {
@@ -346,9 +321,7 @@ def _and_denylist_opaque_callee_tree(callee_sig: str) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
 # Two-hop DB harness.
-# ---------------------------------------------------------------------------
 
 
 def _seed_two_hop(
@@ -358,12 +331,11 @@ def _seed_two_hop(
     callee_trees: dict[str, Any],
     seed_hook: Any = None,
 ) -> dict[str, Any]:
-    """Seed a caller + registry (as its ``registry`` state var), resolve the
-    caller, and return the ``guarded(uint256)`` capability dict.
+    """Seed a caller + registry (as its ``registry`` state var), resolve, and return the
+    ``guarded(uint256)`` capability dict.
 
-    ``seed_hook(session, registry_addr)`` runs after the contracts are seeded and
-    before the resolve — the adapter-live variants use it to make the registry a
-    recognized role store (impl markers + indexed events + warm cursor)."""
+    ``seed_hook(session, registry_addr)`` runs after seeding and before the resolve; the
+    adapter-live variants use it to make the registry a recognized role store."""
     from db.models import Contract, ControllerValue, Job, JobStage, JobStatus, Protocol
     from db.queue import store_artifact
     from services.resolution.capability_resolver import resolve_contract_capabilities
@@ -422,9 +394,7 @@ def _is_public(cap_dict: dict[str, Any]) -> bool:
     return project_capability_surface(cap_dict).authority_public
 
 
-# ---------------------------------------------------------------------------
 # Section 1 — pure shape discriminator (is_caller_keyed_time_denylist).
-# ---------------------------------------------------------------------------
 
 
 def _cmp_leaf(operands, operator) -> Any:
@@ -468,14 +438,10 @@ def test_denylist_discriminator_requires_timestamp_and_caller():
     )
 
 
-# ---------------------------------------------------------------------------
 # Section 2 — companion-2 leaf emission (shape-level, both flags).
-# ---------------------------------------------------------------------------
 
 
 def test_denylist_leaf_emits_root_cofinite(tmp_path, both_flags):
-    """A bound, caller-tainted time denylist emits a root-subject
-    ``cofinite_blacklist`` (deny-by-exception), not ``conditional_universal``."""
     reg = _compile(tmp_path, _CALLEE_DENYLIST, "Registry")
     trees = _build_pipeline(reg)
     key = next(k for k in trees if k.startswith("nonBlacklisted"))
@@ -487,16 +453,13 @@ def test_denylist_leaf_emits_root_cofinite(tmp_path, both_flags):
     assert [c.kind for c in cap.conditions] == ["time"]
 
 
-# ---------------------------------------------------------------------------
 # Section 3 — the :1976 guard, two-hop DB (both flags).
-# ---------------------------------------------------------------------------
 
 
 def test_fixture1_real_opaque_shape_gates_via_guard(session, both_flags):
-    """THE acceptance shape (ROLEGATE_FIX_SPEC §6.1): the faithful real
-    registry ``onlyOperatingMultisig`` leaf (opaque ``view_call``, non-return
-    expression) reaches :1976. Inline projects public -> guard fires ->
-    external_check_only, authority_public False, basis carries the tag."""
+    """THE acceptance shape (ROLEGATE_FIX_SPEC §6.1): the real registry ``onlyOperatingMultisig``
+    leaf reaches :1976; inline projects public, so the guard fires (external_check_only,
+    authority_public False, basis carries the tag)."""
     caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyOperatingMultisig(msg.sender)"), "CallerLike"))
     cap = _seed_two_hop(
         session,
@@ -509,8 +472,8 @@ def test_fixture1_real_opaque_shape_gates_via_guard(session, both_flags):
 
 
 # ---------------------------------------------------------------------------
-# Section 3a — durability telemetry (Stage 4): the guard-fire metric+WARNING and
-# the delegated_gate_unresolved tripwire keyed on the callee signature.
+# Section 3a — durability telemetry (Stage 4): guard-fire metric+WARNING and the
+# delegated_gate_unresolved tripwire keyed on the callee signature.
 # ---------------------------------------------------------------------------
 
 
@@ -603,10 +566,9 @@ def _external_check(*, target: str, selector: str, sig: str, deferred: bool = Fa
 
 
 # ---------------------------------------------------------------------------
-# Section 3b — the adapter-live flip (Stage 2). Same faithful opaque shape as
-# fixture 1, but with the registry made a recognized Solady role store: the
-# EnumerableRoleStoreAdapter enumerates the controllers, so the outer gate never
-# reaches the :1976 guard and resolves to the concrete multisig.
+# Section 3b — the adapter-live flip (Stage 2): fixture 1's shape with the registry made a
+# recognized Solady role store; the adapter enumerates the controllers, so the outer gate
+# never reaches the :1976 guard and resolves to the concrete multisig.
 # ---------------------------------------------------------------------------
 
 _LIVE_IMPL = "0x" + "3b" * 20
@@ -624,8 +586,6 @@ def _addr_word(address: str) -> str:
 
 
 def _adapter_live_seed_hook(callee_sig: str):
-    """Make the seeded registry a recognized Solady role store: proxy→impl
-    linkage, one active RoleSet grant to the multisig, and a warm cursor."""
 
     def _hook(session, registry_addr: str) -> None:
         from sqlalchemy import func, select
@@ -665,10 +625,9 @@ def _adapter_live_seed_hook(callee_sig: str):
 
 
 def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) -> None:
-    """Stub the two wires the adapter touches under the full resolver: standard
-    detection (``get_code`` markers on the impl) and the Multicall3 gate probe
-    (``rpc_request``). Any non-probe RPC (e.g. the resolver's head pin) raises so
-    it falls back exactly as under netguard — the offline default."""
+    """Stub the two wires the adapter touches: standard detection (``get_code`` markers on the
+    impl) and the Multicall3 gate probe (``rpc_request``). Any other RPC (e.g. the resolver's
+    head pin) raises, falling back as under netguard."""
     from eth_abi.abi import decode as abi_decode
     from eth_abi.abi import encode as abi_encode
     from eth_utils.crypto import keccak
@@ -689,9 +648,8 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
     control_l = _NEGATIVE_CONTROL_ADDR.lower()
 
     def _stub(rpc_url, method, params=None, **kwargs):
-        # The adapter's pin-once (§A1) reads one eth_blockNumber when the resolver
-        # left the pass height unpinned (netguard blocks its head read). Answer with
-        # a height above the seeded grant so the fold + probe pin to it.
+        # The adapter's pin-once (§A1) reads eth_blockNumber when the pass height is unpinned
+        # (netguard blocks the head read); answer above the seeded grant so fold + probe pin to it.
         if method == "eth_blockNumber":
             return hex(25_000_000)
         to = (params[0].get("to") if params and isinstance(params[0], dict) else None) if method == "eth_call" else None
@@ -722,12 +680,9 @@ def _install_adapter_live_wire(monkeypatch, callee_sig: str, members: set[str]) 
 
 
 def test_fixture1_adapter_live_flips_to_finite_set(session, both_flags, monkeypatch):
-    """FIXTURE 1 ADAPTER-LIVE (ROLEGATE_FIX_SPEC §6.12 / CONTROLLER_RESOLUTION_SPEC
-    §6 Stage 2): the SAME faithful opaque ``onlyOperatingMultisig`` shape as the
-    guard fixture, but the registry is now a recognized Solady role store with
-    indexed grants and stubbed gate probes. The EnumerableRoleStoreAdapter
-    enumerates the controller, so the function resolves ``finite_set([multisig])``
-    — never reaching the guard."""
+    """FIXTURE 1 ADAPTER-LIVE (ROLEGATE_FIX_SPEC §6.12 / CONTROLLER_RESOLUTION_SPEC §6 Stage 2):
+    same opaque shape as the guard fixture, but the registry is a recognized Solady role store,
+    so the adapter enumerates it and the function resolves ``finite_set([multisig])`` without the guard."""
     caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyOperatingMultisig(msg.sender)"), "CallerLike"))
     _install_adapter_live_wire(monkeypatch, "onlyOperatingMultisig(address)", {_LIVE_MULTISIG})
     cap = _seed_two_hop(
@@ -744,9 +699,8 @@ def test_fixture1_adapter_live_flips_to_finite_set(session, both_flags, monkeypa
 
 
 def test_fixture3_computed_variant_gates(session, both_flags):
-    """Compilation-variant coverage (fixture h): the minimal Solady assembly
-    folds to a ``computed``/return leaf that routes through the
-    materialization fallback — still gated (external_check_only)."""
+    """Compilation-variant coverage (fixture h): the minimal Solady assembly folds to a
+    ``computed``/return leaf routed through the materialization fallback; still gated."""
     reg = _build_pipeline(_compile(_tmp(), _CALLEE_SOLADY_OPAQUE, "Registry"))
     caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyOperatingMultisig(msg.sender)"), "CallerLike"))
     cap = _seed_two_hop(session, caller_trees=caller, callee_trees=reg)
@@ -755,9 +709,8 @@ def test_fixture3_computed_variant_gates(session, both_flags):
 
 
 def test_fixture2_or_mix_gates(session, both_flags):
-    """OR-mix d2 — partial taint loss on one disjunct. Every antecedent-level
-    "no caller taint after binding" rule misses this (the transparent arm
-    keeps taint); the surface-level guard still gates it."""
+    """OR-mix d2 — partial taint loss on one disjunct. Antecedent-level "no caller taint after
+    binding" rules miss this (the transparent arm keeps taint); the surface-level guard gates it."""
     caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.onlyMixed(msg.sender)"), "CallerLike"))
     cap = _seed_two_hop(session, caller_trees=caller, callee_trees=_ormix_callee_tree("onlyMixed(address)"))
     assert cap["kind"] == "external_check_only", f"OR-mix must gate, got {cap['kind']}"
@@ -785,9 +738,6 @@ def test_and_mix_denylist_absorbs_opaque_authority_should_gate(session, both_fla
 
 
 def test_fixture4_transparent_used_arg_gates_without_guard(session, both_flags):
-    """A transparent used-arg allowlist (``checkAllowed``): binding succeeds,
-    the callee threads taint and gates on its own — external_check_only
-    WITHOUT the guard firing (the tag is absent)."""
     reg = _build_pipeline(_compile(_tmp(), _CALLEE_PAUSE_AND_ALLOW, "Registry"))
     caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.checkAllowed(msg.sender)"), "CallerLike"))
     cap = _seed_two_hop(session, caller_trees=caller, callee_trees=reg)
@@ -796,9 +746,6 @@ def test_fixture4_transparent_used_arg_gates_without_guard(session, both_flags):
 
 
 def test_fixture7_no_arg_paused_stays_public(session, both_flags):
-    """A no-arg delegated paused check (``registry.checkNotPaused()``): the
-    outer leaf never receives the caller's identity, so the guard antecedent
-    is false and the pause side-condition stays public."""
     reg = _build_pipeline(_compile(_tmp(), _CALLEE_NOARG_PAUSE, "Registry"))
     caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.checkNotPaused()"), "CallerLike"))
     cap = _seed_two_hop(session, caller_trees=caller, callee_trees=reg)
@@ -807,11 +754,9 @@ def test_fixture7_no_arg_paused_stays_public(session, both_flags):
 
 
 def test_fixture8_unused_arg_paused_now_gates(session, both_flags):
-    """Documented sacrifice (ROLEGATE_FIX_SPEC §6.8): a delegated pause that
-    pointlessly takes the caller address (``checkNotPaused(msg.sender)``, arg
-    unused) now gates. The inline resolves conditional_universal(pause) — NOT
-    a cofinite — so the counterfactual does not spare it; the guard fires.
-    Accepted fail-closed trade (corpus-empty shape)."""
+    """Documented sacrifice (ROLEGATE_FIX_SPEC §6.8): a delegated pause pointlessly taking the
+    caller address (arg unused) now gates. The inline is conditional_universal(pause), not a
+    cofinite, so the counterfactual does not spare it. Accepted fail-closed trade."""
     reg = _build_pipeline(_compile(_tmp(), _CALLEE_PAUSE_AND_ALLOW, "Registry"))
     caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.checkNotPaused(msg.sender)"), "CallerLike"))
     cap = _seed_two_hop(session, caller_trees=caller, callee_trees=reg)
@@ -821,11 +766,9 @@ def test_fixture8_unused_arg_paused_now_gates(session, both_flags):
 
 
 def test_fixture11_transparent_denylist_public_cofinite(session, both_flags):
-    """AMENDED regression anchor (ROLEGATE_FIX_SPEC §6.11): a transparent
-    delegated denylist inline threads taint and emits a root cofinite. The
-    guard's counterfactual (root cofinites removed) is NOT public, so the
-    guard does not fire — the function stays PUBLIC with a deny-by-exception
-    condition."""
+    """AMENDED regression anchor (ROLEGATE_FIX_SPEC §6.11): a transparent delegated denylist emits
+    a root cofinite; the counterfactual is NOT public, so the guard does not fire and the function
+    stays PUBLIC with a deny-by-exception condition."""
     reg = _build_pipeline(_compile(_tmp(), _CALLEE_DENYLIST, "Registry"))
     caller = _build_pipeline(_compile(_tmp(), _caller_src("registry.nonBlacklisted(msg.sender)"), "CallerLike"))
     cap = _seed_two_hop(session, caller_trees=caller, callee_trees=reg)
@@ -834,9 +777,7 @@ def test_fixture11_transparent_denylist_public_cofinite(session, both_flags):
     assert "inline_refine_only_guard" not in _basis(cap)
 
 
-# ---------------------------------------------------------------------------
 # Section 4 — shape-level classification controls (both flags).
-# ---------------------------------------------------------------------------
 
 # Transparent role-store (fixture 5): hasRole via an EXTERNAL RoleRegistry where
 # the account binding survives the helper boundary — the leaf stays a
@@ -859,8 +800,6 @@ contract C {
 
 
 def test_fixture5_transparent_role_store_gates(tmp_path, both_flags):
-    """The transparent role-store variants keep gating exactly as today: taint
-    survives the helper boundary, so the external ACL leaf gates."""
     contract = _compile(tmp_path, _TRANSPARENT_ROLE_STORE, "C")
     trees = _build_pipeline(contract)
     cap = evaluate_tree(trees["setMaxBidPrice(uint256)"])
@@ -883,15 +822,13 @@ contract C {
 
 
 def test_fixture6_effectful_permissionless_stays_open(tmp_path, earned_public):
-    """The value-movement class the guard's non-permissionless conjunct must
-    never gate, protecting the 11 legitimate permissionless rows. Since the
-    static classifier applies the gate-shape discriminator (Wave 5 B2), an
-    effectful ``require(token.transferFrom(msg.sender, …))`` arrives as a
-    BUSINESS leaf — it never reaches the authority-leaf carve-out, and the
-    function is open via the business side-condition path instead of
-    conditional_universal(self_service). Same openness, coarser condition
-    typing; restoring the self_service/permit_sig badge from the mutability
-    now stamped on the leaf is a resolution-plane follow-up."""
+    """The value-movement class the guard's non-permissionless conjunct must never gate (protects
+    the 11 legitimate permissionless rows).
+
+    Since the static classifier applies the gate-shape discriminator (Wave 5 B2), an effectful
+    ``require(token.transferFrom(msg.sender, ...))`` arrives as a BUSINESS leaf and is open via
+    the business side-condition path rather than conditional_universal(self_service): same
+    openness, coarser condition typing (restoring the badge is a resolution-plane follow-up)."""
     contract = _compile(tmp_path, _EFFECTFUL_PERMISSIONLESS, "C")
     trees = _build_pipeline(contract)
     cap = evaluate_tree(trees["wrap(uint256)"])
@@ -900,9 +837,7 @@ def test_fixture6_effectful_permissionless_stays_open(tmp_path, earned_public):
     assert all(c.kind in ("self_service", "business") for c in cap.conditions)
 
 
-# ---------------------------------------------------------------------------
 # Section 5 — the counterfactual helper in isolation.
-# ---------------------------------------------------------------------------
 
 
 def test_public_without_root_cofinites_conditional_universal_is_public():
@@ -931,10 +866,9 @@ def test_public_without_root_cofinites_or_with_conditional_is_public():
 
 
 def test_public_without_root_cofinites_or_cofinite_conditional_is_public():
-    """Milestone follow-up (b): OR(root cofinite, conditional_universal) — the
-    counterfactual strips ONLY the root cofinite, leaving the conditional_universal,
-    which is still public. So a laundered allowlist that OR-composes a denylist with
-    an opaque public arm survives the strip → the guard's antecedent holds (True)."""
+    """Milestone follow-up (b): OR(root cofinite, conditional_universal): the counterfactual strips
+    ONLY the cofinite, leaving a public conditional_universal, so a laundered allowlist
+    OR-composing a denylist with an opaque public arm keeps the guard's antecedent True."""
     from services.resolution.capabilities import Condition
 
     or_cap = CapabilityExpr.structural_or(
@@ -947,10 +881,9 @@ def test_public_without_root_cofinites_or_cofinite_conditional_is_public():
 
 
 # ---------------------------------------------------------------------------
-# Section 6 — transparent role-store variants (milestone follow-up a). Every
-# shape where the account binding SURVIVES the helper/modifier boundary keeps
-# gating exactly as today; none opens. Sources from rolegate-failopen-repro/
-# repro_pr151_B.py + repro_2771.py, alongside the fixture-5 pin above.
+# Section 6 — transparent role-store variants (milestone follow-up a): every shape where the
+# account binding SURVIVES the helper/modifier boundary keeps gating; none opens. Sources:
+# rolegate-failopen-repro/repro_pr151_B.py + repro_2771.py.
 # ---------------------------------------------------------------------------
 
 _TV_EXTERNAL_ROLEREGISTRY = """
@@ -1033,9 +966,6 @@ contract C {
     ids=["external_roleregistry", "external_msgSender_helper", "modifier_onlyRole_local", "erc2771"],
 )
 def test_transparent_role_store_variants_gate(tmp_path, both_flags, source, expected_kind):
-    """Every transparent variant gates (never ``conditional_universal``/public): the
-    account binding survives the helper/modifier boundary, so the ACL leaf stays
-    caller-tainted and resolves to a non-public shape under both flags."""
     from services.resolution.capability_resolver import capability_to_dict
 
     contract = _compile(tmp_path, source, "C")
@@ -1047,10 +977,9 @@ def test_transparent_role_store_variants_gate(tmp_path, both_flags, source, expe
 
 
 # ---------------------------------------------------------------------------
-# Section 7 — two-hop EFFECTFUL permissionless delegation (milestone follow-up
-# c). The guard's ``not is_permissionless_caller_shape`` conjunct must spare a
-# value-movement self-service call at the inline site — the guard never gates it,
-# so the 11 permissionless rows survive under both flags.
+# Section 7 — two-hop EFFECTFUL permissionless delegation (milestone follow-up c): the guard's
+# ``not is_permissionless_caller_shape`` conjunct must spare a value-movement self-service call
+# at the inline site, so the 11 permissionless rows survive under both flags.
 # ---------------------------------------------------------------------------
 
 _CALLER_EFFECTFUL = """
@@ -1081,11 +1010,9 @@ _CALLEE_EFFECTFUL = {
 
 
 def test_two_hop_effectful_permissionless_guard_spares(session, both_flags):
-    """A caller whose gate is an EFFECTFUL delegated ``registry.pull(msg.sender, x)``
-    (value movement) is the ``is_permissionless_caller_shape`` class: the guard's
-    ¬permissionless conjunct means it never appends ``inline_refine_only_guard``.
-    Under earned-public it stays open (conditional_universal); the guard tag is
-    absent under both flags."""
+    """An EFFECTFUL delegated ``registry.pull(msg.sender, x)`` is the ``is_permissionless_caller_shape``
+    class: the guard never appends ``inline_refine_only_guard`` (absent under both flags) and
+    under earned-public it stays open (conditional_universal)."""
     caller = _build_pipeline(_compile(_tmp(), _CALLER_EFFECTFUL, "CallerLike"))
     cap = _seed_two_hop(session, caller_trees=caller, callee_trees=_CALLEE_EFFECTFUL)
     assert "inline_refine_only_guard" not in _basis(cap), "permissionless value movement must not hit the guard"

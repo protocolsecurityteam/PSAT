@@ -228,7 +228,6 @@ def test_proof_class_takes_precedence(db_session):
     db_session.commit()
 
     assert _h_row(db_session, protocol, deployer) is None
-    # The proof class admits it instead — under W4, not W4-H.
     assert _rules(db_session, sibling) == {"w1_code", "w4_deployer"}
 
 
@@ -362,9 +361,8 @@ def test_auto_revoke_below_the_hysteresis_floor(db_session):
 
 def test_same_run_promotion_recomputes_a_foreign_standing_h_row(db_session):
     """A proof-round promotion is a fresh FOREIGN anchor against a standing H
-    row keyed by the same EOA under ANOTHER protocol: the promoted contract's
-    deployer joins the W4-H scope, so the third foreign anchor arriving
-    through the promotion auto-revokes (P1, X) in the SAME evaluate."""
+    row keyed by the same EOA under ANOTHER protocol: the third foreign anchor
+    arriving through the promotion auto-revokes (P1, X) in the SAME evaluate."""
     protocol = _protocol(db_session)
     other = _protocol(db_session, "lombard")
     deployer = _addr(0xD30)
@@ -541,7 +539,6 @@ def test_implementation_discovered_after_its_proxy_still_inherits(db_session):
     assert gate.witness_is_heuristic(derived) is True
     assert gate.member_for_evidence(db_session, contract_id=impl.id, protocol_id=protocol.id) is False
 
-    # Settled: a re-evaluation over unchanged facts mints and revokes nothing.
     before = {(row.id, row.revoked_at) for row in db_session.execute(select(ContractMembershipWitness)).scalars()}
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(impl.id,)))
     db_session.commit()
@@ -550,9 +547,8 @@ def test_implementation_discovered_after_its_proxy_still_inherits(db_session):
 
 
 def test_late_inherited_w2_falls_with_the_proxys_heuristic_standing(db_session):
-    """Revocation propagation for the late-minted W2: an affinity collapse that
-    auto-revokes the H row demotes the proxy, and the implementation's
-    heuristic_via W2 falls with it."""
+    """An affinity collapse that auto-revokes the H row demotes the proxy, and
+    the late-minted heuristic_via W2 falls with it."""
     protocol = _protocol(db_session)
     other = _protocol(db_session, "lombard")
     deployer = _addr(0xD24)
@@ -681,7 +677,6 @@ def test_exclusivity_requires_a_proven_member(db_session):
         )
     )
     db_session.flush()
-    # One proven member licenses; the heuristic member is tolerated as family.
     assert gate._controller_is_exclusive(
         db_session,
         protocol_id=protocol.id,
@@ -791,8 +786,6 @@ def test_reevaluation_over_unchanged_facts_leaves_evidence_untouched(db_session)
     _anchor(db_session, protocol, _addr(0x2101), deployer=deployer)
     _anchor(db_session, protocol, _addr(0x2102), deployer=deployer)
     sibling = _candidate(db_session, protocol, _addr(0x2103), deployer=deployer)
-    # A creation-less candidate keeps the (protocol, EOA) pair examined on
-    # every run without ever settling.
     blocked = _contract(db_session, _addr(0x2104), nominated_protocol_id=protocol.id, deployer=deployer)
     _code_fact(db_session, blocked.address, tx=None)
 
@@ -816,8 +809,6 @@ def test_anchor_swap_preserving_counts_refreshes_evidence(db_session):
     deployer = _addr(0xD33)
     swapped = _anchor(db_session, protocol, _addr(0x2A00), deployer=deployer)
     _anchor(db_session, protocol, _addr(0x2A01), deployer=deployer)
-    # A creation-less candidate keeps the (protocol, EOA) pair examined on
-    # every run without ever settling.
     blocked = _contract(db_session, _addr(0x2A03), nominated_protocol_id=protocol.id, deployer=deployer)
     _code_fact(db_session, blocked.address, tx=None)
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(blocked.id,)))
@@ -827,7 +818,6 @@ def test_anchor_swap_preserving_counts_refreshes_evidence(db_session):
     first = dict(row.evidence)
     assert swapped.id in [anchor["contract_id"] for anchor in first["anchors"]]
 
-    # Swap: one anchor out, a replacement in — every count is preserved.
     replacement = _anchor(db_session, protocol, _addr(0x2A02), deployer=deployer)
     for witness in gate.active_witnesses(db_session, contract_id=swapped.id, protocol_id=protocol.id):
         gate.revoke_witness(db_session, witness, reason="anchor_swap")

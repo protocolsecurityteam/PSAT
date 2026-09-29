@@ -1,20 +1,14 @@
-"""NULL-chain Contract lookups in ``workers.static_worker``
-(MULTICHAIN_INVARIANTS.md 1/6/12).
+"""NULL-chain Contract lookups in ``workers.static_worker`` (MULTICHAIN_INVARIANTS.md 1/6/12).
 
-Two Contract lookups resolved chain from the request JSONB (or not at all) and
-compared it with a raw ``chain == <value>`` predicate:
+Two lookups compared a request-JSONB chain (or none) with a raw ``chain == <value>`` predicate:
 
-  - ``_load_contract_row`` — the job_id-rebind fallback. It read
-    ``request["chain"]``, so a chainless L2 submission (chain only in the
-    first-class ``jobs.chain_id`` column) dropped the filter and could bind a
-    mainnet row.
-  - ``_resolve_proxy`` membership on classification — the membership gate's
-    W2 proxy-edge verification is chain-scoped, so a same-address member impl
-    on another chain can never stand in as the admitting anchor.
+  - ``_load_contract_row`` (job_id-rebind fallback) read ``request["chain"]``, so a chainless L2 submission
+    (chain only in ``jobs.chain_id``) dropped the filter and could bind a mainnet row.
+  - ``_resolve_proxy`` membership: the gate's W2 proxy-edge verification is chain-scoped, so a same-address
+    member impl on another chain can never be the admitting anchor.
 
-Both derive the chain from ``jobs.chain_id`` (``_parent_chain_name``) and
-coalesce (NULL≡mainnet). Proven both directions: mainnet finds legacy NULL
-rows; a non-mainnet job stays isolated.
+Both now derive chain from ``jobs.chain_id`` (``_parent_chain_name``) and coalesce NULL≡mainnet: mainnet finds
+legacy NULL rows, a non-mainnet job stays isolated.
 """
 
 from __future__ import annotations
@@ -47,8 +41,6 @@ def proto_id(db_session):
 
 @requires_postgres
 def test_load_contract_row_finds_legacy_null_row_for_mainnet_job(db_session):
-    """The Contract row was orphaned from the job (job_id rebind) and persisted
-    ``chain=NULL``. A mainnet job resolves it via the coalesced fallback."""
     from db.models import Contract
     from db.queue import create_job
     from workers.static_worker import StaticWorker
@@ -65,8 +57,7 @@ def test_load_contract_row_finds_legacy_null_row_for_mainnet_job(db_session):
 
 @requires_postgres
 def test_load_contract_row_l2_job_does_not_bind_mainnet_row(db_session):
-    """A Base-routed job (chain only in ``jobs.chain_id``, absent from the
-    request JSONB) must not bind a legacy mainnet (NULL) row at the same
+    """A Base-routed job (chain only in ``jobs.chain_id``) must not bind a legacy mainnet NULL row at the same
     address — the request-only read used to drop the filter and bleed."""
     from db.models import Contract
     from db.queue import create_job
@@ -119,8 +110,7 @@ def _seed_adoption_graph(session, proto_id, *, impl_chain):
 
 @pytest.fixture()
 def _stub_resolve_proxy_seams(monkeypatch):
-    """Neutralize the child-spawn tail of ``_resolve_proxy`` so the test targets
-    only the membership-gate hook (which commits before the tail runs)."""
+    """Neutralize ``_resolve_proxy``'s child-spawn tail so the test targets only the membership-gate hook."""
     monkeypatch.setattr("workers.static_worker.store_artifact", lambda *a, **kw: None)
     monkeypatch.setattr("workers.static_worker.reconcile_impl_job_for_proxy", lambda *a, **kw: "skip")
     monkeypatch.setattr("workers.static_worker._redirect_proxy_policy_dependencies", lambda *a, **kw: None)
@@ -128,8 +118,6 @@ def _stub_resolve_proxy_seams(monkeypatch):
 
 @requires_postgres
 def test_resolve_proxy_promotes_when_impl_on_same_chain(db_session, proto_id, monkeypatch, _stub_resolve_proxy_seams):
-    """Mainnet job: the member impl is on ethereum, so the gate's
-    chain-scoped W2 proxy edge verifies and the nominated proxy promotes."""
     from db.models import Contract
     from workers.static_worker import StaticWorker
 
@@ -151,9 +139,8 @@ def test_resolve_proxy_promotes_when_impl_on_same_chain(db_session, proto_id, mo
 def test_resolve_proxy_does_not_promote_when_impl_only_on_other_chain(
     db_session, proto_id, monkeypatch, _stub_resolve_proxy_seams
 ):
-    """Mainnet job: the same-address member impl exists only on Base. The
-    chain-scoped W2 verification finds no mainnet member, so no promotion —
-    the fix against cross-chain evidence bleed."""
+    """The same-address member impl exists only on Base: chain-scoped W2 verification finds no mainnet member,
+    so no promotion (the fix against cross-chain evidence bleed)."""
     from db.models import Contract
     from workers.static_worker import StaticWorker
 

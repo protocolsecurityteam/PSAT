@@ -1,15 +1,10 @@
-"""NULL-chain Contract lookups in ``services.discovery.upgrade_history``
-(MULTICHAIN_INVARIANTS.md 1/6/12).
+"""NULL-chain Contract lookups in ``services.discovery.upgrade_history`` (MULTICHAIN_INVARIANTS.md 1/6/12).
 
-``project_to_events`` (proxy-row lookup) and
-``backfill_historical_impl_contracts`` (impl-row dedup + current-impl anchor)
-resolved Contract rows with a raw ``chain == <value>`` / ``chain IS NULL``
-predicate that ignored the NULL≡mainnet convention. A subject/proxy persisted
-with a legacy ``chain=NULL`` was invisible to a mainnet lookup, so events were
-skipped and impls were re-minted as duplicate rows.
+``project_to_events`` (proxy-row lookup) and ``backfill_historical_impl_contracts`` (impl dedup + current-impl
+anchor) used a raw ``chain == <value>`` / ``chain IS NULL`` predicate that ignored NULL≡mainnet, so legacy
+``chain=NULL`` rows were invisible to mainnet lookups: events skipped, impls re-minted as duplicates.
 
-Both directions are proven: a mainnet lookup finds legacy NULL rows, and a
-non-mainnet lookup stays isolated. Etherscan is stubbed (offline).
+Proven both ways: mainnet finds legacy NULL rows; non-mainnet stays isolated. Etherscan is stubbed.
 """
 
 from __future__ import annotations
@@ -37,7 +32,6 @@ def proto_id(db_session):
 
 @pytest.fixture()
 def stub_etherscan(monkeypatch):
-    """``get_contract_info`` returns a deterministic name; nothing leaves the box."""
     import services.clients.etherscan as etherscan_mod
 
     monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda address, **_kw: (f"Impl-{address[2:6]}", {}))
@@ -56,9 +50,8 @@ def _stub_membership_probe(monkeypatch):
 
 @requires_postgres
 def test_project_events_keys_to_legacy_null_proxy_row_on_mainnet_subject(db_session, proto_id):
-    """The proxy Contract row is a legacy ``chain=NULL`` mainnet row while the
-    subject reports ``chain='ethereum'``. The coalesced lookup keys the events
-    to that proxy; the old ``chain == 'ethereum'`` predicate skipped it."""
+    """A legacy ``chain=NULL`` proxy row is keyed by a mainnet subject via the coalesced lookup (the old
+    ``chain == 'ethereum'`` predicate skipped it)."""
     from db.models import Contract, UpgradeEvent
     from services.discovery.upgrade_history import project_to_events
 
@@ -100,8 +93,6 @@ def test_project_events_keys_to_legacy_null_proxy_row_on_mainnet_subject(db_sess
 
 @requires_postgres
 def test_project_events_skips_mainnet_proxy_row_for_l2_subject(db_session, proto_id):
-    """A Base subject must not key its events onto a mainnet (NULL/ethereum)
-    proxy row at the same address — no cross-chain bleed."""
     from db.models import Contract, UpgradeEvent
     from services.discovery.upgrade_history import project_to_events
 
@@ -148,8 +139,6 @@ def test_project_events_skips_mainnet_proxy_row_for_l2_subject(db_session, proto
 
 @requires_postgres
 def test_backfill_adopts_legacy_null_impl_row_on_mainnet(db_session, proto_id, stub_etherscan):
-    """A legacy ``chain=NULL`` orphan impl row is adopted by a mainnet backfill
-    (coalesced dedup) rather than duplicated into a fresh ``'ethereum'`` row."""
     from db.models import Contract
     from services.discovery.upgrade_history import backfill_historical_impl_contracts
 
@@ -177,8 +166,6 @@ def test_backfill_adopts_legacy_null_impl_row_on_mainnet(db_session, proto_id, s
 
 @requires_postgres
 def test_backfill_base_does_not_adopt_legacy_null_mainnet_impl_row(db_session, proto_id, stub_etherscan):
-    """A Base backfill must create a fresh Base row rather than adopt the legacy
-    mainnet (NULL) row at the same address."""
     from db.models import Contract
     from services.discovery.upgrade_history import backfill_historical_impl_contracts
 

@@ -137,11 +137,9 @@ def test_role_authority_history_uses_event_shapes_not_names():
 
 def test_external_authority_checks_uses_canonical_selector_for_contract_type_params():
     # The predicate-tree key is Slither's full_name ``addAsset(ERC20)``, but the
-    # RolesAuthority ``RoleCapabilityUpdated`` event the timeline replays against
-    # carries the canonical EVM selector ``addAsset(address)`` (0x298410e5), NOT
-    # keccak("addAsset(ERC20)") (0x4fdd72aa). A non-canonical selector here never
-    # matches the on-chain event, so the contract-type-param function would show
-    # no controller in the capability timeline (the canCall selector bug).
+    # ``RoleCapabilityUpdated`` event carries the canonical selector ``addAsset(address)``
+    # (0x298410e5), NOT keccak("addAsset(ERC20)") (0x4fdd72aa); a non-canonical selector
+    # never matches, so the function would show no controller (the canCall selector bug).
     data = json.loads((_SOLMATE_FIXTURES / "teller_predicate_trees.json").read_text())
     checks = _external_authority_checks(
         contract_address=data["contract"],
@@ -150,19 +148,14 @@ def test_external_authority_checks_uses_canonical_selector_for_contract_type_par
     )
     assert len(checks) == 1
     assert checks[0]["function"] == "addAsset(ERC20)"
-    # Canonical keccak("addAsset(address)") — the real msg.sig the event keys on.
     assert checks[0]["selector"] == "0x298410e5"
     assert checks[0]["selector"] != "0x4fdd72aa"
 
 
-# ---------------------------------------------------------------------------
-# build_principal_history end-to-end: real orchestrator path, only the
-# Etherscan ABI/getLogs wire stubbed (per the project's integration-test
-# convention — drive the production stack, fake only the network boundary).
-# ---------------------------------------------------------------------------
+# build_principal_history end-to-end: real orchestrator path, only the Etherscan
+# ABI/getLogs wire stubbed.
 
-# Canonical Solmate RolesAuthority event ABI. ``_classify_role_event_topics``
-# keys off indexed/unindexed shape, not name, but real names keep it legible.
+# Canonical Solmate RolesAuthority event ABI (classification keys off shape, not name).
 _ROLES_AUTHORITY_ABI = [
     {
         "type": "event",
@@ -194,7 +187,6 @@ _ROLES_AUTHORITY_ABI = [
     },
 ]
 
-# Canonical EVM selector for the fixture's ``addAsset(ERC20)`` (== addAsset(address)).
 _ADDASSET_SELECTOR = "0x298410e5"
 _TELLER_AUTHORITY = "0x3994741a5b29c60d0ab318de1024f9256fe959dc"
 
@@ -212,8 +204,7 @@ class _FakeEtherscanResponse:
 
 @pytest.fixture(autouse=True)
 def _clear_principal_history_caches():
-    # The module memoizes authority logs process-wide; clear so the stubbed wire
-    # is actually consulted and tests don't bleed into each other.
+    # The module memoizes authority logs process-wide; clear so the stubbed wire is consulted.
     principal_history._LOG_CACHE.clear()
     yield
     principal_history._LOG_CACHE.clear()
@@ -225,10 +216,8 @@ def _teller_predicate_trees() -> tuple[str, dict]:
 
 
 def test_build_principal_history_ok_path_records_summary_metrics(monkeypatch):
-    """Full orchestrator — real ``_external_authority_checks`` + real
-    ``build_role_authority_history`` event replay — with only the Etherscan ABI
-    and getLogs wire stubbed. Locks in the ok-path summary metrics this stage
-    folds into ``stage_timing_<stage>.metrics``."""
+    """Real ``_external_authority_checks`` + ``build_role_authority_history`` replay,
+    with only the Etherscan wire stubbed. Locks in the ok-path summary metrics."""
     monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
     contract, predicate_trees = _teller_predicate_trees()
 
@@ -276,20 +265,17 @@ def test_build_principal_history_ok_path_records_summary_metrics(monkeypatch):
     assert len(result["sources"]) == 1
     assert result["sources"][0]["status"] == "ok"
     assert result["sources"][0]["authority_address"] == _TELLER_AUTHORITY
-    # The full event replay ran end-to-end, not just the summary tally.
     assert any(
         perm["principal"] == USER and perm["function"] == "addAsset(ERC20)" and perm["roles"] == [5]
         for perm in result["function_permissions"]
     )
-    # The summary metrics this stage folds into the stage_timing artifact.
     assert metrics["principal_history_authorities"] == 1
     assert metrics["principal_history_role_events"] == 2
 
 
 def test_build_principal_history_degraded_on_authority_fetch_failure(monkeypatch):
-    """When an authority's ABI fetch raises, the stage keeps going, marks that
-    source ``error``, AND records a degraded breadcrumb — so the swallow surfaces
-    in the stage_errors artifact instead of vanishing."""
+    """An authority ABI fetch failure keeps the stage going, marks the source ``error``,
+    AND records a degraded breadcrumb so the swallow surfaces in stage_errors."""
     monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
     contract, predicate_trees = _teller_predicate_trees()
 
@@ -318,22 +304,16 @@ def test_build_principal_history_degraded_on_authority_fetch_failure(monkeypatch
     assert len(result["sources"]) == 1
     assert result["sources"][0]["status"] == "error"
     assert "etherscan 500" in result["sources"][0]["reason"]
-    # The degraded breadcrumb this stage now emits (was a silent warning before).
     assert len(errors) == 1
     assert errors[0].phase == "principal_history_authority"
     assert errors[0].severity == "degraded"
     assert errors[0].context.get("authority_address") == _TELLER_AUTHORITY
-    # The summary still records the (failed) authority; no role events folded.
     assert metrics["principal_history_authorities"] == 1
     assert metrics["principal_history_role_events"] == 0
 
 
-# ---------------------------------------------------------------------------
-# _LOG_CACHE size cap + TTL: the process-global authority-log cache must stay
-# bounded (no OOM in a long-lived policy worker) and eventually re-read so role
-# grants after the first fetch are seen. Only the Etherscan getLogs wire is
-# stubbed; _fetch_logs drives the real cache machinery.
-# ---------------------------------------------------------------------------
+# _LOG_CACHE cap + TTL: the process-global cache must stay bounded (no OOM in a
+# long-lived worker) and eventually re-read so later role grants are seen.
 
 
 def _no_records_get(url, params=None, timeout=None):
@@ -341,8 +321,7 @@ def _no_records_get(url, params=None, timeout=None):
 
 
 def test_log_cache_evicts_oldest_when_bounded(monkeypatch):
-    """_fetch_logs caps _LOG_CACHE at its MAX, evicting the oldest entries so a
-    long-lived worker can't accumulate authority histories without bound."""
+    """Caps _LOG_CACHE at its MAX, evicting the oldest entries."""
     monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
     monkeypatch.setattr(principal_history, "_LOG_CACHE_MAX", 4)
     monkeypatch.setattr(requests, "get", _no_records_get)
@@ -359,8 +338,7 @@ def test_log_cache_evicts_oldest_when_bounded(monkeypatch):
 
 
 def test_log_cache_ttl_expiry_refetches(monkeypatch):
-    """A cached authority-log entry is reused within the TTL but re-fetched once
-    it expires, so a later grant/revoke is eventually picked up."""
+    """Reused within the TTL, re-fetched after expiry so later grants/revokes are picked up."""
     monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
     calls: list = []
 
@@ -382,8 +360,8 @@ def test_log_cache_ttl_expiry_refetches(monkeypatch):
 
 
 def test_clear_log_cache_resets_pressure_state(monkeypatch):
-    """clear_log_cache empties the dict and forgets the cache-pressure threshold
-    so a later genuine pressure event still logs."""
+    """clear_log_cache empties the dict and forgets the pressure threshold so a later
+    genuine pressure event still logs."""
     monkeypatch.setenv("ETHERSCAN_API_KEY", "test-key")
     monkeypatch.setattr(principal_history, "_LOG_CACHE_MAX", 4)
     monkeypatch.setattr(requests, "get", _no_records_get)

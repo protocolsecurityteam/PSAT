@@ -1,16 +1,10 @@
-"""The salience spine: §4.2's rule table, the mechanical gate that keeps
-``routine`` honest, E5's ``signal_class``, the three mint sites, the notifier
-opt-in, and the enrichment recompute seam.
+"""The salience spine: §4.2's rule table, the mechanical gate keeping ``routine`` honest,
+E5's ``signal_class``, the three mint sites, the notifier opt-in, and the enrichment seam.
 
-The census this file backs is a per-RULE one: every row of §4.2 is exercised
-here with its basis code asserted, so a rule that stops firing (or starts
-firing on the wrong shape) fails a named test rather than drifting.
-
-The mechanical gate has its own section: **no ``routine`` is minted from an
-absent input.** Both routine arms rest on a positive finding — a stamped
-``signal_class`` carrying its own basis, or a decoded ``not_top_level_call``
-status — and each of those inputs is removed in a test that requires the level
-to fall back to ``not_determined`` (visible), never to ``routine``.
+The census is per-RULE: every §4.2 row is exercised with its basis asserted. The gate:
+**no ``routine`` is minted from an absent input**; both routine arms need a positive finding
+(stamped ``signal_class`` with basis, or decoded ``not_top_level_call``), and removing either
+must fall back to ``not_determined`` (visible), never ``routine``.
 """
 
 from __future__ import annotations
@@ -838,9 +832,8 @@ def test_a_type_the_registry_does_not_cover_is_left_untouched(db_session, make_m
     """The driver only ever touches a row some enricher has something to say
     about — including the salience the mint site already assigned.
 
-    (Phase 1 asserted this with an EMPTY registry. Phase 2 fills it, so the
-    claim is now stated against a type outside it: an ``authority_updated``
-    alone in its transaction has no decoder and no correlation partner.)"""
+    (Phase 1 used an EMPTY registry; now it is stated against a type outside it:
+    ``authority_updated`` alone in its transaction has no decoder or correlation partner.)"""
     assert set(ENRICHERS) == {"safe_tx_executed", "safe_tx_failed", "timelock_scheduled", "timelock_executed"}
     assert NEEDS_TX == frozenset({"safe_tx_executed", "safe_tx_failed"})
 
@@ -1149,9 +1142,8 @@ def test_the_driver_refuses_an_enrichers_non_additive_keys(db_session, make_mc):
 
 def test_an_enricher_producing_only_refused_keys_changes_nothing(db_session, make_mc):
     mc = make_mc(contract_type="safe")
-    # The seeded level is the one the mint site would have written, so the
-    # correlation join's own recompute is an identity and the only thing this
-    # test can observe is the refused enricher.
+    # Seeded at the mint-time level, so the correlation recompute is an identity and only the
+    # refused enricher is observable.
     before = {
         "witness_tier": "hint",
         "salience": sal.SALIENCE_NOT_DETERMINED,

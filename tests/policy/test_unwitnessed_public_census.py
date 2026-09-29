@@ -1,15 +1,10 @@
 """Pin the unwitnessed-public census population definition.
 
-``status='public' AND jsonb_typeof(conditions)='null'`` selects exactly the
-fall-through public population (351 rows on the production-shaped local DB) —
-but that shape was incidental: nothing enforced it and any refactor giving an
-unwitnessed function an empty ARRAY instead of JSON null would break the
-census silently. These tests make the shape a contract:
-
-* a fall-through public row (no capability, no tree, sink-bearing) persists
-  ``conditions`` as JSON null — never ``[]``;
-* a witnessed public row whose capability carries real conditions persists the
-  non-empty array (so the census predicate excludes it).
+``status='public' AND jsonb_typeof(conditions)='null'`` selects the fall-through public
+population (351 rows locally), but the shape was incidental: a refactor giving an
+unwitnessed function an empty ARRAY instead of JSON null would break the census
+silently. A fall-through public row persists ``conditions`` as JSON null, never ``[]``;
+a witnessed public row with real conditions persists the non-empty array.
 """
 
 from __future__ import annotations
@@ -106,19 +101,15 @@ def test_witnessed_public_with_conditions_persists_the_array(db_session):
 
 @requires_postgres
 def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_session):
-    """Every row the POLICY layer mints (the fall-through publics, the
-    assembly fail-closed rows, the ``guard_extraction_uncertain``
-    reroute) must reach the table with ``authority_openness`` and
-    ``authority_roles`` PROJECTED FROM the capability_expr the row itself
-    publishes — never the NULL that is documented as "written before the
-    column existed". Exercises the real path: ``build_effective_permissions``
-    → ``write_effective_function_rows`` with an EMPTY resolver output, which
-    is exactly the branch that dropped the answers.
+    """Every POLICY-minted row (fall-through publics, assembly fail-closed rows, the
+    ``guard_extraction_uncertain`` reroute) must reach the table with
+    ``authority_openness`` / ``authority_roles`` PROJECTED FROM its own capability_expr,
+    never the NULL documented as "written before the column existed". Runs the real
+    ``build_effective_permissions`` → ``write_effective_function_rows`` with an EMPTY
+    resolver output, the branch that dropped the answers.
 
-    Input-shape → published-state table this test pins:
-
-      fall-through public   → openness 'open',           roles ``[]`` (proven absent)
-      assembly fail-closed  → openness 'not_determined', roles ``None``
+      fall-through public     → openness 'open',           roles ``[]`` (proven absent)
+      assembly fail-closed    → openness 'not_determined', roles ``None``
       guard-uncertain reroute → openness 'not_determined', roles ``None``
     """
     contract = Contract(address="0x" + "cf" * 20, chain="ethereum")
@@ -181,22 +172,16 @@ def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_s
     assert rows["sweep"] == ("public", "open", [])
     assert rows["asmMutator"] == ("unsupported", "not_determined", None)
     assert rows["gated"] == ("unsupported", "not_determined", None)
-    # The census predicate itself is unaffected: openness rides alongside,
-    # conditions stays JSON null on the fall-through public.
+    # Openness rides alongside; conditions stays JSON null on the fall-through public.
     assert _conditions_typeof(db_session, contract.id, "sweep") == "null"
 
 
 @requires_postgres
 def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_session):
-    """``fallback`` and ``receive`` are BOTH selector-less, so once the
-    selector-less sentinel became ``""`` a contract declaring both produced two
-    rows under one observed-carry key and the carry cross-assigned one row's
-    observed claims to the other. The key is now ``(selector, function_name)``.
-
-    Armed population: 0 realised on the local corpus (no analysed contract
-    declares both, and every persisted selector-less row still carries the
-    fabricated selector that predates the sentinel) — structural on the first
-    contract that declares both after the sentinel.
+    """``fallback`` and ``receive`` are BOTH selector-less; with the sentinel ``""`` a
+    contract declaring both produced two rows under one observed-carry key and the
+    carry cross-assigned observed claims. The key is now ``(selector, function_name)``.
+    Armed population: 0 realised locally, structural for the first contract declaring both.
     """
     from services.effects import claims_bridge
 
@@ -242,8 +227,7 @@ def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_sessio
         db_session.flush()
 
     _write([observed])
-    # A policy-only rewrite: the carry must return the observed claim to
-    # fallback() and leave receive() claim-free.
+    # A policy-only rewrite must return the observed claim to fallback() and leave receive() claim-free.
     _write([])
 
     rows = db_session.execute(

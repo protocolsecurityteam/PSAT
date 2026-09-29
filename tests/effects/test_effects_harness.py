@@ -1,10 +1,7 @@
-"""Tier-1 effect harness tests: the value-out, code-upgrade, authority-change and
-supply recipes.
+"""Tier-1 effect harness tests: the value-out, code-upgrade, authority-change and supply recipes.
 
-Every recipe is exercised against a stubbed ``Simulate`` wire with recorded
-transcripts — no live RPC, and every verdict is replayable from its transcript.
-The soundness rules each carry an explicit NEGATIVE fail-closed test; the mapping
-is in ``test_section8_*`` below.
+Every recipe runs against a stubbed ``Simulate`` wire with recorded transcripts (no live RPC).
+Each soundness rule has an explicit NEGATIVE fail-closed test; the mapping is in ``test_section8_*``.
 """
 
 from __future__ import annotations
@@ -76,8 +73,7 @@ def test_transfers_in_extracts_only_dest_receives():
 
 
 def test_transfers_in_can_exclude_the_emitting_asset():
-    # A ``Transfer`` topic says nothing about WHICH contract emitted it, so a
-    # caller asking "did some other asset arrive" must pin ``SimLog.address``.
+    # A ``Transfer`` topic doesn't say which contract emitted it, so pin ``SimLog.address``.
     from services.effects.simulate import transfers_in
 
     other = "0x" + "77" * 20
@@ -107,7 +103,6 @@ def test_preflight_probes_and_persists_support():
     sim = ScriptedSimulate(SimResult(calls=(ok(),)))
     assert probe_simulate_support(sim, 1, store) is True
     assert store.get_simulate_support(1) is True
-    # Cached — no second probe.
     assert probe_simulate_support(sim, 1, store) is True
     assert len(sim.blocks) == 1
 
@@ -149,13 +144,9 @@ def test_value_out_caller_arbitrary_proven_via_sentinel():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["destination_shape"] == recipes.SHAPE_CALLER_ARBITRARY
     assert eff.details["shape_proved_by"] == "simulation"
-    # INVERTED. This used to assert the BASE probe's recipient
-    # ("0xabab…ab") as the concrete destination. That address is the recipient
-    # argument the prober itself supplied — measured on 35 of 35 caller_arbitrary
-    # rows in the local DB — so publishing it in the column that means "where the
-    # money went" presents our own calldata as an observation, and it can only
-    # mislead in the reassuring direction. A caller-arbitrary destination IS the
-    # adverse finding; the shape carries it, the address adds nothing.
+    # INVERTED from an older assert on the base probe's recipient ("0xabab…ab"): that is the
+    # prober's own calldata (35 of 35 caller_arbitrary rows), so publishing it as "where the money
+    # went" misleads in the reassuring direction. A caller-arbitrary destination IS the finding.
     assert "destination" not in eff.concrete
     assert SENTINEL.lower() not in str(eff.concrete)
     assert eff.discrepancy is None
@@ -163,16 +154,12 @@ def test_value_out_caller_arbitrary_proven_via_sentinel():
 
 
 def test_a_probe_supplied_recipient_is_never_published_as_an_observed_destination():
-    """The second invented identity. ``SENTINEL_ADDRESS`` was already excluded
-    by construction (the destination is read off the BASE probe); ``NEUTRAL_CALLER``
-    was not, and it is BOTH the caller a public/unresolved-principal probe runs as
-    AND the filler substituted into every address argument of the synthesized call
-    — so it comes straight back in the ``Transfer`` log. The one local
-    caller_arbitrary row with no resolved principals stored ``0x1111…1111``
-    verbatim.
+    """``NEUTRAL_CALLER`` is both the caller of a public/unresolved-principal probe AND the filler
+    for every synthesized address argument, so it comes straight back in the ``Transfer`` log (one
+    local caller_arbitrary row stored ``0x1111…1111`` verbatim). ``SENTINEL_ADDRESS`` is already
+    excluded by construction.
 
-    Here the shape stays ``unknown`` (no sentinel), so this exercises the ordinary
-    destination-capture path rather than the caller_arbitrary early return."""
+    No sentinel here, so the shape stays ``unknown`` and the ordinary capture path is exercised."""
     base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, calldata_mod.NEUTRAL_CALLER, 7)]),))
     eff = recipes.value_out(
         simulate=ScriptedSimulate(base),
@@ -186,9 +173,7 @@ def test_a_probe_supplied_recipient_is_never_published_as_an_observed_destinatio
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["value_moved"] is True
     assert "destination" not in eff.concrete
-    # POSITIVE CONTROL: a real counterparty in the same position is still recorded,
-    # so this is an exclusion of two known-invented addresses and not a blanket
-    # withholding.
+    # POSITIVE CONTROL: a real counterparty in the same position is still recorded (not a blanket withhold).
     real = "0x" + "cd" * 20
     eff2 = recipes.value_out(
         simulate=ScriptedSimulate(SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, real, 7)]),))),
@@ -203,16 +188,11 @@ def test_a_probe_supplied_recipient_is_never_published_as_an_observed_destinatio
 
 
 def test_an_invented_recipient_among_several_destinations_leaves_it_undetermined():
-    """The invented-identity exclusion applies to the convergence ANSWER, not to the
-    set convergence is computed from.
+    """The invented-identity exclusion applies to the convergence ANSWER, not the set it is computed from.
 
-    Applied to the set first, it manufactured agreement: this call provably sends 90%
-    to ``NEUTRAL_CALLER`` — the caller a public/unresolved-principal probe
-    impersonates, i.e. the ordinary "paid msg.sender" leg of a withdrawal — and a 10%
-    fee to the treasury. Dropping the caller left ONE destination, and the fee sink
-    was published as "the address value actually left to": the reassuring-direction
-    mislead the exclusion exists to remove, newly created BY the exclusion. Two
-    destinations, one of them invented, means the destination is not determined."""
+    Applied to the set first, it manufactured agreement: 90% to ``NEUTRAL_CALLER`` (the ordinary
+    "paid msg.sender" leg) plus a 10% treasury fee left ONE destination, so the fee sink was
+    published as where value went. Two destinations, one invented, is undetermined."""
     treasury = "0x" + "17" * 20
     base = SimResult(
         calls=(
@@ -235,8 +215,7 @@ def test_an_invented_recipient_among_several_destinations_leaves_it_undetermined
     )
     assert eff.verdict == VERDICT_PROVEN
     assert "destination" not in eff.concrete
-    # POSITIVE CONTROL: two REAL destinations were already withheld as ambiguous and
-    # still are, so the answer above is not an artifact of the invented address.
+    # POSITIVE CONTROL: two REAL destinations were already withheld as ambiguous and still are.
     other = "0x" + "ce" * 20
     diverged = SimResult(
         calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, treasury, 90), transfer_log(TOKEN, CONTRACT, other, 10)]),)
@@ -269,9 +248,8 @@ def test_an_invented_recipient_among_several_destinations_leaves_it_undetermined
 
 
 def test_sentinel_only_caller_arbitrary_publishes_no_destination():
-    # The sentinel lands but the base probe moved nothing: caller_arbitrary is
-    # still proven, and the concrete destination is EMPTY rather than the
-    # fabricated probe address (nothing was observed leaving).
+    # The sentinel lands but the base probe moved nothing: caller_arbitrary is still proven and
+    # the concrete destination is EMPTY, not the fabricated probe address.
     base = SimResult(calls=(ok(),))
     sentinel = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, SENTINEL, 3)]),))
     eff = recipes.value_out(
@@ -292,9 +270,8 @@ def test_sentinel_only_caller_arbitrary_publishes_no_destination():
 
 
 def test_value_out_value_moved_records_single_observed_destination():
-    # value moved, no sentinel, no static shape → shape stays unknown (a single
-    # observation can't prove a fixed shape) BUT the concrete destination the
-    # value reached this run is recorded for the state plane.
+    # No sentinel, no static shape: shape stays unknown (one observation can't prove a fixed shape)
+    # but the destination reached this run is recorded for the state plane.
     recipient = "0x" + "ab" * 20
     base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, recipient, 9)]),))
     eff = recipes.value_out(
@@ -460,12 +437,9 @@ def test_supply_mint_unbacked_emits_backing_inflow_false():
 
 
 def test_self_mint_into_the_vault_is_not_backing():
-    # THE over-claim: ``_mint(address(this), fee)`` emits Transfer(0x0 -> vault)
-    # FROM the minted token itself. Matching only on the recipient counted that as
-    # an asset inflow, so the purest case of unbacked issuance produced a
-    # ``backing`` object byte-identical to a real deposit-backed conversion.
-    # Backing means an inflow of some OTHER asset; freshly-printed units of the
-    # token whose supply just rose back nothing.
+    # THE over-claim: ``_mint(address(this), fee)`` emits Transfer(0x0 -> vault) FROM the minted
+    # token itself. Matching only the recipient counted it as inflow, so unbacked issuance looked
+    # like a deposit-backed conversion. Backing means an inflow of some OTHER asset.
     zero = "0x" + "00" * 20
     res = SimResult(
         calls=(
@@ -493,8 +467,7 @@ def test_self_mint_into_the_vault_is_not_backing():
 
 
 def test_foreign_asset_mint_into_the_vault_still_counts_as_backing():
-    # The mirror of the test above: the same shape with a DIFFERENT token emitting
-    # the inbound Transfer is a genuine inflow and must keep reporting True.
+    # Mirror of the test above: a DIFFERENT token emitting the inbound Transfer is a genuine inflow.
     zero = "0x" + "00" * 20
     asset = "0x" + "77" * 20
     res = SimResult(
@@ -518,9 +491,8 @@ def test_foreign_asset_mint_into_the_vault_still_counts_as_backing():
 
 
 def test_supply_mint_counts_only_the_measured_token_as_minted():
-    # The mirror-image of the backing defect on ``transfers_out``: ``totalSupply``
-    # was measured on ONE token, so an unrelated token minting inside the same
-    # call must not stand in for its mint witness.
+    # Mirror of the backing defect on ``transfers_out``: ``totalSupply`` was measured on ONE token,
+    # so an unrelated token minting in the same call must not stand in for its mint witness.
     zero = "0x" + "00" * 20
     other = "0x" + "88" * 20
     res = SimResult(
@@ -544,8 +516,6 @@ def test_supply_mint_counts_only_the_measured_token_as_minted():
 
 
 def test_supply_mint_backed_emits_backing_inflow_true():
-    # Backing: a proportional asset Transfer INTO the vault co-occurs with the mint
-    # (deposit-backed conversion) → inflow_observed True.
     zero = "0x" + "00" * 20
     asset = "0x" + "44" * 20
     res = SimResult(
@@ -621,10 +591,8 @@ def test_supply_unsupported_downgrades_no_backing():
 
 
 def test_value_out_reach_measures_downstream_holder_loss():
-    # A genuine value-out (the acting contract sends value → proven flow.out) that
-    # ALSO drains a downstream value-holder in the same call. Reach sums each holder
-    # whose value provably left (full on-chain USD, conservative upper bound),
-    # fork-observed via Transfer-out logs; a holder that didn't move is excluded.
+    # A genuine value-out that ALSO drains a downstream holder in the same call. Reach sums each
+    # holder whose value provably left (conservative upper bound, via Transfer-out logs).
     lp = "0x" + "55" * 20
     other = "0x" + "66" * 20
     base = SimResult(
@@ -661,9 +629,8 @@ def test_value_out_reach_measures_downstream_holder_loss():
 
 
 def test_value_out_reach_floors_and_flags_when_no_holder_moved():
-    # Acting contract moves value (value_moved) but NO downstream holder loses value
-    # → floor to the acting deployment's own balance, flag reach_indeterminate.
-    # Downstream value is never imputed via the control graph.
+    # value_moved but NO downstream holder loses value -> floor to the acting deployment's own
+    # balance, flag reach_indeterminate; downstream value is never imputed via the control graph.
     lp = "0x" + "55" * 20
     base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "ab" * 20, 3)]),))
     eff = recipes.value_out(
@@ -678,9 +645,8 @@ def test_value_out_reach_floors_and_flags_when_no_holder_moved():
         acting_balance_usd=221_000_000.0,
     )
     assert eff.verdict == VERDICT_PROVEN
-    # The floor is published as a FLOOR. The key that means "measured reach" is
-    # absent, because nothing was measured — publishing the acting balance as
-    # ``observed_reach_value_usd`` is what let a zero-balance router read "$0 reach".
+    # Published as a FLOOR; the "measured reach" key stays absent because publishing the acting
+    # balance as ``observed_reach_value_usd`` let a zero-balance router read "$0 reach".
     assert eff.concrete["reach_determined"] is False
     assert eff.concrete["reach_indeterminate"] is True
     assert eff.concrete["observed_reach_floor_usd"] == 221_000_000.0
@@ -690,8 +656,7 @@ def test_value_out_reach_floors_and_flags_when_no_holder_moved():
 
 
 def test_value_out_reach_absent_without_holder_set():
-    # No value-holder set supplied → verdict shape unchanged (no reach fields), so
-    # existing callers and the value_out contract stay byte-identical.
+    # No value-holder set supplied -> no reach fields; existing callers stay byte-identical.
     base = SimResult(calls=(ok(logs=[transfer_log(TOKEN, CONTRACT, "0x" + "ab" * 20, 3)]),))
     eff = recipes.value_out(
         simulate=ScriptedSimulate(base),
@@ -705,8 +670,7 @@ def test_value_out_reach_absent_without_holder_set():
     assert eff.verdict == VERDICT_PROVEN
     assert "observed_reach_value_usd" not in eff.concrete
     assert "reach_indeterminate" not in eff.concrete
-    # ...and no discriminator either: absence of EVERY key is the third state, "no
-    # reach measurement was attempted", distinct from a measured or a floored one.
+    # ...and no discriminator: absence of EVERY key means "no reach measurement attempted".
     assert "reach_determined" not in eff.concrete
     assert "observed_reach_floor_usd" not in eff.concrete
     assert "observed_reach_value_usd" not in eff.details
@@ -941,16 +905,10 @@ def test_code_upgrade_tier0_historical_only_current_fails_is_unknown():
 # ---------------------------------------------------------------------------
 # Backing — the WITHHOLDING branches
 #
-# ``inflow_observed`` was ``true`` on 11/11 rows and ``backing_withheld`` on
-# zero, anywhere. Every one of the four branches below the ASYMMETRIC BURDEN
-# comment had therefore never executed, and they are the adverse half: the
-# negative is what renders as "(unbacked)" and as the inspector's "supply rose
-# alone (dilution)" sentence. Etherfi's mints are deposit-backed conversions, so
-# 11/11 is a property of that corpus, not of the code.
-#
-# Withholding is NOT the negative. Each test below asserts that ``backing`` is
-# ABSENT rather than present-and-false: a mint whose backing could not be
-# measured must not be published as dilution.
+# ``inflow_observed`` was true on 11/11 rows and ``backing_withheld`` on zero, so the four
+# withholding branches had never executed in the corpus (etherfi mints are deposit-backed).
+# Withholding is NOT the negative: each test asserts ``backing`` is ABSENT, not present-and-false,
+# because a mint whose backing could not be measured must not be published as dilution.
 # ---------------------------------------------------------------------------
 
 
@@ -960,10 +918,8 @@ def _mint_block(supply_before: int = 1000, supply_after: int = 1500, logs=()):
 
 
 def test_backing_withheld_when_a_proven_token_slot_kept_the_encoder_filler():
-    """Reason 1 — ``token_param_unresolved``. The static plane PROVED parameter 1
-    carries a token and no seeded retry ever supplied one, so the call was made
-    with a non-token in a known token slot. Nothing about backing is witnessable
-    from it, and the absent inflow is an artifact of the argument."""
+    """Reason 1 — ``token_param_unresolved``. The static plane PROVED parameter 1 carries a token
+    and no seeded retry supplied one, so the absent inflow is an artifact of the argument."""
     zero = "0x" + "00" * 20
     store = RecordingStore()
     eff = recipes.supply(
@@ -979,17 +935,14 @@ def test_backing_withheld_when_a_proven_token_slot_kept_the_encoder_filler():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["supply_delta_sign"] == "mint"
     assert "backing" not in eff.details
-    # The reason is named on the transcript, so a run can say what it could not
-    # prove instead of going quiet.
+    # Named on the transcript so a run can say what it could not prove.
     assert store.stored[-1]["backing_withheld"] == "token_param_unresolved"
 
 
 def test_backing_withheld_when_no_identity_could_fill_the_address_arguments():
-    """Reason 3 — ``prober_address_unidentifiable``. With no principal the
-    encoder wrote ``address(0)`` into every address argument, and a call to a
-    codeless address is a silent no-op inside every safe-transfer wrapper. The
-    mint executed and nothing came in — but the reason nothing came in may be the
-    prober's own zero address, and nothing here can tell which slots those were."""
+    """Reason 3 — ``prober_address_unidentifiable``. With no principal the encoder wrote
+    ``address(0)`` into every address argument, a silent no-op in safe-transfer wrappers; the empty
+    inflow may be the prober's own zero address and nothing can tell which slots those were."""
     zero = "0x" + "00" * 20
     store = RecordingStore()
     eff = recipes.supply(
@@ -1008,19 +961,16 @@ def test_backing_withheld_when_no_identity_could_fill_the_address_arguments():
 
 
 def test_backing_withheld_when_the_prober_supplied_address_is_not_proven_inert():
-    """Reason 2 — ``prober_address_not_proven_inert``. The prober wrote its own
-    identity into an address argument, no inflow was seen, and the differential
-    (same block, reverting code at that address) did NOT reproduce the same
-    delta. The execution depended on an address this prober invented, so the
-    empty inflow describes the argument and not the function."""
+    """Reason 2 — ``prober_address_not_proven_inert``. The prober wrote its own identity into an
+    address argument and the differential (reverting code at that address) did NOT reproduce the
+    delta, so the empty inflow describes the argument, not the function."""
     zero = "0x" + "00" * 20
     principal_word = PRINCIPAL[2:].rjust(64, "0")
     store = RecordingStore()
     eff = recipes.supply(
         simulate=ScriptedSimulate(
             _mint_block(logs=[transfer_log(TOKEN, zero, PRINCIPAL, 500)]),
-            # The inertness differential: the mint now reverts with the suspect
-            # stubbed out, so the pull it made was on the executed path.
+            # Inertness differential: the mint reverts with the suspect stubbed, so its pull was on the executed path.
             SimResult(calls=(ok(uint_ret(1000)), rv(), ok(uint_ret(1000)))),
         ),
         store=store,
@@ -1037,11 +987,9 @@ def test_backing_withheld_when_the_prober_supplied_address_is_not_proven_inert()
 
 
 def test_the_same_call_publishes_dilution_once_the_prober_address_is_proven_inert():
-    """THE DISCRIMINATING SIBLING for the three above, and the reason they are not
-    just "withhold everything". Identical calldata, identical logs; the only
-    change is that the differential REPRODUCES the delta with reverting code at
-    the prober's address, so no pull was silently skipped and the empty inflow is
-    a statement about F. ``inflow_observed: false`` is then earned."""
+    """THE DISCRIMINATING SIBLING of the three above (why they are not "withhold everything").
+    Identical calldata and logs, but the differential REPRODUCES the delta with reverting code at
+    the prober's address, so ``inflow_observed: false`` is earned."""
     zero = "0x" + "00" * 20
     principal_word = PRINCIPAL[2:].rjust(64, "0")
     store = RecordingStore()

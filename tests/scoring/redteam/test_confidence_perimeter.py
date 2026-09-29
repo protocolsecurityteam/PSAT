@@ -1,7 +1,4 @@
-"""Confidence perimeter admission rules.
-
-One of the twenty sections of the former ``test_scoring_redteam.py``.
-"""
+"""Confidence perimeter admission rules."""
 
 from __future__ import annotations
 

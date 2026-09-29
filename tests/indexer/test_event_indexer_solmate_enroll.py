@@ -1,8 +1,6 @@
-"""The event-log indexer enrolls Solmate RolesAuthority role events directly off
-a ``canCall`` descriptor — so the under-resolution fix works even on
-``predicate_trees`` materialized before the enumeration-hint pass existed (the
-bytecode-keyed materialization cache won't carry the hints until rebuilt).
-"""
+"""The event-log indexer enrolls Solmate RolesAuthority role events directly off a ``canCall`` descriptor,
+so it works on ``predicate_trees`` materialized before the enumeration-hint pass existed (the bytecode-keyed cache lacks
+the hints)."""
 
 from __future__ import annotations
 

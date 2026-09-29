@@ -1,12 +1,8 @@
-"""Tag-driven Discord embed rendering — pin the field shape per write target.
+"""Tag-driven Discord embed rendering: pin the field shape per write target.
 
-``_format_governance_embed`` used to branch on event_type to render
-event-specific fields. After the PR-B refactor it drives off
-``effect_tags.writes`` with a per-write-target render table.
-
-These tests pin the regression: every event_type the old branches
-covered must produce the same fields under the new tag-driven path.
-Pure unit tests — no DB queries, no Discord posts.
+``_format_governance_embed`` used to branch on event_type; after the PR-B refactor it drives
+off ``effect_tags.writes``. Every event_type the old branches covered must produce the same
+fields. Pure unit tests.
 """
 
 from __future__ import annotations
@@ -23,9 +19,7 @@ from services.monitoring.notifier import _format_governance_embed as _format_emb
 
 
 class _FakeSession:
-    """No-op session — _format_governance_embed only calls .get() to
-    resolve Protocol / Contract names. Returning None falls back to the
-    address-only title path, which is fine for field-shape assertions."""
+    """No-op session: only .get() is called, and None falls back to the address-only title."""
 
     def get(self, _model, _id):
         return None
@@ -52,14 +46,11 @@ def _make_evt(event_type: str, data: dict, *, address: str = "0x" + "aa" * 20) -
 
 
 def _format_governance_embed(event: MonitoredEvent, session: Any) -> dict:
-    """Test wrapper — casts the duck-typed fake session through Session
-    so pyright doesn't flag the call site. The function only touches
-    ``session.get`` so any object with that method works at runtime."""
+    """Casts the duck-typed fake session through Session so pyright accepts the call site."""
     return _format_embed_real(event, cast(Session, session))
 
 
 def _fields(embed: dict) -> dict[str, dict]:
-    """Map field name → the full field dict for easy lookup."""
     return {f["name"]: f for f in embed["fields"]}
 
 
@@ -84,8 +75,7 @@ def test_ownership_transferred_renders_old_and_new_owner():
 
 
 def test_ownership_transfer_started_renders_via_pending_owner_write():
-    """Ownable2Step intent phase: emitter writes ``pendingOwner`` and the
-    decoder fills old_owner/new_owner via the semantic-key alias."""
+    """Ownable2Step intent phase: emitter writes ``pendingOwner``; decoder fills old/new owner."""
     evt = _make_evt(
         "ownership_transfer_started",
         {
@@ -138,18 +128,16 @@ def test_upgrade_family_renders_new_implementation(event_type):
 
 
 def test_new_implementation_renders_via_synthesis_fallback():
-    """Compound NewImplementation can land with no effect_tags at all.
-    The renderer must synthesize them from ``_HANDROLLED_EVENT_TYPE_TO_TAGS``
-    — no per-event_type render branch, and no silently empty embed."""
+    """Compound NewImplementation can land with no effect_tags; the renderer must synthesize
+    them from ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` rather than render an empty embed."""
     evt = _make_evt("new_implementation", {"implementation": "0x" + "cc" * 20})
     fields = _fields(_format_governance_embed(evt, _FakeSession()))
     assert fields["New Implementation"]["value"] == "`0x" + "cc" * 20 + "`"
 
 
 def test_diamond_cut_renders_first_facet_as_implementation():
-    """EIP-2535 facet swap: the upgrade-history decoder stores the
-    first new facet address under ``implementation`` so it surfaces
-    under the upgrade-style ``New Implementation`` label."""
+    """EIP-2535 facet swap: the first new facet is stored under ``implementation`` so it
+    renders as ``New Implementation``."""
     evt = _make_evt(
         "diamond_cut",
         {
@@ -177,8 +165,7 @@ def test_admin_changed_renders_old_and_new_admin():
 
 
 def test_admin_changed_compound_single_new_admin():
-    """Compound's NewAdmin only emits the new admin; the embed surfaces
-    only the New Admin field — no fabricated Old Admin."""
+    """Compound's NewAdmin carries only the new admin: no fabricated Old Admin."""
     evt = _make_evt(
         "admin_changed",
         {
@@ -232,7 +219,6 @@ def test_role_family_renders_role_account_sender(event_type):
     assert fields["Role"]["value"] == "`0x" + "00" * 32 + "`"
     assert fields["Account"]["value"] == "`0x" + "ee" * 20 + "`"
     assert fields["Sender"]["value"] == "`0x" + "ff" * 20 + "`"
-    # Role is full-width; account and sender share a row.
     assert fields["Role"]["inline"] is False
     assert fields["Account"]["inline"] is True
     assert fields["Sender"]["inline"] is True
@@ -261,7 +247,6 @@ def test_threshold_changed_renders_integer_threshold_inline():
     )
     fields = _fields(_format_governance_embed(evt, _FakeSession()))
     assert fields["New Threshold"]["value"] == "3"
-    # No backticks around integer values
     assert "`" not in fields["New Threshold"]["value"]
     assert fields["New Threshold"]["inline"] is True
 
@@ -283,8 +268,7 @@ def test_delay_changed_renders_old_and_new_delays_inline():
 
 
 def test_state_changed_poll_keeps_synthetic_field_shape():
-    """Poll events don't go through a decoder and don't carry tags —
-    the renderer keeps the (Field, Old, New) shape directly."""
+    """Poll events carry no decoder or tags; the renderer keeps the (Field, Old, New) shape."""
     evt = _make_evt(
         "state_changed_poll",
         {
@@ -305,9 +289,8 @@ def test_state_changed_poll_keeps_synthetic_field_shape():
 
 
 def test_legacy_event_without_tags_renders_via_synthesis_fallback():
-    """A persisted MonitoredEvent from before tag synthesis landed
-    (no ``effect_tags`` in ``data``) still renders correctly — the
-    embed function synthesizes tags from event_type."""
+    """A persisted event from before tag synthesis (no ``effect_tags``) still renders via
+    synthesis from event_type."""
     evt = _make_evt(
         "ownership_transferred",
         {
@@ -321,11 +304,8 @@ def test_legacy_event_without_tags_renders_via_synthesis_fallback():
 
 
 def test_custom_named_slot_renders_via_generic_fallback():
-    """A protocol with a custom slot ``protocolAdmin`` (not in the
-    render table) gets rendered via the generic name-match fallback:
-    label derived from the write target, value pulled from
-    data["newProtocolAdmin"]. This is the rendering counterpart of
-    the custom-slot dispatch story in unified_watcher / reanalysis."""
+    """A custom slot ``protocolAdmin`` (not in the render table) renders via the generic
+    name-match fallback: label from the write target, value from data["newProtocolAdmin"]."""
     evt = _make_evt(
         "controller_changed:state_variable:protocolAdmin",
         {
@@ -339,8 +319,7 @@ def test_custom_named_slot_renders_via_generic_fallback():
 
 
 def test_custom_slot_bare_name_falls_through_when_no_new_prefix():
-    """If the ABI input wasn't named ``new<X>`` the decoder stores the
-    value under the bare slot name. The generic fallback finds it."""
+    """Without a ``new<X>`` arg name the decoder stores the bare slot name; the fallback finds it."""
     evt = _make_evt(
         "controller_changed:state_variable:guardian",
         {
@@ -356,9 +335,8 @@ def test_custom_slot_bare_name_falls_through_when_no_new_prefix():
 
 
 def test_synthetic_write_target_no_extra_fields():
-    """Synthetic markers like ``_safe_op`` aren't rendered by the
-    generic fallback (underscore-prefixed targets are activity markers,
-    not addressable slots). The standard envelope fields still appear."""
+    """Underscore-prefixed markers like ``_safe_op`` are activity markers, not slots, so the
+    generic fallback doesn't render them; envelope fields still appear."""
     evt = _make_evt(
         "safe_tx_executed",
         {
@@ -369,7 +347,6 @@ def test_synthetic_write_target_no_extra_fields():
     )
     embed = _format_governance_embed(evt, _FakeSession())
     field_names = {f["name"] for f in embed["fields"]}
-    # Standard header
     assert "Contract" in field_names
     assert "Chain" in field_names
     assert "Event" in field_names
@@ -379,9 +356,7 @@ def test_synthetic_write_target_no_extra_fields():
 
 
 def test_unknown_event_type_with_no_tags_renders_only_envelope():
-    """Defense-in-depth: a completely unknown event_type with no tags
-    renders the envelope (Contract/Chain/Event/Block/Tx) without
-    error."""
+    """Defense-in-depth: an unknown event_type with no tags renders the envelope without error."""
     evt = _make_evt(
         "totally_unknown_event_type",
         {"some_field": "value"},
@@ -399,10 +374,8 @@ def test_unknown_event_type_with_no_tags_renders_only_envelope():
 
 
 def test_color_critical_derives_from_write_target():
-    """Red for events that mutate critical control state — derived from
-    the tag write target (owner / authority / paused), not the event_type.
-    A custom ABI that classifies as ownership_transferred via tags gets
-    the same red color without per-event_type maintenance."""
+    """Red for critical control writes (owner / authority / paused), derived from tags, so a
+    custom ABI classified as ownership_transferred gets red with no per-event_type entry."""
     cases = [
         ("ownership_transferred", {"writes": ["owner"]}),
         ("authority_updated", {"writes": ["authority"]}),
@@ -418,9 +391,7 @@ def test_color_critical_derives_from_write_target():
 
 
 def test_color_warning_derives_from_upgrade_write_targets():
-    """Orange for upgrade-shape writes (implementation, beacon, facets,
-    admin, pendingImplementation) and intent-phase pendingOwner. All
-    derived from tags — no per-event_type entry needed."""
+    """Orange for upgrade-shape writes and intent-phase pendingOwner, all tag-derived."""
     cases = [
         ("upgraded", {"writes": ["implementation"], "delegates": True}),
         ("admin_changed", {"writes": ["admin"]}),
@@ -454,10 +425,8 @@ def test_color_amber_for_operational_params():
 
 
 def test_color_success_failure_for_safe_execution_via_event_type_override():
-    """Safe execution events split by outcome — green for success, red
-    for failure. Kept event_type-keyed via _EVENT_TYPE_COLOR_OVERRIDES
-    because both share writes=['_safe_op'] / writes=['_safe_module_op']
-    and the schema deliberately doesn't carry an outcome marker."""
+    """Safe execution outcome: green success, red failure. Keyed on event_type via
+    _EVENT_TYPE_COLOR_OVERRIDES since both share writes=['_safe_op'] with no outcome marker."""
     for et in ("safe_tx_executed", "safe_module_executed"):
         evt = _make_evt(et, {"effect_tags": {"writes": ["_safe_op"]}})
         assert _format_governance_embed(evt, _FakeSession())["color"] == 0x2ECC71, et
@@ -468,8 +437,7 @@ def test_color_success_failure_for_safe_execution_via_event_type_override():
 
 
 def test_color_phase_split_for_timelock_via_event_type_override():
-    """Timelock scheduled vs executed — blue (queued) vs orange (applied).
-    Same writes=['_timelock_op']; the phase distinction lives in
+    """Timelock scheduled (blue) vs executed (orange): same writes, phase lives in
     _EVENT_TYPE_COLOR_OVERRIDES."""
     scheduled = _make_evt("timelock_scheduled", {"effect_tags": {"writes": ["_timelock_op"]}})
     assert _format_governance_embed(scheduled, _FakeSession())["color"] == 0x3498DB
@@ -479,16 +447,14 @@ def test_color_phase_split_for_timelock_via_event_type_override():
 
 
 def test_color_state_changed_poll_uses_override():
-    """The synthetic poll event has no tags and no decoder — color
-    resolved through the event_type override map."""
+    """The synthetic poll event has no tags or decoder; color comes from the override map."""
     evt = _make_evt("state_changed_poll", {"field": "owner"})
     assert _format_governance_embed(evt, _FakeSession())["color"] == 0x9B59B6
 
 
 def test_color_multi_write_priority_picks_most_critical():
-    """Ownable2Step ``acceptOwnership`` writes BOTH owner and
-    pendingOwner. Color priority resolves to red (owner) over orange
-    (pendingOwner) — committed control changes outrank intent phase."""
+    """Ownable2Step ``acceptOwnership`` writes owner AND pendingOwner: red (committed)
+    outranks orange (intent)."""
     evt = _make_evt(
         "ownership_transferred",
         {"effect_tags": {"writes": ["owner", "pendingOwner"]}},
@@ -497,10 +463,7 @@ def test_color_multi_write_priority_picks_most_critical():
 
 
 def test_color_legacy_event_synthesis_fallback():
-    """A legacy event with no effect_tags still resolves correctly via
-    the canonical event_type → tags synthesis fallback in
-    _HANDROLLED_EVENT_TYPE_TO_TAGS."""
-    # No effect_tags in data
+    """A legacy event with no effect_tags resolves via _HANDROLLED_EVENT_TYPE_TO_TAGS."""
     evt = _make_evt("ownership_transferred", {"new_owner": "0x" + "11" * 20})
     assert _format_governance_embed(evt, _FakeSession())["color"] == 0xFF0000
 

@@ -1,8 +1,7 @@
 """Unit-level adversarial cases for the F3/F7/F8 qualification machinery.
 
-The corpus test (``test_witness_corpus_completeness``) proves the whole
-derivation on compiled Solidity; these pin the individual judgements at the
-shapes that are hard or impossible to reach from source — an OR-shaped gate, a
+The corpus test (``test_witness_corpus_completeness``) proves the whole derivation on compiled
+Solidity; these pin judgements at shapes hard to reach from source: an OR-shaped gate, a
 struct whose members are not word-projectable, an ambiguous correspondence.
 """
 
@@ -56,9 +55,8 @@ def _leaf(**kwargs):
 
 _OWNER_GATE = _leaf()
 _BUSINESS = _leaf(authority_role="business")
-# ``require(!denied[msg.sender])`` — a cofinite denylist admits every address it
-# has not named, which the resolution plane's earned-public projection calls
-# open. It carries an authority role all the same.
+# ``require(!denied[msg.sender])``: a cofinite denylist admits every unnamed address, which
+# the resolution plane's earned-public projection calls open. It carries an authority role anyway.
 _DENYLIST = _leaf(
     kind="membership",
     operator="falsy",
@@ -93,8 +91,8 @@ def test_restriction_requires_every_path_to_pass_a_gate(tree, restricted):
 
 
 def test_a_value_movement_call_is_not_a_gate():
-    """``require(token.transferFrom(msg.sender, …))`` taints from the caller and
-    moves the caller's own assets. The gate-shape guard keeps it out."""
+    """``require(token.transferFrom(msg.sender, …))`` taints from the caller and moves the
+    caller's own assets; the gate-shape guard keeps it out."""
     leaf = _leaf(
         kind="external_bool",
         operator="truthy",
@@ -108,8 +106,7 @@ def test_a_value_movement_call_is_not_a_gate():
 
 
 def test_a_function_without_a_tree_is_not_determined():
-    """No tree means the gate question was never answered for it — which is not
-    an answer of "no gate", and equally not one of "gated"."""
+    """No tree means the gate question was never answered: not "no gate", and not "gated"."""
     assert restricted_function_signatures(None) == frozenset()
     assert restricted_function_signatures({"schema_version": "semantic", "error": "boom"}) == frozenset()
 
@@ -129,10 +126,9 @@ def test_one_unrestricted_path_demotes_the_event():
 
 
 def test_the_kill_switch_cannot_promote(monkeypatch):
-    """``PSAT_AUTHORITY_EARNED_PUBLIC=0`` turns the resolution plane's
-    earned-public projection off, which there NARROWS what publishes. Here the
-    same test only withholds a promotion, so honouring the switch would make it
-    a promoter: a cofinite denylist would read as a proof of restriction."""
+    """``PSAT_AUTHORITY_EARNED_PUBLIC=0`` turns off the resolution plane's earned-public
+    projection, which there NARROWS publishing. Here it would only withhold a promotion, so
+    honouring it would make it a promoter: a cofinite denylist would read as proof of restriction."""
     for value in ("0", "1"):
         monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", value)
         assert restricted_function_signatures(_trees(**{"f()": _DENYLIST})) == frozenset()
@@ -154,7 +150,7 @@ def _fact(var="s", member=None, hygiene="normal", origin: str | None = "body"):
 
 
 def _guard_write(var="s"):
-    """The modifier's own set-and-restore — the write the latch proof is about."""
+    """The modifier's own set-and-restore, the write the latch proof is about."""
     return _fact(var=var, hygiene="reentrancy_guard", origin="guard")
 
 
@@ -190,11 +186,9 @@ def test_writer_hygiene_subtracts_only_what_is_proven(facts, member_path, surviv
 
 
 def test_the_latch_class_alone_subtracts_nothing():
-    """``hygiene_class`` carries a name fallback ({locked, _status, *reentran*})
-    with no IR behind it, and it is VARIABLE-granular — once a var is a proven
-    latch every write of it is stamped, including an admin setter's. Neither may
-    delete a controller on its own: the drop needs the var in the IR-proven set
-    AND the write to be the modifier's own."""
+    """``hygiene_class`` has a name fallback ({locked, _status, *reentran*}) with no IR behind
+    it and is VARIABLE-granular (an admin setter's write is stamped too). Neither may delete a
+    controller alone: the drop needs the var in the IR-proven set AND the modifier's own write."""
     guard = [_guard_write()]
     assert _writer_survives_hygiene(guard, "s", None, frozenset()) is True
     assert _writer_survives_hygiene(guard, "s", None, _IR_PROVEN) is False
@@ -204,8 +198,7 @@ def test_the_latch_class_alone_subtracts_nothing():
 
 
 def test_the_opaque_set_reads_both_shapes_the_artifact_records():
-    """Inline-assembly storage access and a delegatecall are the two
-    unattributable write shapes ``effects`` records per function."""
+    """Inline-assembly storage access and delegatecall are the two unattributable write shapes."""
     from services.static.contract_analysis_pipeline.tracking import _unattributable_write_functions
 
     effects = {
@@ -329,11 +322,9 @@ def test_a_record_naming_no_variable_mints_no_member_type():
     assert member_witness_mapping_var({"key_position": 0, "direction": "add"}) == ""
     spec = extract_governance_topics(_plan_with({"key_position": 0, "direction": "add"}))[0]
     assert spec["event_type"] == "state_changed:state_variable:m"
-    # And the TIER falls with the type. A spec that publishes under the slot
-    # stem while classified self_describing would carry an entry key into
-    # last_known_state and a ControllerValue row as the slot's value: the
-    # is_member_changed_event_type guards key off the type, so a promotion the
-    # type refused must not survive.
+    # The TIER falls with the type: a spec publishing under the slot stem while classified
+    # self_describing would put an entry key into last_known_state / ControllerValue as the
+    # slot's value, since is_member_changed_event_type guards key off the type.
     assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
     assert "member_witness" not in spec
 
@@ -348,9 +339,8 @@ def test_a_key_outside_the_events_arg_list_mints_no_member_type():
 
 
 def test_a_log_that_cannot_name_the_entry_publishes_nothing():
-    """A spec that DID qualify, decoding a log whose args do not reach the
-    proven key position: the row would claim "some entry of m moved" and name
-    none. Refused, exactly as an undecodable log is."""
+    """A qualified spec decoding a log whose args miss the proven key position would claim
+    "some entry of m moved" and name none; refused, like an undecodable log."""
     spec = {
         "event_type": "member_changed:m",
         "inputs": [{"name": "user", "type": "address", "indexed": True}],
@@ -369,8 +359,8 @@ def test_a_log_that_cannot_name_the_entry_publishes_nothing():
 
 
 def test_a_mapping_name_that_would_overflow_the_column_mints_no_member_type():
-    """``monitored_events.event_type`` is the row's identity; a truncated one
-    names a different mapping."""
+    """``monitored_events.event_type`` is the row's identity; a truncated one names a
+    different mapping."""
     long_name = "m" * MAX_EVENT_TYPE_LENGTH
     spec = extract_governance_topics(_plan_with({"mapping_name": long_name, "key_position": 0, "direction": "add"}))[0]
     assert not is_member_changed_event_type(spec["event_type"])
@@ -386,9 +376,8 @@ def test_an_unproven_writer_mints_no_member_type(openness):
 
 
 def test_one_topic0_on_two_controllers_resolves_by_evidence():
-    """A donated topic0 can appear under several controllers. Which spec wins
-    decided the published claim, and it used to be decided by the controllers'
-    alphabetical label order."""
+    """A donated topic0 can appear under several controllers; which spec wins decides the
+    published claim, and it used to be decided by alphabetical label order."""
     topic0 = "0x" + "ab" * 32
     weak = {
         "controller_id": "state_variable:aaa",
@@ -413,11 +402,9 @@ def test_one_topic0_on_two_controllers_resolves_by_evidence():
 
 
 def test_a_legacy_witness_under_a_slot_type_does_not_promote():
-    """``_resolve_spec_tier`` re-classifies a spec persisted before the taxonomy.
-    A record honoured there regardless of the published type would promote a row
-    that publishes as ``state_changed:`` — and every slot-shaped consumer keys
-    off the type, so the entry key would land in ``last_known_state`` and in a
-    ``ControllerValue`` row as the slot's value."""
+    """``_resolve_spec_tier`` re-classifies a spec persisted before the taxonomy. Honouring a
+    record regardless of published type would promote a row publishing as ``state_changed:``,
+    landing the entry key in ``last_known_state`` / ``ControllerValue`` as the slot's value."""
     from services.monitoring.unified_watcher import _resolve_spec_tier
 
     mc = SimpleNamespace(monitoring_config={"polling_plan": []})
@@ -435,8 +422,8 @@ def test_a_legacy_witness_under_a_slot_type_does_not_promote():
 
 
 def test_member_change_never_reflects_into_last_known_state():
-    """One entry of a mapping is not the mapping's value. The stub has no
-    SQLAlchemy identity, so a path that did NOT skip would raise on the write."""
+    """One entry of a mapping is not the mapping's value. The stub has no SQLAlchemy identity,
+    so a path that did NOT skip would raise on the write."""
     from services.monitoring.unified_watcher import _update_state_from_event
 
     mc = SimpleNamespace(last_known_state={"m": "before"})
@@ -448,8 +435,7 @@ def test_member_change_never_reflects_into_last_known_state():
 
 
 def test_member_change_never_writes_a_controller_value_row():
-    """Same reason. ``session=None`` makes the skip provable: any row write
-    would dereference it."""
+    """Same reason. ``session=None`` makes the skip provable: any row write would dereference it."""
     from services.monitoring.unified_watcher import _sync_relational_tables
 
     mc = SimpleNamespace(contract_id=1, address="0x" + "11" * 20, chain="ethereum")

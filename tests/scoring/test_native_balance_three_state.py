@@ -1,16 +1,12 @@
-"""B2 — the native/asset three-state, and the blast radius of delivering it.
+"""B2: the native/asset three-state, and the blast radius of delivering it.
 
-B2's own damage population is 0 rows, so nothing here is calibrated on the
-corpus; every arm is argued from the code contract. What these tests defend is
-the DELIVERY: the discriminator had to land somewhere that does not make
+B2's own damage population is 0 rows, so every arm is argued from the code
+contract. What is defended is the DELIVERY: the discriminator must not make
 ``contract_balances`` row existence mean something new, because
-``services.effects.selection`` consumes that existence as "this deployment holds
-this asset" and that set feeds the published reach rows.
-
-The second half of the file is the reader side, which is where this unit's own
-gap-widening risk actually lives: an absence manufactured by a failed fetch, a
-retention prune, or a view predicate becomes a published ``$0.00`` two hops
-downstream.
+``services.effects.selection`` reads it as "this deployment holds this asset"
+and feeds the published reach rows. The second half is the reader side, where
+an absence manufactured by a failed fetch, a retention prune or a view predicate
+becomes a published ``$0.00`` two hops downstream.
 """
 
 from __future__ import annotations
@@ -199,10 +195,10 @@ class TestCompletenessMappingIsTotalAndCannotSayComplete:
         assert _completeness_from_fetch(ASSET_SET_STATUS_RETURNED_ASSETS) == HOLDINGS_COMPLETENESS_NOT_DETERMINED
 
     def test_only_the_status_witnesses_the_cap(self):
-        """The fetch's own status, and never a length.
+        """The fetch's own status, never a length.
 
-        The fetch pages the endpoint to exhaustion, so an exhausted list of exactly
-        ``TOKEN_BALANCE_PAGE_SIZE`` entries — or more — was never cut off. Only
+        The fetch pages to exhaustion, so an exhausted list of exactly
+        ``TOKEN_BALANCE_PAGE_SIZE`` entries or more was never cut off; only
         ``at_page_cap`` says the stored list is a prefix.
         """
         assert _completeness_from_fetch(ASSET_SET_STATUS_AT_PAGE_CAP) == HOLDINGS_COMPLETENESS_AT_PAGE_CAP
@@ -382,9 +378,9 @@ class TestFailedFetchIsAbsentNotZero:
     """A11 — an absent balance must not become a published ``$0.00`` floor.
 
     ``recipes._add_reach`` publishes ``graph.deployment_balance.get(acting,
-    _ZERO_USD)`` as ``observed_reach_floor_usd``. A LEFT JOIN, or a 0 entry for a
-    contract whose fetch failed, would put a confident-looking zero on a function
-    that may move millions.
+    _ZERO_USD)`` as ``observed_reach_floor_usd``; a LEFT JOIN, or a 0 entry for a
+    failed-fetch contract, would put a confident zero on a function that may move
+    millions.
     """
 
     def test_contract_with_only_a_failed_fetch_has_no_balance_key(self, db_session):
@@ -422,7 +418,6 @@ class TestHoldingsRequireAPositiveWitness:
         assert real.raw_balance == "5"
 
     def test_a_fetch_row_never_becomes_a_holding(self, db_session):
-        """The three-state lives on a plane whose rows are not holdings at all."""
         proto = _protocol(db_session, "3s-plane")
         c = _contract(db_session, proto.id, _addr("62"))
         _fetch(db_session, c, native=NATIVE_STATUS_PROVEN_ZERO, block=25643300, assets=ASSET_SET_STATUS_RETURNED_EMPTY)
@@ -436,9 +431,9 @@ class TestHoldingsRequireAPositiveWitness:
 class TestReachInputsOnAMixedFetchContract:
     """A14(c) — the whole reader chain over a contract that HAS fetches.
 
-    The corpus-wide differential can only show the legacy path is untouched
-    (every new column is NULL on all 1617 rows). This is the arm that exercises
-    the new plane end to end and pins the exact tuple.
+    The corpus-wide differential only shows the legacy path is untouched (every
+    new column is NULL on all 1617 rows); this exercises the new plane end to
+    end and pins the exact tuple.
     """
 
     def test_exact_asset_holding_tuple(self, db_session):
@@ -531,9 +526,8 @@ class TestSnapshotDoesNotPublishAFailedReadAsMoney:
 class TestAbsentNativeRowIsNeverZero:
     """The reject-list item itself: an absent native row must not read as $0.
 
-    The production consumer is ``recipes._add_reach``, which returns before
-    writing anything when the holder set is empty — so the key that means
-    "measured reach" is ABSENT rather than present-and-zero.
+    ``recipes._add_reach`` returns before writing anything when the holder set is
+    empty, so the "measured reach" key is ABSENT, not present-and-zero.
     """
 
     def test_no_holder_entry_and_no_zero_valued_pair(self, db_session):
@@ -561,10 +555,10 @@ class TestAbsentNativeRowIsNeverZero:
 class TestRowlessNonFailedFetchIsAnIntegrityViolation:
     """R3 — a class status that outruns its rows must flip ``partial``.
 
-    The writers can no longer produce this shape (a non-failed class status is a
-    promise its row set was written), so it is constructed directly here. If it
-    ever appears again the view will publish the class from a row set nobody
-    wrote, and the snapshot must refuse to call that a measurement.
+    The writers can no longer produce this shape (a non-failed class status
+    promises its row set was written), so it is constructed directly. If it
+    reappears the view publishes the class from a row set nobody wrote, and the
+    snapshot must refuse to call that a measurement.
     """
 
     def test_proven_nonzero_with_no_native_row_is_missing(self, db_session):
@@ -581,7 +575,6 @@ class TestRowlessNonFailedFetchIsAnIntegrityViolation:
         assert partial is True
 
     def test_proven_zero_with_no_native_row_is_NOT_missing(self, db_session):
-        """The empty row set IS the observation here — no violation."""
         proto = _protocol(db_session, "3s-rowless-zero")
         c = _contract(db_session, proto.id, _addr("c2"))
         _fetch(
@@ -598,8 +591,8 @@ class TestRowlessNonFailedFetchIsAnIntegrityViolation:
         """A page whose every entry was zero-balance is a real observation.
 
         ``get_token_balances_page`` drops those entries, so ``returned_assets``
-        with zero persisted rows is reachable without any integrity break — which
-        is why there is no asset-class analogue of the native rule.
+        with zero persisted rows is reachable without an integrity break; hence
+        no asset-class analogue of the native rule.
         """
         proto = _protocol(db_session, "3s-rowless-assets")
         c = _contract(db_session, proto.id, _addr("c3"))
@@ -620,10 +613,9 @@ class TestViewCurrencyIsPerContractNotPerObservedAddress:
     """R4 — documented semantics, pinned.
 
     The view resolves currency per ``contract_id`` and IGNORES
-    ``observed_address``: a contract fetched at two different addresses publishes
-    whichever writer wrote LAST. That is deliberate — it preserves the
-    pre-migration last-writer-wins DELETE semantics, and per-address currency
-    would publish both address' rows at once, double-counting the proxy/impl
+    ``observed_address``: a contract fetched at two addresses publishes whichever
+    writer wrote LAST. Deliberate: it preserves the pre-migration last-writer-wins
+    DELETE semantics, and per-address currency would double-count proxy/impl
     pairs in ``build_authority_graph``'s per-contract sum.
     """
 
@@ -655,11 +647,11 @@ class TestViewCurrencyIsPerContractNotPerObservedAddress:
 class TestValuePlaneReadsAssetSetCompleteness:
     """The scorer's half of the at-cap fact: it reaches the sheet, not just the row.
 
-    ``asset_set_status`` was written by the producers and read by nothing on the
-    scoring side, so a sheet assembled from a list cut off at entry 100
-    published the same state as one assembled from a whole list — and
-    ``ceiling_for`` bounded a move from above with a prefix of the holdings. The
-    plane carries the truncated case per ENTITY so the ceiling can refuse it.
+    ``asset_set_status`` was written by producers and read by nothing on the
+    scoring side, so a sheet from a list cut off at entry 100 published the same
+    state as one from a whole list, and ``ceiling_for`` bounded a move from above
+    with a prefix of the holdings. The plane carries the truncated case per
+    ENTITY so the ceiling can refuse it.
     """
 
     def test_the_latest_at_cap_fetch_marks_the_entity_truncated(self, db_session):
@@ -697,7 +689,6 @@ class TestValuePlaneReadsAssetSetCompleteness:
         assert load_value_plane(db_session, proto.id).asset_set_truncated == set()
 
     def test_a_capped_implementation_truncates_the_proxy_sheet_it_folds_onto(self, db_session):
-        """One sheet: the alias fold makes the two accounts one asset list."""
         from services.scoring.planes import load_value_plane
 
         proto = _protocol(db_session, "3s-plane-atcap-alias")
@@ -720,13 +711,12 @@ class TestValuePlaneReadsAssetSetCompleteness:
 class TestValuePlaneReadsAChainScanAsAnEmptySheet:
     """The other half of the completeness fact: the earned POSITIVE.
 
-    ``asset_set_truncated`` carries "this list is a prefix". Nothing carried
-    "this list is everything", so a contract whose every quantity was witnessed
-    zero still published ``no_rows`` — an absence where a measurement had been
-    made — and ``ceiling_for`` refused it under "no balance was ever observed".
-    The witness is the chain's own transfer history through a named block, and it
-    is the ONLY one: a third-party index answering "no tokens" is the trigger
-    that sends the producer to the chain, never the proof (§2 of
+    Nothing carried "this list is everything", so a contract whose every quantity
+    was witnessed zero still published ``no_rows`` (an absence where a
+    measurement had been made) and ``ceiling_for`` refused it under "no balance
+    was ever observed". The witness is the chain's own transfer history through a
+    named block, and the ONLY one: a third-party index answering "no tokens"
+    triggers the producer to go to the chain, never proves (§2 of
     SHEET_OBSERVATION_SPEC.md).
     """
 
@@ -768,10 +758,10 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert plane.provenance["asset_set_completeness"]["sheets_published_empty"] == 1
 
     def test_the_etherscan_negative_alone_publishes_nothing(self, db_session):
-        """No scan, same empty answer, same pinned zero — and no $0.
+        """No scan, same empty answer, same pinned zero, and no $0.
 
-        This is §2's ruling as a test: the index's empty list is a completeness
-        claim about the index, and under-indexing is precisely its failure mode.
+        §2's ruling as a test: the index's empty list is a completeness claim
+        about the index, and under-indexing is precisely its failure mode.
         """
         from services.scoring import planes as P
 
@@ -799,10 +789,9 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
     def test_the_scan_publishes_whatever_the_index_answered(self, db_session, answer: str):
         """The Etherscan status is not a conjunct in either direction.
 
-        An at-cap sheet that swept clean, a persistent failure that swept clean
-        and an entity that never got its own index answer are all publishable
-        once the SCAN proves them empty — so the sheet state reads the scan and
-        never the answer that triggered it.
+        At-cap, persistently failing and never-indexed sheets are all publishable
+        once the SCAN proves them empty, so the sheet state reads the scan, never
+        the answer that triggered it.
         """
         from services.scoring import planes as P
 
@@ -834,7 +823,6 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert plane.total(key) is None
 
     def test_a_typed_receipt_read_back_to_zero_is_a_resolved_one(self, db_session):
-        """Arrived and provably gone. The evidence resolved, so it refuses nothing."""
         from services.scoring import planes as P
 
         proto = _protocol(db_session, "3s-plane-typed-zero")
@@ -867,9 +855,9 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         """The alias fold makes two accounts one asset list, so both must be scanned.
 
         No exemption for an implementation nothing has read: its rows fold into
-        this sheet, so publishing the sheet empty asserts that its address holds
-        nothing, and nobody looked. The refusal carries its own token and names
-        the address, because one producer cycle closes it.
+        this sheet, so publishing it empty asserts its address holds nothing and
+        nobody looked. The refusal carries its own token and names the address,
+        because one producer cycle closes it.
         """
         from services.scoring import planes as P
 
@@ -899,7 +887,6 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert plane.sheet_state(proxy_key) == P.SHEET_UNPRICED
 
     def test_a_capped_account_contradicts_the_scan_and_the_refusal_wins(self, db_session):
-        """Two witnesses of one sheet that disagree prove nothing together."""
         from services.scoring import planes as P
 
         proto = _protocol(db_session, "3s-plane-contradiction")
@@ -930,11 +917,10 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
     def test_an_implementation_nobody_ever_read_refuses_the_sheet(self, db_session):
         """The fail-open this rule closes, in its live shape.
 
-        The implementation has one fetch and it was observed AT THE PROXY — the
-        divergent-address policy's legacy. Nothing has ever read the
-        implementation's own address, so the proxy's sheet cannot be shown whole
-        however cleanly the proxy itself sweeps, and "we never looked" is
-        not_determined rather than $0.
+        The implementation has one fetch, observed AT THE PROXY (the
+        divergent-address policy's legacy). Nothing has read the implementation's
+        own address, so the proxy's sheet cannot be shown whole, and "we never
+        looked" is not_determined rather than $0.
         """
         from services.scoring import planes as P
 
@@ -972,11 +958,11 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert reread.sheet_state(proxy_key) == P.SHEET_PROVEN_EMPTY
 
     def test_a_scan_filed_against_a_row_but_issued_elsewhere_scans_nothing(self, db_session):
-        """A fetch names the contract it belongs to and the address it read.
+        """A fetch names its contract and the address it read.
 
         The recipient-topic filter that makes a scan a proof is built from the
-        second, so a scan of one address filed against another contract's row
-        proves nothing about that contract's address.
+        address, so a scan of one address filed against another contract's row
+        proves nothing about that contract.
         """
         from services.scoring import planes as P
 
@@ -995,11 +981,10 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
     def test_two_accounts_that_disagree_about_the_native_balance_publish_neither(self, db_session):
         """A folded account's zero is not this entity's zero.
 
-        Live shape: a proxy holding ETH read ``proven_nonzero`` at its own
-        address while its implementation row carried a stale ``proven_zero``, and
-        the higher ``contracts.id`` won the map. The polarities disagree, one of
-        them is wrong about this entity, and the plane cannot say which — so it
-        publishes the third state and the sheet earns no empty.
+        Live shape: a proxy holding ETH read ``proven_nonzero`` at its own address
+        while its implementation row carried a stale ``proven_zero``, and the
+        higher ``contracts.id`` won the map. The plane cannot say which polarity
+        is wrong, so it publishes the third state and the sheet earns no empty.
         """
         from services.scoring import planes as P
 
@@ -1024,9 +1009,8 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
     def test_the_entitys_own_account_is_what_answers_its_native_balance(self, db_session):
         """Agreeing polarities, different heights: the entity's own read wins.
 
-        Both accounts say proven_zero, so nothing is refused — but the block
-        published is the one read AT the entity, not whichever folded row sorted
-        last.
+        Both accounts say proven_zero, so nothing is refused, but the block
+        published is the one read AT the entity, not whichever row sorted last.
         """
         from services.scoring import planes as P
 
@@ -1050,19 +1034,16 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
 class TestValuePlaneReadsEntityKeyedSheets:
     """A perimeter entity with no ``contracts`` row still has a balance sheet.
 
-    Proven-codeless principals — Safe owners, capability principals — are in the
-    scored perimeter and have no ``contracts`` row at all, so nothing could read
-    them and their sheets published ``no_rows`` forever: not "holds nothing",
-    not "holds something", but "nobody looked". Their records are keyed on
-    ``(chain, address)`` instead, and the plane reads them through the SAME
-    conjunction it applies to a contract — never a weaker one because the
-    account happens to be absent from a table.
+    Proven-codeless principals (Safe owners, capability principals) are in the
+    scored perimeter with no ``contracts`` row, so nothing could read them and
+    their sheets published ``no_rows`` forever: "nobody looked". Their records are
+    keyed on ``(chain, address)`` and the plane reads them through the SAME
+    conjunction as a contract, never a weaker one.
     """
 
     SCAN_BASIS = "chain log sweep of Transfer/TransferSingle/TransferBatch, blocks 0-21000000"
 
     def _eoa_node(self, session, protocol_id: int, host: Contract, address: str) -> None:
-        """The earned ``eth_getCode`` witness that puts an address in the population."""
         session.add(
             ControlGraphNode(
                 contract_id=host.id,
@@ -1161,8 +1142,8 @@ class TestValuePlaneReadsEntityKeyedSheets:
     def test_an_entity_outside_the_earned_eoa_witness_is_not_read_at_all(self, db_session):
         """A record with no getCode witness behind it is not admitted by existence.
 
-        Rows exist for this address; nothing says the address is codeless. The
-        plane's population is the witness, never the row.
+        Rows exist for this address, but nothing says it is codeless. The plane's
+        population is the witness, never the row.
         """
         from services.scoring import planes as P
 

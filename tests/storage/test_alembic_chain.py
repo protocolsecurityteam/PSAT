@@ -43,16 +43,10 @@ def test_no_branched_revisions():
 def test_no_autogenerate_drift_between_models_and_migrations():
     """The migrations and ``db.models`` describe the same schema.
 
-    This is the gate the mapped-view filter in ``alembic/env.py`` depends on.
-    ``ContractBalanceLatest`` maps a VIEW, and Alembic cannot tell a mapped view
-    from a mapped table — without the ``include_object`` filter it would report
-    the view as a missing TABLE here, and a later autogenerate would emit a
-    ``CREATE TABLE`` that shadows it. Asserting no drift is what proves the
-    filter is doing its job rather than merely being present.
-
-    It also catches the ordinary case: a column added to a model and not to a
-    migration, which shows up in production as ``UndefinedColumn``.
-    """
+    Also the gate the mapped-view filter in ``alembic/env.py`` depends on: Alembic can't tell the
+    ``ContractBalanceLatest`` VIEW from a table, so without ``include_object`` it would report a
+    missing TABLE here and a later autogenerate would emit a shadowing ``CREATE TABLE``. Also
+    catches a model column missing from a migration (``UndefinedColumn`` in production)."""
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
     from sqlalchemy import create_engine

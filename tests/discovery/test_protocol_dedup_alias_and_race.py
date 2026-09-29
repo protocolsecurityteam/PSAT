@@ -1,22 +1,9 @@
 """Protocol dedup regression guards: alias-driven merge, slug race, hostname match.
 
-Originally POC reproductions of three concrete issues raised in code review.
-After the fixes landed they were inverted into regression guards:
-
-(1) ``test_orphan_duplicates_merge_via_aliases`` — passing ``aliases`` to
-    ``get_or_create_protocol`` pulls every NULL-slug row sharing the family
-    onto the slug-keyed row and reassigns FK children before deleting the
-    orphans. Without aliases, the legacy single-row adoption still works.
-
-(2) ``test_concurrent_slug_insert_serializes`` — concurrent workers racing
-    to create a row for the same canonical slug now serialize cleanly: one
-    INSERTs, the other catches the ``uq_protocol_canonical_slug``
-    IntegrityError inside a savepoint and re-fetches the winner.
-
-(3) ``test_resolver_matches_bare_hostname`` — ``_match_protocol`` now does
-    a bidirectional substring check, so ``"etherfi.org"`` matches the
-    ``"etherfi"`` slug. Hostname-only dapp-crawl jobs dedupe correctly with
-    discovery's row.
+Originally POC reproductions of three code-review issues, inverted into guards
+once fixed: (1) ``aliases`` merges NULL-slug family rows onto the slug-keyed row,
+(2) concurrent slug INSERTs serialize via a savepoint on
+``uq_protocol_canonical_slug``, (3) ``_match_protocol`` matches bare hostnames.
 """
 
 from __future__ import annotations
@@ -42,15 +29,9 @@ pytestmark = [requires_postgres]
 
 
 def test_orphan_duplicates_merge_via_aliases(db_session):
-    """Simulate post-migration prod state — two NULL-slug rows for the
-    same family — and verify that the first worker call collapses them.
-
-    The fix: ``get_or_create_protocol`` accepts an ``aliases`` list (the
-    family's display-name spellings, e.g. from ``resolved["all_names"]``).
-    On a slug-keyed miss it gathers every NULL-slug row whose name matches
-    the requested name OR an alias, adopts the first, and merges the rest
-    into it (FK children reassigned, orphan deleted).
-    """
+    """Post-migration prod state: two NULL-slug rows for one family collapse on
+    the first worker call, ``aliases`` (display-name spellings) merging the rest
+    into the adopted row."""
     from db.models import AuditReport
 
     row_a = Protocol(name="ether fi", canonical_slug=None)
@@ -58,9 +39,8 @@ def test_orphan_duplicates_merge_via_aliases(db_session):
     db_session.add_all([row_a, row_b])
     db_session.flush()
 
-    # Attach an audit report to the row that's about to be merged-from
-    # (CASCADE FK). After merge it must point at the surviving row, not
-    # be deleted alongside the orphan.
+    # The audit report hangs off the merged-from row (CASCADE FK); it must
+    # follow the survivor, not die with the orphan.
     orphan_audit = AuditReport(
         protocol_id=row_a.id,
         url="https://example.com/audit",
@@ -78,22 +58,17 @@ def test_orphan_duplicates_merge_via_aliases(db_session):
     )
     db_session.commit()
 
-    # Exactly one row remains, with the slug stamped.
     rows = db_session.execute(select(Protocol)).scalars().all()
     assert len(rows) == 1, f"expected merge to one row, got {[(r.name, r.canonical_slug) for r in rows]}"
     assert rows[0].id == adopted.id
     assert adopted.canonical_slug == "ether.fi-cash"
 
-    # The audit report's FK was reassigned, not cascade-deleted.
     db_session.refresh(orphan_audit)
     assert orphan_audit.protocol_id == adopted.id
 
 
 def test_no_aliases_keeps_legacy_single_row_adoption(db_session):
-    """When ``aliases`` is omitted, the function must still adopt the one
-    row that matches by exact name. Guards the no-regression path for
-    callers that don't yet pass aliases.
-    """
+    """Without ``aliases`` the function still adopts the one exact-name match."""
     row = Protocol(name="solo-protocol", canonical_slug=None)
     db_session.add(row)
     db_session.commit()
@@ -116,15 +91,10 @@ def test_no_aliases_keeps_legacy_single_row_adoption(db_session):
 
 
 def test_concurrent_slug_insert_serializes():
-    """Two threads, two sessions, same canonical_slug. Both miss the lookup
-    and call INSERT. The fix wraps the INSERT in a savepoint and catches
-    ``IntegrityError`` on ``uq_protocol_canonical_slug``, re-fetching the
-    winner. Both threads should see the same final row id.
-
-    Two engines (one per thread) so the connections are genuinely separate.
-    A barrier ensures both transactions issue their SELECT before either
-    flushes — that's the window the savepoint retry has to handle.
-    """
+    """Two threads, two sessions, same canonical_slug: both miss the lookup and
+    INSERT; the savepoint catches the loser's IntegrityError and re-fetches, so
+    both see the same row id. Separate engines give genuinely separate
+    connections; a barrier makes both SELECT before either flushes."""
     db_url = os.environ.get("TEST_DATABASE_URL")
     if not db_url:
         pytest.skip("TEST_DATABASE_URL not set")
@@ -167,11 +137,8 @@ def test_concurrent_slug_insert_serializes():
         s.commit()
     cleanup_engine.dispose()
 
-    # Neither thread should have raised — the savepoint catches the loser's
-    # IntegrityError and re-fetches the winner.
     assert results["a"]["exc"] is None, f"thread A raised: {results['a']['exc']!r}"
     assert results["b"]["exc"] is None, f"thread B raised: {results['b']['exc']!r}"
-    # Both should converge on the same row id.
     assert results["a"]["id"] == results["b"]["id"], f"expected both threads to see the same row, got {results!r}"
 
 
@@ -181,12 +148,9 @@ def test_concurrent_slug_insert_serializes():
 
 
 def test_resolver_matches_bare_hostname():
-    """``_match_protocol`` now does a bidirectional substring check:
-    ``slug_norm in name_norm`` was missing, so ``"etherfiorg"`` (the
-    normalized form of the hostname ``"etherfi.org"``) failed to match
-    the ``"etherfi"`` slug. Adding the reverse direction with the same
-    ≥50% length gate fixes the dapp_crawl fall-through.
-    """
+    """``slug_norm in name_norm`` was missing, so ``"etherfiorg"`` (normalized
+    ``"etherfi.org"``) failed to match the ``"etherfi"`` slug; the reverse
+    direction with the same ≥50% length gate fixes the dapp_crawl fall-through."""
     protocols = [
         {
             "slug": "etherfi",
@@ -199,15 +163,12 @@ def test_resolver_matches_bare_hostname():
         {"slug": "uniswap-v3", "name": "Uniswap V3", "url": "https://uniswap.org", "chains": ["Ethereum"], "tvl": 1},
     ]
 
-    # Existing match paths still work.
     assert _match_protocol("etherfi", protocols) is not None
     assert _match_protocol("Ether.fi", protocols) is not None
     assert _match_protocol("ether fi", protocols) is not None
 
-    # Bare-hostname inputs from dapp_crawl_worker now resolve.
     matched = _match_protocol("etherfi.org", protocols)
     assert matched is not None and matched["slug"] == "etherfi"
 
-    # And we should not pick up an unrelated short-input false positive:
-    # an input with no real overlap should still miss.
+    # An input with no real overlap must still miss.
     assert _match_protocol("zzz", protocols) is None

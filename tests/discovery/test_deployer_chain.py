@@ -1,10 +1,7 @@
 """Multichain (M1.1): chain_id threading through deployer expansion.
 
-The deployer-expansion Etherscan calls (``getcontractcreation`` and
-``txlist``) must carry the chain being searched, not a hardcoded mainnet
-default. Name resolution still routes through the shared
-``get_contract_name`` wrapper (no chain param yet), so these tests set
-``resolve_names=False`` to isolate the chain-threaded wire calls.
+The Etherscan calls (``getcontractcreation``, ``txlist``) must carry the searched chain, not a hardcoded mainnet
+default. Name resolution still uses ``get_contract_name`` (no chain param yet), so tests set ``resolve_names=False``.
 """
 
 from services.discovery import deployer
@@ -28,7 +25,6 @@ def _fake_get_factory(seen):
 
 
 def test_expand_from_deployers_threads_chain_id(monkeypatch):
-    """A non-mainnet chain_id reaches getcontractcreation and txlist."""
     seen: list[tuple[str, int | None]] = []
     monkeypatch.setattr(deployer.etherscan, "get", _fake_get_factory(seen))
 
@@ -42,7 +38,6 @@ def test_expand_from_deployers_threads_chain_id(monkeypatch):
 
 
 def test_expand_from_deployers_defaults_to_mainnet(monkeypatch):
-    """Absent an explicit chain_id, wire calls carry chain_id=1 (mainnet unchanged)."""
     seen: list[tuple[str, int | None]] = []
     monkeypatch.setattr(deployer.etherscan, "get", _fake_get_factory(seen))
 
@@ -65,7 +60,6 @@ def test_explorer_links_follow_the_expansion_chain(monkeypatch):
 
 
 def test_explorer_base_falls_back_for_unknown_chain():
-    """An off-registry chain_id degrades to Etherscan rather than raising."""
     assert deployer._explorer_base(1) == "https://etherscan.io"
     assert deployer._explorer_base(8453) == "https://basescan.org"
     assert deployer._explorer_base(999999999) == "https://etherscan.io"

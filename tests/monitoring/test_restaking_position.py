@@ -1,21 +1,13 @@
-"""D1 — per-node restaking position: the record, its bases, and its backstops.
+"""D1 - per-node restaking position: the record, its bases, and its backstops.
 
-Every expected value below is a read taken at block 25643300 and reproduced
-independently three times (implementer, gate, implementer again). The wire is
-replayed, never touched.
+Every expected value is a read at block 25643300, reproduced independently three times;
+the wire is replayed, never touched. Two shapes are pinned side by side, since pinning one
+alone would ship a rule the measured corpus cannot satisfy:
 
-The two shapes that must both hold are pinned side by side, because pinning only
-one of them is how this unit would have shipped a rule that the measured corpus
-cannot satisfy:
-
-* node ``0x53e1eb2f…`` — 30e18 shares, 3 active validators, pod native 0;
-* node ``0x05b1e403…`` — an EigenPod present, **0 shares, 0 validators**, and a
-  pod holding 3.578775160 ETH at the same block.
-
-The second is 26 of the 26 enumerated nodes. Over that whole set this column
-sums to **0 wei** while the pods hold **374.148164612 ETH**, one of them
-(``0x7474b357…``) exactly **320 ETH** — which is what the column's published
-meaning has to survive.
+* node ``0x53e1eb2f…`` - 30e18 shares, 3 active validators, pod native 0;
+* node ``0x05b1e403…`` - an EigenPod, **0 shares, 0 validators**, pod holding 3.578775160 ETH
+  (26 of the 26 enumerated nodes: the column sums to **0 wei** while pods hold
+  **374.148164612 ETH**, ``0x7474b357…`` exactly **320 ETH**).
 """
 
 from __future__ import annotations
@@ -227,13 +219,9 @@ class TestHappyPathBothShapes:
             assert record["consensus_layer_residual"] != 0
 
     def test_published_zero_states_its_scope_and_omits_native_balances(self):
-        """What a 0 means, and what it must not be read as.
-
-        Summing this column over the 26 enumerated nodes yields 0 wei while those
-        pods hold 374.148164612 ETH at the same block, one of them exactly 320
-        ETH. The record therefore carries no node or pod native balance at all —
-        those are not_determined on this plane, not zero.
-        """
+        """What a 0 means: summing this column over the 26 nodes gives 0 wei while the pods hold
+        374.148164612 ETH (one exactly 320), so the record carries no node or pod native
+        balance: those are not_determined on this plane, not zero."""
         record = position_record(
             chain_id=1,
             node_address="0xf538ac27909beed9652b8f008f2246851fded09b",
@@ -272,12 +260,9 @@ class TestEigenpodIdentityLegs:
         assert record["shares_strategy"] is None
 
     def test_codeless_node_empty_return_is_not_a_proven_zero(self):
-        """The constructible attack: before deployment the node is codeless.
-
-        ``getEigenPod()`` answers ``"0x"`` WITH success while EigenLayer's
-        mappings answer clean zeros. A one-leg reading would mint "proven no
-        eigenpod, 0 shares" for an address whose own state was never read.
-        """
+        """The constructible attack: a codeless node answers ``getEigenPod()`` with ``"0x"`` AND
+        success while EigenLayer's mappings answer zeros; a one-leg reading would mint "proven
+        no eigenpod, 0 shares" for an address whose state was never read."""
         record = _record(get_eigen_pod="0x", owner_to_pod=ZERO_WORD, has_pod=_word(0))
         assert record == _skeleton(NODE_WITH_SHARES)
 
@@ -323,14 +308,10 @@ class TestStrategyIsWitnessed:
         assert _record()["shares_strategy"] != NEAR_MISS_STRATEGY
 
     def test_near_miss_strategy_answer_is_not_a_proven_zero(self):
-        """A wrong strategy returns [0]/[0] with success, as does a non-staker.
-
-        The producer only ever queries the witnessed strategy, so this pins the
-        downstream consequence: that answer shape, arriving with a deposit leg
-        that also reads 0, is admitted ONLY under three-way agreement — and the
-        thing that actually rejects a non-staker is the identity cross-read,
-        which a non-staker fails because it is codeless.
-        """
+        """A wrong strategy returns [0]/[0] with success, as does a non-staker. The producer
+        only queries the witnessed strategy, so this pins the downstream consequence: that shape
+        with a zero deposit leg is admitted ONLY under three-way agreement, and the identity
+        cross-read (a non-staker is codeless) is what rejects a non-staker."""
         record = position_record(
             chain_id=1,
             node_address="0x00000000000000000000000000000000deadbeef",
@@ -378,11 +359,8 @@ class TestFailedReadsNeverBecomeZero:
         assert record["eigenlayer_beacon_shares_wei"] is None
 
     def test_dm_deposit_leg_below_withdrawable_is_inconsistent(self):
-        """A PRESENT deposit leg below the withdrawable leg is a real conflict.
-
-        Distinct from an ABSENT leg (below): here the accounting model that
-        licenses the quantity is disproved by a read that succeeded.
-        """
+        """A PRESENT deposit leg below the withdrawable leg is a real conflict (unlike an ABSENT
+        leg, below): a successful read disproves the accounting model behind the quantity."""
         record = _record(
             pod_owner_deposit_shares=None,
             withdrawable_shares="0x" + "".join(f"{v:064x}" for v in (0x40, 0x80, 1, SHARES_WEI, 1, 0)),
@@ -390,12 +368,9 @@ class TestFailedReadsNeverBecomeZero:
         assert record["shares_basis"] == SHARES_BASIS_NOT_DETERMINED
 
     def test_nonzero_with_failed_epm_deposit_leg_publishes_single_source(self):
-        """INTENDED. Absence of the deposit leg is not disagreement.
-
-        Suppressing here would discard a proven read on the strength of a
-        missing one, so the quantity publishes with a NULL deposit column and an
-        explicitly not-determined cross-read.
-        """
+        """INTENDED. An absent deposit leg is not disagreement: suppressing would discard a
+        proven read on the strength of a missing one, so the quantity publishes with a NULL
+        deposit column and a not-determined cross-read."""
         record = _record(pod_owner_deposit_shares=None)
         assert record["shares_basis"] == SHARES_BASIS_EIGENLAYER_BEACON_SHARES
         assert record["eigenlayer_beacon_shares_wei"] == SHARES_WEI
@@ -432,12 +407,8 @@ class TestCrossReadPartition:
         assert record["eigenlayer_beacon_shares_wei"] is None
 
     def test_fully_slashed_zero_against_positive_deposit_is_withheld(self):
-        """Intended under-claim: withdrawable 0 with a positive deposit leg.
-
-        It fails the zero-only equality requirement, so it publishes nothing
-        rather than a 0 that the deposit leg contradicts. Recorded here so a
-        later reader does not "fix" requirement (iii).
-        """
+        """Intended under-claim: withdrawable 0 with a positive deposit leg fails the zero-only
+        equality and publishes nothing. Recorded so a later reader does not "fix" (iii)."""
         record = _record(
             withdrawable_shares=_shares_return(0, SHARES_WEI),
             pod_owner_deposit_shares=_word(SHARES_WEI),
@@ -467,12 +438,8 @@ class TestDecoders:
         assert decode_int256_word(_word((1 << 256) - 1)) != (1 << 256) - 1
 
     def test_negative_deposit_beside_zero_withdrawable_is_withheld(self):
-        """Decoded as -5, so ``withdrawable > deposit`` fires and the row is withheld.
-
-        The point is that the sign survives the decode: an unsigned read would
-        make the same word ~1.15e77, which is above the withdrawable leg and
-        would have published happily.
-        """
+        """Decoded as -5, so ``withdrawable > deposit`` fires and the row is withheld; an
+        unsigned read would give ~1.15e77 and publish happily."""
         record = _record(
             pod_owner_deposit_shares=_word((1 << 256) - 5),
             withdrawable_shares=_shares_return(0, 0),
@@ -498,14 +465,10 @@ class TestDecoders:
 
 
 class TestDecoderStrictness:
-    """A short or non-canonical word must not become a clean number.
-
-    Python's ``int(s, 16)`` accepts ``_`` separators and strips surrounding
-    whitespace, so a 63-nibble return with a trailing newline parses fine — the
-    length check would be satisfied by the padding and the value decoded anyway.
-    Not reachable through ``multicall3_aggregate3`` today (it re-hexes via
-    ``bytes.hex()``), but every decoder here is exported.
-    """
+    """A short or non-canonical word must not become a clean number. ``int(s, 16)`` accepts
+    ``_`` separators and strips whitespace, so a 63-nibble return with a trailing newline would
+    pass the length check and decode. Not reachable via ``multicall3_aggregate3`` today (it
+    re-hexes via ``bytes.hex()``), but every decoder here is exported."""
 
     def test_whitespace_padded_short_word_is_not_a_zero(self):
         assert decode_word("0x" + "0" * 63 + "\n") is None
@@ -543,11 +506,9 @@ class TestDecoderStrictness:
 
 
 class TestStrategyGateIsOnTheIssuedBytes:
-    """The witnessed strategy alone is a calling convention, not a gate.
-
-    What licenses the quantity is that the answer was read AGAINST that strategy
-    and against THIS node, checked out of the bytes that were sent.
-    """
+    """The witnessed strategy alone is a calling convention, not a gate: the quantity is
+    licensed by the answer being read AGAINST that strategy and THIS node, checked out of
+    the bytes sent."""
 
     def test_asserted_strategy_must_match_the_calldata(self):
         record = _record(strategy=NEAR_MISS_STRATEGY, calldata=_calldata(NODE_WITH_SHARES, STRATEGY))
@@ -597,12 +558,9 @@ class TestPodFactsRequireAProvenPod:
         assert record["last_checkpoint_timestamp"] == 0
 
     def test_out_of_range_pod_words_are_not_determined_not_an_abort(self):
-        """One malformed pod must not cost every other node its observation.
-
-        Unguarded, a 2**200 word reaches the insert as a Numeric that the int4 /
-        int8 columns cannot hold, raising NumericValueOutOfRange and taking the
-        whole batch down with it.
-        """
+        """One malformed pod must not cost every other node its observation: a 2**200 word
+        would reach the insert as a Numeric the int columns cannot hold
+        (NumericValueOutOfRange), taking the whole batch down."""
         record = _record(active_validator_count=_word(2**200), last_checkpoint_timestamp=_word(2**200))
         assert record["active_validator_count"] is None
         assert record["last_checkpoint_timestamp"] is None
@@ -640,11 +598,8 @@ class TestPinnedHead:
         assert pinned_head(1, "http://stub") == (BLOCK, BLOCK_HASH)
 
     def test_header_for_a_different_height_is_refused(self, monkeypatch):
-        """A racing or load-balanced upstream can answer another block.
-
-        Pairing that hash with this number would make the stored reorg witness
-        name a block the reads were never issued at.
-        """
+        """A racing or load-balanced upstream can answer another block; pairing that hash with
+        this number would make the stored reorg witness name a block the reads never used."""
         self._stub(monkeypatch, {"number": hex(BLOCK - 3), "hash": BLOCK_HASH})
         assert pinned_head(1, "http://stub") is None
 
@@ -749,12 +704,8 @@ class TestConstraintsAreABackstop:
         db_session.rollback()
 
     def test_basis_columns_are_not_null_in_the_reflected_schema(self, db_session):
-        """The OR-joined arms are fail-closed only while these are NOT NULL.
-
-        A NULL basis makes every arm NULL; an OR of NULLs is NULL; and a CHECK
-        that evaluates to NULL PASSES in Postgres. Nullability here is therefore
-        part of the constraint, not a style choice.
-        """
+        """The OR-joined arms are fail-closed only while these are NOT NULL: a NULL basis makes
+        every arm NULL, and a CHECK evaluating to NULL PASSES in Postgres."""
         columns = {c["name"]: c for c in inspect(db_session.get_bind()).get_columns("restaking_positions")}
         for name in (
             "shares_basis",
@@ -838,12 +789,8 @@ class TestLatestView:
         db_session.rollback()
 
     def test_node_with_only_non_observing_rows_is_absent_not_zero(self, db_session):
-        """Absence from the view is not_determined, never "no position".
-
-        With both failure classes excluded, such a node vanishes entirely — so a
-        consumer that read a missing row as 0 would reintroduce the
-        absent-row-as-$0 shape at the projection layer.
-        """
+        """Absence from the view is not_determined, never "no position": a consumer reading a
+        missing row as 0 would reintroduce absent-row-as-$0 at the projection layer."""
         self._insert(db_session, block=BLOCK, basis=SHARES_BASIS_READ_FAILED, shares=None)
         self._insert(db_session, block=BLOCK + 1, basis=SHARES_BASIS_NOT_DETERMINED, shares=None)
         assert self._latest(db_session) == []
@@ -885,12 +832,8 @@ class TestLatestView:
 @requires_postgres
 class TestPersistence:
     def test_producer_never_attempts_a_violating_insert(self, db_session):
-        """Constraints are a backstop; the producer is the control flow.
-
-        Every leg outcome in this matrix is persisted without a single
-        IntegrityError, which is the property that keeps the CHECKs from
-        becoming a guard the writer leans on.
-        """
+        """Constraints are a backstop; the producer is the control flow. Every leg outcome here
+        persists without an IntegrityError, so the CHECKs never become a guard the writer leans on."""
         legs = [
             {},
             {"get_eigen_pod": "0x"},
@@ -976,13 +919,10 @@ def test_column_comment_states_what_a_zero_does_not_mean(db_session):
 
 @requires_postgres
 def test_the_value_plane_publishes_what_it_read_and_what_it_dropped(db_session):
-    """Every admission rule states where it fired. A position dropped uncounted
-    reads as a node that holds nothing rather than one this plane refused.
-
-    Lives here rather than beside the other value-plane folds because this file
-    is part of the plane's licensed import surface for ``RestakingPosition``
-    (see ``test_restaking_node_fold``'s import-surface guard).
-    """
+    """Every admission rule states where it fired: a position dropped uncounted reads as a
+    node that holds nothing rather than one this plane refused. Lives here because this file
+    is in the plane's licensed import surface for ``RestakingPosition`` (see
+    ``test_restaking_node_fold``'s import-surface guard)."""
     import uuid
 
     from services.scoring.planes import load_value_plane

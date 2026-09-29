@@ -8,7 +8,6 @@ from services.crawlers.defillama.core_assets import build_address_to_chain_map, 
 
 
 def _make_repo_with_core_assets(tmp: str, assets: dict) -> Path:
-    """Create a mock repo directory with a coreAssets.json file."""
     repo = Path(tmp) / "repo"
     helper = repo / "projects" / "helper"
     helper.mkdir(parents=True)

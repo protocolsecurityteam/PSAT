@@ -1,18 +1,10 @@
 """Caller-keyed boolean mapping-ACL value fold over the DURABLE index (FA-R2b).
 
 The value-aware fold (``forwardEigenPodCall`` / ``forwardExternalCall`` on
-EtherFiNodesManager) folds latest-value-per-caller over the Postgres-backed
-``indexed_event_logs`` durable index — the same data source the add/remove path
-reads — so it issues no live request and is immune to upstream rate-limiting or
-token plumbing.
-
-These tests seed real ``indexed_event_logs`` + ``indexed_event_cursors`` rows in
-the test DB and drive the production ``PostgresEventLogRepo`` through the real
-``EventIndexedAdapter`` value path. The HyperSync client is NOT stubbed: a spy on
-``enumerate_mapping_values_sync`` asserts the durable path makes zero live calls.
-The event shapes mirror the audited run's logs on the state-holder
-``0x8b71140a…`` (topics ``UserAllowedForwardedEigenpodCallsUpdated`` /
-``UserAllowedForwardedExternalCallsUpdated``).
+EtherFiNodesManager) reads the Postgres ``indexed_event_logs`` index, so it issues no
+live request. Tests seed real logs + cursors and drive ``PostgresEventLogRepo`` through
+the real ``EventIndexedAdapter``; a spy on ``enumerate_mapping_values_sync`` asserts zero
+live calls. Event shapes mirror the audited run on state-holder ``0x8b71140a…``.
 """
 
 from __future__ import annotations
@@ -152,10 +144,8 @@ def _external_descriptor() -> dict:
 
 @pytest.fixture(autouse=True)
 def _stub_creation_block_floor(monkeypatch):
-    """Keep the live-fold scan floor off the network in the offline suite: default
-    the floor to a known block (0) so the live fold runs over the stub logs rather
-    than deferring. Tests asserting a specific floor or the defer path re-stub
-    ``resolve_scan_floor`` after this autouse fixture runs."""
+    """Default the live-fold scan floor to block 0 so the live fold runs over stub logs
+    rather than deferring; tests of a specific floor or the defer path re-stub ``resolve_scan_floor``."""
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
@@ -164,8 +154,7 @@ def _stub_creation_block_floor(monkeypatch):
 
 @pytest.fixture
 def no_live_calls(monkeypatch):
-    """Spy that fails the test if the live event-replay path is hit. The durable
-    fold must answer entirely from ``indexed_event_logs``."""
+    """Fail the test if the live event-replay path is hit; the durable fold must answer from the index."""
     calls: list[tuple] = []
     orig = mapping_enumerator.enumerate_mapping_values_sync
 
@@ -291,12 +280,10 @@ def test_durable_value_fold_respects_resolution_block(db_session, no_live_calls)
 
 
 def test_cold_durable_index_with_rows_defers_pending_index(db_session, no_live_calls):
-    # backfill_complete=False (cold) is incomplete by definition: a partial
-    # mid-backfill member set can neither be trusted as exact nor be re-resolved
-    # later if returned as a finite_set, so a cold cursor always defers to
-    # external_check_only tagged ``deferred_pending_index`` (the reconciler
-    # re-resolves once the index warms) — even when rows are already present, and
-    # without scanning them. ZERO live calls.
+    # backfill_complete=False (cold) is incomplete by definition: a partial mid-backfill
+    # set can't be trusted as exact, so a cold cursor always defers to external_check_only
+    # tagged ``deferred_pending_index`` — even when rows are present, and without scanning
+    # them. ZERO live calls.
     rows = [
         _eig_log(CALLER_A, "0x88676cad", True, block=23591216, tx_index=0, log_index=146),
     ]
@@ -319,11 +306,9 @@ def test_cold_durable_index_with_rows_defers_pending_index(db_session, no_live_c
 
 
 def test_cold_durable_index_no_rows_defers_pending_index(db_session, no_live_calls):
-    # A real durable repo but no rows AND no backfill_complete cursor for this
-    # event address (``no_index_cursor``) is index-cold: defer to
-    # external_check_only tagged ``deferred_pending_index`` (the reconciler
-    # re-resolves once the indexer warms) rather than blocking on a live replay.
-    # ZERO live enumerate_mapping_values_sync calls.
+    # No rows AND no backfill_complete cursor (``no_index_cursor``) is index-cold: defer to
+    # external_check_only tagged ``deferred_pending_index`` rather than block on a live
+    # replay. ZERO live enumerate_mapping_values_sync calls.
     ctx = EvaluationContext(
         chain_id=1,
         contract_address=STATE_HOLDER,
@@ -335,23 +320,20 @@ def test_cold_durable_index_no_rows_defers_pending_index(db_session, no_live_cal
     assert cap.kind == "external_check_only"
     assert cap.check is not None
     assert cap.check.extra.get("deferred_pending_index") is True
-    # ``no_index_cursor`` drives the reconciler; ``caller_keyed_membership_allowlist``
-    # (a CALLER_GATE_BASIS_TAGS member) makes the earned-public projection treat the
-    # cold deferral as a root-authority blocker so the function stays gated.
+    # ``no_index_cursor`` drives the reconciler; ``caller_keyed_membership_allowlist`` (a
+    # CALLER_GATE_BASIS_TAGS member) makes the cold deferral a root-authority blocker so it stays gated.
     assert cap.check.extra.get("basis") == ["no_index_cursor", "caller_keyed_membership_allowlist"]
     from services.resolution.permissionless_shapes import CALLER_GATE_BASIS_TAGS
 
     assert "caller_keyed_membership_allowlist" in CALLER_GATE_BASIS_TAGS
-    # The reconciler keys on target_address; it MUST be the event state-holder
-    # whose cursor backfilling triggers re-resolution.
+    # The reconciler keys on target_address: it MUST be the event state-holder.
     assert cap.check.target_address == STATE_HOLDER
     assert no_live_calls == []
 
 
 @pytest.fixture
 def iter_rows_spy(monkeypatch):
-    """Count ``PostgresEventLogRepo.iter_event_rows`` invocations (the durable row
-    scan) so a test can assert a cold fold performs zero scans."""
+    """Count ``iter_event_rows`` invocations so a test can assert a cold fold performs zero scans."""
     calls: list[dict] = []
     orig = PostgresEventLogRepo.iter_event_rows
 
@@ -364,8 +346,7 @@ def iter_rows_spy(monkeypatch):
 
 
 def test_cold_durable_index_performs_zero_row_scans(db_session, no_live_calls, iter_rows_spy):
-    # A cold cursor (backfill_complete=False) reads the cursor state first and
-    # defers WITHOUT scanning indexed_event_logs: zero iter_event_rows calls.
+    # A cold cursor reads cursor state first and defers WITHOUT scanning: zero iter_event_rows calls.
     _seed(db_session, [], [_cursor(EIG_TOPIC0, last_block=23600000, complete=False)])
 
     ctx = EvaluationContext(
@@ -384,10 +365,8 @@ def test_cold_durable_index_performs_zero_row_scans(db_session, no_live_calls, i
 
 
 def test_no_cursor_at_all_performs_zero_row_scans(db_session, no_live_calls, iter_rows_spy):
-    # The audited-run cold shape: no cursor row exists for the event address yet
-    # (never enrolled). The fold reads cursor state, finds none, and defers
-    # without scanning. This is the row-scan the audited run wasted on every
-    # caller-keyed-ACL function before the index warmed.
+    # Audited-run cold shape: no cursor row yet (never enrolled). The fold finds none and
+    # defers without scanning — the scan the audited run wasted on every caller-keyed-ACL function.
     ctx = EvaluationContext(
         chain_id=1,
         contract_address=STATE_HOLDER,
@@ -404,9 +383,7 @@ def test_no_cursor_at_all_performs_zero_row_scans(db_session, no_live_calls, ite
 
 
 def test_warm_durable_index_still_scans_rows(db_session, no_live_calls, iter_rows_spy):
-    # Counterpart to the cold-skip tests: a warm cursor (backfill_complete=True)
-    # DOES scan + fold, returning the same exact member set as before. The scan
-    # is skipped only when cold.
+    # Counterpart: a warm cursor DOES scan + fold; the scan is skipped only when cold.
     rows = [_eig_log(CALLER_A, "0x88676cad", True, block=23591216, tx_index=0, log_index=146)]
     _seed(db_session, rows, [_cursor(EIG_TOPIC0, last_block=25389740, complete=True)])
 
@@ -426,12 +403,10 @@ def test_warm_durable_index_still_scans_rows(db_session, no_live_calls, iter_row
 
 
 def test_cold_defer_projects_identically_to_unsupported_leaf(db_session, no_live_calls):
-    # Regression guard (no public flip): the cold deferral projects the SAME
-    # public/gated verdict as the unsupported leaf it replaces, in every position.
-    #   AND[gate, public]: gated (the gate blocks the sibling public path) — both.
-    #   OR[gate, public] : public (a genuine open disjunct keeps the OR open) —
-    #                      both, so no row that was OR-public flips and none that
-    #                      was AND-gated opens.
+    # Regression guard (no public flip): the cold deferral projects the SAME public/gated
+    # verdict as the unsupported leaf it replaces.
+    #   AND[gate, public]: gated (both).  OR[gate, public]: public (both) — no OR-public
+    #   row flips and no AND-gated row opens.
     from services.policy.capability_surface import project_capability_surface
     from services.resolution.capabilities import CapabilityExpr, Condition
     from services.resolution.capability_resolver import capability_to_dict
@@ -450,10 +425,10 @@ def test_cold_defer_projects_identically_to_unsupported_leaf(db_session, no_live
     def pub(cap) -> bool:
         return project_capability_surface(capability_to_dict(cap)).authority_public
 
-    # AND position: deferral blocks the public sibling exactly like unsupported.
+    # AND: deferral blocks the public sibling exactly like unsupported.
     assert pub(CapabilityExpr.structural_and([defer, public])) is False
     assert pub(CapabilityExpr.structural_and([unsupported, public])) is False
-    # OR position: a real public disjunct keeps the OR open for BOTH — unchanged.
+    # OR: a real public disjunct keeps the OR open for BOTH.
     assert pub(CapabilityExpr.structural_or([defer, public])) == pub(
         CapabilityExpr.structural_or([unsupported, public])
     )
@@ -461,10 +436,8 @@ def test_cold_defer_projects_identically_to_unsupported_leaf(db_session, no_live
 
 
 def test_structural_absent_repo_without_fold_event_values_falls_through_to_live(db_session, monkeypatch):
-    # A repo present but lacking ``fold_event_values`` (fixture / non-PG wire) is
-    # STRUCTURAL-absent, not index-cold: the live replay is the only resolver and
-    # MUST still run. Here it fails closed without a token (no live endpoint in
-    # the offline suite), proving the live path was taken (not deferred).
+    # A repo lacking ``fold_event_values`` is STRUCTURAL-absent, not index-cold: the live
+    # replay MUST still run (fails closed without a token offline, proving it wasn't deferred).
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
 
     class _NoValueFoldRepo:
@@ -486,8 +459,7 @@ def test_structural_absent_repo_without_fold_event_values_falls_through_to_live(
 
 
 def test_structural_absent_no_repo_falls_through_to_live(monkeypatch):
-    # No repo at all (no ctx.event_log_repo, no meta) is STRUCTURAL-absent: the
-    # live replay runs and fails closed without a token. NOT a cold-index defer.
+    # No repo at all is STRUCTURAL-absent: the live replay runs and fails closed without a token.
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
     ctx = EvaluationContext(chain_id=1, contract_address=STATE_HOLDER, block=RESOLUTION_BLOCK)
     cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
@@ -497,13 +469,11 @@ def test_structural_absent_no_repo_falls_through_to_live(monkeypatch):
 
 
 def test_zero_event_address_does_not_defer_forever(db_session, monkeypatch):
-    # A renounced / zero event address never gets an indexer cursor, so deferring
-    # on it would wait forever. It is treated as STRUCTURAL-absent (anti-stranding,
-    # mirrors solmate_roles' nonzero-authority guard): the live replay runs (fails
-    # closed here), it does NOT emit a deferred external_check.
+    # A renounced/zero event address never gets a cursor, so deferring would wait forever;
+    # it's STRUCTURAL-absent (anti-stranding, mirrors solmate_roles' nonzero-authority
+    # guard): the live replay runs and no deferred external_check is emitted.
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
-    # The hint pins the event address (checked first by _resolve_event_address)
-    # to the zero address; contract_address stays valid so the value path runs.
+    # The hint pins the event address to zero; contract_address stays valid so the value path runs.
     desc = _eigenpod_descriptor()
     desc["enumeration_hint"][0]["event_address"] = "0x" + "0" * 40
     ctx = EvaluationContext(
@@ -519,9 +489,7 @@ def test_zero_event_address_does_not_defer_forever(db_session, monkeypatch):
 
 
 def test_fold_repo_error_falls_through_to_live(monkeypatch):
-    # A repo whose fold_event_values raises is STRUCTURAL-absent (transient repo
-    # error, not index-cold): fall through to the live replay so a later retry
-    # resolves it. Does NOT defer.
+    # A raising fold_event_values is STRUCTURAL-absent (transient): fall through to the live replay, no defer.
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
 
     class _RaisingRepo:
@@ -541,9 +509,8 @@ def test_fold_repo_error_falls_through_to_live(monkeypatch):
 
 
 def test_non_cold_partial_reason_falls_through_to_live_not_defer(monkeypatch):
-    # The defer discriminator is STRICTLY ``no_index_cursor``. A different partial
-    # reason (e.g. ``unresolved_event_key``) with no entries is structural — fall
-    # through to the live replay, NEVER defer (no deferred_pending_index).
+    # The defer discriminator is STRICTLY ``no_index_cursor``; another partial reason
+    # (e.g. ``unresolved_event_key``) with no entries falls through to the live replay.
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
     from services.resolution.repos.event_logs_pg import ValueFoldResult
 
@@ -564,10 +531,8 @@ def test_non_cold_partial_reason_falls_through_to_live_not_defer(monkeypatch):
 
 
 def test_durable_and_tree_recovers_membership_keeps_hasrole_external_and_not_public(db_session, no_live_calls):
-    # AND[ membership(allowedForwardedEigenpodCalls), hasRole(roleRegistry, ...) ]:
-    # the membership leaf resolves to the caller set off the durable index and
-    # the roleRegistry.hasRole sibling stays external_check_only. The AND is not
-    # opened — the function stays gated (authority_public would be False).
+    # AND[membership, hasRole(roleRegistry, ...)]: the membership leaf resolves off the
+    # durable index, the hasRole sibling stays external_check_only; the AND is not opened.
     from services.resolution.adapters import AdapterRegistry
     from services.resolution.predicate_evaluator import evaluate_tree_with_registry
 
@@ -658,8 +623,7 @@ def _ownerset_log(key: str, value: int, *, block: int, tx_index: int, log_index:
 
 
 def _ownerset_descriptor() -> dict:
-    # Explicit value_predicate path (D.2): the enumerated key is the hint's own
-    # key_position (the caller), no caller-arg re-keying.
+    # Explicit value_predicate path (D.2): the enumerated key is the hint's own key_position.
     return {
         "kind": "mapping_membership",
         "storage_var": "ownerRole",
@@ -684,9 +648,7 @@ def _ownerset_descriptor() -> dict:
 
 
 def test_durable_explicit_value_predicate_filters_by_value(db_session, no_live_calls):
-    # Explicit predicate {value == 3}: caller A's latest value is 3 (kept),
-    # caller B's latest is 1 (dropped). Exercises the hint-key (non-re-keyed)
-    # durable fold path.
+    # Predicate {value == 3}: A's latest is 3 (kept), B's is 1 (dropped); hint-key durable fold path.
     rows = [
         _ownerset_log(CALLER_A, 2, block=100, tx_index=0, log_index=0),
         _ownerset_log(CALLER_A, 3, block=200, tx_index=0, log_index=0),
@@ -709,10 +671,8 @@ def test_durable_explicit_value_predicate_filters_by_value(db_session, no_live_c
 
 
 def test_live_fallback_forwards_token_and_block_when_durable_absent(db_session, monkeypatch):
-    # STRUCTURAL-absent repo (no ``fold_event_values``) → live replay fallback.
-    # The token, an injected client, the module and url ride from ctx.meta; the
-    # resolution block becomes to_block. (Index-cold defers and is covered
-    # separately; only the structural case reaches the live wire.)
+    # STRUCTURAL-absent repo → live replay fallback; token, injected client, module and
+    # url ride from ctx.meta and the resolution block becomes to_block.
     captured: dict = {}
 
     async def fake_values(contract_address, writer_specs, **kwargs):
@@ -760,10 +720,9 @@ def test_live_fallback_forwards_token_and_block_when_durable_absent(db_session, 
 
 
 def test_live_fallback_floors_from_block_at_creation_block(monkeypatch):
-    # The remaining live replay (structural-absent repo) scans deploy→head, not
-    # genesis→head: from_block is the event address's creation block minus one
-    # (the _seed_block convention), so the empty pre-deployment range — and the
-    # 429-storm it triggers on high-volume contracts — is never scanned.
+    # The live replay scans deploy→head, not genesis→head: from_block is the event
+    # address's creation block minus one, so the empty pre-deployment range (the 429-storm
+    # trigger on high-volume contracts) is never scanned.
     import services.resolution.creation_block_floor as floor_mod
 
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
@@ -795,16 +754,13 @@ def test_live_fallback_floors_from_block_at_creation_block(monkeypatch):
 
 
 def test_live_fallback_defers_on_unknown_floor(monkeypatch):
-    # A scan floor that can't be resolved (no cursor, creation-block lookup fails)
-    # must NOT fall open to a genesis scan: the live fold is skipped entirely and
-    # the function defers to the gated external check, to be re-resolved once the
-    # durable index warms. Deferral returns the same member set without storming.
+    # An unresolvable scan floor must NOT fall open to a genesis scan: the live fold is
+    # skipped and the function defers to the gated external check until the index warms.
     import services.resolution.creation_block_floor as floor_mod
 
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
     floor_mod.clear_scan_floor_cache()
-    # Override the autouse floor stub: an unresolvable floor returns the DEFER
-    # sentinel (None), which must skip the live scan entirely.
+    # Override the autouse floor stub: an unresolvable floor returns the DEFER sentinel (None).
     monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: None)
 
     invoked: dict = {"called": False}

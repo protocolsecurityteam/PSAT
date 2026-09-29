@@ -1,24 +1,16 @@
 """``fallback`` / ``receive`` as first-class entry points.
 
-Two defects, one shape: having no 4-byte selector was treated as having no
-caller.
+Two defects, one shape: having no 4-byte selector was treated as having no caller.
 
-1. ``predicate_artifacts._is_externally_callable`` excluded them, so a
-   predicate tree was never *built* for a fallback/receive. The policy stage
-   reads a missing tree as "no gate found", so an owner-gated fallback
-   published exactly the evidence an open one does. Measured on the local
-   corpus: 27 fallback/receive records across 88 replayed contracts, 0 with a
-   tree; two of the seven that reach ``effective_functions`` --
-   PriorityWithdrawalQueue and WithdrawRequestNFT -- gate ``receive()`` on
-   ``msg.sender != address(liquidityPool)`` and were published
+1. ``_is_externally_callable`` excluded them, so no predicate tree was built and the
+   policy stage read "no gate found": an owner-gated fallback published the same
+   evidence as an open one. PriorityWithdrawalQueue and WithdrawRequestNFT gate
+   ``receive()`` on ``msg.sender != address(liquidityPool)`` and were published
    ``authority_public = True``.
-
-2. Slither renders their signatures as ``fallback()`` / ``receive()``, which
-   every string-level canonicality test accepted and hashed:
-   ``keccak("fallback()")[:4] = 0x552079dc`` and
-   ``keccak("receive()")[:4] = 0xa3e76c0f`` were persisted as selectors on 7
-   ``effective_functions`` rows. Neither is a dispatch any caller can send.
-   ``db/effect_cache.py`` already fixes ``""`` as the sentinel for this case.
+2. Slither renders their signatures as ``fallback()`` / ``receive()``, which every
+   string-level canonicality test hashed (``0x552079dc`` / ``0xa3e76c0f`` persisted
+   as selectors on 7 rows). Neither is a dispatch any caller can send;
+   ``db/effect_cache.py`` fixes ``""`` as the sentinel.
 """
 
 from __future__ import annotations
@@ -69,9 +61,7 @@ def contract(tmp_path_factory):
     return next(c for c in slither.contracts if c.name == "C")
 
 
-# ---------------------------------------------------------------------------
 # 1. The tree is attempted
-# ---------------------------------------------------------------------------
 
 
 def test_gated_fallback_gets_a_predicate_tree(contract):
@@ -108,9 +98,7 @@ def test_open_receive_is_absent_after_being_attempted_not_before(contract):
     assert "receive()" not in trees
 
 
-# ---------------------------------------------------------------------------
 # 2. The selector sentinel
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("signature", ["fallback()", "receive()"])
@@ -123,7 +111,6 @@ def test_effects_emits_the_empty_selector_for_fallback_and_receive(contract):
     functions = build_effects(contract)["functions"]
     assert functions["fallback()"]["selector"] == ""
     assert functions["receive()"]["selector"] == ""
-    # Positive control: a real entry point still gets its real selector.
     assert functions["contribute()"]["selector"] == "0xd7bb99ba"
 
 
@@ -150,19 +137,11 @@ def test_persisted_selector_is_the_empty_sentinel_not_a_fabricated_hash(signatur
 def test_no_named_function_can_receive_the_selectorless_sentinel():
     """The ``""`` sentinel is reserved for a PROVEN absence of a selector.
 
-    Two named functions (``alertBatchMetadataUpdate``, ``alertMetadataUpdate``)
-    were once reported as carrying ``selector = ''`` beside well-formed ABI
-    signatures. That does not reproduce — no row in any local database carries
-    an empty or NULL selector, and both functions hold their real keccak — but
-    the invariant it asks for was only pinned by a single unlowered example. Pin
-    it over the shapes instead, because ``''`` on a named function re-opens an
-    identity collision: ``_selector_key`` deliberately folds ``None`` onto
-    ``""``, so a named function landing there shares an identity with the
-    contract's ``fallback``/``receive`` and inherits its observed claims.
-
-    ``fallbackHandler()`` is the discriminating control: it is the reason this
-    recognition must stay signature-EXACT and can never become a prefix or
-    substring test on "fallback"/"receive".
+    ``''`` on a named function re-opens an identity collision: ``_selector_key``
+    folds ``None`` onto ``""``, so the function would share an identity with the
+    contract's ``fallback``/``receive`` and inherit its observed claims.
+    ``fallbackHandler()`` is the discriminating control: recognition must stay
+    signature-EXACT, never a prefix or substring test.
     """
     named = [
         "alertMetadataUpdate(uint256)",

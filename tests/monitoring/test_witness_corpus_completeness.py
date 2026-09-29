@@ -1,20 +1,10 @@
 """Corpus completeness for the witness taxonomy (spec Part 6, G3 artifact).
 
-A zero-diff on golden fixtures proves nothing unless the corpus actually
-CONTAINS the shapes the taxonomy exists to separate. This module compiles one
-contract carrying all five degenerate shapes, derives the real tracking plan
-from it, and pins the ``witness_tier`` each shape earns:
-
-  1. reentrancy guard      — a latch written and restored in one call
-  2. open-writer mapping   — self-registration behind a denylist gate
-  3. struct-member mismatch — a sibling member's event under a member controller
-  4. DenyFrom-class        — a proven correspondence from a restricted writer
-  5. canonical family      — an event whose own signature corroborates it
-
-Every assertion is paired with a NON-VACUITY assertion: the shape's raw
-ingredient (the guard write, the sibling writer, the topic) is shown to be
-present in the corpus, so an assertion that something is absent cannot pass
-because the corpus never had it.
+Zero-diff on golden fixtures proves nothing unless the corpus CONTAINS the shapes the
+taxonomy separates. One contract carries all five degenerate shapes (reentrancy guard,
+open-writer mapping, struct-member mismatch, DenyFrom-class, canonical family); the real
+tracking plan is derived and each shape's ``witness_tier`` pinned. Every assertion is paired
+with a NON-VACUITY check that the raw ingredient is present in the corpus.
 """
 
 from __future__ import annotations
@@ -233,7 +223,6 @@ def _topic0(signature: str) -> str:
 
 @pytest.fixture(scope="module")
 def corpus(tmp_path_factory):
-    """The derived plan for the corpus contract: targets, plan, specs, polling."""
     project_dir = tmp_path_factory.mktemp("witness_corpus")
     source = project_dir / "WitnessCorpus.sol"
     source.write_text(textwrap.dedent(CORPUS_SOURCE).strip() + "\n")
@@ -274,9 +263,8 @@ def _spec(corpus, signature: str) -> dict:
 
 
 def test_every_spec_carries_the_taxonomy_fields(corpus):
-    """Golden pin: the tier and the openness are on every derived spec, in the
-    vocabulary. A spec without a tier would be classified at runtime from
-    whatever the row happened to carry."""
+    """Golden pin: tier and openness are on every derived spec, in the vocabulary; a spec
+    without a tier would be classified at runtime from whatever the row carried."""
     assert corpus["specs"], "corpus produced no tracked-topic specs at all"
     for spec in corpus["specs"].values():
         assert spec["witness_tier"] in WITNESS_TIERS
@@ -284,9 +272,8 @@ def test_every_spec_carries_the_taxonomy_fields(corpus):
 
 
 def test_corpus_covers_all_five_degenerate_shapes(corpus):
-    """The differential below is only meaningful if each shape is present. This
-    reads the tiers as a set so a corpus that silently lost a shape — or a
-    change that collapsed two tiers into one — fails here first."""
+    """Reads the tiers as a set so a corpus that lost a shape, or a change collapsing two
+    tiers, fails here first."""
     tiers = {}
     for spec in corpus["specs"].values():
         tiers.setdefault(spec["witness_tier"], set()).add(spec["event_type"])
@@ -312,15 +299,14 @@ def test_corpus_covers_all_five_degenerate_shapes(corpus):
 
 
 def test_reentrancy_latch_donates_nothing(corpus):
-    """``deposit`` writes ``_status`` and emits ``Deposited``. Before the hygiene
-    filter that made every deposit a ``state_changed:state_variable:_status``
-    publication — 2 of the 446 audited rows, and unbounded on real traffic."""
+    """``deposit`` writes ``_status`` and emits ``Deposited``. Before the hygiene filter every
+    deposit was a ``state_changed:state_variable:_status`` publication (2 of 446 audited rows,
+    unbounded on real traffic)."""
     writers = _state_writers_from_effects(corpus["effects"])
     assert "deposit(uint256)" in writers.get("_status", set()), "corpus lost the latch-write shape"
 
-    # With no writer left, the latch has no event watch and no address-like
-    # read, so it is not a runtime-resolvable controller and never reaches the
-    # plan — the ``Deposited`` topic it used to donate is watched by nothing.
+    # With no writer left the latch has no event watch or address-like read, so it never
+    # reaches the plan; the ``Deposited`` topic it used to donate is watched by nothing.
     assert corpus["targets"]["state_variable:_status"]["associated_events"] == []
     assert corpus["targets"]["state_variable:_status"]["writer_functions"] == []
     assert "state_variable:_status" not in corpus["planned"]
@@ -328,12 +314,10 @@ def test_reentrancy_latch_donates_nothing(corpus):
 
 
 def test_a_var_named_locked_is_not_a_latch_without_the_ir_proof(corpus):
-    """``bool public locked`` is an owner-gated withdrawal pause: set inside the
-    call and never restored. The hygiene class the effects artifact gives it is
-    the NAME fallback, which is sound only as a suppressor of facts nobody
-    admits — deleting a controller on it would make the name the witness and
-    stop watching a real pause. Only the IR-proven set (written on both sides of
-    a modifier's ``_;``) may subtract."""
+    """``bool public locked`` is an owner-gated withdrawal pause, set and never restored. Its
+    NAME-fallback hygiene class is sound only as a suppressor; deleting a controller on it would
+    make the name the witness and stop watching a real pause. Only the IR-proven set (written on
+    both sides of a modifier's ``_;``) may subtract."""
     writers = _state_writers_from_effects(corpus["effects"])
     assert "pauseWithdrawals()" in writers.get("locked", set())
 
@@ -348,11 +332,10 @@ def test_a_var_named_locked_is_not_a_latch_without_the_ir_proof(corpus):
 
 
 def test_open_writer_mapping_stays_activity(corpus):
-    """``register`` proves emit-write correspondence — ``Registered(user)``
-    names the key it wrote — but its only gate is ``require(!registered[caller])``,
-    a cofinite denylist that admits every address it has not named. The
-    correspondence alone must not promote it, or every ERC-20 ``Transfer`` on a
-    token with a denylist republishes as a witnessed change."""
+    """``register`` proves emit-write correspondence (``Registered(user)`` names the key) but
+    its only gate is ``require(!registered[caller])``, a cofinite denylist admitting every
+    unnamed address. Correspondence alone must not promote it, or every ERC-20 ``Transfer`` on
+    a denylisted token republishes as a witnessed change."""
     spec = _spec(corpus, "Registered(address)")
     assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
     assert spec["writer_openness"] == "not_determined"
@@ -366,11 +349,9 @@ def test_open_writer_mapping_stays_activity(corpus):
 
 
 def test_a_denylist_gated_writer_is_not_a_restricted_one(corpus):
-    """``claim`` proves correspondence and its only gate is
-    ``require(!fromDenyList[msg.sender])`` — a cofinite denylist that admits
-    every address the owner has not named. This is the shape the earned-public
-    arm exists for; without it the same reasoning would qualify every ERC-20
-    ``Transfer`` on a token with a denylist (P1b, 444 of the 446 audited rows).
+    """``claim`` proves correspondence but is gated only by ``require(!fromDenyList[msg.sender])``,
+    a cofinite denylist. This is what the earned-public arm exists for; without it every
+    ERC-20 ``Transfer`` on a denylisted token would qualify (P1b, 444 of 446 audited rows).
     """
     spec = _spec(corpus, "Claimed(address)")
     assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
@@ -383,10 +364,9 @@ def test_a_denylist_gated_writer_is_not_a_restricted_one(corpus):
 
 
 def test_a_two_entry_write_names_no_single_entry(corpus):
-    """``transfer`` writes ``balances[from]`` and ``balances[to]`` under one
-    ``Transfer``. The discovery pass keeps the first of the two, so a record
-    survives that names the sender and says nothing about the recipient — a
-    false description of the event rather than a partial one."""
+    """``transfer`` writes ``balances[from]`` and ``balances[to]`` under one ``Transfer``. Discovery
+    keeps the first, leaving a record that names the sender and says nothing of the recipient,
+    a false description rather than a partial one."""
     specs = discover_mapping_writer_events(corpus["contract"])
     assert any(
         spec["mapping_name"] == "balances" and spec["event_signature"] == "Transfer(address,address,uint256)"
@@ -406,10 +386,9 @@ def test_a_two_entry_write_names_no_single_entry(corpus):
 
 
 def test_member_controller_drops_a_sibling_members_event(corpus):
-    """``updateExchangeRate`` writes ``accountantState`` and was therefore a
-    writer of ``accountantState.payoutAddress``; its ``ExchangeRateUpdated``
-    keeper traffic enrolled under the payout controller (75 specs on the live
-    fleet) and would have published as a payout-address change."""
+    """``updateExchangeRate`` writes ``accountantState`` and so counted as a writer of
+    ``accountantState.payoutAddress``; its keeper ``ExchangeRateUpdated`` traffic enrolled under
+    the payout controller (75 specs on the live fleet) and would publish as a payout change."""
     writers = _state_writers_from_effects(corpus["effects"])
     assert "updateExchangeRate(uint96)" in writers.get("accountantState", set())
 
@@ -420,9 +399,8 @@ def test_member_controller_drops_a_sibling_members_event(corpus):
 
 
 def test_member_controller_is_readable_through_its_parent_getter(corpus):
-    """F8: the member is one word of ``accountantState()``'s return, so the
-    controller has a verification read and its events become hints instead of
-    bare activity."""
+    """F8: the member is one word of ``accountantState()``'s return, so the controller has a
+    verification read and its events become hints instead of bare activity."""
     spec = _spec(corpus, "PayoutAddressUpdated(address,address)")
     assert spec["witness_tier"] == WITNESS_TIER_HINT
 
@@ -430,8 +408,7 @@ def test_member_controller_is_readable_through_its_parent_getter(corpus):
     assert entry["kind"] == "getter_call"
     assert entry["target"] == "accountantState"
     assert entry["member_word_index"] == 0
-    # The verification-read binding is an identity on this stamp, not a name
-    # match — an entry without it is unreachable from the hint path.
+    # The verification-read binding is an identity on this stamp, not a name match.
     assert entry["source"] == "analyzer:state_variable:accountantState.payoutAddress"
 
 
@@ -441,8 +418,8 @@ def test_member_controller_is_readable_through_its_parent_getter(corpus):
 
 
 def test_denyfrom_class_publishes_as_a_qualified_member_change(corpus):
-    """Both facts proven: the event's arg is the written key, and every
-    externally-callable path that emits it is caller-gated."""
+    """Both facts proven: the event's arg is the written key, and every externally-callable
+    path that emits it is caller-gated."""
     for signature, direction in (("DenyFrom(address)", "add"), ("AllowFrom(address)", "remove")):
         spec = _spec(corpus, signature)
         assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
@@ -450,14 +427,13 @@ def test_denyfrom_class_publishes_as_a_qualified_member_change(corpus):
         assert spec["event_type"] == "member_changed:fromDenyList"
         assert spec["member_witness"]["direction"] == direction
         assert spec["member_witness"]["key_position"] == 0
-        # add/remove state no value; ``_value_writer_spec`` would have dropped
-        # these specs entirely for exactly that reason.
+        # add/remove state no value; ``_value_writer_spec`` would have dropped these specs.
         assert spec["member_witness"]["value_position"] is None
 
 
 def test_qualified_set_direction_carries_the_value_position(corpus):
-    """``gasLimits[id] = limit; emit ChainSetGasLimit(id, limit)`` — the event
-    states the new value as well as the key, and the record says where."""
+    """``gasLimits[id] = limit; emit ChainSetGasLimit(id, limit)``: the event states the new
+    value as well as the key, and the record says where."""
     spec = _spec(corpus, "ChainSetGasLimit(uint256,uint128)")
     assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
     assert spec["event_type"] == "member_changed:gasLimits"
@@ -467,8 +443,7 @@ def test_qualified_set_direction_carries_the_value_position(corpus):
 
 
 def test_qualified_member_change_decodes_key_value_and_direction(corpus):
-    """The runtime half of the vocabulary: the entry identity rides in ``data``,
-    never in the event type."""
+    """Runtime half of the vocabulary: the entry identity rides in ``data``, never the event type."""
     spec = _spec(corpus, "ChainSetGasLimit(uint256,uint128)")
     log = {
         "topics": [_topic0("ChainSetGasLimit(uint256,uint128)"), "0x" + "0" * 63 + "7"],
@@ -487,11 +462,9 @@ def test_qualified_member_change_decodes_key_value_and_direction(corpus):
 
 
 def test_a_flag_set_publishes_no_value_even_when_an_arg_is_named_value(corpus):
-    """``WardAdded(address indexed usr, uint256 value)`` for ``wards[usr] = true``.
-    The record proves the event states NO value for the entry, so the amount
-    that happens to ride along under the name ``value`` must not be published as
-    one — on a ``member_changed`` row ``data.value`` is the witnessed new value
-    of the entry, and nothing else."""
+    """``WardAdded(address indexed usr, uint256 value)`` for ``wards[usr] = true``: the event
+    states NO value for the entry, so an arg merely named ``value`` must not be published as one
+    (on a ``member_changed`` row ``data.value`` is the witnessed new value, nothing else)."""
     spec = _spec(corpus, "WardAdded(address,uint256)")
     assert spec["event_type"] == "member_changed:wards"
     assert spec["member_witness"]["value_position"] is None
@@ -512,8 +485,7 @@ def test_a_flag_set_publishes_no_value_even_when_an_arg_is_named_value(corpus):
 
 
 def test_add_remove_events_publish_no_value(corpus):
-    """An ``add``/``remove`` event states which entry, not what it now holds.
-    Publishing a value there would be inventing one."""
+    """An ``add``/``remove`` event states which entry, not what it holds; a value would be invented."""
     spec = _spec(corpus, "DenyFrom(address)")
     denied = "0x" + "cd" * 20
     log = {
@@ -533,10 +505,9 @@ def test_add_remove_events_publish_no_value(corpus):
 # ---------------------------------------------------------------------------
 # Shape 6 — write paths no attribution can see
 #
-# Each of these contracts carries the SAME clean pair: an owner-gated
-# ``allow(user)`` writing ``gated[user]`` and emitting ``Allowed(user)``, which
-# qualifies on its own. What varies is one open path that can write storage the
-# attribution never records — so the differential is the guard and nothing else.
+# Each contract carries the SAME clean pair (owner-gated ``allow(user)`` writing ``gated[user]``
+# and emitting ``Allowed(user)``, which qualifies alone). One open path writes storage the
+# attribution never records, so the differential is the guard and nothing else.
 # ---------------------------------------------------------------------------
 
 _CLEAN_PAIR = """
@@ -555,10 +526,8 @@ _CLEAN_PAIR = """
 """
 
 _OPAQUE_SOURCES = {
-    # (a) An assembly-only writer. Its write is recorded against
-    #     ``assembly_storage:<slot>``, so it appears in NO mapping's writer set —
-    #     which is why intersecting the opaque set with an attributed writer set
-    #     can never catch it.
+    # (a) Assembly-only writer, recorded against ``assembly_storage:<slot>``, so it is in NO
+    #     mapping's writer set and intersecting with an attributed writer set can never catch it.
     "OpaqueAssembly": """
 pragma solidity ^0.8.19;
 contract OpaqueAssembly {
@@ -571,8 +540,8 @@ contract OpaqueAssembly {
     }
 }
 """,
-    # (b) An open arbitrary delegatecall: the callee's writes land in THIS
-    #     contract's storage and are not in this compilation unit at all.
+    # (b) Open arbitrary delegatecall: the callee writes THIS contract's storage and is not
+    #     in this compilation unit.
     "OpaqueDelegatecall": """
 pragma solidity ^0.8.19;
 contract OpaqueDelegatecall {
@@ -585,9 +554,8 @@ contract OpaqueDelegatecall {
     }
 }
 """,
-    # (c) A library call through a STORAGE pointer. Slither attributes the write
-    #     to neither function and ``all_state_variables_written()`` on the caller
-    #     is empty for it.
+    # (c) Library call through a STORAGE pointer: Slither attributes the write to neither
+    #     function and ``all_state_variables_written()`` on the caller is empty.
     "OpaqueLibrary": """
 pragma solidity ^0.8.19;
 library MarkLib {
@@ -602,13 +570,11 @@ contract OpaqueLibrary {
     function anyoneLib(address user) external { MarkLib.put(sideMap, user); }
 }
 """,
-    # The guard's NEGATIVE SPACE (the Solady shape): the assembly writer is an
-    # internal helper reached only from a gated entry point, so nothing survives
-    # subtracting the restricted functions and the clean pair still qualifies.
-    # An ungated function that emits the qualified topic0 from an assembly LOG
-    # and writes NOTHING. Invisible to both openness quantifiers on its own: no
-    # EventCall node puts it in the emitter set, and touching no storage keeps it
-    # out of every writer set and out of the assembly-STORAGE set.
+    # The guard's NEGATIVE SPACE (Solady shape): the assembly writer is an internal helper
+    # reached only from a gated entry point, so the clean pair still qualifies.
+    # An ungated function emitting the qualified topic0 from an assembly LOG and writing
+    # NOTHING is invisible to both openness quantifiers: no EventCall node, and no storage
+    # touched.
     "OpaqueLogOnly": """
 pragma solidity ^0.8.19;
 contract OpaqueLogOnly {
@@ -622,8 +588,8 @@ contract OpaqueLogOnly {
     }
 }
 """,
-    # The round-2 mixed-style shape: a gated EventCall emitter and an open
-    # assembly emitter of the same topic0, where the open one also WRITES.
+    # Round-2 mixed style: a gated EventCall emitter and an open assembly emitter of the same
+    # topic0, where the open one also WRITES.
     "OpaqueMixedEmitter": """
 pragma solidity ^0.8.19;
 contract OpaqueMixedEmitter {
@@ -638,9 +604,8 @@ contract OpaqueMixedEmitter {
     }
 }
 """,
-    # A latch var with an owner-controlled setter of the SAME variable. The
-    # modifier's set-and-restore is the transient write; the setter's is a real
-    # mutation and the controller must stay in the plan.
+    # A latch var with an owner-controlled setter of the SAME variable: the modifier's
+    # set-and-restore is transient, the setter's is real, so the controller stays in the plan.
     "LatchWithAdminSetter": """
 pragma solidity ^0.8.19;
 contract LatchWithAdminSetter {
@@ -660,8 +625,7 @@ contract LatchWithAdminSetter {
     }
 }
 """,
-    # Ordinary library use: no storage pointer, so the library cannot write the
-    # caller's state and the qualification must be untouched.
+    # Ordinary library use (no storage pointer) cannot write the caller's state.
     "PlainLibrary": """
 pragma solidity ^0.8.19;
 library MathLib {
@@ -729,10 +693,9 @@ def _allowed(derived) -> dict:
 
 
 def test_the_clean_pair_qualifies_without_an_opaque_path(opaque):
-    """The guard's negative space, and the baseline the three demotions below
-    are read against. ``adminTouch`` reaches an internal assembly helper — the
-    Solady/OZ-v5 shape — but it is owner-gated, so it does not survive
-    subtracting the restricted functions and the qualification stands."""
+    """The guard's negative space, and the baseline for the three demotions below.
+    ``adminTouch`` reaches an internal assembly helper (Solady/OZ-v5 shape) but is owner-gated,
+    so it does not survive subtracting the restricted functions."""
     derived = opaque["SoladyShaped"]
     # Non-vacuity: the assembly write really is there and really is opaque.
     assert derived["effects"]["functions"]["adminTouch(address)"]["assembly_state_access"] is True
@@ -747,13 +710,11 @@ def test_the_clean_pair_qualifies_without_an_opaque_path(opaque):
 def test_an_assembly_only_writer_demotes_the_qualification(opaque):
     derived = opaque["OpaqueAssembly"]
     effects = derived["effects"]
-    # Non-vacuity: present in the artifact as an assembly writer, and absent
-    # from every attributed writer set — so an intersection with one is empty.
+    # Non-vacuity: present as an assembly writer, absent from every attributed writer set.
     assert effects["functions"]["anyoneAsm(address)"]["assembly_state_access"] is True
     writers = _state_writers_from_effects(effects)
-    # It is attributed to a raw SLOT, never to a variable — so intersecting the
-    # opaque set with any variable's writer set is empty exactly when this shape
-    # is present, which is why the guard cannot be an intersection.
+    # Attributed to a raw SLOT, never a variable, so no variable-writer-set intersection can
+    # catch it; hence the guard cannot be an intersection.
     assert "anyoneAsm(address)" in writers["assembly_storage:slot"]
     assert all("anyoneAsm(address)" not in fns for var, fns in writers.items() if not var.startswith("assembly_"))
 
@@ -767,8 +728,7 @@ def test_an_open_delegatecall_demotes_the_qualification(opaque):
     effects = derived["effects"]
     sinks = effects["functions"]["anyoneDc(address,bytes)"]["sinks"]
     assert any(sink["kind"] == "delegatecall" for sink in sinks)
-    # The callee writes THIS contract's storage and is not in this compilation
-    # unit, so no write is attributed to the caller at all.
+    # The callee writes THIS contract's storage outside this compilation unit.
     assert all("anyoneDc(address,bytes)" not in fns for fns in _state_writers_from_effects(effects).values())
 
     spec = _allowed(derived)
@@ -780,8 +740,7 @@ def test_a_library_storage_write_demotes_the_qualification(opaque):
     derived = opaque["OpaqueLibrary"]
     contract = derived["contract"]
     caller = next(fn for fn in contract.functions if fn.full_name == "anyoneLib(address)")
-    # Non-vacuity: the write is invisible to BOTH attribution routes — the
-    # effects writer set and Slither's recursive accessor.
+    # Non-vacuity: invisible to BOTH attribution routes (effects writer set, Slither accessor).
     assert list(caller.all_state_variables_written()) == []
     assert all("anyoneLib(address)" not in fns for fns in _state_writers_from_effects(derived["effects"]).values())
     callee = next(call.function for call in caller.all_library_calls())
@@ -793,12 +752,9 @@ def test_a_library_storage_write_demotes_the_qualification(opaque):
 
 
 def test_an_assembly_log_only_emitter_demotes_the_qualification(opaque):
-    """The forging shape. ``anyoneLog`` emits the qualified topic0 from an
-    assembly LOG and writes nothing, so it is in neither quantifier's domain:
-    no ``EventCall`` node puts it in the emitter set, and touching no storage
-    keeps it out of every writer set and out of the assembly-STORAGE set.
-    Without the log-opcode arm, any address could mint a notified
-    ``member_changed`` claim naming an entry of its choosing."""
+    """The forging shape: ``anyoneLog`` emits the qualified topic0 from an assembly LOG and
+    writes nothing, so it is in neither quantifier's domain. Without the log-opcode arm any
+    address could mint a notified ``member_changed`` claim naming an entry of its choosing."""
     derived = opaque["OpaqueLogOnly"]
     effects = derived["effects"]
     # Non-vacuity: invisible to every other signal the qualification reads.
@@ -813,10 +769,9 @@ def test_an_assembly_log_only_emitter_demotes_the_qualification(opaque):
 
 
 def test_a_mixed_style_emitter_demotes_the_qualification(opaque):
-    """A gated ``EventCall`` emitter beside an open assembly emitter of the same
-    topic0, where the open one also writes. Two independent arms now refuse it —
-    the writers-side quantifier (tested on its own by the denylist-gated writer
-    above) and the log-opcode arm."""
+    """A gated ``EventCall`` emitter beside an open assembly emitter of the same topic0 that
+    also writes. Two arms refuse it: the writers-side quantifier (tested on its own by the
+    denylist-gated writer above) and the log-opcode arm."""
     derived = opaque["OpaqueMixedEmitter"]
     effects = derived["effects"]
     assert "anyoneAlso(address)" in _state_writers_from_effects(effects).get("gated", set())
@@ -828,16 +783,13 @@ def test_a_mixed_style_emitter_demotes_the_qualification(opaque):
 
 
 def test_a_latch_var_keeps_its_admin_setter(opaque):
-    """``hygiene_class`` is VARIABLE-granular: once ``_status`` is a proven latch,
-    every write of it is stamped, including an ``onlyOwner setStatus`` in a
-    function body. Subtracting on the class alone deleted a real owner-controlled
-    writer and took the controller out of the plan entirely — no watch, no poll,
-    silently. Only the modifier's own set-and-restore (``origin == "guard"``) is
-    the write the proof is about."""
+    """``hygiene_class`` is VARIABLE-granular: once ``_status`` is a proven latch every write of
+    it is stamped, including an ``onlyOwner setStatus``. Subtracting on class alone deleted a
+    real owner-controlled writer and silently dropped the controller (no watch, no poll). Only
+    the modifier's own set-and-restore (``origin == "guard"``) is the write the proof covers."""
     derived = opaque["LatchWithAdminSetter"]
     facts = derived["effects"]["functions"]
-    # Non-vacuity: BOTH writes carry the latch class, and only their origin
-    # tells them apart.
+    # Non-vacuity: BOTH writes carry the latch class; only origin tells them apart.
     guard_write = facts["deposit()"]["state_writes"][0]
     body_write = next(w for w in facts["setStatus(uint256)"]["state_writes"] if w["var"] == "_status")
     assert guard_write == {
@@ -859,9 +811,8 @@ def test_a_latch_var_keeps_its_admin_setter(opaque):
 
 
 def test_ordinary_library_use_is_not_opaque(opaque):
-    """A library taking no storage pointer cannot write the caller's state, so
-    Math-style and SafeERC20-style use must leave the qualification alone —
-    otherwise the guard nullifies F3 on most real contracts."""
+    """A library taking no storage pointer cannot write the caller's state; Math/SafeERC20 use
+    must leave the qualification alone, or the guard nullifies F3 on most real contracts."""
     from services.static.contract_analysis_pipeline.tracking import _library_storage_write_functions
 
     derived = opaque["PlainLibrary"]
@@ -882,9 +833,8 @@ def test_ordinary_library_use_is_not_opaque(opaque):
 
 
 def test_canonical_family_is_unchanged_by_qualification(corpus):
-    """A Solmate-shaped ``OwnerUpdated`` classifies from its own signature and
-    keeps its family name — the member vocabulary never overwrites a semantic
-    claim that was already earned."""
+    """A Solmate ``OwnerUpdated`` keeps its family name; the member vocabulary never overwrites
+    an already-earned semantic claim."""
     spec = _spec(corpus, "OwnerUpdated(address,address)")
     assert spec["event_type"] == "ownership_transferred"
     assert spec["witness_tier"] == WITNESS_TIER_SELF_DESCRIBING
@@ -897,29 +847,24 @@ def test_canonical_family_is_unchanged_by_qualification(corpus):
 
 
 def test_keyless_old_new_on_a_mapping_is_not_self_describing(corpus):
-    """An old/new pair naming no key states that ONE ENTRY moved, not that the
-    mapping did.
+    """An old/new pair naming no key says ONE ENTRY moved, not the mapping.
 
-    Publishing it under the slot stem ``state_changed:state_variable:_tokenInfos``
-    puts one entry's limit into ``last_known_state`` and ``ControllerValue`` as
-    the whole mapping's value — and the member-change guards downstream key off
-    the ``member_changed`` type, which this stem is not, so they never fire.
-    The live case is LRTSquaredCore's ``TokenMaxPositionWeightLimitUpdated``.
+    Publishing under ``state_changed:state_variable:_tokenInfos`` would put one entry's limit
+    into ``last_known_state`` / ``ControllerValue`` as the whole mapping's value, and the
+    ``member_changed`` guards downstream never fire. Live case: LRTSquaredCore's
+    ``TokenMaxPositionWeightLimitUpdated``.
     """
     spec = _spec(corpus, "TokenMaxWeightUpdated(uint64,uint64)")
 
-    # Non-vacuity, both halves of the shape: the emitter really is a
-    # single-write RESTRICTED writer (so nothing else is doing the demoting),
-    # and the ABI really does carry the old/new pair.
+    # Non-vacuity: the emitter is a single-write RESTRICTED writer (so the writer is not doing
+    # the demoting) and the ABI carries the old/new pair.
     target = corpus["targets"]["state_variable:_tokenInfos"]
     assert str((target.get("read_spec") or {}).get("type_kind")) == "mapping"
     assert spec["effect_tags"]["writes"] == ["_tokenInfos"]
     names = [i.get("name") for i in spec["inputs"]]
     assert names == ["oldLimit", "newLimit"]
-    # The emitter is owner-gated in the corpus source, so nothing about the
-    # WRITER is doing the demoting here.
     assert "function setTokenMaxWeight(address token, uint64 limit) external onlyOwner" in CORPUS_SOURCE
-    # ... and no key rides in the args, which is why no member witness saves it.
+    # No key rides in the args, so no member witness saves it.
     assert "member_witness" not in spec
 
     assert spec["witness_tier"] != WITNESS_TIER_SELF_DESCRIBING
@@ -927,12 +872,9 @@ def test_keyless_old_new_on_a_mapping_is_not_self_describing(corpus):
 
 
 def test_the_same_pair_on_a_scalar_slot_still_qualifies(corpus):
-    """The guard refuses the slot shape, not the old/new arm.
-
-    Identical emitter discipline and identical ABI shape over a slot that holds
-    ONE value: the pair can only be about that value, so it still publishes
-    directly. The live cases are LRTSquaredCore's PriceProviderSet /
-    RebalancerSet / SwapperSet.
+    """The guard refuses the slot shape, not the old/new arm: over a slot holding ONE value the
+    pair can only be about that value, so it still publishes. Live cases: LRTSquaredCore's
+    PriceProviderSet / RebalancerSet / SwapperSet.
     """
     spec = _spec(corpus, "DepositLimitUpdated(uint64,uint64)")
 
@@ -945,14 +887,12 @@ def test_the_same_pair_on_a_scalar_slot_still_qualifies(corpus):
 
 
 def test_the_two_old_new_shapes_differ_only_in_the_slot(corpus):
-    """The differential itself: same writer discipline, same arg shape, same
-    single-write attribution — only the slot's own type_kind separates them, so
-    neither assertion above can be passing for an unrelated reason."""
+    """The differential: same writer discipline, arg shape and attribution; only the slot's
+    ``type_kind`` separates them, so neither test above passes for an unrelated reason."""
     mapping_spec = _spec(corpus, "TokenMaxWeightUpdated(uint64,uint64)")
     scalar_spec = _spec(corpus, "DepositLimitUpdated(uint64,uint64)")
 
-    # Openness is the same on both (neither carries a mapping-writer record),
-    # so it cannot be what separates them.
+    # Openness is the same on both, so it cannot be what separates them.
     assert mapping_spec["writer_openness"] == scalar_spec["writer_openness"]
     assert [i.get("name") for i in mapping_spec["inputs"]] == [i.get("name") for i in scalar_spec["inputs"]]
     assert len(mapping_spec["effect_tags"]["writes"]) == len(scalar_spec["effect_tags"]["writes"]) == 1
@@ -965,8 +905,8 @@ def test_the_two_old_new_shapes_differ_only_in_the_slot(corpus):
 
 
 def _label_golden_flow_rows():
-    """Every (claim-witness flow entry, value_flows record) pair in the label
-    golden, which the A/B gate has already proved equal to a live compile."""
+    """Every (claim-witness flow entry, value_flows record) pair in the label golden, already
+    proved equal to a live compile by the A/B gate."""
     from tests.support import label_corpus as label_harness
 
     golden = label_harness.load_golden()
@@ -977,12 +917,10 @@ def _label_golden_flow_rows():
 
 
 def test_the_label_corpus_contains_an_element_read_amount():
-    """Non-vacuity for W1's amount half. Every A-fixture that asserts a W1
-    refusal ("A5 fails W1") is only a gate if the corpus holds at least one
-    amount that IS an element read — a record cell selected by a caller-named
-    key, with the member path resolved. Before SelfServicePayout the only
-    bounded_by_storage amount refused at the root, so the refusal assertions
-    could pass with the shape entirely absent from the corpus."""
+    """Non-vacuity for W1's amount half: A-fixtures asserting a W1 refusal ("A5 fails W1") only
+    gate if the corpus holds an amount that IS an element read (a record cell selected by a
+    caller-named key, member path resolved). Before SelfServicePayout the only
+    bounded_by_storage amount refused at the root, so those assertions could pass vacuously."""
     element_reads = [
         vf
         for _c, _fn, _wf, value_flows in _label_golden_flow_rows()
@@ -990,8 +928,8 @@ def test_the_label_corpus_contains_an_element_read_amount():
         if vf.get("amount_record_variable") and vf.get("amount_record_member_path")
     ]
     assert element_reads, "no element-read amount anywhere in the label corpus"
-    # ...and at least one is keyed by a whole caller argument, the shape whose
-    # key the caller names (`bids[_bidId]`), with the ordering witness beside it.
+    # ...and one is keyed by a whole caller argument (`bids[_bidId]`), with the ordering
+    # witness beside it.
     assert any(
         vf.get("amount_record_key_kinds") == ["param"]
         and vf.get("amount_record_key_param_indexes") == [0]
@@ -1001,11 +939,10 @@ def test_the_label_corpus_contains_an_element_read_amount():
 
 
 def test_the_label_corpus_contains_a_caller_authority_element_guard():
-    """Non-vacuity for W1's guard half: at least one witness proves the guard
-    and the amount name the SAME record with the caller's own membership
-    (`owner_guarded_record`), and the full conjunction is exercised positively —
-    so a producer that stops resolving the guard side falls to not_determined
-    and a golden test goes red, rather than every refusal holding vacuously."""
+    """Non-vacuity for W1's guard half: a witness proves the guard and amount name the SAME
+    record with the caller's own membership (`owner_guarded_record`), and the full conjunction
+    is exercised positively, so a producer that stops resolving the guard goes red rather than
+    every refusal holding vacuously."""
     witness_entries = [f for _c, _fn, wf, _vf in _label_golden_flow_rows() for f in wf]
     constrained = [
         f["amount_record_constraint"]

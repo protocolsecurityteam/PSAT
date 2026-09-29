@@ -1,23 +1,18 @@
 """``authority_roles`` keeps its three states across BOTH published surfaces.
 
 ``effective_functions.authority_roles`` is three-state (see
-``schemas/effective_permissions.EffectiveFunctionPermission``): a non-empty list
-is a WITNESSED role requirement, jsonb ``null`` is role-gated with the role NOT
-determined, ``[]`` is proven not role-gated. ``[]`` is the NEGATION of what
-``null`` asserts, not a coarsening of it.
+``schemas/effective_permissions.EffectiveFunctionPermission``): a non-empty list is a WITNESSED
+role requirement, jsonb ``null`` is role-gated with the role NOT determined, ``[]`` is proven not
+role-gated (the NEGATION of ``null``, not a coarsening of it).
 
-Two endpoints publish the same rows and disagreed. ``/api/analyses/{job}``
-(``services/aggregations/analysis_detail``) passed the column through;
-``/api/company/{name}/functions``
-(``services/governance/principals._build_company_function_entry``) seeded its
-result with ``list(authority_roles_by_key.values())`` — a list on every path,
-including the "witnessed nothing" one that every row takes
-(``function_principals.principal_type`` is ``controller`` on 100% of rows) — so
-the column's ``null`` could not reach the payload. On the ether.fi preview the
-company endpoint served 0 nulls over 1,109 rows whose pool holds 324.
+``/api/analyses/{job}`` passed the column through, but ``/api/company/{name}/functions``
+(``services/governance/principals._build_company_function_entry``) seeded its result with
+``list(authority_roles_by_key.values())`` — a list on every path, including the "witnessed
+nothing" one every row takes (``principal_type`` is ``controller`` on 100% of rows) — so ``null``
+never reached the payload (ether.fi preview: 0 nulls over 1,109 rows whose pool holds 324).
 
-These tests pin the POSITIVE case of all three states on both endpoints, and
-that the two endpoints agree row-for-row.
+These tests pin the POSITIVE case of all three states on both endpoints, and that the two
+agree row-for-row.
 """
 
 from __future__ import annotations
@@ -183,9 +178,6 @@ def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
 
     for signature in COLUMN_BY_FUNCTION:
         assert state(company[signature]["authority_roles"]) == state(analyses[signature]["authority_roles"]), signature
-        # …and each equals the expected published state (the column's own
-        # state for the three honest shapes; the unreadable non-object shape
-        # degrades to not-determined on both surfaces).
         assert state(company[signature]["authority_roles"]) == EXPECTED_STATE[signature], signature
 
 

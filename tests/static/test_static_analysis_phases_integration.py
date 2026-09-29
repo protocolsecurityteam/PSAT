@@ -33,7 +33,6 @@ def _job(**overrides):
 
 
 def _capture_store_artifact(monkeypatch):
-    """Patch store_artifact and return a list that collects all calls."""
     calls: list[dict] = []
 
     def _fake_store(_session, _job_id, name, data=None, text_data=None):
@@ -49,8 +48,6 @@ def _capture_store_artifact(monkeypatch):
 
 
 class TestAnalysisPhaseSuccess:
-    """Mock collect_contract_analysis() to return a dict; verify artifact is stored."""
-
     def test_stores_contract_analysis_artifact(self, monkeypatch, tmp_path):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
@@ -110,8 +107,6 @@ class TestAnalysisPhaseSuccess:
         assert [call["name"] for call in calls] == ["contract_analysis", "predicate_trees", "effects"]
 
     def test_skips_predicate_trees_for_vyper(self, monkeypatch, tmp_path):
-        """Vyper projects return ``None`` for predicate_trees + effects;
-        only contract_analysis is stored."""
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
         monkeypatch.setattr(worker, "_write_analysis_tables", lambda *a, **kw: None)
@@ -131,9 +126,6 @@ class TestAnalysisPhaseSuccess:
 
 
 class TestAnalysisPhaseFailure:
-    """Mock ``collect_contract_analysis_with_artifacts()`` to raise;
-    verify error artifact and return value."""
-
     def test_stores_analysis_error_on_exception(self, monkeypatch, tmp_path):
         worker = StaticWorker()
         monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)

@@ -1,17 +1,7 @@
-"""Pure-logic + contract-boundary tests for the audit-PDF text extractor.
-
-The full worker loop (claim → download → extract → store → persist) is
-covered end-to-end by ``test_audit_text_extraction_integration.py`` which
-runs against real Postgres + real MinIO. What lives here is:
-
-    - ``extract_text_from_pdf`` round-trip through real ``pypdf``
-    - ``download_pdf`` HTTP contract boundaries that the integration test
-      doesn't exercise because it stubs ``download_pdf`` wholesale
-      (size caps, content-type rejection, transport errors)
-    - ``audit_text_key`` deterministic key format
-
-Anything that would re-mock the worker / storage / LLM paths belongs in
-the integration test, not here.
+"""Pure-logic and contract-boundary tests for the audit-PDF text extractor: ``extract_text_from_pdf`` through real
+``pypdf``, ``download_pdf`` HTTP boundaries the integration test skips (it stubs ``download_pdf`` wholesale), and
+``audit_text_key`` format. The worker loop is covered by ``test_audit_text_extraction_integration.py``; don't
+re-mock worker/storage/LLM paths here.
 """
 
 from __future__ import annotations
@@ -46,8 +36,6 @@ class TestExtractTextFromPdf:
         text = extract_text_from_pdf(body)
         assert "Pool.sol" in text
         assert "Vault.sol" in text
-        # Page markers must be preserved so the scope extractor can recover
-        # page boundaries.
         assert "--- page 1 ---" in text
 
     def test_garbage_body_raises_parse_error(self):
@@ -59,13 +47,8 @@ class TestExtractTextFromPdf:
             extract_text_from_pdf(b"")
 
     def test_link_annotation_uris_are_included_in_extracted_text(self):
-        """Certora's audit PDFs embed commit SHAs as hyperlinks
-        ("Fixed in [commit](https://github.com/x/y/commit/<sha>)") rather
-        than inline text. pypdf's ``extract_text()`` drops the URI. Without
-        the annotation-scraping path, the scope extractor's hex regex sees
-        the body as "Fixed in commit" with no SHA following, and
-        ``reviewed_commits`` stays empty — which kills source-equivalence
-        and strands the audit in heuristic grace-zone matching.
+        """Certora PDFs embed commit SHAs as hyperlinks and pypdf's ``extract_text()`` drops the URI, leaving
+        ``reviewed_commits`` empty, which kills source-equivalence and strands the audit in grace-zone matching.
         """
         import io
 
@@ -87,14 +70,10 @@ class TestExtractTextFromPdf:
 
         text = extract_text_from_pdf(buf.getvalue())
 
-        # The full URL (or at least the SHA) must appear somewhere in the
-        # extracted text so downstream regex can see it. We assert on the
-        # SHA rather than the URL so we don't pin the impl to a specific
-        # formatting choice (raw URL vs bracketed vs prefixed line).
+        # Assert on the SHA, not the URL, so the impl isn't pinned to a formatting choice.
         assert sha in text, f"commit SHA from link annotation lost in extraction. Extracted text: {text!r}"
 
     def test_multiple_link_annotations_all_extracted(self):
-        """A real PDF has many commit links — we can't drop any of them."""
         import io
 
         from pypdf import PdfWriter
@@ -157,13 +136,12 @@ class TestExtractTextFromPdf:
         text = extract_text_from_pdf(buf.getvalue())
         assert sha_p1 in text
         assert sha_p2 in text
-        # Both page markers must still be there.
         assert "--- page 1 ---" in text
         assert "--- page 2 ---" in text
 
     def test_non_link_annotations_do_not_leak_garbage(self):
-        """We only want ``/Subtype == /Link`` with ``/A/URI``. Highlight
-        annotations, form fields, comments etc. must not pollute the text.
+        """Only ``/Subtype == /Link`` with ``/A/URI`` counts; highlights, form fields and comments must not pollute the
+        text.
         """
         import io
 
@@ -193,17 +171,11 @@ class TestExtractTextFromPdf:
         body = minimal_pdf_with_text("No links here, just scope contracts.")
         text = extract_text_from_pdf(body)
         assert "No links here" in text
-        # No stray URI placeholders, empty sections, or duplicated markers.
         assert text.count("--- page 1 ---") == 1
 
     def test_end_to_end_link_sha_reaches_reviewed_commits_extractor(self):
-        """The real reason we care about link URIs: downstream,
-        ``extract_reviewed_commits`` must pick up the SHA out of the
-        extracted text. This test locks the end-to-end behaviour —
-        extract_text_from_pdf → extract_reviewed_commits — so a future
-        change to either side won't silently re-break the
-        Certora-V3.Prelude-1 case (hyperlinked "commit" with no inline
-        SHA) that motivated this fix.
+        """Locks extract_text_from_pdf -> extract_reviewed_commits end to end for the Certora-V3.Prelude-1 case
+        (hyperlinked "commit" with no inline SHA).
         """
         import io
 
@@ -232,15 +204,8 @@ class TestExtractTextFromPdf:
         )
 
 
-# ---------------------------------------------------------------------------
-# download_pdf — boundary conditions around HTTP behaviour.
-#
-# These are *not* covered by the integration test: the integration suite
-# stubs ``download_pdf`` wholesale so it can drop fixture PDFs in without
-# a real HTTP server. The contract boundaries below (HTTP error, wrong
-# content-type, oversize body) are the thing that would actually break in
-# prod when a publisher changes their CDN behaviour.
-# ---------------------------------------------------------------------------
+# download_pdf HTTP boundaries (error, wrong content-type, oversize). The integration suite stubs download_pdf
+# wholesale, so these break unnoticed in prod when a publisher changes CDN behaviour.
 
 
 def _mock_response(
@@ -313,23 +278,13 @@ class TestDownloadPdfBoundaries:
         assert "application/pdf" in _ACCEPTED_CONTENT_TYPES
 
 
-# ---------------------------------------------------------------------------
-# download_audit_body — retry-with-backoff on transient transport failures.
-#
-# Production observed bursts of ConnectionResetError(104, 'Connection reset by
-# peer') from upstream publishers (Code4rena / Sherlock). Without retry, every
-# transient flake permanently fails an audit row — the worker writes
-# ``ExtractionOutcome(status="failed")`` and the audit never gets reattempted.
-# requests wraps OS-level ConnectionResetError as
-# requests.exceptions.ConnectionError, so the tests below mock with the wrapped
-# form to mirror what actually flows through ``download_audit_body``.
-# ---------------------------------------------------------------------------
+# download_audit_body retry-with-backoff. Prod saw bursts of ConnectionResetError(104) from Code4rena / Sherlock
+# that permanently failed audit rows. requests wraps it as requests.exceptions.ConnectionError, so tests mock
+# the wrapped form.
 
 
 class TestDownloadAuditBodyRetry:
     def test_transient_connection_error_is_retried_to_success(self, monkeypatch):
-        """First call RSTs the way prod does, second call succeeds — audit
-        should end as a successful download, not a terminal failure."""
         monkeypatch.setattr("services.audits.text_extraction._retry_sleep", lambda _s: None, raising=False)
 
         ok = _mock_response(body=b"%PDF-1.4\n...")
@@ -347,8 +302,6 @@ class TestDownloadAuditBodyRetry:
         assert session.get.call_count == 2
 
     def test_retries_exhausted_raises_download_error(self, monkeypatch):
-        """Caps the retry budget — three transient flakes in a row still
-        surface as a download failure, not an infinite loop."""
         monkeypatch.setattr("services.audits.text_extraction._retry_sleep", lambda _s: None, raising=False)
 
         session = MagicMock()
@@ -378,8 +331,7 @@ class TestDownloadAuditBodyRetry:
         assert session.get.call_count == 2
 
     def test_transient_5xx_is_retried_to_success(self, monkeypatch):
-        """A 503 from a CDN is the HTTP-level analogue of a connection reset.
-        Bucketed with 4xx as fatal pre-fix; should be retried post-fix."""
+        """503 is the HTTP-level analogue of a connection reset; it used to be bucketed with 4xx as fatal."""
         monkeypatch.setattr("services.audits.text_extraction._retry_sleep", lambda _s: None, raising=False)
 
         ok = _mock_response(body=b"%PDF-1.4\n...")
@@ -391,7 +343,6 @@ class TestDownloadAuditBodyRetry:
         assert session.get.call_count == 2
 
     def test_fatal_4xx_does_not_retry(self, monkeypatch):
-        """404 means the audit URL is dead — retrying just wastes the budget."""
         monkeypatch.setattr("services.audits.text_extraction._retry_sleep", lambda _s: None, raising=False)
 
         session = MagicMock()
@@ -442,11 +393,6 @@ class TestDownloadAuditBodyRetry:
             f"expected success after transient retry, got {outcome.status}: {outcome.error}"
         )
         assert session.get.call_count == 2
-
-
-# ---------------------------------------------------------------------------
-# audit_text_key — deterministic key format that downstream routes depend on
-# ---------------------------------------------------------------------------
 
 
 def test_audit_text_key_is_deterministic():
@@ -555,8 +501,6 @@ class TestProcessAuditReportTextFiles:
         assert captured["url"] == "https://raw.githubusercontent.com/x/y/main/audits/report.md"
 
     def test_markdown_url_success_stores_text_unchanged(self, monkeypatch):
-        """URL ending in .md should succeed, skip pypdf entirely, and store
-        the decoded text verbatim (no page markers inserted)."""
         captured: dict = {}
 
         def fake_download_text(url, session=None):
@@ -570,7 +514,6 @@ class TestProcessAuditReportTextFiles:
             return (f"audits/text/{aid}.txt", len(text.encode("utf-8")), "b" * 64)
 
         monkeypatch.setattr("services.audits.text_extraction.download_text", fake_download_text)
-        # Ensure the pdf path is not taken — monkeypatch to explode if hit.
         monkeypatch.setattr(
             "services.audits.text_extraction.download_pdf",
             lambda *_a, **_kw: pytest.fail("pdf path must not run for .md URL"),
@@ -585,12 +528,10 @@ class TestProcessAuditReportTextFiles:
         assert out.storage_key == "audits/text/7.txt"
         assert out.text_size_bytes == len(_MD_BODY.encode("utf-8"))
         assert captured["mode"] == "text"
-        # Text is passed to store verbatim — no pypdf page markers.
         assert captured["text"] == _MD_BODY
         assert "--- page 1 ---" not in captured["text"]
 
     def test_txt_url_success(self, monkeypatch):
-        """``.txt`` suffix is also routed through the text-file path."""
         body = ("plain text audit body. " * 60).encode("utf-8")
 
         monkeypatch.setattr(
@@ -608,7 +549,6 @@ class TestProcessAuditReportTextFiles:
         assert out.status == "success"
 
     def test_markdown_under_min_threshold_skipped(self, monkeypatch):
-        """The 500-char min-useful-text gate still applies to markdown."""
         monkeypatch.setattr(
             "services.audits.text_extraction.download_text",
             lambda url, session=None: b"tiny md",
@@ -620,8 +560,6 @@ class TestProcessAuditReportTextFiles:
         assert out.status == "skipped"
 
     def test_pdf_url_still_uses_pypdf_path(self, monkeypatch):
-        """Regression: a .pdf URL must go through the pypdf extraction path,
-        not the text decode path."""
         body = minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20)
 
         monkeypatch.setattr(
@@ -645,7 +583,6 @@ class TestProcessAuditReportTextFiles:
             url="https://example.com/audit.pdf",
         )
         assert out.status == "success"
-        # pypdf path preserves the --- page N --- markers.
         assert "--- page 1 ---" in captured_text["text"]
 
     def test_normalizes_github_blob_pdf_url_before_download(self, monkeypatch):

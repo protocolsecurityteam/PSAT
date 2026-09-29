@@ -1,20 +1,15 @@
 """Regression tests for the ``param_derived`` amount kind.
 
-The shape is the ERC-4626 redemption / rebasing-wrapper unwrap: the caller
-supplies an input, an EXTERNAL contract scales it, and the scaled result is what
-leaves (``token.transfer(msg.sender, rate.convertToAssets(shares))``). It used to
-classify ``indeterminate``, indistinguishable from "we traced nothing".
+Shape: ERC-4626 redemption / rebasing-wrapper unwrap, where the caller supplies an
+input, an EXTERNAL contract scales it, and the result leaves. It used to classify
+``indeterminate``, indistinguishable from "we traced nothing".
 
-What the kind claims is deliberately narrow — the amount IS a call's return value
-and a caller-supplied entry parameter was among that call's arguments. It is NOT
-a bound (the callee's rate is unseen state that can move arbitrarily) and NOT
-proof of caller control (we cannot see whether the callee honors its argument).
-The tests below pin both the recall and those limits.
+The kind is deliberately narrow: the amount IS a call's return value and a
+caller-supplied parameter was among its arguments. It is NOT a bound (the rate is
+unseen state) and NOT proof of caller control. Tests pin recall and those limits.
 
-Same harness as ``tests/static/test_flow_lattice.py`` — a real solc compile driving the
-production ``build_effects``. Every fixture is SYNTHETIC and minimal, and no rule
-here keys on a callee name: ``convertToAssets`` is written only because some name
-must appear in the source.
+Same harness as ``test_flow_lattice.py``; fixtures are SYNTHETIC and no rule keys on
+a callee name.
 """
 
 from __future__ import annotations

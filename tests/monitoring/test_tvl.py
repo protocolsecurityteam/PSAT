@@ -42,8 +42,7 @@ from utils.balance_status import (
     SWEEP_STATUS_COMPLETED,
 )
 
-# Unique address helpers — each test class gets its own prefix to avoid
-# unique-constraint collisions across tests sharing the same DB.
+# Unique address prefix per test class to avoid unique-constraint collisions on the shared DB.
 _ADDR_PREFIX = {
     "get_addrs": "0x0000000000000000000000000000000000001",
     "refresh": "0x0000000000000000000000000000000000002",
@@ -68,11 +67,8 @@ def _addr(prefix_key: str, suffix: str) -> str:
 
 @pytest.fixture(autouse=True)
 def _no_pinned_native(monkeypatch):
-    """Every balance test here stubs Etherscan only; pin the second native wire too.
-
-    No test in this module exercises the pinned read, so the whole module takes
-    the unpinned path — the one its expectations were written against.
-    """
+    """Balance tests stub Etherscan only; pin the second native wire too. None exercises the
+    pinned read, so the module takes the unpinned path its expectations were written against."""
     pinned_native_unavailable(monkeypatch)
 
 
@@ -181,12 +177,10 @@ class TestGetProtocolAddresses:
         assert impl_addr.lower() not in addr_set
 
     def test_the_implementation_of_a_SCANNING_proxy_is_read_at_its_own_address(self, db_session, _cleanup):
-        """The value plane folds the two addresses into one sheet, and a sheet
-        that publishes an asset list as COMPLETE claims it of both. Nothing could
-        earn that while the implementation's own address was never read — so a
-        proxy carrying a completed chain scan pulls its implementation back into
-        the population. An implementation whose proxy is NOT scanning stays out:
-        the exception is the completeness claim, not a general re-admission."""
+        """The value plane folds both addresses into one sheet, and a COMPLETE asset list claims
+        both, which nothing could earn while the implementation's address was unread. So a
+        proxy with a completed chain scan pulls its implementation back in; one whose proxy is
+        NOT scanning stays out (the exception is the completeness claim, not re-admission)."""
         protocol = Protocol(name="TestProto_scanimpl")
         db_session.add(protocol)
         db_session.flush()
@@ -261,10 +255,8 @@ class TestGetProtocolAddresses:
         assert quiet_impl_addr.lower() not in kept
 
     def test_impl_twin_on_other_chain_not_excluded(self, db_session, _cleanup):
-        # A base standalone contract sharing an address with an ethereum proxy's
-        # implementation must NOT be dropped from balance collection: the
-        # exclusion is per-chain (impl-behind-proxy on its OWN chain only), so
-        # the base twin still gets a balance row + breakdown entry.
+        # A base standalone contract sharing an address with an ethereum proxy's implementation
+        # must NOT be dropped: the exclusion is per-chain (impl-behind-proxy on its OWN chain).
         protocol = Protocol(name="TestProto_impltwin")
         db_session.add(protocol)
         db_session.flush()
@@ -394,14 +386,9 @@ class TestRefreshContractBalances:
         assert {b.token_symbol for b in balances} == {"ETH", "DUST", "NOPRICE"}
 
     def test_handles_balance_failure_gracefully(self, db_session, monkeypatch, _cleanup):
-        """Both reads fail ⇒ the contract is OMITTED and the cycle is partial.
-
-        It used to be published with ``total_usd: 0.0``, which is the same value
-        a contract that genuinely holds nothing gets, and which enters
-        ``TvlSnapshot.total_usd`` and the served breakdown with no discriminator
-        — a failed read turned into a measured money figure. Same rule as the
-        sibling read-existing branch (``_read_existing_balances``).
-        """
+        """Both reads fail => the contract is OMITTED and the cycle partial. It used to publish
+        ``total_usd: 0.0``, the same value as a contract holding nothing, so a failed read
+        became a measured money figure (same rule as ``_read_existing_balances``)."""
         protocol = Protocol(name="TestProto_failure")
         db_session.add(protocol)
         db_session.flush()
@@ -500,10 +487,8 @@ class TestRefreshAllProtocols:
         for i, p in enumerate([p1, p2]):
             db_session.add(
                 Contract(
-                    # Keyed on the loop index, not the protocol id: ``_addr``
-                    # truncates to 42 chars, so two ids sharing a hex prefix
-                    # composed the SAME address and the second insert violated
-                    # the (address, chain) unique key.
+                    # Keyed on the loop index: ``_addr`` truncates to 42 chars, so ids sharing
+                    # a hex prefix composed the SAME address and violated (address, chain).
                     address=_addr("all_protos", f"b{i}"),
                     chain="ethereum",
                     protocol_id=p.id,
@@ -626,11 +611,9 @@ class TestSnapshotDedup:
 
 @requires_postgres
 class TestNativeAssetPricingDispatch:
-    """Native-asset USD pricing dispatches on the contract's chain (inv. 5):
-    each contract's native balance is valued in its OWN chain's coin. ETH-native
-    chains reuse the mainnet ETH/USD quote; a non-ETH chain is priced per-chain
-    via ``get_native_price`` and is skipped (partial-flagged) — never ETH-quoted
-    — when that price is unavailable."""
+    """Native USD pricing dispatches on the contract's chain (inv. 5): ETH-native chains reuse
+    the mainnet quote; a non-ETH chain is priced via ``get_native_price`` and skipped
+    (partial-flagged), never ETH-quoted, when unavailable."""
 
     def _mock_eth_native(self, monkeypatch, *, wei: int) -> None:
         monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda address, chain_id=1: wei)
@@ -676,8 +659,7 @@ class TestNativeAssetPricingDispatch:
         assert len(rows) == 1 and rows[0].token_symbol == "ETH"
 
     def test_polygon_contract_priced_at_pol_quote(self, db_session, monkeypatch, _cleanup, _no_escalation):
-        # Regression: polygon (native POL) must be priced at its OWN coin's USD
-        # quote and recorded under the POL symbol — never raised, never ETH-quoted.
+        # Regression: polygon (native POL) is priced at POL's own quote, never ETH-quoted.
         protocol = Protocol(name="PolygonProto")
         db_session.add(protocol)
         db_session.flush()
@@ -706,9 +688,8 @@ class TestNativeAssetPricingDispatch:
         assert float(rows[0].price_usd) == 0.0826
 
     def test_unpriceable_chain_skips_contract_and_flags_partial(self, db_session, monkeypatch, _cleanup):
-        # A non-ETH chain whose native price can't be fetched must not wedge the
-        # protocol: the failing contract is skipped (no row, no wrong quote), the
-        # ETH sibling still snapshots, and the cycle is flagged partial.
+        # A non-ETH chain with no native price must not wedge the protocol: skip it, snapshot
+        # the ETH sibling, flag partial.
         protocol = Protocol(name="MixedChainProto")
         db_session.add(protocol)
         db_session.flush()
@@ -776,9 +757,8 @@ class TestEthPriceDegradationDB:
         with caplog.at_level(logging.WARNING, logger="services.monitoring.tvl"):
             breakdown, _ = refresh_contract_balances(db_session, protocol.id)
 
-        # Both contracts hold 5 ETH that could not be valued. Neither appears:
-        # an unpriced holding is not a holding worth $0, and $0 is what the
-        # breakdown would have carried into the headline figure.
+        # Neither appears: an unpriced holding is not worth $0, which the breakdown would have
+        # carried into the headline figure.
         assert len(breakdown) == 2
         assert all(entry["total_usd"] is None and entry["unpriced_count"] == 1 for entry in breakdown.values())
         assert any("native quote unavailable" in r.message for r in caplog.records)
@@ -786,10 +766,8 @@ class TestEthPriceDegradationDB:
 
 @requires_postgres
 class TestContractBreakdownCompositeKey:
-    """A CREATE2 twin (same address on ≥2 of a protocol's chains) must not
-    collapse in the snapshot ``contract_breakdown``. The breakdown is keyed by
-    the composite ``"<chain>::<address>"`` entity token so each chain's balance
-    keeps its own entry and ``on_chain_total`` sums both (reviewer finding 1)."""
+    """A CREATE2 twin (same address on >=2 chains) must not collapse in ``contract_breakdown``:
+    it is keyed ``"<chain>::<address>"`` so ``on_chain_total`` sums both (reviewer finding 1)."""
 
     @staticmethod
     def _chain_varying_eth_balance(address, chain_id=1):
@@ -994,15 +972,10 @@ class TestMainnetEthQuoteFailurePartial:
 
 @requires_postgres
 class TestFailedReadIsNotAMeasuredZero:
-    """A contract whose reads failed must not reach the snapshot as ``0.0``.
-
-    The failure was recorded only in the fetch plane and the cycle's ``partial``
-    flag; ``TvlSnapshot.total_usd`` and the served ``contract_breakdown``
-    (routers/protocols.py) carry no discriminator, so a published ``0.0`` is
-    read downstream as "this contract holds nothing" — an absence turned into a
-    money figure. The sibling read-existing branch was already fixed for exactly
-    this; this pins the refresh branch.
-    """
+    """A contract whose reads failed must not reach the snapshot as ``0.0``: the failure lives
+    only in the fetch plane and ``partial``, while ``total_usd`` / ``contract_breakdown`` carry
+    no discriminator, so 0.0 reads as "holds nothing". Pins the refresh branch; the
+    read-existing branch was already fixed."""
 
     @staticmethod
     def _one_good_one_failing(monkeypatch, good_addr: str, bad_addr: str):
@@ -1047,12 +1020,8 @@ class TestFailedReadIsNotAMeasuredZero:
         assert snapshot.total_usd is not None and float(snapshot.total_usd) == 2000.0
 
     def test_a_genuine_zero_is_still_published(self, db_session, monkeypatch, _cleanup, _no_escalation):
-        """Recall pin: a contract that really holds nothing keeps its ``0.0``.
-
-        Omission must mean "not measured", so a measured empty contract has to
-        stay in the breakdown or the two states collapse again from the other
-        side.
-        """
+        """Recall pin: a contract that really holds nothing keeps its ``0.0``, else "not
+        measured" and "measured empty" collapse from the other side."""
         protocol = Protocol(name="GenuineZeroProto")
         db_session.add(protocol)
         db_session.flush()
@@ -1075,10 +1044,8 @@ class TestFailedReadIsNotAMeasuredZero:
         assert breakdown[_entity_key("ethereum", addr)]["tokens"] == [{"symbol": "ETH", "usd_value": 0.0}]
 
     def test_token_read_failure_keeps_native_subset_with_partial_disclosure(self, db_session, monkeypatch, _cleanup):
-        """One unpublishable row class is enough — the same rule
-        ``contracts_missing_current_rows`` applies on the sibling branch. A total
-        built from the native leg only would understate the contract while
-        looking measured."""
+        """One unpublishable row class is enough (as ``contracts_missing_current_rows`` on the
+        sibling branch); a native-leg-only total would understate while looking measured."""
         protocol = Protocol(name="TokenFailOnlyProto")
         db_session.add(protocol)
         db_session.flush()
@@ -1110,15 +1077,10 @@ class TestFailedReadIsNotAMeasuredZero:
 
 @requires_postgres
 class TestProvenCodelessHolderPopulation:
-    """Who ``refresh_entity_balances`` reads, and why nobody else is in it.
-
-    The population is the earned ``eth_getCode`` witness and nothing looser: a
-    node is in it because an empty code read put ``resolved_type = 'eoa'`` on it,
-    never because a name, a relation or a row suggests an EOA. Everything the
-    producer declines to read comes back as an ``ExcludedHolder`` carrying the
-    reason, because a population that quietly shrinks is indistinguishable from
-    one that was never that size.
-    """
+    """Who ``refresh_entity_balances`` reads: the earned ``eth_getCode`` witness only (an empty
+    code read put ``resolved_type = 'eoa'``), never a name or relation. Everything declined
+    comes back as an ``ExcludedHolder`` with a reason, since a quietly shrinking population
+    looks like one that was never that size."""
 
     PREFIX = "0x000000000000000000000000000000000000e"
 
@@ -1148,9 +1110,8 @@ class TestProvenCodelessHolderPopulation:
         proto, host = self._fixture(db_session, monkeypatch)
         eoa = self._addr("2")
         self._node(db_session, host, eoa, "eoa")
-        # The three kinds that are NOT the witness. ``unknown`` is the one that
-        # matters: a node nobody probed carries it, and sweeping it as an EOA
-        # would be a name standing in for the getCode that was never issued.
+        # The three non-witness kinds. ``unknown`` matters: sweeping an unprobed node as an EOA
+        # would let a name stand in for a getCode never issued.
         self._node(db_session, host, self._addr("3"), "unknown")
         self._node(db_session, host, self._addr("4"), "contract")
         self._node(db_session, host, self._addr("5"), None)
@@ -1164,12 +1125,8 @@ class TestProvenCodelessHolderPopulation:
         assert excluded == []
 
     def test_an_eoa_node_that_also_carries_an_unknown_node_stays_in(self, db_session, monkeypatch, _cleanup):
-        """An unprobed sibling does not retract an earned witness.
-
-        ``resolved_type='eoa'`` is only written after an empty ``eth_getCode``.
-        A second node for the same address that nobody probed says nothing about
-        the address, so it cannot withdraw what the probe established.
-        """
+        """An unprobed sibling does not retract an earned witness: ``eoa`` is written only after
+        an empty ``eth_getCode``, and a second unprobed node says nothing about the address."""
         proto, host = self._fixture(db_session, monkeypatch)
         eoa = self._addr("6")
         self._node(db_session, host, eoa, "eoa")
@@ -1180,15 +1137,10 @@ class TestProvenCodelessHolderPopulation:
         assert [h.entity_key for h in holders] == [f"ethereum::{eoa}"]
 
     def test_an_address_with_its_own_contracts_row_is_never_a_second_subject(self, db_session, monkeypatch, _cleanup):
-        """The guard at the heart of the carrier.
-
-        One address read as a contract subject AND as an entity subject would
-        fold TWO accounts onto one entity key, and the sheet's "every folded
-        account was scanned at its own address" conjunct would then be asking
-        about the same account twice — a completeness claim that counts one
-        witness as two. The address is read through its ``contracts`` row, and
-        the entity population declines it WITH the reason.
-        """
+        """The carrier's guard: an address read as both a contract subject and an entity subject
+        would fold TWO accounts onto one entity key, so the "every folded account scanned at its
+        own address" conjunct would count one witness as two. The entity population declines it
+        WITH the reason."""
         proto, host = self._fixture(db_session, monkeypatch)
         # The host contract's own address, also reached as an owner node.
         self._node(db_session, host, host.address, "eoa")
@@ -1212,12 +1164,9 @@ class TestProvenCodelessHolderPopulation:
         assert "no RPC URL configured" in excluded[0].reason
 
     def test_every_candidate_is_a_holder_or_an_exclusion_with_a_reason(self, db_session, monkeypatch, _cleanup):
-        """Nothing leaves the population silently.
-
-        The candidate set is the plane's own ``load_proven_eoa_entities``; this
-        pins that the two output lists partition it, so a future guard cannot
-        drop an address without either reading it or saying why.
-        """
+        """Nothing leaves the population silently: the output lists partition
+        ``load_proven_eoa_entities``, so a guard can't drop an address without reading it or
+        saying why."""
         from services.scoring.planes import load_proven_eoa_entities
 
         proto, host = self._fixture(db_session, monkeypatch)
@@ -1231,14 +1180,9 @@ class TestProvenCodelessHolderPopulation:
         assert all(e.reason for e in excluded)
 
     def test_a_holder_already_carrying_rows_stays_in_the_population(self, db_session, monkeypatch, _cleanup):
-        """``no_rows`` is the LEVER's framing, deliberately not a producer filter.
-
-        Filtering the population on "has no sheet yet" would read each holder
-        exactly once and never again: the cursor would stop advancing, and a
-        proven-empty sheet published through block N would stand for a holder
-        that has since been paid. The producer's population is the witness; what
-        bounds the cost is the sweep cursor, not a one-shot population.
-        """
+        """``no_rows`` is the LEVER's framing, deliberately not a producer filter: filtering on
+        "has no sheet yet" would read each holder once, stall the cursor, and let a proven-empty
+        sheet through block N stand for a since-paid holder. The sweep cursor bounds the cost."""
         proto, host = self._fixture(db_session, monkeypatch)
         eoa = self._addr("9")
         self._node(db_session, host, eoa, "eoa")
@@ -1260,12 +1204,8 @@ class TestProvenCodelessHolderPopulation:
         assert [h.entity_key for h in holders] == [f"ethereum::{eoa}"]
 
     def test_the_producer_writes_entity_keyed_records_for_the_population(self, db_session, monkeypatch, _cleanup):
-        """End to end, offline: the population is what gets written, keyed on itself.
-
-        Also the carrier's own invariant, asserted where it is produced rather
-        than only where it is consumed: reading an entity holder mints no
-        ``contracts`` row.
-        """
+        """End to end, offline: the population is what gets written, keyed on itself. Also the
+        carrier invariant where it is produced: reading an entity holder mints no ``contracts`` row."""
         proto, host = self._fixture(db_session, monkeypatch)
         eoa = self._addr("a")
         self._node(db_session, host, eoa, "eoa")
@@ -1275,9 +1215,8 @@ class TestProvenCodelessHolderPopulation:
         monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda address, chain_id=1: 0)
         monkeypatch.setattr("services.clients.etherscan.get_eth_price", lambda chain_id=1: 2000.0)
         monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", lambda address, chain_id=1: page([]))
-        # The escalation fires (an empty page is a trigger, never a proof) and
-        # the scan is what would answer it; this test pins the RECORD, so the
-        # scan is stubbed to no outcome and the sheet stays honestly unproven.
+        # The escalation fires (an empty page is a trigger, never a proof); the scan is stubbed to
+        # no outcome so the sheet stays honestly unproven.
 
         report = refresh_entity_balances(db_session, proto.id)
         assert [h.entity_key for h in report.holders] == [f"ethereum::{eoa}"]
@@ -1303,15 +1242,10 @@ class TestProvenCodelessHolderPopulation:
 
 @requires_postgres
 class TestEntityCohortInTheCycle:
-    """The daily arm of the TVL cycle, and why it spends nothing the sweep needs.
-
-    Two facts are pinned here, both about wiring rather than about what a
-    balance means. The cohort of proven-codeless principals is read on ITS
-    schedule — once a day, measured against its own fetch rows — while the
-    snapshot keeps the clock it always had. And the requests that reading costs
-    are counted somewhere else: a counter handed to the entity pass, never the
-    one the contract sweep's ceiling is being spent against.
-    """
+    """The daily arm of the TVL cycle, and why it spends nothing the sweep needs. The cohort
+    of proven-codeless principals is read on ITS schedule (daily, against its own fetch rows)
+    while the snapshot keeps its clock, and its requests are counted on a counter handed to the
+    entity pass, never the contract sweep's ceiling."""
 
     PREFIX = "0x000000000000000000000000000000000000f"
 
@@ -1319,13 +1253,9 @@ class TestEntityCohortInTheCycle:
         return (self.PREFIX + suffix).ljust(42, "0")[:42]
 
     def _fixture(self, db_session, monkeypatch, tag: str):
-        """One protocol, one deployment, one proven-codeless owner.
-
-        *tag* gives each test its own addresses on purpose: an entity-keyed
-        fetch row hangs off ``(chain, address)`` and no ``contracts`` row, so
-        the session teardown's cascade never reaches it and a shared address
-        would let one test's reading answer the next test's cadence question.
-        """
+        """One protocol, one deployment, one proven-codeless owner. *tag* gives each test its own
+        addresses: an entity-keyed fetch row has no ``contracts`` row, so session teardown's
+        cascade misses it and a shared address would answer the next test's cadence question."""
         monkeypatch.setattr("services.monitoring.tvl.rpc_url_for_chain_id", lambda chain_id: "http://rpc.invalid")
         monkeypatch.setattr("services.monitoring.tvl.fetch_defillama_tvl", lambda name: None)
         monkeypatch.setattr("services.clients.etherscan.get_eth_balance", lambda address, chain_id=1: 0)
@@ -1340,10 +1270,8 @@ class TestEntityCohortInTheCycle:
         eoa = self._addr(f"{tag}2")
         db_session.add(ControlGraphNode(contract_id=host.id, address=eoa, node_type="owner", resolved_type="eoa"))
         db_session.commit()
-        # State the precondition instead of inheriting it. The session teardown
-        # sweeps these rows, but a DB polluted by a build that predates that
-        # sweep would hand the first test of the run a cohort already fresh, and
-        # a cadence test that reads someone else's answer is not a test.
+        # State the precondition: a DB polluted by a build predating the teardown sweep would
+        # hand the first test a cohort already fresh.
         db_session.query(ContractBalanceFetch).filter(
             ContractBalanceFetch.entity_address.like(f"{self.PREFIX}{tag}%")
         ).delete(synchronize_session=False)
@@ -1379,14 +1307,9 @@ class TestEntityCohortInTheCycle:
         db_session.commit()
 
     def test_the_cohort_is_read_daily_and_the_snapshot_keeps_its_own_clock(self, db_session, monkeypatch, _cleanup):
-        """Cadence (a): the entity arm fires on the day, the contract arm does not move.
-
-        Three ticks of the cycle. The first reads both. The second is inside
-        BOTH windows and reads neither. The third comes after the cohort's
-        reading has aged past a day and nothing else has changed — so the entity
-        arm fires again while the contract sweep, whose
-        ``MIN_SNAPSHOT_INTERVAL`` dedupe is untouched, still declines.
-        """
+        """Cadence (a): three ticks. The first reads both; the second is inside BOTH windows and
+        reads neither; the third is past the cohort's day, so the entity arm fires while the
+        contract sweep, whose ``MIN_SNAPSHOT_INTERVAL`` dedupe is untouched, declines."""
         proto, _host, eoa = self._fixture(db_session, monkeypatch, "a")
         contract_sweeps: list[int] = []
         real_contract_refresh = tvl_module.refresh_contract_balances
@@ -1414,12 +1337,8 @@ class TestEntityCohortInTheCycle:
         assert contract_sweeps == [proto.id]
 
     def test_the_window_is_measured_against_the_cohorts_own_rows(self, db_session, monkeypatch, _cleanup):
-        """What "daily" is anchored to: the cohort's own readings, rolling.
-
-        Not a wall-clock day and not loop-local state — the rows the producer
-        itself wrote. A cohort read inside the window returns ``None`` (the pass
-        did not run); one outside it reads again.
-        """
+        """What "daily" is anchored to: the cohort's own rolling readings, not a wall-clock day or
+        loop-local state. A cohort read inside the window returns ``None``; outside, it reads again."""
 
         proto, _host, eoa = self._fixture(db_session, monkeypatch, "b")
 
@@ -1437,16 +1356,10 @@ class TestEntityCohortInTheCycle:
         assert self._readings(db_session, eoa) == 2
 
     def test_a_shared_members_fresh_row_cannot_mask_a_stale_exclusive_one(self, db_session, monkeypatch, _cleanup):
-        """The anchor is the cohort's OLDEST reading, and this is why.
-
-        A fetch row's identity is ``(chain, address)`` and carries no protocol,
-        but the cohort is protocol-scoped — so an EOA reached from two
-        protocols' control graphs is one row that either protocol's pass
-        refreshes. Anchored on the newest reading, protocol A's daily pass would
-        keep that row fresh and protocol B's exclusive holder would never be
-        read again. Here B goes stale, A refreshes only the shared member, and B
-        must still be due for the holder A cannot reach.
-        """
+        """The anchor is the cohort's OLDEST reading. A fetch row is ``(chain, address)`` with no
+        protocol, so an EOA shared by two protocols' graphs is one row either pass refreshes;
+        anchored on the newest, A's pass would keep it fresh and B's exclusive holder would never
+        be read. B goes stale, A refreshes only the shared member, B must still be due."""
         proto_b, host_b, exclusive = self._fixture(db_session, monkeypatch, "d")
         shared = self._addr("d9")
         self._eoa_node(db_session, host_b, shared)
@@ -1471,13 +1384,9 @@ class TestEntityCohortInTheCycle:
         assert self._readings(db_session, exclusive) == 2
 
     def test_never_read_holder_is_due_without_refetching_fresh_cohort(self, db_session, monkeypatch, _cleanup):
-        """No reading is a third state, and it is not a floor of zero.
-
-        A holder discovered after the last pass has no reading at all. Folding
-        that absence into the anchor as an infinitely old one would re-open the
-        cohort on every tick and spend the day's requests hourly. It waits for
-        the pass the cohort's own age opens — and then it is read.
-        """
+        """No reading is a third state, not a floor of zero: a holder discovered after the last
+        pass, folded in as infinitely old, would re-open the cohort every tick and spend the
+        day's requests hourly. It waits for the cohort's own age, then is read."""
         proto, host, first_eoa = self._fixture(db_session, monkeypatch, "e")
         assert refresh_entity_balances_if_due(db_session, proto.id) is not None
 

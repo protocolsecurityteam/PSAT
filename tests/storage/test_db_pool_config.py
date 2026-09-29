@@ -1,17 +1,10 @@
 """Regression tests for DB engine pool sizing in ``db/models/session.py``.
 
-The pool was previously left at SQLAlchemy defaults (5+10). At 10 worker
-processes per VM that caps out at 150 connections per VM under load,
-which can blow past Neon's pool ceiling and surface as
-``OperationalError: too many connections`` from random workers.
-
-Pool size is now env-tunable via ``PSAT_DB_POOL_SIZE`` /
-``PSAT_DB_MAX_OVERFLOW`` / ``PSAT_DB_POOL_RECYCLE``. ``deploy/start_workers.sh``
-ships tight defaults (2+3) for workers; api/scripts keep 5+10 by default.
-
-These tests pin the defaults *and* verify env overrides take effect, so a
-silent revert (e.g. someone refactors the engine block and drops the
-kwargs) gets caught at unit-test time rather than as a Fly incident.
+The pool was left at SQLAlchemy defaults (5+10); at 10 worker processes per VM that is 150
+connections, which can blow past Neon's ceiling (``too many connections``). It is now env-tunable
+via ``PSAT_DB_POOL_SIZE`` / ``PSAT_DB_MAX_OVERFLOW`` / ``PSAT_DB_POOL_RECYCLE`` (workers ship 2+3 in
+``deploy/start_workers.sh``). These tests pin defaults and overrides so a silent revert is caught
+at unit-test time rather than as a Fly incident.
 """
 
 from __future__ import annotations
@@ -65,8 +58,6 @@ def _reload_models():
 
 
 def test_default_pool_size_matches_sqlalchemy_baseline(monkeypatch):
-    """Without env overrides we must match the historical 5+10 to avoid
-    a surprise behavior change for api/scripts that import the engine."""
     monkeypatch.delenv("PSAT_DB_POOL_SIZE", raising=False)
     monkeypatch.delenv("PSAT_DB_MAX_OVERFLOW", raising=False)
     monkeypatch.delenv("PSAT_DB_POOL_RECYCLE", raising=False)
@@ -77,8 +68,7 @@ def test_default_pool_size_matches_sqlalchemy_baseline(monkeypatch):
 
 
 def test_pool_size_env_override_honored(monkeypatch):
-    """deploy/start_workers.sh sets PSAT_DB_POOL_SIZE=2 PSAT_DB_MAX_OVERFLOW=3.
-    A regression here would silently re-balloon worker DB connections."""
+    """deploy/start_workers.sh sets POOL_SIZE=2 MAX_OVERFLOW=3; a regression would re-balloon worker connections."""
     monkeypatch.setenv("PSAT_DB_POOL_SIZE", "2")
     monkeypatch.setenv("PSAT_DB_MAX_OVERFLOW", "3")
     models = _reload_models()
@@ -88,8 +78,7 @@ def test_pool_size_env_override_honored(monkeypatch):
 
 
 def test_pool_recycle_env_override_honored(monkeypatch):
-    """Neon idle-disconnects at ~5 min; recycle must be tunable so we can
-    drop below that ceiling on noisy networks."""
+    """Neon idle-disconnects at ~5 min; recycle must be tunable below that."""
     monkeypatch.setenv("PSAT_DB_POOL_RECYCLE", "120")
     models = _reload_models()
     assert models.engine.pool._recycle == 120

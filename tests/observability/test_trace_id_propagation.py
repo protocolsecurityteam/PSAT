@@ -1,19 +1,9 @@
-"""Integration tests: ``trace_id`` end-to-end across HTTP → DB → child jobs.
+"""Integration tests: ``trace_id`` end-to-end across HTTP -> DB -> child jobs.
 
-Skips when ``TEST_DATABASE_URL`` is unset or unreachable (matches the
-pattern in ``tests/cache_helpers.requires_postgres`` so the offline CI
-can still run the rest of the suite).
-
-What this pins:
-
-1. ``POST /api/analyze`` without ``X-PSAT-Trace-Id`` → response carries
-   the header → ``Job.trace_id`` matches the echoed value (the API
-   minted it and persisted it).
-2. ``POST /api/analyze`` *with* a client-supplied ``X-PSAT-Trace-Id`` →
-   that exact value lands on ``Job.trace_id`` and is echoed back.
-3. ``db.queue.create_job`` invoked with a parent's bound trace context
-   stamps the child's ``trace_id`` to the parent's, modelling the
-   discovery worker's DApp/DefiLlama sibling spawn path.
+Skips when ``TEST_DATABASE_URL`` is unset or unreachable (as ``tests/cache_helpers.requires_postgres``
+does). Pins: the API mints, echoes and persists a trace id without ``X-PSAT-Trace-Id``; a
+client-supplied one is persisted and echoed; ``db.queue.create_job`` under a parent's bound trace
+context stamps the child with the parent's id (the discovery DApp/DefiLlama sibling spawn path).
 """
 
 from __future__ import annotations
@@ -27,7 +17,6 @@ from tests.cache_helpers import requires_postgres
 
 @requires_postgres
 def test_post_analyze_without_header_mints_trace_id(db_session, api_client):
-    """Round-trip the no-header path: server mints, echoes, and persists."""
     from db.models import Job
 
     address = "0x" + "a" * 40
@@ -45,7 +34,6 @@ def test_post_analyze_without_header_mints_trace_id(db_session, api_client):
 
 @requires_postgres
 def test_post_analyze_with_client_header_uses_supplied_trace_id(db_session, api_client):
-    """A client-supplied trace_id flows through to the persisted Job row."""
     from db.models import Job
 
     supplied = "client12345678ab"
@@ -67,10 +55,7 @@ def test_post_analyze_with_client_header_uses_supplied_trace_id(db_session, api_
 def test_create_job_inherits_bound_trace_id(db_session):
     """A child job created inside a parent's bind block inherits the parent's id.
 
-    Exercises the discovery worker's sibling-spawn pattern: the worker
-    binds via ``BaseWorker._execute_job`` and then ``create_job(...)`` is
-    called for every DApp/DefiLlama sibling. This test fakes the bind
-    directly because spawning a real worker would require RPC plumbing.
+    Fakes the bind that ``BaseWorker._execute_job`` does, since a real worker needs RPC plumbing.
     """
     from db.models import Job, JobStage
     from db.queue import create_job
@@ -94,12 +79,8 @@ def test_create_job_inherits_bound_trace_id(db_session):
 
 @requires_postgres
 def test_create_job_without_bind_mints_fresh_id(db_session):
-    """A create_job call outside any bind still gets a non-null trace_id.
-
-    Stops legacy callers (e.g. cron jobs that skip the API ingress) from
-    silently writing rows with NULL trace_id, which would defeat
-    correlation later.
-    """
+    """A create_job outside any bind still gets a non-null trace_id, so legacy callers (cron jobs
+    skipping API ingress) can't write NULL rows that defeat correlation."""
     from db.models import Job, JobStage
     from db.queue import create_job
 

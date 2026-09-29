@@ -54,7 +54,6 @@ def test_label_prefers_request_chain_name():
 
 
 def test_label_falls_back_to_chain_id_name():
-    """No request chain but a chain_id → canonical name for that id."""
     job = _make_job(chain_id=8453)
     assert _job_chain_log_value(job, {}) == "base"
 

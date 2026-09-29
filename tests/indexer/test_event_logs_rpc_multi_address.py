@@ -1,20 +1,8 @@
 """Shared multi-address getLogs on ``RpcEventLogFetcher``.
 
-The monitoring scanner (a later stage) needs one ``eth_getLogs`` to serve a
-whole cohort of monitored contracts, attribute each returned log back to the
-contract that emitted it, and hand a raw log dict to the existing decode
-pipeline (``services/monitoring/event_topics.parse_any_log``). It shares the
-indexer's single bisect-on-reject implementation. These pin:
-
-* the multi-address filter shape on the wire + per-emitter attribution;
-* bisect-on-rejection with an address list (window halves, results in block
-  order) and the floor re-raise;
-* single-address back-compat — byte-identical request to today;
-* the raw-dict carried on each result decodes end-to-end through the real
-  governance parser.
-
-Only the wire (``rpc_request``) is stubbed; the fetcher and the parser are the
-production code under test.
+The monitoring scanner needs one ``eth_getLogs`` for a whole cohort of contracts, per-emitter attribution, and a raw
+log dict for ``services/monitoring/event_topics.parse_any_log``. Pins the multi-address filter shape, bisect-on-reject
+with an address list, single-address back-compat, and the end-to-end governance decode. Only ``rpc_request`` is stubbed.
 """
 
 from __future__ import annotations
@@ -40,7 +28,6 @@ _TOPIC_B = "0x" + "bb" * 32
 
 
 def _topic_addr(addr: str) -> str:
-    """A 20-byte address left-padded to a 32-byte indexed-topic word."""
     return "0x" + addr[2:].rjust(64, "0").lower()
 
 
@@ -66,9 +53,6 @@ def _raw_log(
 
 
 def test_multi_address_filter_shape_and_attribution(monkeypatch):
-    """A list of addresses goes on the wire as the JSON-RPC ``address`` list in
-    one request, and each result is attributed to its emitter via ``.address``
-    (normalized lowercase, independent of the checksum casing the node returns)."""
     calls: list[list] = []
 
     def fake_rpc(url, method, params, *, chain_id=None):
@@ -104,9 +88,6 @@ def test_multi_address_filter_shape_and_attribution(monkeypatch):
 
 
 def test_multi_address_bisects_on_rejection(monkeypatch):
-    """An address-list window that the upstream rejects halves and retries; the
-    sub-window results concatenate in block order — same bisect core as the
-    single-address path, exercised through the list branch."""
     calls: list[tuple[int, int]] = []
 
     def fake_rpc(url, method, params, *, chain_id=None):
@@ -156,8 +137,6 @@ def test_multi_address_bisects_on_rejection(monkeypatch):
 
 
 def test_multi_address_bisect_floor_re_raises(monkeypatch):
-    """A rejection that persists down to ``min_bisect_span`` is a real error, not
-    a sizing problem — it propagates on the address-list path too."""
     calls: list[int] = []
 
     def fake_rpc(url, method, params, *, chain_id=None):
@@ -175,8 +154,7 @@ def test_multi_address_bisect_floor_re_raises(monkeypatch):
 
 
 def test_single_address_request_shape_unchanged(monkeypatch):
-    """Existing per-cursor callers pass a single string: the wire ``address`` is
-    that bare string (not a one-element list), identical to today."""
+    """Per-cursor callers pass a single string: the wire ``address`` stays a bare string, not a one-element list."""
     calls: list[dict] = []
 
     def fake_rpc(url, method, params, *, chain_id=None):
@@ -202,10 +180,8 @@ def test_single_address_request_shape_unchanged(monkeypatch):
 
 
 def test_raw_dict_decodes_through_governance_parser(monkeypatch):
-    """The raw dict carried on each result feeds the scanner's decode pipeline.
-    A realistic OwnershipTransferred log (two indexed address topics, empty
-    data) round-trips through the production ``parse_any_log`` to the decoded
-    owner rotation, keyed to the emitter the fetcher attributed it to."""
+    """A realistic OwnershipTransferred log round-trips through the production ``parse_any_log`` to the
+    decoded owner rotation, keyed to the emitter the fetcher attributed it to."""
     old_owner = "0x" + "de" * 20
     new_owner = "0x" + "ad" * 20
     raw = _raw_log(
@@ -240,13 +216,6 @@ def test_raw_dict_decodes_through_governance_parser(monkeypatch):
     assert parsed["new_owner"].lower() == new_owner.lower()
 
 
-# ---------------------------------------------------------------------------
-# Topic-filter normalization and the request shapes it produces
-#
-# Same claim as the tests above — what goes on the wire — asserted at the
-# normalizer and at fetch_logs's payload directly.
-# ---------------------------------------------------------------------------
-
 HOLDER = "0x00000000000000000000000000000000000ho1de"[:42].ljust(42, "1")
 TOKEN = "0x000000000000000000000000000000000000c0de"
 
@@ -256,8 +225,6 @@ def _pad(address: str) -> str:
 
 
 class _StubRpc:
-    """One eth_getLogs wire, scripted per call, with the requests recorded."""
-
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls: list[dict] = []

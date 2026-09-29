@@ -177,7 +177,6 @@ def test_remapping_target_rejects_embedded_newline():
     assert not fetch._remapping_target_is_safe("@a/=lib/\n@x/=/etc/")
     assert not fetch._remapping_target_is_safe("@a/=lib/\r@x/=/etc/")
     assert not fetch._remapping_target_is_safe("@a/=lib/\r\n@x/=/etc/")
-    # Legit single-line entries (relative, empty target) still pass.
     assert fetch._remapping_target_is_safe("@openzeppelin/=lib/openzeppelin-contracts/")
     assert fetch._remapping_target_is_safe("@a/=")
 
@@ -199,7 +198,6 @@ def test_scaffold_remappings_never_writes_absolute_line(tmp_path):
     fetch.scaffold("0xabc", result, project)
     lines = (project / "remappings.txt").read_text().splitlines()
     assert lines == ["@oz/=lib/openzeppelin/"]
-    # No line may point at an absolute read root.
     assert not any(line.split("=", 1)[-1].startswith("/") for line in lines if line)
 
 

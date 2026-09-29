@@ -56,12 +56,9 @@ class TestTopic:
         assert PUBKEY_LINKED_TOPIC0 == "0x5e525a525cf73653f769c8305dc71a68b85b0e62e3cc5258fe187ff9fd3e5cb9"
 
     def test_enrollment_basis_carries_the_incomplete_ceiling(self):
-        """Code-asserted, exactly like the tracked-topics surface.
-
-        The value is named here so the cursor-coverage column can take it at
-        assembly without a second literal appearing, and so this unit can never
-        claim a descriptor-derived provenance it does not have.
-        """
+        """Code-asserted, like the tracked-topics surface: named here so the cursor-coverage
+        column takes it without a second literal, and so this unit never claims a
+        descriptor-derived provenance it lacks."""
         assert RESTAKING_FOLD_ENROLLMENT_BASIS == "tracked_topics_asserted"
 
 
@@ -135,14 +132,10 @@ class TestEnrollment:
         db_session.rollback()
 
     def test_warm_siblings_never_regress_and_stay_complete(self, db_session, monkeypatch):
-        """The measured deferral: a cold cursor joins a group of warm ones.
-
-        ``index_event_group_step`` takes ``start = min(last_indexed_block)`` over
-        the group's active cursors, so the shared window is dragged back over
-        8,468,848 blocks (17 windows at a 500,000-block span). What must NOT
-        happen is a sibling losing ground or its completeness being reset by the
-        enrollment itself.
-        """
+        """The measured deferral: a cold cursor joins warm ones, and
+        ``index_event_group_step`` takes ``min(last_indexed_block)``, dragging the shared
+        window back 8,468,848 blocks (17 windows at 500,000). A sibling must not lose ground
+        or have its completeness reset by the enrollment itself."""
         warm_topics = [
             "0x1bb6cfc6cc765f48d6e1b6b8c5e5503c0d2ee684bdd46f53e0785cc966e20fab",
             "0x2a1547b8c4fcc5c564373b299ab7eecb2d5013083f2fe08a64698fe5198e1930",
@@ -252,13 +245,8 @@ class TestNodeSet:
 
 
 def test_no_module_outside_the_plane_imports_the_position_model():
-    """Makes "zero readers modified" self-enforcing rather than a one-time claim.
-
-    The plane is invisible to every spot-balance reader because they all join
-    ``contract_balances(_latest).contract_id`` to ``contracts.id`` and a node has
-    no ``contracts`` row. That invisibility stops being structural the moment
-    something else reads the model, so the import surface is asserted here.
-    """
+    """Makes "zero readers modified" self-enforcing: the plane is invisible to spot-balance
+    readers only structurally (a node has no ``contracts`` row), so the import surface is asserted."""
     root = pathlib.Path(__file__).resolve().parents[2]
     allowed = {
         # The model's home and the package re-export surface.
@@ -267,23 +255,13 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         root / "tests" / "monitoring" / "test_restaking_position.py",
         root / "services" / "monitoring" / "restaking_reads.py",
         root / "services" / "monitoring" / "restaking_enrollment.py",
-        # The scorer's value plane: SCORER_INTEGRATION_STRATEGY §7.1 rules that
-        # restaking positions contribute (entity, asset) rows under the same
-        # MAX-per-entity fold, keyed by their OWN entity keys — a mandated read,
-        # and one that cannot go through the spot-balance readers precisely
-        # because a node has no ``contracts`` row. The plane is a package: the
-        # value plane holds the mandated fold read, and the provenance loader's
-        # row census counts the table (a COUNT, never a quantity or a dollar).
+        # The scorer's value plane: SCORER_INTEGRATION_STRATEGY §7.1 mandates a fold read keyed
+        # by the positions' OWN entity keys, which cannot use spot-balance readers.
         root / "services" / "scoring" / "planes" / "value.py",
         root / "services" / "scoring" / "planes" / "provenance.py",
-        # The scorer's P4 universe builder, and an ADDRESS-ONLY read: it selects
-        # node_address and eigenpod, unions them into a flat set of strings, and
-        # folds no quantity, no share basis and no dollar. The rule this list
-        # protects is about VALUE readers — a node has no ``contracts`` row, so a
-        # spot-balance reader that learned to see one would double-count or
-        # mis-key it — and reading an address out of the table cannot do either.
-        # The universe is assembled here rather than in the plane because its
-        # source-literal arm reads object storage, which the fold may not.
+        # The scorer's P4 universe builder: an ADDRESS-ONLY read (no quantity, share basis or
+        # dollar), so it cannot double-count or mis-key like a value reader. Kept outside the
+        # plane because its source-literal arm reads object storage, which the fold may not.
         root / "services" / "scoring" / "distill" / "universe.py",
         # This file: the needle appears in the assertion below.
         pathlib.Path(__file__).resolve(),

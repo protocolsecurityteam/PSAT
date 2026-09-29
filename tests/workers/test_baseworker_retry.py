@@ -1,7 +1,5 @@
-"""Integration tests for ``BaseWorker._execute_job`` retry behaviour.
+"""Integration tests for ``BaseWorker._execute_job`` retry behaviour against real Postgres.
 
-Hits real Postgres so the full claim → process → requeue/terminal cycle
-(including the stage_errors artifact) is exercised against the live schema.
 Object storage is intentionally NOT configured; the artifact stays inline
 JSONB which keeps these tests offline-safe.
 """
@@ -23,13 +21,8 @@ from workers.base import BaseWorker
 
 @pytest.fixture()
 def test_session_local(monkeypatch):
-    """Point ``workers.base.SessionLocal`` at the test database.
-
-    ``BaseWorker._persist_stage_errors``/``_run_one_job`` open fresh
-    ``SessionLocal()`` instances; without this monkeypatch they'd hit the
-    prod DATABASE_URL even though the test holds a session against
-    TEST_DATABASE_URL.
-    """
+    """Worker code opens fresh ``SessionLocal()`` instances that would otherwise hit the
+    prod DATABASE_URL."""
     test_url = os.environ.get("TEST_DATABASE_URL")
     if not test_url:
         pytest.skip("TEST_DATABASE_URL not set")
@@ -42,10 +35,7 @@ def test_session_local(monkeypatch):
 
 @pytest.fixture()
 def clean_jobs(db_session):
-    """Drop any leftover jobs/artifacts so the retry-state assertions are
-    deterministic. The shared db_session fixture only sweeps monitoring
-    tables on teardown.
-    """
+    """The shared db_session fixture only sweeps monitoring tables on teardown."""
     db_session.query(Artifact).delete()
     db_session.query(Job).delete()
     db_session.commit()
@@ -64,11 +54,7 @@ def _read_stage_errors(session, job_id):
 
 
 class _ConfigurableWorker(BaseWorker):
-    """Worker whose ``process()`` executes a caller-supplied side effect.
-
-    Lets each test express the failure shape it wants (which exception, on
-    which attempt) without subclassing per scenario.
-    """
+    """Worker whose ``process()`` runs a caller-supplied side effect (per-attempt failure shape)."""
 
     stage = JobStage.discovery
     next_stage = JobStage.static
@@ -98,9 +84,6 @@ def _transient_exc():
 
 @requires_postgres
 def test_transient_exception_requeues(clean_jobs, test_session_local, monkeypatch):
-    """A transient (ConnectionError) failure leaves the job queued with
-    retry_count=1 and next_attempt_at set. Stage_errors artifact has one
-    entry tagged retry_count=0."""
     monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "30")
     monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "5")
 
@@ -134,10 +117,8 @@ def test_transient_exception_requeues(clean_jobs, test_session_local, monkeypatc
 
 @requires_postgres
 def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local, monkeypatch):
-    """Five transient failures → status=failed_terminal, retry_count=5,
-    artifact has 5 entries tagged 0..4. ``last_failure_kind="transient"``
-    so an operator can tell exhaustion apart from deterministic-from-the-start.
-    """
+    """``last_failure_kind="transient"`` lets an operator tell exhaustion apart from
+    deterministic-from-the-start."""
     monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "1")
     monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "5")
 
@@ -145,8 +126,7 @@ def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local,
     job_row = create_job(job, {"address": "0xabc", "name": "exhaustion"})
 
     worker = _ConfigurableWorker(side_effect=lambda _n: _transient_exc())
-    # Drive the job through 5 attempts; bump retry_count on the row each
-    # iteration to mimic what the worker fleet would observe across claims.
+    # bump retry_count each iteration to mimic what the fleet observes across claims.
     for _ in range(5):
         # Re-fetch the job each iteration so retry_count is current.
         job.expire_all()
@@ -178,8 +158,6 @@ def test_transient_retries_exhausted_to_terminal(clean_jobs, test_session_local,
 
 @requires_postgres
 def test_terminal_exception_skips_retries(clean_jobs, test_session_local):
-    """``ValueError`` is classified terminal — the row jumps straight to
-    ``failed_terminal`` on attempt one, no requeue ever scheduled."""
     job = clean_jobs
     job_row = create_job(job, {"address": "0xabc", "name": "terminal-1"})
 
@@ -209,9 +187,6 @@ def test_terminal_exception_skips_retries(clean_jobs, test_session_local):
 
 @requires_postgres
 def test_transient_then_success(clean_jobs, test_session_local, monkeypatch):
-    """Two transient failures + one success → status=done (or queued for
-    next stage), retry_count=2 (bumped twice), artifact has two transient
-    error entries. The success path doesn't append a new error entry."""
     monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "1")
     monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "5")
 
@@ -225,7 +200,7 @@ def test_transient_then_success(clean_jobs, test_session_local, monkeypatch):
 
     worker = _ConfigurableWorker(side_effect=_side_effect)
 
-    # Patch the success advance so we don't need a real next-stage row.
+    # Patched so we don't need a real next-stage row.
     import workers.base as base
 
     advances: list = []
@@ -242,10 +217,8 @@ def test_transient_then_success(clean_jobs, test_session_local, monkeypatch):
     job.expire_all()
     refreshed = job.get(Job, job_row.id)
     assert refreshed is not None
-    # The third attempt succeeded → advance_job was called (via the patch),
-    # so the row stays in the same DB state advance_job would have left it
-    # unchanged: still queued because we didn't actually run advance_job's
-    # commit. The interesting assertion is the retry_count and the artifact.
+    # Row stays queued (patched advance_job never commits); the interesting
+    # assertions are retry_count and the artifact.
     assert refreshed.retry_count == 2
 
     payload = _read_stage_errors(job, job_row.id)
@@ -263,21 +236,14 @@ def test_transient_then_success(clean_jobs, test_session_local, monkeypatch):
 # Corrupt prior artifact body is preserved as a degraded breadcrumb
 # ---------------------------------------------------------------------------
 #
-# When ``BaseWorker._persist_stage_errors`` finds an existing ``stage_errors``
-# body that fails ``StageErrors.model_validate`` (legacy schema, partial
-# write, manual tampering), it must not silently drop the prior payload —
-# operators reading /api/jobs/{id}/errors after a manual triage need to be
-# able to see what was there.
-#
-# The contract: prepend a ``severity="degraded"``, ``phase="corrupt_prior"``
-# entry whose ``context.raw`` carries the original payload, then continue
-# with the new entries the current attempt produced.
+# A ``stage_errors`` body failing ``StageErrors.model_validate`` must not be
+# silently dropped (operators read /api/jobs/{id}/errors): prepend a
+# ``severity="degraded"``, ``phase="corrupt_prior"`` entry carrying it in
+# ``context.raw``, then the new entries.
 
 
 @requires_postgres
 def test_persist_stage_errors_preserves_corrupt_prior_as_breadcrumb(clean_jobs, test_session_local):
-    """A corrupt prior body becomes a ``corrupt_prior`` breadcrumb entry
-    rather than being silently dropped."""
     from db.queue import store_artifact
     from schemas.stage_errors import StageError
 
@@ -297,8 +263,7 @@ def test_persist_stage_errors_preserves_corrupt_prior_as_breadcrumb(clean_jobs, 
     store_artifact(db_session, job_row.id, "stage_errors", data=corrupt_body)
     db_session.commit()
 
-    # Run a worker attempt that triggers _persist_stage_errors via the
-    # normal failure path. Use a terminal exception so the path executes once.
+    # Terminal exception so the failure path executes once.
     worker = _ConfigurableWorker(side_effect=lambda _n: ValueError("bad input"))
     worker._execute_job(db_session, job_row)
 
@@ -308,8 +273,7 @@ def test_persist_stage_errors_preserves_corrupt_prior_as_breadcrumb(clean_jobs, 
     assert "errors" in payload
 
     entries = payload["errors"]
-    # Two entries: the corrupt-prior breadcrumb (first), and the just-failed
-    # attempt's error entry.
+    # Corrupt-prior breadcrumb first, then the just-failed attempt's entry.
     assert len(entries) == 2, f"expected breadcrumb + new error, got {entries}"
 
     breadcrumb = entries[0]

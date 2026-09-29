@@ -1,33 +1,13 @@
 """The decode corpus — what a Safe execution SAYS once enrichment has run.
 
-Every fixture here is a whole transaction: a real ``execTransaction`` calldata
-built from the published Safe ABI, decoded by the real enricher, driven through
-the real driver, and asserted on twice — once on the published enrichment block
-and once on the salience level + basis the recompute assigned it. A test that
-only checked the block would let a decode drift the operator's attention
-without failing.
+Every fixture is a whole transaction (real ``execTransaction`` calldata from the published Safe ABI, real enricher,
+real driver), asserted on both the published enrichment block and the salience level + basis, so a decode drift that
+moves operator attention cannot pass unnoticed.
 
-**Mechanical gate (spec Part 8):** every ``alert`` the decode rules can mint
-appears below with its basis —
-
-* ``safe_exec_delegatecall_unrecognized`` from an OUTER delegatecall to an
-  address the pinned list cannot vouch for
-  (:func:`test_delegatecall_to_an_unrecognized_target_alerts`);
-* ``safe_exec_delegatecall_unrecognized`` from an INNER one inside an otherwise
-  recognized MultiSend (:func:`test_an_inner_delegatecall_raises_the_whole_batch`);
-* ``execution_failure`` on ``safe_tx_failed`` — decoded or not
-  (:func:`test_a_failed_execution_is_an_alert_whatever_the_decode_says`);
-* ``correlated_cause`` raising a decoded execution to its effect's level
-  (:func:`test_a_correlated_effect_raises_its_cause`).
-
-and :func:`test_the_corpus_covers_every_alert_the_decode_rules_can_mint` states
-that list as an assertion rather than as a comment. The ``correlated_scope``
-caveat is pinned by
-:func:`test_an_empty_correlation_publishes_its_scope_not_an_earned_negative`.
-
-The wire is stubbed throughout (fixture transaction objects through the
-``rpc_batch_request_classified`` seam). Nothing here touches RPC: the offline
-suite runs under netguard and this module must keep it hermetic.
+Mechanical gate (spec Part 8): every ``alert`` the decode rules can mint appears below with its basis, and
+:func:`test_the_corpus_covers_every_alert_the_decode_rules_can_mint` states that list as an assertion. The
+``correlated_scope`` caveat is pinned by :func:`test_an_empty_correlation_publishes_its_scope_not_an_earned_negative`.
+The wire is stubbed throughout (``rpc_batch_request_classified`` seam); the offline suite runs under netguard.
 """
 
 from __future__ import annotations
@@ -83,8 +63,6 @@ def exec_transaction_input(
 
 
 def multisend_payload(calls: list[tuple[int, str, int, bytes]]) -> bytes:
-    """``multiSend(bytes)`` calldata over packed
-    ``(operation:1B, to:20B, value:32B, dataLength:32B, data)`` entries."""
     packed = b"".join(
         bytes([operation]) + bytes.fromhex(to[2:]) + value.to_bytes(32, "big") + len(data).to_bytes(32, "big") + data
         for operation, to, value, data in calls
@@ -137,7 +115,6 @@ def safe(make_mc):
 
 @pytest.fixture()
 def known_target(db_session, protocol):
-    """A target the fleet has itself analysed — E2's only (witnessed) source."""
 
     def make(address: str, selector: str, signature: str) -> Contract:
         contract = db_session.query(Contract).filter_by(address=address, chain="ethereum").one_or_none()
@@ -160,8 +137,8 @@ def known_target(db_session, protocol):
 
 
 def seed_event(db_session, mc, event_type: str, tx_hash: str, *, data: dict | None = None, log_index: int = 0):
-    """A row exactly as the taxonomy wrote it: mint-time salience included, so
-    every assertion below is about what enrichment CHANGED."""
+    """A row exactly as the taxonomy wrote it (mint-time salience included), so assertions are about what enrichment
+    CHANGED."""
     payload = dict(data or {})
     level, basis = sal.assign_salience(db_session, event_type, payload, mc)
     payload["salience"] = level
@@ -188,7 +165,6 @@ def run(
     calls_out: list | None = None,
     rpc_by_chain: dict[str, str] | None = None,
 ):
-    """Drive the real driver with the wire stubbed by fixture transactions."""
 
     def fake_batch(rpc_url, calls, headers=None, *, chain_id=None):
         if calls_out is not None:
@@ -216,8 +192,6 @@ def tx(*, to: str, input_hex: str, tx_hash: str) -> dict:
 
 
 def test_a_direct_exec_transaction_publishes_the_witnessed_call(db_session, safe, known_target):
-    """The prototype case: what the Safe was asked to do, decoded from the
-    transaction's own bytes, and rated on the decode rather than on the type."""
     known_target(TARGET, SET_FEE, "setFee(uint256)")
     tx_hash = "0x" + "11" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
@@ -257,9 +231,8 @@ def test_a_direct_exec_transaction_publishes_the_witnessed_call(db_session, safe
 
 
 def test_an_unresolved_selector_publishes_the_selector_and_a_null_signature(db_session, safe):
-    """A raw selector is a real fact and renders fine; inventing a name would
-    not. And the level is identical to the resolved case — a name is not a
-    witness, so it may not move an operator's attention."""
+    """A raw selector is a real fact; inventing a name is not. The level equals the resolved case: a name is not a
+    witness."""
     tx_hash = "0x" + "12" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
@@ -279,8 +252,6 @@ def test_an_unresolved_selector_publishes_the_selector_and_a_null_signature(db_s
 
 
 def test_a_selector_two_analyses_disagree_about_stays_unresolved(db_session, safe, known_target):
-    """Two contracts at one address disagreeing about a selector is an
-    ambiguity. Picking one would publish a name no witness picked."""
     known_target(TARGET, SET_FEE, "setFee(uint256)")
     known_target(TARGET, SET_FEE, "somethingElse(uint256)")
     tx_hash = "0x" + "13" * 32
@@ -300,8 +271,6 @@ def test_a_selector_two_analyses_disagree_about_stays_unresolved(db_session, saf
 
 
 def test_a_signature_from_another_chain_does_not_resolve(db_session, safe, protocol):
-    """``effective_functions`` joins on (address, chain). The same address on
-    another chain is another contract."""
     other = Contract(protocol_id=protocol.id, address=TARGET, chain="base")
     db_session.add(other)
     db_session.flush()
@@ -333,10 +302,9 @@ def test_a_signature_from_another_chain_does_not_resolve(db_session, safe, proto
 
 
 def test_a_relayer_wrapped_execution_is_not_a_top_level_call(db_session, safe):
-    """Common and legitimate — a relayer, a nested Safe, or two
-    ``execTransaction`` calls inside one outer call. Guessing at the inner call
-    from the outer input would be exactly the unwitnessed inference the
-    overhaul removed, so the row states the finding and collapses."""
+    """Legitimate (relayer, nested Safe, two ``execTransaction`` calls in one outer call), but guessing the inner
+    call from the outer input is the unwitnessed inference the overhaul removed, so the row states the finding and
+    collapses."""
     tx_hash = "0x" + "21" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
@@ -352,8 +320,6 @@ def test_a_relayer_wrapped_execution_is_not_a_top_level_call(db_session, safe):
 
 
 def test_the_right_target_with_the_wrong_selector_is_not_a_top_level_call(db_session, safe):
-    """Both halves are required: a call TO the Safe that is not
-    ``execTransaction`` proves nothing about an execution."""
     tx_hash = "0x" + "22" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
@@ -383,8 +349,6 @@ def test_the_top_level_check_is_case_insensitive_on_the_address(db_session, safe
 
 
 def test_undecodable_arguments_state_the_gap_rather_than_leaving_the_block_absent(db_session, safe):
-    """A proven ``execTransaction`` whose arguments are truncated. The status
-    says which undecoded world this is, and the level stays VISIBLE."""
     tx_hash = "0x" + "24" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
@@ -405,9 +369,8 @@ def test_undecodable_arguments_state_the_gap_rather_than_leaving_the_block_absen
     ids=["neither-field", "no-input", "no-to-key"],
 )
 def test_a_transaction_object_missing_its_fields_mints_no_finding(db_session, safe, fixture):
-    """``not_top_level_call`` is a positive finding that DEMOTES the row, so it
-    may only be minted from fields the response actually carried. A response
-    shape we cannot read is an unread transaction, not a proven indirect one."""
+    """``not_top_level_call`` DEMOTES the row, so it may only be minted from fields the response carried; an unreadable
+    shape is an unread transaction."""
     tx_hash = "0x" + "26" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
@@ -419,8 +382,6 @@ def test_a_transaction_object_missing_its_fields_mints_no_finding(db_session, sa
 
 
 def test_a_contract_creation_is_witnessed_not_to_be_this_safes_call(db_session, safe):
-    """``to: null`` is a field the response carried, and it proves the
-    transaction called nobody — a finding, and the row collapses on it."""
     tx_hash = "0x" + "27" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
@@ -431,8 +392,6 @@ def test_a_contract_creation_is_witnessed_not_to_be_this_safes_call(db_session, 
 
 
 def test_a_transaction_that_was_never_fetched_publishes_no_block(db_session, safe):
-    """ "Not fetched" is not a finding about the transaction. No block, and the
-    salience rules read that as enrichment-absent: visible, never demoted."""
     tx_hash = "0x" + "25" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
@@ -449,8 +408,7 @@ def test_a_transaction_that_was_never_fetched_publishes_no_block(db_session, saf
 
 
 def test_delegatecall_to_an_unrecognized_target_alerts(db_session, safe):
-    """Not proven to be MultiSend. The address is not proven malicious either —
-    which is precisely why the level goes UP rather than down."""
+    """Not proven MultiSend, nor proven malicious, which is why the level goes UP rather than down."""
     tx_hash = "0x" + "31" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
@@ -477,8 +435,8 @@ def test_delegatecall_to_an_unrecognized_target_alerts(db_session, safe):
 
 @pytest.mark.parametrize("library", [MULTISEND_1_3_0, MULTISEND_CALL_ONLY_1_4_1])
 def test_a_pinned_multisend_batch_is_expanded(db_session, safe, known_target, library):
-    """The routine shape the naive ``operation == 1 ⇒ alert`` rule would have
-    fired on: the standard Safe UI batches by delegatecalling MultiSend."""
+    """The routine shape a naive ``operation == 1 ⇒ alert`` rule would fire on: the Safe UI batches by delegatecalling
+    MultiSend."""
     known_target(TARGET, SET_FEE, "setFee(uint256)")
     tx_hash = "0x" + "32" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
@@ -514,8 +472,6 @@ def test_a_pinned_multisend_batch_is_expanded(db_session, safe, known_target, li
 
 
 def test_an_inner_delegatecall_raises_the_whole_batch(db_session, safe):
-    """Each inner call is evaluated by the same operation rules as the outer
-    one, and the batch takes the max."""
     tx_hash = "0x" + "33" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
     payload = multisend_payload(
@@ -562,11 +518,8 @@ def _decode_batch(db_session, safe_mc, tx_hash: str, payload: bytes) -> dict:
 
 
 def test_a_nested_batch_is_expanded_and_its_inner_alert_propagates(db_session, safe):
-    """One extra wrapping layer is not a reason to trust a payload. A
-    recognized MultiSend INSIDE a recognized MultiSend is a batch in its own
-    right and is expanded by the same rules — otherwise a hostile delegatecall
-    would be hidden by nesting it, which is executable on-chain (the singleton
-    guard passes in the Safe's delegatecall context)."""
+    """A recognized MultiSend INSIDE a recognized MultiSend is expanded by the same rules; otherwise a hostile
+    delegatecall could hide by nesting, which is executable on-chain."""
     inner = multisend_payload([(1, UNKNOWN_LIB, 0, bytes.fromhex(PAUSE[2:]))])
     payload = multisend_payload([(0, TARGET, 0, b""), (1, MULTISEND_CALL_ONLY_1_4_1, 0, inner)])
 
@@ -583,8 +536,6 @@ def test_a_nested_batch_is_expanded_and_its_inner_alert_propagates(db_session, s
 
 
 def test_a_benign_nested_batch_stays_at_the_batch_floor(db_session, safe):
-    """Expansion is not escalation: a nested batch that decodes and holds only
-    calls earns the same floor a flat one does."""
     inner = multisend_payload([(0, TARGET, 0, bytes.fromhex(PAUSE[2:]))])
     payload = multisend_payload([(1, MULTISEND_CALL_ONLY_1_4_1, 0, inner)])
 
@@ -596,8 +547,7 @@ def test_a_benign_nested_batch_stays_at_the_batch_floor(db_session, safe):
 
 
 def test_a_nested_payload_that_will_not_decode_takes_the_whole_batch_with_it(db_session, safe):
-    """No partial list, at any depth: an inner MultiSend that will not expand
-    may not stand as an entry whose contents nobody read."""
+    """No partial list at any depth: an inner MultiSend that will not expand may not stand as an entry nobody read."""
     payload = multisend_payload([(0, TARGET, 0, b""), (1, MULTISEND_CALL_ONLY_1_4_1, 0, bytes.fromhex(PAUSE[2:]))])
 
     data = _decode_batch(db_session, safe, "0x" + "38" * 32, payload)
@@ -614,8 +564,8 @@ def test_a_nested_payload_that_will_not_decode_takes_the_whole_batch_with_it(db_
 
 
 def test_every_batch_failure_reason_is_reachable(db_session, safe):
-    """Each reason names a distinct layer, and each is produced by a real
-    payload — a code no input can mint is a code that describes nothing."""
+    """Each reason names a distinct layer and must be producible by a real payload; a code no input can mint describes
+    nothing."""
     inner_bad = multisend_payload([(1, MULTISEND_CALL_ONLY_1_4_1, 0, b"\x00")])
     too_deep = multisend_payload([(0, TARGET, 0, b"")])
     for _ in range(enr.MAX_MULTISEND_DEPTH):
@@ -632,8 +582,8 @@ def test_every_batch_failure_reason_is_reachable(db_session, safe):
 
 
 def test_a_batch_nested_past_the_depth_cap_states_the_gap(db_session, safe):
-    """The cap bounds an adversarially deep payload's cost. Exceeding it is a
-    STATED gap on the WHOLE batch, never a quiet floor over calls nobody read."""
+    """The cap bounds an adversarial payload's cost; exceeding it is a STATED gap on the whole batch, never a quiet
+    floor."""
     payload = multisend_payload([(0, TARGET, 0, b"")])
     for _ in range(enr.MAX_MULTISEND_DEPTH):
         payload = multisend_payload([(1, MULTISEND_1_3_0, 0, payload)])
@@ -649,8 +599,6 @@ def test_a_batch_nested_past_the_depth_cap_states_the_gap(db_session, safe):
 
 
 def test_the_depth_cap_admits_exactly_max_depth_layers(db_session, safe):
-    """The boundary, pinned: MAX_MULTISEND_DEPTH layers decode, one more does
-    not. A cap nobody measured is a cap that drifts."""
     payload = multisend_payload([(0, TARGET, 0, b"")])
     for _ in range(enr.MAX_MULTISEND_DEPTH - 1):
         payload = multisend_payload([(1, MULTISEND_1_3_0, 0, payload)])
@@ -662,10 +610,8 @@ def test_the_depth_cap_admits_exactly_max_depth_layers(db_session, safe):
 
 
 def test_the_salience_rules_refuse_an_unexpanded_nested_batch(db_session, make_mc):
-    """Defence in depth for the shape the decoder can no longer produce: a
-    batch entry claiming to be a MultiSend with no expansion and no stated
-    failure rates ``not_determined``, not the ``notable`` floor. Asserted
-    against the rules directly, since the decode path cannot build it."""
+    """Defence in depth for a shape the decoder can no longer produce: an unexpanded MultiSend with no stated
+    failure rates ``not_determined``, not ``notable``. Asserted on the rules directly."""
     data = {
         "safe_exec": {
             "status": "decoded",
@@ -707,9 +653,7 @@ def test_the_salience_rules_refuse_an_unexpanded_nested_batch(db_session, make_m
     ids=["header-overrun", "length-overrun", "wrong-selector", "empty"],
 )
 def test_a_malformed_batch_publishes_undecodable_and_no_partial_list(db_session, safe, payload, why):
-    """A truncated batch would UNDERSTATE what the Safe did, so there is no
-    partial list — the failure itself is the publication, and the level refuses
-    rather than guessing."""
+    """A truncated batch would UNDERSTATE what the Safe did, so no partial list; the failure is the publication."""
     tx_hash = "0x" + "35" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
@@ -733,9 +677,7 @@ def test_a_malformed_batch_publishes_undecodable_and_no_partial_list(db_session,
 
 
 def test_a_recognized_delegatecall_always_carries_a_batch_or_a_stated_failure(db_session, safe):
-    """The shape that would otherwise rate ``safe_exec_not_enriched`` — a
-    recognized MultiSend whose contents nobody examined and nobody said so — is
-    non-occurring on the decode path, by construction."""
+    """Otherwise-``safe_exec_not_enriched`` (a recognized MultiSend nobody examined) cannot occur on the decode path."""
     payloads = [
         multisend_payload([(0, TARGET, 0, b"")]),
         multisend_payload([]),
@@ -761,9 +703,8 @@ def test_a_recognized_delegatecall_always_carries_a_batch_or_a_stated_failure(db
 
 
 def test_every_decoded_batch_entry_is_a_mapping(db_session, safe):
-    """The batch feeds a salience fold that can only rate a Mapping. The
-    decoder never emits anything else — a shape it cannot build as one entry
-    takes the whole batch to ``undecodable``."""
+    """The salience fold rates only Mappings; a shape the decoder cannot build as one takes the whole batch to
+    ``undecodable``."""
     calls, reason = enr._decode_multisend(multisend_payload([(0, TARGET, 1, b"\x01"), (1, UNKNOWN_LIB, 0, b"")]))
     assert calls is not None and reason is None
     assert all(isinstance(call, dict) for call in calls)
@@ -773,9 +714,8 @@ def test_every_decoded_batch_entry_is_a_mapping(db_session, safe):
 
 
 def test_a_decoded_delegatecall_always_states_the_multisend_discriminator(db_session, safe):
-    """The salience rules read ``multisend_recognized`` and treat its ABSENCE
-    as not-proven-MultiSend. Publishing it on every decode is what keeps the
-    loud direction from being an accident."""
+    """The rules read ABSENCE of ``multisend_recognized`` as not-proven-MultiSend; publishing it always keeps the loud
+    direction non-accidental."""
     for index, (target, expected) in enumerate([(MULTISEND_1_3_0, True), (UNKNOWN_LIB, False), (TARGET, False)]):
         tx_hash = "0x" + f"{index + 0x40:02x}" * 32
         event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
@@ -796,8 +736,6 @@ def test_a_decoded_delegatecall_always_states_the_multisend_discriminator(db_ses
 
 
 def test_a_failed_execution_is_an_alert_whatever_the_decode_says(db_session, safe):
-    """``safe_tx_failed`` outranks every decode rule — but it is still decoded,
-    because "which call reverted" is the first thing an operator asks."""
     tx_hash = "0x" + "36" * 32
     event = seed_event(db_session, safe, "safe_tx_failed", tx_hash)
 
@@ -822,8 +760,8 @@ def test_a_failed_execution_is_an_alert_whatever_the_decode_says(db_session, saf
 
 
 def test_over_budget_hashes_are_recorded_not_dropped(db_session, make_mc, monkeypatch):
-    """The budget bounds how long the fetch holds the open window transaction.
-    What it may not do is make a Safe execution look examined-and-boring."""
+    """The budget bounds how long the fetch holds the open window transaction, without making an execution look
+    examined-and-boring."""
     monkeypatch.setenv(enr.ENRICH_TX_BUDGET_ENV, "1")
     safes = [make_mc(address=ADDR(0x5A00 + i)) for i in range(2)]
     hashes = ["0x" + "a1" * 32, "0x" + "a2" * 32]
@@ -843,8 +781,7 @@ def test_over_budget_hashes_are_recorded_not_dropped(db_session, make_mc, monkey
 
 
 def test_the_budget_is_spent_once_across_every_chain_in_the_pass(db_session, make_mc, monkeypatch):
-    """The seam the budget protects — the open window transaction — is
-    per-pass, not per-chain, so a fleet on N chains may not spend N×."""
+    """The open window transaction is per-pass, not per-chain, so N chains may not spend N×."""
     monkeypatch.setenv(enr.ENRICH_TX_BUDGET_ENV, "1")
     on_ethereum = make_mc(address=ADDR(0x5A20))
     on_base = make_mc(address=ADDR(0x5A21), chain="base")
@@ -877,8 +814,6 @@ def test_the_budget_is_spent_once_across_every_chain_in_the_pass(db_session, mak
 
 
 def test_a_skipped_chain_does_not_consume_the_budget(db_session, make_mc, monkeypatch):
-    """A chain whose id will not resolve fetches nothing, so it may not spend
-    budget the next chain would have spent on transactions it actually reads."""
     monkeypatch.setenv(enr.ENRICH_TX_BUDGET_ENV, "1")
     unresolvable = make_mc(address=ADDR(0x5A30), chain="nosuchchain")
     resolvable = make_mc(address=ADDR(0x5A31))
@@ -910,9 +845,8 @@ def test_a_skipped_chain_does_not_consume_the_budget(db_session, make_mc, monkey
 
 
 def test_the_fetch_is_deduplicated_and_carries_the_chain_id(db_session, safe, make_mc):
-    """Two executions in one transaction cost one fetch — the live feed already
-    contains that shape — and the chain_id rides so the URL↔chain guard the
-    rest of monitoring uses applies here too."""
+    """Two executions in one transaction cost one fetch (the live feed has that shape); ``chain_id`` rides so the
+    URL↔chain guard applies."""
     other = make_mc(address=ADDR(0x5A0F))
     tx_hash = "0x" + "a3" * 32
     events = [
@@ -935,12 +869,9 @@ def test_the_fetch_is_deduplicated_and_carries_the_chain_id(db_session, safe, ma
 
 
 def test_two_executions_of_one_safe_in_one_tx_refuse_attribution(db_session, safe):
-    """The live feed's own shape (two ExecutionSuccess logs, one transaction,
-    one Safe — spec appendix, log_index 414/416). The transaction holds ONE set
-    of top-level ``execTransaction`` arguments, which describes at most one of
-    the two executions; nothing in the transaction object witnesses which.
-    Publishing it on both would state another execution's target, value and
-    operation as a witnessed fact about this row."""
+    """The live feed's shape (two ExecutionSuccess logs, one Safe, one tx; spec appendix, log_index 414/416). The tx
+    holds ONE set of ``execTransaction`` arguments, describing at most one execution and witnessing none, so
+    publishing it on both would state another execution's target/value/operation as fact."""
     tx_hash = "0x" + "a5" * 32
     events = [
         seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=414),
@@ -972,9 +903,7 @@ def test_two_executions_of_one_safe_in_one_tx_refuse_attribution(db_session, saf
 
 
 def test_a_sibling_execution_from_an_earlier_window_still_contests(db_session, safe):
-    """The contest is queried, not read off the window: a Safe whose second
-    execution in the same transaction was inserted by an earlier pass must not
-    be decoded now as though it were alone in it."""
+    """The contest is queried, not read off the window: a sibling inserted by an earlier pass must still contest."""
     tx_hash = "0x" + "a6" * 32
     earlier = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
     current = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=2)
@@ -990,9 +919,8 @@ def test_a_sibling_execution_from_an_earlier_window_still_contests(db_session, s
 
 
 def test_a_contested_tx_that_is_not_this_safes_call_still_states_that(db_session, safe):
-    """``not_top_level_call`` is a statement about the OBSERVED TRANSACTION and
-    is true of every row in it, so the ambiguity — which is about attributing
-    ARGUMENTS to one row — does not erase it."""
+    """``not_top_level_call`` describes the OBSERVED TRANSACTION and holds for every row in it; the attribution
+    ambiguity does not erase it."""
     tx_hash = "0x" + "a7" * 32
     events = [
         seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=0),
@@ -1012,9 +940,7 @@ def test_a_contested_tx_that_is_not_this_safes_call_still_states_that(db_session
 
 
 def test_two_executions_of_DIFFERENT_safes_in_one_tx_each_decode(db_session, safe, make_mc):
-    """The contest is per (Safe, transaction). Two different Safes in one
-    transaction are two different top-level calls only if each is the
-    transaction's ``to`` — and the one that is gets its decode."""
+    """The contest is per (Safe, transaction): different Safes each decode only if each is the transaction's ``to``."""
     other = make_mc(address=ADDR(0x5A10))
     tx_hash = "0x" + "a8" * 32
     mine = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=0)
@@ -1031,7 +957,6 @@ def test_two_executions_of_DIFFERENT_safes_in_one_tx_each_decode(db_session, saf
 
 
 def test_only_needs_tx_types_go_on_the_wire(db_session, safe, make_mc):
-    """A window with no Safe execution in it costs zero RPC."""
     timelock = make_mc(address=ADDR(0x71E), contract_type="timelock")
     event = seed_event(
         db_session,
@@ -1053,9 +978,7 @@ def test_only_needs_tx_types_go_on_the_wire(db_session, safe, make_mc):
 
 
 def test_a_timelock_operation_resolves_its_selector_in_its_own_namespace(db_session, make_mc, known_target):
-    """The timelock families' ``target``/``selector`` are already decoded at
-    mint and are keys the taxonomy owns, so the resolution lands in a namespaced
-    block of its own rather than beside them."""
+    """Timelock ``target``/``selector`` are taxonomy-owned keys, so the resolution lands in its own namespaced block."""
     known_target(TARGET, SET_FEE, "setFee(uint256)")
     timelock = make_mc(address=ADDR(0x71F), contract_type="timelock")
     event = seed_event(
@@ -1081,8 +1004,6 @@ def test_a_timelock_operation_resolves_its_selector_in_its_own_namespace(db_sess
 
 
 def test_target_function_is_the_only_widening_of_the_additive_key_set(db_session, safe):
-    """The allowlist stays closed: ``target_function`` is admitted, anything
-    else an enricher invents is still loudly refused."""
     assert "target_function" in enr.ENRICHABLE_KEYS
     event = seed_event(db_session, safe, "safe_tx_executed", "0x" + "b2" * 32)
 
@@ -1103,8 +1024,6 @@ def test_target_function_is_the_only_widening_of_the_additive_key_set(db_session
 
 
 def test_a_timelock_without_a_decoded_selector_publishes_nothing(db_session, make_mc):
-    """A plain-value timelock call has no calldata. There is nothing to resolve
-    and nothing to say — an invented empty block would say otherwise."""
     timelock = make_mc(address=ADDR(0x720), contract_type="timelock")
     event = seed_event(
         db_session,
@@ -1125,9 +1044,8 @@ def test_a_timelock_without_a_decoded_selector_publishes_nothing(db_session, mak
 
 
 def test_a_correlated_effect_raises_its_cause(db_session, safe, make_mc):
-    """Same transaction hash is a fact, not an inference — so both directions
-    are published, and a decoded execution whose effect is an alert is at least
-    an alert itself."""
+    """Same tx hash is a fact, not an inference, so both directions are published; a decoded execution whose effect is
+    an alert is at least an alert."""
     victim = make_mc(address=ADDR(0xC0FFEE), contract_type="regular")
     tx_hash = "0x" + "c1" * 32
     cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
@@ -1156,8 +1074,8 @@ def test_a_correlated_effect_raises_its_cause(db_session, safe, make_mc):
 
 
 def test_each_correlated_entry_carries_the_effects_own_level(db_session, safe, make_mc):
-    """``assign_salience`` reads this list and does NOT query, so an entry
-    without its level would silently under-rate the cause."""
+    """``assign_salience`` reads this list without querying, so an entry lacking its level would under-rate the
+    cause."""
     quiet = make_mc(address=ADDR(0xB0B), contract_type="regular")
     tx_hash = "0x" + "c2" * 32
     cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
@@ -1183,9 +1101,8 @@ def test_each_correlated_entry_carries_the_effects_own_level(db_session, safe, m
 
 
 def test_an_empty_correlation_publishes_its_scope_not_an_earned_negative(db_session, safe):
-    """An empty list means "no monitored contract emitted in this transaction",
-    never "this execution had no effect". The scope key is what stops a
-    consumer from reading the second."""
+    """An empty list means "no monitored contract emitted in this tx", never "no effect"; the scope key blocks the
+    second reading."""
     tx_hash = "0x" + "c3" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
@@ -1202,9 +1119,7 @@ def test_an_empty_correlation_publishes_its_scope_not_an_earned_negative(db_sess
 
 
 def test_a_read_witnessed_row_never_joins(db_session, safe, make_mc):
-    """Read-witnessed rows persist ``tx_hash = ''``. The empty string is not a
-    transaction, and a join on it would correlate every poll diff in the fleet
-    with every other one."""
+    """Read-witnessed rows persist ``tx_hash = ''``; joining on it would correlate every poll diff in the fleet."""
     polled = make_mc(address=ADDR(0xDEAD1), contract_type="regular")
     cause = seed_event(db_session, safe, "safe_tx_executed", "")
     read_row = seed_event(db_session, polled, "value_changed:state_variable:owner", "", data={"field": "owner"})
@@ -1216,9 +1131,8 @@ def test_a_read_witnessed_row_never_joins(db_session, safe, make_mc):
 
 
 def test_two_executions_in_one_transaction_do_not_claim_a_direction(db_session, make_mc):
-    """Which of two executions caused a given effect is NOT witnessed by the
-    shared hash. The link still exists from each execution's side, so nothing
-    is lost — only the unproven direction is withheld."""
+    """The shared hash does not witness which of two executions caused an effect; the link stays from each side, only
+    the direction is withheld."""
     safe_a = make_mc(address=ADDR(0x5A01))
     safe_b = make_mc(address=ADDR(0x5A02))
     victim = make_mc(address=ADDR(0xC0FFE2), contract_type="regular")
@@ -1235,11 +1149,8 @@ def test_two_executions_in_one_transaction_do_not_claim_a_direction(db_session, 
 
 
 def test_an_effect_row_keeps_the_level_it_was_minted_with(db_session, safe, make_mc):
-    """``caused_by`` is read by no salience rule, so the effect side is linked
-    and NOT re-rated. Re-rating it would not be the no-op it looks like: the
-    reinitialization rule asks whether a prior ``initialized`` row exists, and
-    by the time enrichment runs the row being rated is one of the rows that
-    query can see."""
+    """``caused_by`` is read by no salience rule, so the effect is linked, NOT re-rated: re-rating is not a no-op,
+    because the reinitialization rule's ``initialized`` lookup would see the row being rated."""
     proxy = make_mc(address=ADDR(0x9711), contract_type="proxy")
     tx_hash = "0x" + "c7" * 32
     cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
@@ -1254,9 +1165,8 @@ def test_an_effect_row_keeps_the_level_it_was_minted_with(db_session, safe, make
 
 
 def test_the_join_does_not_cross_protocols(db_session, safe):
-    """Tenancy. The published entry names another row's id, address and level,
-    and the API spreads ``data`` verbatim — so an unscoped join would hand one
-    protocol's subscriber a row belonging to another."""
+    """Tenancy. The API spreads ``data`` verbatim, so an unscoped join would hand one protocol's subscriber another's
+    row."""
     stranger_protocol = Protocol(name="decode-corpus-other", chains=["ethereum"])
     db_session.add(stranger_protocol)
     db_session.flush()
@@ -1291,11 +1201,8 @@ def test_the_join_does_not_cross_protocols(db_session, safe):
 
 
 def test_a_cause_in_another_tenant_withholds_the_direction(db_session, safe, make_mc):
-    """Tenancy scopes what may be PUBLISHED, not what is KNOWN. Another
-    protocol's execution in the same transaction is exactly as plausible a
-    cause, so counting causes per protocol would name a cause the transaction
-    does not single out. The count runs over every row; the writes stay inside
-    the protocol."""
+    """Tenancy scopes what is PUBLISHED, not what is KNOWN: another protocol's execution is as plausible a cause, so the
+    count runs over every row while writes stay inside the protocol."""
     stranger_protocol = Protocol(name="decode-corpus-tenant-b", chains=["ethereum"])
     db_session.add(stranger_protocol)
     db_session.flush()
@@ -1334,12 +1241,9 @@ def test_a_cause_in_another_tenant_withholds_the_direction(db_session, safe, mak
 
 
 def test_an_effect_from_an_earlier_window_still_links(db_session, safe, make_mc):
-    """DELIBERATE and additive, and recorded as a deviation: §3.4's query has
-    no window restriction, so an effect already stored when its cause arrives
-    still links. It is not the bounded look-back OQ4 declined to build — no
-    extra lookup happens, the cause's own transaction hash is matched against
-    what is already there — and it cannot re-notify a committed row. Pinned so
-    nobody "fixes" it into a regression."""
+    """DELIBERATE, additive deviation: §3.4's query has no window restriction, so an effect stored before its cause
+    arrives still links (no extra lookup, cannot re-notify a committed row; not the look-back OQ4 declined).
+    Pinned so nobody "fixes" it into a regression."""
     victim = make_mc(address=ADDR(0xC0FFE9), contract_type="regular")
     tx_hash = "0x" + "c9" * 32
     # Stored by an earlier pass: it is NOT in the list the driver receives.
@@ -1354,8 +1258,6 @@ def test_an_effect_from_an_earlier_window_still_links(db_session, safe, make_mc)
 
 
 def test_a_correlated_entry_publishes_a_normalized_address(db_session, safe, make_mc):
-    """One normal form for every published address, so a consumer never has to
-    case-fold to compare two of this system's own facts."""
     victim = make_mc(address=ADDR(0xC0FFEA).upper().replace("0X", "0x"), contract_type="regular")
     tx_hash = "0x" + "ca" * 32
     cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
@@ -1368,8 +1270,6 @@ def test_a_correlated_entry_publishes_a_normalized_address(db_session, safe, mak
 
 
 def test_a_historical_row_is_never_enriched_by_the_join(db_session, safe, make_mc):
-    """§3.0 rule 5. A pre-enrollment row is not a witness to anything this
-    window did, in either direction."""
     victim = make_mc(address=ADDR(0xC0FFE3), contract_type="regular")
     tx_hash = "0x" + "c5" * 32
     cause = seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=1)
@@ -1382,8 +1282,7 @@ def test_a_historical_row_is_never_enriched_by_the_join(db_session, safe, make_m
 
 
 def test_the_join_does_not_cross_chains(db_session, safe, protocol):
-    """Two chains can carry the same transaction hash. A cross-chain
-    "correlation" would be a coincidence published as a cause."""
+    """Two chains can share a tx hash; a cross-chain "correlation" would be a coincidence published as a cause."""
     contract = Contract(protocol_id=protocol.id, address=ADDR(0xBA5E), chain="base")
     db_session.add(contract)
     db_session.flush()
@@ -1418,9 +1317,8 @@ def test_the_join_does_not_cross_chains(db_session, safe, protocol):
 
 
 def test_the_corpus_covers_every_alert_the_decode_rules_can_mint(db_session, safe, make_mc):
-    """Part 8's gate: each alert-minting decode shape, with its basis, in one
-    place. A rule that starts minting an alert from a shape not listed here
-    fails this test rather than reaching an operator unannounced."""
+    """Part 8's gate: a rule that starts minting an alert from an unlisted shape fails here, not in front of an
+    operator."""
     victim = make_mc(address=ADDR(0xC0FFE4), contract_type="regular")
 
     def decode(event, tx_input: str) -> dict:
@@ -1496,8 +1394,8 @@ def embed_fields(db_session, event) -> dict[str, str]:
 
 
 def test_the_embed_renders_the_decoded_call(db_session, safe, known_target):
-    """The single highest-value operator-facing change in the spec: an embed
-    that said "safe_tx_executed on 0x…" now says what was executed."""
+    """The highest-value operator-facing change in the spec: an embed that said "safe_tx_executed on 0x…" now says what
+    was executed."""
     known_target(TARGET, SET_FEE, "setFee(uint256)")
     tx_hash = "0x" + "f1" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
@@ -1570,8 +1468,7 @@ def test_the_embed_summarizes_a_batch_and_refuses_a_partial_one(db_session, safe
 
 
 def test_the_embed_renders_the_timelock_signature(db_session, make_mc, known_target):
-    """The timelock resolution was write-only until now: published, carried
-    through the API, and rendered nowhere."""
+    """The timelock resolution was write-only (published, carried through the API, rendered nowhere)."""
     known_target(TARGET, SET_FEE, "setFee(uint256)")
     timelock = make_mc(address=ADDR(0x721), contract_type="timelock")
     event = seed_event(
@@ -1587,9 +1484,7 @@ def test_the_embed_renders_the_timelock_signature(db_session, make_mc, known_tar
 
 
 def test_the_embed_names_the_ambiguous_attribution(db_session, safe):
-    """The most operator-relevant status the attribution refusal introduced. An
-    embed that rendered it as a bare code would leave a reader unable to tell it
-    from a decode that simply failed."""
+    """A bare code would leave a reader unable to tell the ambiguous attribution from a decode that simply failed."""
     tx_hash = "0x" + "f7" * 32
     events = [
         seed_event(db_session, safe, "safe_tx_executed", tx_hash, log_index=0),
@@ -1622,8 +1517,6 @@ def test_the_embed_names_which_batch_layer_failed(db_session, safe):
 
 
 def test_the_embed_states_an_undecoded_execution_rather_than_rendering_nothing(db_session, safe):
-    """A recipient who sees no target must be able to tell "the Safe called
-    nobody" from "we did not decode this"."""
     tx_hash = "0x" + "f5" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
     run(db_session, [event], {tx_hash: tx(to=RELAYER, tx_hash=tx_hash, input_hex="0xdeadbeef")})
@@ -1632,9 +1525,8 @@ def test_the_embed_states_an_undecoded_execution_rather_than_rendering_nothing(d
 
 
 def test_the_pinned_allowlist_is_the_published_deployment_set(db_session):
-    """The list is a vendored witness, so its contents are pinned here: a
-    silent addition would quiet a delegatecall nobody vouched for, and a silent
-    removal would alert on every routine batch."""
+    """The list is a vendored witness: a silent addition would quiet an unvouched delegatecall, a removal would alert on
+    every routine batch."""
     assert enr._SAFE_MULTISEND_ADDRESSES == {
         "0xa238cbeb142c10ef7ad8442c6d1f9e89e07e7761",
         "0x998739bfdaadde7c933b942a68053933098f9eda",

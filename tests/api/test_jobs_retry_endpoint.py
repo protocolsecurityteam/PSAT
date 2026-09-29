@@ -39,8 +39,6 @@ def _read_stage_errors(session, job_id):
 
 @requires_postgres
 def test_retry_endpoint_resets_failed_terminal_to_queued(api_client, clean_jobs):
-    """A failed_terminal job is reset to queued with retry_count=0 and a
-    manual_retry artifact entry appended."""
     db_session = clean_jobs
     job = create_job(db_session, {"address": "0xabc", "name": "manual-retry"})
     fail_job_terminal(db_session, job.id, "boom", kind="terminal")
@@ -147,27 +145,20 @@ def test_retry_endpoint_returns_404_for_malformed_uuid(api_client, clean_jobs):
 # ---------------------------------------------------------------------------
 # Concurrency: two operators hitting /retry simultaneously
 # ---------------------------------------------------------------------------
-#
-# Asserts that ``routers/jobs.py:retry_job`` serializes concurrent admin
-# retries via ``SELECT … FOR UPDATE`` on the row read. Without the lock, two
-# near-simultaneous POSTs both observe ``failed_terminal``, both flip the row
-# to ``queued``, and the second writer's ``store_artifact`` upsert clobbers
-# the first writer's manual_retry entry — losing audit history.
-#
-# With the lock, the second caller blocks until the first commits and then
-# observes ``queued`` status, returning 409.
+# ``routers/jobs.py:retry_job`` must serialize concurrent admin retries via ``SELECT … FOR UPDATE``.
+# Without the lock, two near-simultaneous POSTs both see ``failed_terminal`` and the second
+# ``store_artifact`` upsert clobbers the first's manual_retry entry, losing audit history. With
+# it, the second caller blocks, then sees ``queued`` and returns 409.
 
 
 @requires_postgres
 def test_retry_endpoint_concurrent_operators_serialize_via_row_lock(clean_jobs, monkeypatch):
-    """Two concurrent /retry calls: exactly one returns 200, the other 409.
-    The audit log gets exactly one manual_retry entry — no clobber.
+    """Two concurrent /retry calls: exactly one returns 200, the other 409, and the audit log
+    gets exactly one manual_retry entry.
 
-    Bypasses the shared-session ``api_client`` fixture because that wires
-    every request through one ``Session``, which would serialize at the
-    SQLAlchemy layer and never exercise the DB-level lock. Real production
-    traffic gives each request its own session — replicated here via a real
-    sessionmaker bound to the test DB.
+    Bypasses the shared-session ``api_client`` fixture, which serializes at the SQLAlchemy layer
+    and never exercises the DB-level lock; each request gets its own session from a sessionmaker
+    bound to the test DB, as in production.
     """
     import os
     import threading
@@ -216,8 +207,6 @@ def test_retry_endpoint_concurrent_operators_serialize_via_row_lock(clean_jobs, 
         def execute(self, *args, **kwargs):
             if self._first_execute:
                 self._first_execute = False
-                # Sync both threads at the row-lock attempt so the test
-                # genuinely contends on the lock instead of running serially.
                 started.wait(timeout=10)
             return self._inner.execute(*args, **kwargs)
 
@@ -238,11 +227,9 @@ def test_retry_endpoint_concurrent_operators_serialize_via_row_lock(clean_jobs, 
     # commits, second one wakes up holding the lock, sees queued, returns 409.
     assert statuses == [200, 409], f"expected serialized [200, 409] — got {statuses}"
 
-    # Verify the 409 response carries the post-flip status.
     body_409 = next(r.json() for r in responses if r.status_code == 409)
     assert "queued" in body_409["detail"]
 
-    # Read artifact via a fresh session so we see committed state.
     with real_factory() as verify:
         from db.models import Artifact
 

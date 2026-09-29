@@ -1,14 +1,10 @@
-"""Offline logging/observability tests for the API + aggregations layer.
+"""Offline logging tests for the API + aggregations layer.
 
-Locks in the structured-field emission added for backlog items #12 (request
-middleware + global exception handler), #17 (fleet degraded-health WARNINGs),
-and #18 (admin-mutation audit trail + admin-key reject WARNING + stage_timing
-body-missing WARNING + lifespan exc_type).
-
-Fully offline: no DB, no network. The HTTP-layer assertions drive a throwaway
-FastAPI app wired with the *real* middleware/handler functions from ``api`` so
-the behaviour is exercised end-to-end without touching the production app's
-lifespan (which would try to reach Postgres).
+Locks in structured-field emission for backlog #12 (request middleware + global exception
+handler), #17 (fleet degraded-health WARNINGs) and #18 (admin-mutation audit trail, admin-key
+reject WARNING, stage_timing body-missing WARNING, lifespan exc_type). HTTP assertions drive a
+throwaway FastAPI app wired with the real middleware/handlers, avoiding the production lifespan
+(which would reach Postgres).
 """
 
 from __future__ import annotations
@@ -148,8 +144,7 @@ def test_require_admin_key_distinguishes_missing_from_mismatch(caplog, monkeypat
 
 
 def test_fleet_warns_stale_daemon_with_process_and_age():
-    # The WARNING is transition-gated, so the state a prior read may have left
-    # is cleared first: this asserts the announcement, not the dedupe.
+    # The WARNING is transition-gated; clear prior state so this asserts the announcement, not the dedupe.
     fleet.reset_fleet_log_dedupe()
     with _capture(fleet.logger) as records:
         fleet._warn_stale_daemon("event_log_indexer", 420.0)
@@ -205,9 +200,8 @@ class _ListHandler(logging.Handler):
 class _capture:
     """Attach a record-collecting handler to *logger* for the block.
 
-    Independent of caplog so the assertions read the exact ``extra`` fields off
-    the ``LogRecord`` regardless of the root handler configuration other tests
-    may have installed (configure_logging swaps the root handler globally)."""
+    Independent of caplog so assertions read exact ``extra`` fields regardless of the root
+    handler (configure_logging swaps it globally)."""
 
     def __init__(self, logger: logging.Logger) -> None:
         self._logger = logger

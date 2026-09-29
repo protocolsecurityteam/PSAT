@@ -1,12 +1,8 @@
 """Cross-chain job-level static-cache reuse (invariant 1).
 
-The job-level static cache (``find_completed_static_cache`` + copy) reuses a
-completed job's CODE plane for a new ``(chain, address)`` deployment of the same
-verified source — the analog of the ``contract_materializations`` reuse for the
-per-job ROOT analysis. Primary ``(address, chain)`` behaviour is untouched; the
-source-hash path is a fallback that fires only on a primary miss, and the copy
-re-stamps the one deployment-specific field (the contract address) while leaving
-chain/on-chain-derived artifacts to be re-derived per chain.
+``find_completed_static_cache`` + copy reuses a completed job's CODE plane for a new ``(chain, address)``
+deployment of the same verified source. The source-hash path is a fallback on primary miss only; the copy
+re-stamps the contract address and leaves chain-derived artifacts to be re-derived per chain.
 """
 
 from __future__ import annotations
@@ -150,7 +146,6 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
     cid = copy_static_cache_cross_chain(db_session, donor_job.id, target_job.id, target_address=ADDR_BASE)
     assert cid == target_contract.id
 
-    # Address re-stamped on the copied code plane.
     ca = get_artifact(db_session, target_job.id, "contract_analysis")
     assert isinstance(ca, dict)
     assert ca["subject"]["address"] == ADDR_BASE.lower()
@@ -158,7 +153,6 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
     assert isinstance(tp, dict)
     assert tp["contract_address"] == ADDR_BASE.lower()
 
-    # Source-only artifacts reused byte-for-byte.
     assert get_artifact(db_session, target_job.id, "predicate_trees") == _PREDICATE_TREES
     assert get_artifact(db_session, target_job.id, "effects") == _EFFECTS
 
@@ -167,7 +161,6 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
     assert get_artifact(db_session, target_job.id, "enrichment_cache") is None
     assert get_artifact(db_session, target_job.id, "upgrade_history") is None
 
-    # Summary + roles copied and linked to the TARGET contract.
     summary = db_session.execute(
         select(ContractSummary).where(ContractSummary.contract_id == target_contract.id)
     ).scalar_one()
@@ -190,8 +183,7 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
 
 
 def test_parity_fresh_vs_cross_chain_copy(db_session):
-    """The copied artifact set is byte-equivalent to what a fresh analysis of the
-    same source on the target chain would produce, modulo the re-stamped address."""
+    """Copied artifacts equal a fresh analysis of the same source on the target chain, modulo the re-stamped address."""
     donor_job, _ = _make_donor(db_session)
     target_job, _ = _make_target(db_session)
     copy_static_cache_cross_chain(db_session, donor_job.id, target_job.id, target_address=ADDR_BASE)
@@ -224,7 +216,6 @@ def test_fallback_fires_only_on_primary_miss(db_session):
     primary_job, _ = _make_donor(db_session, address=ADDR_MAINNET, chain="ethereum", source_content_hash=HASH)
     hash_donor, _ = _make_donor(db_session, address=ADDR_OTHER, chain="base", source_content_hash=HASH)
 
-    # Primary hit: (ADDR_MAINNET, ethereum) exists → returns it, not the hash donor.
     hit = find_completed_static_cache(db_session, ADDR_MAINNET, chain="ethereum", source_content_hash=HASH)
     assert hit is not None and hit.id == primary_job.id
 

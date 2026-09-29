@@ -1,10 +1,5 @@
-"""Unit tests for services/concurrency primitives.
-
-Covers ordering, exception capture, heartbeat invocation, RpcExecutor
-singleton semantics. Every parallel
-fan-out elsewhere in the codebase relies on these guarantees, so this file
-is the safety net for the helper itself.
-"""
+"""Unit tests for services/concurrency primitives (parallel_map, RpcExecutor). Every parallel
+fan-out in the codebase relies on these."""
 
 from __future__ import annotations
 
@@ -33,7 +28,6 @@ def _reset_executor():
 
 
 def test_parallel_map_preserves_input_order():
-    """Output order must match input order regardless of completion order."""
     barrier = threading.Barrier(4)
 
     def slow_then_value(x):
@@ -46,7 +40,6 @@ def test_parallel_map_preserves_input_order():
 
 
 def test_parallel_map_returns_exceptions_instead_of_raising():
-    """Per-item failures land in the result tuple; the helper itself never raises."""
 
     def maybe_fail(x):
         if x == 2:
@@ -61,7 +54,6 @@ def test_parallel_map_returns_exceptions_instead_of_raising():
 
 
 def test_parallel_map_calls_heartbeat_once_per_completion():
-    """Heartbeat fires exactly once per completed task."""
     counter = {"n": 0}
 
     def increment_heartbeat():
@@ -72,7 +64,6 @@ def test_parallel_map_calls_heartbeat_once_per_completion():
 
 
 def test_parallel_map_heartbeat_exception_is_swallowed():
-    """A raising heartbeat must not break the fan-out for transient errors."""
 
     def bad_heartbeat():
         raise RuntimeError("hb broke")
@@ -82,15 +73,11 @@ def test_parallel_map_heartbeat_exception_is_swallowed():
 
 
 def test_parallel_map_propagates_lease_lost_from_heartbeat_parallel_path():
-    """LeaseLost is a directive — the lease has rolled to a sibling worker
-    and continuing this fan-out would be wasted work on a job we no longer
-    own. The parallel-path heartbeat handler must propagate LeaseLost so
-    ``BaseWorker._execute_job`` can bail.
+    """LeaseLost must propagate so ``BaseWorker._execute_job`` can bail.
 
-    Why this matters: psat-pr-73 hit duplicate-build symptoms because
-    ``parallel_map`` previously caught LeaseLost as a generic Exception
-    and continued, so the abandoned worker kept running forge builds on
-    a job a sibling had already claimed (signal #4, 2026-05-08 08:17-21).
+    psat-pr-73 hit duplicate builds because ``parallel_map`` caught it as a generic
+    Exception, so the abandoned worker kept running forge builds on a job a sibling
+    had claimed (signal #4, 2026-05-08 08:17-21).
     """
     from db.queue import LeaseLost
 
@@ -102,7 +89,6 @@ def test_parallel_map_propagates_lease_lost_from_heartbeat_parallel_path():
 
 
 def test_parallel_map_propagates_lease_lost_from_heartbeat_single_worker_path():
-    """Same invariant for the ``max_workers=1`` heartbeat path."""
     from db.queue import LeaseLost
 
     def lease_lost_heartbeat():
@@ -175,7 +161,6 @@ def test_parallel_map_empty_input_returns_empty():
 
 
 def test_parallel_map_workers_one_runs_sequentially_in_thread(monkeypatch):
-    """``max_workers=1`` is parity mode: callers use it to assert sequential equivalence in tests."""
     seen_threads = []
 
     def record_thread(x):
@@ -188,7 +173,6 @@ def test_parallel_map_workers_one_runs_sequentially_in_thread(monkeypatch):
 
 
 def test_parallel_map_respects_psat_rpc_fanout_env(monkeypatch):
-    """When max_workers is None, ``PSAT_RPC_FANOUT`` is the ceiling."""
     monkeypatch.setenv("PSAT_RPC_FANOUT", "1")
     seen_threads = []
 

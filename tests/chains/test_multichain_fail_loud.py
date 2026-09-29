@@ -70,8 +70,6 @@ class TestRequireChain:
 
 
 class TestDefaultRpcUrlNoSilentMainnet:
-    """``default_rpc_url`` no longer maps a missing/unknown chain to mainnet."""
-
     @pytest.fixture(autouse=True)
     def _erpc(self, monkeypatch):
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
@@ -197,8 +195,6 @@ class TestErpcChainIdGuard:
 
 
 class TestEdgeKeepsStillDefaultMainnet:
-    """The sanctioned user-facing edges keep their explicit mainnet defaults."""
-
     def test_analyze_request_defaults(self):
         from schemas.api_requests import AnalyzeRequest
 
@@ -236,11 +232,9 @@ def test_registry_still_resolves_all_supported_chains():
 
 
 class TestResolutionRpcUrlUsesJobChainColumn:
-    """Regression: a chainless /api/analyze request carries its mainnet edge
-    default only in the first-class ``jobs.chain_id`` column — the request
-    JSONB has no chain keys. ``_rpc_url_for_job`` must resolve through the
-    column, or every such job dies terminal at the resolution stage (the
-    PR #153 live-suite failure)."""
+    """Regression (PR #153 live-suite failure): a chainless /api/analyze request has its mainnet default only
+    in ``jobs.chain_id``, not the request JSONB. ``_rpc_url_for_job`` must resolve through the column or every
+    such job dies terminal at the resolution stage."""
 
     def test_chainless_request_resolves_via_column(self, monkeypatch):
         from types import SimpleNamespace
@@ -279,9 +273,8 @@ class TestResolutionRpcUrlUsesJobChainColumn:
 
 
 class TestWorkerRpcHelpersUseJobChainColumn:
-    """Same regression class as the resolution helper: policy and static
-    workers must resolve RPC via the job's first-class chain, not the
-    request JSONB alone."""
+    """Same regression as the resolution helper: policy and static workers must resolve RPC via the job's
+    chain column, not the request JSONB alone."""
 
     def test_policy_rpc_chainless_request_resolves_via_column(self, monkeypatch):
         from types import SimpleNamespace

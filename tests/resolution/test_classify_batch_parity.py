@@ -1,31 +1,14 @@
-"""Parity tests for the batched classify path in
-``services.resolution.tracking``.
+"""Parity tests for the batched classify path in ``services.resolution.tracking``.
 
-#2 from todo-no-commit-to-gihub.txt — JSON-RPC batch classify probes.
-The codex gate explicitly required: ``_PROBE_ERROR`` sentinel
-preservation under partial failures, AND identical (kind, details,
-cacheable) on every branch.
+The batched path (``PSAT_CLASSIFY_BATCH``, default ON; ``=0`` disables) must preserve
+the ``_PROBE_ERROR`` sentinel under partial failures and return identical (kind,
+details, cacheable) on every branch. Both paths run against the same mocked RPC
+responses and must be byte-identical; env-dispatch tests patch the constant directly.
 
-The batched path is gated behind ``PSAT_CLASSIFY_BATCH`` (default ON
-since the parity tests + production benches confirmed equivalence;
-set ``PSAT_CLASSIFY_BATCH=0`` to disable per environment). These tests
-exercise BOTH paths with the same mocked RPC responses and assert
-they produce byte-identical outputs — the env-dispatch tests below
-monkeypatch the constant directly so they are insensitive to the
-default.
-
-Branches covered (each tested in batched and sequential mode):
-1. Zero address → ("zero", ..., cacheable=True), no RPC issued.
-2. EOA (eth_getCode == "0x") → ("eoa", ..., cacheable=True), no probes.
-3. Safe → ("safe", {owners, threshold}, ...).
-4. Timelock via getMinDelay → ("timelock", {delay, optional owner}, ...).
-5. Timelock via fallback delay() → same shape.
-6. OZ-v5 ProxyAdmin shape (UIV + zero 1967 slot + no proxiableUUID +
-   owner) → ("proxy_admin", {...}, ...).
-7. Generic contract (every probe absent) → ("contract", {address, ...}, ...).
-8. Generic contract WITH per-probe RPC error → had_error=True (cacheable=False).
-9. Whole-batch RPC failure → had_error=True (matches sequential where
-   ``_eth_call_raw`` raises).
+Branches (each in batched and sequential mode): zero address; EOA (no probes); Safe;
+Timelock via getMinDelay / fallback delay(); OZ-v5 ProxyAdmin (UIV + zero 1967 slot +
+no proxiableUUID + owner); generic contract; generic contract WITH per-probe RPC error
+(had_error=True, cacheable=False); whole-batch RPC failure (had_error=True).
 """
 
 from __future__ import annotations
@@ -60,8 +43,7 @@ def _abi_encode_uint256(n: int) -> str:
 
 
 def _abi_encode_address_array(addrs: list[str]) -> str:
-    """Tail-encoded address[]: offset (32 bytes), length (32 bytes), then
-    each address right-padded to 32 bytes."""
+    """Tail-encoded address[]: offset, length, then each address right-padded to 32 bytes."""
     body = format(32, "064x")  # offset to data
     body += format(len(addrs), "064x")  # length
     for a in addrs:
@@ -78,13 +60,10 @@ def _abi_encode_string(s: str) -> str:
     return "0x" + body
 
 
-# Sequence of probe responses keyed by selector — the test harness
-# returns the matching value when the sequential path calls eth_call,
-# and the same set drives the batched path's mock.
+# Probe responses keyed by selector; the same set drives both the sequential and batched mocks.
 def _probe_responses_for(scenario: str) -> dict[str, str]:
-    """Map of selector → raw eth_call response. Selectors match the ones
-    in tracking._CLASSIFY_PROBE_SIGS. Missing selectors imply "0x" (probe
-    legitimately returns no data)."""
+    """Selector → raw eth_call response (selectors from tracking._CLASSIFY_PROBE_SIGS);
+    missing selectors imply "0x" (no data)."""
     if scenario == "safe":
         return {
             "getOwners()": _abi_encode_address_array([ADDR_OWNER]),
@@ -102,10 +81,8 @@ def _probe_responses_for(scenario: str) -> dict[str, str]:
             "owner()": _abi_encode_address(ADDR_OWNER),
         }
     if scenario == "proxy_admin":
-        # The OZ-v5 ProxyAdmin shape: UIV answers, the ERC-1967 implementation
-        # slot is zero (default "storage"), proxiableUUID() is absent, owner()
-        # answers. A UIV answer with a NONZERO slot is a UUPS proxy, not a
-        # proxy admin — covered in test_classify_uiv_shape.py.
+        # OZ-v5 ProxyAdmin: UIV answers, the ERC-1967 slot is zero, proxiableUUID() absent,
+        # owner() answers. UIV with a NONZERO slot is a UUPS proxy (test_classify_uiv_shape.py).
         return {
             "UPGRADE_INTERFACE_VERSION()": _abi_encode_string("5.0.0"),
             "owner()": _abi_encode_address(ADDR_OWNER),
@@ -117,8 +94,7 @@ def _probe_responses_for(scenario: str) -> dict[str, str]:
 
 
 def _mock_sequential(monkeypatch, probe_map, *, code="0x60", get_code_raises=False, type_authority_raises=False):
-    """Wire the sequential code path: _get_code returns `code`,
-    _try_eth_call_decoded routes to `probe_map`."""
+    """Wire the sequential path: _get_code returns `code`, _try_eth_call_decoded routes to `probe_map`."""
 
     def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         if get_code_raises:
@@ -138,8 +114,7 @@ def _mock_sequential(monkeypatch, probe_map, *, code="0x60", get_code_raises=Fal
 
     monkeypatch.setattr(tracking, "_get_code", _fake_get_code)
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
-    # ERC-1967 slot read (the UIV-arm discriminator): zero word unless the
-    # scenario provides one under the "storage" key.
+    # ERC-1967 slot read (the UIV-arm discriminator): zero word unless the scenario gives "storage".
     monkeypatch.setattr(tracking, "_get_storage_at", lambda *_a, **_k: probe_map.get("storage", "0x" + "0" * 64))
     monkeypatch.setattr(tracking, "type_authority_contract", _fake_type_authority)
 
@@ -153,8 +128,7 @@ def _mock_batched(
     type_authority_raises=False,
     batch_errors=False,
 ):
-    """Wire the batched code path. ``probe_map`` is keyed by selector;
-    we synthesize a list aligned with _CLASSIFY_PROBE_SIGS."""
+    """Wire the batched path; ``probe_map`` is keyed by selector and aligned with _CLASSIFY_PROBE_SIGS."""
 
     def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         if get_code_raises:
@@ -258,8 +232,7 @@ def test_proxy_admin_branch_parity(monkeypatch):
 
 
 def test_generic_contract_branch_parity(monkeypatch):
-    """No probes succeed → falls through to 'contract' branch with
-    type_authority info merged in."""
+    """No probes succeed → 'contract' branch with type_authority info merged in."""
     seq, batch = _both_paths(monkeypatch, _probe_responses_for("contract_no_probes"))
     assert seq == batch
     assert seq[0] == "contract"
@@ -267,8 +240,7 @@ def test_generic_contract_branch_parity(monkeypatch):
 
 
 def test_generic_contract_with_type_authority_failure_parity(monkeypatch):
-    """type_authority_contract raised → both paths set had_error=True
-    even though no probe returned _PROBE_ERROR."""
+    """type_authority_contract raised → both paths set had_error=True though no probe returned _PROBE_ERROR."""
     seq, batch = _both_paths(monkeypatch, _probe_responses_for("contract_no_probes"), type_authority_raises=True)
     assert seq == batch
     assert seq[0] == "contract"
@@ -276,13 +248,9 @@ def test_generic_contract_with_type_authority_failure_parity(monkeypatch):
 
 
 def test_whole_batch_failure_marks_had_error(monkeypatch):
-    """If the batch helper returns (None, True) for every slot (network
-    or provider rejection), the batched path must classify as 'contract'
-    with had_error=True — same as if every sequential probe had raised.
-
-    No sequential equivalent in this test (the sequential path raises on
-    every probe → also lands in 'contract', had_error=True via the
-    type_authority fallback). We compare structurally."""
+    """A (None, True) batch result for every slot (network or provider rejection) must
+    classify as 'contract' with had_error=True, as if every sequential probe had raised.
+    Compared structurally (the sequential path also lands there via the type_authority fallback)."""
 
     def _seq_all_raise(_rpc_url, _addr, _signature, _block, chain_id=None):
         raise RuntimeError("RPC down")
@@ -305,17 +273,15 @@ def test_whole_batch_failure_marks_had_error(monkeypatch):
     )
     batch = _classify_uncached_batched("https://rpc", "0xab", "latest")
 
-    # Both should land at "contract" with had_error=True. The details
-    # dict has only the address since no probe data made it through.
+    # Both land at "contract" with had_error=True; details has only the address.
     assert seq[0] == batch[0] == "contract"
     assert seq[2] is True
     assert batch[2] is True
 
 
 def test_partial_per_call_error_preserves_had_error(monkeypatch):
-    """One probe in the batch errored, the rest succeeded enough to
-    classify as Safe. had_error must still be True so the result is
-    not cached — even though the kind classification was correct."""
+    """One probe errored but the rest classify as Safe: had_error must still be True so
+    the result isn't cached, though the kind was correct."""
 
     def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
         return "0x60"
@@ -324,8 +290,7 @@ def test_partial_per_call_error_preserves_had_error(monkeypatch):
         return {}
 
     def _fake_batch(_rpc_url, calls, chain_id=None):
-        # Slot 0 (getOwners), 1 (getThreshold) success → Safe.
-        # Slot 2 (getMinDelay) errors. Wouldn't affect Safe dispatch.
+        # Slots 0 (getOwners), 1 (getThreshold) succeed → Safe; slot 2 (getMinDelay) errors, irrelevant.
         out = [
             (_abi_encode_address_array([ADDR_OWNER]), False),
             (_abi_encode_uint256(1), False),
@@ -347,8 +312,7 @@ def test_partial_per_call_error_preserves_had_error(monkeypatch):
 
 
 def test_classify_dispatch_uses_batched_path_when_env_enabled(monkeypatch):
-    """The env-flag dispatch in classify_resolved_address_with_status
-    must actually route to the batched path when PSAT_CLASSIFY_BATCH is on."""
+    """classify_resolved_address_with_status must route to the batched path when PSAT_CLASSIFY_BATCH is on."""
     addr = "0x" + "00" * 20
     monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", True)
     called = {"batched": 0, "sequential": 0}
@@ -390,22 +354,15 @@ def test_classify_dispatch_uses_sequential_path_when_env_disabled(monkeypatch):
     assert called == {"batched": 0, "sequential": 1}
 
 
-# ---------------------------------------------------------------------------
 # Codex-iter-1 finding: whole-batch failure must fall back to sequential
-# ---------------------------------------------------------------------------
 
 
 def test_whole_batch_failure_falls_back_to_sequential_path(monkeypatch):
-    """Codex review finding: when PSAT_CLASSIFY_BATCH=1 and a provider
-    rejects JSON-RPC batches (some private RPCs do), the batch helper
-    returns (None, True) for every slot. Without a fallback, the batched
-    classifier dumps out as ('contract', ..., had_error=True) — but the
-    SEQUENTIAL path may have classified correctly via individual eth_calls.
-
-    Enabling the flag must not silently degrade resolution accuracy on
-    providers that don't support batches. Verify that whole-batch failure
-    triggers a fallback to ``_classify_uncached`` and recovers the right
-    Safe classification."""
+    """Codex review finding: some private RPCs reject JSON-RPC batches, so the batch
+    helper returns (None, True) for every slot. Without a fallback the batched classifier
+    yields ('contract', ..., had_error=True) though the SEQUENTIAL path would classify
+    correctly; enabling the flag must not degrade accuracy on such providers. Whole-batch
+    failure falls back to ``_classify_uncached`` and recovers the Safe."""
     sequential_called = {"count": 0}
 
     def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
@@ -414,12 +371,11 @@ def test_whole_batch_failure_falls_back_to_sequential_path(monkeypatch):
     def _fake_type_authority(*_a, **_kw):
         return {}
 
-    # Batch helper: simulates a provider that rejects every JSON-RPC batch.
+    # Batch helper: a provider that rejects every JSON-RPC batch.
     def _failing_batch(*_a, **_kw):
         return [(None, True)] * len(tracking._CLASSIFY_PROBE_SIGS)
 
-    # Sequential helper: simulates a Safe contract responding correctly to
-    # individual eth_calls.
+    # Sequential helper: a Safe responding correctly to individual eth_calls.
     def _safe_seq_eth_call(_rpc_url, _addr, signature, _block, chain_id=None):
         sequential_called["count"] += 1
         if signature == "getOwners()":
@@ -446,10 +402,8 @@ def test_whole_batch_failure_falls_back_to_sequential_path(monkeypatch):
 
 
 def test_partial_batch_failure_does_not_trigger_fallback(monkeypatch):
-    """The fallback fires ONLY on whole-batch failure. If even one probe
-    in the batch succeeded, we trust the batched dispatch — partial
-    failure is normal (e.g., a non-Safe contract returning ``"0x"`` for
-    getOwners and a real value for getMinDelay)."""
+    """The fallback fires ONLY on whole-batch failure; if one probe succeeded we trust
+    the batch (partial failure is normal, e.g. "0x" for getOwners on a non-Safe)."""
     sequential_called = {"count": 0}
 
     def _fake_get_code(_rpc_url, _addr, _block, chain_id=None):
@@ -459,8 +413,7 @@ def test_partial_batch_failure_does_not_trigger_fallback(monkeypatch):
         return {}
 
     def _partial_batch(*_a, **_kw):
-        # Only slot 2 (getMinDelay) errored — the rest "succeeded" with
-        # empty results. NOT a whole-batch failure.
+        # Only slot 2 (getMinDelay) errored, the rest "succeeded" empty: NOT a whole-batch failure.
         return [
             ("0x", False),
             ("0x", False),
@@ -485,15 +438,11 @@ def test_partial_batch_failure_does_not_trigger_fallback(monkeypatch):
     assert sequential_called["count"] == 0, "no fallback should fire on partial failure"
 
 
-# ---------------------------------------------------------------------------
-# Multicall3 classify path (PSAT_CLASSIFY_MULTICALL) — must be byte-identical to
-# the sequential / JSON-RPC-batch paths. The probes are caller-independent view
-# getters, so routing them through Multicall3 (which becomes msg.sender) cannot
-# change a value; a reverting probe → success=False → _PROBE_ERROR, exactly the
-# sentinel a per-call JSON-RPC error yields. Wire is stubbed at
-# services.clients.rpc.rpc_request (the aggregate3 eth_call) so the REAL _multicall_probe +
-# multicall3_aggregate3 run hermetically.
-# ---------------------------------------------------------------------------
+# Multicall3 classify path (PSAT_CLASSIFY_MULTICALL) — byte-identical to the sequential /
+# JSON-RPC-batch paths. Probes are caller-independent view getters, so Multicall3 (which
+# becomes msg.sender) can't change a value; a reverting probe → success=False →
+# _PROBE_ERROR, like a per-call JSON-RPC error. The wire is stubbed at
+# services.clients.rpc.rpc_request so the REAL _multicall_probe + multicall3_aggregate3 run hermetically.
 
 
 def _run_multicall(
@@ -507,9 +456,8 @@ def _run_multicall(
 ):
     """Drive _classify_uncached_batched through the real Multicall3 probe path.
 
-    Absent probes are modeled as success/empty ("0x") — matching how the sequential and
-    JSON-RPC-batch mocks model an absent function — so (kind, details, cacheable) are directly
-    comparable. ``revert_sigs`` forces specific probe selectors to report success=False (revert).
+    Absent probes are success/empty ("0x"), as in the other mocks, so results are
+    comparable; ``revert_sigs`` forces those selectors to success=False (revert).
     """
     import services.clients.rpc as rpc_mod
 
@@ -546,9 +494,8 @@ def _run_multicall(
             out.append((True, raw_bytes))
         return "0x" + encode(["(bool,bytes)[]"], [out]).hex()
 
-    # The lazy negative-control probe goes through _eth_call_raw (module-bound
-    # _rpc_request, not the services.clients.rpc attribute patched above) — stub it at the
-    # same probe_map layer so control behavior is scenario-driven.
+    # The lazy negative-control probe goes through _eth_call_raw (module-bound _rpc_request,
+    # not the patched attribute) — stub it at the probe_map layer so it's scenario-driven.
     def _fake_eth_call_raw(_rpc_url, _addr, signature, _block, chain_id=None):
         raw = probe_map.get(signature, "0x")
         if raw == "revert":
@@ -592,8 +539,8 @@ def test_multicall_eoa_short_circuits_without_aggregate3(monkeypatch):
 
 
 def test_multicall_revert_maps_to_probe_error(monkeypatch):
-    """A reverting probe (success=False) must set had_error=True (so the result is not cached),
-    exactly as a (None, True) slot does on the JSON-RPC-batch path — Safe still classifies."""
+    """A reverting probe (success=False) sets had_error=True (not cached), like a (None, True)
+    slot on the JSON-RPC-batch path; Safe still classifies."""
     mc = _run_multicall(monkeypatch, _probe_responses_for("safe"), revert_sigs={"getMinDelay()"})
     assert mc[0] == "safe"
     assert mc[1]["owners"] == [ADDR_OWNER.lower()]
@@ -601,8 +548,8 @@ def test_multicall_revert_maps_to_probe_error(monkeypatch):
 
 
 def test_multicall_failure_falls_back_to_batch(monkeypatch):
-    """If the aggregate3 eth_call raises (chain lacks Multicall3 / provider rejects it),
-    _probe_classify falls back to the JSON-RPC batch, which classifies correctly. No accuracy loss."""
+    """If the aggregate3 eth_call raises (no Multicall3 / provider rejects), _probe_classify
+    falls back to the JSON-RPC batch with no accuracy loss."""
     import services.clients.rpc as rpc_mod
 
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", True)
@@ -630,7 +577,7 @@ def test_multicall_failure_falls_back_to_batch(monkeypatch):
 
 
 def test_probe_classify_dispatch_on_flag(monkeypatch):
-    """_probe_classify routes to Multicall3 when the flag is on, to the JSON-RPC batch when off."""
+    """_probe_classify routes to Multicall3 when the flag is on, else the JSON-RPC batch."""
     seen = {"mc": 0, "batch": 0}
     monkeypatch.setattr(
         tracking,

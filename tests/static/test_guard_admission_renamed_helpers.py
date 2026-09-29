@@ -1,31 +1,16 @@
-"""Regression test: parametric guards land in semantic_functions but
-resolve to no concrete principals — the EtherFiTimelock symptom.
+"""Regression test: parametric guards land in semantic_functions but resolve to no
+concrete principals, the EtherFiTimelock symptom (todo.txt #7).
 
-Original todo (#7 in /home/gnome2/asu/capstone/PSAT/todo.txt): the
-EtherFiTimelock's grantRole/revokeRole/renounceRole show as 'Unresolved'
-in the UI even though the contract is plainly role-controlled. The
-analyzer admits these functions to ``semantic_functions`` (we
-verified — see ``test_renamed_helpers_dispense_role_is_admitted``
-below). What it does NOT do is bind them to concrete principals, so
-``effective_permissions`` emits an entry with empty
-``direct_owner`` / ``authority_roles`` / ``controllers``, and the UI's
-``direct.length === 0`` branch ends up rendering 'Unresolved'.
+grantRole/revokeRole/renounceRole show as 'Unresolved' in the UI although the contract
+is plainly role-controlled: the functions are admitted to ``semantic_functions`` but
+never bound to principals, so ``effective_permissions`` has empty ``direct_owner`` /
+``authority_roles`` / ``controllers``. Pins three claims: (1) OZ-style and
+renamed-helper variants both admit (the admission gate is not the broken layer);
+(2) the Unguarded control does NOT admit; (3) both guarded variants emit an
+``EffectiveFunctionPermission`` with EMPTY principals, the gap to close.
 
-This test pins three claims:
-
-  1. Both OZ-style and renamed-helper variants admit to
-     semantic_functions. (Both pass today — confirms the admission
-     gate isn't actually the broken layer.)
-  2. The Unguarded negative control does NOT admit. (Pin against
-     overinclusive future fixes.)
-  3. Both guarded variants emit an ``EffectiveFunctionPermission`` with
-     EMPTY ``direct_owner``, ``authority_roles``, AND ``controllers``
-     resolving to addresses — i.e. the user-facing 'Unresolved' state.
-     This is the gap the user wants closed.
-
-The xfail in (3) flips to passing when the policy stage learns to
-express 'guarded by getRoleAdmin(role_arg) holders' as a typed
-parametric principal — see todo.txt #7's deferred fix block.
+The xfail in (3) flips to passing when the policy stage can express 'guarded by
+getRoleAdmin(role_arg) holders' as a typed parametric principal (todo.txt #7).
 """
 
 from __future__ import annotations
@@ -120,9 +105,7 @@ def _semantic_signatures(analysis: Any) -> set[str]:
     return {fn["function"] for fn in (ac.get("semantic_functions") or [])}
 
 
-# ---------------------------------------------------------------------------
 # (1) Admission stage — passes for both naming conventions.
-# ---------------------------------------------------------------------------
 
 
 def test_oz_style_grant_role_admits(tmp_path: Path):
@@ -132,24 +115,18 @@ def test_oz_style_grant_role_admits(tmp_path: Path):
 
 
 def test_renamed_helpers_dispense_role_admits(tmp_path: Path):
-    """Confirms the admission gate is name-neutral. The helper rename
-    (_checkRole → _bouncer, _getRoleAdmin → _adminOf) doesn't change
-    the IR shape, and ``caller_reach_analysis`` recurses into the
-    helper to find the ``caller_in_mapping`` revert-gate inside
-    ``_bouncer``'s body. So this passes today — admission isn't the
-    broken stage."""
+    """The admission gate is name-neutral: the helper rename doesn't change the IR
+    shape and ``caller_reach_analysis`` recurses into it to find the
+    ``caller_in_mapping`` revert-gate."""
     project = _write_project(tmp_path, "Renamed", RENAMED_SOURCE)
     analysis = collect_contract_analysis(project)
     assert "dispenseRole(bytes32,address)" in _semantic_signatures(analysis)
 
 
 def test_unguarded_grant_role_does_not_admit(tmp_path: Path):
-    """Semantic inclusion is "caller/delegated
-    authority leaf OR sensitive sink". An unguarded ``grantRole``
-    writes mapping state → it IS admitted under the structural rule.
-    The original "negative control" (no caller_authority leaf) is now
-    asserted on the predicate tree itself, not on semantic_functions.
-    """
+    """An unguarded ``grantRole`` writes mapping state, so it IS admitted under the
+    structural rule; the "no caller_authority leaf" control is asserted on the
+    predicate tree instead."""
     project = _write_project(tmp_path, "Unguarded", UNGUARDED_SOURCE)
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
@@ -168,18 +145,12 @@ def test_unguarded_grant_role_does_not_admit(tmp_path: Path):
     assert not _has_auth_leaf(tree), "unguarded grantRole surfaced a caller/delegated authority leaf"
 
 
-# ---------------------------------------------------------------------------
-# (2) Resolution stage — produces empty principals for parametric guards.
-# This is the user-facing "Unresolved" gap.
-# ---------------------------------------------------------------------------
+# (2) Resolution stage — empty principals for parametric guards (the user-facing "Unresolved" gap).
 
 
 def _function_entry(analysis: Any, signature: str) -> dict | None:
-    """Pull the semantic function entry. Resolution-stage output
-    layers (effective_permissions / function_principals) live in a
-    later pipeline pass that this test deliberately skips — the empty
-    principal state is observable directly from the semantic function
-    entry's controller_refs/guards/sinks before policy join."""
+    """Pull the semantic function entry. The empty principal state is observable
+    there before the policy join, which this test deliberately skips."""
     ac = analysis.get("semantic_control") or {}
     for fn in ac.get("semantic_functions") or []:
         if fn["function"] == signature:

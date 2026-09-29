@@ -1,15 +1,11 @@
 """A2 — the earned-negative gate, served beside the payload it gates.
 
-An empty caller set is the strongest earned negative the resolver publishes.
-The shipped consumers award it on ``membership_quality == "exact" and members ==
-[]`` alone — a shape a provenance-less empty satisfies exactly as well as a
-read-confirmed one. On the validated corpus 86 rows are ``restricted`` resting
-solely on that branch, 86/86 with no height anywhere in the tree, and 4 of them
-cannot be reconstructed at all.
-
-The gate requires four things TOGETHER, each with an allow-list rather than a
-presence check, because a presence check fails open for any future producer.
-Every test below is a rejecting arm except the two that earn.
+An empty caller set is the strongest earned negative the resolver publishes, but the
+shipped consumers award it on ``membership_quality == "exact" and members == []``
+alone — which a provenance-less empty satisfies as well as a read-confirmed one
+(86 ``restricted`` rows on the validated corpus rest solely on it). The gate requires
+four things TOGETHER, each via allow-list (a presence check fails open for future
+producers). Every test is a rejecting arm except the two that earn.
 """
 
 from __future__ import annotations
@@ -62,12 +58,10 @@ def test_an_equal_heights_exact_as_of_is_an_admissible_observation_block():
 
 
 def test_last_indexed_block_is_not_an_observation_block():
-    """The MIN over operands at DIFFERENT heights is a staleness floor. Reading
-    it as "the set was empty at that block" is false — both fold families
-    publish state-AT-h with revocations applied, so a member revoked from the
-    later operand is absent from the published set while the true set at MIN
-    still held it. Admitting it here would re-introduce through the consumer the
-    exact claim the producer refuses."""
+    """The MIN over operands at DIFFERENT heights is a staleness floor, not "the set
+    was empty at that block": both fold families publish state-AT-h with revocations
+    applied, so a member revoked from the later operand is absent while the true set
+    at MIN still held it. Admitting it would re-introduce the claim the producer refuses."""
     cap = _empty(
         trace=[{"step": "enumerable_role_store"}],
         last_indexed_block=OTHER_BLOCK,
@@ -89,10 +83,9 @@ def test_a_refused_exact_as_of_is_not_a_block():
 
 
 def test_an_unlisted_trace_step_does_not_prove_coverage():
-    """A step name is not evidence. A future producer appending its own step,
-    with a block and a reason, must not thereby mint an earned negative — the
-    admissible producers are enumerated and each refuses to answer at all
-    without proven coverage of what it read."""
+    """A future producer appending its own step, with a block and a reason, must not
+    mint an earned negative — admissible producers are enumerated and each refuses to
+    answer without proven coverage."""
     cap = _empty(trace=[{"step": "some_new_adapter", "observed_at_block": BLOCK}])
     credit = exact_empty_credit(cap)
     assert credit["verdict"] == "not_determined"
@@ -119,10 +112,9 @@ def test_each_allow_listed_producer_is_accepted():
 
 
 def test_empty_by_design_never_earns_the_credit():
-    """Its only surviving producer classifies the gate from the accessor's
-    ``pending`` prefix and records ``basis: "accessor_name"``. A name may not
-    license the strongest negative in the system — and the one persisted row
-    carrying this reason got it from a DEFAULT ARGUMENT VALUE."""
+    """Its only surviving producer classifies from the accessor's ``pending`` prefix
+    (``basis: "accessor_name"``). A name may not license the strongest negative — and
+    the one persisted row with this reason got it from a DEFAULT ARGUMENT VALUE."""
     cap = _empty(empty_reason="empty_by_design")
     credit = exact_empty_credit(cap)
     assert credit["verdict"] == "not_determined"

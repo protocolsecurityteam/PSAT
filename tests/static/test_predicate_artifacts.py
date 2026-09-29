@@ -1,8 +1,5 @@
-"""Tests for ``build_predicate_artifacts``.
-
-End-to-end: compile a Solidity fixture, run the artifact builder,
-assert the trees include the expected functions, exclude unguarded
-ones, and serialize cleanly via ``json.dumps``.
+"""Tests for ``build_predicate_artifacts``: compile a Solidity fixture, run the
+builder, and check the trees, the omissions, and ``json.dumps`` serializability.
 """
 
 from __future__ import annotations
@@ -46,9 +43,7 @@ def _leaves(tree: dict) -> list[dict]:
 
 
 def test_artifact_includes_only_guarded_external_functions(tmp_path):
-    """The artifact dict has trees for guarded external/public
-    functions and OMITS unguarded ones (resolver convention:
-    absent = unguarded)."""
+    """Unguarded functions are OMITTED (resolver convention: absent = unguarded)."""
     sl = _compile(
         tmp_path,
         """
@@ -74,9 +69,7 @@ def test_artifact_includes_only_guarded_external_functions(tmp_path):
 
 
 def test_bool_returning_authority_check_goes_to_check_trees(tmp_path):
-    """Read-only authorization predicates are resolver inputs, not
-    protected entrypoints. They should be available for recursive
-    inlining without appearing in the normal function surface."""
+    """Read-only authorization predicates are resolver inputs, not protected entrypoints."""
     sl = _compile(
         tmp_path,
         """
@@ -97,8 +90,6 @@ def test_bool_returning_authority_check_goes_to_check_trees(tmp_path):
 
 
 def test_bool_returning_checker_keeps_literal_true_branch(tmp_path):
-    """Checker functions with public fast paths must preserve the
-    literal-true branch as a predicate over the preceding if condition."""
     sl = _compile(
         tmp_path,
         """
@@ -144,8 +135,6 @@ def test_bool_returning_checker_keeps_unconditional_literal_true(tmp_path):
 
 
 def test_guarded_bool_returning_checker_gets_tree_and_check_tree(tmp_path):
-    """A guarded bool checker is both a callable function and a
-    resolver-side authorization provider."""
     sl = _compile(
         tmp_path,
         """
@@ -173,8 +162,6 @@ def test_guarded_bool_returning_checker_gets_tree_and_check_tree(tmp_path):
 
 
 def test_artifact_omits_internal_functions(tmp_path):
-    """Internal/private helpers don't appear at the boundary the
-    resolver consumes — only external/public surface."""
     sl = _compile(
         tmp_path,
         """
@@ -290,19 +277,13 @@ def test_artifact_omits_constructor(tmp_path):
     """,
     )
     artifact = build_predicate_artifacts(_contract(sl))
-    # Constructors aren't part of the public ABI surface; the
-    # artifact must omit them so the resolver doesn't conflate
-    # construction-time gates with runtime gates.
+    # Constructors are omitted so the resolver does not conflate construction-time gates with runtime gates.
     keys = list(artifact["trees"].keys())
     assert all("constructor" not in k for k in keys)
     assert "f()" in artifact["trees"]
 
 
 def test_artifact_serializes_cleanly_to_json(tmp_path):
-    """The trees use TypedDict shapes that ``json.dumps`` can
-    handle. The set_descriptor's role bytes are encoded as
-    str(constant_value) per the existing predicate builder, so the
-    JSON roundtrip works end-to-end."""
     sl = _compile(
         tmp_path,
         """
@@ -326,14 +307,11 @@ def test_artifact_serializes_cleanly_to_json(tmp_path):
 
 
 def test_artifact_with_low_level_call_provenance_serializes(tmp_path):
-    """A guarded function whose comparison operand derives from a low-level
-    ``.staticcall`` through a built-in's ``arg_origins``: Slither's
-    ``LowLevelCall.function_name`` is a ``Constant``, and before it was
-    stringified at the provenance layer it reached the published
-    ``derived_from`` operands and crashed the ``json.dumps`` workspace write
-    on 4 real contracts (PriceProvider, EmissionsController, StrategyManager,
-    DelegationManager — PR-161, failed_terminal with 'Object of type Constant
-    is not JSON serializable')."""
+    """A comparison operand derived from a low-level ``.staticcall`` via a built-in's
+    ``arg_origins``: Slither's ``LowLevelCall.function_name`` is a ``Constant``, and
+    before it was stringified at the provenance layer it crashed the ``json.dumps``
+    workspace write on 4 real contracts (PriceProvider, EmissionsController,
+    StrategyManager, DelegationManager; PR-161 failed_terminal)."""
     sl = _compile(
         tmp_path,
         """
@@ -356,8 +334,7 @@ def test_artifact_with_low_level_call_provenance_serializes(tmp_path):
     decoded = json.loads(json.dumps(artifact))
     tree = decoded["trees"]["guarded(bytes32,uint256)"]
 
-    # The low-level call's kind must have survived as a plain string in the
-    # published provenance (not been dropped to make serialization pass).
+    # The call kind survives as a plain string (not dropped to make serialization pass).
     def _iter(node):
         if node.get("op") == "LEAF":
             yield node.get("leaf") or {}
@@ -376,10 +353,8 @@ def test_artifact_with_low_level_call_provenance_serializes(tmp_path):
 
 
 def test_artifact_writer_gate_runs_on_full_contract(tmp_path):
-    """Writer-gate pass needs every function's tree to evaluate
-    writer authority. The artifact builder runs it AFTER collecting
-    all trees, so a 1-key blacklist promoted via writer-gate shows
-    caller_authority in the output (not the un-promoted business)."""
+    """The writer-gate pass runs AFTER collecting all trees, so a 1-key blacklist
+    promoted via writer-gate shows caller_authority (not the un-promoted business)."""
     sl = _compile(
         tmp_path,
         """
@@ -419,9 +394,8 @@ def test_artifact_writer_gate_runs_on_full_contract(tmp_path):
 
 
 def test_artifact_runs_reentrancy_pause_pass(tmp_path):
-    """OZ Pausable pattern — the ``whenNotPaused`` modifier's
-    leaf classifies as ``pause`` only after the cross-function
-    pass. Confirms the artifact builder runs that pass."""
+    """The ``whenNotPaused`` leaf classifies as ``pause`` only after the cross-function
+    pass; confirms the builder runs it."""
     sl = _compile(
         tmp_path,
         """
@@ -449,8 +423,6 @@ def test_artifact_runs_reentrancy_pause_pass(tmp_path):
 
 
 def test_artifact_attaches_mapping_writer_event_hints(tmp_path):
-    """Generic writer events should land on the predicate leaf the
-    resolver consumes, not only in a sidecar semantic summary."""
     sl = _compile(
         tmp_path,
         """
@@ -489,7 +461,6 @@ def test_artifact_attaches_mapping_writer_event_hints(tmp_path):
 
 
 def test_artifact_does_not_invent_role_event_hints_from_names(tmp_path):
-    """Declared events alone are not semantic writer evidence."""
     sl = _compile(
         tmp_path,
         """
@@ -528,7 +499,6 @@ def test_non_address_constant_does_not_make_caller_authority():
 
 
 def test_struct_field_mapping_membership_gets_writer_event_hints(tmp_path):
-    """Nested mapping fields still resolve to the base storage var."""
     sl = _compile(
         tmp_path,
         """
@@ -567,8 +537,6 @@ def test_struct_field_mapping_membership_gets_writer_event_hints(tmp_path):
 
 
 def test_artifact_preserves_bitmask_value_predicate_and_set_hint(tmp_path):
-    """Solady-style bitmask roles need both the mask and the set-event
-    value position to resolve semantically."""
     sl = _compile(
         tmp_path,
         """
@@ -603,16 +571,10 @@ def test_artifact_preserves_bitmask_value_predicate_and_set_hint(tmp_path):
 
 
 def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
-    """When multiple functions share a cross-fn helper (e.g.
-    grantRole / revokeRole / renounceRole all funneling through
-    ``_checkRole``), build_predicate_artifacts wires a per-call
-    helper-engine cache so the second + third cross-fn build
-    don't re-run ProvenanceEngine on the helper.
-
-    Pinned by counting ProvenanceEngine instantiations: with the
-    cache active, fewer engines should be created than without.
-    Correctness is validated by every other corpus test — this
-    test specifically guards the cache HITS HAPPEN."""
+    """Functions sharing a cross-fn helper (grantRole / revokeRole / renounceRole via
+    ``_checkRole``) get a per-call helper-engine cache. Pinned by counting
+    ProvenanceEngine instantiations; correctness is covered by the corpus tests, so
+    this guards that cache HITS HAPPEN."""
     from services.static.contract_analysis_pipeline import predicates
     from services.static.contract_analysis_pipeline.predicates import (
         _helper_engine_cache,
@@ -646,9 +608,7 @@ def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
     )
     contract = _contract(sl)
 
-    # Count ProvenanceEngine constructions during the artifact
-    # build. With cache hits across grantRole/revokeRole the
-    # number is lower than the no-cache baseline.
+    # Count ProvenanceEngine constructions; cache hits make it lower than the no-cache baseline.
     instantiations: list[None] = []
     original_init = predicates.ProvenanceEngine.__init__
 
@@ -658,17 +618,13 @@ def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
 
     try:
         predicates.ProvenanceEngine.__init__ = _counting_init
-        # With cache active (entered by build_predicate_artifacts).
         artifact = build_predicate_artifacts(contract)
         cached_count = len(instantiations)
         assert "grantRole(bytes32,address)" in artifact["trees"]
         assert "revokeRole(bytes32,address)" in artifact["trees"]
 
-        # Now run the exact same work WITHOUT the cache scope —
-        # build_predicate_tree directly without entering the
-        # build_predicate_artifacts wrapper.
+        # Same work WITHOUT the cache scope: build_predicate_tree directly, no ambient cache.
         instantiations.clear()
-        # Ensure no ambient cache.
         token = _helper_engine_cache.set(None)
         try:
             for fn in contract.functions:
@@ -685,15 +641,12 @@ def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
     finally:
         predicates.ProvenanceEngine.__init__ = original_init
 
-    # Cached path runs strictly fewer engines than uncached.
     assert cached_count < uncached_count, (
         f"helper-engine cache did not reduce engine count: cached={cached_count} uncached={uncached_count}"
     )
 
 
 def test_artifact_empty_contract(tmp_path):
-    """An interface-only contract with no externally-callable
-    body produces an empty trees dict (still valid)."""
     sl = _compile(
         tmp_path,
         """

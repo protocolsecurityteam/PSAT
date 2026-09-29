@@ -1,11 +1,7 @@
-"""Tests for DefiLlamaWorker — process() paths and edge cases.
+"""Tests for DefiLlamaWorker.process() paths and edge cases.
 
-Child-job creation and ``analyze_limit`` enforcement moved out of the
-worker in the move to a unified selection stage; tests that covered
-those concerns now live next to the ``SelectionWorker`` and the
-DApp-crawl integration suite. What's left here is the worker's direct
-responsibilities: run the scan, persist artifacts, populate the
-``contracts`` table, and mark the job complete.
+Child-job creation and ``analyze_limit`` moved to ``SelectionWorker``; this file keeps the worker's direct duties:
+run the scan, persist artifacts, populate ``contracts``, complete the job.
 """
 
 from __future__ import annotations
@@ -19,10 +15,6 @@ import pytest
 
 from workers.base import JobHandledDirectly
 from workers.defillama_worker import DefiLlamaWorker
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 ADDR_1 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ADDR_2 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -46,7 +38,6 @@ def _scan_result(
     addresses: list[str] | None = None,
     address_details: list[dict] | None = None,
 ) -> dict:
-    """Return a minimal scan_protocol result."""
     addrs = addresses or []
     return {
         "addresses": addrs,
@@ -56,7 +47,6 @@ def _scan_result(
 
 
 def _patch_worker_deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
-    """Patch all external dependencies of DefiLlamaWorker.process() and return trackers."""
     store_calls: list[tuple[str, Any]] = []
     complete_calls: list[tuple] = []
     protocol_calls: list[tuple[str, str | None]] = []
@@ -92,14 +82,7 @@ def _patch_worker_deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
 class TestMissingProtocol:
-    """process() raises ValueError when defillama_protocol is missing."""
-
     def test_missing_protocol_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
@@ -120,8 +103,6 @@ class TestMissingProtocol:
 
 
 class TestHappyPath:
-    """Full successful scan writes artifacts and completes the job."""
-
     def test_stores_artifacts_and_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
@@ -153,8 +134,6 @@ class TestHappyPath:
 
 
 class TestJobName:
-    """Job name is set when missing, not overwritten when present."""
-
     def test_sets_name_when_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
@@ -192,8 +171,6 @@ class TestJobName:
 
 
 class TestNoCloneEnvVar:
-    """DEFILLAMA_NO_CLONE env var is correctly passed through to scan_protocol."""
-
     def test_no_clone_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
@@ -240,8 +217,6 @@ class TestNoCloneEnvVar:
 
 
 class TestScanResultArtifactContent:
-    """Verify artifact data payloads contain correct information."""
-
     def test_full_scan_artifact_contents(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
@@ -297,15 +272,12 @@ class TestScanResultArtifactContent:
         assert summary["mode"] == "defillama_scan"
         assert summary["protocol"] == PROTOCOL
         assert summary["discovered_count"] == 2
-        # Ranking and child-job creation moved to SelectionWorker; the
-        # DefiLlama summary no longer reports analyzed_count or child_jobs.
+        # Ranking/child jobs moved to SelectionWorker; the summary no longer reports analyzed_count or child_jobs.
         assert "analyzed_count" not in summary
         assert "child_jobs" not in summary
 
 
 class TestZeroAddressesFound:
-    """Scan finds zero addresses — still completes with discovery_summary."""
-
     def test_no_addresses(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
@@ -327,8 +299,6 @@ class TestZeroAddressesFound:
 
 
 class TestScanProtocolRaises:
-    """If scan_protocol raises, the exception propagates (not caught by worker)."""
-
     def test_exception_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
@@ -345,8 +315,6 @@ class TestScanProtocolRaises:
 
 
 class TestProtocolCreation:
-    """Protocol row is created from defillama slug when company is absent."""
-
     def test_slug_becomes_protocol_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()

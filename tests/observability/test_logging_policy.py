@@ -1,22 +1,14 @@
-"""Observability locks for the policy stage.
+"""Observability locks for ``workers/policy_worker.py``.
 
-Covers the logging/observability behaviour added to ``workers/policy_worker.py``:
+* Zero-write path (no ``Contract`` row): WARNING, ``record_degraded(phase='policy_db_write')`` and
+  ``record_stage_metric('rows_written', False)`` instead of silently writing nothing.
+* The authority-resolution line puts ``authority_status`` / ``authority_reason`` in ``extra={}``
+  and folds an ``authority_status`` metric.
+* Phase timers fold ``phase_ms_<phase>`` via ``log_timed_phase``.
+* Materialization hydration tells a DB error (rollback, warn, degraded) from a row miss (silent).
 
-* The explicit zero-write path — when no ``Contract`` row exists for the job,
-  the stage emits a WARNING, ``record_degraded(phase='policy_db_write')``, and
-  ``record_stage_metric('rows_written', False)`` instead of silently writing
-  nothing (DB and artifacts disagreeing with a green job).
-* The authority-resolution line puts ``authority_status`` / ``authority_reason``
-  into ``extra={}`` and folds an ``authority_status`` stage metric.
-* The phase timers (formerly the bespoke ``_log_policy_phase``) fold
-  ``phase_ms_<phase>`` metrics via the canonical ``log_timed_phase``.
-* Materialization hydration tells a DB error apart from a row miss: the error
-  path rolls the session back, warns, and records degraded; the miss stays
-  silent.
-
-Offline: ``process()`` is driven with all DB/RPC collaborators stubbed; the
-``MagicMock`` session's ``scalar_one_or_none`` returns ``None`` so ``contract_row``
-is missing, which is exactly the zero-write scenario.
+``process()`` runs with DB/RPC collaborators stubbed; the ``MagicMock`` session's
+``scalar_one_or_none`` returns ``None`` so ``contract_row`` is missing.
 """
 
 from __future__ import annotations
@@ -39,11 +31,10 @@ TARGET_ADDRESS = "0x1111111111111111111111111111111111111111"
 
 
 class _RecordCollector(logging.Handler):
-    """Collect emitted records directly off the module logger.
+    """Collect records directly off the module logger.
 
-    The worker calls ``configure_logging()`` at BOOT, which reconfigures the
-    root logger and can drop pytest's ``caplog`` handler. Attaching our own
-    handler to ``workers.policy_worker`` is immune to that reconfiguration.
+    The worker calls ``configure_logging()`` at BOOT, which can drop pytest's ``caplog``
+    handler; our own handler on ``workers.policy_worker`` is immune.
     """
 
     def __init__(self) -> None:
@@ -68,13 +59,12 @@ def _job(**overrides: Any) -> SimpleNamespace:
 
 
 def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Run ``PolicyWorker.process`` with every collaborator stubbed and no
-    ``Contract`` row, returning the (mock) session for assertions."""
+    """Run ``PolicyWorker.process`` with every collaborator stubbed and no ``Contract`` row;
+    returns the mock session."""
     from unittest.mock import MagicMock
 
     worker = PolicyWorker()
     session = MagicMock()
-    # No Contract row for this job -> the zero-write path.
     session.execute.return_value.scalar_one_or_none.return_value = None
     job = _job()
 
@@ -226,8 +216,7 @@ def test_hydration_db_error_warns_and_rolls_back(monkeypatch: pytest.MonkeyPatch
     ]
     assert len(warnings) == 1
     assert getattr(warnings[0], "exc_type", None) == "RuntimeError"
-    # ``bundle_address``, not ``address``: JsonFormatter drops an extra whose
-    # key collides with a bound context field (the job's own address).
+    # ``bundle_address``, not ``address``: JsonFormatter drops an extra colliding with a bound context field.
     assert getattr(warnings[0], "bundle_address", None) == TARGET_ADDRESS
     assert getattr(warnings[0], "bundle_chain", None) == "ethereum"
 

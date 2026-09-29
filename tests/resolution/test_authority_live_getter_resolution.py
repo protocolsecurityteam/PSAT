@@ -1,17 +1,11 @@
 """Regression: owner()/governor()-gated functions must resolve a principal.
 
-Pins the etherfi recall gap where ``msg.sender == owner()`` /
-``== governor()`` produced an empty ``finite_set(lower_bound)`` (hence zero
-``FunctionPrincipal`` rows, hence no surfaced controller) because the equality
-evaluator consulted only the persisted ``state_var_values`` feed and never read
-the getter. EtherfiL1SyncPoolETH (onlyOwner) and LRTSquaredCore (onlyGovernor)
-each lost their governor this way; CumulativeMerkleDrop is the separate
-self-AccessControl case (see module docstring of ``predicate_evaluator``).
-
-The fix (``predicate_evaluator._live_resolve_authority``) reads the getter live
-when an RPC is reachable through the outer resolver context. These tests are
-pure/offline: the predicate trees are literal dicts and the RPC is stubbed, so
-they pin the behaviour without the analysis pipeline or MinIO artifacts.
+Pins the etherfi recall gap where ``msg.sender == owner()`` / ``== governor()`` gave an
+empty ``finite_set(lower_bound)`` (no ``FunctionPrincipal`` rows, no surfaced
+controller) because the equality evaluator only consulted persisted
+``state_var_values`` and never read the getter (EtherfiL1SyncPoolETH, LRTSquaredCore).
+The fix, ``predicate_evaluator._live_resolve_authority``, reads it live. Pure/offline:
+literal predicate trees and a stubbed RPC.
 """
 
 from __future__ import annotations
@@ -35,12 +29,8 @@ GOVERNOR_SELECTOR = "0x0c340a24"  # governor()
 AUTHORITY_SELECTOR = "0xbf7e214f"  # authority()
 
 
-# --------------------------------------------------------------------------
-# Stub resolver context: exposes ``_outer_ctx`` (carrying rpc_url + address)
-# exactly the way the real registry-backed adapter does, so the equality
-# resolver's live-getter path can reach an RPC. No outer ⇒ no RPC ⇒ the
-# pre-fix empty-placeholder behaviour (the gap condition).
-# --------------------------------------------------------------------------
+# Stub resolver context exposing ``_outer_ctx`` (rpc_url + address) like the real adapter.
+# No outer ⇒ no RPC ⇒ the pre-fix empty-placeholder behaviour.
 
 
 class _Outer:
@@ -71,13 +61,12 @@ def _ctx_with_rpc(rpc_url: str = "http://rpc.test") -> EvaluationContext:
 
 
 def _ctx_no_rpc() -> EvaluationContext:
-    # An adapter with no _outer_ctx — the pure-unit path, no RPC reachable.
+    # No _outer_ctx: the pure-unit path, no RPC reachable.
     return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(None))
 
 
 def _stub_rpc(monkeypatch: pytest.MonkeyPatch, return_addr: str | None, *, recorder: list | None = None) -> None:
-    """Patch services.clients.rpc.rpc_request to return ``return_addr`` left-padded to a
-    32-byte word (the eth_call ABI shape for a single address return)."""
+    """Patch services.clients.rpc.rpc_request to return ``return_addr`` left-padded to a 32-byte word."""
 
     def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
         if recorder is not None:
@@ -98,10 +87,8 @@ def _sel(signature: str) -> str:
 def _stub_rpc_by_selector(
     monkeypatch: pytest.MonkeyPatch, returns: dict[str, str], *, recorder: list | None = None
 ) -> None:
-    """Selector-aware ``eth_call`` stub: returns the 32-byte word for
-    ``returns[selector]`` and reverts on any other selector — so a test can prove
-    *which* getter recovered the principal (e.g. ``owner()`` but never
-    ``_owner()``)."""
+    """Selector-aware ``eth_call`` stub: returns the word for ``returns[selector]`` and
+    reverts otherwise, proving *which* getter recovered the principal (``owner()``, never ``_owner()``)."""
 
     def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
         if recorder is not None:
@@ -115,9 +102,7 @@ def _stub_rpc_by_selector(
     monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
 
 
-# --------------------------------------------------------------------------
 # The gap condition: no RPC reachable ⇒ empty placeholder ⇒ no principal.
-# --------------------------------------------------------------------------
 
 
 def test_owner_view_call_without_rpc_stays_empty_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -135,9 +120,7 @@ def test_owner_view_call_without_rpc_stays_empty_placeholder(monkeypatch: pytest
     assert project_capability_surface(capability_to_dict(cap)).principal_rows == []
 
 
-# --------------------------------------------------------------------------
 # The fix: with an RPC reachable, owner()/governor() resolve to the principal.
-# --------------------------------------------------------------------------
 
 
 def test_owner_view_call_resolves_via_live_getter(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,7 +137,7 @@ def test_owner_view_call_resolves_via_live_getter(monkeypatch: pytest.MonkeyPatc
 
 def test_view_call_resolves_from_signature_when_selector_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_rpc(monkeypatch, GOVERNOR)
-    # No callee_selector — must be derived from the nullary signature.
+    # No callee_selector: must be derived from the nullary signature.
     tree = _eq_tree({"source": "view_call", "callee_signature": "governor()"})
 
     cap = evaluate_tree(tree, _ctx_with_rpc())
@@ -164,9 +147,8 @@ def test_view_call_resolves_from_signature_when_selector_missing(monkeypatch: py
 
 
 def test_state_var_miss_resolves_via_live_getter(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`msg.sender == governor` as a bare state variable whose value wasn't in
-    the ControllerValue feed (LRTSquaredCore's governor was filed under the
-    wrong key) — the getter is read live."""
+    """`msg.sender == governor` as a bare state variable missing from the ControllerValue
+    feed (LRTSquaredCore's governor was filed under the wrong key) — the getter is read live."""
     _stub_rpc(monkeypatch, GOVERNOR)
     tree = _eq_tree({"source": "state_variable", "state_variable_name": "governor"})
 
@@ -179,8 +161,7 @@ def test_state_var_miss_resolves_via_live_getter(monkeypatch: pytest.MonkeyPatch
 
 
 def test_renounced_getter_resolves_to_exact_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Getter returns the zero address (renounced/unset) — distinguishable
-    'exact empty' rather than the 'unresolved' lower_bound placeholder."""
+    """A zero-address getter (renounced/unset) is 'exact empty', not the 'unresolved' lower_bound placeholder."""
     _stub_rpc(monkeypatch, "0x" + "00" * 20)
     tree = _eq_tree({"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR})
 
@@ -191,16 +172,12 @@ def test_renounced_getter_resolves_to_exact_empty(monkeypatch: pytest.MonkeyPatc
     assert cap.membership_quality == "exact"
 
 
-# --------------------------------------------------------------------------
 # Leading-underscore state-var operand: an OZ-v4 ``onlyOwner`` lowers to
-# ``msg.sender == _owner`` (the trivial ``owner(){return _owner;}`` getter is
-# inlined to its backing private var). ``_owner()`` has no selector, so on a
-# snapshot miss the state_variable branch must de-underscore to ``owner()`` —
-# the same fallback the view_call branch already does for ``_governor()``. Pins
-# the gap where this branch tried only ``_owner()`` (revert) and dropped the
-# principal. Selector-aware stub proves ``owner()`` — never ``_owner()`` — is
-# what recovers it.
-# --------------------------------------------------------------------------
+# ``msg.sender == _owner`` (the trivial getter inlined to its private var). ``_owner()``
+# has no selector, so on a snapshot miss the state_variable branch must de-underscore to
+# ``owner()`` (as the view_call branch already does for ``_governor()``). Pins the gap
+# where it tried only ``_owner()`` (revert) and dropped the principal.
+# The selector-aware stub proves ``owner()`` — never ``_owner()`` — recovers it.
 
 
 @pytest.mark.parametrize(
@@ -214,8 +191,7 @@ def test_renounced_getter_resolves_to_exact_empty(monkeypatch: pytest.MonkeyPatc
 def test_underscore_authority_state_var_resolves_via_canonical_getter(
     monkeypatch: pytest.MonkeyPatch, basename: str, selector: str, resolved: str
 ) -> None:
-    """Every member of ``_AUTHORITY_GETTER_BASENAMES`` de-underscores on the
-    state_variable branch, not just ``owner``."""
+    """Every member of ``_AUTHORITY_GETTER_BASENAMES`` de-underscores, not just ``owner``."""
     recorder: list = []
     _stub_rpc_by_selector(monkeypatch, {selector: resolved}, recorder=recorder)
     tree = _eq_tree({"source": "state_variable", "state_variable_name": f"_{basename}"})
@@ -233,8 +209,7 @@ def test_underscore_authority_state_var_resolves_via_canonical_getter(
 
 
 def test_underscore_owner_renounced_resolves_to_exact_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A de-underscored ``owner()`` reading the zero address is a renounced/unset
-    authority — ``exact`` empty, not the ``lower_bound`` unresolved placeholder."""
+    """A de-underscored ``owner()`` reading zero is a renounced authority — ``exact`` empty, not ``lower_bound``."""
     _stub_rpc_by_selector(monkeypatch, {OWNER_SELECTOR: "0x" + "00" * 20})
     tree = _eq_tree({"source": "state_variable", "state_variable_name": "_owner"})
 
@@ -245,10 +220,9 @@ def test_underscore_owner_renounced_resolves_to_exact_empty(monkeypatch: pytest.
 
 
 def test_arbitrary_underscore_state_var_is_not_de_underscored(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail-closed over-reach guard: only {owner,governor,authority} de-underscore.
-    A ``_secret`` whose own ``_secret()`` getter reverts must NOT be bound to
-    whatever public ``secret()`` returns — a wrong controller is worse than a
-    missing one. ``secret()`` is readable here yet must never be called."""
+    """Fail-closed over-reach guard: only {owner,governor,authority} de-underscore. A
+    ``_secret`` whose ``_secret()`` reverts must NOT bind to public ``secret()`` — a
+    wrong controller is worse than a missing one."""
     recorder: list = []
     _stub_rpc_by_selector(monkeypatch, {_sel("secret()"): OWNER}, recorder=recorder)
     tree = _eq_tree({"source": "state_variable", "state_variable_name": "_secret"})
@@ -261,14 +235,11 @@ def test_arbitrary_underscore_state_var_is_not_de_underscored(monkeypatch: pytes
     assert _sel("secret()") not in selectors  # the de-underscored getter was never guessed
 
 
-# --------------------------------------------------------------------------
 # Precision guards: don't regress existing behaviour or re-introduce noise.
-# --------------------------------------------------------------------------
 
 
 def test_state_var_present_wins_without_any_rpc_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A value already in state_var_values resolves from the feed — the live
-    getter must not fire (no behaviour change, no extra RPC)."""
+    """A value already in state_var_values resolves from the feed; no live getter, no extra RPC."""
     recorder: list = []
     _stub_rpc(monkeypatch, OWNER, recorder=recorder)
     tree = _eq_tree({"source": "state_variable", "state_variable_name": "owner"})
@@ -285,9 +256,8 @@ def test_state_var_present_wins_without_any_rpc_call(monkeypatch: pytest.MonkeyP
 
 
 def test_struct_member_destination_is_not_live_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`accountantState.payoutAddress` is a fund destination, not a caller.
-    It has no nullary getter and must stay the placeholder — the FP-only
-    attribution must not re-acquire fee-destination noise this way."""
+    """`accountantState.payoutAddress` is a fund destination, not a caller: no nullary
+    getter, stays the placeholder so FP-only attribution doesn't regain fee-destination noise."""
     recorder: list = []
     _stub_rpc(monkeypatch, OWNER, recorder=recorder)
     tree = _eq_tree(
@@ -307,8 +277,7 @@ def test_struct_member_destination_is_not_live_resolved(monkeypatch: pytest.Monk
 
 
 def test_view_call_with_args_is_not_live_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`msg.sender == roleAdmin(role)` takes an argument and can't be read
-    with empty calldata — left as the placeholder, no RPC attempted."""
+    """`msg.sender == roleAdmin(role)` takes an argument, can't be read with empty calldata — stays the placeholder."""
     recorder: list = []
     _stub_rpc(monkeypatch, OWNER, recorder=recorder)
     tree = _eq_tree(
@@ -328,10 +297,8 @@ def test_view_call_with_args_is_not_live_resolved(monkeypatch: pytest.MonkeyPatc
     assert recorder == []
 
 
-# --------------------------------------------------------------------------
-# End-to-end: the resolved capability surfaces as a FunctionPrincipal row,
-# which is the signal services.governance.primary_controller keys on.
-# --------------------------------------------------------------------------
+# End-to-end: the resolved capability surfaces as a FunctionPrincipal row (the signal
+# services.governance.primary_controller keys on).
 
 
 def test_resolved_owner_surfaces_as_function_principal_row(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -351,13 +318,10 @@ def test_resolved_owner_surfaces_as_function_principal_row(monkeypatch: pytest.M
     assert unresolved_rows == []
 
 
-# --------------------------------------------------------------------------
-# OZ v5 (ERC-7201) namespaced Ownable: the owner lives in a storage struct, so
-# the gate is ``msg.sender == OwnableStorageLocation._owner`` — a struct-member
-# operand. Its canonical accessor is the same ``owner()`` getter, so it must be
-# read live. This is the EtherfiL1SyncPoolETH owner gap (owner = EtherFiTimelock)
-# that the "treat the slot-pointer constant as a getter" heuristic missed.
-# --------------------------------------------------------------------------
+# OZ v5 (ERC-7201) namespaced Ownable: the gate is ``msg.sender ==
+# OwnableStorageLocation._owner`` (a struct-member operand) whose canonical accessor is
+# ``owner()``, so it must be read live. This is the EtherfiL1SyncPoolETH owner gap
+# (owner = EtherFiTimelock) the "slot-pointer constant as a getter" heuristic missed.
 
 
 def test_oz_v5_namespaced_owner_resolves_via_owner_getter(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -392,17 +356,13 @@ def test_oz_v5_namespaced_owner_without_rpc_stays_placeholder(monkeypatch: pytes
     assert recorder == []
 
 
-# --------------------------------------------------------------------------
-# Within-pass live-getter memo: owner()/governor() reads are deterministic at a
-# fixed block, so N functions gating on the same getter need ONE read. The memo
-# rides on the resolver's contract-scoped meta['live_read_memo']; only SUCCESSFUL
-# reads are cached, so a failure is never poisoned across the pass. Resolution
-# results are identical — only the RPC count drops.
-# --------------------------------------------------------------------------
+# Within-pass live-getter memo: owner()/governor() reads are deterministic at a fixed
+# block, so N functions gating on one getter need ONE read (``meta['live_read_memo']``).
+# Only SUCCESSFUL reads are cached, so a failure is never poisoned across the pass.
 
 
 def _ctx_with_memo(memo: dict, rpc_url: str = "http://rpc.test") -> EvaluationContext:
-    # meta is the contract-scoped carrier the resolver wires (meta['live_read_memo']).
+    # meta is the contract-scoped carrier the resolver wires.
     outer = _Outer(rpc_url, CONTRACT, meta={"live_read_memo": memo})
     return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(outer))
 
@@ -423,8 +383,7 @@ def test_live_getter_memo_dedups_repeat_reads_in_a_pass(monkeypatch: pytest.Monk
 
 
 def test_live_getter_memo_does_not_cache_failures(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A reverting/transient read is never memoized, so each gated function still reads/retries
-    independently — a blip on the first function can't drop principals for the rest of the pass."""
+    """A reverting/transient read is never memoized, so one blip can't drop principals for the rest of the pass."""
     recorder: list = []
     _stub_rpc(monkeypatch, None, recorder=recorder)  # rpc_request raises every time
     tree = _eq_tree({"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR})
@@ -439,8 +398,7 @@ def test_live_getter_memo_does_not_cache_failures(monkeypatch: pytest.MonkeyPatc
 
 
 def test_live_getter_memo_zero_address_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A renounced getter (zero address) is a deterministic SUCCESS, so it is memoized as the
-    'exact empty' set and reused — identical to the un-memoized result, one fewer read."""
+    """A renounced (zero) getter is a deterministic SUCCESS, memoized as 'exact empty' — same result, one fewer read."""
     recorder: list = []
     _stub_rpc(monkeypatch, "0x" + "00" * 20, recorder=recorder)
     tree = _eq_tree({"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR})

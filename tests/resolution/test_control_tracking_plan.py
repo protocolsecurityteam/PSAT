@@ -110,7 +110,6 @@ def test_build_control_tracking_plan_falls_back_to_state_only(tmp_path):
 
 
 def test_build_control_tracking_plan_from_dict_matches_fixture():
-    """Analysis dict -> plan produces the documented event_first shape."""
     analysis = {
         "schema_version": "0.1",
         "subject": {
@@ -179,7 +178,6 @@ def test_build_control_tracking_plan_from_dict_matches_fixture():
 
 
 def test_build_control_tracking_plan_filters_non_controller_runtime_reads():
-    """Only address-like state and role identifiers should reach runtime resolution."""
     base_target = {
         "tracking_mode": "state_only",
         "writer_functions": [],

@@ -59,9 +59,8 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
     assert child["address"] == "0x2222222222222222222222222222222222222222"
     assert child["proxy_address"] == "0x1111111111111111111111111111111111111111"
     assert child["parent_job_id"] == "job-1"
-    # root_job_id falls back to the parent job's id when no upstream cascade was
-    # set on the request — preserves the within-cascade dedup semantics for
-    # top-level calls too.
+    # root_job_id falls back to the parent job id when no upstream cascade is set (keeps within-cascade
+    # dedup for top-level calls).
     assert child["root_job_id"] == "job-1"
     # ``discovery_relationship`` + ``parent_is_member`` carry the
     # structural-ownership signal to the child's discovery worker.
@@ -76,7 +75,6 @@ def test_resolve_proxy_queues_hidden_proxy_impl(monkeypatch):
 def test_process_attempts_semantic_proxy_classification_for_non_obvious_names(monkeypatch, tmp_path):
     worker = StaticWorker()
     session = MagicMock()
-    # Provide a mock Contract row so the worker can read contract metadata
     mock_contract = MagicMock()
     mock_contract.contract_name = "OssifiableProxy"
     mock_contract.address = "0x1111111111111111111111111111111111111111"
@@ -166,20 +164,15 @@ def test_force_dedupes_impl_jobs_within_same_root_cascade(monkeypatch):
     worker._resolve_proxy(session, job1, job1.address, job1.name)
     worker._resolve_proxy(session, job2, job2.address, job2.name)
 
-    # First proxy spawned its impl; second proxy in same cascade was deduped.
     assert len(created_jobs) == 1, f"second proxy in same cascade must dedupe its impl; got {len(created_jobs)} jobs"
-    # The created job carries root_job_id so downstream static_worker calls
-    # in the same cascade can dedupe against it too.
+    # The created job carries root_job_id so downstream static_worker calls in the cascade can dedupe too.
     assert created_jobs[0]["root_job_id"] == "root-1"
 
 
 def test_force_does_not_dedupe_across_different_root_cascades(monkeypatch):
-    """The (address, root_job_id) check must NOT block a fresh cascade.
-    If root_job_id differs, the impl gets a fresh job per cascade —
-    bench A/B runs need clean cold-path measurements per root."""
+    """A differing root_job_id must NOT block a fresh cascade (bench A/B runs need cold-path measurements per root)."""
     worker = StaticWorker()
     session = MagicMock()
-    # Both queries return None → no existing job in either cascade.
     session.execute.return_value.scalar_one_or_none.return_value = None
 
     created_jobs: list[dict] = []
@@ -218,14 +211,11 @@ def test_force_does_not_dedupe_across_different_root_cascades(monkeypatch):
 
 
 def test_no_force_uses_global_dedupe(monkeypatch):
-    """Without --force, the historical global dedupe is preserved: any
-    prior job for the impl wins, even from an unrelated cascade. This
-    is the production behavior and the new (address, root_job_id) check
-    must NOT silently apply when force is off."""
+    """Without --force the global dedupe holds (any prior job wins, even from another cascade); the
+    (address, root_job_id) check must NOT apply."""
     worker = StaticWorker()
     session = MagicMock()
     prior = SimpleNamespace(id="prior-impl-from-other-cascade")
-    # The global query (no root_job_id filter) returns the prior job.
     session.execute.return_value.scalar_one_or_none.return_value = prior
 
     created_jobs: list[dict] = []
@@ -257,16 +247,9 @@ def test_no_force_uses_global_dedupe(monkeypatch):
 def test_load_contract_row_falls_back_to_address_when_job_id_rebound(db_session):
     """Regression for the live-tests USDC failure (run #25828735277).
 
-    When two jobs target the same ``(address, chain)`` — e.g. USDC
-    discovered concurrently by two protocol cascades — discovery's
-    existing-row branch (``workers/discovery.py:402``) rebinds the
-    Contract row's ``job_id`` to whichever job wrote it last. The earlier
-    job's static lookup keyed on ``Contract.job_id`` then returns ``None``
-    and ``process`` terminates with "Contract row not found for this job".
-
-    ``StaticWorker._load_contract_row`` must locate the orphaned row via
-    its ``(address, chain)`` fallback so the job can still complete.
-    """
+    Concurrent cascades on one ``(address, chain)`` rebind the Contract row's ``job_id``
+    (``workers/discovery.py:402``), so the earlier job's job_id lookup returns None;
+    ``_load_contract_row`` must fall back to ``(address, chain)``."""
     from db.models import Contract, Job, JobStage, JobStatus
 
     chain = "ethereum"
@@ -303,13 +286,10 @@ def test_load_contract_row_falls_back_to_address_when_job_id_rebound(db_session)
     contract.job_id = job_b.id
     db_session.commit()
 
-    # Before the fallback, a job_id-keyed lookup for job_a returns None.
-    # After: the address+chain fallback finds the orphaned row.
     row_for_a = StaticWorker._load_contract_row(db_session, job_a)
     assert row_for_a is not None, "address fallback must locate the orphaned Contract row"
     assert row_for_a.id == contract.id
 
-    # job_b still finds the row via the primary job_id lookup.
     row_for_b = StaticWorker._load_contract_row(db_session, job_b)
     assert row_for_b is not None
     assert row_for_b.id == contract.id

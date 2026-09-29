@@ -1,18 +1,8 @@
-"""Integration tests proving that governance events detected by the unified
-watcher propagate to the relational database tables (Contract, ControllerValue,
-UpgradeEvent) — not just MonitoredEvent / last_known_state.
+"""Integration tests that governance events detected by the unified watcher propagate to the
+relational tables (Contract, ControllerValue, UpgradeEvent), not just MonitoredEvent /
+last_known_state. Deploys on Anvil, triggers governance actions, scans, asserts the tables.
 
-Deploys contracts on Anvil, sets up full relational DB state (Protocol,
-Contract, ControllerValue, UpgradeEvent, MonitoredContract), triggers
-governance actions, scans, and asserts the relational tables are updated.
-
-Requires:
-  - anvil, cast, forge (from Foundry) on PATH
-  - PostgreSQL (TEST_DATABASE_URL env var)
-
-Run with:
-    TEST_DATABASE_URL=postgresql://psat:psat@localhost:5433/psat_test \
-        uv run pytest tests/monitoring/test_relational_sync.py -v --timeout=120
+Requires anvil/cast/forge on PATH and TEST_DATABASE_URL.
 """
 
 from __future__ import annotations
@@ -75,8 +65,7 @@ PROTO_NAME = "__test_relational_sync__"
 
 @pytest.fixture(autouse=True)
 def _disable_scan_confirmation_depth(monkeypatch):
-    # These anvil chains are only a handful of blocks long; the production
-    # 12-block confirmation clamp would hide every just-emitted event.
+    # Anvil chains are a few blocks long; the 12-block confirmation clamp would hide events.
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
 
 
@@ -220,9 +209,7 @@ def _setup_monitored(
 ) -> MonitoredContract:
     from services.monitoring.polling_plan import build_polling_plan
 
-    # Match what enrollment would produce for these contract shapes so
-    # tests that flip needs_polling=True after setup exercise the same
-    # poll dispatch the production path uses.
+    # Match enrollment's polling plan so tests flipping needs_polling exercise production dispatch.
     plan_proxy_type = (contract.proxy_type or None) or ("custom" if contract_type == "proxy" else None)
     tracking_plan: dict | None = None
     if contract_type in ("regular", "pausable", "proxy"):
@@ -522,11 +509,9 @@ class TestUpgradePollingUpdatesRelational:
         current_block = int(_cast(["block-number"], rpc_url))
 
         proto = _setup_protocol(pg_session)
-        # The PROXY_SOURCE writes to the EIP-1967 slot via assembly and
-        # has no ``implementation()`` getter, so its proxy_type is
-        # ``eip1967`` even though the test framing uses the word
-        # "custom". The polling-plan builder reads proxy_type to pick
-        # the right vendored entry (storage slot vs. getter call).
+        # PROXY_SOURCE writes the EIP-1967 slot via assembly and has no ``implementation()``
+        # getter, so its proxy_type is ``eip1967`` despite the "custom" framing; the plan
+        # builder keys the vendored entry (slot vs getter) off proxy_type.
         contract = _setup_contract(
             pg_session,
             proxy_addr,
@@ -546,9 +531,7 @@ class TestUpgradePollingUpdatesRelational:
         mc.needs_polling = True
         pg_session.commit()
 
-        # Upgrade by calling the proxy's upgradeTo. The poll reads the
-        # EIP-1967 slot directly — the storage-slot path is what the
-        # ``eip1967`` vendored entry resolves to.
+        # The poll reads the EIP-1967 slot directly (the ``eip1967`` vendored entry).
         _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
 
         events = poll_for_state_changes(pg_session, rpc_url)

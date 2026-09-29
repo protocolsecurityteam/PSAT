@@ -1,18 +1,11 @@
-"""Regression guard: a resolution-time HyperSync scan can never silently walk
-from genesis.
+"""Regression guard: a resolution-time HyperSync scan can never silently walk from genesis.
 
-The Envio HyperSync SDK issues a getLogs scan ONLY by constructing
-``hypersync.Query(...)`` then ``client.get(query)``. This test pins the
-boundary so a 7th live-scan path can't reappear and 429-storm cold authority
-addresses (the failure mode of the local run that motivated this fix):
-
-  (a) the HyperSync enumerator entry points reject an omitted ``from_block`` — a
-      caller that forgets the floor fails fast instead of defaulting to 0;
-  (b) a source-level scan catches any new ``.Query(`` site or any enumerator
-      signature that reintroduces a ``from_block`` default;
-  (c) the shared floor-or-defer helper DEFERS (returns None) on an unknown
-      floor, never fails open to 0; and the missed recursive path floors when a
-      floor is known and skips the live scan when it isn't.
+The SDK issues a getLogs scan ONLY via ``hypersync.Query(...)`` then ``client.get(query)``.
+This pins the boundary so a 7th live-scan path can't reappear and 429-storm cold authority
+addresses: (a) the enumerator entry points reject an omitted ``from_block``; (b) a source-level
+scan catches any new ``.Query(`` site or ``from_block`` default; (c) the floor-or-defer
+helper DEFERS (None) on an unknown floor, never fails open to 0, and the recursive path
+floors when known and skips the live scan when not.
 """
 
 from __future__ import annotations
@@ -33,10 +26,8 @@ _REPO = Path(__file__).resolve().parents[2]
 
 
 def test_enumerators_raise_typeerror_when_from_block_omitted():
-    """The structural guard, enforced at the call boundary: omitting ``from_block``
-    must raise ``TypeError`` — not silently default to a genesis (0) scan. It would
-    have caught the missed recursive path (which called the enumerator with no
-    ``from_block``)."""
+    """Omitting ``from_block`` must raise ``TypeError``, not default to a genesis scan. It
+    would have caught the missed recursive path (no ``from_block``)."""
     import asyncio
 
     # The omitted from_block is the point of the test; pyright correctly objects,
@@ -49,10 +40,9 @@ def test_enumerators_raise_typeerror_when_from_block_omitted():
 
 # (b) completeness grep encoded as a source assertion ------------------------
 
-# The exhaustive set of live-HyperSync scan sites: every module that constructs
-# a ``hypersync.Query(...)``. Adding a new one is fine — but it must take a
-# floored ``from_block`` (resolved via resolve_scan_floor) and route the client
-# through the shared bound. New modules MUST be added here deliberately.
+# The exhaustive set of live-HyperSync scan sites. A new one must take a floored
+# ``from_block`` (via resolve_scan_floor) and route the client through the shared bound;
+# add it here deliberately.
 _KNOWN_QUERY_MODULES = {
     "services/resolution/mapping_enumerator.py",
     "services/resolution/external_check_materializer.py",
@@ -99,13 +89,9 @@ def _is_hypersync_query_call(node: ast.AST) -> bool:
 def _innermost_functions_building_hypersync_query(
     tree: ast.AST,
 ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-    """The INNERMOST function that directly builds a ``hypersync.Query(...)``.
-
-    ``ast.walk`` descends into nested ``def``s, so an outer function would falsely
-    appear to "build" a query its inner ``_scan`` closure actually constructs (the
-    predicate_evaluator shape). Attribute the Query to the closest enclosing
-    function so the floor/defer assertions land on the real scan site, not its
-    caller.
+    """The INNERMOST function that directly builds a ``hypersync.Query(...)``. ``ast.walk``
+    descends into nested ``def``s, so an outer function would falsely appear to build a
+    query its inner ``_scan`` closure constructs (the predicate_evaluator shape).
     """
     parent: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
@@ -125,9 +111,8 @@ def _innermost_functions_building_hypersync_query(
 
 
 def _calls_named(fn: ast.AST, name: str) -> bool:
-    """True if ``fn`` contains an actual ``ast.Call`` to a function named ``name``
-    (a direct ``name(...)`` or ``mod.name(...)`` invocation) — NOT merely an import
-    or attribute reference. This is what defeats the 'keep the import line' mutation."""
+    """True if ``fn`` has an actual ``ast.Call`` to ``name``, not merely an import or
+    reference (defeats the 'keep the import line' mutation)."""
     for node in ast.walk(fn):
         if not isinstance(node, ast.Call):
             continue
@@ -188,22 +173,13 @@ def _from_block_kwargs_in_query_calls(fn: ast.AST) -> list[ast.keyword]:
 
 
 def test_inline_query_sites_resolve_a_floor():
-    """The two INLINE ``hypersync.Query(`` sites (the param-keyed key-word
-    observation in predicate_evaluator and the external-check candidate scan) build
-    their own query rather than routing through the enumerator's required
-    ``from_block`` — so the required-arg guard can't protect them. Pin, STRUCTURALLY
-    (not by substring), that each such function:
-
-      (a) actually CALLs ``resolve_scan_floor`` (an ``ast.Call``, not the lingering
-          import line — this defeats the 'keep the import, route a 0 into the Query'
-          mutation the reviewer flagged);
-      (b) has a ``floor is None`` defer/skip branch on the floored variable; and
-      (c) every ``hypersync.Query(...)`` it builds binds ``from_block`` to that
-          floored variable (a ``Name``) — never a literal ``0`` and never a literal
-          at all.
-
-    The enumerator/repo modules build queries from a parameter, so they're covered
-    by the required-arg + AST-default guards instead and are excluded here.
+    """The two INLINE ``hypersync.Query(`` sites (predicate_evaluator's param-keyed
+    observation and the external-check candidate scan) bypass the enumerator's required
+    ``from_block``, so the required-arg guard can't protect them. Pin STRUCTURALLY that each:
+    (a) actually CALLs ``resolve_scan_floor`` (defeats 'keep the import, route a 0 into the
+    Query'); (b) has a ``floor is None`` defer branch; (c) binds every Query's ``from_block``
+    to the floored variable, never a literal. Enumerator/repo modules take a parameter and
+    are covered by the required-arg + AST-default guards.
     """
     inline_modules = {
         "services/resolution/predicate_evaluator/membership.py",
@@ -215,7 +191,6 @@ def test_inline_query_sites_resolve_a_floor():
         query_fns = _innermost_functions_building_hypersync_query(tree)
         assert query_fns, f"{rel}: expected an inline hypersync.Query( site; inventory drifted"
         for fn in query_fns:
-            # (a) a real call, not the import line.
             assert _calls_named(fn, "resolve_scan_floor"), (
                 f"{rel}:{fn.name} builds a hypersync.Query( but never CALLS resolve_scan_floor "
                 "(an import alone does not float a floor) — it may genesis-scan."
@@ -227,7 +202,6 @@ def test_inline_query_sites_resolve_a_floor():
                 "variable used as the scan floor."
             )
 
-            # (b) defer on the unknown-floor sentinel.
             assert _has_is_none_defer_branch(fn, floor_vars), (
                 f"{rel}:{fn.name} has no `floor is None` defer branch — an unknown floor must "
                 "SKIP the live scan, not fall through to a genesis walk."
@@ -242,17 +216,15 @@ def test_inline_query_sites_resolve_a_floor():
                     f"(value={getattr(kw.value, 'value', '?')!r}) — must bind the floored variable, "
                     "not a constant (a literal 0 is the genesis footgun)."
                 )
-                # The from_block must trace back to the floored variable: either the
-                # floor var directly, or a loop cursor seeded from it (current_from =
-                # floor). Require it to be a plain Name reference, not a call/expr.
+                # from_block must be the floor var or a loop cursor seeded from it, as a
+                # plain Name, not a call/expr.
                 assert isinstance(kw.value, ast.Name), (
                     f"{rel}:{fn.name} from_block is not a simple variable reference — "
                     "cannot prove it traces to the resolved floor."
                 )
 
-    # Cross-check: the floored variable IS actually seeded from the floor. The loop
-    # cursor (``current_from``) must be assigned from a floor variable somewhere in
-    # the function, so a `from_block=current_from` provably traces to resolve_scan_floor.
+    # The loop cursor (``current_from``) must be assigned from a floor variable somewhere,
+    # so `from_block=current_from` provably traces to resolve_scan_floor.
     for rel in inline_modules:
         src = (_REPO / rel).read_text()
         tree = ast.parse(src)
@@ -263,7 +235,6 @@ def test_inline_query_sites_resolve_a_floor():
             }
             seeded_from_floor = floor_vars & cursor_names  # from_block=floor directly
             if not seeded_from_floor:
-                # Otherwise require an assignment `cursor = <floor_var>` seeding it.
                 for node in ast.walk(fn):
                     if (
                         isinstance(node, ast.Assign)
@@ -280,23 +251,18 @@ def test_inline_query_sites_resolve_a_floor():
 
 
 def test_no_enumerator_reintroduces_a_from_block_default():
-    """Parse the enumerator module and fail if any ``enumerate_*`` /
-    ``__init__`` ``from_block`` regains a default — whether it is declared
-    keyword-only OR positional-with-default (``def f(addr, from_block=0)``).
-    Both shapes silently re-arm a genesis scan, so both are guarded."""
+    """Fail if any ``enumerate_*`` / ``__init__`` ``from_block`` regains a default, keyword-only
+    or positional-with-default; both silently re-arm a genesis scan."""
     for rel in ("services/resolution/mapping_enumerator.py",):
         tree = ast.parse((_REPO / rel).read_text())
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            # keyword-only defaults align 1:1 with kwonlyargs.
             for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
                 if arg.arg == "from_block":
                     assert default is None, (
                         f"{rel}:{node.name} reintroduced a keyword-only from_block default — genesis footgun"
                     )
-            # positional defaults bind to the LAST len(defaults) positional args
-            # (incl. posonlyargs).
             posargs = node.args.posonlyargs + node.args.args
             pos_defaults = node.args.defaults
             if pos_defaults:
@@ -316,7 +282,6 @@ def test_resolve_scan_floor_never_fails_open_to_zero(monkeypatch):
     floor_mod.clear_scan_floor_cache()
     monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
     monkeypatch.setattr(floor_mod, "get_contract_creation_block", lambda *_a, **_k: None)
-    # Unknown floor → DEFER sentinel, never 0.
     assert floor_mod.resolve_scan_floor("0x" + "ab" * 20, 1) is None
 
     floor_mod.clear_scan_floor_cache()
@@ -352,9 +317,9 @@ class _FakeSession:
 
 
 def test_resolve_scan_floor_rechecks_cursor_within_ttl_with_session(monkeypatch):
-    """Self-heal under the raised defer TTL: a deferring address re-reads the durable cursor
-    on every call when a live session is threaded, so a cursor the indexer seeds mid-run is
-    picked up at once — WITHOUT re-hitting the rate-limited Etherscan creation-block lookup."""
+    """Self-heal under the raised defer TTL: with a live session threaded, a cursor the
+    indexer seeds mid-run is picked up at once, WITHOUT re-hitting the rate-limited
+    Etherscan creation-block lookup."""
     floor_mod.clear_scan_floor_cache()
     cursor: dict[str, int | None] = {"v": None}  # cursor not yet seeded
     monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: cursor["v"])
@@ -377,9 +342,9 @@ def test_resolve_scan_floor_rechecks_cursor_within_ttl_with_session(monkeypatch)
 
 
 def test_resolve_scan_floor_throttles_re_resolution_within_ttl_sessionless(monkeypatch):
-    """Without a threaded session a deferring address must NOT re-resolve within the defer TTL —
-    neither the cursor read (a fresh SessionLocal/Neon checkout) nor the rate-limited Etherscan
-    lookup may fire on every call. This is the churn the re-tune removes."""
+    """Without a threaded session a deferring address must NOT re-resolve within the defer
+    TTL (neither the fresh-SessionLocal cursor read nor Etherscan): the churn the re-tune
+    removes."""
     floor_mod.clear_scan_floor_cache()
     cursor_calls = {"n": 0}
     es_calls = {"n": 0}

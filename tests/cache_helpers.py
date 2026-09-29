@@ -1,10 +1,5 @@
-"""Shared fixtures, helpers, and constants for static cache tests.
-
-Provides a PostgreSQL database session with the full PSAT schema.
-Test modules import the ``db_session`` fixture and helper functions
-from this module.
-
-Requires TEST_DATABASE_URL env var pointing to a PostgreSQL test database.
+"""Shared fixtures, helpers and constants for static cache tests: a PostgreSQL ``db_session`` with the full PSAT
+schema (needs TEST_DATABASE_URL) that test modules import from here.
 """
 
 from __future__ import annotations
@@ -191,7 +186,6 @@ FAKE_UH_NEW = {
 
 # Keep this export for test files that still import it
 def _sqlite_compatible_store_artifact(session, job_id, name, data=None, text_data=None):
-    """ORM-based store_artifact (works with both SQLite and PostgreSQL)."""
     from db.models import Artifact
 
     existing = session.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == name).first()
@@ -210,10 +204,6 @@ def _sqlite_compatible_store_artifact(session, job_id, name, data=None, text_dat
 
 @pytest.fixture()
 def db_session():
-    """PostgreSQL database session with full PSAT schema.
-
-    Creates all tables, yields a session, cleans up test data on teardown.
-    """
     from db.models import (
         Artifact,
         Contract,
@@ -247,7 +237,6 @@ def db_session():
         yield session
     finally:
         session.rollback()
-        # Delete in FK-safe order
         for model in [
             FunctionPrincipal,
             EffectiveFunction,
@@ -289,7 +278,6 @@ def db_session():
 
 
 def _create_completed_job_with_static_data(session, address=ADDR_A):
-    """Helper: create a completed job with all static data populated."""
     from db.models import (
         Contract,
         ContractSummary,
@@ -304,7 +292,6 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
     job.stage = JobStage.done
     session.commit()
 
-    # Contract row
     contract = Contract(
         job_id=job.id,
         address=address,
@@ -323,7 +310,6 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
     session.add(contract)
     session.flush()
 
-    # Contract summary
     session.add(
         ContractSummary(
             contract_id=contract.id,
@@ -334,7 +320,6 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
         )
     )
 
-    # Role definitions
     session.add(
         RoleDefinition(
             contract_id=contract.id,
@@ -345,7 +330,6 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
 
     session.commit()
 
-    # Source files
     store_source_files(
         session,
         job.id,
@@ -355,7 +339,6 @@ def _create_completed_job_with_static_data(session, address=ADDR_A):
         },
     )
 
-    # Artifacts
     store_artifact(session, job.id, "contract_analysis", data={"summary": {"control_model": "ownable"}})
     store_artifact(session, job.id, "slither_results", data={"results": {"detectors": []}})
     store_artifact(session, job.id, "analysis_report", text_data="Test analysis report")
@@ -374,7 +357,6 @@ def _create_source_job_with_proxy(
     beacon=None,
     admin=None,
 ):
-    """Helper: create a completed source job with proxy fields set."""
     from db.models import Contract, ContractSummary, JobStage, JobStatus
     from db.queue import create_job, store_artifact, store_source_files
 
@@ -417,7 +399,6 @@ def _create_source_job_with_proxy(
 
 
 def _create_target_job_with_contract(session, source_job_id, address=ADDR_A, rpc_url="https://rpc.example"):
-    """Helper: create a new job with static_cached flag and a contract row."""
     from db.queue import copy_static_cache, create_job, store_source_files
 
     job = create_job(
@@ -438,7 +419,6 @@ def _create_target_job_with_contract(session, source_job_id, address=ADDR_A, rpc
 
 
 def _make_dep_phase_job(session, address=ADDR_A, extra_request=None):
-    """Helper: create a job suitable for _run_dependency_phase testing."""
     from db.models import Contract
     from db.queue import create_job, store_source_files
 
@@ -482,7 +462,6 @@ def _patch_dep_phase_helpers(monkeypatch, find_dyn_fn):
 
 
 def _patch_static_worker_phases(monkeypatch, worker):
-    """Apply common monkeypatches for StaticWorker phase methods."""
     phases_run = []
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *a, **kw: phases_run.append("resolve_proxy"))
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)

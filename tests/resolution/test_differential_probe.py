@@ -148,7 +148,6 @@ def test_synth_caller_correlated_substitution_sets_identity():
     identity = "0x" + "ab" * 20
     data = dp.synthesize_calldata("0x12345678", "f(address,uint256)", identity=identity, caller_correlated_indices={0})
     assert data is not None
-    # First 32-byte word after the selector is the identity address.
     first_word = data[10 : 10 + 64]
     assert first_word == encode_address_word(identity)
 
@@ -179,7 +178,6 @@ def test_derive_random_identities_deterministic_and_distinct():
     assert a == b  # replayable
     assert len(set(a)) == 2  # distinct
     assert all(x.startswith("0x") and len(x) == 42 for x in a)
-    # Different contract → different identities.
     c = dp.derive_random_identities("0x9a1e97d1", "0x" + "34" * 20, 2)
     assert set(a).isdisjoint(c)
 
@@ -214,17 +212,14 @@ def _run(responder, *, principal=None, block=1_000_000, block_delta=1000):
 
 
 def test_run_candidate_public_with_block_independence_pass_upgrades():
-    # Everyone succeeds at both blocks → confirmed public.
     result, wire = _run(lambda _tag, _frm: ok())
     assert result.verdict == "public"
     assert result.attribution == "not_caller_discriminating"
     assert result.transcript["cross_checks"]["block_independence"] == "pass"
     assert result.transcript["block_independence_block"] == 1_000_000 - 1000
-    # Two batches: primary block + older block.
     assert len(wire.batches) == 2
     assert wire.batches[0][0] == hex(1_000_000)
     assert wire.batches[1][0] == hex(1_000_000 - 1000)
-    # Transcript is replayable: identities + per-address outcomes recorded.
     assert len(result.transcript["identities"]["random"]) == 2
     assert all("success" in o for o in result.transcript["outcomes"].values())
 
@@ -310,7 +305,6 @@ def test_recorded_real_gated_transcript_replays_to_confirmed_gated():
     )
     assert result.verdict == "gated_confirmed"
     assert result.transcript["outcomes"][owner]["success"] is True
-    # The recorded revert decodes for the transcript (richness only).
     rand0 = result.transcript["identities"]["random"][0]
     assert result.transcript["outcomes"][rand0]["decoded_error"] == "Error('Ownable: caller is not the owner')"
 

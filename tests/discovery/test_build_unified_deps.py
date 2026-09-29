@@ -39,16 +39,13 @@ def _dynamic(deps, provenance=None, graph=None):
 
 
 def test_source_tracking():
-    """Static-only, dynamic-only, and merged sources are all tracked correctly."""
     build = _get_build_fn()
 
-    # Static only
     r = build(TARGET, _static([DEP_A]), None, None)
     assert r["dependencies"][DEP_A]["source"] == ["static"]
     assert r["network"] == "ethereum"
     assert "dependency_graph" not in r
 
-    # Dynamic only (with graph)
     graph = [
         {
             "from": TARGET,
@@ -79,7 +76,6 @@ def test_source_tracking():
 
 
 def test_classification_merging():
-    """Classification types, target classification, and nested implementations."""
     build = _get_build_fn()
     cls = {
         "address": TARGET,
@@ -103,7 +99,6 @@ def test_classification_merging():
     }
     r = build(TARGET, _static([DEP_A]), None, cls)
 
-    # Dep classification
     assert r["dependencies"][DEP_A]["type"] == "proxy"
     assert r["dependencies"][DEP_A]["proxy_type"] == "eip1967"
 
@@ -121,22 +116,18 @@ def test_classification_merging():
     # discovered_addresses is not stored — derived from source=["classification"]
     assert "discovered_addresses" not in r
 
-    # Target classification included when non-regular
     assert r["target_classification"]["type"] == "proxy"
     assert r["target_classification"]["implementation"] == IMPL
 
-    # Target classification omitted when regular
     cls["classifications"][TARGET]["type"] = "regular"
     r = build(TARGET, _static([DEP_A]), None, cls)
     assert "target_classification" not in r
 
 
 def test_target_classification_fallback():
-    """target_classification kwarg is used when classify_contracts is unavailable."""
     build = _get_build_fn()
     fallback = {"address": TARGET, "type": "proxy", "proxy_type": "eip1967", "implementation": IMPL}
 
-    # No cls_output — fallback fills target_classification
     r = build(TARGET, _static([DEP_A]), None, None, target_classification=fallback)
     assert r["target_classification"]["type"] == "proxy"
     assert r["target_classification"]["proxy_type"] == "eip1967"
@@ -159,14 +150,11 @@ def test_target_classification_fallback():
 
 
 def test_edge_cases():
-    """Empty deps, no classification, and discovered-address deduplication."""
     build = _get_build_fn()
 
-    # Empty deps
     r = build(TARGET, _static([]), None, None)
     assert r["dependencies"] == {}
 
-    # No classification — all regular
     r = build(TARGET, _static([DEP_A, DEP_B]), None, None)
     assert all(d["type"] == "regular" for d in r["dependencies"].values())
     assert "discovered_addresses" not in r
@@ -199,7 +187,6 @@ def test_edge_cases():
 
 
 def test_dependency_graph_keyed():
-    """dependency_graph is keyed by from|to pair."""
     build = _get_build_fn()
 
     graph = [
@@ -229,7 +216,6 @@ def test_dependency_graph_keyed():
     dg = r["dependency_graph"]
     assert isinstance(dg, dict)
 
-    # Two edges for TARGET→DEP_A
     key_a = f"{TARGET}|{DEP_A}"
     assert key_a in dg
     assert len(dg[key_a]) == 2
@@ -239,7 +225,6 @@ def test_dependency_graph_keyed():
     assert "from" not in dg[key_a][0]
     assert "to" not in dg[key_a][0]
 
-    # One edge for TARGET→DEP_B
     key_b = f"{TARGET}|{DEP_B}"
     assert key_b in dg
     assert len(dg[key_b]) == 1
@@ -247,11 +232,9 @@ def test_dependency_graph_keyed():
 
 
 def test_enrich_dependency_metadata(monkeypatch):
-    """enrich_dependency_metadata resolves contract names and maps selectors to function names."""
     enrich = _get_enrich_fn()
     build = _get_build_fn()
 
-    # Mock get_contract_info to return name + selector map per address
     selector_a = "0xdeadbeef"
     info_map = {
         DEP_A: ("TokenVault", {selector_a: "deposit"}),
@@ -263,7 +246,6 @@ def test_enrich_dependency_metadata(monkeypatch):
         lambda addr, *, chain_id=1: info_map.get(addr, (None, {})),
     )
 
-    # Build a unified output with a proxy dep (impl nested) and a dependency graph
     cls = {
         "address": TARGET,
         "rpc": "https://rpc.example",
@@ -301,11 +283,9 @@ def test_enrich_dependency_metadata(monkeypatch):
     unified = build(TARGET, _static([DEP_A, DEP_B]), dyn, cls)
     enrich(unified, chain_id=1)
 
-    # Contract names resolved
     assert unified["dependencies"][DEP_A]["contract_name"] == "TokenVault"
     assert unified["dependencies"][DEP_B]["contract_name"] == "PriceOracle"
 
-    # Nested implementation name resolved
     impl_entry = unified["dependencies"][DEP_A]["implementation"]
     assert impl_entry["contract_name"] == "VaultImpl"
 

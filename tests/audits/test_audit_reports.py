@@ -1,22 +1,7 @@
-"""Pure-logic tests for the audit report discovery module.
-
-The orchestrator — ``search_audit_reports`` and the LLM classify/extract
-helpers — is exercised end-to-end in ``test_audit_discovery_integration.py``
-against real HTTP fixtures via the ``responses`` library. That test is the
-source of truth for the discovery pipeline's behaviour.
-
-What lives here is everything that is *pure* (no HTTP, no LLM, no DB):
-    - JSON parsing helpers tolerant of markdown fences / surrounding text
-    - ``merge_audit_reports`` append-only dedup + richness selection
-    - filename date-extraction regex
-    - audit folder-name allowlist
-    - single-org auto-hop policy check
-    - cross-source filename dedup
-    - provenance field plumbing
-    - branch → commit SHA cache
-
-Any test that would need mocks for Tavily / LLM / GitHub / Solodit belongs
-in the integration test, not here.
+"""Pure-logic tests for audit report discovery (no HTTP, LLM or DB): JSON parsing helpers, ``merge_audit_reports``
+dedup/richness, filename date regex, folder-name allowlist, auto-hop policy, cross-source filename dedup,
+provenance plumbing, branch->commit SHA cache. Anything needing Tavily/LLM/GitHub/Solodit mocks belongs in
+``test_audit_discovery_integration.py``, the source of truth for the pipeline.
 """
 
 from __future__ import annotations
@@ -28,10 +13,6 @@ import pytest
 
 from services.discovery.audit_reports import merge_audit_reports
 from services.discovery.audit_reports_llm import _parse_json_array, _parse_json_object
-
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
 
 
 def _report(
@@ -150,7 +131,6 @@ class TestMergeAuditReports:
         assert merged["reports"] == []
 
     def test_url_normalization_dedup(self):
-        """Trailing slashes and case differences treated as the same URL."""
         r1 = _report(url="https://Example.com/Audit/")
         r2 = _report(url="https://example.com/Audit", title="Updated Title")
         merged = merge_audit_reports(
@@ -184,7 +164,6 @@ class TestFilenameDateExtraction:
             ("20241109-scroll-native-minting.md", "2024-11-09"),
             ("2024-06_audit.pdf", "2024-06"),
             ("Audit-2023.pdf", "2023"),
-            # URL-encoded
             ("2025.10.20%20-%20WeETH%20withdrawal%20adapter.pdf", "2025-10-20"),
             # Invalid month → falls through to year-only
             ("2024-13-01.pdf", "2024"),
@@ -255,14 +234,12 @@ class TestGithubBlobToRaw:
         assert github_blob_to_raw("https://example.com/foo/bar.md") == "https://example.com/foo/bar.md"
 
     def test_already_raw_url_passes_through(self):
-        """Idempotent — applying twice is a no-op."""
         from services.discovery.audit_reports import github_blob_to_raw
 
         raw = "https://raw.githubusercontent.com/a/b/main/foo.md"
         assert github_blob_to_raw(raw) == raw
 
     def test_github_tree_url_passes_through(self):
-        """``/tree/`` URLs aren't file blobs — leave them alone."""
         from services.discovery.audit_reports import github_blob_to_raw
 
         tree = "https://github.com/a/b/tree/main/audits"
@@ -315,11 +292,8 @@ class TestAutoHopPolicy:
     def test_should_auto_hop_includes_org_kind(self):
         from services.discovery.audit_reports import _should_auto_hop_org
 
-        # Bare org URL whose owner matches company name → hop
         assert _should_auto_hop_org("https://github.com/morpho-org", "Morpho", set())
-        # Same org already enumerated → don't re-hop
         assert not _should_auto_hop_org("https://github.com/morpho-org", "Morpho", {"morpho-org"})
-        # Org name doesn't substring-match company → don't hop
         assert not _should_auto_hop_org("https://github.com/Certora", "Morpho", set())
 
 
@@ -333,7 +307,6 @@ class TestFilenameDedup:
         from services.discovery.audit_reports import _collapse_by_filename
 
         reports = [
-            # Same PDF mirrored on two hosts — should collapse
             {
                 "url": "https://solodit.cyfrin.io/audit.pdf",
                 "pdf_url": "https://s3/audit.pdf",
@@ -348,7 +321,6 @@ class TestFilenameDedup:
                 "title": "Foo Audit longer title",
                 "date": "2024-05-01",
             },
-            # Different filename — standalone
             {
                 "url": "https://github.com/x/y/other.pdf",
                 "pdf_url": "https://github.com/x/y/other.pdf",
@@ -359,12 +331,10 @@ class TestFilenameDedup:
         ]
         out = _collapse_by_filename(reports)
         assert len(out) == 2
-        # Richer entry (longer title) wins
         foo = next(r for r in out if r["auditor"] == "Spearbit")
         assert "longer title" in foo["title"]
 
     def test_different_year_month_stays_separate(self):
-        """Same filename + different dates = different audits (retest)."""
         from services.discovery.audit_reports import _collapse_by_filename
 
         reports = [
@@ -437,7 +407,6 @@ class TestProvenanceFields:
         assert out["source_path"] == "audits/X.pdf"
 
     def test_build_report_entry_omits_provenance_when_missing(self):
-        """Non-GitHub sources don't supply a commit SHA — entry stays clean."""
         from services.discovery.audit_reports import _build_report_entry
 
         out = _build_report_entry(
@@ -481,7 +450,6 @@ class TestResolveBranchCommit:
 
         assert ar._resolve_branch_commit("owner", "repo", "main") == sha
         assert call_count["n"] == 1
-        # Second call: cache hit, no extra HTTP.
         assert ar._resolve_branch_commit("owner", "repo", "main") == sha
         assert call_count["n"] == 1
 
@@ -526,12 +494,10 @@ class TestResolveBranchCommit:
 
         assert _github._resolve_branch_commit("owner", "repo", "main") is None
         assert ("owner", "repo", "main") not in _github._BRANCH_SHA_CACHE
-        # Retry resolves and now caches.
         assert _github._resolve_branch_commit("owner", "repo", "main") == sha
         assert state["n"] == 2
 
     def test_expired_entry_reprobes(self, monkeypatch):
-        """An entry older than the TTL is dropped and the HEAD re-fetched."""
         from services.discovery.audit_reports import _github
 
         _github.clear_branch_sha_cache()
@@ -560,7 +526,6 @@ class TestResolveBranchCommit:
         assert _github._BRANCH_SHA_CACHE[key][0] == fresh
 
     def test_eviction_bounds_at_max(self, monkeypatch):
-        """Distinct repos past the cap evict, keeping the cache size-bounded."""
         from services.discovery.audit_reports import _github
 
         _github.clear_branch_sha_cache()
@@ -582,7 +547,6 @@ class TestResolveBranchCommit:
         assert len(_github._BRANCH_SHA_CACHE) <= _github._BRANCH_SHA_CACHE_MAX
 
     def test_clear_resets_pressure_state(self, monkeypatch):
-        """clear_branch_sha_cache empties the dict and forgets pressure state."""
         from services.discovery.audit_reports import _github
         from utils import memory
 

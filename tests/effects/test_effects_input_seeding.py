@@ -1,16 +1,10 @@
 """Input-asset seeding for Tier-1 value/supply probes (EFFECTS_RESOLUTION_SPEC §4.2/§4.5).
 
-A deposit-backed conversion reverts at its ERC-20 precondition, so it never
-reaches the mint and drops out of the backing population. These tests drive the
-REAL recipes against a slot-faithful fake ERC-20 + vault: the storage overrides
-the probe sends are applied to the fake's storage, so a wrong slot produces a
-wrong read-back exactly as it would on chain.
-
-The witness bar is what most of this file is about:
-  * a seeded verdict exists only when the read-back echoed inside the probe block;
-  * ``inflow_observed`` still comes only from Transfers the call emitted;
-  * ETH is attached only after a zero-value attempt provably failed;
-  * every unseedable shape degrades to the pre-seeding probe, verbatim.
+A deposit-backed conversion reverts at its ERC-20 precondition and drops out of the backing
+population. The REAL recipes run against a slot-faithful fake ERC-20 + vault (storage overrides are
+applied to the fake, so a wrong slot gives a wrong read-back as on chain). Witness bar: a seeded
+verdict needs the read-back echoed inside the probe block; ``inflow_observed`` comes only from
+emitted Transfers; ETH is attached only after a zero-value attempt failed; unseedable shapes degrade verbatim.
 """
 
 from __future__ import annotations
@@ -136,11 +130,9 @@ def test_discovery_identifies_balance_and_allowance_bases():
 
 
 def test_a_seeded_holder_balance_never_exceeds_the_supply_backing_it():
-    """``totalSupply >= balanceOf(holder)`` is an invariant every real token keeps
-    and a direct storage write does not. Handing a caller more shares than exist
-    makes a burn arithmetically impossible — ``unchecked { totalSupply -= amount }``
-    wraps past zero — so the seed is capped at the live supply. The ALLOWANCE slot
-    is not capped: approvals above the supply are ordinary and bound nothing."""
+    """``totalSupply >= balanceOf(holder)`` holds for real tokens but not direct storage writes;
+    more shares than exist makes a burn wrap (``unchecked { totalSupply -= amount }``), so the seed
+    is capped at live supply. The ALLOWANCE slot is not capped: approvals above supply are ordinary."""
     supply = 10**20  # well under SEED_AMOUNT (2**128)
     chain = FakeChain(asset_total_supply=supply)
     layout = discover_token_layout(chain, token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
@@ -162,8 +154,7 @@ def test_an_unanswered_total_supply_leaves_the_seed_at_full_value():
 
 
 def test_a_supply_above_the_seed_leaves_the_seed_at_full_value():
-    """The cap is a minimum, not a replacement: a token whose supply dwarfs the
-    seed keeps the seed, which is already far above any probe amount."""
+    """The cap is a minimum, not a replacement: a supply far above the seed keeps the seed."""
     chain = FakeChain(asset_total_supply=2**200)
     layout = discover_token_layout(chain, token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
 
@@ -271,8 +262,8 @@ def test_seeder_memoizes_identity_and_layout_across_candidates():
 
 
 def test_unseeded_probe_runs_first_and_no_seeding_happens_when_it_succeeds():
-    """An admin mint that needs no input asset must never trigger discovery — and
-    its ``inflow_observed: false`` (witnessed dilution) is unchanged."""
+    """An admin mint needing no input asset must never trigger discovery; its
+    ``inflow_observed: false`` (witnessed dilution) is unchanged."""
     chain = FakeChain(vault_needs_asset=False, vault_pulls=False)
     store = RecordingStore()
     eff = _supply(chain, store, **_wrap_inputs(chain))
@@ -306,18 +297,13 @@ def test_seeded_conversion_proves_the_mint_and_witnesses_the_inflow():
 
 
 def test_a_seeded_supply_verdict_carries_its_qualifiers_through_to_the_claim():
-    """G8, seam ``claims_bridge.verdict_to_claim``. The synthesis qualifiers must
-    sit at the TOP LEVEL of a supply witness — the only plane ``_observed_summary``
-    carries — or the minted/burned claim reads STRONGER than the seeded observation
-    it came from. The recipe wrote ``input_seeded`` only into the nested
-    ``backing`` map (mint-only, withheld-gated), which the bridge never reads, so
-    every seeded supply row (incl. all 4 burns) disclosed nothing. Feeds the REAL
-    recipe witness through the bridge, so reverting the recipe's top-level stamp
-    fails this."""
+    """G8, seam ``claims_bridge.verdict_to_claim``. Synthesis qualifiers must sit at the TOP LEVEL
+    of a supply witness (the only plane ``_observed_summary`` carries) or the claim reads STRONGER
+    than the seeded observation. The recipe once wrote ``input_seeded`` only under ``backing``
+    (mint-only), so every seeded supply row incl. all 4 burns disclosed nothing. Uses the REAL recipe witness."""
     chain = FakeChain()
     eff = _supply(chain, RecordingStore(), **_wrap_inputs(chain))
     assert eff.verdict == VERDICT_PROVEN
-    # The fix: the qualifier is at witness TOP LEVEL, not only under ``backing``.
     assert eff.details["input_seeded"] is True
 
     claim = claims_bridge.verdict_to_claim(
@@ -340,10 +326,8 @@ def test_a_seeded_supply_verdict_carries_its_qualifiers_through_to_the_claim():
 
 
 def test_a_seeded_supply_burn_witness_reaches_the_claim_observed_summary():
-    """The burn half of G8 explicitly: a ``supply.burn`` witness carrying the
-    top-level qualifiers projects them into ``observed`` exactly as a mint does.
-    (There was no burn equivalent of the value_out top-level assertion, which is
-    why the gap shipped green.)"""
+    """The burn half of G8: top-level qualifiers on a ``supply.burn`` witness project into
+    ``observed`` as for a mint (no burn test existed, so the gap shipped green)."""
     claim = claims_bridge.verdict_to_claim(
         cast(
             claims_bridge.VerdictLike,
@@ -447,10 +431,8 @@ def test_value_out_seeded_retry_proves_a_precondition_blocked_withdrawal():
         simulate_supported=True,
         gate_ref="gate:none",
     )
-    # The UNSEEDED probe reverted on the precondition, and that is a different
-    # non-observation from "the call ran and moved nothing" — same empty log set,
-    # different fact. The reason must say so, or the code-plane cache transfers a
-    # precondition revert to every bytecode twin.
+    # The UNSEEDED probe reverted on the precondition, a different non-observation from "ran and
+    # moved nothing"; the reason must say so or the code-plane cache transfers it to every bytecode twin.
     assert plain.verdict == VERDICT_UNKNOWN and plain.reason == "value_probe_reverted"
     assert plain.details["observation"] == "reverted"
 
@@ -557,11 +539,9 @@ def test_no_seeder_without_simulate_support():
 # ---------------------------------------------------------------------------
 # Per-job cost ceiling (SeedBudget)
 #
-# The retry path fires on the COMMON case — an unseeded probe that reverted —
-# not the rare one, so its cost scales with the protocol's distinct vaults and
-# tokens with nothing holding it down. These tests pin the ceiling, the degrade
-# (exactly the pre-seeding probe, never a guess), the log, and the counters that
-# let the next live run judge the spend on evidence rather than a projection.
+# The retry path fires on the COMMON case (an unseeded probe that reverted), so its cost scales
+# with distinct vaults and tokens. These pin the ceiling, the degrade (exactly the pre-seeding
+# probe), the log, and the counters for judging spend on evidence.
 # ---------------------------------------------------------------------------
 
 
@@ -574,7 +554,6 @@ def test_layout_budget_stops_discovery_and_degrades_to_the_unseeded_probe(caplog
     with caplog.at_level("WARNING", logger="services.effects.seeding"):
         eff = _supply(chain, RecordingStore(), **inputs)
 
-    # Exactly the pre-seeding verdict.
     assert eff.verdict == VERDICT_UNKNOWN and eff.reason == "mint_call_reverted"
     assert budget.layout_discoveries == 0
     assert budget.skipped_layout_discoveries >= 1
@@ -595,8 +574,7 @@ def test_retry_budget_stops_the_seeded_attempt_entirely(caplog):
         eff = _supply(chain, RecordingStore(), **inputs)
 
     assert eff.verdict == VERDICT_UNKNOWN and eff.reason == "mint_call_reverted"
-    # One block only — the unseeded read/mint/read. No identity, no discovery,
-    # no seeded attempt, no seeded sentinel.
+    # One block only (unseeded read/mint/read): no identity, discovery, or seeded attempt.
     assert len(chain.blocks) == 1
     assert budget.identity_probes == 0 and budget.layout_discoveries == 0
     assert budget.skipped_probe_retries == 1
@@ -645,10 +623,9 @@ def test_a_probe_that_succeeds_unseeded_spends_nothing():
 
 
 def test_self_token_discovery_is_skipped_once_a_named_asset_anchors():
-    """``__self__`` is the always-appended fallback and resolves with no wire
-    call, so every reverting probe used to pay a full 548-override discovery
-    block for the probe target itself. A specific hint that already anchored is
-    the asset static actually saw flow in."""
+    """``__self__`` is the always-appended fallback and resolves with no wire call, so every
+    reverting probe paid a full 548-override discovery block for the probe target itself. A hint
+    that already anchored is the asset static actually saw flow in."""
     budget = SeedBudget()
     chain = FakeChain()
     inputs = _wrap_inputs(chain)

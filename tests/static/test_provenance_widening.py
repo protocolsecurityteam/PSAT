@@ -1,13 +1,9 @@
 """Widening of digest-churning provenance sets.
 
-The provenance lattice must have finite height for the worklist to converge.
-``callee_args_digest`` embeds a hash of the member set itself, so a
-self-referential assignment (OZ ``Math.mulDiv``'s ``inverse *= 2 - denominator
-* inverse`` chain) mints a fresh digest variant every iteration and burns the
-full worklist cap. ``ProvenanceMap.set`` widens a variable that keeps being
-rewritten — dropping the digest, which is never emitted — so the engine
-converges while the caller-taint witness (``derived_from`` origins) is
-preserved exactly.
+A self-referential assignment (OZ ``Math.mulDiv``'s ``inverse *= 2 - denominator * inverse``)
+mints a fresh ``callee_args_digest`` every iteration and burns the worklist cap.
+``ProvenanceMap.set`` widens by dropping the (never-emitted) digest, so the engine converges
+while the ``derived_from`` caller-taint witness stays exact.
 """
 
 import textwrap

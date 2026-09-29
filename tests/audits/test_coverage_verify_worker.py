@@ -1,14 +1,7 @@
-"""Tests for ``workers.coverage_verify.CoverageVerifyWorker``.
-
-The worker drains ``audit_contract_coverage`` rows where
-``equivalence_status='pending'`` — the deferred-verify side of the
-fix that split source-equivalence out of the inline coverage write
-(#82). These tests exercise the claim → verify → persist cycle without
-running the full poll loop, plus the stale-recovery and crash-fallback
-paths.
-
-Network calls into ``services.audits.source_equivalence`` are stubbed
-at module scope; tests that need a positive proof override locally.
+"""Tests for ``CoverageVerifyWorker``, which drains ``audit_contract_coverage`` rows with
+``equivalence_status='pending'`` (the deferred half of the source-equivalence split, #82). Exercises
+claim -> verify -> persist without the poll loop, plus stale recovery and crash fallback. Network calls into
+``source_equivalence`` are stubbed at module scope; positive-proof tests override locally.
 """
 
 from __future__ import annotations
@@ -27,11 +20,6 @@ pytestmark = [
     # offline: no RPC for the coverage upsert's eth_getCode bytecode-drift anchor
     pytest.mark.usefixtures("_stub_rpc_bytecode"),
 ]
-
-
-# ---------------------------------------------------------------------------
-# Network-stubbing fixture — every test in this module gets it.
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
@@ -59,12 +47,8 @@ def _stub_source_equivalence_network(monkeypatch):
 
 @pytest.fixture()
 def worker(monkeypatch):
-    """CoverageVerifyWorker with SessionLocal rebound to the test DB.
-
-    ``_process_row`` opens its own ``SessionLocal()`` (each row gets a
-    fresh session in production so failures don't poison siblings); in
-    tests that session must talk to ``TEST_DATABASE_URL`` instead of
-    ``DATABASE_URL`` or the verify writes land in the wrong database.
+    """Worker with SessionLocal rebound to the test DB: ``_process_row`` opens its own session per row, so it must
+    use ``TEST_DATABASE_URL`` or verify writes land in the wrong database.
     """
     from unittest.mock import patch
 
@@ -84,11 +68,6 @@ def worker(monkeypatch):
         yield w
     finally:
         test_engine.dispose()
-
-
-# ---------------------------------------------------------------------------
-# Seeding helpers
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -149,7 +128,6 @@ def _add_audit(session, *, protocol_id: int, scope: list[str]):
 
 
 def _seed_pending_row(db_session, *, protocol_id: int, name: str = "MyPool", address: str = "0x" + "a" * 40):
-    """Insert a Contract + AuditReport + pending coverage row in one helper."""
     from services.audits.coverage import upsert_coverage_for_audit
 
     contract = _add_contract(db_session, protocol_id=protocol_id, name=name, address=address)
@@ -163,7 +141,6 @@ def _seed_pending_row(db_session, *, protocol_id: int, name: str = "MyPool", add
 
 
 def _stub_proven_match(monkeypatch, *, content: str = "contract MyPool {}", name: str = "MyPool"):
-    """Wire the source-equivalence stubs to return a positive proof."""
     from services.audits import source_equivalence
 
     h = hashlib.sha256(content.encode()).hexdigest()
@@ -213,14 +190,11 @@ def test_claim_batch_picks_pending_rows_and_marks_them_verifying(db_session, wor
 
 
 def test_claim_batch_skips_terminal_rows(db_session, worker, seed_protocol):
-    """Rows already in a terminal status (proven, hash_mismatch, etc.)
-    must NOT be re-claimed — they're done."""
     from db.models import AuditContractCoverage
 
     protocol_id, _ = seed_protocol
     contract, audit = _seed_pending_row(db_session, protocol_id=protocol_id)
 
-    # Manually advance the row to a terminal state.
     row = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit.id).one()
     row.equivalence_status = "proven"
     db_session.commit()
@@ -235,21 +209,16 @@ def test_claim_batch_returns_empty_when_no_pending(db_session, worker):
 
 
 def test_idle_queue_makes_no_http_calls_and_no_writes(db_session, worker, seed_protocol, monkeypatch):
-    """When every coverage row has reached a terminal status, the verify
-    worker's poll tick must be a true no-op: zero Etherscan calls, zero
-    GitHub calls, zero DB row updates. This is the guarantee that lets
-    us run the worker continuously alongside the rest of the fleet
-    without re-introducing the rate-limit cascade — an empty queue is
-    the most common state and it has to stay free.
+    """With every coverage row terminal, a poll tick must be a true no-op (zero Etherscan/GitHub calls, zero row
+    updates). This lets the worker run continuously without re-introducing the rate-limit cascade; an empty
+    queue is the most common state and must stay free.
     """
     from services.audits import source_equivalence
 
     protocol_id, _ = seed_protocol
 
-    # Seed one coverage row, but in a TERMINAL state (proven). The worker
-    # must skip it — proven rows aren't pending. Pair with a manually-
-    # created row in another terminal state so the predicate gets exercised
-    # against more than one shape.
+    # Seed rows in terminal states (proven plus another) so the claim predicate is exercised against more than
+    # one shape.
     contract, audit = _seed_pending_row(db_session, protocol_id=protocol_id)
     db_session.execute(
         text("UPDATE audit_contract_coverage SET equivalence_status = 'proven' WHERE audit_report_id = :a"),
@@ -257,7 +226,6 @@ def test_idle_queue_makes_no_http_calls_and_no_writes(db_session, worker, seed_p
     )
     db_session.commit()
 
-    # Snapshot the row state pre-tick so we can prove it's untouched.
     rows_before = db_session.execute(
         text(
             "SELECT id, equivalence_status, equivalence_checked_at, match_type "
@@ -281,14 +249,10 @@ def test_idle_queue_makes_no_http_calls_and_no_writes(db_session, worker, seed_p
     monkeypatch.setattr(source_equivalence, "fetch_etherscan_source_files", boom_etherscan)
     monkeypatch.setattr(source_equivalence, "fetch_github_source_hash", boom_github)
 
-    # One tick: claim + stale recovery (the same operations the poll loop
-    # runs every interval). Both must be no-ops on a queue with no
-    # pending / verifying rows.
     claimed = worker._claim_batch(db_session)
     assert claimed == []
     worker._recover_stale(db_session)
 
-    # No HTTP calls — that's the headline guarantee.
     assert calls == {"github": 0, "etherscan": 0}
 
     # And the row is byte-identical to its pre-tick state. equivalence_checked_at
@@ -305,7 +269,6 @@ def test_idle_queue_makes_no_http_calls_and_no_writes(db_session, worker, seed_p
 
 
 def test_claim_batch_respects_batch_size(db_session, worker, seed_protocol, monkeypatch):
-    """Multiple pending rows → claim only ``batch_size`` of them."""
     from db.models import AuditContractCoverage
 
     protocol_id, _ = seed_protocol
@@ -321,41 +284,28 @@ def test_claim_batch_respects_batch_size(db_session, worker, seed_protocol, monk
     claimed = worker._claim_batch(db_session)
     assert len(claimed) == 2
 
-    # Remaining four still pending.
     remaining = db_session.query(AuditContractCoverage).filter_by(equivalence_status="pending").count()
     assert remaining == 4
 
 
 def test_claim_batch_skips_rows_whose_contract_was_reclassified_as_proxy(db_session, worker, seed_protocol):
-    """Regression for the live-test crash on 2026-05-09.
-
-    A coverage row was inserted while its contract had ``is_proxy=FALSE``;
-    a later static-analysis pass flipped the contract to ``is_proxy=TRUE``.
-    The DB trigger ``_reject_proxy_coverage`` correctly rejects any
-    INSERT/UPDATE that targets a proxy. Without filtering on the claim
-    side, the worker's UPDATE-to-``verifying`` raised, the exception
-    propagated out of ``run_loop``, the process exited 1, and
-    ``deploy/start_workers.sh``'s ``wait -n`` brought the whole VM down with it
-    — Fly retried, the same row was still bad, the machine stayed
-    stopped.
-
-    The fix: the claim CTE joins ``contracts`` and filters
-    ``is_proxy=FALSE``. Reclassified rows stay in ``pending`` (orphaned
-    but harmless); valid pending rows continue to be claimed.
+    """Regression for the live-test crash on 2026-05-09. A coverage row was inserted while its contract had
+    ``is_proxy=FALSE``; a later static-analysis pass flipped it to TRUE, and the DB trigger
+    ``_reject_proxy_coverage`` rejects writes targeting proxies. The worker's UPDATE-to-``verifying`` raised, the
+    exception escaped ``run_loop``, the process exited 1, and ``deploy/start_workers.sh``'s ``wait -n`` took the
+    whole VM down (Fly retried into the same bad row). The claim CTE now joins ``contracts`` and filters
+    ``is_proxy=FALSE``; reclassified rows stay pending (orphaned but harmless).
     """
     from db.models import AuditContractCoverage, Contract
 
     protocol_id, _ = seed_protocol
 
-    # Row A: pending, contract still impl → should be claimed.
     contract_ok, _audit_ok = _seed_pending_row(
         db_session,
         protocol_id=protocol_id,
         name="GoodImpl",
         address="0x" + "1" * 40,
     )
-    # Row B: pending, contract reclassified to proxy mid-flight →
-    # claim must skip it instead of raising.
     contract_bad, _audit_bad = _seed_pending_row(
         db_session,
         protocol_id=protocol_id,
@@ -369,8 +319,6 @@ def test_claim_batch_skips_rows_whose_contract_was_reclassified_as_proxy(db_sess
     db_session.query(Contract).filter_by(id=contract_bad.id).update({"is_proxy": True})
     db_session.commit()
 
-    # The previously-failing path: this used to raise psycopg2 error and
-    # crash the worker. After the fix, it returns only the valid row.
     claimed = worker._claim_batch(db_session)
     assert len(claimed) == 1
 
@@ -379,19 +327,12 @@ def test_claim_batch_skips_rows_whose_contract_was_reclassified_as_proxy(db_sess
     bad_row = db_session.query(AuditContractCoverage).filter_by(contract_id=contract_bad.id).one()
     assert good_row.equivalence_status == "verifying"
     assert good_row.id == claimed[0]
-    # The proxy-targeting row is left pending — orphaned but never
-    # crashes the worker.
     assert bad_row.equivalence_status == "pending"
 
 
 def test_run_loop_survives_claim_batch_exception(db_session, worker, seed_protocol, monkeypatch):
-    """Defense-in-depth: any future SQL failure in the claim/recover
-    phase must not crash the worker process.
-
-    Earlier behaviour: an exception from ``_claim_batch`` propagated
-    straight out of ``run_loop`` → process exits 1 → ``deploy/start_workers.sh``
-    ``wait -n`` ends the whole VM. Now ``run_loop`` catches the failure,
-    rolls back, logs, and continues to the next poll.
+    """Defense-in-depth: a SQL failure in claim/recover must not crash the worker. ``_claim_batch`` exceptions used
+    to escape ``run_loop`` (exit 1, ``wait -n`` ends the VM); now it rolls back, logs and polls again.
     """
     import threading
 
@@ -402,12 +343,10 @@ def test_run_loop_survives_claim_batch_exception(db_session, worker, seed_protoc
 
     def boom(_session):
         calls.append("called")
-        # Stop the loop after the first failure so the test terminates.
         worker._running = False
         raise RuntimeError("simulated SQL failure")
 
     monkeypatch.setattr(worker, "_claim_batch", boom)
-    # Avoid sleeping idle — we want the loop to exit promptly.
     monkeypatch.setattr(worker, "idle_poll_interval", 0.01)
 
     # Run the loop on a thread so a hypothetical hang doesn't deadlock the
@@ -431,7 +370,6 @@ def test_process_row_proves_pending_to_proven(db_session, worker, seed_protocol,
     _seed_pending_row(db_session, protocol_id=protocol_id)
     _stub_proven_match(monkeypatch)
 
-    # Claim (writes 'verifying') then run verify on the row.
     claimed = worker._claim_batch(db_session)
     assert len(claimed) == 1
     row_id, status, exc, ctx = worker._process_row(claimed[0])
@@ -451,10 +389,9 @@ def test_process_row_proves_pending_to_proven(db_session, worker, seed_protocol,
 
 
 def test_process_row_records_crash_via_handle_crash(db_session, worker, seed_protocol, monkeypatch):
-    """A crash inside ``verify_one_coverage_row`` (e.g. an unexpected DB
-    error) must be caught by ``_process_row`` and surfaced via
-    ``_handle_crash`` so the row gets a ``github_fetch_failed`` stamp
-    and the worker thread doesn't drop the result."""
+    """A crash inside ``verify_one_coverage_row`` is caught by ``_process_row`` and surfaced via ``_handle_crash``,
+    which stamps ``github_fetch_failed`` so the result isn't dropped.
+    """
     from db.models import AuditContractCoverage
     from services.audits import coverage as coverage_mod
 
@@ -471,8 +408,6 @@ def test_process_row_records_crash_via_handle_crash(db_session, worker, seed_pro
     assert status is None
     assert isinstance(exc, RuntimeError)
 
-    # Manually invoke the crash handler — the run loop does this for us
-    # in production; we exercise it here to assert the fallback write.
     worker._handle_crash(row_id, exc)
     db_session.expire_all()
     row = db_session.query(AuditContractCoverage).filter_by(id=row_id).one()
@@ -488,15 +423,14 @@ def test_process_row_records_crash_via_handle_crash(db_session, worker, seed_pro
 
 
 def test_recover_stale_resets_old_verifying_rows_to_pending(db_session, worker, seed_protocol):
-    """A row stuck in ``verifying`` past the cutoff is reverted to
-    ``pending`` so the next claim picks it up. Without recovery, a
-    crashed worker would strand its claimed rows invisible to siblings."""
+    """A row stuck in ``verifying`` past the cutoff reverts to ``pending``; otherwise a crashed worker strands its
+    claimed rows invisible to siblings.
+    """
     from db.models import AuditContractCoverage
 
     protocol_id, _ = seed_protocol
     _seed_pending_row(db_session, protocol_id=protocol_id)
 
-    # Force the row into a stale 'verifying' state.
     row = db_session.query(AuditContractCoverage).filter_by(equivalence_status="pending").one()
     backdated = datetime.now(timezone.utc) - timedelta(seconds=worker.stale_seconds + 60)
     db_session.execute(
@@ -521,8 +455,6 @@ def test_recover_stale_resets_old_verifying_rows_to_pending(db_session, worker, 
 
 
 def test_recover_stale_leaves_fresh_verifying_rows_alone(db_session, worker, seed_protocol):
-    """A fresh ``verifying`` row (within the cutoff) must not be reset —
-    that worker's still working on it."""
     from db.models import AuditContractCoverage
 
     protocol_id, _ = seed_protocol
@@ -568,13 +500,10 @@ def test_in_flight_verify_survives_coverage_rebuild_race(db_session, worker, see
     assert len(claimed) == 1
     claimed_id = claimed[0]
 
-    # Rebuild coverage for the audit — old row goes away, new pending row appears.
     upsert_coverage_for_audit(db_session, audit.id)
     db_session.commit()
 
-    # The original claimed row should be gone.
     assert db_session.get(AuditContractCoverage, claimed_id) is None
 
-    # And there's exactly one fresh pending row to verify.
     pending_rows = db_session.query(AuditContractCoverage).filter_by(equivalence_status="pending").all()
     assert len(pending_rows) == 1

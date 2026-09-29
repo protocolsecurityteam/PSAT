@@ -1,19 +1,10 @@
-"""What a probe is allowed to put in an argument, and which attempts it may fire.
+"""What a probe may put in an argument, and which attempts it may fire.
 
-Three failures the 2026-07-22 live run made visible, all of them the prober's own
-fault rather than the contract's:
-
-* the probe amount was written into EVERY integer argument, so a redemption's
-  token id received one whole token unit and the call reverted on its own input
-  (``ERC721: invalid token ID``);
-* a ``msg.value`` retry was appended unconditionally, and a non-payable target
-  rejects it with an EMPTY revert before its body runs — 9 of 13 seeded calls;
-* a payout the contract could not fund (its own ETH balance was short) read as a
-  non-observation, with nothing recorded to say which precondition failed.
-
-The fixtures here are deliberately generic shapes — a plain ERC-721
-``redeem(uint256 id)``, a ``withdraw(uint256 amount, uint256 deadline)`` — so a
-pass cannot come from recognizing a protocol.
+Three prober-fault failures from the 2026-07-22 live run: the probe amount was written into EVERY
+integer argument (a token id got one whole token unit -> ``ERC721: invalid token ID``); a
+``msg.value`` retry was appended unconditionally and non-payable targets rejected it with an EMPTY
+revert (9 of 13 seeded calls); an unfundable payout read as a non-observation with no recorded reason.
+Fixtures are deliberately generic shapes so a pass cannot come from recognizing a protocol.
 """
 
 from __future__ import annotations
@@ -341,8 +332,7 @@ def test_contract_balance_attempt_runs_last_and_only_where_static_says_eth_leave
     chain = _UnderfundedChain()
     eff = _payout(chain, target_payable=True, native_payout=True)
     assert eff.verdict == VERDICT_PROVEN
-    # Ordering: the funded block is the LAST one, so a less synthetic attempt
-    # would always have won had it executed.
+    # The funded block is the LAST one, so a less synthetic attempt would have won had it executed.
     funded = [i for i, (_c, _t, ov) in enumerate(chain.blocks) if (ov or {}).get(CONTRACT.lower(), {}).get("balance")]
     assert funded == [len(chain.blocks) - 1]
 
