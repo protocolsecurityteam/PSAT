@@ -203,7 +203,23 @@ def test_dep_phase_passes_proxy_address(monkeypatch, tmp_path):
 # ===================================================================
 
 
-def test_dep_phase_stores_upgrade_history(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "fake_uh, expected_total_upgrades",
+    [
+        pytest.param(
+            {"schema_version": "0.1", "target_address": TARGET, "proxies": {DEP_A: {}}, "total_upgrades": 2},
+            2,
+            id="stored-when-proxies-exist",
+        ),
+        # No artifact is written when there are no proxies.
+        pytest.param(
+            {"schema_version": "0.1", "target_address": TARGET, "proxies": {}, "total_upgrades": 0},
+            None,
+            id="skipped-when-no-proxies",
+        ),
+    ],
+)
+def test_dep_phase_upgrade_history_artifact(monkeypatch, tmp_path, fake_uh, expected_total_upgrades):
     from workers.static_worker import StaticWorker
 
     worker = StaticWorker()
@@ -213,12 +229,6 @@ def test_dep_phase_stores_upgrade_history(monkeypatch, tmp_path):
         static=_static_deps(TARGET, [DEP_A]),
         dynamic=lambda addr, **_kw: _dynamic_deps(addr, [DEP_A]),
     )
-    fake_uh = {
-        "schema_version": "0.1",
-        "target_address": TARGET,
-        "proxies": {DEP_A: {}},
-        "total_upgrades": 2,
-    }
     monkeypatch.setattr(
         "services.discovery.upgrade_history.build_upgrade_history",
         lambda _p, enrich=True, from_block=0, chain_id=1: fake_uh,
@@ -228,30 +238,8 @@ def test_dep_phase_stores_upgrade_history(monkeypatch, tmp_path):
     project_dir.mkdir()
     worker._run_dependency_phase(MagicMock(), _job(), project_dir, "TestContract", TARGET)
 
-    assert "upgrade_history" in store
-    assert store["upgrade_history"]["total_upgrades"] == 2
-
-
-def test_dep_phase_skips_upgrade_history_when_no_proxies(monkeypatch, tmp_path):
-    from workers.static_worker import StaticWorker
-
-    worker = StaticWorker()
-    store = _patch_dep_phase(
-        monkeypatch,
-        worker,
-        static=_static_deps(TARGET, [DEP_A]),
-        dynamic=lambda addr, **_kw: _dynamic_deps(addr, [DEP_A]),
-    )
-    monkeypatch.setattr(
-        "services.discovery.upgrade_history.build_upgrade_history",
-        lambda _p, enrich=True: {"schema_version": "0.1", "target_address": TARGET, "proxies": {}, "total_upgrades": 0},
-    )
-
-    project_dir = tmp_path / "p"
-    project_dir.mkdir()
-    worker._run_dependency_phase(MagicMock(), _job(), project_dir, "TestContract", TARGET)
-
-    assert "upgrade_history" not in store
+    assert ("upgrade_history" in store) is (expected_total_upgrades is not None)
+    assert store.get("upgrade_history", {}).get("total_upgrades") == expected_total_upgrades
     assert "dependencies" in store
 
 

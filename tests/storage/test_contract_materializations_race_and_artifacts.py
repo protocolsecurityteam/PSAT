@@ -322,21 +322,22 @@ def _row_stub(**kwargs: Any) -> Any:
     return SimpleNamespace(**defaults)
 
 
-def test_hydrate_predicate_trees_unit():
-    row = _row_stub(
-        analysis={"should": "not appear"},
-        predicate_trees={"trees": {"f()": {}}},
-    )
-    assert cm.hydrate_predicate_trees(row) == {"trees": {"f()": {}}}
-
-
-def test_hydrate_predicate_trees_returns_none_for_pre_migration_row():
-    """Pre-c1d2e3f4a5b6 rows have neither column; None lets the caller take its "no semantic artifact" path."""
-    row = _row_stub(
-        analysis={"controllers": []},
-        tracking_plan={"slots": []},
-    )
-    assert cm.hydrate_predicate_trees(row) is None
+@pytest.mark.parametrize(
+    "row_kwargs, expected",
+    [
+        pytest.param(
+            {"analysis": {"should": "not appear"}, "predicate_trees": {"trees": {"f()": {}}}},
+            {"trees": {"f()": {}}},
+            id="reads-predicate-trees-column",
+        ),
+        # Pre-c1d2e3f4a5b6 rows have neither column; None lets the caller take its "no semantic artifact" path.
+        pytest.param(
+            {"analysis": {"controllers": []}, "tracking_plan": {"slots": []}}, None, id="pre-migration-row-is-none"
+        ),
+    ],
+)
+def test_hydrate_predicate_trees_unit(row_kwargs, expected):
+    assert cm.hydrate_predicate_trees(_row_stub(**row_kwargs)) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -345,67 +346,50 @@ def test_hydrate_predicate_trees_returns_none_for_pre_migration_row():
 
 
 @requires_postgres
-def test_find_by_keccak_filters_on_schema_version(_clean_cm):
-    chain = "1"
-    keccak_old = "0x" + "a1" * 32
-    keccak_cur = "0x" + "a2" * 32
-
+@pytest.mark.parametrize(
+    "find, hit_attr, hit_idx, old_keys, cur_keys",
+    [
+        pytest.param(
+            lambda session, keys: cm.find_by_keccak(session, chain="1", bytecode_keccak=keys[0]),
+            "bytecode_keccak",
+            0,
+            ("0x" + "a1" * 32, "0x" + "1" * 40),
+            ("0x" + "a2" * 32, "0x" + "2" * 40),
+            id="find_by_keccak",
+        ),
+        pytest.param(
+            lambda session, keys: cm.find_by_address(session, chain="1", address=keys[1]),
+            "address",
+            1,
+            ("0x" + "b3" * 32, "0x" + "a3" * 20),
+            ("0x" + "b4" * 32, "0x" + "a4" * 20),
+            id="find_by_address",
+        ),
+    ],
+)
+def test_find_filters_on_schema_version(_clean_cm, find, hit_attr, hit_idx, old_keys, cur_keys):
+    """keys are (bytecode_keccak, address)."""
     _clean_cm.add_all(
         [
             ContractMaterialization(
-                chain=chain,
-                bytecode_keccak=keccak_old,
-                address="0x" + "1" * 40,
+                chain="1",
+                bytecode_keccak=keys[0],
+                address=keys[1],
                 status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION - 1,
-            ),
-            ContractMaterialization(
-                chain=chain,
-                bytecode_keccak=keccak_cur,
-                address="0x" + "2" * 40,
-                status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
-            ),
+                analysis_schema_version=version,
+            )
+            for keys, version in (
+                (old_keys, cm.ANALYSIS_SCHEMA_VERSION - 1),
+                (cur_keys, cm.ANALYSIS_SCHEMA_VERSION),
+            )
         ]
     )
     _clean_cm.commit()
 
-    assert cm.find_by_keccak(_clean_cm, chain=chain, bytecode_keccak=keccak_old) is None
-    hit = cm.find_by_keccak(_clean_cm, chain=chain, bytecode_keccak=keccak_cur)
+    assert find(_clean_cm, old_keys) is None
+    hit = find(_clean_cm, cur_keys)
     assert hit is not None
-    assert hit.bytecode_keccak == keccak_cur
-
-
-@requires_postgres
-def test_find_by_address_filters_on_schema_version(_clean_cm):
-    chain = "1"
-    addr_old = "0x" + "a3" * 20
-    addr_cur = "0x" + "a4" * 20
-
-    _clean_cm.add_all(
-        [
-            ContractMaterialization(
-                chain=chain,
-                bytecode_keccak="0x" + "b3" * 32,
-                address=addr_old,
-                status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION - 1,
-            ),
-            ContractMaterialization(
-                chain=chain,
-                bytecode_keccak="0x" + "b4" * 32,
-                address=addr_cur,
-                status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
-            ),
-        ]
-    )
-    _clean_cm.commit()
-
-    assert cm.find_by_address(_clean_cm, chain=chain, address=addr_old) is None
-    hit = cm.find_by_address(_clean_cm, chain=chain, address=addr_cur)
-    assert hit is not None
-    assert hit.address == addr_cur
+    assert getattr(hit, hit_attr) == cur_keys[hit_idx]
 
 
 @requires_postgres

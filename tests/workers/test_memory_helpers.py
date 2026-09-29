@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 from utils.memory import (
     _vmrss_bytes,
     cache_pressure_message,
@@ -103,28 +105,24 @@ def test_cache_pressure_skips_to_top_threshold():
     assert cache_pressure_message("jumpy", 50, 100) is None
 
 
-def test_reset_cache_pressure_state_per_name():
-    reset_cache_pressure_state("a")
-    reset_cache_pressure_state("b")
-    cache_pressure_message("a", 50, 100)
-    cache_pressure_message("b", 50, 100)
-
-    reset_cache_pressure_state("a")
-    # Only 'a' was reset — 'b' still suppressed.
-    assert cache_pressure_message("a", 50, 100) is not None
-    assert cache_pressure_message("b", 60, 100) is None
-
-
-def test_reset_cache_pressure_state_all():
+@pytest.mark.parametrize(
+    ("reset_arg", "y_level", "y_fires_again"),
+    [
+        # Only 'x' was reset — 'y' still suppressed.
+        pytest.param("x", 60, False, id="per_name"),
+        # Both should fire again.
+        pytest.param(None, 50, True, id="all"),
+    ],
+)
+def test_reset_cache_pressure_state(reset_arg, y_level, y_fires_again):
     reset_cache_pressure_state("x")
     reset_cache_pressure_state("y")
     cache_pressure_message("x", 50, 100)
     cache_pressure_message("y", 50, 100)
 
-    reset_cache_pressure_state(None)
-    # Both should fire again.
+    reset_cache_pressure_state(reset_arg)
     assert cache_pressure_message("x", 50, 100) is not None
-    assert cache_pressure_message("y", 50, 100) is not None
+    assert (cache_pressure_message("y", y_level, 100) is not None) is y_fires_again
 
 
 def test_cache_pressure_handles_zero_max():

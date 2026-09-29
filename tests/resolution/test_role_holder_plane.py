@@ -310,30 +310,31 @@ def test_cold_or_missing_cursor_withholds_every_holder_set(db_session, monkeypat
         assert row["unconfirmed_candidate_count"] is None
 
 
-def test_all_candidates_revert_withholds(db_session, monkeypatch):
-    """The 0xd5edf773 / USDC shape: warm cursors, but no AccessControl beneath."""
+@pytest.mark.parametrize(
+    "verdicts",
+    [
+        # The 0xd5edf773 / USDC shape: warm cursors, but no AccessControl beneath (every probe
+        # falls through to MEASURED_REVERT).
+        pytest.param({}, id="all-candidates-revert"),
+        # A genuinely fully-revoked role publishes NULL, never ``[]``: a direct storage write the
+        # recording surface never saw would appear in neither the fold nor this arm.
+        pytest.param(
+            {
+                (role, account): FALSE_WORD
+                for role in (ZERO_ROLE, PAUSER, OPERATING_ADMIN)
+                for account in (ADMIN_HOLDER, REVOKED_A, REVOKED_B, PAUSER_EXTRA, OPS_HOLDER)
+            },
+            id="all-candidates-read-false",
+        ),
+    ],
+)
+def test_all_candidates_withhold(db_session, monkeypatch, verdicts):
     session = db_session
     _seed(session)
-    rows = _run(session, monkeypatch, {})  # every probe falls through to MEASURED_REVERT
-    for row in rows:
-        assert row["holders"] is None
-        assert row["holders_basis"] == "not_determined"
-        assert row["coverage"] == "partial"
-
-
-def test_all_candidates_read_false_withholds(db_session, monkeypatch):
-    """A genuinely fully-revoked role publishes NULL, never ``[]``: a direct storage write the
-    recording surface never saw would appear in neither the fold nor this arm."""
-    session = db_session
-    _seed(session)
-    verdicts = {
-        (role, account): FALSE_WORD
-        for role in (ZERO_ROLE, PAUSER, OPERATING_ADMIN)
-        for account in (ADMIN_HOLDER, REVOKED_A, REVOKED_B, PAUSER_EXTRA, OPS_HOLDER)
-    }
     rows = _run(session, monkeypatch, verdicts)
     for row in rows:
         assert row["holders"] is None
+        assert row["holders_basis"] == "not_determined"
         assert row["coverage"] == "partial"
 
 
@@ -403,30 +404,40 @@ def test_role_name_absent_without_a_preimage(db_session, monkeypatch):
     assert row["holders"] == [ADMIN_HOLDER], "the hash is the identity; the name is decoration"
 
 
-def test_keccak_mismatch_is_refused():
-    """The hard ban: a role-shaped name may not be attached to a hash it does not hash to."""
-    bogus = "0x" + "de" * 32
-    assert rhp.resolve_role_name(bogus, ["PAUSER_ROLE", "DEFAULT_ADMIN_ROLE"], has_role_answered=True) == (
-        None,
-        "not_determined",
-    )
-
-
-def test_misparsed_storage_pointers_cannot_leak_a_name():
-    """D6-reject stops MINTING these, but existing rows persist until re-analysis; the keccak gate
-    makes that harmless."""
-    pool = ["OwnableStorageLocation", "AccessControlDefaultAdminRulesStorageLocation"]
-    assert rhp.resolve_role_name(PAUSER, pool, has_role_answered=True) == (None, "not_determined")
-
-
-def test_default_admin_name_needs_an_answered_has_role():
-    """A6 — the zero-word arm is an AccessControl convention; it may not fire on an emitter proven not to implement
-    ``hasRole``."""
-    assert rhp.resolve_role_name(ZERO_ROLE, [], has_role_answered=True) == (
-        "DEFAULT_ADMIN_ROLE",
-        "accesscontrol_default_admin_literal",
-    )
-    assert rhp.resolve_role_name(ZERO_ROLE, [], has_role_answered=False) == (None, "not_determined")
+@pytest.mark.parametrize(
+    "role, pool, has_role_answered, expected",
+    [
+        # CRITICAL, the hard ban: a role-shaped name may not be attached to a hash it does not hash to.
+        pytest.param(
+            "0x" + "de" * 32,
+            ["PAUSER_ROLE", "DEFAULT_ADMIN_ROLE"],
+            True,
+            (None, "not_determined"),
+            id="keccak-mismatch-refused",
+        ),
+        # D6-reject stops MINTING these, but existing rows persist until re-analysis; the keccak
+        # gate makes that harmless.
+        pytest.param(
+            PAUSER,
+            ["OwnableStorageLocation", "AccessControlDefaultAdminRulesStorageLocation"],
+            True,
+            (None, "not_determined"),
+            id="misparsed-storage-pointers-cannot-leak-a-name",
+        ),
+        # A6: the zero-word arm is an AccessControl convention; it may not fire on an emitter
+        # proven not to implement ``hasRole``.
+        pytest.param(
+            ZERO_ROLE,
+            [],
+            True,
+            ("DEFAULT_ADMIN_ROLE", "accesscontrol_default_admin_literal"),
+            id="default-admin-answered",
+        ),
+        pytest.param(ZERO_ROLE, [], False, (None, "not_determined"), id="default-admin-unanswered"),
+    ],
+)
+def test_resolve_role_name(role, pool, has_role_answered, expected):
+    assert rhp.resolve_role_name(role, pool, has_role_answered=has_role_answered) == expected
 
 
 def test_default_admin_name_withheld_when_registry_never_answers(db_session, monkeypatch):
@@ -529,50 +540,48 @@ def test_disagreement_records_carry_no_cause(db_session, monkeypatch):
 # Cursor bounds consumed from U10A
 
 
-def test_explicit_seed_lower_bound_is_dropped(db_session, monkeypatch):
-    """A caller-supplied seed is not a witness; the number goes with the basis so nothing can cite it."""
+@pytest.mark.parametrize(
+    "cursor_kwargs, expected",
+    [
+        # A caller-supplied seed is not a witness; the number goes with the basis so nothing can cite it.
+        pytest.param(
+            [
+                {"first_indexed_block": 100, "first_indexed_block_basis": FIRST_INDEXED_BASIS_EXPLICIT},
+                {"first_indexed_block": 100, "first_indexed_block_basis": FIRST_INDEXED_BASIS_EXPLICIT},
+            ],
+            {"cursor_first_indexed_block": None, "cursor_first_indexed_block_basis": "not_determined"},
+            id="explicit-seed-dropped",
+        ),
+        # Weakest link: the pair is only covered from the HIGHER of the two. A lower bound alone
+        # licenses nothing (never exhaustiveness).
+        pytest.param(
+            [
+                {"first_indexed_block": 20933000, "first_indexed_block_basis": FIRST_INDEXED_BASIS_CREATION},
+                {"first_indexed_block": 20933100, "first_indexed_block_basis": FIRST_INDEXED_BASIS_CREATION},
+            ],
+            {
+                "cursor_first_indexed_block": 20933100,
+                "cursor_first_indexed_block_basis": FIRST_INDEXED_BASIS_CREATION,
+                "holder_set_exhaustive": "not_determined",
+            },
+            id="witnessed-carried",
+        ),
+        pytest.param(
+            [{"enrollment_basis": ENROLLMENT_BASIS_TRACKED_TOPICS}] * 2,
+            {
+                "holders": [ADMIN_HOLDER],
+                "cursor_enrollment_bases": {RG: ENROLLMENT_BASIS_TRACKED_TOPICS, RR: ENROLLMENT_BASIS_TRACKED_TOPICS},
+                "holder_set_exhaustive": "not_determined",
+            },
+            id="tracked-topics-recorded-not-depended-on",
+        ),
+    ],
+)
+def test_cursor_lower_bound_basis(db_session, monkeypatch, cursor_kwargs, expected):
     session = db_session
-    _seed(
-        session,
-        cursors=[
-            _cursor(RG, first_indexed_block=100, first_indexed_block_basis=FIRST_INDEXED_BASIS_EXPLICIT),
-            _cursor(RR, first_indexed_block=100, first_indexed_block_basis=FIRST_INDEXED_BASIS_EXPLICIT),
-        ],
-    )
+    _seed(session, cursors=[_cursor(RG, **cursor_kwargs[0]), _cursor(RR, **cursor_kwargs[1])])
     row = _by_role(_run(session, monkeypatch, {(PAUSER, ADMIN_HOLDER): TRUE_WORD}))[PAUSER]
-    assert row["cursor_first_indexed_block"] is None
-    assert row["cursor_first_indexed_block_basis"] == "not_determined"
-
-
-def test_witnessed_lower_bound_is_carried(db_session, monkeypatch):
-    session = db_session
-    _seed(
-        session,
-        cursors=[
-            _cursor(RG, first_indexed_block=20933000, first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION),
-            _cursor(RR, first_indexed_block=20933100, first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION),
-        ],
-    )
-    row = _by_role(_run(session, monkeypatch, {(PAUSER, ADMIN_HOLDER): TRUE_WORD}))[PAUSER]
-    # Weakest link: the pair is only covered from the HIGHER of the two.
-    assert row["cursor_first_indexed_block"] == 20933100
-    assert row["cursor_first_indexed_block_basis"] == FIRST_INDEXED_BASIS_CREATION
-    assert row["holder_set_exhaustive"] == "not_determined", "a lower bound alone licenses nothing"
-
-
-def test_tracked_topics_basis_is_recorded_not_depended_on(db_session, monkeypatch):
-    session = db_session
-    _seed(
-        session,
-        cursors=[
-            _cursor(RG, enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS),
-            _cursor(RR, enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS),
-        ],
-    )
-    row = _by_role(_run(session, monkeypatch, {(PAUSER, ADMIN_HOLDER): TRUE_WORD}))[PAUSER]
-    assert row["holders"] == [ADMIN_HOLDER]
-    assert row["cursor_enrollment_bases"] == {RG: ENROLLMENT_BASIS_TRACKED_TOPICS, RR: ENROLLMENT_BASIS_TRACKED_TOPICS}
-    assert row["holder_set_exhaustive"] == "not_determined"
+    assert {key: row[key] for key in expected} == expected
 
 
 # The pinned probe block itself (R2)
@@ -614,32 +623,33 @@ def test_probe_block_is_confirmation_depth_below_head(monkeypatch):
     assert all("latest" not in str(params) for _, params in calls), "never latest"
 
 
-def test_probe_block_survives_an_unreadable_hash(monkeypatch):
-    """The height stands on its own; only replay-after-reorg is weaker (hash is persisted WHEN READABLE)."""
+@pytest.mark.parametrize(
+    "stub_kwargs",
+    [
+        # The height stands on its own; only replay-after-reorg is weaker (hash is persisted WHEN READABLE).
+        pytest.param({"fail_hash": True}, id="survives-an-unreadable-hash"),
+        pytest.param({"block": {}}, id="hash-absent-from-payload-is-not-invented"),
+    ],
+)
+def test_probe_block_without_a_hash(monkeypatch, stub_kwargs):
     calls: list[tuple[str, list[Any]]] = []
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, fail_hash=True))
+    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, **stub_kwargs))
     pinned = rhp.pin_probe_block("http://stub", chain_id=1)
     assert pinned is not None
     assert pinned.number == HEAD - DEFAULT_CONFIRMATION_DEPTH
     assert pinned.block_hash is None
 
 
-def test_probe_block_hash_absent_from_payload_is_not_invented(monkeypatch):
+@pytest.mark.parametrize(
+    "stub_kwargs",
+    [
+        pytest.param({"fail_head": True}, id="unreadable-head"),
+        pytest.param({"head": hex(DEFAULT_CONFIRMATION_DEPTH)}, id="chain-shallower-than-confirmation-depth"),
+    ],
+)
+def test_no_probe_block(monkeypatch, stub_kwargs):
     calls: list[tuple[str, list[Any]]] = []
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, block={}))
-    pinned = rhp.pin_probe_block("http://stub", chain_id=1)
-    assert pinned is not None and pinned.block_hash is None
-
-
-def test_unreadable_head_yields_no_probe_block(monkeypatch):
-    calls: list[tuple[str, list[Any]]] = []
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, fail_head=True))
-    assert rhp.pin_probe_block("http://stub", chain_id=1) is None
-
-
-def test_chain_shallower_than_confirmation_depth_yields_no_probe_block(monkeypatch):
-    calls: list[tuple[str, list[Any]]] = []
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, head=hex(DEFAULT_CONFIRMATION_DEPTH)))
+    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, **stub_kwargs))
     assert rhp.pin_probe_block("http://stub", chain_id=1) is None
 
 
@@ -842,15 +852,6 @@ def test_published_row_must_carry_a_disagreement_log(db_session):
     session.rollback()
 
 
-def test_published_empty_disagreement_log_is_allowed(db_session):
-    session = db_session
-    session.add(RoleHolderPlane(**_valid_row(fold_chain_disagreements=[])))
-    session.flush()
-    stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
-    assert stored is not None and stored.fold_chain_disagreements == []
-    session.rollback()
-
-
 def test_withheld_rows_carry_a_null_disagreement_log(db_session, monkeypatch):
     session = db_session
     _seed(session)
@@ -873,6 +874,7 @@ def test_withheld_rows_carry_a_null_disagreement_log(db_session, monkeypatch):
             {"cursor_first_indexed_block_basis": "'creation_block_minus_one'"},
             id="witnessed_basis_without_a_block",
         ),
+        pytest.param({"cursor_first_indexed_block": "999"}, id="lower_bound_block_without_a_basis"),
     ],
 )
 def test_cursor_bound_columns_are_domain_checked(db_session, cols):
@@ -884,13 +886,6 @@ def test_cursor_bound_columns_are_domain_checked(db_session, cols):
     session = db_session
     with pytest.raises(IntegrityError):
         _raw_insert(session, "NULL", **cols)
-    session.rollback()
-
-
-def test_lower_bound_block_without_a_basis_is_rejected(db_session):
-    session = db_session
-    with pytest.raises(IntegrityError):
-        _raw_insert(session, "NULL", cursor_first_indexed_block="999")
     session.rollback()
 
 
@@ -911,23 +906,29 @@ def test_non_array_holders_are_rejected(db_session):
         session.rollback()
 
 
-def test_valid_row_round_trips(db_session):
+@pytest.mark.parametrize(
+    "row, expected",
+    [
+        pytest.param(
+            _valid_row(), {"holders": [ADMIN_HOLDER], "holder_set_exhaustive": "not_determined"}, id="valid-row"
+        ),
+        pytest.param(_withheld_orm_row(), {"holders": None, "fold_chain_disagreements": None}, id="withheld-row"),
+        # Positive control for the CHECKs: a published row may carry an empty disagreement log.
+        pytest.param(
+            _valid_row(fold_chain_disagreements=[]),
+            {"fold_chain_disagreements": []},
+            id="published-empty-disagreement-log",
+        ),
+    ],
+)
+def test_row_round_trips(db_session, row, expected):
     session = db_session
-    session.add(RoleHolderPlane(**_valid_row()))
+    session.add(RoleHolderPlane(**row))
     session.flush()
     stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
     assert stored is not None
-    assert stored.holders == [ADMIN_HOLDER]
-    assert stored.holder_set_exhaustive == "not_determined"
-
-
-def test_withheld_row_round_trips(db_session):
-    session = db_session
-    session.add(RoleHolderPlane(**_withheld_orm_row()))
-    session.flush()
-    stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
-    assert stored is not None and stored.holders is None
-    assert stored.fold_chain_disagreements is None
+    assert {column: getattr(stored, column) for column in expected} == expected
+    session.rollback()
 
 
 def test_persist_upserts(db_session, monkeypatch):

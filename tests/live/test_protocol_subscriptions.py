@@ -40,22 +40,15 @@ def protocol_subscription(
     return sub
 
 
-def test_protocol_subscription_created(protocol_subscription, company_protocol_id: int):
+def test_protocol_subscription_created(protocol_subscription, company_protocol_id: int, live_client: LiveClient):
     assert protocol_subscription["protocol_id"] == company_protocol_id
     assert protocol_subscription["discord_webhook_url"] == TEST_DISCORD_WEBHOOK_REDACTED
     assert protocol_subscription["label"] == "psat-live-test"
     # event_filter must roundtrip verbatim; the request validator could mangle it.
     assert protocol_subscription.get("event_filter") == {"event_types": ["upgraded"]}
 
-
-def test_protocol_subscription_listed(
-    protocol_subscription,
-    company_protocol_id: int,
-    live_client: LiveClient,
-):
     subs = live_client.protocol_subscriptions(company_protocol_id)
-    ids = {s["id"] for s in subs}
-    assert protocol_subscription["id"] in ids
+    assert protocol_subscription["id"] in {s["id"] for s in subs}
 
 
 def test_protocol_subscription_delete_roundtrip(
@@ -69,15 +62,6 @@ def test_protocol_subscription_delete_roundtrip(
 
     remaining = live_client.protocol_subscriptions(company_protocol_id)
     assert sub["id"] not in {s["id"] for s in remaining}
-
-
-def test_protocol_subscribe_unknown_protocol_404(live_client: LiveClient):
-    r = live_client._session.post(
-        live_client._url("/api/protocols/999999999/subscribe"),
-        json={"discord_webhook_url": TEST_DISCORD_WEBHOOK},
-        timeout=15,
-    )
-    assert r.status_code == 404, f"subscribing to unknown protocol should 404, got {r.status_code}"
 
 
 def test_re_enroll_protocol(company_protocol_id: int, live_client: LiveClient):
@@ -96,10 +80,18 @@ def test_re_enroll_protocol(company_protocol_id: int, live_client: LiveClient):
     assert isinstance(body.get("contracts_enrolled"), int)
 
 
-def test_re_enroll_unknown_protocol_404(live_client: LiveClient):
-    r = live_client._session.post(
-        live_client._url("/api/protocols/999999999/re-enroll"),
-        params={"chain": "ethereum"},
-        timeout=30,
-    )
-    assert r.status_code == 404, f"re-enroll on unknown protocol should 404, got {r.status_code}"
+@pytest.mark.parametrize(
+    ("path", "request_kwargs", "timeout"),
+    [
+        pytest.param(
+            "/api/protocols/999999999/subscribe",
+            {"json": {"discord_webhook_url": TEST_DISCORD_WEBHOOK}},
+            15,
+            id="subscribe",
+        ),
+        pytest.param("/api/protocols/999999999/re-enroll", {"params": {"chain": "ethereum"}}, 30, id="re_enroll"),
+    ],
+)
+def test_unknown_protocol_404(live_client: LiveClient, path, request_kwargs, timeout):
+    r = live_client._session.post(live_client._url(path), timeout=timeout, **request_kwargs)
+    assert r.status_code == 404, f"{path} on unknown protocol should 404, got {r.status_code}"

@@ -13,6 +13,8 @@ from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import cast
 
+import pytest
+
 from services.effects import claims_bridge, recipes
 from services.effects.calldata import (
     FunctionFacts,
@@ -143,21 +145,20 @@ def test_a_seeded_holder_balance_never_exceeds_the_supply_backing_it():
     assert balance_seed_amount(by_sig["allowance(address,address)"], layout) == SEED_AMOUNT
 
 
-def test_an_unanswered_total_supply_leaves_the_seed_at_full_value():
-    """No supply to respect, and seeding nothing would simply lose the probe."""
-    chain = FakeChain(asset_total_supply=None)
+@pytest.mark.parametrize(
+    "supply",
+    [
+        # No supply to respect, and seeding nothing would simply lose the probe.
+        pytest.param(None, id="unanswered_total_supply"),
+        # The cap is a minimum, not a replacement: a supply far above the seed keeps the seed.
+        pytest.param(2**200, id="supply_above_the_seed"),
+    ],
+)
+def test_an_uncapping_supply_leaves_the_seed_at_full_value(supply):
+    chain = FakeChain(asset_total_supply=supply)
     layout = discover_token_layout(chain, token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
 
-    assert layout.total_supply is None
-    for anchor in layout.anchors:
-        assert balance_seed_amount(anchor, layout) == SEED_AMOUNT
-
-
-def test_a_supply_above_the_seed_leaves_the_seed_at_full_value():
-    """The cap is a minimum, not a replacement: a supply far above the seed keeps the seed."""
-    chain = FakeChain(asset_total_supply=2**200)
-    layout = discover_token_layout(chain, token=ASSET, holder=PRINCIPAL, spender=VAULT, block_tag="0x1")
-
+    assert layout.total_supply == supply
     for anchor in layout.anchors:
         assert balance_seed_amount(anchor, layout) == SEED_AMOUNT
 

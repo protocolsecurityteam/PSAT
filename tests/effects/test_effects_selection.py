@@ -1447,26 +1447,33 @@ def test_shape1_empty_planning_marker_stops_the_re_sweep(db_session):
     assert orphan_fn not in _scoped_since(db_session, proto.id, owner_addr, reading_job_created)
 
 
-def test_marker_older_than_the_reading_job_does_not_own(db_session):
-    """The expiry that keeps the marker safe: planning inputs are not immutable
-    (an upgrade_events row lands, a re-analysis rewrites the functions), so a
-    marker from a previous run must NOT suppress this run's sweep."""
-    proto = _protocol(db_session, "scope-marker-stale")
+@pytest.mark.parametrize(
+    ("marker_offset", "read"),
+    [
+        # The expiry that keeps the marker safe: planning inputs are not immutable (an upgrade_events
+        # row lands, a re-analysis rewrites the functions), so a marker from a previous run must NOT
+        # suppress this run's sweep.
+        pytest.param(
+            -timedelta(hours=6),
+            lambda session, proto_id, owner_addr, created: _scoped_since(session, proto_id, owner_addr, created),
+            id="marker-older-than-the-reading-job",
+        ),
+        # No timestamp => rule 4 off. Costs a sweep, never coverage.
+        pytest.param(
+            timedelta(hours=1),
+            lambda session, proto_id, owner_addr, created: _scoped(session, proto_id, owner_addr),
+            id="marker-ignored-without-a-planned-since",
+        ),
+    ],
+)
+def test_marker_does_not_own_the_orphan(db_session, marker_offset, read):
+    proto = _protocol(db_session, "scope-marker-not-owning")
     owner_addr, orphan_fn, orphan = _swept_only(db_session, proto)
     reading_job_created = datetime.now(timezone.utc)
 
-    _mark_planned_empty(db_session, orphan.id, None, at=reading_job_created - timedelta(hours=6))
+    _mark_planned_empty(db_session, orphan.id, None, at=reading_job_created + marker_offset)
     db_session.commit()
-    assert orphan_fn in _scoped_since(db_session, proto.id, owner_addr, reading_job_created)
-
-
-def test_marker_is_ignored_without_a_planned_since(db_session):
-    """No timestamp ⇒ rule 4 off. Costs a sweep, never coverage."""
-    proto = _protocol(db_session, "scope-marker-nosince")
-    owner_addr, orphan_fn, orphan = _swept_only(db_session, proto)
-    _mark_planned_empty(db_session, orphan.id, None, at=datetime.now(timezone.utc) + timedelta(hours=1))
-    db_session.commit()
-    assert orphan_fn in _scoped(db_session, proto.id, owner_addr)
+    assert orphan_fn in read(db_session, proto.id, owner_addr, reading_job_created)
 
 
 def test_marker_does_not_shadow_a_contract_that_yields_plans(db_session):

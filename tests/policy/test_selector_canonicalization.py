@@ -162,22 +162,6 @@ def test_build_effective_permissions_selector_column_is_canonical(predicate_arti
     assert by_name["setFoo"]["selector"] == SET_FOO_CANONICAL
 
 
-def test_canonical_signature_falls_back_when_slither_cannot_lower():
-    """``solidity_signature`` raises for the occasional non-lowerable struct param
-    (recursive types); those drop out of the map so consumers fall back to full_name."""
-
-    class _Raises:
-        @property
-        def solidity_signature(self) -> str:
-            raise ValueError("recursive struct cannot be lowered")
-
-    class _NonString:
-        solidity_signature = 1234  # not a str
-
-    assert _canonical_signature(_Raises()) is None
-    assert _canonical_signature(_NonString()) is None
-
-
 # --- nested / repeated user-defined type lowering -------------------------
 #
 # Every occurrence of a repeated or nested user-defined type must lower, not just the
@@ -329,18 +313,39 @@ def test_canonical_signature_rejects_self_recursive_struct():
     assert _canonical_signature(walk) is None
 
 
-def test_canonical_signature_guards_missing_parameters():
-    """No lowerable ``parameters`` returns ``None`` rather than raising."""
+class _Raises:
+    @property
+    def solidity_signature(self) -> str:
+        raise ValueError("recursive struct cannot be lowered")
 
-    class _NoParams:
-        name = "f"
-        parameters = None
 
-    class _NoName:
-        parameters = []
+class _NonString:
+    solidity_signature = 1234  # not a str
 
-    assert _canonical_signature(_NoParams()) is None
-    assert _canonical_signature(_NoName()) is None
+
+class _NoParams:
+    name = "f"
+    parameters = None
+
+
+class _NoName:
+    parameters = []
+
+
+@pytest.mark.parametrize(
+    "fake",
+    [
+        # ``solidity_signature`` raises for the occasional non-lowerable struct param (recursive
+        # types); those drop out of the map so consumers fall back to full_name.
+        pytest.param(_Raises(), id="slither-cannot-lower"),
+        pytest.param(_NonString(), id="non-string-solidity-signature"),
+        # No lowerable ``parameters`` returns ``None`` rather than raising.
+        pytest.param(_NoParams(), id="missing-parameters"),
+        pytest.param(_NoName(), id="missing-name"),
+    ],
+)
+def test_canonical_signature_guards(fake):
+    assert _canonical_signature(fake) is None
 
 
 # ---------------------------------------------------------------------------

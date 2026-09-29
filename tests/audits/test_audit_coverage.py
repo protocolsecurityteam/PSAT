@@ -32,14 +32,27 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 
-def test_audit_effective_ts_full_date():
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # End-of-day semantics so "impl replaced on 2024-06-15" matches.
+        pytest.param("2024-06-15", {"year": 2024, "month": 6, "day": 15, "hour": 23, "minute": 59}, id="full_date"),
+        pytest.param("2023", {"month": 12, "day": 31}, id="year_only"),
+        pytest.param(None, None, id="none"),
+        pytest.param("", None, id="empty"),
+        pytest.param("nonsense", None, id="garbage"),
+    ],
+)
+def test_audit_effective_ts(raw, expected):
     from services.audits.coverage import _audit_effective_ts
 
-    got = _audit_effective_ts("2024-06-15")
+    got = _audit_effective_ts(raw)
+    if expected is None:
+        assert got is None
+        return
     assert got is not None
-    # End-of-day semantics so "impl replaced on 2024-06-15" matches.
-    assert got.year == 2024 and got.month == 6 and got.day == 15
-    assert got.hour == 23 and got.minute == 59
+    for attr, value in expected.items():
+        assert getattr(got, attr) == value
 
 
 def test_audit_effective_ts_month_placeholder():
@@ -51,22 +64,6 @@ def test_audit_effective_ts_month_placeholder():
     b = _audit_effective_ts("2024-06")
     assert a == b
     assert a is not None and a.month == 6 and a.day == 30
-
-
-def test_audit_effective_ts_year_only():
-    from services.audits.coverage import _audit_effective_ts
-
-    got = _audit_effective_ts("2023")
-    assert got is not None
-    assert got.month == 12 and got.day == 31
-
-
-def test_audit_effective_ts_none_and_garbage():
-    from services.audits.coverage import _audit_effective_ts
-
-    assert _audit_effective_ts(None) is None
-    assert _audit_effective_ts("") is None
-    assert _audit_effective_ts("nonsense") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1437,25 +1434,25 @@ def test_fetch_bytecode_keccak_returns_hex_hash(monkeypatch):
     assert len(got) == 66  # 0x + 64 hex chars
 
 
-def test_fetch_bytecode_keccak_none_on_empty_code(monkeypatch):
-    """EOA or selfdestructed address returns ``None`` not a zero hash."""
+def _boom_get_code(_rpc_url, _addr):
+    raise RuntimeError("RPC down")
+
+
+@pytest.mark.parametrize(
+    ("addr", "get_code"),
+    [
+        # EOA or selfdestructed address returns ``None`` not a zero hash.
+        pytest.param("0x" + "cd" * 20, _stub_get_code({}), id="empty_code"),
+        # RPC exception -> NULL propagates (drift-unknown, not drift-detected).
+        pytest.param("0x" + "ef" * 20, _boom_get_code, id="rpc_error"),
+    ],
+)
+def test_fetch_bytecode_keccak_none(monkeypatch, addr, get_code):
     from services.audits import coverage as cov
     from services.clients import rpc
 
-    monkeypatch.setattr(rpc, "get_code", _stub_get_code({}))
-    assert cov._fetch_bytecode_keccak("0x" + "cd" * 20, "ethereum") is None
-
-
-def test_fetch_bytecode_keccak_none_on_rpc_error(monkeypatch):
-    """RPC exception → NULL propagates (drift-unknown, not drift-detected)."""
-    from services.audits import coverage as cov
-    from services.clients import rpc
-
-    def boom(_rpc_url, _addr):
-        raise RuntimeError("RPC down")
-
-    monkeypatch.setattr(rpc, "get_code", boom)
-    assert cov._fetch_bytecode_keccak("0x" + "ef" * 20, "ethereum") is None
+    monkeypatch.setattr(rpc, "get_code", get_code)
+    assert cov._fetch_bytecode_keccak(addr, "ethereum") is None
 
 
 def test_upsert_coverage_keccak_null_when_rpc_fails(db_session, seed_protocol, monkeypatch):
@@ -1754,58 +1751,48 @@ class TestComputeProofKind:
 
         return _compute_proof_kind({m.lower() for m in matched}, classified)
 
-    def test_unclassified_when_no_classification_data(self):
-        assert self._call(["abc1234"], None) == "unclassified"
-        assert self._call(["abc1234"], []) == "unclassified"
+    _REVIEWED = {"sha": "abc1234", "label": "reviewed", "context": "review"}
+    _FIX = {"sha": "def5678", "label": "fix", "context": "fix L-01"}
 
-    def test_clean_when_matched_reviewed_and_no_fix_commits(self):
-        classified = [{"sha": "abc1234", "label": "reviewed", "context": "audited at abc1234"}]
-        assert self._call(["abc1234"], classified) == "clean"
-
-    def test_clean_when_matched_reviewed_and_fix(self):
-        classified = [
-            {"sha": "abc1234", "label": "reviewed", "context": "review"},
-            {"sha": "def5678", "label": "fix", "context": "fix L-01"},
-        ]
-        assert self._call(["abc1234", "def5678"], classified) == "clean"
-
-    def test_post_fix_when_matched_only_fix(self):
-        classified = [
-            {"sha": "abc1234", "label": "reviewed", "context": "review"},
-            {"sha": "def5678", "label": "fix", "context": "fix L-01"},
-        ]
-        assert self._call(["def5678"], classified) == "post_fix"
-
-    def test_pre_fix_unpatched_when_reviewed_matches_but_fix_doesnt(self):
-        """DANGER: deployed matches reviewed AND fix commits exist AND
-        deployed doesn't match any fix. Audit's findings are still
-        present in the deployed code."""
-        classified = [
-            {"sha": "abc1234", "label": "reviewed", "context": "review"},
-            {"sha": "def5678", "label": "fix", "context": "fix L-01"},
-            {"sha": "ffa9876", "label": "fix", "context": "fix L-02"},
-        ]
-        assert self._call(["abc1234"], classified) == "pre_fix_unpatched"
-
-    def test_cited_only_when_match_hits_cited_label(self):
-        """Matched only a commit labeled as 'cited' (historical context,
-        not the reviewed commit) — coincidence. Weak signal."""
-        classified = [
-            {"sha": "abc1234", "label": "reviewed", "context": "review"},
-            {"sha": "def5678", "label": "cited", "context": "baseline"},
-        ]
-        assert self._call(["def5678"], classified) == "cited_only"
-
-    def test_cited_only_when_match_hits_unclear_label(self):
-        classified = [
-            {"sha": "abc1234", "label": "reviewed", "context": "review"},
-            {"sha": "def5678", "label": "unclear", "context": "?"},
-        ]
-        assert self._call(["def5678"], classified) == "cited_only"
-
-    def test_prefix_match_tolerates_abbreviated_shas(self):
-        """Matched commit is 40-char full SHA; classified is 7-char abbrev.
-        Proof kind computation compares on the shared 7-char prefix."""
-        full = "abc1234" + "f" * 33
-        classified = [{"sha": "abc1234", "label": "reviewed", "context": "review"}]
-        assert self._call([full], classified) == "clean"
+    @pytest.mark.parametrize(
+        ("matched", "classified", "expected"),
+        [
+            pytest.param(["abc1234"], None, "unclassified", id="unclassified_none"),
+            pytest.param(["abc1234"], [], "unclassified", id="unclassified_empty"),
+            pytest.param(
+                ["abc1234"],
+                [{"sha": "abc1234", "label": "reviewed", "context": "audited at abc1234"}],
+                "clean",
+                id="clean_reviewed_no_fix_commits",
+            ),
+            pytest.param(["abc1234", "def5678"], [_REVIEWED, _FIX], "clean", id="clean_reviewed_and_fix"),
+            pytest.param(["def5678"], [_REVIEWED, _FIX], "post_fix", id="post_fix_matched_only_fix"),
+            # CRITICAL, DANGER: deployed matches reviewed AND fix commits exist AND deployed doesn't
+            # match any fix. Audit's findings are still present in the deployed code.
+            pytest.param(
+                ["abc1234"],
+                [_REVIEWED, _FIX, {"sha": "ffa9876", "label": "fix", "context": "fix L-02"}],
+                "pre_fix_unpatched",
+                id="pre_fix_unpatched",
+            ),
+            # Matched only a commit labeled 'cited' (historical context, not the reviewed commit):
+            # coincidence, weak signal.
+            pytest.param(
+                ["def5678"],
+                [_REVIEWED, {"sha": "def5678", "label": "cited", "context": "baseline"}],
+                "cited_only",
+                id="cited_only_cited_label",
+            ),
+            pytest.param(
+                ["def5678"],
+                [_REVIEWED, {"sha": "def5678", "label": "unclear", "context": "?"}],
+                "cited_only",
+                id="cited_only_unclear_label",
+            ),
+            # Matched commit is a 40-char full SHA; classified is a 7-char abbrev. Proof kind
+            # compares on the shared 7-char prefix.
+            pytest.param(["abc1234" + "f" * 33], [_REVIEWED], "clean", id="prefix_match_abbreviated_shas"),
+        ],
+    )
+    def test_proof_kind(self, matched, classified, expected):
+        assert self._call(matched, classified) == expected

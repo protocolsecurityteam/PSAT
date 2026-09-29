@@ -1645,12 +1645,6 @@ def test_scalar_collection_read_stamps_an_empty_member_path(element_slither):
     assert element["element_key_param_index"] == 0
 
 
-def test_bare_parameter_comparison_stamps_no_element_fields(element_slither):
-    """``msg.sender == who`` reads no storage element at all."""
-    for op in _operands(element_slither, "bareParameter"):
-        assert not any(field in op for field in _ELEMENT_FIELDS)
-
-
 def test_caller_keyed_read_stamps_a_proven_null_key_slot(element_slither):
     """``balances[msg.sender]``: the key is proven to be the caller, so no entry
     parameter names the cell. That is an earned negative and must reach the
@@ -1674,31 +1668,25 @@ def test_collection_polarity_refuses_a_key_it_cannot_pin(element_slither):
     assert not any(field in collection for field in _ELEMENT_FIELDS)
 
 
-def test_computed_key_stamps_nothing(element_slither):
-    """``bids[_bidId + 1]`` carries ``_bidId``'s own source alongside the
-    arithmetic. Reading the slot off it would publish agreement with
-    ``bids[_bidId]`` over two different cells."""
-    for op in _operands(element_slither, "computedKey"):
-        assert not any(field in op for field in _ELEMENT_FIELDS)
-
-
-def test_storage_pointer_local_stamps_nothing(element_slither):
-    """The member is read off a storage-pointer local, so the walk never reaches
-    the state variable and publishes no cell rather than guessing one."""
-    for op in _operands(element_slither, "storagePointer"):
-        assert not any(field in op for field in _ELEMENT_FIELDS)
-
-
-def test_two_key_levels_stamp_nothing(element_slither):
-    """One published slot cannot name two key levels; an ambiguous cell is not a
-    narrower one."""
-    for op in _operands(element_slither, "twoKeyLevels"):
-        assert not any(field in op for field in _ELEMENT_FIELDS)
-
-
-def test_merged_chain_stamps_nothing(element_slither):
-    """A value joined from two different collections has no single record."""
-    for op in _operands(element_slither, "mergedChain"):
+@pytest.mark.parametrize(
+    "function_name",
+    [
+        # ``msg.sender == who`` reads no storage element at all.
+        pytest.param("bareParameter", id="bare_parameter_comparison"),
+        # ``bids[_bidId + 1]`` carries ``_bidId``'s own source alongside the arithmetic. Reading the slot off it
+        # would publish agreement with ``bids[_bidId]`` over two different cells.
+        pytest.param("computedKey", id="computed_key"),
+        # The member is read off a storage-pointer local, so the walk never reaches the state variable and
+        # publishes no cell rather than guessing one.
+        pytest.param("storagePointer", id="storage_pointer_local"),
+        # One published slot cannot name two key levels; an ambiguous cell is not a narrower one.
+        pytest.param("twoKeyLevels", id="two_key_levels"),
+        # A value joined from two different collections has no single record.
+        pytest.param("mergedChain", id="merged_chain"),
+    ],
+)
+def test_unpinnable_element_read_stamps_nothing(element_slither, function_name):
+    for op in _operands(element_slither, function_name):
         assert not any(field in op for field in _ELEMENT_FIELDS)
 
 

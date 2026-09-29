@@ -4,8 +4,8 @@
    test over a JSONB column is true for the jsonb scalar ``null`` as well as a real payload, so a
    "does this row carry evidence?" filter written that way is inflated (five offenders before
    this module: ``deferred_reconciler``, ``company_overview``, ``coverage``).
-2. :func:`test_jsonb_state_separates_all_three_states` pins, against real Postgres, that the three
-   states exist, ``db.jsonb`` separates them, and the replaced predicate does not.
+2. :func:`test_jsonb_state_separates_three_states_and_has_payload_selects_one` pins, against real Postgres,
+   that the three states exist, ``db.jsonb`` separates them, and the replaced predicate does not.
 
 Known scan limits: it resolves a column by *attribute name*, so ``col = Model.conditions`` then
 ``col.is_not(None)`` is invisible to it (the DB test uses that form on purpose to hold the naive
@@ -152,7 +152,9 @@ def _materializations(db_session: Session):
         db_session.commit()
 
 
-def test_jsonb_state_separates_all_three_states(db_session: Session, _materializations: list[str]) -> None:
+def test_jsonb_state_separates_three_states_and_has_payload_selects_one(
+    db_session: Session, _materializations: list[str]
+) -> None:
     scoped = ContractMaterialization.chain.in_(_materializations)
     rows = db_session.execute(
         select(ContractMaterialization.chain, jsonb_state(ContractMaterialization.analysis)).where(scoped)
@@ -164,9 +166,6 @@ def test_jsonb_state_separates_all_three_states(db_session: Session, _materializ
         "w0-5-unset": "unset",
     }
 
-
-def test_jsonb_has_payload_selects_the_payload_row(db_session: Session, _materializations: list[str]) -> None:
-    scoped = ContractMaterialization.chain.in_(_materializations)
     selected = db_session.scalars(
         select(ContractMaterialization.chain).where(scoped, jsonb_has_payload(ContractMaterialization.analysis))
     ).all()

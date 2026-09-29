@@ -6,6 +6,8 @@ Each soundness rule has an explicit NEGATIVE fail-closed test; the mapping is in
 
 from __future__ import annotations
 
+import pytest
+
 from services.clients.rpc import EthCallResult
 from services.effects import calldata as calldata_mod
 from services.effects import recipes
@@ -72,25 +74,42 @@ def test_transfers_in_extracts_only_dest_receives():
     assert ins[0][1] == CONTRACT.lower()
 
 
-def test_transfers_in_can_exclude_the_emitting_asset():
-    # A ``Transfer`` topic doesn't say which contract emitted it, so pin ``SimLog.address``.
+def _amount_word(n: int) -> str:
+    return "0x" + n.to_bytes(32, "big").hex()
+
+
+_OTHER_ASSET = "0x" + "77" * 20
+
+
+@pytest.mark.parametrize(
+    "direction,logs,pin_kwargs,unpinned_count",
+    [
+        # A ``Transfer`` topic doesn't say which contract emitted it, so pin ``SimLog.address``.
+        pytest.param(
+            "in",
+            [transfer_log(CONTRACT, PRINCIPAL, CONTRACT, 5), transfer_log(_OTHER_ASSET, PRINCIPAL, CONTRACT, 9)],
+            {"exclude_asset": CONTRACT},
+            2,
+            id="transfers_in_exclude_emitting_asset",
+        ),
+        pytest.param(
+            "out",
+            [transfer_log(TOKEN, CONTRACT, SENTINEL, 5), transfer_log(_OTHER_ASSET, CONTRACT, SENTINEL, 9)],
+            {"only_asset": _OTHER_ASSET},
+            2,
+            id="transfers_out_pin_emitting_asset",
+        ),
+    ],
+)
+def test_transfer_filters_pin_the_emitting_asset(direction, logs, pin_kwargs, unpinned_count):
     from services.effects.simulate import transfers_in
 
-    other = "0x" + "77" * 20
-    call = ok(logs=[transfer_log(CONTRACT, PRINCIPAL, CONTRACT, 5), transfer_log(other, PRINCIPAL, CONTRACT, 9)])
-    assert len(transfers_in(call, CONTRACT)) == 2
-    kept = transfers_in(call, CONTRACT, exclude_asset=CONTRACT)
+    fn = transfers_in if direction == "in" else transfers_out
+    call = ok(logs=logs)
+    assert len(fn(call, CONTRACT)) == unpinned_count
+    kept = fn(call, CONTRACT, **pin_kwargs)
     assert len(kept) == 1
-    assert kept[0][2] == "0x" + (9).to_bytes(32, "big").hex()
-
-
-def test_transfers_out_can_pin_the_emitting_asset():
-    other = "0x" + "77" * 20
-    call = ok(logs=[transfer_log(TOKEN, CONTRACT, SENTINEL, 5), transfer_log(other, CONTRACT, SENTINEL, 9)])
-    assert len(transfers_out(call, CONTRACT)) == 2
-    kept = transfers_out(call, CONTRACT, only_asset=other)
-    assert len(kept) == 1
-    assert kept[0][2] == "0x" + (9).to_bytes(32, "big").hex()
+    assert kept[0][2] == _amount_word(9)
 
 
 # ---------------------------------------------------------------------------

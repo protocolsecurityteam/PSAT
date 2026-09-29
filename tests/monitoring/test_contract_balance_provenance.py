@@ -518,35 +518,37 @@ class TestTokenRowsNeverInheritTheNativeHeight:
         view = {r.token_address: r for r in _view(db_session, c.id)}
         assert view[tok["token_address"]].block_number is None
 
-    def test_db_refuses_a_token_row_carrying_a_block(self, db_session):
-        proto = _protocol(db_session, "prov-tokblock-ck")
-        c = _contract(db_session, proto.id, _addr("a2"))
+    @pytest.mark.parametrize(
+        ("slug", "addr_suffix", "sql", "extra_params", "constraint"),
+        [
+            pytest.param(
+                "prov-tokblock-ck",
+                "a2",
+                "INSERT INTO contract_balances "
+                "(contract_id, token_address, decimals, raw_balance, block_number) "
+                "VALUES (:cid, :t, 18, '1', 100)",
+                {"t": "0x" + "ab" * 20},
+                "ck_contract_balances_token_block_null",
+                id="token_row_carrying_a_block",
+            ),
+            pytest.param(
+                "prov-priceblock-ck",
+                "a3",
+                "INSERT INTO contract_balances "
+                "(contract_id, decimals, raw_balance, price_block_number) VALUES (:cid, 18, '1', 100)",
+                {},
+                "ck_contract_balances_price_block_null",
+                id="price_height",
+            ),
+        ],
+    )
+    def test_db_refuses(self, db_session, slug, addr_suffix, sql, extra_params, constraint):
+        proto = _protocol(db_session, slug)
+        c = _contract(db_session, proto.id, _addr(addr_suffix))
         db_session.commit()
         with pytest.raises(Exception) as exc:
-            db_session.execute(
-                text(
-                    "INSERT INTO contract_balances "
-                    "(contract_id, token_address, decimals, raw_balance, block_number) "
-                    "VALUES (:cid, :t, 18, '1', 100)"
-                ),
-                {"cid": c.id, "t": "0x" + "ab" * 20},
-            )
-        assert "ck_contract_balances_token_block_null" in str(exc.value)
-        db_session.rollback()
-
-    def test_db_refuses_a_price_height(self, db_session):
-        proto = _protocol(db_session, "prov-priceblock-ck")
-        c = _contract(db_session, proto.id, _addr("a3"))
-        db_session.commit()
-        with pytest.raises(Exception) as exc:
-            db_session.execute(
-                text(
-                    "INSERT INTO contract_balances "
-                    "(contract_id, decimals, raw_balance, price_block_number) VALUES (:cid, 18, '1', 100)"
-                ),
-                {"cid": c.id},
-            )
-        assert "ck_contract_balances_price_block_null" in str(exc.value)
+            db_session.execute(text(sql), {"cid": c.id, **extra_params})
+        assert constraint in str(exc.value)
         db_session.rollback()
 
 

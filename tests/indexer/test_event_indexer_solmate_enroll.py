@@ -7,6 +7,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
 from eth_utils.crypto import keccak
 
 from workers.event_log_indexer import (
@@ -27,27 +28,32 @@ def _job():
     return cast(Any, SimpleNamespace(address=_PROTECTED))
 
 
-def test_recognizes_cancall_by_signature():
-    assert _is_solmate_cancall_descriptor(
-        {"kind": "external_set", "callee_signature": "canCall(address,address,bytes4)"}
-    )
+_CANCALL_SIGNATURE = "canCall(address,address,bytes4)"
 
 
-def test_recognizes_cancall_by_selector():
-    selector = "0x" + keccak(text="canCall(address,address,bytes4)").hex()[:8]
-    assert _is_solmate_cancall_descriptor({"kind": "external_set", "callee_selector": selector})
-
-
-def test_rejects_non_cancall_external_set():
-    assert not _is_solmate_cancall_descriptor(
-        {"kind": "external_set", "callee_signature": "permitted(address,bytes32)"}
-    )
-
-
-def test_rejects_non_external_set_descriptor():
-    assert not _is_solmate_cancall_descriptor(
-        {"kind": "mapping_membership", "callee_signature": "canCall(address,address,bytes4)"}
-    )
+@pytest.mark.parametrize(
+    "descriptor, expected",
+    [
+        pytest.param({"kind": "external_set", "callee_signature": _CANCALL_SIGNATURE}, True, id="cancall-by-signature"),
+        pytest.param(
+            {"kind": "external_set", "callee_selector": "0x" + keccak(text=_CANCALL_SIGNATURE).hex()[:8]},
+            True,
+            id="cancall-by-selector",
+        ),
+        pytest.param(
+            {"kind": "external_set", "callee_signature": "permitted(address,bytes32)"},
+            False,
+            id="rejects-non-cancall-external-set",
+        ),
+        pytest.param(
+            {"kind": "mapping_membership", "callee_signature": _CANCALL_SIGNATURE},
+            False,
+            id="rejects-non-external-set-descriptor",
+        ),
+    ],
+)
+def test_is_solmate_cancall_descriptor(descriptor, expected):
+    assert _is_solmate_cancall_descriptor(descriptor) is expected
 
 
 # F2: the Solmate enroll path resolves the authority strictly — it must never

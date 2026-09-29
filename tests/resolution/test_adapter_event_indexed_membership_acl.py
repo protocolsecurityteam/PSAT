@@ -13,6 +13,8 @@ import asyncio
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 import services.resolution.mapping_enumerator as mapping_enumerator
 from services.resolution.adapters import EvaluationContext
 from services.resolution.adapters.event_indexed import (
@@ -138,148 +140,149 @@ def test_implicit_predicate_fires_for_caller_keyed_membership_with_value_set_hin
     assert pred == {"op": "any_nonzero", "rhs_values": [], "value_type": "uint256"}
 
 
-def test_implicit_predicate_excluded_when_value_position_absent():
-    # LayerZero composeQueue: a caller-keyed data-map with no value slot stays unsupported.
-    desc = {
-        "kind": "mapping_membership",
-        "storage_var": "composeQueue",
-        "key_sources": [{"source": "msg_sender"}],
-        "enumeration_hint": [
+_COMPOSE_QUEUE_DESC = {
+    "kind": "mapping_membership",
+    "storage_var": "composeQueue",
+    "key_sources": [{"source": "msg_sender"}],
+    "enumeration_hint": [
+        {
+            "topic0": "0x" + "ab" * 32,
+            "direction": "set",
+            "value_position": None,
+            "key_position": 0,
+            "event_signature": "ComposeSent(address)",
+            "indexed_positions": [0],
+        }
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    "desc",
+    [
+        # LayerZero composeQueue: a caller-keyed data-map with no value slot stays unsupported.
+        pytest.param(_COMPOSE_QUEUE_DESC, id="value-position-absent"),
+        pytest.param(
             {
-                "topic0": "0x" + "ab" * 32,
-                "direction": "set",
-                "value_position": None,
-                "key_position": 0,
-                "event_signature": "ComposeSent(address)",
-                "indexed_positions": [0],
-            }
-        ],
-    }
+                **_eigenpod_descriptor(),
+                "key_sources": [{"source": "parameter", "parameter_index": 0, "parameter_name": "x"}],
+            },
+            id="not-caller-keyed",
+        ),
+        pytest.param(
+            {k: v for k, v in _eigenpod_descriptor().items() if k != "enumeration_hint"}, id="without-any-hint"
+        ),
+        pytest.param(
+            {**_eigenpod_descriptor(), "value_predicate": {"op": "eq", "rhs_values": ["3"], "value_type": "uint256"}},
+            id="not-overriding-explicit-value-predicate",
+        ),
+        # WeETH recover* RoleRegistry hasRole is an external_set, a different shape.
+        pytest.param(
+            {
+                "kind": "external_set",
+                "key_sources": [{"source": "msg_sender"}],
+                "enumeration_hint": [{"topic0": "0x" + "cd" * 32, "direction": "set", "value_position": 1}],
+            },
+            id="external-set",
+        ),
+    ],
+)
+def test_implicit_predicate_excluded(desc):
     assert _implicit_membership_value_predicate(desc) is None
 
 
-def test_implicit_predicate_excluded_when_not_caller_keyed():
-    desc = _eigenpod_descriptor()
-    desc["key_sources"] = [{"source": "parameter", "parameter_index": 0, "parameter_name": "x"}]
-    assert _implicit_membership_value_predicate(desc) is None
+@pytest.mark.parametrize(
+    "desc, hint, expected",
+    [
+        # caller key index 0 maps to topic index 1 -> indexed_positions[0] == event arg 0.
+        pytest.param(
+            _eigenpod_descriptor(),
+            _eigenpod_descriptor()["enumeration_hint"][0],
+            0,
+            id="resolves-caller-over-inner-key",
+        ),
+        # Caller key in event data (not a topic): key index 0 -> data slot 0, event arg 1
+        # (arg 0 is the indexed selector).
+        pytest.param(
+            {"kind": "mapping_membership", "storage_var": "consumers", "key_sources": [{"source": "msg_sender"}]},
+            {"topics_to_keys": {}, "data_to_keys": {"0": 0}, "indexed_positions": [0], "value_position": 2},
+            1,
+            id="from-non-indexed-data-arg",
+        ),
+        pytest.param(
+            {"kind": "mapping_membership", "key_sources": [{"source": "parameter", "parameter_index": 0}]},
+            {"topics_to_keys": {"1": 0}, "indexed_positions": [0]},
+            None,
+            id="none-when-no-caller-key",
+        ),
+    ],
+)
+def test_caller_event_arg_position(desc, hint, expected):
+    assert _caller_event_arg_position(desc, hint) == expected
 
 
-def test_implicit_predicate_excluded_without_any_hint():
-    desc = _eigenpod_descriptor()
-    del desc["enumeration_hint"]
-    assert _implicit_membership_value_predicate(desc) is None
+@pytest.mark.parametrize(
+    "desc, expected",
+    [
+        pytest.param(_eigenpod_descriptor(), 55, id="scores-caller-keyed-membership-without-value-predicate"),
+        # The adapter must not claim the composeQueue shape.
+        pytest.param(
+            {
+                "kind": "mapping_membership",
+                "storage_var": "composeQueue",
+                "key_sources": [{"source": "msg_sender"}],
+                "enumeration_hint": [
+                    {"topic0": "0x" + "ab" * 32, "direction": "set", "value_position": None, "key_position": 0}
+                ],
+            },
+            0,
+            id="zero-for-composeQueue-value-position-none",
+        ),
+    ],
+)
+def test_matches_score(desc, expected):
+    assert EventIndexedAdapter.matches(desc, EvaluationContext(chain_id=1)) == expected
 
 
-def test_implicit_predicate_not_overriding_explicit_value_predicate():
-    desc = _eigenpod_descriptor()
-    desc["value_predicate"] = {"op": "eq", "rhs_values": ["3"], "value_type": "uint256"}
-    assert _implicit_membership_value_predicate(desc) is None
-
-
-def test_implicit_predicate_excluded_for_external_set():
-    # WeETH recover* RoleRegistry hasRole is an external_set, a different shape.
-    desc = {
-        "kind": "external_set",
-        "key_sources": [{"source": "msg_sender"}],
-        "enumeration_hint": [{"topic0": "0x" + "cd" * 32, "direction": "set", "value_position": 1}],
-    }
-    assert _implicit_membership_value_predicate(desc) is None
-
-
-def test_caller_event_arg_position_resolves_caller_over_inner_key():
-    desc = _eigenpod_descriptor()
-    hint = desc["enumeration_hint"][0]
-    # caller key index 0 maps to topic index 1 → indexed_positions[0] == event arg 0.
-    assert _caller_event_arg_position(desc, hint) == 0
-
-
-def test_caller_event_arg_position_from_non_indexed_data_arg():
-    # Caller key in event data (not a topic): key index 0 → data slot 0, event arg 1
-    # (arg 0 is the indexed selector).
-    desc = {
-        "kind": "mapping_membership",
-        "storage_var": "consumers",
-        "key_sources": [{"source": "msg_sender"}],
-    }
-    hint = {
-        "topics_to_keys": {},
-        "data_to_keys": {"0": 0},
-        "indexed_positions": [0],
-        "value_position": 2,
-    }
-    assert _caller_event_arg_position(desc, hint) == 1
-
-
-def test_caller_event_arg_position_none_when_no_caller_key():
-    desc = {"kind": "mapping_membership", "key_sources": [{"source": "parameter", "parameter_index": 0}]}
-    hint = {"topics_to_keys": {"1": 0}, "indexed_positions": [0]}
-    assert _caller_event_arg_position(desc, hint) is None
-
-
-def test_matches_scores_caller_keyed_membership_without_value_predicate():
-    score = EventIndexedAdapter.matches(_eigenpod_descriptor(), EvaluationContext(chain_id=1))
-    assert score == 55
-
-
-def test_matches_zero_for_composeQueue_value_position_none():
-    desc = {
-        "kind": "mapping_membership",
-        "storage_var": "composeQueue",
-        "key_sources": [{"source": "msg_sender"}],
-        "enumeration_hint": [
-            {"topic0": "0x" + "ab" * 32, "direction": "set", "value_position": None, "key_position": 0}
-        ],
-    }
-    assert EventIndexedAdapter.matches(desc, EvaluationContext(chain_id=1)) == 0
-
-
-def test_enumerate_recovers_truthy_caller(monkeypatch):
-    # Single caller, value=true → recovered.
-    logs = [_eigenpod_log(CALLER_A, "0x88676cad", True, block=100)]
+@pytest.mark.parametrize(
+    "logs, expected_members",
+    [
+        pytest.param([_eigenpod_log(CALLER_A, "0x88676cad", True, block=100)], [CALLER_A], id="truthy-caller"),
+        # Same caller, three selectors, all true (audited forwardEigenPodCall) -> one principal.
+        pytest.param(
+            [
+                _eigenpod_log(CALLER_A, "0x88676cad", True, block=100, log_index=0),
+                _eigenpod_log(CALLER_A, "0xf074ba62", True, block=100, log_index=1),
+                _eigenpod_log(CALLER_A, "0x3f65cf19", True, block=100, log_index=2),
+            ],
+            [CALLER_A],
+            id="multiple-selectors-fold-to-single-caller",
+        ),
+        pytest.param(
+            [
+                _eigenpod_log(CALLER_A, "0x88676cad", True, block=100),
+                _eigenpod_log(CALLER_B, "0xeea9064b", True, block=200),
+            ],
+            [CALLER_A, CALLER_B],
+            id="two-distinct-callers",
+        ),
+        # Added then removed (latest false) -> not a member (AvsOperatorManager admin, latest AdminUpdated 0).
+        pytest.param(
+            [
+                _eigenpod_log(CALLER_A, "0x88676cad", True, block=100, log_index=0),
+                _eigenpod_log(CALLER_A, "0x88676cad", False, block=200, log_index=0),
+            ],
+            [],
+            id="drops-caller-whose-latest-value-is-false",
+        ),
+    ],
+)
+def test_enumerate_value_fold(monkeypatch, logs, expected_members):
     _patched_value_fold(monkeypatch, logs)
     ctx = EvaluationContext(chain_id=1, contract_address=CONTRACT)
     cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
     assert cap.kind == "finite_set"
-    assert sorted(cap.members or []) == [CALLER_A.lower()]
-
-
-def test_enumerate_folds_multiple_selectors_to_single_caller(monkeypatch):
-    # Same caller, three selectors, all true (audited forwardEigenPodCall) → one principal.
-    logs = [
-        _eigenpod_log(CALLER_A, "0x88676cad", True, block=100, log_index=0),
-        _eigenpod_log(CALLER_A, "0xf074ba62", True, block=100, log_index=1),
-        _eigenpod_log(CALLER_A, "0x3f65cf19", True, block=100, log_index=2),
-    ]
-    _patched_value_fold(monkeypatch, logs)
-    ctx = EvaluationContext(chain_id=1, contract_address=CONTRACT)
-    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
-    assert cap.kind == "finite_set"
-    assert sorted(cap.members or []) == [CALLER_A.lower()]
-
-
-def test_enumerate_recovers_two_distinct_callers(monkeypatch):
-    logs = [
-        _eigenpod_log(CALLER_A, "0x88676cad", True, block=100),
-        _eigenpod_log(CALLER_B, "0xeea9064b", True, block=200),
-    ]
-    _patched_value_fold(monkeypatch, logs)
-    ctx = EvaluationContext(chain_id=1, contract_address=CONTRACT)
-    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
-    assert cap.kind == "finite_set"
-    assert sorted(cap.members or []) == sorted([CALLER_A.lower(), CALLER_B.lower()])
-
-
-def test_enumerate_drops_caller_whose_latest_value_is_false(monkeypatch):
-    # Added then removed (latest false) → not a member (AvsOperatorManager admin, latest AdminUpdated 0).
-    logs = [
-        _eigenpod_log(CALLER_A, "0x88676cad", True, block=100, log_index=0),
-        _eigenpod_log(CALLER_A, "0x88676cad", False, block=200, log_index=0),
-    ]
-    _patched_value_fold(monkeypatch, logs)
-    ctx = EvaluationContext(chain_id=1, contract_address=CONTRACT)
-    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
-    assert cap.kind == "finite_set"
-    assert (cap.members or []) == []
+    assert sorted(cap.members or []) == sorted(m.lower() for m in expected_members)
 
 
 def _run(coro):

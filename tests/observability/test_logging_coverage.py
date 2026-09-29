@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 from sqlalchemy.orm.exc import StaleDataError
 
 import workers.coverage_verify as cv
@@ -94,24 +95,20 @@ def test_summarize_pass_warns_and_beats_on_high_hash_mismatch_rate(caplog, monke
     assert warn.verdicts_total == 4
 
 
-def test_summarize_pass_quiet_when_rate_below_threshold(caplog, monkeypatch):
+@pytest.mark.parametrize(
+    ("claimed", "verdicts", "expected_rate"),
+    [
+        pytest.param(10, {"hash_mismatch": 1, "proven": 9}, 0.1, id="rate_below_threshold"),
+        # Rate 1.0 but total 1 < warn min: the min-sample guard keeps it quiet.
+        pytest.param(1, {"hash_mismatch": 1}, 1.0, id="small_sample"),
+    ],
+)
+def test_summarize_pass_stays_quiet(caplog, monkeypatch, claimed, verdicts, expected_rate):
     monkeypatch.setattr(cv, "record_heartbeat", lambda *a, **k: None)
     w = _worker()
-    verdicts = {"hash_mismatch": 1, "proven": 9}  # rate 0.1
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
-        rate = w._summarize_pass(10, verdicts)
+        rate = w._summarize_pass(claimed, verdicts)
 
-    assert rate == 0.1
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == LOGGER_NAME]
-
-
-def test_summarize_pass_does_not_trip_on_small_sample(caplog, monkeypatch):
-    monkeypatch.setattr(cv, "record_heartbeat", lambda *a, **k: None)
-    w = _worker()
-    verdicts = {"hash_mismatch": 1}  # rate 1.0 but total 1 < warn min
-
-    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
-        w._summarize_pass(1, verdicts)
-
+    assert rate == expected_rate
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == LOGGER_NAME]

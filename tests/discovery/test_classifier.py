@@ -359,18 +359,17 @@ def test_phase3_create2_edge_does_not_override_proxy(pipeline):
 
 
 @pytest.mark.parametrize(
-    "addr_attr",
-    ["eip1167", "eip1967", "beacon_proxy", "uups", "oz", "diamond", "gnosis", "compound", "synthetix"],
+    ("addr_attr", "expected"),
+    # Known-event types: monitor detects their upgrade events -> no polling.
+    [
+        pytest.param(a, False, id=a)
+        for a in ["eip1167", "eip1967", "beacon_proxy", "uups", "oz", "diamond", "gnosis", "compound", "synthetix"]
+    ]
+    # No known event pattern -> need polling.
+    + [pytest.param(a, True, id=a) for a in ["custom", "geth_proxy", "parity_proxy", "static_proxy"]],
 )
-def test_needs_polling_false_for_known_event_proxy_types(pipeline, addr_attr):
-    # Known-event types: monitor detects their upgrade events → no polling.
-    assert pipeline.c[getattr(pipeline, addr_attr)]["needs_polling"] is False
-
-
-@pytest.mark.parametrize("addr_attr", ["custom", "geth_proxy", "parity_proxy", "static_proxy"])
-def test_needs_polling_true_for_custom_and_unknown(pipeline, addr_attr):
-    # No known event pattern → need polling.
-    assert pipeline.c[getattr(pipeline, addr_attr)]["needs_polling"] is True
+def test_needs_polling(pipeline, addr_attr, expected):
+    assert pipeline.c[getattr(pipeline, addr_attr)]["needs_polling"] is expected
 
 
 # ---------------------------------------------------------------------------

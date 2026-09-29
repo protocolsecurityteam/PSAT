@@ -21,6 +21,8 @@ No wire, no DB: ``_add_reach`` is called directly on stub inputs.
 
 from __future__ import annotations
 
+import pytest
+
 from services.effects.recipes import _add_reach
 from services.effects.selection import AssetHolding
 from services.effects.simulate import SimCallResult
@@ -48,49 +50,31 @@ def _router_call() -> SimCallResult:
 VALUE_HOLDERS = (AssetHolding(HOLDER.lower(), TOKEN.lower(), 1_000.0),)
 
 
-def test_value_leaving_a_non_holder_is_indeterminate_not_zero_reach():
-    """Byte-exact: three keys, no fourth; the measured ``observed_reach_*`` keys are absent."""
+_INDETERMINATE = {"reach_determined": False, "reach_indeterminate": True}
+
+
+@pytest.mark.parametrize(
+    "acting_balance_usd, expected",
+    [
+        pytest.param(250.0, {**_INDETERMINATE, "observed_reach_floor_usd": 250.0}, id="positive-floor"),
+        # A PRESENT zero is a witness, so the key stays with 0.0. Only the floor key's presence
+        # separates it from the absent case.
+        pytest.param(0.0, {**_INDETERMINATE, "observed_reach_floor_usd": 0.0}, id="witnessed-zero-keeps-floor-key"),
+        # CRITICAL, the honest absence: no ``deployment_balance`` entry, so no floor key. Byte-exact
+        # TWO keys, not three-with-a-null or -a-zero. A ``.get()`` default on the floor would
+        # reintroduce the ``selection.py:1369`` defect: an unwitnessed floor shaped like a witnessed one.
+        pytest.param(None, dict(_INDETERMINATE), id="absent-acting-balance-publishes-no-floor-key"),
+    ],
+)
+def test_value_leaving_a_non_holder_is_indeterminate_not_zero_reach(acting_balance_usd, expected):
+    """Byte-exact: the measured ``observed_reach_*`` keys are absent on every arm."""
     concrete: dict[str, object] = {}
-    _add_reach(concrete, _router_call(), VALUE_HOLDERS, 250.0)
+    _add_reach(concrete, _router_call(), VALUE_HOLDERS, acting_balance_usd)
 
-    assert concrete == {
-        "reach_determined": False,
-        "reach_indeterminate": True,
-        "observed_reach_floor_usd": 250.0,
-    }
-
-
-def test_a_witnessed_zero_balance_still_publishes_a_floor_of_zero():
-    """A PRESENT zero is a witness, so the key stays with ``0.0``.
-
-    Same three keys as the positive case; only the floor key's presence separates it from the absent case.
-    """
-    concrete: dict[str, object] = {}
-    _add_reach(concrete, _router_call(), VALUE_HOLDERS, 0.0)
-
-    assert concrete == {
-        "reach_determined": False,
-        "reach_indeterminate": True,
-        "observed_reach_floor_usd": 0.0,
-    }
-
-
-def test_an_absent_acting_balance_publishes_no_floor_key_at_all():
-    """The honest absence: no ``deployment_balance`` entry, so no floor key.
-
-    Byte-exact TWO keys, not three-with-a-null or -a-zero. A ``.get()`` default on the floor
-    would reintroduce the ``selection.py:1369`` defect: an unwitnessed floor shaped like a witnessed one.
-    """
-    concrete: dict[str, object] = {}
-    _add_reach(concrete, _router_call(), VALUE_HOLDERS, None)
-
-    assert concrete == {
-        "reach_determined": False,
-        "reach_indeterminate": True,
-    }
-    # Stated separately from the equality above: a ``null`` under the key would
-    # satisfy neither, but only this says which of the two failures we mean.
-    assert "observed_reach_floor_usd" not in concrete
+    assert concrete == expected
+    # Stated separately from the equality above: a ``null`` under the key would satisfy neither
+    # arm, but only this says which of the two failures we mean.
+    assert ("observed_reach_floor_usd" in concrete) is (acting_balance_usd is not None)
 
 
 def test_no_holder_set_supplied_emits_no_reach_keys_at_all():

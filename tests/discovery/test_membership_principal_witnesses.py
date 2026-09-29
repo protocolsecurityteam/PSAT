@@ -606,26 +606,33 @@ def test_child_of_a_member_factory_admits(db_session, protocol):
     assert witness.evidence["factory_member_contract_id"] == factory.id
 
 
-def test_child_of_a_d2_only_factory_is_refused(db_session, protocol):
+def _child_of_d2_only_factory(db_session, protocol):
     anchor = _anchored_member(db_session, protocol, ADDR(0x6100))
     endpoint = _d2_only_member(db_session, protocol, ADDR(0x6101), controls=anchor)
-    child = _contract(db_session, ADDR(0x6102), nominated=protocol.id, factory=endpoint.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(child.id,)))
-    db_session.flush()
-    assert child.protocol_id is None
+    return _contract(db_session, ADDR(0x6102), nominated=protocol.id, factory=endpoint.address)
 
 
-def test_child_of_a_non_member_factory_is_refused(db_session, protocol):
+def _child_of_non_member_factory(db_session, protocol):
     outsider = _contract(db_session, ADDR(0x6200), nominated=protocol.id)
-    child = _contract(db_session, ADDR(0x6201), nominated=protocol.id, factory=outsider.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(child.id,)))
-    db_session.flush()
-    assert child.protocol_id is None
+    return _contract(db_session, ADDR(0x6201), nominated=protocol.id, factory=outsider.address)
 
 
-def test_null_factory_attribution_licenses_nothing(db_session, protocol):
+def _child_with_null_factory(db_session, protocol):
     _anchored_member(db_session, protocol, ADDR(0x6300))
-    child = _contract(db_session, ADDR(0x6301), nominated=protocol.id, factory=None)
+    return _contract(db_session, ADDR(0x6301), nominated=protocol.id, factory=None)
+
+
+# CRITICAL: only an anchored (non-D2-only) member factory may license its children.
+@pytest.mark.parametrize(
+    "build_child",
+    [
+        pytest.param(_child_of_d2_only_factory, id="d2_only_factory_anchors_nothing"),
+        pytest.param(_child_of_non_member_factory, id="non_member_factory_refused"),
+        pytest.param(_child_with_null_factory, id="null_factory_attribution_licenses_nothing"),
+    ],
+)
+def test_child_of_a_refused_factory_is_refused(db_session, protocol, build_child):
+    child = build_child(db_session, protocol)
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(child.id,)))
     db_session.flush()
     assert child.protocol_id is None

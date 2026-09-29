@@ -53,15 +53,22 @@ def _backdate_job(s, job_id, seconds_ago: int) -> None:
 
 
 class TestGetOrCreateProtocol:
-    def test_creates_when_missing(self):
+    @pytest.mark.parametrize(
+        "name,kwargs,expected_domain",
+        [
+            pytest.param("ether.fi", {"official_domain": "ether.fi"}, "ether.fi", id="with_domain"),
+            pytest.param("some-slug", {}, None, id="no_domain_leaves_null"),
+        ],
+    )
+    def test_creates_when_missing(self, name, kwargs, expected_domain):
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
 
-        row = get_or_create_protocol(session, "ether.fi", official_domain="ether.fi")
+        row = get_or_create_protocol(session, name, **kwargs)
 
         assert isinstance(row, Protocol)
-        assert row.name == "ether.fi"
-        assert row.official_domain == "ether.fi"
+        assert row.name == name
+        assert row.official_domain == expected_domain
         session.add.assert_called_once()
         session.flush.assert_called_once()
 
@@ -99,15 +106,6 @@ class TestGetOrCreateProtocol:
         assert row.official_domain == "aave-v3.com"
         session.flush.assert_not_called()
 
-    def test_no_domain_provided_leaves_null_on_new_row(self):
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-
-        row = get_or_create_protocol(session, "some-slug")
-
-        assert row.name == "some-slug"
-        assert row.official_domain is None
-
 
 # ---------------------------------------------------------------------------
 # reclaim_stuck_jobs — cross-stage worker-crash recovery
@@ -129,10 +127,12 @@ def test_reclaim_stuck_jobs_resets_long_running_processing_to_queued(session):
     reclaimed_ids = reclaim_stuck_jobs(session, stale_timeout_seconds=1)
 
     assert str(job.id) in [str(i) for i in reclaimed_ids]
+    assert len(reclaimed_ids) == 1
     session.expire_all()
     refreshed = session.get(type(job), job.id)
     assert refreshed.status == JobStatus.queued
     assert refreshed.worker_id is None
+    assert reclaim_stuck_jobs(session, stale_timeout_seconds=1) == []  # idempotent: second sweep finds nothing
 
 
 @requires_postgres
@@ -152,22 +152,6 @@ def test_reclaim_stuck_jobs_leaves_recent_processing_alone(session):
     refreshed = session.get(type(job), job.id)
     assert refreshed.status == JobStatus.processing
     assert refreshed.worker_id == "live-worker"
-
-
-@requires_postgres
-def test_reclaim_stuck_jobs_is_idempotent(session):
-    from db.models import JobStage
-    from db.queue import claim_job, create_job, reclaim_stuck_jobs
-
-    job = create_job(session, {"address": "0x" + "3" * 40})
-    claim_job(session, JobStage.discovery, "crashed-worker")
-    _backdate_job(session, job.id, seconds_ago=10)
-
-    first = reclaim_stuck_jobs(session, stale_timeout_seconds=1)
-    assert len(first) == 1
-
-    second = reclaim_stuck_jobs(session, stale_timeout_seconds=1)
-    assert second == []
 
 
 @requires_postgres
@@ -206,12 +190,33 @@ def test_reclaim_stuck_jobs_ignores_terminal_states(session):
 # ---------------------------------------------------------------------------
 
 
+def _complete(session, job_id, lease):
+    from db.queue import complete_job
+
+    complete_job(session, job_id, lease_id=lease)
+
+
+def _advance(session, job_id, lease):
+    from db.models import JobStage
+    from db.queue import advance_job
+
+    advance_job(session, job_id, JobStage.static, lease_id=lease)
+
+
 @requires_postgres
-def test_reclaimed_job_cannot_be_silently_finished_by_original_holder(session):
-    """Worker A claims, lags past stale_timeout, is reclaimed; B claims; A's completion must be rejected
+@pytest.mark.parametrize(
+    "op",
+    [
+        pytest.param(_complete, id="complete"),
+        # CRITICAL: a reclaimed job must not be silently advanced by the original holder either.
+        pytest.param(_advance, id="advance"),
+    ],
+)
+def test_reclaimed_job_cannot_be_silently_written_by_original_holder(session, op):
+    """Worker A claims, lags past stale_timeout, is reclaimed; B claims; A's completion/advance must be rejected
     (lease lost)."""
     from db.models import JobStage
-    from db.queue import LeaseLost, claim_job, complete_job, create_job, reclaim_stuck_jobs
+    from db.queue import LeaseLost, claim_job, create_job, reclaim_stuck_jobs
 
     job = create_job(session, {"address": "0x" + "a" * 40, "name": "long-running"})
     a = claim_job(session, JobStage.discovery, "worker-A")
@@ -229,28 +234,7 @@ def test_reclaimed_job_cannot_be_silently_finished_by_original_holder(session):
     assert getattr(b, "lease_id", None) != a_lease, "B's claim must produce a fresh lease id"
 
     with pytest.raises(LeaseLost):
-        complete_job(session, a.id, lease_id=a_lease)
-
-
-@requires_postgres
-def test_reclaimed_job_cannot_be_silently_advanced_by_original_holder(session):
-    from db.models import JobStage
-    from db.queue import LeaseLost, advance_job, claim_job, create_job, reclaim_stuck_jobs
-
-    job = create_job(session, {"address": "0x" + "b" * 40, "name": "long-running"})
-    a = claim_job(session, JobStage.discovery, "worker-A")
-    assert a is not None
-    a_lease = getattr(a, "lease_id", None)
-
-    _backdate_job(session, job.id, seconds_ago=1000)
-    reclaim_stuck_jobs(session, stale_timeout_seconds=1)
-
-    b = claim_job(session, JobStage.discovery, "worker-B")
-    assert b is not None
-    assert b.worker_id == "worker-B"
-
-    with pytest.raises(LeaseLost):
-        advance_job(session, a.id, JobStage.static, lease_id=a_lease)
+        op(session, a.id, a_lease)
 
 
 @requires_postgres

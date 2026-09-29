@@ -286,27 +286,23 @@ def test_custom_bool_latch_is_candidate_not_standard(artifacts):
     assert "one_shot" not in _surface_condition_kinds(tree)
 
 
-def test_capped_counter_is_not_a_one_shot(artifacts):
-    """``require(depositCount < 100); depositCount += 1`` must NOT be flagged —
-    the write is not a constant that permanently falsifies the guard."""
-    tree = _fn_tree(artifacts["Custom"], "deposit")
+@pytest.mark.parametrize(
+    ("fn_name", "expected_kinds"),
+    [
+        # ``require(depositCount < 100); depositCount += 1``: the write is not a constant that
+        # permanently falsifies the guard.
+        pytest.param("deposit", (), id="capped-counter"),
+        pytest.param("swap", ("reentrancy",), id="reentrancy-guard-keeps-reentrancy-kind"),
+        # ``require(paused); paused = false``: a setter re-arms it, so it is not a consuming
+        # one-shot (the monotonic-ascent requirement).
+        pytest.param("unpause", (), id="rearmable-toggle"),
+    ],
+)
+def test_custom_non_latches_are_not_a_one_shot(artifacts, fn_name, expected_kinds):
+    tree = _fn_tree(artifacts["Custom"], fn_name)
     latches = collect_one_shot_latches(tree)
     assert not latches["standard"] and not latches["candidate"]
-
-
-def test_reentrancy_guard_is_not_a_one_shot(artifacts):
-    tree = _fn_tree(artifacts["Custom"], "swap")
-    latches = collect_one_shot_latches(tree)
-    assert not latches["standard"] and not latches["candidate"]
-    assert "reentrancy" in _surface_condition_kinds(tree)
-
-
-def test_rearmable_toggle_is_not_a_latch(artifacts):
-    """``require(paused); paused = false`` — a setter re-arms it, so it is not a
-    consuming one-shot (the monotonic-ascent requirement)."""
-    tree = _fn_tree(artifacts["Custom"], "unpause")
-    latches = collect_one_shot_latches(tree)
-    assert not latches["standard"] and not latches["candidate"]
+    assert set(expected_kinds) <= _surface_condition_kinds(tree)
 
 
 def test_unstructured_storage_getter_link_candidate(artifacts):

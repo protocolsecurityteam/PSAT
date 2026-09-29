@@ -11,6 +11,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 
 def _ef_namespace(**overrides: Any) -> SimpleNamespace:
     base = {
@@ -111,41 +113,55 @@ def test_signature_witness_in_serialize_effective_functions() -> None:
     )
 
 
-def test_capability_expr_propagates_through_company_serializer() -> None:
-    """``capability_expr`` reaches the company payload's per-function entry verbatim."""
+def _company_entry(ef: SimpleNamespace) -> dict:
     from services.governance.principals import _build_company_function_entry
 
-    cap_expr = {
-        "kind": "finite_set",
-        "members": ["0x" + "1" * 40],
-        "confidence": "enumerable",
-        "quality": "exact",
-    }
-    conditions = [{"kind": "time", "description": "after 2026-01-01"}]
-    ef = _ef_namespace(capability_expr=cap_expr, conditions=conditions, status="public")
-
-    result = _build_company_function_entry(cast(Any, ef), [])
-
-    assert result["capability_expr"] == cap_expr
-    assert result["conditions"] == conditions
-    assert result["status"] == "public"
+    return _build_company_function_entry(cast(Any, ef), [])
 
 
-def test_capability_expr_propagates_through_analysis_detail_serializer() -> None:
-    """The columns reach the ``/api/analyses/{run}`` payload via ``_serialize_effective_functions``."""
+def _analysis_detail_entry(ef: SimpleNamespace) -> dict:
     from services.aggregations.analysis_detail import _serialize_effective_functions
 
-    cap_expr = {"kind": "unsupported", "reason": "external_check_only_unresolved"}
-    ef = _ef_namespace(capability_expr=cap_expr, conditions=[], status="unsupported")
     ef.principals = []
-
     out = _serialize_effective_functions(cast(Any, [ef]))
-
     assert len(out) == 1
-    fn = out[0]
+    return out[0]
+
+
+@pytest.mark.parametrize(
+    ("serialize", "cap_expr", "conditions", "status"),
+    [
+        # Reaches the company payload's per-function entry verbatim.
+        pytest.param(
+            _company_entry,
+            {
+                "kind": "finite_set",
+                "members": ["0x" + "1" * 40],
+                "confidence": "enumerable",
+                "quality": "exact",
+            },
+            [{"kind": "time", "description": "after 2026-01-01"}],
+            "public",
+            id="company_serializer",
+        ),
+        # Reaches the ``/api/analyses/{run}`` payload via ``_serialize_effective_functions``.
+        pytest.param(
+            _analysis_detail_entry,
+            {"kind": "unsupported", "reason": "external_check_only_unresolved"},
+            [],
+            "unsupported",
+            id="analysis_detail_serializer",
+        ),
+    ],
+)
+def test_capability_expr_propagates_through_serializer(serialize, cap_expr, conditions, status) -> None:
+    ef = _ef_namespace(capability_expr=cap_expr, conditions=conditions, status=status)
+
+    fn = serialize(ef)
+
     assert fn["capability_expr"] == cap_expr
-    assert fn["conditions"] == []
-    assert fn["status"] == "unsupported"
+    assert fn["conditions"] == conditions
+    assert fn["status"] == status
 
 
 def test_safe_role_int_handles_string_and_dict_without_crashing() -> None:

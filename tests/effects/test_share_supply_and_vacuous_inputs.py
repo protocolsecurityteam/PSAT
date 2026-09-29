@@ -6,6 +6,7 @@ Drives the REAL ``recipes.supply`` / ``recipes.value_out`` against minimal wire 
 
 from __future__ import annotations
 
+import pytest
 from eth_utils.crypto import keccak
 
 from services.effects import recipes
@@ -75,19 +76,13 @@ def _supply(chain, **kwargs):
 # S2 — a zero totalSupply delta with an unambiguous zero-address Transfer
 
 
-def test_share_accounted_zero_delta_with_mint_transfer_yields_a_verdict():
+@pytest.mark.parametrize("direction", [pytest.param("mint", id="mint"), pytest.param("burn", id="burn")])
+def test_share_accounted_zero_delta_with_zero_address_transfer_yields_a_verdict(direction):
     """The old early return fired on a zero delta before the mint/burn ``Transfer`` witnesses were computed."""
-    eff = _supply(SharesChain(emit="mint"))
+    eff = _supply(SharesChain(emit=direction))
     assert eff.verdict == VERDICT_PROVEN
-    assert eff.reason == "supply_mint"
-    assert eff.details["supply_delta_sign"] == "mint"
-
-
-def test_share_accounted_zero_delta_with_burn_transfer_yields_a_verdict():
-    eff = _supply(SharesChain(emit="burn"))
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.reason == "supply_burn"
-    assert eff.details["supply_delta_sign"] == "burn"
+    assert eff.reason == f"supply_{direction}"
+    assert eff.details["supply_delta_sign"] == direction
 
 
 def test_zero_delta_with_no_zero_address_transfer_stays_no_supply_delta():

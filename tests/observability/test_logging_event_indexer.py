@@ -60,10 +60,26 @@ class _BoomHead:
         raise RuntimeError("rpc down")
 
 
-def test_group_scan_failure_is_swallowed_warning_not_exception(caplog):
-    """A group whose head fetch raises is counted in ``failed_groups`` and logged as a WARNING
-    with ``exc_type``, never a traceback storm (a prod outage emitted 2,172 ERROR tracebacks)."""
-    session = _FakeSession([(1, _ADDR, _TOPIC, None, 0, False)])
+# A group whose head fetch raises is counted in ``failed_groups`` and logged as a WARNING with
+# ``exc_type``, never a traceback storm (a prod outage emitted 2,172 ERROR tracebacks).
+@pytest.mark.parametrize(
+    ("rows", "scan_kwargs", "expected_failed_groups", "expected_rollbacks", "expected_address"),
+    [
+        pytest.param([(1, _ADDR, _TOPIC, None, 0, False)], {}, 1, 1, _ADDR, id="default-mode"),
+        pytest.param(
+            [(1, _ADDR, _TOPIC, None, 100, True), (1, "0x" + "12" * 20, _TOPIC, None, 100, True)],
+            {"scan_mode": "warm"},
+            2,
+            0,  # warm mode fails the whole chain's head read, not one address group
+            None,
+            id="warm-mode",
+        ),
+    ],
+)
+def test_group_scan_failure_is_swallowed_warning_not_exception(
+    caplog, rows, scan_kwargs, expected_failed_groups, expected_rollbacks, expected_address
+):
+    session = _FakeSession(rows)
     sentinel = object()
     with caplog.at_level(logging.WARNING, logger="workers.event_log_indexer"):
         summary = scan_enrolled_events(
@@ -71,37 +87,22 @@ def test_group_scan_failure_is_swallowed_warning_not_exception(caplog):
             fetchers={1: sentinel},  # pyright: ignore[reportArgumentType]
             head_fetchers={1: _BoomHead()},
             block_hash_fetchers={1: sentinel},  # pyright: ignore[reportArgumentType]
+            **scan_kwargs,
         )
 
-    assert summary.failed_groups == 1
+    assert summary.failed_groups == expected_failed_groups
     assert summary.windows_scanned == 0
-    assert summary.total_cursors == 1
-    assert session.rollbacks == 1
+    assert summary.total_cursors == len(rows)
+    assert session.rollbacks == expected_rollbacks
 
     recs = [r for r in caplog.records if r.name == "workers.event_log_indexer"]
     assert len(recs) == 1
+    assert len(caplog.records) == 1
     rec = recs[0]
     assert rec.levelno == logging.WARNING  # not ERROR
     assert rec.exc_info is None  # no traceback attached
     assert getattr(rec, "exc_type", None) == "RuntimeError"
-    assert getattr(rec, "event_address", None) == _ADDR
-
-
-def test_warm_head_failure_is_reported_without_crashing(caplog):
-    session = _FakeSession([(1, _ADDR, _TOPIC, None, 100, True), (1, "0x" + "12" * 20, _TOPIC, None, 100, True)])
-    sentinel = object()
-    with caplog.at_level(logging.WARNING, logger="workers.event_log_indexer"):
-        summary = scan_enrolled_events(
-            session,  # pyright: ignore[reportArgumentType]
-            fetchers={1: sentinel},  # pyright: ignore[reportArgumentType]
-            head_fetchers={1: _BoomHead()},
-            block_hash_fetchers={1: sentinel},  # pyright: ignore[reportArgumentType]
-            scan_mode="warm",
-        )
-    assert summary.failed_groups == 2
-    assert summary.windows_scanned == 0
-    assert len(caplog.records) == 1
-    assert getattr(caplog.records[0], "exc_type", None) == "RuntimeError"
+    assert getattr(rec, "event_address", None) == expected_address
 
 
 def test_total_outage_pass_degrades_the_heartbeat():

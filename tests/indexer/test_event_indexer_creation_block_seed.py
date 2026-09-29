@@ -264,68 +264,62 @@ def test_enroll_from_completed_jobs_skips_zero_authority(session, monkeypatch):
     assert zero_cursors == 0
 
 
-def test_get_contract_creation_block_prefers_blocknumber(monkeypatch):
-    import services.clients.etherscan as es
-
-    monkeypatch.setattr(
-        es,
-        "get",
-        lambda module, action, **params: {
-            "status": "1",
-            "result": [
-                {"contractAddress": "0x" + "ab" * 20, "contractCreator": "0x" + "cd" * 20, "blockNumber": "18500000"}
-            ],
-        },
-    )
-    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) == 18_500_000
+def _etherscan_down(*_a, **_k):
+    raise RuntimeError("etherscan down")
 
 
-def test_get_contract_creation_block_falls_back_to_txhash(monkeypatch):
+_CREATOR = "0x" + "ab" * 20
+
+
+@pytest.mark.parametrize(
+    ("address", "es_get", "kwargs", "expected"),
+    [
+        pytest.param(
+            _CREATOR,
+            lambda module, action, **params: {
+                "status": "1",
+                "result": [
+                    {"contractAddress": _CREATOR, "contractCreator": "0x" + "cd" * 20, "blockNumber": "18500000"}
+                ],
+            },
+            {},
+            18_500_000,
+            id="prefers_blocknumber",
+        ),
+        pytest.param(
+            _CREATOR,
+            lambda module, action, **params: {"status": "1", "result": [{"txHash": "0x" + "11" * 32}]},
+            {"rpc_url": "http://stub"},
+            18_500_000,
+            id="falls_back_to_txhash",
+        ),
+        # A transient lookup failure yields None, never a genesis 0.
+        pytest.param(_CREATOR, _etherscan_down, {}, None, id="none_on_failure"),
+        pytest.param(
+            _CREATOR,
+            lambda module, action, **params: {"status": "1", "result": [{"blockNumber": 18_500_000}]},
+            {},
+            18_500_000,
+            id="accepts_int_blocknumber",
+        ),
+        pytest.param("not-an-address", _etherscan_down, {}, None, id="rejects_non_address"),
+        # Neither blockNumber nor a usable txHash -> None (caller defers enrollment).
+        pytest.param(
+            _CREATOR,
+            lambda module, action, **params: {"status": "1", "result": [{"contractCreator": "0x" + "cd" * 20}]},
+            {},
+            None,
+            id="none_when_no_block_and_no_txhash",
+        ),
+    ],
+)
+def test_get_contract_creation_block(monkeypatch, address, es_get, kwargs, expected):
     import services.clients.etherscan as es
     import services.clients.rpc as rpc
 
-    monkeypatch.setattr(
-        es,
-        "get",
-        lambda module, action, **params: {"status": "1", "result": [{"txHash": "0x" + "11" * 32}]},
-    )
+    monkeypatch.setattr(es, "get", es_get)
     monkeypatch.setattr(rpc, "rpc_request", lambda url, method, params, chain_id=None: {"blockNumber": hex(18_500_000)})
-    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1, rpc_url="http://stub") == 18_500_000
-
-
-def test_get_contract_creation_block_returns_none_on_failure(monkeypatch):
-    import services.clients.etherscan as es
-
-    def _raise(*_a, **_k):
-        raise RuntimeError("etherscan down")
-
-    monkeypatch.setattr(es, "get", _raise)
-    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) is None
-
-
-def test_get_contract_creation_block_accepts_int_blocknumber(monkeypatch):
-    import services.clients.etherscan as es
-
-    monkeypatch.setattr(
-        es, "get", lambda module, action, **params: {"status": "1", "result": [{"blockNumber": 18_500_000}]}
-    )
-    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) == 18_500_000
-
-
-def test_get_contract_creation_block_rejects_non_address():
-    import services.clients.etherscan as es
-
-    assert es.get_contract_creation_block("not-an-address", chain_id=1) is None
-
-
-def test_get_contract_creation_block_none_when_no_block_and_no_txhash(monkeypatch):
-    import services.clients.etherscan as es
-
-    # Neither blockNumber nor a usable txHash → None (caller defers enrollment).
-    monkeypatch.setattr(
-        es, "get", lambda module, action, **params: {"status": "1", "result": [{"contractCreator": "0x" + "cd" * 20}]}
-    )
-    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) is None
+    assert es.get_contract_creation_block(address, chain_id=1, **kwargs) == expected
 
 
 def test_seed_block_defers_on_lookup_error(monkeypatch):

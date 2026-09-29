@@ -196,26 +196,105 @@ def _readbacks(store: RecordingStore) -> list[str | None]:
 
 
 # ---------------------------------------------------------------------------
-# 1. plain ERC-20 — storage_layout
+# 1-3, 5. derive -> seed -> read-back -> pause blast radius, per fixture family
 # ---------------------------------------------------------------------------
 
+_OZ_BASE = "0x52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00"
+_SLOT_1 = "0x" + "0" * 63 + "1"
 
-def test_plain_erc20_pausable_e2e(tmp_path: Path) -> None:
-    fixture = _load_fixture("token_plain_pausable.json")
+
+# fixture json, expected derived entries by role, roles that must have NO entry, declared transferFrom
+# parameter names, read-back statuses, anvil port.
+@pytest.mark.parametrize(
+    ("fixture_name", "expected_entries", "absent_roles", "param_names", "readbacks", "port"),
+    [
+        # plain ERC-20, storage_layout
+        pytest.param(
+            "token_plain_pausable.json",
+            {
+                # owner+paused pack into slot 0
+                "balance": {"derivation": "storage_layout", "getter": "balanceOf(address)", "base_slot": _SLOT_1},
+                "allowance": {
+                    "derivation": "storage_layout",
+                    "getter": "allowance(address,address)",
+                    "base_slot": "0x" + "0" * 63 + "2",
+                },
+            },
+            (),
+            ("from", "to", "amount"),
+            ["ok", "ok"],
+            8551,
+            id="plain-erc20",
+        ),
+        # OZ-v5 ERC-7201 namespaced: the folded StorageLocation constant is the balance base; the
+        # allowance member sits exactly one slot past it (base+offset arithmetic against a real EVM).
+        pytest.param(
+            "token_ozv5_pausable.json",
+            {
+                "balance": {"derivation": "oz_v5_namespaced", "base_slot": _OZ_BASE},
+                "allowance": {"derivation": "oz_v5_namespaced", "base_slot": _OZ_BASE[:-2] + "01"},
+            },
+            (),
+            ("from", "to", "amount"),
+            ["ok", "ok"],
+            8552,
+            id="ozv5-namespaced",
+        ),
+        # rebasing: no entry for the computed balanceOf (it must never be a seed anchor); a direct entry
+        # for shares (the raw read the read-back anchor needs) and for allowance. Seeding shares is what
+        # lets transferFrom's derived-balance requirement pass and reach the pause gate.
+        pytest.param(
+            "token_rebasing_pausable.json",
+            {
+                "shares": {"derivation": "storage_layout", "getter": "shares(address)", "base_slot": _SLOT_1},
+                "allowance": {},
+            },
+            ("balance",),
+            ("from", "to", "amount"),
+            ["ok", "ok"],  # allowance + shares
+            8553,
+            id="rebasing-shares",
+        ),
+        # ERC-721 ownerOf: uint256-keyed owner mapping seeded at tokenId == ARG_AMOUNT. The third
+        # argument is a token ID, not a quantity, so the probe must fill it with the id filler the
+        # ownership seed is keyed at. "ok" means the uint256-keyed slot was live and ownerOf(ARG_AMOUNT)
+        # echoed the caller.
+        pytest.param(
+            "token_nft_pausable.json",
+            {
+                "owner": {
+                    "derivation": "storage_layout",
+                    "getter": "ownerOf(uint256)",
+                    "key_kind": "uint256",
+                    "base_slot": _SLOT_1,
+                }
+            },
+            (),
+            ("from", "to", "tokenId"),
+            ["ok"],
+            8555,
+            id="erc721-owner",
+        ),
+    ],
+)
+def test_token_fixture_e2e(
+    tmp_path: Path, fixture_name, expected_entries, absent_roles, param_names, readbacks, port
+) -> None:
+    fixture = _load_fixture(fixture_name)
     entries = _derive_entries(fixture, tmp_path)
     by_role = _by_role(entries)
 
-    assert by_role["balance"]["derivation"] == "storage_layout"
-    assert by_role["balance"]["getter"] == "balanceOf(address)"
-    assert by_role["balance"]["base_slot"] == "0x" + "0" * 63 + "1"  # owner+paused pack into slot 0
-    assert by_role["allowance"]["derivation"] == "storage_layout"
-    assert by_role["allowance"]["getter"] == "allowance(address,address)"
-    assert by_role["allowance"]["base_slot"] == "0x" + "0" * 63 + "2"
+    for role, fields in expected_entries.items():
+        assert role in by_role
+        for key, value in fields.items():
+            assert by_role[role][key] == value, (role, key)
+    for role in absent_roles:
+        assert role not in by_role, f"a computed {role} must never be a seed anchor"
 
-    with SubprocessAnvil(port=8551, hardfork_name="prague") as anvil:
-        eff, store, _addr = _run_pause(anvil, fixture, entries)
+    with SubprocessAnvil(port=port, hardfork_name="prague") as anvil:
+        eff, store, _addr = _run_pause(anvil, fixture, entries, param_names)
 
-    assert _readbacks(store) == ["ok", "ok"]
+    assert _readbacks(store) == readbacks
     # The previously-invisible entry point is now witnessed by the diff.
     assert eff.verdict == VERDICT_PROVEN
     assert "transferFrom" in eff.details["pre_pause_succeeding"]
@@ -223,64 +302,7 @@ def test_plain_erc20_pausable_e2e(tmp_path: Path) -> None:
     assert eff.details["latch_flip"] is True
     # The ungated control never enters the blast radius.
     assert "owner_getter" in eff.details["pre_pause_succeeding"]
-
-
-# ---------------------------------------------------------------------------
-# 2. OZ-v5 ERC-7201 namespaced — base + member offset against a real EVM
-# ---------------------------------------------------------------------------
-
-_OZ_BASE = "0x52c63247e1f47db19d5ce0460030c497f067ca4cebf71ba98eeadabe20bace00"
-
-
-def test_ozv5_namespaced_pausable_e2e(tmp_path: Path) -> None:
-    fixture = _load_fixture("token_ozv5_pausable.json")
-    entries = _derive_entries(fixture, tmp_path)
-    by_role = _by_role(entries)
-
-    # Derivation: the folded StorageLocation constant is the balance base; the
-    # allowance member sits exactly one slot past it.
-    assert by_role["balance"]["derivation"] == "oz_v5_namespaced"
-    assert by_role["balance"]["base_slot"] == _OZ_BASE
-    assert by_role["allowance"]["derivation"] == "oz_v5_namespaced"
-    assert by_role["allowance"]["base_slot"] == _OZ_BASE[:-2] + "01"
-
-    with SubprocessAnvil(port=8552, hardfork_name="prague") as anvil:
-        eff, store, _addr = _run_pause(anvil, fixture, entries)
-
-    # The base+offset arithmetic hit the exact slots the bytecode reads.
-    assert _readbacks(store) == ["ok", "ok"]
-    assert eff.verdict == VERDICT_PROVEN
-    assert "transferFrom" in eff.details["pre_pause_succeeding"]
-    assert eff.details["observed_blast_radius"] == ["transferFrom"]
-
-
-# ---------------------------------------------------------------------------
-# 3. rebasing — computed balance skipped, direct shares seeded
-# ---------------------------------------------------------------------------
-
-
-def test_rebasing_shares_seeded_e2e(tmp_path: Path) -> None:
-    fixture = _load_fixture("token_rebasing_pausable.json")
-    entries = _derive_entries(fixture, tmp_path)
-    by_role = _by_role(entries)
-
-    # No entry for the computed balanceOf; a direct entry for shares (the raw read
-    # the read-back anchor needs) and for allowance.
-    assert "balance" not in by_role, "a computed balanceOf must never be a seed anchor"
-    assert by_role["shares"]["derivation"] == "storage_layout"
-    assert by_role["shares"]["getter"] == "shares(address)"
-    assert by_role["shares"]["base_slot"] == "0x" + "0" * 63 + "1"
-    assert "allowance" in by_role
-
-    with SubprocessAnvil(port=8553, hardfork_name="prague") as anvil:
-        eff, store, _addr = _run_pause(anvil, fixture, entries)
-
-    # Seeding shares (not balance) is what lets transferFrom's derived-balance
-    # requirement pass and reach the pause gate.
-    assert _readbacks(store) == ["ok", "ok"]  # allowance + shares
-    assert eff.verdict == VERDICT_PROVEN
-    assert "transferFrom" in eff.details["pre_pause_succeeding"]
-    assert eff.details["observed_blast_radius"] == ["transferFrom"]
+    assert SEED_AMOUNT > ARG_AMOUNT  # sanity: seed clears any amount check
 
 
 # ---------------------------------------------------------------------------
@@ -317,35 +339,6 @@ def test_wrong_slot_never_mints_witness(tmp_path: Path) -> None:
         res = anvil.call({"to": addr, "data": getter_calldata})
         assert res.success
         assert int(res.return_data, 16) == 0
-
-
-# ---------------------------------------------------------------------------
-# 5. ERC-721 ownerOf — uint256-keyed owner mapping seeded at tokenId == ARG_AMOUNT
-# ---------------------------------------------------------------------------
-
-
-def test_erc721_owner_seeded_e2e(tmp_path: Path) -> None:
-    fixture = _load_fixture("token_nft_pausable.json")
-    entries = _derive_entries(fixture, tmp_path)
-    by_role = _by_role(entries)
-
-    assert by_role["owner"]["derivation"] == "storage_layout"
-    assert by_role["owner"]["getter"] == "ownerOf(uint256)"
-    assert by_role["owner"]["key_kind"] == "uint256"
-    assert by_role["owner"]["base_slot"] == "0x" + "0" * 63 + "1"
-
-    with SubprocessAnvil(port=8555, hardfork_name="prague") as anvil:
-        # The NFT's third argument is a token ID, not a quantity — the probe must
-        # fill it with the id filler the ownership seed is keyed at.
-        eff, store, _addr = _run_pause(anvil, fixture, entries, ("from", "to", "tokenId"))
-
-    # The seeded owner word IS the prober: "ok" means the uint256-keyed slot was live and
-    # ownerOf(ARG_AMOUNT) echoed the caller.
-    assert _readbacks(store) == ["ok"]
-    assert eff.verdict == VERDICT_PROVEN
-    assert "transferFrom" in eff.details["pre_pause_succeeding"]
-    assert eff.details["observed_blast_radius"] == ["transferFrom"]
-    assert SEED_AMOUNT > ARG_AMOUNT  # sanity: seed clears any amount check
 
 
 # ---------------------------------------------------------------------------

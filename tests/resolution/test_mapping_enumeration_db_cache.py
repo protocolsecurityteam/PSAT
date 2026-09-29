@@ -330,18 +330,20 @@ def test_l2_ttl_invalidation(monkeypatch, _clean_l2):
 
 
 @requires_postgres
-def test_specs_fingerprint_is_order_insensitive_for_indexed_positions():
-    """``indexed_positions=[1,0]`` and ``[0,1]`` describe the same spec; the fingerprint
-    must collapse them."""
-    spec_a = [{**_rely_spec(), "indexed_positions": [0, 1]}]
-    spec_b = [{**_rely_spec(), "indexed_positions": [1, 0]}]
-    assert db_cache.specs_fingerprint(spec_a) == db_cache.specs_fingerprint(spec_b)
-
-
-@requires_postgres
-def test_specs_fingerprint_changes_on_direction(_clean_l2):
-    """Flipping direction must change the fingerprint, else a Rely-only scan could return a
-    stale Deny-bearing principal set."""
-    rely = [_rely_spec()]
-    deny = [{**_rely_spec(), "direction": "remove"}]
-    assert db_cache.specs_fingerprint(rely) != db_cache.specs_fingerprint(deny)
+@pytest.mark.parametrize(
+    "spec_a,spec_b,same",
+    [
+        # ``indexed_positions=[1,0]`` and ``[0,1]`` describe the same spec; the fingerprint must collapse them.
+        pytest.param(
+            {**_rely_spec(), "indexed_positions": [0, 1]},
+            {**_rely_spec(), "indexed_positions": [1, 0]},
+            True,
+            id="indexed_positions_order_insensitive",
+        ),
+        # Flipping direction must change the fingerprint, else a Rely-only scan could return a
+        # stale Deny-bearing principal set.
+        pytest.param(_rely_spec(), {**_rely_spec(), "direction": "remove"}, False, id="direction_changes_it"),
+    ],
+)
+def test_specs_fingerprint(_clean_l2, spec_a, spec_b, same):
+    assert (db_cache.specs_fingerprint([spec_a]) == db_cache.specs_fingerprint([spec_b])) is same

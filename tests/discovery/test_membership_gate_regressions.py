@@ -244,30 +244,28 @@ class TestCallTargetOverreachShape:
         gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(candidate.id,)))
         db_session.commit()
 
-    def test_call_target_controller_value_never_admits(self, db_session, seed_protocol):
+    # CRITICAL (invariant 6): a ControllerValue whose provenance is refused never admits a D2 controller.
+    @pytest.mark.parametrize(
+        ("tag", "controller_id", "provenance"),
+        [
+            pytest.param(0, "nativeWrapper", "call_target", id="call_target"),
+            pytest.param(1, "endpoint", None, id="null_provenance"),
+        ],
+    )
+    def test_refused_controller_value_provenance_never_admits(
+        self, db_session, seed_protocol, tag, controller_id, provenance
+    ):
         from db.models import ContractMembershipWitness, ControllerValue
 
-        member, weth9 = self._seed(db_session, seed_protocol, 0)
+        member, foreign = self._seed(db_session, seed_protocol, tag)
         db_session.add(
             ControllerValue(
                 contract_id=member.id,
-                controller_id="nativeWrapper",
-                value=weth9.address,
-                authority_provenance="call_target",
+                controller_id=controller_id,
+                value=foreign.address,
+                authority_provenance=provenance,
             )
         )
-        self._evaluate(db_session, weth9)
-
-        assert weth9.protocol_id is None
-        assert (
-            db_session.query(ContractMembershipWitness).filter_by(contract_id=weth9.id, rule="w3_control").count() == 0
-        )
-
-    def test_null_provenance_controller_value_never_admits(self, db_session, seed_protocol):
-        from db.models import ContractMembershipWitness, ControllerValue
-
-        member, foreign = self._seed(db_session, seed_protocol, 1)
-        db_session.add(ControllerValue(contract_id=member.id, controller_id="endpoint", value=foreign.address))
         self._evaluate(db_session, foreign)
 
         assert foreign.protocol_id is None

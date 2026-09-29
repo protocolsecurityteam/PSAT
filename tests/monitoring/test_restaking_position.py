@@ -409,13 +409,20 @@ class TestDecoderStrictness:
         assert decode_address_word(raw) is None
         assert decode_strict_bool_word(raw) is None
 
-    def test_whitespace_element_word_does_not_decode_to_a_quantity(self):
-        clean = _shares_return(0, 0)
-        dirty = clean[: 2 + 64 * 3] + "0" * 63 + "\n" + clean[2 + 64 * 4 :]
-        assert decode_withdrawable_shares(dirty) == (None, None)
-
-    def test_whitespace_padded_offset_word_fails_the_shape_assertion(self):
-        dirty = "0x" + " " + "0" * 61 + "40" + "".join(f"{v:064x}" for v in (0x80, 1, 0, 1, 0))
+    @pytest.mark.parametrize(
+        "dirty",
+        [
+            pytest.param(
+                _shares_return(0, 0)[: 2 + 64 * 3] + "0" * 63 + "\n" + _shares_return(0, 0)[2 + 64 * 4 :],
+                id="whitespace-element-word",
+            ),
+            pytest.param(
+                "0x" + " " + "0" * 61 + "40" + "".join(f"{v:064x}" for v in (0x80, 1, 0, 1, 0)),
+                id="whitespace-padded-offset-word",
+            ),
+        ],
+    )
+    def test_whitespace_in_a_shares_word_is_rejected(self, dirty):
         assert decode_withdrawable_shares(dirty) == (None, None)
 
     def test_dirty_high_order_bits_are_not_truncated_into_an_address(self):
@@ -476,21 +483,18 @@ class TestPodFactsRequireAProvenPod:
         record = _record(last_checkpoint_timestamp=_word(0))
         assert record["last_checkpoint_timestamp"] == 0
 
-    def test_out_of_range_pod_words_are_not_determined_not_an_abort(self):
-        """One malformed pod must not cost every other node its observation: a 2**200 word
-        would reach the insert as a Numeric the int columns cannot hold
-        (NumericValueOutOfRange), taking the whole batch down."""
-        record = _record(active_validator_count=_word(2**200), last_checkpoint_timestamp=_word(2**200))
-        assert record["active_validator_count"] is None
-        assert record["last_checkpoint_timestamp"] is None
-
     @pytest.mark.parametrize(
         ("count", "timestamp", "expected"),
         [
             (2**31 - 1, 2**63 - 1, (2**31 - 1, 2**63 - 1)),
             (2**31, 2**63 - 1, (None, 2**63 - 1)),
             (3, 2**63, (3, None)),
+            # One malformed pod must not cost every other node its observation: a 2**200 word
+            # would reach the insert as a Numeric the int columns cannot hold
+            # (NumericValueOutOfRange), taking the whole batch down.
+            (2**200, 2**200, (None, None)),
         ],
+        ids=["at-both-maxima", "count-over-int4", "timestamp-over-int8", "out-of-range-words-not-an-abort"],
     )
     def test_pod_fact_bounds_are_the_column_widths(self, count, timestamp, expected):
         record = _record(active_validator_count=_word(count), last_checkpoint_timestamp=_word(timestamp))

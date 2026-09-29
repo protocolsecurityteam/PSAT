@@ -110,16 +110,11 @@ def test_latest_path_publishes_no_observation_block(monkeypatch: pytest.MonkeyPa
     assert "observed_at_block" not in cap.trace[0]
 
 
-def test_pinned_read_uses_the_hex_block(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_non_empty_read_carries_its_block_and_reads_at_the_pinned_hex_block(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _stub_getter(monkeypatch, returns=_word(GOVERNOR), only=OWNER_SELECTOR)
-    evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "owner()"}), _ctx())
-    assert calls[0][1][1] == hex(PINNED_BLOCK)
-
-
-def test_non_empty_read_also_carries_its_block(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_getter(monkeypatch, returns=_word(GOVERNOR), only=OWNER_SELECTOR)
     cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "owner()"}), _ctx())
 
+    assert calls[0][1][1] == hex(PINNED_BLOCK)
     assert cap.members == [GOVERNOR]
     assert cap.trace[0]["observed_at_block"] == PINNED_BLOCK
 
@@ -282,14 +277,26 @@ def _authority_details(cap: CapabilityExpr) -> dict[str, Any]:
     return rows[0]["details"]
 
 
-def test_deunderscore_convention_is_labelled_and_hoisted(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "returned",
+    [
+        pytest.param(GOVERNOR, id="labelled_and_hoisted"),
+        # Anti-name-inference control. A reverting internal ``_governor()`` AND an unrelated public ``governor()``
+        # returning a DIFFERENT address still resolves to the public getter (that is the convention), but must
+        # publish ``deunderscore_convention``: the row discloses a name match rather than claiming it was checked.
+        # A genuine slot differential would invert this, but it is unrunnable on 2 of 3 runtime addresses and
+        # non-identifying on the third, so ``accessor_slot_agreement`` stays ``not_determined``.
+        pytest.param("0x" + "77" * 20, id="disclosed_not_validated"),
+    ],
+)
+def test_deunderscore_convention(monkeypatch: pytest.MonkeyPatch, returned: str) -> None:
     """``onlyGovernor`` lowers to ``msg.sender == _governor()``; the accessor has no
     selector so it reverts and the resolver falls back to the de-underscored public
     getter. The row says so BESIDE its strength fields, not only inside the trace."""
-    _stub_getter(monkeypatch, returns=_word(GOVERNOR), only=GOVERNOR_SELECTOR)
+    _stub_getter(monkeypatch, returns=_word(returned), only=GOVERNOR_SELECTOR)
     cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "_governor()"}), _ctx())
 
-    assert cap.members == [GOVERNOR]
+    assert cap.members == [returned]
     assert {"step": "authority_getter_basis", "basis": "deunderscore_convention", "selector": GOVERNOR_SELECTOR} in (
         cap.trace
     )
@@ -346,22 +353,3 @@ def test_a_lower_bound_read_never_stamps_a_basis(monkeypatch: pytest.MonkeyPatch
 
     assert cap.membership_quality != "exact"
     assert [step for step in cap.trace if step.get("step") == "authority_getter_basis"] == []
-
-
-def test_the_convention_is_disclosed_not_validated(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Anti-name-inference control. A reverting internal ``_governor()`` AND an unrelated
-    public ``governor()`` returning a DIFFERENT address still resolves to the public
-    getter (that is the convention), but must publish ``deunderscore_convention`` — the
-    row discloses a name match rather than claiming it was checked.
-
-    A genuine slot differential would invert this, but it is unrunnable on 2 of 3 runtime
-    addresses and non-identifying on the third, so ``accessor_slot_agreement`` stays
-    ``not_determined``."""
-    unrelated = "0x" + "77" * 20
-    _stub_getter(monkeypatch, returns=_word(unrelated), only=GOVERNOR_SELECTOR)
-    cap = evaluate_tree(_eq_tree({"source": "view_call", "callee_signature": "_governor()"}), _ctx())
-
-    assert cap.members == [unrelated]
-    details = _authority_details(cap)
-    assert details["authority_basis"] == "deunderscore_convention"
-    assert details["accessor_slot_agreement"] == "not_determined"

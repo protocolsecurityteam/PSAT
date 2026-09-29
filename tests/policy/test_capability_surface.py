@@ -8,6 +8,8 @@ project to a PUBLIC path carrying the denylist as a side-condition, not fall to 
 
 from __future__ import annotations
 
+import pytest
+
 from services.policy.capability_surface import (
     capability_surface_status,
     project_capability_surface,
@@ -166,24 +168,68 @@ def test_role_grants_witnessed_for_single_role_capability():
     ]
 
 
-def test_role_grants_not_determined_for_multi_role_capability():
-    """Two roles carry the capability, so which role each member holds is unrecoverable;
-    attributing every member to every role is the over-claim."""
+@pytest.mark.parametrize(
+    "cap",
+    [
+        # Two roles carry the capability, so which role each member holds is unrecoverable;
+        # attributing every member to every role is the over-claim.
+        pytest.param(_solmate_cap([1, 2], [ADDR_A]), id="multi_role_capability"),
+        # The enumerable role-store probes the gate and never a role name: role-gated, role unknown.
+        pytest.param(
+            {
+                "kind": "finite_set",
+                "members": [ADDR_A],
+                "membership_quality": "exact",
+                "trace": [{"step": "enumerable_role_store", "authority": "0x" + "3" * 40}],
+            },
+            id="role_identity_dissolved",
+        ),
+        # ``[]`` means the gate was lowered and no role appeared. An ``unsupported`` capability was
+        # NEVER lowered, so nothing (including "not role-keyed") was read: not-determined ``None``,
+        # anywhere in the tree (inverts the earlier pin, the chronic not-determined->proven route).
+        pytest.param({"kind": "unsupported", "unsupported_reason": "x"}, id="unsupported"),
+        pytest.param(
+            {
+                "kind": "and",
+                "children": [
+                    {"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"},
+                    {"kind": "unsupported", "unsupported_reason": "x"},
+                ],
+            },
+            id="unsupported_nested_in_tree",
+        ),
+        # Regression: ``[]`` claims the gate WAS lowered with no role-keyed authority. Not-determined
+        # openness shapes read NOTHING about the gate, role-keyed or not. 12 of 1,159 ether.fi rows on
+        # the PR-161 preview carried the contradiction (``authority_roles=[]`` beside
+        # ``authority_openness='not_determined'``), including two ``grantRole`` entry points gated only
+        # by a never-lowered external view probe.
+        pytest.param(
+            {
+                "kind": "external_check_only",
+                "check": {
+                    "extra": {"basis": ["caller_tainted_authority_unresolved"]},
+                    "target_address": "0x" + "9" * 40,
+                },
+                "confidence": "check_only",
+                "membership_quality": "exact",
+            },
+            id="never_lowered_external_check_probe",
+        ),
+        pytest.param(
+            {
+                "kind": "finite_set",
+                "members": [],
+                "confidence": "partial",
+                "empty_reason": "not_read",
+                "membership_quality": "lower_bound",
+            },
+            id="never_lowered_not_read",
+        ),
+    ],
+)
+def test_role_grants_not_determined(cap):
     from services.policy.capability_surface import capability_role_grants
 
-    assert capability_role_grants(_solmate_cap([1, 2], [ADDR_A])) is None
-
-
-def test_role_grants_not_determined_when_role_identity_is_dissolved():
-    """The enumerable role-store probes the gate and never a role name: role-gated, role unknown."""
-    from services.policy.capability_surface import capability_role_grants
-
-    cap = {
-        "kind": "finite_set",
-        "members": [ADDR_A],
-        "membership_quality": "exact",
-        "trace": [{"step": "enumerable_role_store", "authority": "0x" + "3" * 40}],
-    }
     assert capability_role_grants(cap) is None
 
 
@@ -194,55 +240,6 @@ def test_role_grants_empty_when_no_role_authority_witnessed():
 
     assert capability_role_grants({"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"}) == []
     assert capability_role_grants({"kind": "conditional_universal", "conditions": []}) == []
-
-
-def test_role_grants_not_determined_on_unsupported():
-    """``[]`` means the gate was lowered and no role appeared. An ``unsupported`` capability was
-    NEVER lowered, so nothing (including "not role-keyed") was read: not-determined ``None``,
-    anywhere in the tree (inverts the earlier pin, the chronic not-determined->proven route)."""
-    from services.policy.capability_surface import capability_role_grants
-
-    assert capability_role_grants({"kind": "unsupported", "unsupported_reason": "x"}) is None
-    assert (
-        capability_role_grants(
-            {
-                "kind": "and",
-                "children": [
-                    {"kind": "finite_set", "members": [ADDR_A], "membership_quality": "exact"},
-                    {"kind": "unsupported", "unsupported_reason": "x"},
-                ],
-            }
-        )
-        is None
-    )
-
-
-def test_role_grants_not_determined_when_the_gate_was_never_lowered():
-    """``[]`` claims the gate WAS lowered with no role-keyed authority. Not-determined openness
-    shapes (an ``external_check_only`` probe interface, a ``finite_set`` with ``empty_reason``
-    ``not_read``) read NOTHING about the gate, role-keyed or not.
-
-    12 of 1,159 ether.fi rows on the PR-161 preview carried the contradiction
-    (``authority_roles=[]`` beside ``authority_openness='not_determined'``), including two
-    ``grantRole`` entry points gated only by a never-lowered external view probe."""
-    from services.policy.capability_surface import capability_role_grants
-
-    probe = {
-        "kind": "external_check_only",
-        "check": {"extra": {"basis": ["caller_tainted_authority_unresolved"]}, "target_address": "0x" + "9" * 40},
-        "confidence": "check_only",
-        "membership_quality": "exact",
-    }
-    assert capability_role_grants(probe) is None
-
-    not_read = {
-        "kind": "finite_set",
-        "members": [],
-        "confidence": "partial",
-        "empty_reason": "not_read",
-        "membership_quality": "lower_bound",
-    }
-    assert capability_role_grants(not_read) is None
 
 
 def test_role_grants_not_determined_when_no_named_role_member_is_readable():

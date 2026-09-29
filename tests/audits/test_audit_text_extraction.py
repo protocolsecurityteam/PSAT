@@ -36,13 +36,10 @@ class TestExtractTextFromPdf:
         assert "Vault.sol" in text
         assert "--- page 1 ---" in text
 
-    def test_garbage_body_raises_parse_error(self):
+    @pytest.mark.parametrize("body", [b"not a pdf at all", b""], ids=["garbage_body", "empty_body"])
+    def test_unparseable_body_raises_parse_error(self, body):
         with pytest.raises(PdfParseError):
-            extract_text_from_pdf(b"not a pdf at all")
-
-    def test_empty_body_raises_parse_error(self):
-        with pytest.raises(PdfParseError):
-            extract_text_from_pdf(b"")
+            extract_text_from_pdf(body)
 
     def test_link_annotation_uris_are_included_in_extracted_text(self):
         """Certora PDFs embed commit SHAs as hyperlinks and pypdf's ``extract_text()`` drops the URI, leaving
@@ -242,18 +239,28 @@ class TestDownloadPdfBoundaries:
 
 
 class TestDownloadAuditBodyRetry:
-    def test_transient_connection_error_is_retried_to_success(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            pytest.param(
+                requests.exceptions.ConnectionError(
+                    "Connection aborted.",
+                    ConnectionResetError(104, "Connection reset by peer"),
+                ),
+                id="connection_error",
+            ),
+            # Slow CDNs surface as ReadTimeout, not ConnectionError; same transient retry treatment.
+            pytest.param(requests.exceptions.ReadTimeout("read timed out"), id="read_timeout"),
+            # 503 is the HTTP-level analogue of a connection reset; it used to be bucketed with 4xx as fatal.
+            pytest.param(_mock_response(status_code=503), id="transient_5xx"),
+        ],
+    )
+    def test_transient_failure_is_retried_to_success(self, monkeypatch, failure):
         monkeypatch.setattr("services.audits.text_extraction._retry_sleep", lambda _s: None, raising=False)
 
         ok = _mock_response(body=b"%PDF-1.4\n...")
         session = MagicMock()
-        session.get.side_effect = [
-            requests.exceptions.ConnectionError(
-                "Connection aborted.",
-                ConnectionResetError(104, "Connection reset by peer"),
-            ),
-            ok,
-        ]
+        session.get.side_effect = [failure, ok]
 
         body = download_pdf("https://example.com/audit.pdf", session=session)
         assert body == b"%PDF-1.4\n..."
@@ -272,54 +279,24 @@ class TestDownloadAuditBodyRetry:
             download_pdf("https://example.com/audit.pdf", session=session)
         assert session.get.call_count == 3
 
-    def test_read_timeout_is_retried_to_success(self, monkeypatch):
-        """Slow CDNs surface as ReadTimeout, not ConnectionError. Both are
-        transient transport failures and get the same retry treatment."""
-        monkeypatch.setattr("services.audits.text_extraction._retry_sleep", lambda _s: None, raising=False)
-
-        ok = _mock_response(body=b"%PDF-1.4\n...")
-        session = MagicMock()
-        session.get.side_effect = [
-            requests.exceptions.ReadTimeout("read timed out"),
-            ok,
-        ]
-
-        body = download_pdf("https://example.com/audit.pdf", session=session)
-        assert body == b"%PDF-1.4\n..."
-        assert session.get.call_count == 2
-
-    def test_transient_5xx_is_retried_to_success(self, monkeypatch):
-        """503 is the HTTP-level analogue of a connection reset; it used to be bucketed with 4xx as fatal."""
-        monkeypatch.setattr("services.audits.text_extraction._retry_sleep", lambda _s: None, raising=False)
-
-        ok = _mock_response(body=b"%PDF-1.4\n...")
-        session = MagicMock()
-        session.get.side_effect = [_mock_response(status_code=503), ok]
-
-        body = download_pdf("https://example.com/audit.pdf", session=session)
-        assert body == b"%PDF-1.4\n..."
-        assert session.get.call_count == 2
-
-    def test_fatal_4xx_does_not_retry(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("response_kwargs", "url", "match"),
+        [
+            pytest.param({"status_code": 404}, "https://example.com/missing.pdf", "HTTP 404", id="fatal_4xx"),
+            # text/html signals a wrong URL was captured at discovery; refetching keeps returning HTML.
+            pytest.param(
+                {"content_type": "text/html"}, "https://example.com/login.pdf", "content-type", id="fatal_content_type"
+            ),
+        ],
+    )
+    def test_fatal_failure_does_not_retry(self, monkeypatch, response_kwargs, url, match):
         monkeypatch.setattr("services.audits.text_extraction._retry_sleep", lambda _s: None, raising=False)
 
         session = MagicMock()
-        session.get.return_value = _mock_response(status_code=404)
+        session.get.return_value = _mock_response(**response_kwargs)
 
-        with pytest.raises(PdfDownloadError, match="HTTP 404"):
-            download_pdf("https://example.com/missing.pdf", session=session)
-        assert session.get.call_count == 1
-
-    def test_fatal_content_type_does_not_retry(self, monkeypatch):
-        """text/html signals a wrong URL was captured at discovery — refetching
-        the same URL will keep returning HTML, so this short-circuits."""
-        monkeypatch.setattr("services.audits.text_extraction._retry_sleep", lambda _s: None, raising=False)
-
-        session = MagicMock()
-        session.get.return_value = _mock_response(content_type="text/html")
-
-        with pytest.raises(PdfDownloadError, match="content-type"):
-            download_pdf("https://example.com/login.pdf", session=session)
+        with pytest.raises(PdfDownloadError, match=match):
+            download_pdf(url, session=session)
         assert session.get.call_count == 1
 
 
@@ -334,44 +311,23 @@ def test_audit_text_key_is_deterministic():
 
 
 class TestDownloadAuditBodyTextMode:
-    def test_accepts_text_markdown_content_type(self):
+    @pytest.mark.parametrize(
+        ("content_type", "payload"),
+        [
+            pytest.param("text/markdown", b"# Audit Report\n\nFindings...", id="text_markdown"),
+            pytest.param("text/plain", b"plain text audit content", id="text_plain"),
+            pytest.param("text/x-markdown", b"markdown body", id="text_x_markdown"),
+        ],
+    )
+    def test_accepts_text_content_type(self, content_type, payload):
         session = MagicMock()
-        session.get.return_value = _mock_response(
-            content_type="text/markdown",
-            body=b"# Audit Report\n\nFindings...",
-        )
+        session.get.return_value = _mock_response(content_type=content_type, body=payload)
         body = download_audit_body(
             "https://raw.githubusercontent.com/x/y/main/audit.md",
             session=session,
             kind="text",
         )
-        assert body == b"# Audit Report\n\nFindings..."
-
-    def test_accepts_text_plain_content_type(self):
-        session = MagicMock()
-        session.get.return_value = _mock_response(
-            content_type="text/plain",
-            body=b"plain text audit content",
-        )
-        body = download_audit_body(
-            "https://raw.githubusercontent.com/x/y/main/audit.md",
-            session=session,
-            kind="text",
-        )
-        assert body == b"plain text audit content"
-
-    def test_accepts_text_x_markdown_content_type(self):
-        session = MagicMock()
-        session.get.return_value = _mock_response(
-            content_type="text/x-markdown",
-            body=b"markdown body",
-        )
-        body = download_audit_body(
-            "https://raw.githubusercontent.com/x/y/main/audit.md",
-            session=session,
-            kind="text",
-        )
-        assert body == b"markdown body"
+        assert body == payload
 
     def test_rejects_html_in_text_mode(self):
         """Even in text mode we reject HTML — a GitHub /blob/ URL serves HTML
@@ -407,26 +363,46 @@ _MD_BODY = "# Hats Finance Audit\n\n" + ("\n## Scope\n\nPool.sol, Vault.sol, Str
 
 
 class TestProcessAuditReportTextFiles:
-    def test_normalizes_github_blob_markdown_url_before_download(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("downloader", "payload", "audit_id", "blob_url", "raw_url"),
+        [
+            pytest.param(
+                "download_text",
+                _MD_BODY.encode("utf-8"),
+                9,
+                "https://github.com/x/y/blob/main/audits/report.md",
+                "https://raw.githubusercontent.com/x/y/main/audits/report.md",
+                id="markdown",
+            ),
+            pytest.param(
+                "download_pdf",
+                minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20),
+                43,
+                "https://github.com/x/y/blob/main/audits/report.pdf",
+                "https://raw.githubusercontent.com/x/y/main/audits/report.pdf",
+                id="pdf",
+            ),
+        ],
+    )
+    def test_normalizes_github_blob_url_before_download(
+        self, monkeypatch, downloader, payload, audit_id, blob_url, raw_url
+    ):
         captured: dict[str, str] = {}
 
-        def fake_download_text(url, session=None):
+        def fake_download(url, session=None):
             captured["url"] = url
-            return _MD_BODY.encode("utf-8")
+            return payload
 
-        monkeypatch.setattr("services.audits.text_extraction.download_text", fake_download_text)
+        monkeypatch.setattr(f"services.audits.text_extraction.{downloader}", fake_download)
         monkeypatch.setattr(
             "services.audits.text_extraction.store_audit_text",
             lambda aid, text: (f"audits/text/{aid}.txt", len(text.encode("utf-8")), "e" * 64),
         )
 
-        out = process_audit_report(
-            audit_report_id=9,
-            url="https://github.com/x/y/blob/main/audits/report.md",
-        )
+        out = process_audit_report(audit_report_id=audit_id, url=blob_url)
 
         assert out.status == "success"
-        assert captured["url"] == "https://raw.githubusercontent.com/x/y/main/audits/report.md"
+        assert captured["url"] == raw_url
 
     def test_markdown_url_success_stores_text_unchanged(self, monkeypatch):
         captured: dict = {}
@@ -512,26 +488,3 @@ class TestProcessAuditReportTextFiles:
         )
         assert out.status == "success"
         assert "--- page 1 ---" in captured_text["text"]
-
-    def test_normalizes_github_blob_pdf_url_before_download(self, monkeypatch):
-        captured: dict[str, str] = {}
-
-        monkeypatch.setattr(
-            "services.audits.text_extraction.download_pdf",
-            lambda url, session=None: (
-                captured.setdefault("url", url),
-                minimal_pdf_with_text("Audits covering Pool.sol Vault.sol Strategy.sol Registry.sol. " * 20),
-            )[1],
-        )
-        monkeypatch.setattr(
-            "services.audits.text_extraction.store_audit_text",
-            lambda aid, text: (f"audits/text/{aid}.txt", len(text.encode("utf-8")), "f" * 64),
-        )
-
-        out = process_audit_report(
-            audit_report_id=43,
-            url="https://github.com/x/y/blob/main/audits/report.pdf",
-        )
-
-        assert out.status == "success"
-        assert captured["url"] == "https://raw.githubusercontent.com/x/y/main/audits/report.pdf"

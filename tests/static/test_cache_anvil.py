@@ -157,17 +157,7 @@ def _set_storage(rpc_url: str, address: str, slot: str, value: str) -> None:
 class TestAnvilProxyCache:
     """Integration tests that exercise real EIP-1967 storage slot reads via Anvil."""
 
-    def test_resolve_current_implementation_reads_real_slot(self, anvil_rpc):
-        from services.monitoring.proxy_watcher import resolve_current_implementation
-
-        proxy_addr = _deploy_minimal_contract(anvil_rpc)
-        _set_storage(anvil_rpc, proxy_addr, _EIP1967_IMPL_SLOT, _ANVIL_IMPL_A)
-
-        result = resolve_current_implementation(proxy_addr, anvil_rpc, proxy_type="eip1967")
-        assert result is not None
-        assert result.lower() == _ANVIL_IMPL_A.lower()
-
-    def test_resolve_current_implementation_detects_change(self, anvil_rpc):
+    def test_resolve_current_implementation_reads_real_slot_and_detects_change(self, anvil_rpc):
         from services.monitoring.proxy_watcher import resolve_current_implementation
 
         proxy_addr = _deploy_minimal_contract(anvil_rpc)

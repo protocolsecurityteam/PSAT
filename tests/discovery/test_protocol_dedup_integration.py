@@ -87,47 +87,25 @@ def _count_protocols(session) -> int:
 
 
 # ---------------------------------------------------------------------------
-# (a) Idempotent same-input — happy-path regression guard.
+# (a-c) Spelling variants of one family must collapse to ONE row.
 # ---------------------------------------------------------------------------
 
 
-def test_same_input_twice_yields_one_row(db_session, stub_resolver):
-    p1 = _resolve_and_create(db_session, "etherfi", official_domain="ether.fi")
+@pytest.mark.parametrize(
+    ("first", "second", "official_domain"),
+    [
+        pytest.param("etherfi", "etherfi", "ether.fi", id="same-input-twice"),
+        # CRITICAL, the prod-incident reproduction: ``ether fi`` (TVL/dapp-crawl) and ``etherfi``
+        # (github-org) must collapse to ONE row; pre-fix prod had two (protocol_id=2 and 3) with
+        # audits and contracts split.
+        pytest.param("ether fi", "etherfi", "ether.fi", id="whitespace-variants"),
+        pytest.param("EtherFi", "etherfi", None, id="case-variants"),
+    ],
+)
+def test_spelling_variants_dedupe_via_slug(db_session, stub_resolver, first, second, official_domain):
+    p1 = _resolve_and_create(db_session, first, official_domain=official_domain)
     db_session.commit()
-    p2 = _resolve_and_create(db_session, "etherfi", official_domain="ether.fi")
-    db_session.commit()
-
-    assert p1.id == p2.id
-    assert _count_protocols(db_session) == 1
-
-
-# ---------------------------------------------------------------------------
-# (b) Whitespace variant — THE prod-incident reproduction.
-# ---------------------------------------------------------------------------
-
-
-def test_whitespace_variants_dedupe_via_slug(db_session, stub_resolver):
-    """``ether fi`` (TVL/dapp-crawl) and ``etherfi`` (github-org) must collapse
-    to ONE row; pre-fix prod had two (protocol_id=2 and 3) with audits and
-    contracts split."""
-    p1 = _resolve_and_create(db_session, "ether fi", official_domain="ether.fi")
-    db_session.commit()
-    p2 = _resolve_and_create(db_session, "etherfi", official_domain="ether.fi")
-    db_session.commit()
-
-    assert p1.id == p2.id
-    assert _count_protocols(db_session) == 1
-
-
-# ---------------------------------------------------------------------------
-# (c) Case variant — same family, different capitalization.
-# ---------------------------------------------------------------------------
-
-
-def test_case_variants_dedupe_via_slug(db_session, stub_resolver):
-    p1 = _resolve_and_create(db_session, "EtherFi")
-    db_session.commit()
-    p2 = _resolve_and_create(db_session, "etherfi")
+    p2 = _resolve_and_create(db_session, second, official_domain=official_domain)
     db_session.commit()
 
     assert p1.id == p2.id

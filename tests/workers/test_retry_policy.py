@@ -27,44 +27,8 @@ from workers.retry_policy import (
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "exc",
-    [
-        requests.exceptions.ConnectionError("connection reset"),
-        requests.exceptions.Timeout("read timeout"),
-        requests.exceptions.ChunkedEncodingError("chunked"),
-        socket.timeout("blip"),
-        urllib3.exceptions.ReadTimeoutError(MagicMock(), "/u", "timeout"),
-        urllib3.exceptions.NewConnectionError(MagicMock(), "refused"),
-        urllib3.exceptions.ProtocolError("partial"),
-    ],
-)
-def test_classify_transient_for_network_blips(exc):
-    assert classify(exc) == "transient"
-
-
-@pytest.mark.parametrize(
-    "exc",
-    [
-        ValueError("bad"),
-        TypeError("bad"),
-        KeyError("missing"),
-        AssertionError("nope"),
-        RuntimeError("generic"),
-    ],
-)
-def test_classify_terminal_for_bug_or_bad_input(exc):
-    assert classify(exc) == "terminal"
-
-
-def test_classify_psycopg2_operational_is_transient():
-    psycopg2 = pytest.importorskip("psycopg2")
-    assert classify(psycopg2.OperationalError("connection closed")) == "transient"
-
-
-# ---------------------------------------------------------------------------
-# classify() — HTTPError status-code branch
-# ---------------------------------------------------------------------------
+_TRANSIENT_STATUSES = [408, 425, 429, 500, 502, 503, 504, 522, 524]
+_TERMINAL_STATUSES = [400, 401, 403, 404, 405, 410, 422]
 
 
 def _http_error(status: int | None) -> requests.exceptions.HTTPError:
@@ -75,21 +39,41 @@ def _http_error(status: int | None) -> requests.exceptions.HTTPError:
     return requests.exceptions.HTTPError(f"{status}", response=response)  # pyright: ignore[reportArgumentType]
 
 
-@pytest.mark.parametrize("status", [408, 425, 429, 500, 502, 503, 504, 522, 524])
-def test_classify_http_transient_statuses(status):
-    assert classify(_http_error(status)) == "transient"
+def _psycopg2_operational() -> Exception:
+    psycopg2 = pytest.importorskip("psycopg2")
+    return psycopg2.OperationalError("connection closed")
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 405, 410, 422])
-def test_classify_http_terminal_statuses(status):
-    assert classify(_http_error(status)) == "terminal"
-
-
-def test_classify_http_no_response_is_terminal():
-    """HTTPError raised without a response is treated as a deterministic shape problem."""
-    exc = requests.exceptions.HTTPError("no response attached")
-    exc.response = None
-    assert classify(exc) == "terminal"
+# Network errors must retry; bug-class exceptions must not (CRITICAL: a terminal error that
+# retries loops forever). Exceptions are built lazily so importorskip only skips its own case.
+@pytest.mark.parametrize(
+    "make_exc, expected",
+    [
+        pytest.param(lambda: requests.exceptions.ConnectionError("connection reset"), "transient", id="conn-error"),
+        pytest.param(lambda: requests.exceptions.Timeout("read timeout"), "transient", id="timeout"),
+        pytest.param(lambda: requests.exceptions.ChunkedEncodingError("chunked"), "transient", id="chunked"),
+        pytest.param(lambda: socket.timeout("blip"), "transient", id="socket-timeout"),
+        pytest.param(
+            lambda: urllib3.exceptions.ReadTimeoutError(MagicMock(), "/u", "timeout"), "transient", id="urllib3-read"
+        ),
+        pytest.param(
+            lambda: urllib3.exceptions.NewConnectionError(MagicMock(), "refused"), "transient", id="urllib3-newconn"
+        ),
+        pytest.param(lambda: urllib3.exceptions.ProtocolError("partial"), "transient", id="urllib3-protocol"),
+        pytest.param(_psycopg2_operational, "transient", id="psycopg2-operational"),
+        pytest.param(lambda: ValueError("bad"), "terminal", id="value-error"),
+        pytest.param(lambda: TypeError("bad"), "terminal", id="type-error"),
+        pytest.param(lambda: KeyError("missing"), "terminal", id="key-error"),
+        pytest.param(lambda: AssertionError("nope"), "terminal", id="assertion-error"),
+        pytest.param(lambda: RuntimeError("generic"), "terminal", id="runtime-error"),
+        *[pytest.param(lambda s=s: _http_error(s), "transient", id=f"http-{s}") for s in _TRANSIENT_STATUSES],
+        *[pytest.param(lambda s=s: _http_error(s), "terminal", id=f"http-{s}") for s in _TERMINAL_STATUSES],
+        # HTTPError raised without a response is a deterministic shape problem.
+        pytest.param(lambda: _http_error(None), "terminal", id="http-no-response"),
+    ],
+)
+def test_classify(make_exc, expected):
+    assert classify(make_exc()) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -104,17 +88,10 @@ def _delay_seconds(result: datetime) -> float:
     return (result - _NOW).total_seconds()
 
 
-def test_compute_next_attempt_first_retry_in_jitter_window(monkeypatch):
-    monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "30")
-    for _ in range(50):
-        delay = _delay_seconds(compute_next_attempt(0, now=_NOW))
-        # base=30, retry_count=0 → 30s; jitter ±25% → [22.5, 37.5]
-        assert 30 * 0.75 <= delay <= 30 * 1.25 + 1e-6
-
-
 @pytest.mark.parametrize(
     "retry_count, expected_base",
     [
+        (0, 30),  # first retry: base * 1, jitter +-25% -> [22.5, 37.5]
         (1, 60),
         (2, 120),
         (3, 240),
@@ -123,7 +100,7 @@ def test_compute_next_attempt_first_retry_in_jitter_window(monkeypatch):
 )
 def test_compute_next_attempt_doubles_each_retry(monkeypatch, retry_count, expected_base):
     monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "30")
-    for _ in range(20):
+    for _ in range(50):
         delay = _delay_seconds(compute_next_attempt(retry_count, now=_NOW))
         assert expected_base * 0.75 <= delay <= expected_base * 1.25 + 1e-6
 
@@ -143,26 +120,19 @@ def test_compute_next_attempt_caps_at_30min(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_max_retries_default(monkeypatch):
-    monkeypatch.delenv("PSAT_JOB_MAX_RETRIES", raising=False)
-    assert max_retries() == 5
-
-
-def test_max_retries_env_override(monkeypatch):
-    monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "9")
-    assert max_retries() == 9
-
-
-def test_max_retries_env_garbage_falls_back(monkeypatch):
-    monkeypatch.setenv("PSAT_JOB_MAX_RETRIES", "not-an-int")
-    assert max_retries() == 5
-
-
-def test_retry_base_s_default(monkeypatch):
-    monkeypatch.delenv("PSAT_JOB_RETRY_BASE_S", raising=False)
-    assert retry_base_s() == 30.0
-
-
-def test_retry_base_s_env_override(monkeypatch):
-    monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "12.5")
-    assert retry_base_s() == 12.5
+@pytest.mark.parametrize(
+    "fn, var, value, expected",
+    [
+        pytest.param(max_retries, "PSAT_JOB_MAX_RETRIES", None, 5, id="max_retries-default"),
+        pytest.param(max_retries, "PSAT_JOB_MAX_RETRIES", "9", 9, id="max_retries-override"),
+        pytest.param(max_retries, "PSAT_JOB_MAX_RETRIES", "not-an-int", 5, id="max_retries-garbage-falls-back"),
+        pytest.param(retry_base_s, "PSAT_JOB_RETRY_BASE_S", None, 30.0, id="retry_base_s-default"),
+        pytest.param(retry_base_s, "PSAT_JOB_RETRY_BASE_S", "12.5", 12.5, id="retry_base_s-override"),
+    ],
+)
+def test_env_knobs(monkeypatch, fn, var, value, expected):
+    if value is None:
+        monkeypatch.delenv(var, raising=False)
+    else:
+        monkeypatch.setenv(var, value)
+    assert fn() == expected

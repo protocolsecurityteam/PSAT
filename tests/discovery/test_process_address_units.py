@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from workers.discovery import DiscoveryWorker
 
 # ---------------------------------------------------------------------------
@@ -127,98 +129,85 @@ def test_happy_path_does_not_overwrite_existing_job_name(monkeypatch):
     assert job.name == "AlreadySet"
 
 
-# ---------------------------------------------------------------------------
-# 2. Vyper detection
-# ---------------------------------------------------------------------------
+# source_format is 'standard_json' when 'sources' is in the first 10 chars. Single-brace ``{"sources":...}`` puts it at
+# index 2; Etherscan's double-brace format overflows the window, so this variant exercises the branch.
+_STANDARD_JSON_SOURCE = json.dumps(
+    {
+        "sources": {"contracts/Token.sol": {"content": "pragma solidity ^0.8.0; contract Token {}"}},
+        "language": "Solidity",
+        "settings": {"optimizer": {"enabled": True, "runs": 200}, "remappings": []},
+    }
+)
+assert "sources" in _STANDARD_JSON_SOURCE[:10]
 
 
-def test_vyper_detected_from_compiler_version(monkeypatch):
-    result = _etherscan_result(
-        CompilerVersion="vyper:0.3.7",
-        SourceCode="# @version 0.3.7\n@external\ndef foo(): pass",
-        ContractName="VyperVault",
-    )
-    _, artifact_calls = _patch_discovery(monkeypatch, result)
-
-    worker = DiscoveryWorker()
-    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    worker._process_address(session, job)
-
-    contract = session.add.call_args[0][0]
-    assert contract.language == "vyper"
-
-
-def test_vyper_detected_from_v0_prefix(monkeypatch):
-    """is_vyper_result() also matches CompilerVersion starting with 'v0.' (Vyper convention)."""
-    result = _etherscan_result(
-        CompilerVersion="v0.3.7+commit.abc",
-        SourceCode="# @version 0.3.7\n@external\ndef bar(): pass",
-        ContractName="VyperPool",
-    )
-    _, artifact_calls = _patch_discovery(monkeypatch, result)
-
-    worker = DiscoveryWorker()
-    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    worker._process_address(session, job)
-
-    contract = session.add.call_args[0][0]
-    # is_vyper_result checks for "vyper" in compiler string; "v0." alone does not
-    # match unless source starts with "# @version". The source above does start
-    # with that, so is_vyper_result returns True via the source-code fallback.
-    assert contract.language == "vyper"
-
-
-def test_solidity_when_compiler_not_vyper(monkeypatch):
-    result = _etherscan_result(
-        CompilerVersion="v0.8.20+commit.a1b2c3",
-        SourceCode="pragma solidity ^0.8.20; contract Foo {}",
-    )
-    _, artifact_calls = _patch_discovery(monkeypatch, result)
-
-    worker = DiscoveryWorker()
-    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    worker._process_address(session, job)
-
-    contract = session.add.call_args[0][0]
-    assert contract.language == "solidity"
-
-
-# ---------------------------------------------------------------------------
-# 3. EVM version fallback
-# ---------------------------------------------------------------------------
-
-
-def test_evm_version_defaults_to_shanghai_when_empty(monkeypatch):
-    result = _etherscan_result(EVMVersion="")
-    _, artifact_calls = _patch_discovery(monkeypatch, result)
-
-    worker = DiscoveryWorker()
-    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    worker._process_address(session, job)
-
-    contract = session.add.call_args[0][0]
-    assert contract.evm_version == "shanghai"
-
-
-def test_evm_version_defaults_to_shanghai_when_default(monkeypatch):
-    result = _etherscan_result(EVMVersion="Default")
-    _, artifact_calls = _patch_discovery(monkeypatch, result)
+@pytest.mark.parametrize(
+    "overrides, drop_keys, expected",
+    [
+        pytest.param(
+            {
+                "CompilerVersion": "vyper:0.3.7",
+                "SourceCode": "# @version 0.3.7\n@external\ndef foo(): pass",
+                "ContractName": "VyperVault",
+            },
+            (),
+            {"language": "vyper"},
+            id="vyper-from-compiler-version",
+        ),
+        # is_vyper_result checks for "vyper" in the compiler string; "v0." alone does not match unless the source starts
+        # with "# @version", which it does here, so this hits the source-comment fallback.
+        pytest.param(
+            {
+                "CompilerVersion": "v0.3.7+commit.abc",
+                "SourceCode": "# @version 0.3.7\n@external\ndef bar(): pass",
+                "ContractName": "VyperPool",
+            },
+            (),
+            {"language": "vyper"},
+            id="vyper-from-v0-prefix-source-fallback",
+        ),
+        pytest.param(
+            {
+                "CompilerVersion": "v0.8.20+commit.a1b2c3",
+                "SourceCode": "pragma solidity ^0.8.20; contract Foo {}",
+            },
+            (),
+            {"language": "solidity"},
+            id="solidity-when-compiler-not-vyper",
+        ),
+        pytest.param({"EVMVersion": ""}, (), {"evm_version": "shanghai"}, id="evm-version-empty-defaults-to-shanghai"),
+        pytest.param(
+            {"EVMVersion": "Default"}, (), {"evm_version": "shanghai"}, id="evm-version-default-defaults-to-shanghai"
+        ),
+        pytest.param({"EVMVersion": "cancun"}, (), {"evm_version": "cancun"}, id="evm-version-explicit-preserved"),
+        # EVMVersion key missing from the Etherscan result entirely.
+        pytest.param({}, ("EVMVersion",), {"evm_version": "shanghai"}, id="evm-version-key-missing"),
+        pytest.param(
+            {"SourceCode": _STANDARD_JSON_SOURCE, "ContractName": "Token"},
+            (),
+            {"source_format": "standard_json"},
+            id="source-format-standard-json",
+        ),
+        pytest.param(
+            {"SourceCode": "pragma solidity ^0.8.0; contract Flat {}", "ContractName": "Flat"},
+            (),
+            {"source_format": "flat"},
+            id="source-format-flat",
+        ),
+        pytest.param(
+            {"OptimizationUsed": "0"},
+            (),
+            {"optimization": False, "optimization_runs": 200},
+            id="optimization-disabled",
+        ),
+        pytest.param({"Runs": "10000"}, (), {"optimization_runs": 10000}, id="runs-custom-value"),
+    ],
+)
+def test_process_address_contract_fields(monkeypatch, overrides, drop_keys, expected):
+    result = _etherscan_result(**overrides)
+    for key in drop_keys:
+        del result[key]
+    _patch_discovery(monkeypatch, result)
 
     worker = DiscoveryWorker()
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
@@ -229,95 +218,8 @@ def test_evm_version_defaults_to_shanghai_when_default(monkeypatch):
     worker._process_address(session, job)
 
     contract = session.add.call_args[0][0]
-    assert contract.evm_version == "shanghai"
-
-
-def test_evm_version_preserves_explicit_value(monkeypatch):
-    result = _etherscan_result(EVMVersion="cancun")
-    _, artifact_calls = _patch_discovery(monkeypatch, result)
-
-    worker = DiscoveryWorker()
-    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    worker._process_address(session, job)
-
-    contract = session.add.call_args[0][0]
-    assert contract.evm_version == "cancun"
-
-
-def test_evm_version_defaults_when_key_missing(monkeypatch):
-    """EVMVersion key missing from Etherscan result entirely."""
-    result = _etherscan_result()
-    del result["EVMVersion"]
-    _, artifact_calls = _patch_discovery(monkeypatch, result)
-
-    worker = DiscoveryWorker()
-    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    worker._process_address(session, job)
-
-    contract = session.add.call_args[0][0]
-    assert contract.evm_version == "shanghai"
-
-
-# ---------------------------------------------------------------------------
-# 4. Source format detection
-# ---------------------------------------------------------------------------
-
-
-def test_source_format_standard_json(monkeypatch):
-    """source_format is 'standard_json' when 'sources' is in the first 10 chars.
-
-    Single-brace ``{"sources":...}`` puts it at index 2; Etherscan's double-brace
-    format overflows the window, so this variant exercises the branch.
-    """
-    source_code = json.dumps(
-        {
-            "sources": {"contracts/Token.sol": {"content": "pragma solidity ^0.8.0; contract Token {}"}},
-            "language": "Solidity",
-            "settings": {"optimizer": {"enabled": True, "runs": 200}, "remappings": []},
-        }
-    )
-    assert "sources" in source_code[:10]
-
-    result = _etherscan_result(SourceCode=source_code, ContractName="Token")
-    _, artifact_calls = _patch_discovery(monkeypatch, result)
-
-    worker = DiscoveryWorker()
-    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    worker._process_address(session, job)
-
-    contract = session.add.call_args[0][0]
-    assert contract.source_format == "standard_json"
-
-
-def test_source_format_flat(monkeypatch):
-    result = _etherscan_result(
-        SourceCode="pragma solidity ^0.8.0; contract Flat {}",
-        ContractName="Flat",
-    )
-    _, artifact_calls = _patch_discovery(monkeypatch, result)
-
-    worker = DiscoveryWorker()
-    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    worker._process_address(session, job)
-
-    contract = session.add.call_args[0][0]
-    assert contract.source_format == "flat"
+    for field, value in expected.items():
+        assert getattr(contract, field) == value
 
 
 def test_standard_json_multiple_files_parsed_correctly(monkeypatch):
@@ -358,44 +260,6 @@ def test_standard_json_multiple_files_parsed_correctly(monkeypatch):
     contract = session.add.call_args[0][0]
     assert contract.source_file_count == 3
     assert "@openzeppelin/=node_modules/@openzeppelin/" in contract.remappings
-
-
-# ---------------------------------------------------------------------------
-# 5. Build settings edge cases
-# ---------------------------------------------------------------------------
-
-
-def test_optimization_disabled(monkeypatch):
-    result = _etherscan_result(OptimizationUsed="0")
-    _, artifact_calls = _patch_discovery(monkeypatch, result)
-
-    worker = DiscoveryWorker()
-    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    worker._process_address(session, job)
-
-    contract = session.add.call_args[0][0]
-    assert contract.optimization is False
-    assert contract.optimization_runs == 200
-
-
-def test_runs_custom_value(monkeypatch):
-    result = _etherscan_result(Runs="10000")
-    _, artifact_calls = _patch_discovery(monkeypatch, result)
-
-    worker = DiscoveryWorker()
-    monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
-    session = MagicMock()
-    session.execute.return_value.scalar_one_or_none.return_value = None
-    job = _job()
-
-    worker._process_address(session, job)
-
-    contract = session.add.call_args[0][0]
-    assert contract.optimization_runs == 10000
 
 
 # ---------------------------------------------------------------------------

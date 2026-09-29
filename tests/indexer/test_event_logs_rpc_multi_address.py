@@ -213,15 +213,21 @@ class _StubRpc:
 
 
 class TestTopicFilter:
-    def test_a_flat_topic_sequence_is_still_the_topic0_or_set(self):
-        assert normalize_topic_filter(["0xAA", "0xBB"]) == [["0xaa", "0xbb"]]
-
-    def test_an_empty_flat_sequence_keeps_the_payload_it_always_had(self):
-        # ``[[]]`` and ``[]`` are different filters; the historical shape wins.
-        assert normalize_topic_filter([]) == [[]]
-
-    def test_a_positional_array_keeps_its_none_slots(self):
-        assert normalize_topic_filter([["0xAA"], None, ["0xBB", "0xCC"]]) == [["0xaa"], None, ["0xbb", "0xcc"]]
+    @pytest.mark.parametrize(
+        ("topics", "expected"),
+        [
+            pytest.param(["0xAA", "0xBB"], [["0xaa", "0xbb"]], id="flat_sequence_is_topic0_or_set"),
+            # ``[[]]`` and ``[]`` are different filters; the historical shape wins.
+            pytest.param([], [[]], id="empty_flat_sequence_keeps_historical_payload"),
+            pytest.param(
+                [["0xAA"], None, ["0xBB", "0xCC"]],
+                [["0xaa"], None, ["0xbb", "0xcc"]],
+                id="positional_array_keeps_none_slots",
+            ),
+        ],
+    )
+    def test_normalize_topic_filter(self, topics, expected):
+        assert normalize_topic_filter(topics) == expected
 
     def test_an_empty_slot_is_refused_rather_than_sent(self):
         # An empty list in a topic slot matches nothing at some upstreams and

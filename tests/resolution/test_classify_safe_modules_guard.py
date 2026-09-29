@@ -481,27 +481,23 @@ def test_one_nibble_return_does_not_pad_into_the_modules_sentinel(monkeypatch):
         assert protection[key] == value
 
 
-def test_whitespace_body_is_rejected(monkeypatch):
-    """64 spaces has the right LENGTH; ``bytes.fromhex`` would ignore every one
-    of them and hand back an empty bytes."""
-    protection = _malformed(monkeypatch, "0x" + " " * 64)
-    for key, value in _ALL_NOT_DETERMINED.items():
-        assert protection[key] == value
-
-
-def test_short_body_padded_out_by_trailing_whitespace_is_rejected(monkeypatch):
-    """The shape a bare length check lets through: 63 nibbles + a newline is 64
-    characters, and 62 nibbles + two spaces decodes to a clean 31 bytes."""
-    for word in ("0x" + "0" * 62 + "1" + "\n", "0x" + "0" * 61 + "1" + "  "):
-        protection = _malformed(monkeypatch, word)
-        for key, value in _ALL_NOT_DETERMINED.items():
-            assert protection[key] == value
-
-
-def test_underscore_bearing_body_is_rejected(monkeypatch):
-    """``int("1_000...", 16)`` parses; ``bytes.fromhex`` does not. The separator
-    is why this decoder never routes through ``int``."""
-    protection = _malformed(monkeypatch, "0x" + "1_" + "0" * 62)
+@pytest.mark.parametrize(
+    "word",
+    [
+        # 64 spaces has the right LENGTH; ``bytes.fromhex`` would ignore every one
+        # of them and hand back an empty bytes.
+        pytest.param("0x" + " " * 64, id="whitespace_body"),
+        # The shape a bare length check lets through: 63 nibbles + a newline is 64
+        # characters, and 62 nibbles + two spaces decodes to a clean 31 bytes.
+        pytest.param("0x" + "0" * 62 + "1" + "\n", id="short_body_trailing_newline"),
+        pytest.param("0x" + "0" * 61 + "1" + "  ", id="short_body_trailing_spaces"),
+        # ``int("1_000...", 16)`` parses; ``bytes.fromhex`` does not. The separator
+        # is why this decoder never routes through ``int``.
+        pytest.param("0x" + "1_" + "0" * 62, id="underscore_body"),
+    ],
+)
+def test_malformed_word_body_is_rejected(monkeypatch, word):
+    protection = _malformed(monkeypatch, word)
     for key, value in _ALL_NOT_DETERMINED.items():
         assert protection[key] == value
 

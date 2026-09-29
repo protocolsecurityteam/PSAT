@@ -372,16 +372,17 @@ def test_resolve_trace_rpc_raises_without_rpc(monkeypatch):
         ddc.resolve_trace_rpc()
 
 
-def test_resolve_trace_rpc_prefers_arg(monkeypatch):
+@pytest.mark.parametrize(
+    "arg, expected",
+    [
+        pytest.param("https://arg.example", "https://arg.example", id="prefers-arg"),
+        pytest.param(None, "https://erpc-proxy.example/main/evm/1", id="falls-back-to-erpc"),
+    ],
+)
+def test_resolve_trace_rpc(monkeypatch, arg, expected):
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-    assert ddc.resolve_trace_rpc("https://arg.example") == "https://arg.example"
-
-
-def test_resolve_trace_rpc_falls_back_to_erpc(monkeypatch):
-    monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
-    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-    assert ddc.resolve_trace_rpc() == "https://erpc-proxy.example/main/evm/1"
+    assert ddc.resolve_trace_rpc(arg) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -646,29 +647,24 @@ def test_find_dynamic_dependencies_parity_parallel_vs_sequential(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_fetch_contract_transactions_threads_chain_id(monkeypatch):
+@pytest.mark.parametrize(
+    "kwargs, expected_chain_id",
+    [
+        pytest.param({"chain_id": 8453}, 8453, id="threads-chain-id"),
+        pytest.param({}, 1, id="defaults-to-mainnet"),
+    ],
+)
+def test_fetch_contract_transactions_chain_id(monkeypatch, kwargs, expected_chain_id):
     seen_chain_ids = []
 
-    def fake_etherscan_get(_module, _action, **kwargs):
-        seen_chain_ids.append(kwargs.get("chain_id"))
+    def fake_etherscan_get(_module, _action, **kw):
+        seen_chain_ids.append(kw.get("chain_id"))
         return {"result": []}
 
     monkeypatch.setattr(ddc, "etherscan_get", fake_etherscan_get)
-    ddc.fetch_contract_transactions("0x1", chain_id=8453)
-    # txlist + txlistinternal, both stamped with the Base chain id.
-    assert seen_chain_ids == [8453, 8453]
-
-
-def test_fetch_contract_transactions_defaults_to_mainnet(monkeypatch):
-    seen_chain_ids = []
-
-    def fake_etherscan_get(_module, _action, **kwargs):
-        seen_chain_ids.append(kwargs.get("chain_id"))
-        return {"result": []}
-
-    monkeypatch.setattr(ddc, "etherscan_get", fake_etherscan_get)
-    ddc.fetch_contract_transactions("0x1")
-    assert seen_chain_ids == [1, 1]
+    ddc.fetch_contract_transactions("0x1", **kwargs)
+    # txlist + txlistinternal, both stamped with the chain id.
+    assert seen_chain_ids == [expected_chain_id, expected_chain_id]
 
 
 def test_find_dynamic_dependencies_threads_chain_id_to_fetch(monkeypatch):

@@ -301,31 +301,31 @@ def test_a_signature_from_another_chain_does_not_resolve(db_session, safe, proto
 # ---------------------------------------------------------------------------
 
 
-def test_a_relayer_wrapped_execution_is_not_a_top_level_call(db_session, safe):
-    """Legitimate (relayer, nested Safe, two ``execTransaction`` calls in one outer call), but guessing the inner
-    call from the outer input is the unwitnessed inference the overhaul removed, so the row states the finding and
-    collapses."""
+@pytest.mark.parametrize(
+    "make_tx",
+    [
+        # Legitimate (relayer, nested Safe, two ``execTransaction`` calls in one outer call), but guessing the inner
+        # call from the outer input is the unwitnessed inference the overhaul removed, so the row states the finding
+        # and collapses.
+        pytest.param(
+            lambda h: tx(to=RELAYER, tx_hash=h, input_hex="0xdeadbeef" + "00" * 32),
+            id="relayer_wrapped_execution",
+        ),
+        pytest.param(
+            lambda h: tx(to=SAFE, tx_hash=h, input_hex="0x468721a7" + "00" * 32),
+            id="right_target_wrong_selector",
+        ),
+        pytest.param(lambda h: {"hash": h, "to": None, "input": "0x6080"}, id="contract_creation"),
+    ],
+)
+def test_a_call_that_is_not_this_safes_own_is_not_a_top_level_call(db_session, safe, make_tx):
     tx_hash = "0x" + "21" * 32
     event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
 
-    (data,) = run(
-        db_session,
-        [event],
-        {tx_hash: tx(to=RELAYER, tx_hash=tx_hash, input_hex="0xdeadbeef" + "00" * 32)},
-    )
+    (data,) = run(db_session, [event], {tx_hash: make_tx(tx_hash)})
 
     assert data["safe_exec"] == {"status": "not_top_level_call"}
     assert data["salience"] == sal.SALIENCE_ROUTINE
-    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_INDIRECT]
-
-
-def test_the_right_target_with_the_wrong_selector_is_not_a_top_level_call(db_session, safe):
-    tx_hash = "0x" + "22" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-
-    (data,) = run(db_session, [event], {tx_hash: tx(to=SAFE, tx_hash=tx_hash, input_hex="0x468721a7" + "00" * 32)})
-
-    assert data["safe_exec"] == {"status": "not_top_level_call"}
     assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_INDIRECT]
 
 
@@ -379,16 +379,6 @@ def test_a_transaction_object_missing_its_fields_mints_no_finding(db_session, sa
     assert "safe_exec" not in data
     assert data["salience"] == sal.SALIENCE_NOT_DETERMINED
     assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_NOT_ENRICHED]
-
-
-def test_a_contract_creation_is_witnessed_not_to_be_this_safes_call(db_session, safe):
-    tx_hash = "0x" + "27" * 32
-    event = seed_event(db_session, safe, "safe_tx_executed", tx_hash)
-
-    (data,) = run(db_session, [event], {tx_hash: {"hash": tx_hash, "to": None, "input": "0x6080"}})
-
-    assert data["safe_exec"] == {"status": "not_top_level_call"}
-    assert data["salience_basis"] == [sal.BASIS_SAFE_EXEC_INDIRECT]
 
 
 def test_a_transaction_that_was_never_fetched_publishes_no_block(db_session, safe):

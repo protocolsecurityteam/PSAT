@@ -768,19 +768,6 @@ def test_unclassified_safe_emitter_is_not_determined(world, wire):
     assert row.executor_classification_source is None
 
 
-def test_planes_that_disagree_are_not_determined(world, wire):
-    session = world["session"]
-    proxy = world["contract"](PROXY_SAFE_DIRECT)
-    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    world["classify"](SAFE_DIRECT_EMITTER, "safe")
-    world["classify"](SAFE_DIRECT_EMITTER, "timelock")
-    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
-    assert row.executor_kind == "not_determined"
-
-
 def test_reverted_transaction_publishes_nothing_positive(world, wire):
     """T8 — a reverted transaction cannot have upgraded anything, so every
     positive is withheld even though the marker log shape is intact."""
@@ -818,54 +805,39 @@ def test_receipt_without_status_is_unusable(world, wire):
 # ---------------------------------------------------------------------------
 
 
-def test_classification_block_is_not_determined_when_the_plane_has_none(world, wire):
-    """The classifier's ``probe_block`` is absent on every current row, so the
-    height at which the emitter was typed is unknown.
-
-    The kind stays valid, but it never claims "the emitter was a Safe AT the
-    upgrade's block", which no receipt can prove.
-    """
+# The classifier's ``probe_block`` is absent on every current row, so the height at which the emitter
+# was typed is unknown. The kind stays valid, but it never claims "the emitter was a Safe AT the
+# upgrade's block", which no receipt can prove.
+@pytest.mark.parametrize(
+    ("details", "expected_block"),
+    [
+        pytest.param({"address": SAFE_DIRECT_EMITTER}, None, id="not-determined-when-the-plane-has-none"),
+        pytest.param(
+            {"safe_protection": {"probe_block": 25643300, "guard": "not_determined"}},
+            25643300,
+            id="published-when-the-probe-recorded-one",
+        ),
+        pytest.param(
+            {"safe_protection": {"probe_block": "not_determined"}},
+            None,
+            id="not-determined-probe-block-string-is-not-a-height",
+        ),
+    ],
+)
+def test_classification_block(world, wire, details, expected_block):
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    world["classify"](SAFE_DIRECT_EMITTER, "safe", details={"address": SAFE_DIRECT_EMITTER})
+    world["classify"](SAFE_DIRECT_EMITTER, "safe", details=details)
     wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
     _run_fold(session, wire, [proxy.id])
 
     row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
     assert row.executor_kind == "safe_direct"
-    assert row.executor_classification_block is None
-
-
-def test_classification_block_is_published_when_the_probe_recorded_one(world, wire):
-    session = world["session"]
-    proxy = world["contract"](PROXY_SAFE_DIRECT)
-    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    world["classify"](
-        SAFE_DIRECT_EMITTER,
-        "safe",
-        details={"safe_protection": {"probe_block": 25643300, "guard": "not_determined"}},
-    )
-    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
-    assert row.executor_classification_block == 25643300
-    # The direction that matters: the classification is strictly LATER than the
-    # upgrade it is being used to describe.
-    assert row.executor_classification_block > row.block_number
-
-
-def test_not_determined_probe_block_string_is_not_a_height(world, wire):
-    session = world["session"]
-    proxy = world["contract"](PROXY_SAFE_DIRECT)
-    world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    world["classify"](SAFE_DIRECT_EMITTER, "safe", details={"safe_protection": {"probe_block": "not_determined"}})
-    wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
-    _run_fold(session, wire, [proxy.id])
-
-    row = session.get(UpgradeTransaction, (1, TX_SAFE_DIRECT))
-    assert row.executor_classification_block is None
+    assert row.executor_classification_block == expected_block
+    # The direction that matters: the classification is strictly LATER than the upgrade it is being
+    # used to describe.
+    assert expected_block is None or row.executor_classification_block > row.block_number
 
 
 # ---------------------------------------------------------------------------
@@ -1109,14 +1081,24 @@ def test_an_off_chain_disagreement_no_longer_blocks_a_same_chain_verdict(world, 
     assert row.executor_classified_type == "safe"
 
 
-def test_same_chain_disagreement_still_blanks_the_verdict(world, wire):
-    """RECALL of the fail-closed arm: two rows on the RECEIPT'S OWN chain that
-    disagree are still an undecidable emitter."""
+# RECALL of the fail-closed arm: two rows on the emitter that disagree are an undecidable emitter,
+# including two rows on the RECEIPT'S OWN chain (``mainnet`` is the registry alias for chain 1).
+@pytest.mark.parametrize(
+    "classifications",
+    [
+        pytest.param([("safe", {}), ("timelock", {})], id="planes-that-disagree"),
+        pytest.param(
+            [("safe", {"chain": "ethereum"}), ("timelock", {"chain": "mainnet"})],
+            id="same-chain-disagreement",
+        ),
+    ],
+)
+def test_disagreeing_classifications_blank_the_verdict(world, wire, classifications):
     session = world["session"]
     proxy = world["contract"](PROXY_SAFE_DIRECT)
     world["event"](proxy, TX_SAFE_DIRECT, BLOCK_SAFE_DIRECT)
-    world["classify"](SAFE_DIRECT_EMITTER, "safe", chain="ethereum")
-    world["classify"](SAFE_DIRECT_EMITTER, "timelock", chain="mainnet")  # registry alias for chain 1
+    for classified_type, kwargs in classifications:
+        world["classify"](SAFE_DIRECT_EMITTER, classified_type, **kwargs)
     wire.receipts = {TX_SAFE_DIRECT: _receipt(TX_SAFE_DIRECT)}
     _run_fold(session, wire, [proxy.id])
 

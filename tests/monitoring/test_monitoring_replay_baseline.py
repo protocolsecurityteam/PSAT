@@ -96,6 +96,20 @@ def test_replay_reproduces_all_446_recorded_rows_when_every_spec_publishes(db_se
     topics_seen = {log["topics"][0] for log in fixture["logs"]}
     assert len(topics_seen) == 6
 
+    # Salience census (c) on the same run: all 446 rows must carry a level AND a non-empty basis. They
+    # are ``self_describing`` so ``notable``; none collapse, since the routine arms need inputs
+    # (``signal_class``, ``safe_exec`` status) no row here has.
+    rated = env.persisted_salience()
+    assert len(rated) == 446
+    assert all(level in SALIENCE_VALUES for _et, level, _basis in rated)
+    assert all(basis and set(basis) <= SALIENCE_BASIS_VALUES for _et, _level, basis in rated)
+
+    by_level: dict[str | None, int] = {}
+    for _event_type, level, _basis in rated:
+        by_level[level] = by_level.get(level, 0) + 1
+    assert by_level == {SALIENCE_NOTABLE: 446}
+    assert {basis for _et, _level, basis in rated} == {(BASIS_TRACKED_CONFIG_EVENT,)}
+
 
 def test_replay_classifies_every_window_spec(db_session):
     """Per-spec adjudication. ``_balances`` and ``locked`` are activity (no poll-decodable
@@ -136,33 +150,6 @@ def test_replay_queues_no_reanalysis(db_session):
     env = build_replay(db_session)
     env.run()
     assert db_session.query(Job).count() == 0
-
-
-def test_every_replayed_publication_carries_an_auditable_salience(db_session):
-    """Salience census (c) on the recording: with every spec forced to publish (the only
-    variant producing rows), all 446 rows must carry a level AND a non-empty basis. They
-    are ``self_describing`` so ``notable``; none collapse, since the routine arms need
-    inputs (``signal_class``, ``safe_exec`` status) no row here has."""
-    fixture = copy.deepcopy(load_replay_fixture())
-    for contract in fixture["contracts"]:
-        for spec in contract["monitoring_config"].get("tracked_topics") or []:
-            spec["witness_tier"] = WITNESS_TIER_SELF_DESCRIBING
-
-    from tests.support.monitoring_replay import ReplayEnv
-
-    env = ReplayEnv(db_session, fixture).seed()
-    env.run()
-
-    rated = env.persisted_salience()
-    assert len(rated) == 446
-    assert all(level in SALIENCE_VALUES for _et, level, _basis in rated)
-    assert all(basis and set(basis) <= SALIENCE_BASIS_VALUES for _et, _level, basis in rated)
-
-    by_level: dict[str | None, int] = {}
-    for _event_type, level, _basis in rated:
-        by_level[level] = by_level.get(level, 0) + 1
-    assert by_level == {SALIENCE_NOTABLE: 446}
-    assert {basis for _et, _level, basis in rated} == {(BASIS_TRACKED_CONFIG_EVENT,)}
 
 
 @pytest.mark.parametrize("openness", ["restricted", "open", "not_determined", None])
