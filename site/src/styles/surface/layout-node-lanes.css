@@ -47,30 +47,6 @@
   text-overflow: ellipsis;
 }
 
-.ps-node-risk {
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 2px 6px;
-  border-radius: 4px;
-  flex-shrink: 0;
-}
-
-.ps-node-stats {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 2px 12px;
-  font-size: 11px;
-  color: #64748b;
-}
-
-.ps-node-stat-val {
-  color: #94a3b8;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
 .ps-node-addr {
   margin-top: 4px;
   font-size: 10px;
@@ -111,49 +87,6 @@
 }
 
 /* Lane indicator tags on node edges */
-.ps-node-lane-tag {
-  position: absolute;
-  font-size: 7px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  padding: 1px 4px;
-  border-radius: 3px;
-  opacity: 0.7;
-  pointer-events: none;
-  line-height: 1;
-}
-
-.ps-node-lane-top {
-  top: -4px;
-  left: 50%;
-  transform: translate(-50%, -100%);
-  background: #8b92a822;
-  color: #8b92a8;
-}
-
-.ps-node-lane-left {
-  left: -4px;
-  top: 50%;
-  transform: translate(-100%, -50%);
-  background: #6a9e9422;
-  color: #6a9e94;
-}
-
-.ps-node-lane-right {
-  right: -4px;
-  top: 50%;
-  transform: translate(100%, -50%);
-  background: #9a8a6e22;
-  color: #9a8a6e;
-}
-
-.ps-node-lane-bottom {
-  bottom: -4px;
-  left: 50%;
-  transform: translate(-50%, 100%);
-  background: #6b759022;
-  color: #6b7590;
-}
 
 .ps-handle {
   width: 6px !important;

@@ -142,13 +142,11 @@
 .ps-sidebar .agent-suggestion,
 .ps-sidebar .agent-input textarea,
 .ps-sidebar .agent-msg-assistant .agent-bubble,
-.ps-sidebar .agent-tool,
-.ps-sidebar .ps-upgrades-row {
+.ps-sidebar .agent-tool {
   background: rgba(15, 18, 24, 0.34);
 }
 
-.ps-sidebar .agent-suggestion:hover:not(:disabled),
-.ps-sidebar .ps-upgrades-row:hover {
+.ps-sidebar .agent-suggestion:hover:not(:disabled) {
   background: rgba(20, 26, 36, 0.44);
 }
 

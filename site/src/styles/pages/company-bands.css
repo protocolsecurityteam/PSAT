@@ -60,96 +60,13 @@
   margin-top: 5px;
 }
 
-/* Explore pills: inline, no big cards */
-.company-explore-band {
-  padding: 16px 72px 28px;
-  max-width: 1440px;
-  margin: 0 auto;
-  width: 100%;
-  border-top: 1px solid rgba(148, 163, 184, 0.10);
-}
-
-.explore-pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.explore-pill {
-  background: #141a24;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  color: #e2e8f0;
-  padding: 10px 16px;
-  border-radius: 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 13px;
-  font-weight: 700;
-  box-shadow: none;
-  cursor: pointer;
-  letter-spacing: -0.01em;
-  transition: background 140ms ease, border-color 140ms ease, transform 140ms ease;
-}
-
-.explore-pill:hover {
-  background: #1a2230;
-  border-color: rgba(45, 212, 191, 0.35);
-  transform: none;
-}
-
-.explore-pill.primary {
-  border-color: rgba(45, 212, 191, 0.45);
-}
-
-.explore-pill.primary .explore-pill-arrow {
-  color: #2dd4bf;
-}
-
-.explore-pill.primary .explore-pill-name {
-  color: #e2e8f0;
-}
-
-.explore-pill-arrow {
-  color: #94a3b8;
-  font-size: 13px;
-  font-weight: 800;
-}
-
-.explore-pill-name {
-  color: #e2e8f0;
-}
-
-.explore-pill-sep {
-  color: #475569;
-  font-weight: 600;
-}
-
-.explore-pill-sub {
-  color: #94a3b8;
-  font-weight: 500;
-  font-size: 11px;
-}
-
 /* Remaining sections (ownership hierarchy, controller details, all addresses)
    keep their panel styling but need page-width + padding so they don't
    stretch edge to edge. */
-.company-page-rest {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 16px 24px 48px;
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
 
 @media (max-width: 960px) {
   .company-hero-band { padding: 32px 24px 24px; }
   .company-hero-inner { flex-direction: column; align-items: flex-start; }
   .company-hero-inner .company-hero-stats { margin-left: 0; }
-  .company-explore-band { padding: 16px 24px 24px; }
-  .company-page-rest { padding: 8px 16px 32px; }
 }
-
 

@@ -221,13 +221,6 @@
   text-align: center;
 }
 
-.ps-machine-body {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(280px, 360px) minmax(220px, 1fr);
-  gap: 16px;
-  margin-top: 16px;
-}
-
 .ps-port {
   --port-accent: #94a3b8;
   display: flex;
@@ -322,66 +315,6 @@
   -webkit-mask-repeat: no-repeat;
   -webkit-mask-position: center;
   -webkit-mask-size: contain;
-}
-
-.ps-vault {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 14px;
-  border-radius: 10px;
-  background: #12161e;
-  border: 1px solid rgba(148, 163, 184, 0.1);
-}
-
-.ps-vault-label {
-  color: #cbd5e1;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.ps-vault-empty {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 80px;
-  border-radius: 8px;
-  border: 1px dashed rgba(148, 163, 184, 0.15);
-  color: #475569;
-  font-size: 12px;
-}
-
-.ps-vault-footer {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.ps-footer-stat {
-  padding: 10px;
-  border-radius: 14px;
-  background: #111620;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  text-align: center;
-}
-
-.ps-footer-stat span {
-  display: block;
-  color: #94a3b8;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.ps-footer-stat strong {
-  color: #e2e8f0;
-  font-family: "Space Grotesk", system-ui, sans-serif;
-  font-size: 22px;
-  line-height: 1;
 }
 
 .ps-inspector {
@@ -620,28 +553,13 @@
     padding: 18px;
   }
 
-  .ps-surface-overlay {
-    max-width: calc(100vw - 32px);
-    right: 16px;
-  }
-
-  .ps-surface-header,
   .ps-machine-header {
     flex-direction: column;
   }
 
   .ps-machine-badges,
-  .ps-inspector-badges,
-  .ps-surface-stats {
+  .ps-inspector-badges {
     justify-content: flex-start;
-  }
-
-  .ps-machine-body {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .ps-vault {
-    order: -1;
   }
 
   .ps-lane-top .ps-lane-body {
@@ -650,9 +568,6 @@
 }
 
 @media (max-width: 640px) {
-  .ps-surface-title {
-    font-size: 28px;
-  }
 
   .ps-machine {
     padding: 16px;
@@ -661,11 +576,6 @@
   .ps-port {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .ps-vault-footer,
-  .ps-surface-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

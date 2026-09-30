@@ -8,17 +8,6 @@
   font-size: 12px;
 }
 
-.kv-grid {
-  display: grid;
-  gap: 10px;
-}
-
-.kv-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-}
-
 .key {
   color: var(--muted);
 }

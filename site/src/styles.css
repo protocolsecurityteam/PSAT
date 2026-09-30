@@ -9,12 +9,9 @@
 @import "./styles/shell/page.css";
 @import "./styles/shell/forms.css";
 @import "./styles/shell/layout-helpers.css";
-@import "./styles/shell/monitor-stage.css";
-@import "./styles/shell/audit-pipeline.css";
 @import "./styles/shell/utility.css";
 @import "./styles/components/protocol-graph.css";
 @import "./styles/components/agent-sidebar.css";
-@import "./styles/components/principals-sidebar.css";
 @import "./styles/surface/layout-shell.css";
 @import "./styles/surface/layout-sidebar-rail.css";
 @import "./styles/surface/layout-node-lanes.css";

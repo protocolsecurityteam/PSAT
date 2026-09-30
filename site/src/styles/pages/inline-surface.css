@@ -151,21 +151,6 @@
   .company-surface-action-count { font-size: 10px; padding: 1px 5px; }
 
   .company-surface-embed { height: 460px; }
-  .company-page-rest { padding: 10px 12px 28px; gap: 12px; }
-
-  .proto-tabs {
-    overflow-x: auto;
-    flex-wrap: nowrap;
-    padding-bottom: 4px;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-  }
-  .proto-tabs::-webkit-scrollbar { display: none; }
-  .proto-tab {
-    flex-shrink: 0;
-    padding: 6px 10px;
-    font-size: 10px;
-  }
 }
 
 /* ── Company pages — small phone (≤480px) ────────────────────────────────── */
@@ -179,7 +164,6 @@
   }
 
   .company-surface-embed { height: 380px; }
-  .company-page-rest { padding: 8px 10px 20px; }
 }
 
 /* Mobile-only label inside the sidebar handle — hidden by default */
@@ -188,11 +172,6 @@
 /* ── ProtocolSurface page (/company/:name/surface) — phone ───────────────── */
 @media (max-width: 720px) {
   .ps-sidebar-mobile-label { display: block; }
-
-  .page:has(.ps-surface) .proto-tabs {
-    padding-left: 12px;
-    padding-right: 12px;
-  }
   .ps-surface { padding: 12px; }
   .ps-layout { height: calc(100vh - 120px); }
 
@@ -315,59 +294,11 @@
     min-height: 0;
   }
 
-  /* The bottom-left filter pill bar overlaps the sheet — pin it to top-right
-   * area and let it scroll horizontally if it overflows. */
-  .ps-surface-toolbar-overlay {
-    bottom: auto !important;
-    top: 12px !important;
-    left: auto !important;
-    right: 12px !important;
-    max-width: calc(100vw - 24px);
-    padding: 6px 8px;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-
-  /* Search modes (top-left) need to fit too */
-  .ps-search-modes-overlay {
-    top: 12px !important;
-    left: 12px !important;
-    right: auto !important;
-    max-width: calc(100vw - 24px);
-    padding: 5px 7px;
-  }
-  .ps-search-modes-overlay .ps-search-modes {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-
-  /* Search overlay pinned just above the bottom sheet */
-  .ps-surface-search-overlay {
-    top: auto !important;
-    bottom: calc(48px + 12px) !important;
-    left: 12px !important;
-    right: 12px !important;
-    max-width: calc(100vw - 24px);
-  }
-
   /* Embedded variant: make the bottom-sheet behavior work inside the
    * `.company-surface-embed` container too (rather than fixed to viewport). */
   .company-surface-embed .ps-sidebar {
     position: absolute !important;
   }
-  .company-surface-embed .ps-surface-toolbar-overlay,
-  .company-surface-embed .ps-search-modes-overlay,
-  .company-surface-embed .ps-surface-search-overlay {
-    /* Already constrained inside the embed since it has overflow:hidden */
-  }
-}
-
-/* Smaller phones — tighten the toolbar bar so it doesn't dominate */
-@media (max-width: 480px) {
-  .ps-surface-toolbar-overlay { padding: 4px 6px; }
-  .ps-search-modes-overlay { padding: 4px 6px; }
-  .ps-search-modes-overlay .ps-search-mode { padding: 2px 5px; font-size: 9.5px; }
 }
 
 /* Reported miss when a score-page entity button names something this graph

@@ -39,29 +39,6 @@
   opacity: 0.8;
 }
 
-.top-nav-link {
-  background: none;
-  border: none;
-  box-shadow: none;
-  color: var(--muted);
-  font-size: 13px;
-  font-weight: 600;
-  padding: 6px 14px;
-  border-radius: 10px;
-  cursor: pointer;
-}
-
-.top-nav-link:hover {
-  background: rgba(148, 163, 184, 0.08);
-  color: var(--ink);
-  transform: none;
-}
-
-.top-nav-link.active {
-  background: var(--teal-soft);
-  color: var(--teal);
-}
-
 .top-nav-right {
   display: flex;
   align-items: center;

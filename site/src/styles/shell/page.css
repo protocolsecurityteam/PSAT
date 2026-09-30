@@ -26,7 +26,6 @@
 }
 
 .panel,
-.submit-card,
 .card {
   background: linear-gradient(180deg, rgba(20, 26, 36, 0.95), rgba(15, 20, 28, 0.92));
   backdrop-filter: blur(16px);
@@ -36,8 +35,7 @@
   color: var(--ink);
 }
 
-.panel,
-.submit-card {
+.panel {
   padding: 22px;
 }
 
@@ -45,8 +43,7 @@
   padding: 20px;
 }
 
-.panel-header,
-.card-header-row {
+.panel-header {
   display: flex;
   justify-content: space-between;
   align-items: start;

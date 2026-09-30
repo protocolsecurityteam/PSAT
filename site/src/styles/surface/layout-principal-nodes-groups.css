@@ -1,12 +1,4 @@
 /* Principal nodes (Safe, EOA, Timelock) */
-/* Shared with the sidebar InspectorCard. The canvas principal/guardian-rail
-   node that also used the other .ps-principal-* node styles was removed with
-   the Controllers accordion, so only this one remains. */
-.ps-principal-addr {
-  font-size: 9px;
-  color: #64748b;
-  font-family: "JetBrains Mono", monospace;
-}
 
 /* Owner-group container — a labeled box that holds every contract a
    single principal (Safe/Timelock/EOA/proxy admin) owns. Replaces the
