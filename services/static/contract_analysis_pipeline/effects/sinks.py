@@ -16,13 +16,8 @@ from .selectors import (
 from .types import ReceiverDescriptor, SinkRecord
 
 
-# ---------------------------------------------------------------------------
-# Function inclusion (mirrors predicate_artifacts._is_externally_callable but
-# keeps fallback/receive — see module docstring).
-# ---------------------------------------------------------------------------
 def _is_externally_observable(fn: Any) -> bool:
-    """External/public OR fallback/receive. Skips constructor and
-    internal/private functions."""
+    """External/public or fallback/receive; not constructors or internal/private."""
     if getattr(fn, "is_constructor", False) or (getattr(fn, "name", "") or "") == "constructor":
         return False
     if _is_fallback_or_receive(fn):
@@ -32,9 +27,7 @@ def _is_externally_observable(fn: Any) -> bool:
 
 
 def _is_state_changing_entry_point(fn: Any) -> bool:
-    """A selector-bearing external/public, non-view, non-pure function — the
-    ABI mutability surface. Excludes fallback/receive (no selector) and
-    view/pure reads."""
+    """A selector-bearing, non-view, non-pure external/public function."""
     if _is_fallback_or_receive(fn):
         return False
     if getattr(fn, "visibility", None) not in ("external", "public"):
@@ -47,10 +40,9 @@ def _is_view_or_pure(fn: Any) -> bool:
 
 
 def _bare_callee_name(signature: str | None) -> str | None:
-    """The bare function name of a ``name(types)`` signature, or ``None``.
-    The name half of a router-op identity: a DECLARED signature carrying an
-    interface-typed parameter does not hash to the selector a leaf recorded,
-    so the name is the join that survives canonicalization differences."""
+    """The bare name of a ``name(types)`` signature, or ``None``; the join that survives interface-param hash
+    differences.
+    """
     if not isinstance(signature, str) or "(" not in signature:
         return None
     name = signature.split("(", 1)[0].strip()
@@ -58,18 +50,11 @@ def _bare_callee_name(signature: str | None) -> str | None:
 
 
 def _sink_id(function_name: str, kind: str, target: str, idx: int) -> str:
-    """Stable, idx-disambiguated ID. The ``idx`` keeps multiple sinks
-    of the same (kind, target) on one function distinct (e.g. two
-    state_write sinks to the same var from different branches).
-
-    Format is ``<function>:sink<idx>:<kind>:<target>`` so callers can
-    reference individual sinks without relying on source order alone."""
+    """Stable ``<function>:sink<idx>:<kind>:<target>`` id; the index separates repeats of the same kind and target."""
     return f"{function_name}:sink{idx}:{kind}:{target}"
 
 
 def _is_modifier_call(ir: Any) -> bool:
-    """True iff ``ir`` is an InternalCall that dispatches a modifier body.
-    Everything reached through it is guard-origin, not a real effect."""
     if getattr(ir, "is_modifier_call", False):
         return True
     callee = getattr(ir, "function", None)
@@ -77,7 +62,6 @@ def _is_modifier_call(ir: Any) -> bool:
 
 
 def _node_kind_state_writes(node: Any) -> list[str]:
-    """Return the names of state variables written at this node."""
     names: list[str] = []
     for variable in getattr(node, "state_variables_written", []) or []:
         name = getattr(variable, "name", "") or ""
@@ -103,27 +87,14 @@ def _receiver_not_determined(reason: str) -> ReceiverDescriptor:
 def _receiver_descriptor(
     resolved: Any, unit: Any, entry_param_ids: dict[int, int], entry_contract: Any
 ) -> ReceiverDescriptor:
-    """Describe a call's resolved receiver structurally.
+    """A call receiver's structural descriptor.
 
-    ``entry_param_ids`` maps the ENTRY function's formal-parameter object ids
-    to their positions. The sink walk is transitive, so a receiver that is a
-    formal of an internal helper is a real parameter of the unit being walked
-    but occupies no ABI slot of the entry point — and whether the entry's own
-    argument reaches it is a dataflow question this walk does not ask. Such a
-    receiver is reported as a parameter of ``internal_helper`` scope with no
-    index and NO ``caller_named`` claim; only identity against the entry's own
-    parameter objects licenses that.
+    ``entry_param_ids`` maps the entry function's formals to positions. The walk is transitive, so a helper's formal has
+    no ABI slot and is reported as ``internal_helper`` with no index and no ``caller_named`` claim.
 
-    ``entry_contract`` bounds the state-variable arm to declarations the
-    ANALYSED CONTRACT actually has. The walk recurses into library calls, so a
-    library's own ``public constant`` reaches this function as a perfectly good
-    ``StateVariable`` — but it is inlined at each call site, it is not this
-    unit's storage, and the accessor it would name does not exist in this
-    contract's ABI, so a pinned read at the deployment address would revert or
-    fall through. It also defeats the fold silently: two same-named constants,
-    one on the contract and one on the library, produce BYTE-IDENTICAL
-    descriptors (same name ⇒ same visibility, mutability and minted selector),
-    so a disagreement between two distinct assets reads as agreement."""
+    ``entry_contract`` limits the state-variable arm to the analysed contract: a library's ``public constant`` is
+    inlined, isn't this contract's storage, and would collide byte-identically with a same-named contract constant.
+    """
     from slither.core.declarations.solidity_variables import SolidityVariable
     from slither.core.variables.state_variable import StateVariable
     from slither.slithir.variables import Constant
@@ -132,8 +103,7 @@ def _receiver_descriptor(
         return _receiver_not_determined("unresolved_head")
     type_name = type(resolved).__name__
     if "Temporary" in type_name or "Reference" in type_name or "Tuple" in type_name:
-        # The cast walk stopped at a temporary (a computed value) or at a
-        # mapping/array element. Neither names a declaration.
+        # Stopped at a computed temporary or an element: no declaration.
         return _receiver_not_determined("unresolved_head")
     if isinstance(resolved, (SolidityVariable, Constant)):
         return _receiver_not_determined("unsupported_variable_kind")
@@ -161,10 +131,7 @@ def _receiver_descriptor(
             "visibility": str(visibility) if visibility else None,
             "auto_getter_selector": _auto_getter_selector(resolved),
             "variable": variable,
-            # Structural only. This plane resolves no address, so the receiver
-            # is storage of the analysed unit and nothing more; the token that
-            # carries an address is minted where the address is READ, pinned to
-            # its block.
+            # Structural only; the address is minted where it's read, pinned to a block.
             "receiver_provenance": "contract_state_unresolved",
         }
 
@@ -204,13 +171,10 @@ def _receiver_descriptor(
 
 
 def _fold_receivers(descriptors: list[ReceiverDescriptor]) -> ReceiverDescriptor | None:
-    """One descriptor per sink record, or ``not_determined`` when the sites
-    that folded into that record disagreed.
+    """One descriptor per sink record, or ``not_determined`` when folded sites disagree.
 
-    Collect-then-fold, mirroring :func:`_fold_param_index`: a first-seen loop
-    that overwrote on collision would not be STICKY — a third site agreeing
-    with the first could restore a value two disagreeing sites had already
-    destroyed, making the published fact depend on IR order."""
+    Collect-then-fold so a later agreeing site can't undo a disagreement.
+    """
     if not descriptors:
         return None
     distinct = {tuple(sorted(descriptor.items())) for descriptor in descriptors}
@@ -222,22 +186,12 @@ def _fold_receivers(descriptors: list[ReceiverDescriptor]) -> ReceiverDescriptor
 def _classify_node_irs(
     node: Any, unit: Any, entry_param_ids: dict[int, int], entry_contract: Any
 ) -> list[tuple[str, str, str | None, ReceiverDescriptor | None]]:
-    """Classify the non-state-write sinks at a node. Returns a list of
-    ``(kind, target, selector, receiver)`` quads; ``receiver`` is populated
-    only for the high-level/library call arm, which is the one that resolves
-    its head past casts, and is ``None`` everywhere else.
-
-    ``unit`` is the unit whose body this node belongs to (an internal helper
-    once the walk recurses); ``entry_param_ids`` always describes the ENTRY
-    point, which is what makes the two parameter scopes separable.
-
-    State writes are handled separately — Slither's
-    ``node.state_variables_written`` is more reliable than walking IR
-    assignments by hand."""
+    """Non-state-write sinks at a node as ``(kind, target, selector, receiver)``; ``receiver`` only for
+    high-level/library calls. ``unit`` owns the node; ``entry_param_ids`` is always the entry's. State writes come
+    from Slither's ``state_variables_written`` instead.
+    """
     out: list[tuple[str, str, str | None, ReceiverDescriptor | None]] = []
-    # Non-SSA def map, node-local: the cast IRs defining an inline-cast receiver
-    # (``IERC20(address(eETH)).safeTransferFrom`` emits both TypeConversions and
-    # the call in one node) live here, letting the head resolve past the temporary.
+    # Node-local def map, so an inline-cast receiver resolves past its temporary.
     def_by_id = {id(lv): ir for ir in _node_irs(node) if (lv := getattr(ir, "lvalue", None)) is not None}
     for ir in _node_irs(node):
         op = type(ir).__name__
@@ -247,8 +201,7 @@ def _classify_node_irs(
         elif op in ("HighLevelCall", "LibraryCall"):
             function_name = getattr(ir, "function_name", None) or "call"
             selector = _selector_for(_callee_signature(ir))
-            # A LibraryCall's real receiver is its first argument; ``destination``
-            # is the library contract itself.
+            # A library call's receiver is its first argument; ``destination`` is the library.
             if op == "LibraryCall":
                 arguments = list(getattr(ir, "arguments", []) or [])
                 head = arguments[0] if arguments else getattr(ir, "destination", None)
@@ -273,15 +226,11 @@ def _classify_node_irs(
             if function_name.startswith("selfdestruct("):
                 out.append(("selfdestruct", "selfdestruct", None, None))
             elif function_name.startswith("sstore("):
-                # Inline-assembly storage write. Slither does not populate
-                # node.state_variables_written for assembly, so this is the
-                # only place the write is visible. Key the sink by the slot
-                # literal/expr; slot->named-var resolution is a separate concern.
+                # Slither doesn't record assembly writes in ``state_variables_written``; key by the slot expression.
                 slot = str(arguments[0]) if arguments else "unknown"
                 out.append(("state_write", f"assembly_storage:{slot}", None, None))
             elif function_name.startswith("delegatecall("):
-                # Inline-assembly delegatecall, e.g. an EIP-1967 proxy fallback.
-                # Signature: delegatecall(gas, addr, inOff, inLen, outOff, outLen).
+                # Assembly delegatecall (e.g. an EIP-1967 fallback): ``delegatecall(gas, addr, ...)``.
                 target = str(arguments[1]) if len(arguments) > 1 else "assembly_delegatecall"
                 out.append(("delegatecall", f"assembly_delegatecall:{target}", None, None))
     return out
@@ -294,15 +243,10 @@ def _walk_unit_for_sinks(
     entry_param_ids: dict[int, int],
     entry_contract: Any,
 ) -> list[tuple[str, str, str | None, str, ReceiverDescriptor | None]]:
-    """Recursively gather ``(kind, target, selector, origin, receiver)`` sink
-    tuples from ``unit`` and any internal/library/modifier callees. ``origin``
-    flips to ``guard`` the moment the walk steps through a modifier call and
-    stays there for the rest of that subtree. De-dup happens at the caller
-    level so distinct indices are preserved.
+    """Gather ``(kind, target, selector, origin, receiver)`` tuples from ``unit`` and its callees.
 
-    ``entry_param_ids`` is the ENTRY point's and is threaded down unchanged —
-    the recursion is exactly what makes a callee's formal parameter NOT an ABI
-    slot of the record being built."""
+    ``origin`` becomes ``guard`` once the walk enters a modifier. ``entry_param_ids`` stays the entry's.
+    """
     unit_key = getattr(unit, "canonical_name", None) or getattr(unit, "full_name", None) or id(unit)
     if unit_key in visited:
         return []
@@ -314,8 +258,6 @@ def _walk_unit_for_sinks(
             found.append(("state_write", var_name, None, origin, None))
         for kind, target, selector, receiver in _classify_node_irs(node, unit, entry_param_ids, entry_contract):
             found.append((kind, target, selector, origin, receiver))
-        # Recurse into internal/library callees so transitive writes
-        # surface on the entry-point's record.
         for ir in _node_irs(node):
             op = type(ir).__name__
             if op not in ("InternalCall", "LibraryCall"):
@@ -329,14 +271,10 @@ def _walk_unit_for_sinks(
 
 
 def _build_sink_records(function: Any) -> list[SinkRecord]:
-    """One sink per (kind, target) pair we discover, transitively
-    deduped while preserving order. A sink reachable through both the body
-    and a guard keeps ``origin=body`` (a real effect wins). The selector
-    field is per-sink: only ``external_call`` sinks carry one, and only
-    when Slither exposes the called function's canonical signature.
+    """One sink per ``(kind, target)``, order preserved; a sink reachable from both body and guard stays ``body``.
 
-    The receiver descriptor is COLLECTED per key and folded once, after the
-    walk, so a conflict between two sites that share a record is sticky."""
+    Only ``external_call`` sinks carry a selector. Receivers are folded once after the walk so conflicts stick.
+    """
     function_name = _function_full_name(function)
     entry_param_ids = {
         id(parameter): position for position, parameter in enumerate(getattr(function, "parameters", []) or [])

@@ -1,9 +1,4 @@
-"""Matcher auto-discovery.
-
-Importing a matcher module runs its ``@claim_matcher`` decorator, so populating
-the registry is just "import every sibling module here". :func:`discover` does
-that once; a matcher agent adds a module and needs no other wiring.
-"""
+"""Matcher auto-discovery: importing a module runs its ``@claim_matcher`` decorator."""
 
 from __future__ import annotations
 
@@ -14,7 +9,7 @@ _discovered = False
 
 
 def discover() -> None:
-    """Import every matcher module so its claim registration runs. Idempotent."""
+    """Import every matcher module. Idempotent."""
     global _discovered
     if _discovered:
         return

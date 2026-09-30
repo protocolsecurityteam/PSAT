@@ -1,35 +1,11 @@
-"""Parameter-taint evidence for the ``exec.arbitrary`` manage-idiom.
+"""Parameter-taint evidence for the ``exec.arbitrary`` manage idiom: a body call op whose read set contains an
+``address`` parameter and a dynamic ``bytes`` parameter (``target.call(data)``), which a plain
+``transfer(address,uint256)`` lacks.
 
-The claim is minted only when a body-origin external call forwards a
-caller-supplied destination *and* a caller-supplied calldata blob — the
-BoringVault.manage / direct low-level ``target.call(data)`` shape. Proven by
-reading Slither IR directly (``ClaimContext.contract``): a call op in the
-function body whose read set contains an ``address`` parameter and a dynamic
-``bytes`` parameter. That two-parameter requirement is what separates ``manage``
-from a plain ``transfer(address,uint256)`` value send (address-tainted
-destination, no arbitrary calldata).
-
-**Read-set membership mints the claim; it does not name the binding.** The two
-published names answer a narrower question — *which* parameter reaches the call
-in the destination position, and *which* one reaches it as the calldata blob —
-and that question is answered from the operand positions, never from the read
-set. Where the operand position does not resolve to a parameter the name is
-``None`` and the accompanying ``*_kind`` says why: a state variable in the
-destination position is a proven *absence* of a caller-chosen destination
-(``state_var``), which is a different fact from the analysis not settling it
-(``not_determined``). A consumer may treat a name as a binding only when the
-kind is ``param``.
-
-**Both proof states are load-bearing, so both are earned rather than defaulted
-into.** The IR this reads is not in SSA form, so a name the body assigns more
-than once carries several candidate values under one variable object; which one
-the call sees is a control-flow question, and answering it with either proof
-state would be a guess in a proof's clothing — the exact inversion of the
-governing rule. Every resolution step that is not forced (a multiply-defined
-name, a cycle, a chain past ``_RESOLVE_DEPTH``, a library body that did not
-resolve) yields ``not_determined``, which under-claims by construction.
-
-Underscore-prefixed so matcher auto-discovery skips it.
+Read-set membership mints the claim; the published names come from operand positions. A name is ``None`` unless its
+``*_kind`` is ``param``: ``state_var`` is a proven absence of a caller-chosen destination, ``not_determined`` is
+unsettled. The IR is not SSA, so any unforced resolution step (multiply-defined name, cycle, depth limit, unresolved
+library) yields ``not_determined``.
 """
 
 from __future__ import annotations
@@ -38,11 +14,8 @@ from typing import Any
 
 from ..context import ClaimContext
 
-# Operand layout of the EVM call opcodes, as inline assembly presents them:
-# ``call``/``callcode`` are (gas, address, value, argsOffset, argsSize,
-# retOffset, retSize); ``delegatecall``/``staticcall`` drop the value word.
-# Solady-class libraries forward in assembly, so these indices are the only
-# place their destination and payload are legible at all.
+# EVM call opcode operand layout in inline assembly (``delegatecall``/``staticcall`` drop the value word); the only
+# place Solady-style assembly forwarders expose destination and payload.
 _ASM_FORWARDER_OPERANDS = {
     "call": (1, 3),
     "callcode": (1, 3),
@@ -50,18 +23,16 @@ _ASM_FORWARDER_OPERANDS = {
     "staticcall": (1, 2),
 }
 
-# The low-level members that carry a caller-chosen calldata blob. ``send`` and
-# ``transfer`` are ``LowLevelCall`` too and carry none.
+# ``send``/``transfer`` are low-level calls too but carry no calldata.
 _PAYLOAD_BEARING_CALLS = frozenset({"call", "callcode", "delegatecall", "staticcall"})
 
-# How far an operand may be followed back through temporaries before giving up.
 _RESOLVE_DEPTH = 8
 
 
 def _slither_function(ctx: ClaimContext, signature: str) -> Any | None:
-    """The implemented Slither function whose full-name matches ``signature``.
-    Returns ``None`` when the contract is absent (degraded) or the function is a
-    pure interface declaration with no body."""
+    """The implemented Slither function for ``signature``; ``None`` if the contract is absent or it's a bodiless
+    interface declaration.
+    """
     contract = getattr(ctx, "contract", None)
     if contract is None:
         return None
@@ -76,13 +47,7 @@ def _slither_function(ctx: ClaimContext, signature: str) -> Any | None:
 
 
 def _element_type(variable: Any) -> str:
-    """The parameter's type with array suffixes stripped.
-
-    A batch executor declares ``address[]``/``bytes[]`` where a scalar one
-    declares ``address``/``bytes``, and the call op forwards one ELEMENT of each.
-    The element type is therefore what decides taint — an exact match on the
-    declared type silently excluded every batch executor. ``bytes32[]`` still
-    reduces to ``bytes32`` and is still rejected."""
+    """The parameter type without array suffixes: batch executors forward one element of ``address[]``/``bytes[]``."""
     type_name = str(getattr(variable, "type", ""))
     while type_name.endswith("]"):
         open_bracket = type_name.rfind("[")
@@ -93,7 +58,6 @@ def _element_type(variable: Any) -> str:
 
 
 def _is_dynamic_bytes(variable: Any) -> bool:
-    # ``bytes`` (dynamic) taints as arbitrary calldata; ``bytes32`` etc. do not.
     return _element_type(variable) == "bytes"
 
 
@@ -106,26 +70,17 @@ def _is_array(variable: Any) -> bool:
 
 
 def _origin(variable: Any) -> Any:
-    """The variable a read ultimately refers to.
-
-    An element access (``targets[i]``) reaches the call op as a Slither
-    ``ReferenceVariable``, never as the parameter itself, so an identity test
-    against the parameter list matches nothing inside a batch loop. Slither
-    already resolves the reference chain; asking it is the whole of the fix, and
-    no points-to analysis of our own is involved. Non-reference variables have no
-    such attribute and stand for themselves."""
+    """The variable a read refers to: element accesses arrive as ``ReferenceVariable``s, so resolve through Slither's
+    reference chain.
+    """
     return getattr(variable, "points_to_origin", None) or variable
 
 
 class _Undetermined:
-    """The resolver reached a point where the operand has more than one candidate.
+    """Sentinel for an operand with several candidate values.
 
-    Deliberately NOT a Slither variable: it matches no parameter identity and is
-    an instance of no Slither class, so every caller that asks "is this a
-    parameter / is this a state variable" answers no and degrades to
-    ``not_determined`` without a branch of its own. The three published states
-    stay distinguishable (R1) precisely because this value cannot be mistaken for
-    either proof."""
+    Matches no parameter and no Slither class, so every check degrades to ``not_determined``.
+    """
 
     __slots__ = ()
 
@@ -137,25 +92,12 @@ UNDETERMINED = _Undetermined()
 
 
 def _definitions(function: Any) -> dict[int, Any]:
-    """``id(lvalue) -> defining IR``, or ``UNDETERMINED`` where more than one
-    definition reaches that name.
+    """``id(lvalue) -> defining IR``, or ``UNDETERMINED`` where more than one definition reaches the name.
 
-    Keyed by identity and only ever read by direct lookup. Slither's variable
-    classes inherit ``object.__hash__``, so any container of them that gets
-    ITERATED orders by allocation address — not by ``PYTHONHASHSEED``, and so
-    not pinnable by any determinism gate built the obvious way.
-
-    These IRs are NOT in SSA form: ``address t = fallbackRoute; if (flag) t = a;``
-    gives both assignments the same ``LocalVariable`` object, so a
-    one-IR-per-name map answers with whichever appears first in source order —
-    and the answer is then published as one of the two PROOF states. Counting is
-    what separates "this name holds one value" from "the call sees one of
-    several, and which one is a control-flow question this analysis does not
-    answer"; only the first is a binding.
-
-    A parameter arrives already holding the caller's value and a state variable
-    already holding storage's, so for those a SINGLE assignment in the body is
-    the second definition of the name, not the first."""
+    Keyed by identity and only looked up, never iterated (Slither variables hash by address). The IR is not SSA, so one
+    variable object can carry several assignments; counting separates a binding from a control-flow question. Parameters
+    and state variables start with a value, so one body assignment is already their second definition.
+    """
     from slither.core.variables.state_variable import StateVariable
 
     counts: dict[int, int] = {}
@@ -182,16 +124,9 @@ def _definitions(function: Any) -> dict[int, Any]:
 def _root_variable(variable: Any, definitions: dict[int, Any]) -> Any:
     """The variable an operand ultimately names, or ``UNDETERMINED``.
 
-    Slither routes ``ISwapper(swapper).swap(…)`` through a temporary, so the call
-    op's ``destination`` is a ``TemporaryVariable`` and the state variable behind
-    it is reachable only through the defining ``TypeConversion``. Without this
-    walk every interface-typed destination reads as unresolvable.
-
-    The walk answers with a variable only where every step of it was forced. A
-    multiply-defined name, a cycle, and a chain longer than ``_RESOLVE_DEPTH``
-    are all cases where it was not, and each returns ``UNDETERMINED`` rather than
-    whatever variable the walk happened to be holding — publishing that would be
-    a guess wearing a proof's clothes."""
+    Walks through temporaries (``ISwapper(swapper).swap(...)`` goes via a conversion); any unforced step returns
+    ``UNDETERMINED``.
+    """
     from slither.slithir.operations import Assignment, TypeConversion
 
     seen: set[int] = set()
@@ -222,16 +157,9 @@ def _parameter_index(variable: Any, parameters: list[Any]) -> int | None:
 
 
 def _operand_parameter_indices(variable: Any, definitions: dict[int, Any], parameters: list[Any]) -> list[int] | None:
-    """Every parameter index the operand is built from, ascending, or ``None``
-    when the walk crossed a name the body defines more than once.
-
-    An assembly forwarder passes ``add(data, 0x20)`` rather than ``data``, so the
-    payload sits one arithmetic step away from the parameter supplying it.
-    Returns a sorted list: a set of Slither objects may never decide an output.
-
-    ``None`` and ``[]`` are different facts and the caller must not merge them —
-    an enumeration that walked past a multiply-defined name has seen one branch's
-    sources, so a single index in it is not evidence that it is the only one."""
+    """Sorted parameter indices the operand is built from, or ``None`` if the walk crossed a multiply-defined name
+    (then any index seen may not be the only one). Assembly forwarders pass ``add(data, 0x20)``.
+    """
     found: set[int] = set()
     seen: set[int] = set()
     stack: list[tuple[Any, int]] = [(variable, 0)]
@@ -258,18 +186,10 @@ def _operand_parameter_indices(variable: Any, definitions: dict[int, Any], param
 
 
 def _forwarded_operand_indices(callee: Any) -> tuple[int, int] | None:
-    """``(destination_index, payload_index)`` into ``callee``'s OWN parameter
-    list, when its body forwards a call assembled from those parameters.
-
-    ``using Address for address`` and ``LibCall.callContract(to, 0, data)`` both
-    put the library in the call op's destination and the real target in argument
-    position. The library body says which argument that is — the OZ shape as a
-    ``LowLevelCall`` on a parameter, the Solady shape as an assembly ``call``
-    whose second operand is a parameter — so one level of indirection is all it
-    takes to answer a question that was previously guessed from the read set.
-
-    One level only, deliberately: a forwarder that itself calls another forwarder
-    is not resolved, and the caller emits ``not_determined`` rather than a name."""
+    """``(destination_index, payload_index)`` into ``callee``'s own parameters when its body forwards a call built
+    from them (OZ ``Address`` as a ``LowLevelCall`` on a parameter, Solady ``LibCall`` as an assembly ``call``).
+    One level only; deeper forwarders give ``not_determined``.
+    """
     from slither.slithir.operations import LowLevelCall, SolidityCall
 
     parameters = list(getattr(callee, "parameters", None) or [])
@@ -303,33 +223,18 @@ def _forwarded_operand_indices(callee: Any) -> tuple[int, int] | None:
 
 
 def proven_param_destination_call_identities(ctx: ClaimContext, signature: str) -> tuple[set[str], set[str]] | None:
-    """``(selectors, bare callee names)`` of the body call ops whose DESTINATION
-    is proven parameter-rooted — the transparency set for ``exec``-mode
-    constraint walks.
+    """``(selectors, bare callee names)`` of body calls whose destination is proven parameter-rooted: the
+    transparency set for ``exec``-mode constraint walks.
 
-    The vacuousness that earns a mandatory revert leaf transparency is a
-    property of the callee call's *destination*, never of being a body call: a
-    call whose receiver the caller picks cannot vet the caller's choice (point
-    it at a contract that always succeeds and the "gate" passes), while a call
-    to a FIXED receiver — a Safe/Zodiac transaction guard — is a genuine
-    precondition whose leaf must stay evaluable. So an identity enters the set
-    only when the op's destination resolves to a parameter through the same IR
-    machinery the binding fragment uses, and it is withheld again the moment any
-    op with a fixed (``state_var``) or unresolved destination shares it: a tree
-    leaf carries the callee identity but not the receiver, so a shared identity
-    cannot say which op the leaf describes, and withholding fails toward a
-    hedge rather than a proof. Low-level calls are skipped — their mandatory
-    check reaches the tree as a bare result equality with no callee identity,
-    so there is nothing to make transparent and nothing to withhold.
-
-    ``None`` when the Slither subject is unavailable: nobody looked, which the
-    caller must keep distinguishable from a looked-and-empty set."""
+    A caller-chosen receiver can't vet the caller's choice; a fixed receiver (a Safe/Zodiac guard) is a real
+    precondition. An identity is withheld if any op sharing it has a fixed or unresolved destination, since a leaf can't
+    say which op it describes. Low-level calls are skipped (their check carries no callee identity). ``None`` means
+    nobody looked (no Slither subject), distinct from empty.
+    """
     function = _slither_function(ctx, signature)
     if function is None:
         return None
-    # Selector/name computed exactly as the effects producer computes them for
-    # the sink records, so this set joins against tree leaves the same way the
-    # sink-derived set did.
+    # Computed as the effects producer computes sink selectors, so it joins against tree leaves the same way.
     from slither.slithir.operations import HighLevelCall, LibraryCall, LowLevelCall
 
     from ...contract_analysis_pipeline.effects import _callee_signature, _selector_for
@@ -359,13 +264,11 @@ def proven_param_destination_call_identities(ctx: ClaimContext, signature: str) 
 
 
 def _call_positions(ir: Any, definitions: dict[int, Any]) -> tuple[Any, str, Any, str, str | None]:
-    """``(destination_operand, destination_state, payload_operand, payload_state,
-    basis)`` for one call op.
+    """``(destination_operand, destination_state, payload_operand, payload_state, basis)`` for one call op.
 
-    ``payload_state`` separates three genuinely different facts: the op has a
-    calldata blob and here it is (``operand``); the op is a typed call whose
-    selector is fixed, so it carries no caller-chosen blob at all (``none``); or
-    the op forwards through a library whose body did not resolve (``unknown``)."""
+    ``payload_state``: ``operand`` (a blob), ``none`` (typed call with fixed selector), or ``unknown`` (unresolved
+    library).
+    """
     from slither.slithir.operations import LibraryCall, LowLevelCall
 
     if isinstance(ir, LibraryCall):
@@ -380,8 +283,7 @@ def _call_positions(ir: Any, definitions: dict[int, Any]) -> tuple[Any, str, Any
         if str(getattr(ir, "function_name", "")) in _PAYLOAD_BEARING_CALLS and arguments:
             return destination, "operand", arguments[0], "operand", "call_destination"
         return destination, "operand", None, "none", "call_destination"
-    # A typed high-level call: the callee's selector is fixed, so no argument of
-    # it is a caller-chosen calldata blob.
+    # A typed call's selector is fixed, so no argument is a caller-chosen blob.
     return destination, "operand", None, "none", "call_destination"
 
 
@@ -390,11 +292,9 @@ def _classify_destination(
 ) -> tuple[str | None, str]:
     """``(name, kind)`` for the destination operand.
 
-    Both proof states are earned here and nothing falls into them by default:
-    ``param`` needs an identity match against the parameter list and
-    ``state_var`` needs the root to BE a state variable. ``UNDETERMINED`` — what
-    ``_root_variable`` answers where the value depends on which branch ran — is
-    neither, so it lands on ``not_determined`` without a test of its own."""
+    ``param`` needs an identity match and ``state_var`` needs the root to be a state variable; ``UNDETERMINED`` falls to
+    ``not_determined``.
+    """
     from slither.core.variables.state_variable import StateVariable
 
     if state != "operand":
@@ -409,20 +309,14 @@ def _classify_destination(
 
 
 def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | None:
-    """Return a witness fragment when ``signature`` forwards a parameter-tainted
-    destination and calldata on a body call op, else ``None``.
+    """A witness fragment when ``signature`` forwards a parameter-tainted destination and calldata on a body call,
+    else ``None``.
 
-    Whether the fragment is returned at all is decided exactly as before — by
-    read-set membership. What the fragment SAYS is answered over EVERY candidate
-    call op, never the first one: the two names are read off the destination and
-    payload operand positions of the op whose destination resolution is the most
-    adverse (``param`` over ``not_determined`` over ``state_var``). So a proven
-    absence (``state_var``) in the returned fragment is a statement about the
-    whole function — every candidate op's destination is storage-held — and a
-    consumer may suppress on it without re-quantifying. A first-op answer read
-    a per-op fact as that function-wide proof, and a Safe-guard body
-    (``guard.checkTransaction(target, data)`` followed by ``target.call(data)``)
-    lost its genuine arbitrary call to whichever statement came first."""
+    Whether it's returned is decided by read-set membership. Its contents come from the most adverse candidate op
+    (``param`` over ``not_determined`` over ``state_var``), so a ``state_var`` result holds for every op. A first-op
+    answer used to lose the real call in a Safe-guard body (``guard.checkTransaction(target, data)`` then
+    ``target.call(data)``).
+    """
     function = _slither_function(ctx, signature)
     if function is None:
         return None
@@ -431,21 +325,12 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | 
     bytes_params = {p for p in parameters if _is_dynamic_bytes(p)}
     if not address_params or not bytes_params:
         return None
-    # An address in the call's READ set is only in argument position, which is
-    # not the same as being the destination — ``fixedSink.execute(users[i],
-    # payloads[i])`` reads an address parameter while calling a fixed contract.
-    # For a SCALAR parameter that conflation is load-bearing: the library-mediated
-    # ``target.functionCallWithValue(data, value)`` puts the library in the
-    # destination and the real target in argument position, and separating the two
-    # needs the library's body. An ARRAY parameter has no such excuse — a genuine
-    # batch executor calls the element, so its destination resolves to the array
-    # itself and the direct test below already proves it. Admitting arrays here
-    # bought one library-mediated batch shape and a false arbitrary-call badge on
-    # every fixed-destination batch forwarder.
+    # An address in the read set may only be an argument (``fixedSink.execute(users[i], payloads[i])``). Scalar
+    # parameters still count, because library forwarders put the real target in argument position; arrays don't, since a
+    # real batch executor's destination resolves to the array directly.
     argument_address_params = {p for p in address_params if not _is_array(p)}
 
-    # Import locally so a missing slither install degrades the matcher (isolated
-    # by build_claims) instead of breaking package import.
+    # Local import so a missing slither only disables this matcher.
     from slither.slithir.operations import HighLevelCall, LibraryCall, LowLevelCall
 
     definitions = _definitions(function)
@@ -467,8 +352,7 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | 
                 data_param = (getattr(parameters[index], "name", "") or "") if index is not None else None
                 data_kind = "param" if index is not None else "not_determined"
             elif data_state == "none":
-                # Proven-absent rather than undetermined only if a tainting bytes
-                # parameter really is sitting in an argument slot of this op.
+                # Proven-absent only if a tainting bytes parameter really is in an argument slot.
                 argument_roots = {
                     id(_root_variable(argument, definitions)) for argument in getattr(ir, "arguments", None) or []
                 }
@@ -488,13 +372,8 @@ def arbitrary_exec_taint(ctx: ClaimContext, signature: str) -> dict[str, Any] | 
             )
     if not fragments:
         return None
-    # The most adverse candidate op speaks for the function. ``param`` is the
-    # claim itself, ``not_determined`` is an open question that still mints, and
-    # ``state_var`` is a proven absence — so ``state_var`` survives to the
-    # returned fragment only when every candidate op resolved to it, which is
-    # the quantifier a downstream suppression needs. Ties rank the calldata slot
-    # the same way (a caller-chosen blob over an open question over a proven
-    # argument-only op), then fall to body order, which is deterministic.
+    # The most adverse op speaks for the function, so ``state_var`` survives only if every op resolved to it. Ties rank
+    # the calldata slot the same way, then body order.
     dest_rank = {"param": 2, "not_determined": 1, "state_var": 0}
     data_rank = {"param": 2, "not_determined": 1, "call_argument": 0}
     return max(

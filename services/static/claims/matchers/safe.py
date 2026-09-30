@@ -1,10 +1,6 @@
-"""Gnosis Safe control-plane claims: signer-set, module, and guard management.
+"""Gnosis Safe signer-set, module and guard claims, on the Safe gate and each entry's published selector.
 
-All three ride the Safe gate (getThreshold + getOwners + execTransaction), which
-h3sim measured at 0 false claims. Within that gate each trigger matches the
-published Safe selector for its entry, so a same-named sibling with a different
-argument list is not a Safe operation. Safe's ``execTransaction`` / module-exec
-entries are handled by the ``exec.arbitrary`` matcher.
+Exec entries are handled by ``exec.arbitrary``.
 """
 
 from __future__ import annotations

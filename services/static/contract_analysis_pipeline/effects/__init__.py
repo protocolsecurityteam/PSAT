@@ -1,45 +1,11 @@
-"""Build the semantic ``effects`` artifact for a contract.
+"""Build the semantic ``effects`` artifact: one record per externally callable function (fallback and receive
+included, constructor excluded) describing its state writes, external calls, delegatecalls, contract creations and
+selfdestructs, including those reached through internal calls.
 
-Walks Slither IR for every externally-callable function on a contract
-and emits a typed record describing the function's *effects*: state
-writes, external calls, delegatecalls, contract creations, and
-selfdestructs — including those reached transitively through internal
-calls. The artifact is the semantic sink/effect carrier for downstream
-consumers (``cross_contract.py``, ``tracking.py``,
-``effective_permissions.py``).
-
-Why a separate artifact (vs. extending ``predicate_trees``):
-``predicate_trees`` deliberately omits *unguarded* functions
-(``predicate_artifacts.py:44``) — the resolver treats absence as
-"public / unguarded". For sink/effect discovery we want a record per
-externally-callable function regardless of guard structure, so a
-publicly callable sensitive action (e.g. unprotected ``mint``) is
-still surfaced to the policy stage.
-
-Function inclusion:
-  * external/public functions: included.
-  * constructor: skipped (matches ``predicate_artifacts._is_externally_callable``;
-    constructor effects are tracked elsewhere).
-  * fallback / receive: INCLUDED. They have real effect semantics —
-    receive can hold ETH; fallback often delegatecalls. The
-    predicate-tree builder skips them because their "guard" semantics
-    are unusual, but that's not a reason to drop them from sink
-    discovery.
-  * internal / private: never appear directly; their effects are
-    surfaced through their external callers via transitive walk.
-
-Plane-0 facts (this artifact is the machine-checkable substrate a later
-claims plane reads):
-  * every sink carries an ``origin`` — ``body`` for the function's own
-    logic, ``guard`` for anything reached only through a modifier. A
-    modifier's auth call (``auth.canCall``) is a guard fact, not an
-    effect, so it never drives a label.
-  * ``state_writes`` records each write at ``var`` / ``member`` /
-    ``assembly_slot`` granularity with a ``hygiene_class`` marking the
-    non-role writes (constants, ``*StorageLocation`` slot pseudo-vars,
-    reentrancy guards, view-function ghost writes).
-  * ``value_flows`` records asset movement with a ``from == address(this)``
-    direction correction and native ``transfer``/``send`` sinks.
+Separate from ``predicate_trees`` because that omits unguarded functions, and an unprotected sensitive action must still
+reach the policy stage. Every sink carries an ``origin`` (``guard`` when only reachable through a modifier, so a
+modifier's auth call never drives a label); ``state_writes`` carry a ``hygiene_class``; ``value_flows`` correct
+direction for ``from == address(this)``.
 """
 
 from __future__ import annotations

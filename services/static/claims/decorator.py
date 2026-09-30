@@ -1,10 +1,5 @@
-"""``@claim_matcher`` — the ADD-only extension point for matcher agents.
-
-A matcher module declares one claim by decorating its per-function trigger. The
-decorator registers the claim (sentence, contract-level gate, legacy projection,
-consumer family) and the trigger together, so a new matcher is a new module and
-nothing else. The ``matchers`` package auto-discovery imports the module, which
-runs the decorator.
+"""``@claim_matcher``: a matcher module declares its claim by decorating its trigger; auto-discovery imports the
+module.
 """
 
 from __future__ import annotations
@@ -28,11 +23,9 @@ def claim_matcher(
     consumer_family: ConsumerFamily,
     gate: Gate | None = None,
 ) -> Callable[[Trigger], Trigger]:
-    """Register the decorated function as the ``trigger`` for ``claim_id``.
+    """Register the decorated function as ``claim_id``'s trigger and return it unchanged.
 
-    ``gate`` defaults to always-on (single-contract claims whose evidence is
-    entirely in the per-function trigger). The trigger is returned unchanged so
-    it stays independently testable.
+    ``gate`` defaults to always-on.
     """
 
     def decorate(trigger: Trigger) -> Trigger:

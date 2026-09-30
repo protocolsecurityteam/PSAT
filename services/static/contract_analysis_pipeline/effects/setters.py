@@ -9,62 +9,34 @@ from utils.logging import record_degraded
 
 from .selectors import _function_full_name, _node_irs
 
-# How many unscanned function signatures a degraded record names individually;
-# the count is always exact.
 _UNSCANNED_SAMPLE = 8
 
 
-# Contract-level setter set: state vars written by any non-constructor function
-# body, as Slither attributes writes. A setter's *existence* is a dispositive
-# fact. Its *absence* is only a sound proof that a non-immutable var cannot be
-# redirected post-deploy when the scan is DISPOSITIVELY COMPLETE — i.e. Slither
-# attributed every write in the contract's code. Two blind spots break that
-# precondition and are checked by ``_setter_scan_complete``: a raw/computed-slot
-# ``sstore`` (Slither attributes ``x.slot`` writes to ``x`` but not
-# ``sstore(0, …)`` / keccak-slot writes), and any ``delegatecall`` (foreign code
-# can write any slot as this contract). When the scan is incomplete, "no setter"
-# degrades to ``indeterminate`` — never a proven-negative "fixed destination".
-# A third blind spot — storage-pointer aliasing — is resolved separately by
-# ``_aliased_storage_writes``: a state var written only through a callee taking a
-# ``storage`` reference (``using X for`` / library / internal storage-lib idiom)
-# is not attributed by ``all_state_variables_written`` either. We follow the
-# aliasing to attribute the write back to its origin var (a real setter), and
-# only fall back to indeterminate for the aliases we genuinely cannot resolve.
-# Memoized per contract for the build pass.
+# State vars written by any non-constructor function, as Slither attributes writes (memoized per contract).
+#
+# A setter's existence is dispositive; its absence only proves a var fixed when the scan is complete.
+# ``_setter_scan_complete`` checks the blind spots: raw or computed-slot ``sstore`` and any ``delegatecall``. Writes
+# through storage-reference callees aren't attributed either; ``_aliased_storage_writes`` resolves those back to their
+# origin var, falling back to indeterminate when it can't.
 _SETTER_VARS: WeakKeyDictionary[Any, dict[str, list[str]]] = WeakKeyDictionary()
 _SETTER_SCAN_COMPLETE: WeakKeyDictionary[Any, bool] = WeakKeyDictionary()
 _ALIASED_WRITES: WeakKeyDictionary[Any, tuple[set[str], set[str], bool]] = WeakKeyDictionary()
 
-# Recursion depth for following a storage reference through forwarding callees.
 _STORAGE_ALIAS_DEPTH = 6
 
 
 def _setter_state_vars(contract: Any) -> dict[str, list[str]]:
-    """``{state var name: the signatures that write it}`` for this contract.
+    """``{state var: writer signatures}``. The key set classifies; the values name writers.
 
-    The KEY SET is what classifies (``_state_var_target_kind`` asks only
-    membership), and it is built exactly as before — every non-constructor
-    function's attributed writes, plus the storage-pointer-aliased origins. The
-    values are the writer identities that were already in hand at the loop and
-    were previously discarded.
-
-    ``all_state_variables_written`` is transitive, so an internal helper's write
-    also lands on every function that reaches it: the value list therefore
-    already CONTAINS every externally callable writer, and is a floor on who
-    can redirect the variable, never a closed set. An aliased-only origin gets
-    an EMPTY list — the write is real but this pass attributed no signature to
-    it — which is why the projection omits the key rather than publishing
-    ``[]`` there (``[]`` is reserved for a completed scan that found none)."""
+    ``all_state_variables_written`` is transitive, so each list already contains every external writer and is a floor,
+    not a closed set. Aliased-only origins get ``[]``, which is why the projection omits the key there (``[]`` means a
+    completed scan found none).
+    """
     cached = _SETTER_VARS.get(contract)
     if cached is not None:
         return cached
     setters: dict[str, set[str]] = {}
-    # A swallowed write-set failure empties this function's contribution to the
-    # KEY SET, which downstream reads as "no setter" — a proven claim built on a
-    # failed scan. This module is deliberately logger-free (pure analysis), so
-    # the shortfall is published as a degraded record on the owning job instead;
-    # collected across the loop so one bad contract is one record, not one per
-    # function.
+    # A swallowed failure would read as "no setter", so the shortfall is published as one degraded record per contract.
     unscanned: list[str] = []
     first_failure: Exception | None = None
     for fn in getattr(contract, "functions", []) or []:
@@ -77,13 +49,8 @@ def _setter_state_vars(contract: Any) -> dict[str, list[str]]:
             written = []
             unscanned.append(signature)
             first_failure = first_failure or exc
-        # Slither synthesises ``slitherConstructorVariables`` /
-        # ``slitherConstructorConstantVariables`` to hold declaration-site
-        # initialisers. They MUST keep contributing membership — dropping them
-        # would turn a var with an inline initialiser and no setter into a
-        # proven "fixed destination" it was never proven to be — but they are
-        # not callable, so publishing one as a writer whose principal can
-        # redirect the destination names a function nobody can invoke.
+        # Slither's synthetic initializer functions keep contributing membership (else an inline-initialized var with no
+        # setter reads as provably fixed) but aren't callable, so they aren't published as writers.
         synthetic = getattr(fn, "is_constructor_variables", False)
         for var in written or []:
             name = getattr(var, "name", None)
@@ -92,8 +59,6 @@ def _setter_state_vars(contract: Any) -> dict[str, list[str]]:
             attributed = setters.setdefault(name, set())
             if not synthetic:
                 attributed.add(signature)
-    # Storage-pointer-aliased writes Slither did not attribute, resolved back to
-    # their origin state var — these are real, redirecting setters.
     for name in _aliased_storage_writes(contract)[0]:
         setters.setdefault(name, set())
     if first_failure is not None:
@@ -119,21 +84,16 @@ def _arg_is_param(arg: Any, param: Any) -> bool:
 
 
 def _storage_param_write_status(callee: Any, param: Any, depth: int = 0, seen: set[int] | None = None) -> str:
-    """Whether ``callee`` writes through its storage-reference parameter
-    ``param`` — directly (``param.field = …`` / ``param[…] = …``, which puts
-    ``param`` in the callee's ``variables_written``) or transitively (forwarding
-    ``param`` into another storage-writing callee). Returns ``writes`` /
-    ``reads_only`` / ``unresolved`` (callee body absent — cannot decide)."""
+    """Whether ``callee`` writes through its storage-reference ``param``, directly or by forwarding it: ``writes``,
+    ``reads_only`` or ``unresolved`` (no body).
+    """
     if callee is None or not getattr(callee, "nodes", None):
         return "unresolved"
     if depth > _STORAGE_ALIAS_DEPTH:
         return "unresolved"
     seen = seen if seen is not None else set()
     if id(callee) in seen:
-        # A recursion cycle: we cannot see whether the write happens down the
-        # recursive tail. Fail toward unresolved (-> indeterminate), never
-        # reads_only — that would let a genuinely-redirected var read as a
-        # proven-fixed "no setter".
+        # A cycle: can't see the recursive tail, so unresolved, never reads_only.
         return "unresolved"
     seen.add(id(callee))
     pname = getattr(param, "name", None)
@@ -159,11 +119,9 @@ def _storage_param_write_status(callee: Any, param: Any, depth: int = 0, seen: s
 
 
 def _resolve_storage_origin(arg: Any, function: Any, seen: set[str] | None = None) -> str | None:
-    """The origin state-variable NAME a storage-reference argument aliases, or
-    ``None`` when it cannot be tied to a single declared state var. Handles a
-    direct state var and a local storage pointer assigned from a state var or a
-    member/index of one (``Box storage b = box;`` / ``= boxes[k];``). A pointer
-    sourced from a call return is unresolvable — ``None``."""
+    """The state variable a storage-reference argument aliases (direct, or a local pointer assigned from a var or its
+    element), or ``None`` (e.g. from a call return).
+    """
     from slither.core.variables.state_variable import StateVariable
 
     if isinstance(arg, StateVariable):
@@ -193,17 +151,9 @@ def _resolve_storage_origin(arg: Any, function: Any, seen: set[str] | None = Non
 
 
 def _aliased_storage_writes(contract: Any) -> tuple[set[str], set[str], bool]:
-    """Resolve storage-pointer aliasing the attributed-write scan misses.
-
-    Returns ``(resolved_setters, indeterminate_vars, contract_unresolvable)``:
-    * ``resolved_setters`` — origin state vars written through a storage-ref
-      alias that resolved to a definite variable: real setters (-> storage_setter).
-    * ``indeterminate_vars`` — origin vars aliased into a callee whose
-      write-through status couldn't be decided; their no-setter proof is unsound
-      so they degrade to indeterminate (not storage_no_setter).
-    * ``contract_unresolvable`` — a write-through alias whose origin var itself
-      couldn't be resolved (unknown which var was redirected): no no-setter proof
-      in the contract is sound, so the whole scan is incomplete.
+    """Resolve storage-pointer aliasing the attributed-write scan misses: ``(resolved_setters, indeterminate_vars,
+    contract_unresolvable)``. Resolved origins are real setters; origins aliased into undecidable callees lose
+    their no-setter proof; an unresolvable origin makes the whole scan incomplete.
     """
     cached = _ALIASED_WRITES.get(contract)
     if cached is not None:
@@ -239,21 +189,11 @@ def _aliased_storage_writes(contract: Any) -> tuple[set[str], set[str], bool]:
 
 
 def _setter_scan_complete(contract: Any) -> bool:
-    """True iff Slither's write attribution is exhaustive for this contract, so
-    the *absence* of a setter is dispositive. False when a value could be
-    written through a channel the attributed-write scan cannot see:
+    """True iff write attribution is exhaustive, so a missing setter is dispositive.
 
-    * an unattributed assembly ``sstore`` — Slither lowers ``sstore(x.slot, …)``
-      to an attributed write of ``x`` (no ``sstore`` IR survives), so a residual
-      ``SolidityCall sstore(...)`` IR is exactly the raw-numeric / computed-slot
-      write it could not attribute;
-    * a ``delegatecall`` / ``callcode`` — foreign code executes in this
-      contract's storage context and may write any slot;
-    * a storage-pointer alias written through a callee whose ORIGIN state var
-      could not be resolved (``_aliased_storage_writes`` third element) — some
-      unknown var was redirected.
-
-    Modifiers are scanned too (assembly can live in a guard body). Memoized."""
+    False on a residual assembly ``sstore`` (Slither lowers ``x.slot`` writes, so what's left is raw or computed), any
+    ``delegatecall``/``callcode``, or an unresolvable storage alias. Scans modifiers too; memoized.
+    """
     cached = _SETTER_SCAN_COMPLETE.get(contract)
     if cached is not None:
         return cached
