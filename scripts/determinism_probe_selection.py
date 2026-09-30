@@ -1,38 +1,17 @@
 """String-hash determinism probe (class A).
 
-Runs the real candidate selection over the local corpus database and prints a
-canonical serialization of the whole emitted queue. Under every
-``PYTHONHASHSEED`` the bytes must be identical: the queue's ORDER decides which
-candidates a ``resource_cap`` run reaches at all, so a seed-dependent order is a
-seed-dependent set of probed functions.
+Runs real candidate selection over the corpus DB and prints the whole queue canonically; bytes must match under every
+``PYTHONHASHSEED``, because queue order decides which candidates a ``resource_cap`` run reaches.
 
-Serialization rules, both deliberate:
+* ordered containers serialize in emitted order (the thing under test);
+* sets serialize sorted: ``repr(frozenset)`` compares CPython hashing, and ``restrict_families`` (the only set field) is
+only read with ``in``. A set-order leak that reaches a decision still shows up as a different order or value.
 
-* ordered containers (list, tuple) are serialized in their emitted order — that
-  is the thing under test;
-* unordered containers (set, frozenset) are serialized SORTED. Comparing
-  ``repr(frozenset)`` compares CPython's string hashing, not this code. The one
-  set-typed field on a ``Candidate`` is ``restrict_families``, and both of its
-  consumers — ``calldata.py:2295`` and ``orchestrator.py:190`` — read it with
-  ``in`` only, so its iteration order reaches no decision. Without this rule the
-  gate fails today for a reason nothing downstream can observe, and a gate that
-  cries wolf gets ignored. Any set-order leak that DOES reach a decision still
-  surfaces here, because it surfaces as a different queue order or a different
-  value.
+``unordered_control`` recomputes the removed float fold (verbatim from pre-fix ``services/effects/selection.py``). The
+gate requires it to vary across seeds; if it stops, the corpus has lost its discriminating power and the gate must say
+so.
 
-Alongside the queue the probe publishes ``unordered_control``: the *removed*
-arithmetic — ``sum(self.balance.get(a, 0.0) for a in seen)``, copied verbatim
-from ``services/effects/selection.py`` as it stood before the fix —
-recomputed over the same real graph. It is an instrument, never a product: the
-gate requires it to **vary** across the seed sweep. If it stops varying, this
-corpus no longer contains a closure whose float fold is order-sensitive, the
-sweep has lost its discriminating power, and the gate must say so rather than
-report a green it has not earned: a control is only evidence while it still
-discriminates.
-
-Needs ``DATABASE_URL`` pointed at the corpus database (protocol 1). It is not
-optional and there is no synthetic fallback: a gate that quietly degrades to a
-toy workload reports green about a workload nobody cared about.
+Needs ``DATABASE_URL`` at the corpus DB (protocol 1); no synthetic fallback.
 """
 
 from __future__ import annotations
@@ -49,10 +28,8 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-# The row this gate refuses to lose — the positive control, carried forward.
-# `sweepDust` sits inside the largest tied value cluster in the queue — 84
-# members at $4,024,163,604.46 — so it is the row a wrong tiebreak moves first,
-# and a payload that no longer contains it cannot testify about ordering at all.
+# Positive control: ``sweepDust`` sits in the largest tied value cluster (84 at $4,024,163,604.46), so a wrong tiebreak
+# moves it first.
 ANCHOR_FUNCTION_ID = 2771
 ANCHOR_NAME = "sweepDust"
 ANCHOR_VALUE = Decimal("4024163604.46")
@@ -66,7 +43,6 @@ def canonical(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(k): canonical(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
     if isinstance(value, Decimal):
-        # Exact, and distinguishable from the float that used to stand here.
         return {"__decimal__": str(value)}
     if isinstance(value, float):
         return {"__float__": repr(value)}
@@ -74,11 +50,7 @@ def canonical(value: Any) -> Any:
 
 
 def _prefix_float_fold(graph: Any, seeds: set[str]) -> float:
-    """``AuthorityGraph.reachable_value`` as it stood before the fix.
-
-    Verbatim, including the unsorted ``seen`` and the binary-float ``sum`` — that
-    is the whole point.
-    """
+    """``AuthorityGraph.reachable_value`` before the fix, verbatim (unsorted ``seen``, float ``sum``)."""
     from services.effects.selection import _addr
 
     stack = [s for s in (_addr(s) for s in seeds) if s]
@@ -99,9 +71,7 @@ def main() -> int:
 
     from utils.logging import configure_logging
 
-    # The probe's own output is the print()s below; this is so the library
-    # code it drives logs through the house JSON handler instead of falling
-    # to lastResort (WARNING-only, unscrubbed).
+    # So library logs go through the JSON handler rather than lastResort (WARNING-only, unscrubbed).
     configure_logging()
 
     from db.models import SessionLocal
@@ -126,12 +96,8 @@ def main() -> int:
         )
         return 3
 
-    # An anchor violation still PRINTS its payload and exits 4, rather than
-    # aborting. Exit 3 means "there is nothing here to compare"; exit 4 means
-    # "compare it, and also know the anchor moved". Aborting would throw away the
-    # seed sweep's own testimony in exactly the runs where it is most
-    # interesting — the pre-fix code moves this anchor on 3 of 8 seeds, which IS
-    # the seed-dependence, not a separate problem.
+    # Exit 4 still prints the payload: aborting would discard the seed sweep's testimony (pre-fix code moves the anchor
+    # on 3 of 8 seeds). Exit 3 means nothing to compare.
     anchor = [
         (i, c)
         for i, c in enumerate(candidates)
@@ -143,9 +109,7 @@ def main() -> int:
         violation = f"ANCHOR LOST: function_id={ANCHOR_FUNCTION_ID} ({ANCHOR_NAME}) is not in the emitted queue"
     else:
         rank, candidate = anchor[0]
-        # `Decimal(str(...))` rather than a bare `!=` on purpose: the anchor's job
-        # is "this row is still here and still holds this money", not "this field
-        # is a Decimal" — the type is pinned by the selection module's own tests.
+        # The anchor checks the money, not the type (pinned by selection's own tests).
         if Decimal(str(candidate.value_at_stake_usd)) != ANCHOR_VALUE:
             violation = (
                 f"ANCHOR MOVED: {ANCHOR_NAME} value_at_stake_usd = {candidate.value_at_stake_usd!r}, "

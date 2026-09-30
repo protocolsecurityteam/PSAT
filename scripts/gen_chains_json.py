@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
-"""Codegen: emit ``site/src/surface/chains.json`` from the canonical chain registry.
+"""Emit ``site/src/surface/chains.json`` from the chain registry (inv.
 
-The frontend needs chain id / name / explorer-base-url triples but must not keep
-its own hand-maintained map (inv. 5). This script is the single writer of
-``site/src/surface/chains.json``; ``tests/chains/test_chains_json_parity.py`` asserts the
-committed file still matches the registry, so a registry change that forgets to
-regenerate the JSON fails CI (parity-or-die).
-
-Run from the repo root:
+5). ``tests/chains/test_chains_json_parity.py`` fails CI if it's stale.
 
     python scripts/gen_chains_json.py
 """
@@ -28,7 +22,6 @@ CHAINS_JSON_PATH = _REPO_ROOT / "site" / "src" / "surface" / "chains.json"
 
 
 def build_chains_payload() -> list[dict[str, object]]:
-    """Registry → the list serialized into ``chains.json`` (sorted by id)."""
     return [
         {
             "chain_id": info.chain_id,
@@ -40,7 +33,6 @@ def build_chains_payload() -> list[dict[str, object]]:
 
 
 def render_json() -> str:
-    """Canonical serialized form (2-space indent, trailing newline)."""
     return json.dumps(build_chains_payload(), indent=2) + "\n"
 
 

@@ -1,19 +1,9 @@
-"""Membership reconcile (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.4 safety net,
-§5.4, invariant 13).
+"""Membership reconcile (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.4, §5.4, invariant 13).
 
-Recomputes the gate verdict for every claimed row FROM STORED WITNESSES ONLY —
-no probes, no Etherscan — and reports any row whose state disagrees with its
-evidence. The verdict is the gate's own ``promote`` run inside a rolled-back
-savepoint, so edge validity (via-address still a member, perimeter fact still
-held, deployer registry row unrevoked) is re-verified by the gate's own
-internals, never a fork of them: reconcile and gate cannot diverge.
+Recomputes each claimed row's verdict from stored witnesses only (no probes) via the gate's own ``promote`` in a
+rolled-back savepoint, so reconcile and gate can't diverge. Drift on a freshly gated DB is a bug report; exits nonzero.
 
-Drift on a freshly gated DB is a bug report, never routine correction — the
-report exits nonzero so it cannot pass silently.
-
-**``--report`` is the default** (read-only; exit 0 on zero drift, 1 on drift).
-``--apply`` fixes drift through the gate primitives (revoke + demote, or
-promote), cascading demotions to quiescence, and logs every row::
+``--report`` (default, read-only) or ``--apply`` (fix via gate primitives, cascading demotions)::
 
     uv run python -m scripts.reconcile_membership
     uv run python -m scripts.reconcile_membership --apply
@@ -51,7 +41,7 @@ DRIFT_CANDIDATE_WITH_EVIDENCE = "candidate_with_supporting_evidence"
 DRIFT_HEURISTIC_REGISTRY_STALE = "heuristic_registry_numbers_stale"
 DRIFT_HEURISTIC_WITNESS_ON_REVOKED_ROW = "heuristic_witness_on_revoked_registry_row"
 
-#: Fix passes are bounded; drift deep enough to need more is a bug, not load.
+# Drift needing more passes is a bug, not load.
 _APPLY_PASS_CAP = 10
 
 
@@ -66,8 +56,7 @@ class Drift:
 
 
 def audit(session: Session, *, protocol_ids: list[int] | None = None) -> list[Drift]:
-    """Every claimed row whose stored state disagrees with the gate verdict
-    recomputed from its stored witnesses. Reads only (savepoints roll back)."""
+    """Claimed rows whose state disagrees with the recomputed verdict. Read-only."""
     stmt = select(Contract).where(or_(Contract.protocol_id.is_not(None), Contract.nominated_protocol_id.is_not(None)))
     if protocol_ids:
         stmt = stmt.where(or_(Contract.protocol_id.in_(protocol_ids), Contract.nominated_protocol_id.in_(protocol_ids)))
@@ -107,13 +96,11 @@ def audit(session: Session, *, protocol_ids: list[int] | None = None) -> list[Dr
 
 
 def audit_heuristic_registry(session: Session, *, protocol_ids: list[int] | None = None) -> list[Drift]:
-    """DEPLOYER_HEURISTIC_SPEC.md §8.5 / §9 invariant 10: recompute the whole
-    heuristic layer from stored witness rows — no network — and report every
-    disagreement with what an H row records, plus every ``w4h`` witness whose
-    registry row is revoked. Nonzero drift is a bug report.
+    """DEPLOYER_HEURISTIC_SPEC.md §8.5 / §9 inv.
 
-    The recomputation writes challenge rows, so it runs inside a savepoint that
-    is always rolled back: the audit stays read-only."""
+    10: recompute the heuristic layer from stored witnesses and report disagreements and revoked ``w4h`` registry rows.
+    Runs in a rolled-back savepoint.
+    """
     drifts: list[Drift] = []
     savepoint = session.begin_nested()
     try:
@@ -171,10 +158,9 @@ def audit_heuristic_registry(session: Session, *, protocol_ids: list[int] | None
 
 
 def late_inheritance_would_admit(session: Session, *, protocol_ids: list[int] | None = None) -> list[int]:
-    """Named observation (report mode only, never drift): pending candidates
-    the gate's §6 late-arrival inheritance sweep would admit on its next
-    evaluate. Computed by the gate's own seed + pass inside a rolled-back
-    savepoint — no parallel definition of the rule."""
+    """Report-only observation: candidates the gate's §6 late-arrival sweep would admit, computed by the gate itself
+    in a rolled-back savepoint.
+    """
     stmt = select(Contract.id).where(Contract.protocol_id.is_(None), Contract.nominated_protocol_id.is_not(None))
     if protocol_ids:
         stmt = stmt.where(Contract.nominated_protocol_id.in_(protocol_ids))
@@ -190,16 +176,12 @@ def late_inheritance_would_admit(session: Session, *, protocol_ids: list[int] | 
 
 
 def apply_fixes(session: Session, drifts: list[Drift]) -> int:
-    """Fix each drift through the gate's own primitives; demotions cascade to
-    quiescence so dependents of a fixed row settle in the same pass. Returns
-    the number of rows actually fixed (stale drifts and refused promotes
-    don't count)."""
+    """Fix drift via gate primitives, cascading demotions to quiescence. Returns rows actually fixed."""
     fixed_count = 0
     demoted_addresses: set[str] = set()
     for drift in drifts:
         if drift.kind not in (DRIFT_MEMBER_NO_EVIDENCE, DRIFT_CANDIDATE_WITH_EVIDENCE):
-            # Heuristic-registry drift is a bug report about the recorded
-            # numbers, not a membership state a gate primitive can fix.
+            # A bug report about recorded numbers, not a state a primitive can fix.
             continue
         contract = session.get(Contract, drift.contract_id)
         if contract is None:
@@ -207,9 +189,7 @@ def apply_fixes(session: Session, drifts: list[Drift]) -> int:
         if drift.kind == DRIFT_MEMBER_NO_EVIDENCE:
             if contract.protocol_id != drift.protocol_id:
                 continue
-            # Re-verify against the in-pass state: an earlier fix in this
-            # pass (a re-promoted via-member) can restore this row's support,
-            # and a supported member must never be demoted.
+            # An earlier fix this pass may have restored support; never demote a supported member.
             if would_promote(session, contract, drift.protocol_id):
                 continue
             for witness in gate.active_witnesses(session, contract_id=contract.id, protocol_id=drift.protocol_id):
@@ -227,8 +207,7 @@ def apply_fixes(session: Session, drifts: list[Drift]) -> int:
                 demoted_addresses.add(contract.address.lower())
             fixed = True
         else:
-            # ``promote`` re-verifies the evidence itself; a refusal means the
-            # drift went stale within this pass and the next audit re-judges.
+            # A refusal means the drift went stale this pass.
             fixed = gate.promote(session, contract=contract, protocol_id=drift.protocol_id)
         if fixed:
             fixed_count += 1

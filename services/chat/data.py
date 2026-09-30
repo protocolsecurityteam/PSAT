@@ -1,14 +1,6 @@
-"""Read-side helpers used by chat agent tools.
+"""Read-side helpers for chat tools, returning JSON-serializable primitives.
 
-These wrap small, targeted DB queries that are already executed inside
-the larger `/api/company/{name}` and `/api/contracts/{id}/audit_timeline`
-endpoints. We deliberately re-query here (rather than refactor those
-routes) so adding tools doesn't risk regressing the routes during this
-slice. If three+ callers ever need the same shape, lift it then.
-
-Every function takes a SQLAlchemy ``Session`` and returns plain
-JSON-serializable Python primitives — the agent passes results back to
-the LLM as message content, so they must round-trip through ``json``.
+They re-query rather than share code with the company/timeline routes to avoid regressing those routes.
 """
 
 from __future__ import annotations
@@ -29,12 +21,7 @@ from db.models import (
     UpgradeEvent,
 )
 
-# Common aliases the same chain shows up under in our DB. Treat
-# `ethereum`/`mainnet` as the same canonical chain when matching, so a
-# tool call with `chain="ethereum"` resolves rows tagged `mainnet` and
-# vice versa. NULL/empty chain stays a separate "legacy/unknown" bucket
-# — we don't blanket-treat it as Ethereum because that turns missing
-# data into false confidence (per codex's pitfall flag).
+# NULL/empty stays its own bucket: treating it as Ethereum turns missing data into false confidence.
 _CHAIN_ALIASES = {"ethereum": "ethereum", "mainnet": "ethereum"}
 
 
@@ -45,36 +32,18 @@ def _canonical_chain(c: str | None) -> str | None:
 
 
 def _chain_match_values(canonical: str) -> list[str]:
-    """Every stored spelling that canonicalizes to *canonical*.
-
-    ``_canonical_chain`` folds aliases in Python; a SQL predicate needs the fold
-    expanded, or a row tagged ``mainnet`` is invisible to a ``chain="ethereum"``
-    query and the caller silently sees "no such node" instead of the node.
-    """
+    """The alias fold expanded for SQL, or a ``mainnet`` row is invisible to ``chain="ethereum"``."""
     values = {canonical}
     values.update(stored for stored, folded in _CHAIN_ALIASES.items() if folded == canonical)
     return sorted(values)
 
 
 def classify_address(session, address: str, chain: str | None = None) -> dict[str, Any]:
-    """Resolve an address to its control type and gating properties.
+    """Resolve an address to its control type and gating properties, with a plain-English ``note``, so the model
+    never infers EOA vs contract (the main anti-hallucination lever).
 
-    Surfaced to the agent so it never has to *infer* "is this an EOA or
-    a contract?" from indirect signals — the answer is in the tool
-    result, with a plain-English ``note`` explaining the compromise
-    semantics. This is the single highest-leverage anti-hallucination
-    move: the model can't pattern-match "owner = EOA = single point of
-    failure" when the tool literally returns ``kind: "timelock"`` plus
-    a sentence saying private keys don't apply.
-
-    Sources, in priority:
-      1. ``control_graph_nodes.resolved_type`` and ``.details`` — the
-         pipeline already classifies these, including thresholds,
-         owners, and delays.
-      2. ``contracts`` row — if the address has a Contract row it has
-         bytecode and is at minimum a generic "contract".
-      3. Fallback: "unknown" with a note instructing the agent to
-         verify before reasoning about compromise semantics.
+    Sources: ``control_graph_nodes`` type/details, then a ``contracts`` row (generic contract), else "unknown" with a
+    verify-first note.
     """
     from db.models import ControlGraphNode
 
@@ -82,31 +51,16 @@ def classify_address(session, address: str, chain: str | None = None) -> dict[st
         return {"address": address, "kind": "unknown", "is_eoa": False, "note": ""}
     addr_lc = address.lower()
 
-    # ``control_graph_nodes`` has no chain column at all — ``contract_id`` (which
-    # is chain-scoped through ``contracts.chain``) is the only scoping key — so the
-    # chain predicate goes through the join, not onto the node. Without it this
-    # lookup keys on a BARE ADDRESS while ``chain`` is a parameter of this function
-    # and is used on the very next line: three real cross-chain twins already exist
-    # in ``contracts`` (``0x5bdd4b0d…`` ``TopUp`` on ethereum AND scroll, both
-    # protocol_id=1 — the canonical deterministic-deploy aliasing case), and the
-    # aliasing is unrealised today for exactly one reason: no analysis job has ever
-    # run on a second chain, so every control-graph row is ethereum. That number
-    # measures analysis coverage, not the hazard.
-    #
-    # A caller that supplies no chain keeps the address-only lookup (there is no
-    # chain to scope to, and inventing mainnet would turn a missing hint into false
-    # confidence — the same reason ``_canonical_chain`` keeps NULL its own bucket).
+    # CGN has no chain column; scope via the Contract join. Cross-chain twins exist (``0x5bdd4b0d…`` TopUp on ethereum
+    # and scroll); aliasing is unrealised only because no second-chain analysis has run. No chain given keeps the
+    # address-only lookup rather than inventing mainnet.
     stmt = select(ControlGraphNode).join(Contract, ControlGraphNode.contract_id == Contract.id)
     stmt = stmt.where(func.lower(ControlGraphNode.address) == addr_lc)
     canonical = _canonical_chain(chain)
     if canonical is not None:
         stmt = stmt.where(func.lower(Contract.chain).in_(_chain_match_values(canonical)))
-    # An unordered LIMIT 1 over a multi-row set is a query-plan coin flip, and it is
-    # not hypothetical here: 10 local addresses carry differing ``details`` across
-    # their rows and 2 disagree on ``resolved_type`` between ``contract`` (a
-    # non-terminal way-point) and ``timelock`` (a settled key with a delay). The
-    # order is a total one AND prefers a classified row, so the answer is both
-    # reproducible and never the less-resolved of two rows about the same address.
+    # An unordered LIMIT 1 is a coin flip: some addresses have rows disagreeing on type. Total order preferring the
+    # classified row.
     stmt = stmt.order_by(
         case((ControlGraphNode.resolved_type.is_(None), 1), (ControlGraphNode.resolved_type == "unknown", 1), else_=0),
         ControlGraphNode.id.asc(),
@@ -118,10 +72,7 @@ def classify_address(session, address: str, chain: str | None = None) -> dict[st
     kind = (cg_node.resolved_type if cg_node else None) or ("contract" if contract else "unknown")
     label = (cg_node.contract_name if cg_node else None) or (contract.contract_name if contract else None)
 
-    # The pipeline classifies many timelock contracts as plain "contract"
-    # but writes the delay into details. If we have a delay or the name
-    # looks like a timelock, promote — otherwise the agent loses the most
-    # important fact about this address (it has a delay window).
+    # Many timelocks are typed plain "contract" with a delay in details; promote so the delay window isn't lost.
     raw_delay = details.get("delay") or details.get("delay_seconds")
     name_hint = (label or "").lower()
     if kind == "contract" and ((isinstance(raw_delay, (int, float)) and raw_delay > 0) or "timelock" in name_hint):
@@ -142,7 +93,6 @@ def classify_address(session, address: str, chain: str | None = None) -> dict[st
     if owners:
         out["owners"] = owners
         out["owner_count"] = len(owners)
-    # control_graph_nodes uses `delay` for timelock seconds in this codebase.
     delay = details.get("delay") or details.get("delay_seconds")
     if delay is not None:
         out["delay_seconds"] = delay
@@ -151,15 +101,11 @@ def classify_address(session, address: str, chain: str | None = None) -> dict[st
 
 
 def _resolve_contract(session, address: str, chain: str | None) -> Contract | None:
-    """Find a Contract by address. The LLM may pass ``chain`` as a hint
-    (sometimes it's wrong — e.g. it says "ethereum" while the row is
-    tagged ``mainnet`` or NULL). Resolution strategy (codex-recommended):
+    """Find a Contract by address. The LLM's chain hint is sometimes wrong:
 
-      1. If chain is provided: match address + canonical chain. ethereum
-         and mainnet are aliases. Strict miss falls through to (3).
-      2. If chain not provided: address-only.
-      3. Fallback: address-only across all rows, with a tiebreak that
-         prefers ethereum/mainnet over multi-chain hits, NULL last.
+    1. With chain: address + canonical chain (ethereum ≡ mainnet); a miss falls to (3).
+    2. Without chain: address-only.
+    3. Fallback: address-only, preferring ethereum/mainnet, NULL last.
     """
     if not address:
         return None
@@ -172,16 +118,11 @@ def _resolve_contract(session, address: str, chain: str | None) -> Contract | No
 
     if chain is not None:
         target = _canonical_chain(chain)
-        # Strict canonical match (handles ethereum/mainnet alias).
         canonical_matches = [r for r in rows if _canonical_chain(r.chain) == target]
         if canonical_matches:
             return canonical_matches[0]
-        # No canonical match — fall through to the address-only tiebreak
-        # below rather than returning None, since the LLM's chain hint
-        # was probably wrong.
+        # The LLM's hint was probably wrong.
 
-    # Tiebreak: prefer ethereum/mainnet rows; then any non-NULL chain;
-    # NULL last. Stable within each bucket via input order.
     eth = [r for r in rows if _canonical_chain(r.chain) == "ethereum"]
     if eth:
         return eth[0]
@@ -192,13 +133,7 @@ def _resolve_contract(session, address: str, chain: str | None) -> Contract | No
 
 
 def contract_brief(session, address: str, chain: str | None = None) -> dict[str, Any]:
-    """One-screen contract summary: identity, proxy status, controls, recent upgrade.
-
-    Every address that appears (the contract itself + each controller)
-    is annotated via ``classify_address`` so the agent sees the type
-    (eoa / safe / timelock / contract) and gating semantics inline,
-    without having to infer them.
-    """
+    """One-screen contract summary; every address is annotated via ``classify_address``."""
     from db.models import ControllerValue
 
     contract = _resolve_contract(session, address, chain)
@@ -209,15 +144,8 @@ def contract_brief(session, address: str, chain: str | None = None) -> dict[str,
         select(ContractSummary).where(ContractSummary.contract_id == contract.id)
     ).scalar_one_or_none()
 
-    # "The last upgrade", and the polarity has to match the words. Under
-    # ``block_number DESC NULLS LAST`` a poll-detected upgrade — ``block_number``
-    # is NULL by design for the event-scan/poll writers — sorted LAST, i.e. was
-    # reported as the OLDEST event, so ``last_upgrade`` named the newest
-    # BLOCK-CARRYING upgrade while a more recent one sat unreported. Timestamp
-    # leads because every writer sets it (the poll writer stamps a detection
-    # time) and it answers the question actually being asked; the block tiebreak
-    # puts NULLS FIRST under DESC for the same reason, and ``id`` makes the order
-    # total so two rows with one timestamp cannot swap between calls.
+    # Timestamp first: poll-detected upgrades have NULL blocks, and NULLS LAST reported the newest upgrade as oldest.
+    # Block NULLS FIRST, then id for a total order.
     last_event = (
         session.execute(
             select(UpgradeEvent)
@@ -233,9 +161,7 @@ def contract_brief(session, address: str, chain: str | None = None) -> dict[str,
         .first()
     )
 
-    # Classify each controller value (often the address that holds a
-    # role like ``owner`` or ``DEFAULT_ADMIN_ROLE``). Without this the
-    # model treats every controller as an EOA by default.
+    # Otherwise the model treats every controller as an EOA.
     cv_rows = session.execute(select(ControllerValue).where(ControllerValue.contract_id == contract.id)).scalars().all()
     controllers: dict[str, dict[str, Any]] = {}
     for cv in cv_rows:
@@ -271,10 +197,7 @@ def contract_brief(session, address: str, chain: str | None = None) -> dict[str,
                 "timestamp": last_event.timestamp.isoformat() if last_event.timestamp else None,
                 "new_impl": last_event.new_impl,
                 "tx_hash": last_event.tx_hash,
-                # This result is read by an LLM, which cannot be relied on to
-                # interpret ``"block": null`` as "the block is unknown" rather than
-                # "block zero" or "no upgrade". Name the detection route instead:
-                # a poll-detected upgrade has no block and no tx hash by design.
+                # An LLM may read ``"block": null`` as block zero; name the route instead.
                 "detection": ("log_indexed" if last_event.block_number is not None else "poll_detected"),
             }
             if last_event
@@ -284,7 +207,6 @@ def contract_brief(session, address: str, chain: str | None = None) -> dict[str,
 
 
 def upgrade_summary(session, address: str, chain: str | None = None) -> dict[str, Any]:
-    """Per-impl windows + audit-coverage status for a (proxy) contract."""
     contract = _resolve_contract(session, address, chain)
     if contract is None:
         return {"error": f"contract not found: {address}"}
@@ -311,7 +233,6 @@ def upgrade_summary(session, address: str, chain: str | None = None) -> dict[str
             }
         )
 
-    # Coverage: union over the proxy's id and any historical impl ids.
     impl_addrs = {ev.new_impl.lower() for ev in rows if ev.new_impl}
     if contract.implementation:
         impl_addrs.add(contract.implementation.lower())
@@ -357,11 +278,7 @@ def live_findings(
     company: str | None = None,
     limit: int = 10,
 ) -> dict[str, Any]:
-    """Audit findings still affecting the current code (status != 'fixed').
-
-    Filters: by address (joins through coverage), by company (all audits
-    of the protocol), or both. Caps at ``limit`` for prompt budget.
-    """
+    """Findings still affecting current code (status != 'fixed'), by address and/or company, capped at ``limit``."""
     stmt = select(AuditReport)
     if address:
         addr_lc = address.lower()
@@ -371,7 +288,6 @@ def live_findings(
             .where(func.lower(Contract.address) == addr_lc)
         )
     if company:
-        # AuditReport keys to Protocol via protocol_id; resolve the name.
         proto = session.execute(select(Protocol).where(Protocol.name == company)).scalar_one_or_none()
         if proto is None:
             return {"findings": [], "truncated": False}
@@ -400,7 +316,6 @@ def live_findings(
 
 
 def protocol_brief(session, name: str) -> dict[str, Any]:
-    """Top-level snapshot for one protocol: counts + key principals."""
     proto = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
     if proto is None:
         return {"error": f"protocol not found: {name}"}
@@ -417,10 +332,7 @@ def protocol_brief(session, name: str) -> dict[str, Any]:
     ]
     contracts = session.execute(select(Contract).where(Contract.job_id.in_(job_ids))).scalars().all() if job_ids else []
     proxy_count = sum(1 for c in contracts if c.is_proxy)
-    # Unfiltered reports-on-file count — must stay in step with
-    # /api/company/{name}/audits and /audit_coverage's top-level
-    # ``audit_count`` (all three surfaces publish the same total; the
-    # scope-extraction-filtered subset is ``scoped_audit_count`` there).
+    # Must match /audits and /audit_coverage ``audit_count``.
     audit_count = session.execute(
         select(func.count(AuditReport.id)).where(AuditReport.protocol_id == proto.id)
     ).scalar_one()
@@ -434,7 +346,6 @@ def protocol_brief(session, name: str) -> dict[str, Any]:
 
 
 def list_protocol_principals(session, name: str) -> dict[str, Any]:
-    """Roll up principals (Safes/EOAs/timelocks) that govern a protocol's contracts."""
     from db.models import ControlGraphNode  # local import to avoid cycle at module load
 
     proto = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
@@ -465,10 +376,7 @@ def list_protocol_principals(session, name: str) -> dict[str, Any]:
         )
         slot["controls_count"] += 1
 
-    # Classify each principal address — kind, threshold, owners, delay,
-    # and the plain-English compromise-semantics note. The model can no
-    # longer say "a single EOA controls X" when this output literally
-    # tags X as a Timelock contract or a 4-of-7 Safe.
+    # So the model can't call a Timelock or a 4-of-7 Safe "a single EOA".
     out = []
     for entry in by_addr.values():
         cls = classify_address(session, entry["address"])
@@ -491,13 +399,7 @@ ROLE_SOURCE_NOT_A_ROLE = (
 
 
 def _role_key(value: Any) -> str:
-    """Canonical string key for a role identity.
-
-    Grants carry either a numeric Solmate/Solady role id or a named role. The key
-    is used for grouping and for matching a caller's ``role_name``, so a caller
-    asking for ``"2"``, ``"role 2"`` or ``"PROTOCOL_PAUSER"`` reaches the same
-    bucket the grant created.
-    """
+    """``"2"``, ``"role 2"`` and ``"PROTOCOL_PAUSER"`` reach the same bucket."""
     text = str(value).strip()
     if text.lower().startswith("role "):
         text = text[5:].strip()
@@ -505,13 +407,8 @@ def _role_key(value: Any) -> str:
 
 
 def _grant_principal_addresses(grant: Any) -> list[str] | None:
-    """Member addresses named by one ``authority_roles`` grant, or ``None``.
-
-    ``None`` is the third state and is NOT an empty holder set: the grant names a
-    role that gates the function but records no members, so who holds it was not
-    determined. Attributing the function's whole authorized-caller set to the role
-    would be the over-claim ``capability_role_grants`` refuses to make at
-    derivation time, and a consumer cannot redo that reasoning.
+    """Members named by one grant, or ``None`` when the role gates the function but holders weren't determined (not
+    an empty set).
     """
     if not isinstance(grant, dict):
         return None
@@ -529,30 +426,17 @@ def _grant_principal_addresses(grant: Any) -> list[str] | None:
 
 
 def role_holders(session, *, company: str, role_name: str | None = None) -> dict[str, Any]:
-    """Who holds which role, across a protocol, and where that is not determined.
+    """Who holds which role, and where that's not determined.
 
-    ROLES COME FROM ``effective_functions.authority_roles``, never from
-    ``function_principals.origin``. ``origin`` is a resolver-source constant —
-    ``semantic_capability:finite_set`` on 1132/1132 local rows — so grouping by it
-    produced exactly ONE "role", named after the resolver, holding 136 "holders",
-    while every real role name returned ``{"holders": []}``: an empty answer that
-    reads as "nobody holds this role" for a question that was never asked.
-    ``principal_type`` is likewise the single constant ``controller``.
+    Roles come from ``authority_roles``, never ``function_principals.origin`` (a constant resolver tag; grouping by it
+    produced one fake role with 136 holders and empty real roles).
 
-    Three states, and the caller (an LLM) is told which one it is looking at:
+    * grant with members — witnessed.
+    * grant without members — ``holders_state: "not_determined"``, never "no holders".
+    * NULL / ``[]`` — not read / proven no role-keyed authority; both counted in ``role_evidence`` so "no roles" and
+    "didn't look" differ.
 
-    * a grant with members — witnessed: every listed address holds that role.
-    * a grant with no members — the role gates the function, but who holds it was
-      not determined. Reported as the role with ``holders_state:
-      "not_determined"`` and an empty holder list, never as "no holders".
-    * ``authority_roles`` NULL — nothing about this function's role structure was
-      read; ``[]`` — the gate was lowered and carries no role-keyed authority.
-      Both are counted in ``role_evidence`` rather than silently dropped, because
-      "this protocol has no roles" and "we did not look" are the same empty
-      ``roles`` array otherwise.
-
-    The authorized-caller sets ``origin`` really describes are still published,
-    under ``authorized_callers`` and labelled as not being roles.
+    The caller sets ``origin`` describes are published as ``authorized_callers``, labeled as not roles.
     """
     from db.models import EffectiveFunction
     from services.policy.capability_surface import capability_role_grants
@@ -575,8 +459,6 @@ def role_holders(session, *, company: str, role_name: str | None = None) -> dict
         ).scalars()
     )
 
-    # (role key) -> {"role": display value, "addresses": {addr: [fn names]},
-    #                "functions": set, "undetermined_functions": [fn names]}
     by_role: dict[str, dict[str, Any]] = {}
     caller_functions: dict[str, list[str]] = {}
     chain_for_address: dict[str, str | None] = {}
@@ -592,8 +474,7 @@ def role_holders(session, *, company: str, role_name: str | None = None) -> dict
         chain = chain_by_cid.get(ef.contract_id)
         fn_name = ef.function_name or ef.selector or "?"
 
-        # The caller sets ``origin`` describes: authorized callers of a gated
-        # function, with no role attribution available. Kept, renamed.
+        # Authorized callers without role attribution.
         for fp in ef.principals or []:
             address = (fp.address or "").lower()
             if not address:
@@ -603,15 +484,8 @@ def role_holders(session, *, company: str, role_name: str | None = None) -> dict
             if fn_name not in slot:
                 slot.append(fn_name)
 
-        # ``capability_role_grants`` over the persisted ``capability_expr`` is the
-        # SAME function that writes the ``authority_roles`` column, so where the
-        # column was written by the current writer the two agree by construction —
-        # and where it was not, the derivation is the only honest answer. It
-        # matters: every one of the 1,773 persisted rows still carries the
-        # pre-derivation literal ``[]``, which a consumer reading the column alone
-        # reports as "the gate was lowered and carries no role-keyed authority" for
-        # rows nobody ever asked the question of. The column remains the source
-        # when there is no resolved capability to read.
+        # Same function that writes ``authority_roles``, so they agree where the column is current; every persisted row
+        # still has the pre-derivation ``[]``, which would falsely read as proven.
         capability = ef.capability_expr
         grants = (
             capability_role_grants(capability) if isinstance(capability, dict) and capability else ef.authority_roles
@@ -654,9 +528,7 @@ def role_holders(session, *, company: str, role_name: str | None = None) -> dict
             counts["functions_with_a_role_whose_holders_are_not_determined"] += 1
 
     def _holder(address: str, functions: list[str]) -> dict[str, Any]:
-        # Classified WITH the chain of the contract whose gate named the address:
-        # ``classify_address`` scopes the control-graph read by chain, and passing
-        # nothing would reopen cross-chain twin aliasing.
+        # With the gating contract's chain, or cross-chain twin aliasing reopens.
         record = classify_address(session, address, chain_for_address.get(address))
         record["function_count"] = len(functions)
         record["functions"] = functions[:8]
@@ -678,8 +550,7 @@ def role_holders(session, *, company: str, role_name: str | None = None) -> dict
     if role_name:
         entry = by_role.get(_role_key(role_name))
         if entry is None:
-            # NOT "this role has no holders": no grant in this protocol names it,
-            # which given the evidence counts below may mean nobody read the gates.
+            # No grant names it, which may mean nobody read the gates.
             return {
                 "role": role_name,
                 "holders": [],
@@ -742,9 +613,6 @@ def role_holders(session, *, company: str, role_name: str | None = None) -> dict
 
 
 def list_protocol_addresses(session, name: str) -> set[str]:
-    """All in-scope contract addresses (lowercase) for a protocol — used to
-    intersect with addresses extracted from the agent's final answer when
-    deciding what to highlight on the canvas."""
     proto = session.execute(select(Protocol).where(Protocol.name == name)).scalar_one_or_none()
     if proto is None:
         return set()
