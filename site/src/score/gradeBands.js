@@ -1,8 +1,6 @@
-// Letter bands for the published λ, keyed by the model version that produced
-// it. A band table is a calibration against one model's arithmetic: reading λ
-// from one version through another's cut points would publish a letter nobody
-// calibrated. An unknown version therefore gets NO letter — λ is shown bare
-// and labelled uncalibrated, which is the not_determined state for the letter.
+// Letter bands per model version: a band table calibrates one model's
+// arithmetic, so an unknown version gets no letter (λ shown bare, labelled
+// uncalibrated).
 
 const LETTER_CUTS = [
   ["A", 88],
@@ -29,14 +27,12 @@ export function bandsFor(modelVersion) {
   return BANDS[modelVersion] || null;
 }
 
-// Tone class suffix — the letter's family, so A and A− share a colour.
 export function toneForLetter(letter) {
   const head = String(letter || "").charAt(0).toLowerCase();
   return ["a", "b", "c", "d", "f"].includes(head) ? head : "";
 }
 
-// { letter, tone, calibrated }. `calibrated: false` means this model version
-// has no band table: the caller must render λ with no letter and say so.
+// `calibrated: false`: render λ without a letter and say so.
 export function letterFor(modelVersion, lambda) {
   const bands = bandsFor(modelVersion);
   if (!bands) return { letter: null, tone: "", calibrated: false };

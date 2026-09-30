@@ -1,10 +1,7 @@
 export function SidebarTabs({ mode, onSetMode, showDetail = true, isAdmin = false }) {
   return (
     <div className="ps-sidebar-tabs">
-      {/* showDetail is on by default in both embedded and fullscreen
-          modes — clicking a contract anywhere is expected to surface the
-          function-lane view. Kept as an opt-out prop so a future caller
-          that needs a chrome-only sidebar can still suppress the tab. */}
+      {/* Opt-out prop for a future chrome-only sidebar. */}
       {showDetail && (
         <button
           className={`ps-sidebar-tab ${mode === "detail" ? "active" : ""}`}
@@ -27,10 +24,7 @@ export function SidebarTabs({ mode, onSetMode, showDetail = true, isAdmin = fals
       >
         Audits
       </button>
-      {/* Activity folds the old Monitor + Upgrades tabs into one read-first
-          timeline. Reading (timeline / state / protocol feed) is public; the
-          write controls (alert toggles, webhook attach) gate on isAdmin
-          inside the panel — so the tab itself is visible to everyone. */}
+      {/* Reading is public; write controls gate on isAdmin inside the panel. */}
       <button
         className={`ps-sidebar-tab ${mode === "activity" ? "active" : ""}`}
         onClick={() => onSetMode("activity")}

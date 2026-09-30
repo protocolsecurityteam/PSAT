@@ -1,35 +1,15 @@
-// Contract→group assignment for the surface canvas: which principal's box a
-// contract renders inside, and the per-group controller rows. Split from
-// elkLayout.js; consumed by buildGraphLayout and the elkLayout driver.
 
 import { entityKey } from "../entityKey.js";
 import { principalBadge } from "../format.js";
 
-// Every principal (Safe / Timelock / EOA / proxy admin) that owns at
-// least this many contracts becomes a group container. We default to 1
-// — a Safe that touches a single contract still gets a labeled box,
-// matching the visual the user wants for EOAs as well. Principals that
-// the server didn't mark primary for any contract drop off the canvas
-// entirely; they remain addressable via search and sidebar.
+// Principals with no primary_for drop off the canvas but stay searchable.
 const MIN_GROUP_SIZE = 1;
 
-// Compute the contract→group assignment used by both buildGraphLayout
-// (for node parentId + edge filtering) and elkLayout (for ELK compound
-// children).
+// Contract → group from the server's primary-controller assignment
+// (principal.primary_for), the same decision enrollment uses. Client-side
+// derivation double-counted state-variable destinations.
 //
-// The server's primary-controller assignment (services.governance.
-// primary_controller, exposed as principal.primary_for) is the source
-// of truth: a contract belongs to principal P's group iff P.primary_for
-// includes it. That's the same decision monitoring enrollment uses, so
-// the canvas and the Monitoring tab never disagree about who governs
-// what. We previously derived this client-side from principal.controls
-// + a local priority constant, which double-counted state-variable
-// destinations (e.g. payoutAddress Safes) that have no call authority.
-//
-// Returns:
-//   contractToGroup: Map<contractAddr_lc, principalAddr_lc>
-//   groupChildren:   Map<principalAddr_lc, contractAddr_lc[]>
-//   groupedPrincipals: Set<principalAddr_lc> (principals materialized as a group)
+// Returns contractToGroup, groupChildren and groupedPrincipals.
 export function assignGroups(machines, principals) {
   const contractAddrs = new Set();
   for (const m of machines) {
@@ -39,12 +19,9 @@ export function assignGroups(machines, principals) {
   const principalAddrs = new Set(
     (principals || []).map((p) => p?.address?.toLowerCase()).filter(Boolean),
   );
-  // Server-published placement override for governance mediators (contract
-  // .grouped_with): a passthrough timelock/proxy-admin renders inside the
-  // group holding the contracts it operates on, not its driver's group —
-  // primary_for still names the driver, so the Controllers accordion and
-  // every authority claim stay truthful. Honored only when the target is a
-  // known principal; otherwise the primary_for placement stands.
+  // Server placement override (contract.grouped_with): a passthrough mediator
+  // renders with the contracts it operates on; primary_for still names the
+  // driver. Only honoured for known principals.
   const groupedWith = new Map();
   for (const m of machines) {
     const lc = m.address?.toLowerCase();
@@ -64,10 +41,9 @@ export function assignGroups(machines, principals) {
       const lc = c?.toLowerCase();
       if (!lc || lc === principalAddr) continue;
       if (!contractAddrs.has(lc)) continue;
-      // Overridden mediators join their operand group below instead.
       if (groupedWith.has(lc) && groupedWith.get(lc) !== principalAddr) continue;
-      // A contract should only ever appear in one principal's primary_for
-      // (server enforces this), but defensively skip duplicates.
+      // The server enforces one primary per contract; skip duplicates
+      // defensively.
       if (contractToGroup.has(lc)) continue;
       contractToGroup.set(lc, principalAddr);
       owned.push(lc);
@@ -90,27 +66,16 @@ export function assignGroups(machines, principals) {
   };
 }
 
-// Build the Controllers-accordion model for one group: the primary owner
-// first, then every co-controller that holds authority on a contract inside
-// this group. Each row carries the contracts it governs WITHIN this group,
-// with the concrete functions + capability tags it can call on each — all
-// scoped to the group's own children, so a co-controller spanning several
-// groups shows only the authority relevant to the box it's rendered in.
-//
-// Capability tags are taken verbatim from controls_detail[].capabilities
-// (the shared _EFFECT_CAPABILITY vocabulary: pause / upgrade / fund-out / …)
-// and unioned per row — never remapped, so a row reads the same word the
-// per-contract chips do.
+// Controllers accordion model: primary first, then co-controllers, each scoped
+// to this group's children. Capability tags are unioned verbatim from
+// controls_detail.
 export function buildGroupControllers(primary, kids, principalList, nameByAddr, chain = "ethereum") {
-  const childOrder = kids; // group's child addresses (lc), in owned order
+  const childOrder = kids;
   const childSet = new Set(kids);
 
   const rowFor = (principal, isPrimary) => {
-    // Keyed by (chain, address). A controls_detail row carries its own
-    // chain, so a twin-governing principal's two same-address rows key to their
-    // own chains — only the row on the page's active chain matches a visible kid
-    // below; the other-chain row finds no child and is dropped. Legacy rows with
-    // no chain fall back to the active chain, keying exactly as before.
+    // A twin-governing principal's other-chain row finds no child and drops
+    // out; chainless legacy rows use the active chain.
     const detailByAddr = new Map();
     for (const d of principal.controls_detail || []) {
       if (d?.address) detailByAddr.set(entityKey(d.chain ?? chain, d.address), d);
@@ -135,9 +100,7 @@ export function buildGroupControllers(primary, kids, principalList, nameByAddr, 
       isPrimary,
       label: principalBadge(principal),
       capabilities: [...caps].sort(),
-      // Unioned function names — the row summary falls back to these (like the
-      // sidebar's "Can Call") for controllers whose functions map to no
-      // high-level capability tag, so the summary is never blank.
+      // Fallback for the summary when no tag maps.
       functions: [...funcs].sort(),
       governs,
     };
@@ -151,10 +114,8 @@ export function buildGroupControllers(primary, kids, principalList, nameByAddr, 
     const qLc = q.address?.toLowerCase();
     if (!qLc || qLc === primaryAddrLc) continue;
     const co = Array.isArray(q.co_controls) ? q.co_controls : [];
-    // primary_for counts too: a grouped_with machinery contract renders in
-    // this box while ANOTHER principal primary-controls it — that controller
-    // must appear as a controller row here (it may have no other canvas
-    // footprint at all when this was its only owned contract).
+    // A grouped_with contract's real controller must appear here; it may have
+    // no other canvas footprint.
     const owns = Array.isArray(q.primary_for) ? q.primary_for : [];
     if (
       !co.some((c) => childSet.has(c?.toLowerCase())) &&
@@ -162,14 +123,10 @@ export function buildGroupControllers(primary, kids, principalList, nameByAddr, 
     )
       continue;
     const row = rowFor(q, false);
-    // The authority list says it has rights here; if we have no verified
-    // function detail for any of this group's contracts there's nothing to
-    // show, so skip the empty row rather than render "governs 0".
     if (row.governs.length === 0) continue;
     coRows.push(row);
   }
-  // Most-capable co-controllers first; deterministic tie-breaks keep the
-  // layout (and visual snapshots) stable across renders.
+  // Deterministic so layout and snapshots are stable.
   coRows.sort(
     (a, b) =>
       b.governs.length - a.governs.length ||
@@ -179,8 +136,3 @@ export function buildGroupControllers(primary, kids, principalList, nameByAddr, 
   return controllers.concat(coRows);
 }
 
-// `bandHeights` ({ groupId: px }) reserves each group's real header-band
-// height. GroupNode measures the rendered band (colored bar + Controllers
-// accordion, including any capability summary that wraps to several lines) and
-// reports it per group; we reserve that exact height so ELK packs the canvas
-// to fit (rather than a wrapped row overflowing / overlapping cards). Until a

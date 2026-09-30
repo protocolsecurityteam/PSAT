@@ -1,11 +1,5 @@
-/* Surface sidebar Audits panel (AuditsListPanel). Split out of the former
-   surface/upgrades.css — that file mixed the retired Upgrades-tab styles
-   with these still-live ps-audits-* rules; only the audits half survives. */
-
-/* ── Proof-first Audits panel ──────────────────────────────────────────────
- * One verdict only ("Running audited code" — the deployed source hash-matches
- * the reviewed commit). Colored dots, never emoji. No low-confidence or
- * accusatory signals. See site/prototypes/audit-panel/HANDOFF.md. */
+/* One verdict only; coloured dots, never emoji; no low-confidence or accusatory
+   signals (site/prototypes/audit-panel/HANDOFF.md). */
 .ps-audits-panel {
   padding: 12px;
   display: flex;
@@ -27,8 +21,6 @@
   flex: none;
 }
 
-/* Proof-first summary: the one-glance "how audited is this protocol?" answer,
-   built only from cryptographic proofs. */
 .ps-audits-summary {
   display: flex;
   flex-direction: column;
@@ -58,7 +50,6 @@
   vertical-align: middle;
 }
 
-/* The summary line doubles as the "ring every proven contract" control. */
 .ps-audits-summary-btn {
   display: flex;
   align-items: flex-start;
@@ -66,12 +57,9 @@
   width: 100%;
   text-align: left;
   background: transparent;
-  border: 0;
-  box-shadow: none;
   padding: 4px 5px;
   margin: -4px -5px;
   border-radius: 8px;
-  color: inherit;
   font: inherit;
   cursor: pointer;
 }
@@ -93,9 +81,6 @@
   color: #4ade80;
 }
 
-/* The proven-contract roster, disclosed under the summary when "all" is picked.
-   Rows mirror the Governs/Depends reference-row idiom: name + short address, the
-   body peeks the contract on the canvas, the → arrow commits to its card. */
 .ps-audits-covlist {
   display: flex;
   flex-direction: column;
@@ -103,41 +88,6 @@
   margin-top: 9px;
   padding-top: 8px;
   border-top: 1px solid rgba(74, 222, 128, 0.16);
-}
-
-.ps-audits-covrow {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 5px 6px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.ps-audits-covrow:hover {
-  background: rgba(74, 222, 128, 0.06);
-}
-
-.ps-audits-covrow-name {
-  flex: 1;
-  min-width: 0;
-  font-weight: 700;
-  font-size: 12px;
-  color: #cbd5e1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ps-audits-covrow-addr {
-  flex: none;
-  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
-  font-size: 9.5px;
-  color: #64748b;
-}
-
-.ps-audits-covrow:hover .ps-goto-arrow {
-  color: #94a3b8;
 }
 
 .ps-audits-summary-big {
@@ -150,7 +100,6 @@
   color: #cbd5e1;
 }
 
-/* The single proven tier. */
 .ps-audits-tier {
   border: 1px solid rgba(148, 163, 184, 0.14);
   border-radius: 10px;
@@ -192,7 +141,6 @@
   padding: 0 8px 10px;
 }
 
-/* Audit row — collapsed summary; expands to a per-contract breakdown. */
 .ps-audits-arow {
   border: 1px solid rgba(148, 163, 184, 0.14);
   border-radius: 9px;
@@ -214,20 +162,15 @@
   min-width: 0;
   text-align: left;
   background: transparent;
-  border: 0;
-  color: inherit;
   font: inherit;
-  cursor: pointer;
   padding: 9px 11px;
   display: flex;
   flex-direction: column;
   gap: 3px;
-  box-shadow: none;
 }
 
 .ps-audits-arow-btn:hover {
   background: #182031;
-  transform: none;
 }
 
 .ps-audits-arow-top {
@@ -285,25 +228,18 @@
 .ps-audits-arow-read {
   flex-shrink: 0;
   background: rgba(45, 212, 191, 0.10);
-  border: 0;
   border-left: 1px solid rgba(148, 163, 184, 0.14);
   color: #2dd4bf;
   font-size: 11px;
-  font-weight: 700;
   letter-spacing: 0.05em;
   padding: 0 12px;
-  cursor: pointer;
-  box-shadow: none;
 }
 
 .ps-audits-arow-read:hover {
   background: rgba(45, 212, 191, 0.20);
   color: #a7f3d0;
-  transform: none;
 }
 
-/* Per-contract breakdown inside an expanded audit row (the honest unit —
-   the verdict lives on the audit × contract pair). */
 .ps-audits-cc-wrap {
   border-top: 1px solid rgba(148, 163, 184, 0.14);
   background: rgba(8, 11, 17, 0.55);
@@ -362,7 +298,6 @@
   flex-wrap: wrap;
 }
 
-/* The one verdict badge. */
 .ps-audits-verdict {
   display: inline-flex;
   align-items: center;
@@ -377,34 +312,24 @@
 }
 
 .ps-audits-shabadge {
-  padding: 1.5px 6px;
-  border-radius: 5px;
-  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
-  font-size: 9.5px;
-  font-weight: 700;
   color: #2dd4bf;
   background: rgba(45, 212, 191, 0.10);
   border: 1px solid rgba(45, 212, 191, 0.30);
 }
 
-/* Contract-selected mode. */
 .ps-audits-back {
   align-self: flex-start;
   background: transparent;
   border: 1px solid rgba(148, 163, 184, 0.22);
   color: #94a3b8;
   font-size: 11px;
-  font-weight: 700;
   border-radius: 6px;
   padding: 4px 9px;
-  cursor: pointer;
-  box-shadow: none;
 }
 
 .ps-audits-back:hover {
   color: #e2e8f0;
   background: rgba(148, 163, 184, 0.08);
-  transform: none;
 }
 
 .ps-audits-contract-card {

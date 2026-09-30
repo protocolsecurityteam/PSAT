@@ -1,8 +1,5 @@
-// Reading of a capability id in a sentence, for the score page's callouts and
-// its fix-first line ("two EOA authority holes"). Singular/plural, because the
-// callouts count the rows they name. An id with no phrase renders as the id
-// itself — an unmapped capability must not be silently absorbed into a
-// neighbouring phrase.
+// A capability id as a phrase for callouts and the fix-first line,
+// singular/plural. Unmapped ids render as themselves.
 const CAPABILITY_PHRASE = {
   "authority.replace": ["authority hole", "authority holes"],
   "authorized_caller.rotate": ["caller rotation", "caller rotations"],
@@ -27,7 +24,5 @@ export function capabilityPhrase(capability, count) {
   return count === 1 ? entry[0] : entry[1];
 }
 
-// The ids the phrase table covers — the frontend's copy of the scorer's fixed
-// capability vocabulary, exported so parallel maps (the glossary) can assert
-// they cover the same set instead of drifting apart silently.
+// Exported so parallel maps (the glossary) can assert they cover the same set.
 export const CAPABILITY_PHRASE_IDS = Object.freeze(Object.keys(CAPABILITY_PHRASE));

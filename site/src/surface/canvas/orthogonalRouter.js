@@ -1,23 +1,10 @@
-// Multi-bend orthogonal router for cross-group edges.
-//
-// The previous step-path approach only adjusted the *middle* horizontal /
-// vertical segment to dodge obstacles — the two stub legs at the source
-// and target columns were fixed at sx / tx, so any obstacle that
-// happened to sit at that column was sliced through.  This router
-// returns the full polyline, picking three or five waypoints as needed
-// so every segment clears the obstacle list it was handed.
-//
-// The router only handles the same-axis cases the bundle-aggregator
-// actually emits today (ctrl→ctrl and value→value).  Mixed-axis bundles
-// fall through to the caller's smoothstep fallback.
+// Multi-bend orthogonal router for cross-group edges. Returns the full polyline
+// (3 or 5 waypoints) so every segment clears the obstacles. Handles same-axis
+// cases only; mixed-axis falls back to the caller's smoothstep.
 
-// How far past a node we set the initial / final stub.  Big enough to
-// clear the colored border, small enough that the second bend is still
-// inside the same rectpacking lane as the source.
+// Clears the coloured border but keeps the second bend in the source's lane.
 const STUB = 24;
 
-// How far past an obstacle's edge we route when we have to detour.
-// Mirrors the obstacle padding the step path was using.
 const OBSTACLE_PADDING = 20;
 
 export function routeOrthogonal({
@@ -26,14 +13,9 @@ export function routeOrthogonal({
   obstacles,
   sourceId, targetId,
 }) {
-  // Keep source/target in the obstacle list so the route doesn't dive
-  // through their interior — but shrink their bbox along the handle
-  // axis so the handle itself sits on the boundary.  This matters when
-  // a GroupNode's top handle is rendered ~10px below the group's
-  // visible top (the header strip): if we filtered the group out
-  // entirely the V at xm could legitimately pass through it,
-  // re-entering before the terminal stub.  See the
-  // EtherFi Timelock → 3/6 SAFE case for the canonical failure.
+  // Source/target stay obstacles, shrunk at the handle, because a GroupNode's
+  // top handle sits below its visible top; filtering the group out let routes
+  // re-enter it (EtherFi Timelock → 3/6 SAFE).
   const obs = (obstacles || []).map((o) => {
     if (o.id === sourceId) return shrinkAtHandle(o, sourcePos, sx, sy);
     if (o.id === targetId) return shrinkAtHandle(o, targetPos, tx, ty);
@@ -43,17 +25,8 @@ export function routeOrthogonal({
   const sAxisV = sourcePos === "top" || sourcePos === "bottom";
   const tAxisV = targetPos === "top" || targetPos === "bottom";
 
-  // Prefer the 5-segment route over the 3-segment one even when 3
-  // would clear. The 5-segment shape produces the bundling visual:
-  // every edge leaving the same source handle shares the first
-  // `STUB`-pixel perpendicular stub (since y1 = sy ± STUB depends only
-  // on the handle, not the edge), and every edge arriving at the same
-  // target handle shares the last `STUB`-pixel stub the same way.
-  // With many edges through one handle this reads as a single thick
-  // "trunk" that forks/converges at the bus columns, rather than the
-  // spaghetti the 3-segment route produces when each edge picks its
-  // own midline. 3-segment still serves as the fallback for cases
-  // where 5-segment can't find a clear column.
+  // Prefer 5 segments even when 3 would clear: edges sharing a handle share the
+  // first/last STUB-px segment, which reads as one trunk.
   if (sAxisV && tAxisV) {
     return (
       tryFiveSegmentV(sx, sy, tx, ty, sourcePos, targetPos, obs)
@@ -66,16 +39,12 @@ export function routeOrthogonal({
       || tryThreeSegmentH(sx, sy, tx, ty, sourcePos, targetPos, obs)
     );
   }
-  // Mixed-axis cross-group edges (e.g. group ctrl-out → contract
-  // value-in) are rare today and never feature in the routing-bug the
-  // user reported.  Leave them on the caller's smoothstep fallback.
+  // Mixed-axis edges are rare; leave them to smoothstep.
   return null;
 }
 
-// Reshape an obstacle so the given handle position becomes the
-// obstacle's boundary along the handle axis.  A noop when the handle
-// is already outside the obstacle (which is the common case — only
-// GroupNode's header offset triggers the actual shrink today).
+// No-op unless the handle is inside the obstacle (only GroupNode's header
+// offset does that).
 function shrinkAtHandle(o, pos, hx, hy) {
   if (pos === "top" && hy > o.y) {
     return { ...o, y: hy, h: Math.max(0, o.h - (hy - o.y)) };
@@ -113,13 +82,8 @@ function polylineClear(pts, obstacles) {
 }
 
 // V-H-V: (sx,sy) → (sx,cy) → (tx,cy) → (tx,ty)
-// Searches a `cy` such that all three segments clear every obstacle.
-// Returns null when no such midline exists — the caller should escalate
-// to a 5-segment detour.  We constrain cy to the *exit* side of both
-// handles: a ctrl-out source (bottom) must hand the edge down to cy,
-// and a ctrl-in target (top) must receive it from above — without that
-// guard a far-enough natural midpoint can produce a path that backs
-// into the target from below.
+// cy is constrained to the exit side of both handles so a far midpoint can't
+// back into the target from below. Null means escalate to 5 segments.
 function tryThreeSegmentV(sx, sy, tx, ty, sourcePos, targetPos, obstacles) {
   const sDir = sourcePos === "bottom" ? 1 : -1;
   const tDir = targetPos === "bottom" ? 1 : -1;
@@ -160,11 +124,6 @@ function tryThreeSegmentH(sx, sy, tx, ty, sourcePos, targetPos, obstacles) {
 }
 
 // V-H-V-H-V: (sx,sy) → (sx,y1) → (xm,y1) → (xm,y2) → (tx,y2) → (tx,ty)
-//
-// The stubs y1 / y2 fan out perpendicular to the handles, then a column
-// xm at a clear x bridges the two.  We iterate the natural stub first,
-// then alternate stub distances if a nearby obstacle blocks the
-// horizontal hop at the default offset.
 function tryFiveSegmentV(sx, sy, tx, ty, sourcePos, targetPos, obstacles) {
   const sDir = sourcePos === "bottom" ? 1 : -1;
   const tDir = targetPos === "bottom" ? 1 : -1;
@@ -173,9 +132,7 @@ function tryFiveSegmentV(sx, sy, tx, ty, sourcePos, targetPos, obstacles) {
   const y2Candidates = directionalCandidates(ty, tDir, obstacles, "y");
   const xmCandidates = perpendicularCandidates((sx + tx) / 2, obstacles, "x");
 
-  // Try a few of each — the natural stub is first, then nearby
-  // obstacle-edge values.  The triple loop is bounded to keep the
-  // per-edge cost predictable.
+  // Bounded to keep per-edge cost predictable.
   const Y_CAP = Math.min(5, y1Candidates.length);
   for (let i = 0; i < Y_CAP; i++) {
     for (let j = 0; j < Y_CAP; j++) {
@@ -197,7 +154,7 @@ function tryFiveSegmentV(sx, sy, tx, ty, sourcePos, targetPos, obstacles) {
   return null;
 }
 
-// H-V-H-V-H: mirror of tryFiveSegmentV for left/right handles.
+// H-V-H-V-H: mirror of tryFiveSegmentV.
 function tryFiveSegmentH(sx, sy, tx, ty, sourcePos, targetPos, obstacles) {
   const sDir = sourcePos === "right" ? 1 : -1;
   const tDir = targetPos === "right" ? 1 : -1;
@@ -227,9 +184,7 @@ function tryFiveSegmentH(sx, sy, tx, ty, sourcePos, targetPos, obstacles) {
   return null;
 }
 
-// Candidate values for the centre line of a 3-segment route — natural
-// midpoint plus a slot above and below each obstacle.  Sorted by
-// proximity to the natural value so the smallest deviation wins.
+// Natural midpoint plus a slot either side of each obstacle, nearest first.
 function perpendicularCandidates(natural, obstacles, axis) {
   const out = [natural];
   for (const o of obstacles) {
@@ -242,11 +197,8 @@ function perpendicularCandidates(natural, obstacles, axis) {
   return out;
 }
 
-// Stub-distance candidates that respect the handle direction.  `dir`
-// is +1 when the handle exits in the positive axis direction (bottom /
-// right) and -1 otherwise; only values past `base` in that direction
-// survive the filter, so we never propose a stub that retraces back
-// through the source / target node.
+// Only values past `base` in the handle direction, so a stub never retraces
+// through the node.
 function directionalCandidates(base, dir, obstacles, axis) {
   const primary = base + dir * STUB;
   const out = [primary];

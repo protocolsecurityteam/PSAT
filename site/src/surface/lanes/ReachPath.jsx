@@ -1,21 +1,11 @@
 import { flowTypeWord, relationWord, shortAddr } from "../format.js";
 
-// "Reached from {host} via:" — the route a score-page click-through took to this
-// contract.
+// "Reached from {host} via:" for a score-page click-through to a contract only
+// reached through the control graph; without it the card is a non-sequitur.
 //
-// A deduction row names a HOST the controller acts on directly and, after the
-// arrow, the contracts it only reaches through the control graph. Clicking one
-// of those lands here, on a card whose own function lanes say nothing about the
-// deduction: the charged action is on the host, and this contract is downstream
-// of it. Without the route the card is a non-sequitur.
-//
-// Every hop is read off the payload's own control edges (the same ones the
-// canvas reach chips walk), and each names itself with what was witnessed: the flow
-// type always, plus the control-graph relation and role label where a row
-// witnessed them — both projected through the reader-facing word map in
-// format.js (the payload keeps its witness-plane vocabulary). An edge with no
-// witnessed relation shows its type alone — never an invented name. A route
-// this graph does not carry is its own state and says so.
+// Hops come from the payload's control edges and name only what was witnessed
+// (flow type, plus relation/role label where present). A route the graph
+// doesn't carry says so.
 export function ReachPath({ reachPath }) {
   if (!reachPath) return null;
   const { hostName, hostNames, hops } = reachPath;

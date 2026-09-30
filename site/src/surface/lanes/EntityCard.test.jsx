@@ -50,7 +50,7 @@ describe("EntityCard Governs tab", () => {
     expect(getByText("LiquidityPool")).toBeInTheDocument();
     expect(container.querySelectorAll(".ps-ctrl-fnchip")).toHaveLength(0);
     // The expand button carries the function count; clicking it reveals them.
-    const expand = container.querySelector(".ps-governs-expand");
+    const expand = container.querySelector(".ref-toggle");
     expect(expand).toHaveTextContent("2 fns");
     fireEvent.click(expand);
     expect(container.querySelectorAll(".ps-ctrl-fnchip")).toHaveLength(2);
@@ -71,7 +71,7 @@ describe("EntityCard Governs tab", () => {
     );
     fireEvent.click(getByText("Governs").closest("button"));
     // Body click = peek only.
-    fireEvent.click(getByText("LiquidityPool").closest(".ps-governs-head"));
+    fireEvent.click(getByText("LiquidityPool").closest(".ref-link"));
     expect(onPreview).toHaveBeenCalledWith(POOL);
     expect(onNavigate).not.toHaveBeenCalled();
     // The trailing arrow is the commit affordance.
@@ -93,7 +93,7 @@ describe("EntityCard Governs tab", () => {
     fireEvent.click(getByText("Governs").closest("button"));
     // No capability-word summary is rendered anywhere on the row.
     expect(container.querySelector(".ps-governs-summary")).toBeNull();
-    const expand = container.querySelector(".ps-governs-expand");
+    const expand = container.querySelector(".ref-toggle");
     expect(expand).toHaveTextContent("1 fns");
     expect(container.querySelectorAll(".ps-ctrl-fnchip")).toHaveLength(0);
     fireEvent.click(expand);
@@ -119,8 +119,8 @@ describe("EntityCard Governs tab", () => {
     expect(getByText("Appears In Governance Path For (1)")).toBeInTheDocument();
     expect(getByText("LiquidityPool")).toBeInTheDocument();
     // Path rows carry no function list → no expand button, but still focus on click.
-    expect(container.querySelector(".ps-governs-expand")).toBeNull();
-    fireEvent.click(getByText("LiquidityPool").closest(".ps-governs-head"));
+    expect(container.querySelector(".ref-toggle")).toBeNull();
+    fireEvent.click(getByText("LiquidityPool").closest(".ref-link"));
     expect(onPreview).toHaveBeenCalledWith(POOL);
   });
 
@@ -161,7 +161,7 @@ describe("EntityCard Governs tab", () => {
     const ndLine = container.querySelector(".ps-governs-ndcount");
     expect(ndLine).toHaveTextContent("reach unconfirmed · 2 destinations");
     // The reached list itself stays at one row.
-    expect(container.querySelectorAll(".ps-governs-row")).toHaveLength(1);
+    expect(container.querySelectorAll(".ref-row")).toHaveLength(1);
   });
 });
 

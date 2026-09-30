@@ -55,9 +55,8 @@ function ConfidenceColumn({ confidencePct, channels }) {
   );
 }
 
-// The at-most, with the ≤ attached. A ceiling nobody could bound is the louder
-// state, not the quieter one — an unbounded unknown must never read as a small
-// number or as a blank.
+// An unbounded ceiling is the louder state: it must never read as a small
+// number or a blank.
 function CeilingAmount({ usd }) {
   if (usd === null) return <span className="scz-unbounded">no upper limit known</span>;
   return <span className="scz-amt">{ceilingText(usd)}</span>;
@@ -66,8 +65,7 @@ function CeilingAmount({ usd }) {
 function StatusLine({ line }) {
   const category = categoryById(line.categoryId);
   if (!category) {
-    // A basis this page has no reading for. The name is published raw rather
-    // than mapped to whichever question looks closest.
+    // Unknown basis: published raw rather than mapped to the nearest question.
     return (
       <div className="scz-missline">
         <span>
@@ -141,7 +139,7 @@ function CeilingCell({ entry }) {
       )}
       {pool && (
         <div>
-          <span className="scz-poolchip">
+          <span className="tag tag-md tag-plain scz-poolchip">
             ⬡ POOL {pool.name} · {pool.contracts} contracts
           </span>
         </div>
@@ -157,13 +155,12 @@ function CeilingCell({ entry }) {
 
 function LeverRow({ entry, onSelect }) {
   const { lever, levers, row } = entry;
-  // Read through the same helpers the grouping reads: the row may only say
-  // what the group key proved every holder shares.
+  // Same helpers the grouping reads, so the row says only what every holder
+  // shares.
   const chip = leverChip(lever, row);
   const points = pointsText(lever.points_ceiling);
-  // A single holder's address rides on the chip, like the deductions rows. A
-  // grouped row's holders are distinct principals no one chip can carry, so
-  // they stay listed — the addresses are the only thing telling them apart.
+  // A grouped row's holders are distinct principals no single chip can carry,
+  // so they stay listed.
   const grouped = entry.controllers.length > 1 ? entry.controllers : [];
   return (
     <div className="scz-trow">
@@ -205,12 +202,11 @@ export default function ConfidenceZone({ doc, view, onSelect, withheld = false }
       <div>
         <h2 className="sc-band-title">
           Possible deductions
-          {/* With the grade withheld there is no λ for these rows to be outside
-              of, and naming one would put the withheld quantity back on the
-              page. The points ceilings themselves are severity × weakness ×
-              band — the same shape as raw points, which the withheld state
-              still publishes — so the queue itself stays. */}
-          <span className="scz-tag">
+          {/*
+            No λ when the grade is withheld; naming one would republish it. The
+            points ceilings stay (same shape as raw points).
+          */}
+          <span className="tag scz-tag">
             {withheld ? "not determined · not in the grade" : "not determined · not in λ"}
           </span>
         </h2>

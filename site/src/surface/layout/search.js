@@ -1,4 +1,3 @@
-// Filter + sort the machines/principals list for SearchNavigator. Pure.
 
 import { principalLabel } from "../format.js";
 import { ROLE_META } from "../meta.js";
@@ -7,7 +6,6 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
   let items = [];
 
   if (mode === "safe" || mode === "eoa" || mode === "timelock") {
-    // Show principals of this type
     const targetType = mode;
     for (const p of principals) {
       if (p.type !== targetType) continue;
@@ -30,10 +28,8 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
         functions: controlled.length,
       });
     }
-    // Timelock contracts (control-graph type=timelock) aren't principals, but
-    // they belong under the Timelocks filter just like timelock principals.
-    // Surface them as contract results, deduped against any principal already
-    // added at the same address.
+    // Timelock contracts aren't principals but belong under the Timelocks
+    // filter; deduped against principals.
     if (mode === "timelock") {
       const seen = new Set(items.map((i) => i.address?.toLowerCase()));
       for (const m of machines) {
@@ -55,10 +51,8 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
       }
     }
   } else {
-    // Show contracts, badged by their OWN role (the same classification the
-    // canvas node and entity card use) — not the type of whatever principal
-    // controls them, which read as a meaningless "unknown" whenever no owning
-    // principal happened to be in the visible set.
+    // Badged by their own role, not their controller's type (which read
+    // "unknown" when the owner wasn't visible).
     for (const m of machines) {
       items.push({
         kind: "contract",
@@ -75,7 +69,6 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
     if (mode === "funds") items = items.filter((i) => i.value > 0);
   }
 
-  // Text query
   if (query) {
     const q = query.toLowerCase().trim();
     const minMatch = q.match(/(?:min(?:imum)?\s*)?value\s*(?:of\s*|>\s*|>=\s*)?\$?(\d+(?:\.\d+)?)\s*(m|k)?/i);
@@ -93,7 +86,6 @@ export function buildSearchResults(machines, principals, mode, sortKey, query) {
     }
   }
 
-  // Sort
   if (sortKey === "value") items.sort((a, b) => b.value - a.value);
   else if (sortKey === "signers") items.sort((a, b) => b.signers - a.signers);
   else if (sortKey === "functions") items.sort((a, b) => b.functions - a.functions);

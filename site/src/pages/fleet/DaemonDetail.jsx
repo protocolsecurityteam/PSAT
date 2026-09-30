@@ -50,7 +50,6 @@ function alertContent(d, rate) {
       body: `${w.backlog} item${w.backlog === 1 ? "" : "s"} queued but the last pass processed none. The drainer is alive but not advancing — check for un-claimable rows or a stalled dependency.`,
     };
   }
-  // Remaining trigger: a growing backlog (falling behind).
   const w = d.work || {};
   return {
     head: `Backlog growing — ${fmtBacklogRate(rate?.backlogPerMin) || "rising"}`,
@@ -64,9 +63,8 @@ function detailSummary(detail) {
     .join(" · ");
 }
 
-// The docked detail for a fleet process. `daemonKey` is a daemon `process`
-// value or the synthetic "watchers". Reads the latest /api/fleet snapshot —
-// no extra fetch (the page polls fleet for everyone).
+// `daemonKey` is a daemon `process` or "watchers". Reads the page's fleet
+// snapshot; no extra fetch.
 export function DaemonDetail({ daemonKey, fleet, onClose, rates }) {
   if (daemonKey === "watchers") {
     return <WatcherDetail watchers={fleet?.watchers} rate={rates?.watchers} onClose={onClose} />;
@@ -102,13 +100,13 @@ export function DaemonDetail({ daemonKey, fleet, onClose, rates }) {
       </header>
 
       <div className="job-panel-meta">
-        <span className="job-panel-tag" style={{ color: TONE_DOT[tone], borderColor: `${TONE_DOT[tone]}66` }}>
+        <span className="tag tag-md tag-pill job-panel-tag" style={{ color: TONE_DOT[tone], borderColor: `${TONE_DOT[tone]}66` }}>
           {d.status}
         </span>
-        <span className="job-panel-tag job-panel-next">
+        <span className="tag tag-md tag-pill tag-plain job-panel-tag job-panel-next">
           last beat {d.last_beat_at ? `${humanAge(d.beat_age_s)} ago` : "never"}
         </span>
-        {interval && <span className="job-panel-tag job-panel-next">interval {interval}s</span>}
+        {interval && <span className="tag tag-md tag-pill tag-plain job-panel-tag job-panel-next">interval {interval}s</span>}
       </div>
 
       {alert && (

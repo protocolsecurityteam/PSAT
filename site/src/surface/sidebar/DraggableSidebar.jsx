@@ -2,8 +2,7 @@ import { useCallback, useRef, useState } from "react";
 
 export function DraggableSidebar({ children }) {
   const [width, setWidth] = useState(380);
-  // On phones, start the sidebar collapsed — it's a bottom sheet there
-  // and would otherwise cover most of the screen on first load.
+  // On phones the sidebar is a bottom sheet; start collapsed.
   const [collapsed, setCollapsed] = useState(() => {
     if (typeof window === "undefined") return false;
     return window.matchMedia("(max-width: 720px)").matches;
@@ -45,8 +44,6 @@ export function DraggableSidebar({ children }) {
         className="ps-sidebar-handle"
         onMouseDown={onMouseDown}
         onClick={(e) => {
-          // On mobile (where the sidebar is a bottom sheet) tap the
-          // handle to toggle. Desktop keeps drag-to-resize behavior.
           if (typeof window !== "undefined" && window.matchMedia("(max-width: 720px)").matches) {
             e.stopPropagation();
             setCollapsed((c) => !c);

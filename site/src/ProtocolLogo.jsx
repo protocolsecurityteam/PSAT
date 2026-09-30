@@ -23,10 +23,8 @@ function slugify(name) {
     .replace(/^-+|-+$/g, "");
 }
 
-// Curated slug → CoinGecko coin id overrides. The /search endpoint doesn't
-// always return the protocol token as the first hit (e.g. "etherfi" → nothing
-// useful without the dot), so a small lookup table handles the common cases.
-// Logos for anything not listed here still fall through to the search path.
+// CoinGecko's /search doesn't always return the protocol token first
+// ("etherfi"); these override common cases.
 const COINGECKO_SLUG_OVERRIDES = {
   etherfi: "ether-fi",
   "ether-fi": "ether-fi",
@@ -70,7 +68,7 @@ function writeStorageCache(entry) {
     Object.assign(current, entry);
     window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(current));
   } catch {
-    // sessionStorage disabled — in-memory cache still works for this tab
+    // sessionStorage disabled; the in-memory cache still works
   }
 }
 

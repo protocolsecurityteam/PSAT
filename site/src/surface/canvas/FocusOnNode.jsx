@@ -1,11 +1,8 @@
 import { useEffect, useRef } from "react";
 import { useReactFlow, useStoreApi } from "@xyflow/react";
 
-// Focus zoom ceiling: the camera never zooms IN past this, but zooms OUT as
-// far as needed to fit the focused target. A contract card focuses exactly as
-// a plain setCenter(zoom 1.2) did; a group box taller/wider than the
-// viewport at 1.2 (a safe/EOA owning many contracts) fits entirely instead
-// of centering its middle and pushing the header label off-screen.
+// Never zooms in past this, but zooms out as far as needed so a large group
+// fits instead of losing its header off-screen.
 const MAX_FOCUS_ZOOM = 1.2;
 const FIT_MARGIN = 24;
 
@@ -17,21 +14,12 @@ export function FocusOnNode({ address, focusKey, principals }) {
     if (!address || focusKey === lastKey.current) return;
     lastKey.current = focusKey;
 
-    // node.position is RELATIVE to the parent group for nodes inside
-    // a group container (every contract inside a Safe / EOA group on
-    // this page). The resolved absolute position lives on the
-    // internal-node representation, not the public node, so we look
-    // it up via getInternalNode. Without this, focusing a grouped
-    // contract centres the camera at the group's local origin
-    // (sometimes thousands of px from where the card actually
-    // renders, e.g. StakedTokenV1 inside the EOA group).
+    // Grouped nodes have parent-relative positions; the absolute one is on the
+    // internal node.
     const rectFor = (addr) => {
       if (!addr) return null;
-      // Resolve the node case-insensitively FIRST, then fetch its internal
-      // representation by the node's own id — a node id that doesn't share
-      // the caller's case (legacy checksummed payload rows) must still get
-      // the internal node, since only it carries a grouped card's absolute
-      // position.
+      // Legacy checksummed ids: find the node case-insensitively, then get the
+      // internal node by its own id.
       const found = getNodes().find((n) => n.id === addr)
         || getNodes().find((n) => n.id?.toLowerCase() === addr.toLowerCase());
       const internal = getInternalNode(addr)
@@ -47,18 +35,12 @@ export function FocusOnNode({ address, focusKey, principals }) {
       };
     };
 
-    // Small delay to let ReactFlow finish rendering positions
+    // Let ReactFlow finish positioning.
     const timer = setTimeout(() => {
       let rect = rectFor(address);
       if (!rect) {
-        // Node-less principal (a co-controller safe/EOA that owns no group
-        // box). Two framings:
-        //   - listed in some group's Controllers accordion → fit the group
-        //     box(es) holding its touched contracts (headers included), so
-        //     its gold-marked row is in frame, matching a group-header focus.
-        //   - footprint-less (no node, no row anywhere) → zoom to the touched
-        //     contract cards themselves, exactly like browsing a contract —
-        //     that's where the gold dots + off-graph chip land.
+        // Node-less principal: fit the group boxes whose accordions list it;
+        // with no row anywhere, fit its touched contract cards.
         const lc = address.toLowerCase();
         const p = (principals || []).find((x) => x.address?.toLowerCase() === lc);
         const hasRow = getNodes().some(
@@ -85,17 +67,15 @@ export function FocusOnNode({ address, focusKey, principals }) {
         const y2 = Math.max(...rects.map((r) => r.y + r.h));
         rect = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
       }
-      // Inflate the target rect to at least the viewport's extent at
-      // MAX_FOCUS_ZOOM, keeping it centered. fitBounds' computed zoom
-      // (min of the per-axis fits) then caps at MAX_FOCUS_ZOOM for anything
-      // smaller and drops only as far as the larger dimension requires.
+      // Inflate the target to the viewport's extent at MAX_FOCUS_ZOOM so
+      // fitBounds caps there for small targets.
       const { width: vw, height: vh } = store.getState();
       const bw = Math.max(rect.w + FIT_MARGIN * 2, vw / MAX_FOCUS_ZOOM);
       const bh = Math.max(rect.h + FIT_MARGIN * 2, vh / MAX_FOCUS_ZOOM);
       fitBounds(
         { x: rect.x + rect.w / 2 - bw / 2, y: rect.y + rect.h / 2 - bh / 2, width: bw, height: bh },
-        // padding 0: FIT_MARGIN is already baked into the bounds, and the
-        // default 10% padding would undercut MAX_FOCUS_ZOOM for small nodes.
+        // FIT_MARGIN is already in the bounds; default padding would undercut
+        // MAX_FOCUS_ZOOM.
         { duration: 400, padding: 0 },
       );
     }, 100);

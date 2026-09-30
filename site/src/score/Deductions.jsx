@@ -8,11 +8,8 @@ import { ActorLine, KindChip, TargetList } from "./rowAnatomy.jsx";
 
 const VISIBLE_ROWS = 8;
 
-// The disposed part of a row's sheet, printed with its figure attached. A zero
-// with no reason beside it reads as "this reaches nothing"; the reason is what
-// makes it a delivery-shape statement instead. `usdText: null` means the
-// document published no number for the disposed entries, and that renders as
-// not-determined rather than as another zero.
+// A disposed zero needs its reason beside it or it reads as "reaches nothing".
+// `usdText: null` renders not-determined, not zero.
 function SheetDispositionBadge({ disposition }) {
   if (!disposition) return null;
   return (

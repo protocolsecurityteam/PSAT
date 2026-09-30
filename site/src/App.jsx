@@ -11,25 +11,15 @@ import CompanyOverview from "./pages/CompanyOverview.jsx";
 import LoadingFallback from "./LoadingFallback.jsx";
 import RunsPage from "./pages/RunsPage.jsx";
 
-// The control surface is heavy — keep it lazy so the home page bundle
-// stays slim. ProtocolSurface is also imported separately by
-// CompanyOverview; Vite/Rollup dedupe to a single chunk.
+// Lazy so the home bundle stays slim; Vite dedupes it with CompanyOverview's
+// import.
 const ProtocolSurface = lazy(() => import("./surface/ProtocolSurface.jsx"));
 
-// TODO: replace this with a real sign-in page + session-based auth. Options
-// that fit our Fly deployment: (a) an identity-aware proxy sidecar such as
-// oauth2-proxy or Pomerium that authenticates real users (Google/GitHub SSO)
-// and injects X-PSAT-Admin-Key server-side so the key never touches a browser,
-// or (b) an app-level user system with per-user login + roles (fastapi-users,
-// a managed provider like WorkOS/Clerk, etc.). The window.prompt +
-// localStorage pattern in api/client.js is a stopgap so admins can click
-// buttons during local dev and early prod — a shared-secret bearer token
-// sitting in every admin's browser, with no per-user audit log and no
-// revocation story beyond rotating the key and logging everyone out.
+// TODO: replace with real sign-in (an identity-aware proxy like oauth2-proxy
+// injecting the admin key server-side, or per-user login + roles). The prompt +
+// localStorage key in api/client.js is a stopgap: a shared secret in every
+// admin's browser, no per-user audit, no revocation short of rotating the key.
 
-// ---------------------------------------------------------------------------
-// App
-// ---------------------------------------------------------------------------
 
 export default function App() {
   const [analyses, setAnalyses] = useState([]);
@@ -46,9 +36,8 @@ export default function App() {
   const doneTimerRef = useRef(null);
   const isAdmin = useIsAdmin();
 
-  // First-run admin login: ?admin=1 prompts once for the key when none is
-  // stored. This is the only key-entry path now that operator controls are
-  // hidden from non-admins.
+  // ?admin=1 prompts once for a key; the only key-entry path now that operator
+  // controls are hidden.
   useEffect(() => {
     if (new URLSearchParams(window.location.search).get("admin") === "1" && !getAdminKey()) {
       const entered = window.prompt("Paste your PSAT admin key:");
@@ -63,7 +52,7 @@ export default function App() {
     return () => document.removeEventListener("keydown", handleKey);
   }, [menuOpen]);
 
-  // /monitor is operator-only: a non-admin landing there is sent home.
+  // /monitor is operator-only.
   useEffect(() => {
     if (viewMode === "monitor" && !isAdmin) navigate("/", "default");
   }, [viewMode, isAdmin]);
@@ -95,7 +84,6 @@ export default function App() {
     return filtered;
   }
 
-  // Initial load
   useEffect(() => {
     function handlePopState() {
       const route = parseLocationPath(window.location.pathname);
@@ -119,13 +107,12 @@ export default function App() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
-  // Job polling — scoped to the current submission's job tree
+  // Scoped to the current submission's job tree.
   useEffect(() => {
     if (!job?.job_id) return undefined;
     let stopped = false;
     let timer;
 
-    // Collect all job IDs belonging to this submission's tree
     function getJobTree(allJobs, rootId) {
       const ids = new Set([rootId]);
       let changed = true;
@@ -192,16 +179,12 @@ export default function App() {
     } finally { setLoading(false); }
   }
 
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
 
   const isMonitor = viewMode === "monitor";
   const isCompany = viewMode === "company";
 
   return (
     <ErrorBoundary>
-      {/* Top nav */}
       <nav className={`top-nav ${isCompany && companyTab === "surface" ? "top-nav-dark" : ""}`}>
         <div className="top-nav-left">
           <button className="hamburger-btn" onClick={() => setMenuOpen(!menuOpen)} aria-label="Menu">
@@ -212,14 +195,13 @@ export default function App() {
         </div>
         <div className="top-nav-right">
           {isAdmin && isMonitor && (
-            <button className="top-nav-submit-btn" onClick={() => setFormOpen(!formOpen)}>
+            <button className="btn top-nav-submit-btn" onClick={() => setFormOpen(!formOpen)}>
               {formOpen ? "Close" : "+ New Analysis"}
             </button>
           )}
         </div>
       </nav>
 
-      {/* Hamburger drawer */}
       {menuOpen && (
         <HamburgerMenu
           onClose={() => setMenuOpen(false)}
@@ -232,7 +214,6 @@ export default function App() {
         />
       )}
 
-      {/* Submit form dropdown */}
       {isAdmin && isMonitor && formOpen && (
         <div className="submit-dropdown">
           <form className="submit-form" onSubmit={submit}>
@@ -240,12 +221,11 @@ export default function App() {
             <label><span>Run name</span><input value={form.name} onChange={(e) => setForm((c) => ({ ...c, name: e.target.value }))} placeholder="Optional" /></label>
             <label><span>Chain</span><input value={form.chain} onChange={(e) => setForm((c) => ({ ...c, chain: e.target.value }))} placeholder="Optional" /></label>
             <label><span>Analyze limit</span><input type="number" min="1" max="200" value={form.analyzeLimit} onChange={(e) => setForm((c) => ({ ...c, analyzeLimit: e.target.value }))} /></label>
-            <button type="submit" disabled={loading}>{loading ? "Starting..." : "Run"}</button>
+            <button className="btn" type="submit" disabled={loading}>{loading ? "Starting..." : "Run"}</button>
           </form>
         </div>
       )}
 
-      {/* Page content */}
       {isMonitor && isAdmin && <PipelineDashboard />}
 
       {isCompany && companyName && companyTab === "overview" && (

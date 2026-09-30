@@ -1,13 +1,8 @@
-// Direct callers per function, and the indirect callers above them.
-// Pure — no React, no I/O.
-//
-// Indirect callers are derived from the SAME witnessed-agency reach walk the
-// canvas overlay and the Governs tab use (governancePath.js): a principal is
-// an indirect caller of a function only when the closure from that principal
-// was licensed to STAND ON one of the function's contract-typed direct
-// callers — every hop down to it witnessed as agency-conferring. A principal
-// that merely reaches a direct caller through a terminal power (pause-only,
-// say) holds no route to the function and is not published as one.
+// Direct callers per function, and indirect callers above them. Indirect
+// callers come from the same agency walk as the reach overlay
+// (governancePath.js): only when every hop down to a contract-typed direct
+// caller confers agency. Reaching a caller through a terminal power
+// (pause-only) is not a route.
 
 import { isRoleIdAddress } from "../format.js";
 import { principalOnChain } from "../entityKey.js";
@@ -20,9 +15,7 @@ import {
   edgeClaims,
 } from "./governancePath.js";
 
-// Node identity (type/label/details) over every contract's control_graph —
-// buildMachines flags passthrough timelocks off it. Built once per
-// /api/company response; WeakMap entries die with the payload.
+// WeakMap entries die with the payload.
 const nodeIndexCache = new WeakMap();
 
 export function buildControlNodeIndex(companyData) {
@@ -40,12 +33,9 @@ export function buildControlNodeIndex(companyData) {
   return nodeInfo;
 }
 
-// Direct callers = exactly what effective_permissions emits for the function:
-// direct_owner, authority_roles[].principals, controllers[].principals. Contract
-// principals stay as contracts — we do NOT replace them with "first reachable
-// Safe/timelock/EOA" via the control graph, because that produces false claims
-// like "Safe can pause" when the function is role-gated and the Safe doesn't
-// hold that role.
+// Exactly what effective_permissions emits. Contract principals are not
+// replaced by the first reachable Safe/EOA: that produced false claims like
+// "Safe can pause" on role-gated functions.
 export function collectDirectCallers(fn) {
   const byAddress = new Map();
 
@@ -87,11 +77,7 @@ export function collectDirectCallers(fn) {
   return [...byAddress.values()].sort((a, b) => a.address.localeCompare(b.address));
 }
 
-// Shared context for the indirect-caller derivation: the payload's principals
-// (chain-scoped, inv. 13) plus the same adjacency / agency / edge indexes the
-// reach overlay walks, and a per-principal closure cache — one BFS per
-// principal per payload, not one per function. Keyed by payload identity and
-// chain token so a chain switch gets its own scoped indexes.
+// One closure per principal per payload, keyed by payload and chain.
 const indirectCtxCache = new WeakMap();
 
 export function buildIndirectCallerContext(companyData, activeChain = null) {
@@ -126,22 +112,15 @@ function closureFor(ctx, address) {
   return closure;
 }
 
-// The witnessed relation naming a hop, for the path trail: the edge's control
-// claims where the graph carries them, the flow type otherwise, null when the
-// pair has no carried edge at all — never an invented name.
+// Never an invented name.
 function hopRelation(flow) {
   const claims = edgeClaims(flow);
   if (claims.length) return claims.map((c) => c.relation).join(" · ");
   return flow?.type || null;
 }
 
-// Indirect callers = the payload principals whose agency-licensed reach walk
-// can stand on one of the function's contract-typed direct callers. Reported
-// separately so the UI presents governance standing above the caller, not a
-// direct call right. Each entry carries the agency route as `path`, ordered
-// direct-caller-first to principal-last (the shape the inspector's "via" line
-// reads); a principal licensed onto several direct callers keeps the shortest
-// route.
+// Reported separately: governance standing, not a call right. `path` runs
+// direct caller first; the shortest route wins.
 export function collectIndirectCallers(directCallers, ctx) {
   const directAddrs = new Set(directCallers.map((c) => c.address));
   const contractCallers = directCallers.filter((c) => c.resolvedType === "contract");

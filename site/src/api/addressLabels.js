@@ -1,13 +1,6 @@
-// Thin API wrappers for /api/address_labels/*. See api.py for the server
-// shapes. Admin mutations (put/delete) use the shared api() helper so the
-// X-PSAT-Admin-Key header is auto-injected; a missing/invalid key triggers
-// the built-in 401 prompt-retry flow.
-//
-// Global-plus-override model (invariant 12): a label is either GLOBAL (applies
-// on every chain — the right thing for EOA/Safe-signer accounts) or
-// CHAIN-QUALIFIED (overrides the global label for one network — the right thing
-// for contracts, which are a different deployment at the same address per
-// chain). Omit `chain` to operate on the global row; pass it for the override.
+// /api/address_labels wrappers. A label is global (EOAs/Safe signers) or a
+// chain-qualified override (contracts differ per chain) (invariant 12); omit
+// `chain` for the global row.
 
 import { api } from "./client.js";
 
@@ -32,10 +25,8 @@ export function deleteAddressLabel(address, chain = null) {
   });
 }
 
-// Build lookup maps from the /api/address_labels response. Returns
-// `{ global: Map<addr,name>, byChain: Map<chain, Map<addr,name>> }`. Addresses
-// are lowercased so lookups are case-insensitive. Tolerant of the legacy shape
-// (a response with only `labels` and no `chain_labels`).
+// `{ global, byChain }`, lowercased. Tolerates legacy responses without
+// `chain_labels`.
 export function buildLabelMaps(resp) {
   const global = new Map();
   for (const [addr, row] of Object.entries(resp?.labels || {})) {
@@ -52,9 +43,7 @@ export function buildLabelMaps(resp) {
   return { global, byChain };
 }
 
-// Chain-specific-wins-else-global lookup. A chain-qualified label for
-// (address, chain) overrides the global one; with no chain, or no override for
-// that chain, the global label is returned. Missing -> null.
+// Chain-specific wins, else global, else null.
 export function lookupLabel(maps, address, chain = null) {
   const addr = String(address || "").toLowerCase();
   if (chain) {
@@ -64,10 +53,7 @@ export function lookupLabel(maps, address, chain = null) {
   return maps?.global?.get?.(addr) ?? null;
 }
 
-// Resolve the display name from either shape AddressLabelInline may be handed:
-// a plain Map<addr,name> (legacy global-only callers) or the maps struct from
-// buildLabelMaps (chain-aware callers). Keeps the component's `labels` prop
-// backward compatible.
+// Accepts a legacy Map or the buildLabelMaps struct.
 export function resolveLabelName(labels, address, chain = null) {
   const addr = String(address || "").toLowerCase();
   if (labels && typeof labels.get === "function" && !("global" in labels)) {

@@ -1,5 +1,3 @@
-/* ── ProtocolSurface sidebar: dark-theme audits tab ──────────────────────── */
-
 .ps-sidebar-tabs {
   display: flex;
   gap: 4px;
@@ -19,88 +17,17 @@
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
-  cursor: pointer;
-  box-shadow: none;
   transition: background 120ms ease, color 120ms ease;
 }
 
 .ps-sidebar-tab:hover {
   background: rgba(148, 163, 184, 0.08);
   color: #cbd5e1;
-  transform: none;
 }
 
 .ps-sidebar-tab.active {
   background: rgba(30, 41, 59, 0.58);
   color: #e2e8f0;
   font-weight: 700;
-}
-
-.ps-upgrades-global {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.ps-upgrades-global-hint {
-  font-size: 11px;
-  color: #64748b;
-  margin-bottom: 8px;
-}
-
-.ps-upgrades-row {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(148, 163, 184, 0.12);
-  background: #0f1218;
-  color: #e2e8f0;
-  cursor: pointer;
-  text-align: left;
-  font: inherit;
-  /* Cancel the global `button {}` teal drop-shadow + transform — those are
-     CTA-button defaults and look wrong on a list-row affordance. */
-  box-shadow: none;
-  transition: border-color 120ms ease, background 120ms ease;
-}
-
-.ps-upgrades-row:hover {
-  background: #141a26;
-  border-color: rgba(148, 163, 184, 0.22);
-  transform: none;
-  box-shadow: none;
-}
-
-.ps-upgrades-row-name {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  font-size: 13px;
-  font-weight: 600;
-  color: #e2e8f0;
-}
-
-.ps-upgrades-row-arrow {
-  color: #64748b;
-  font-weight: 400;
-  font-size: 14px;
-}
-
-.ps-upgrades-row:hover .ps-upgrades-row-arrow {
-  color: #cbd5e1;
-}
-
-.ps-upgrades-row-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.ps-upgrades-sidebar-body {
-  padding: 12px;
 }
 

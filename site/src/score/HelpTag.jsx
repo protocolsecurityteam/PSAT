@@ -1,17 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
-// A label with a "?" that opens one note beside it. The mechanics — anchoring,
-// dismissal, the roles — live here so every "?" on the score page behaves the
-// same way; what each one SAYS is the caller's, and a caller with nothing
-// witnessed to say renders no button at all rather than an empty popover.
+// Shared "?" mechanics; callers supply the text, and a caller with nothing
+// witnessed renders no button.
 const POP_WIDTH = 280;
 
 export default function HelpTag({ className, ariaLabel, note, children }) {
-  // null = closed; {top, left} = open, anchored where the tag was when
-  // clicked. The popover is position:fixed because the truncating lines it
-  // sits in (.sc-who) are overflow:hidden — an absolutely-positioned child
-  // would be clipped to two slivers. Fixed positioning goes stale on scroll,
-  // so any scroll closes it rather than letting it drift off its anchor.
+  // position:fixed because the truncating lines (.sc-who) are overflow:hidden.
+  // Fixed goes stale on scroll, so scrolling closes it.
   const [pos, setPos] = useState(null);
   const ref = useRef(null);
 
@@ -39,7 +34,7 @@ export default function HelpTag({ className, ariaLabel, note, children }) {
     const close = () => setPos(null);
     document.addEventListener("mousedown", away);
     document.addEventListener("keydown", esc);
-    // Capture-phase: scrolls of inner containers don't bubble.
+    // Capture phase: inner-container scrolls don't bubble.
     window.addEventListener("scroll", close, true);
     return () => {
       document.removeEventListener("mousedown", away);

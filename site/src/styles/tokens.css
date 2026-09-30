@@ -15,9 +15,6 @@
   --amber-deep: #fbbf24;
   --amber-soft: rgba(245, 158, 11, 0.14);
 
-  /* Effect tones — function classification by what it does (lifted from
-     ProtocolSurface LANE_META). Used for lane chips, function ports, and
-     any cross-page surface that classifies behavior. */
   --tone-control: #8b92a8;
   --tone-ops: #6b7590;
   --tone-inflow: #6a9e94;
@@ -26,7 +23,6 @@
   --tone-pause: #998a6a;
   --tone-timelock: #9a8a6e;
 
-  /* Status — generic state vocabulary for jobs, audits, findings, runs. */
   --status-ok: #22c55e;
   --status-warn: #f59e0b;
   --status-err: #ef4444;

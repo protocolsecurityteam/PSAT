@@ -1,7 +1,5 @@
 import React from "react";
 
-// Rate annotation next to a metric. ``good`` paints it green (healthy
-// direction) vs amber (concerning).
 export function RateNote({ text, good }) {
   if (!text) return null;
   return (

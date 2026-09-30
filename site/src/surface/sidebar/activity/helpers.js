@@ -1,14 +1,9 @@
-// Pure config helpers for the Activity tab: monitoring_config ↔ alert-group
-// keys ↔ event types, plus the monitoring contract-type of a machine.
 
 import { MONITOR_ALERT_GROUPS } from "../../meta.js";
 
-// A group may also be offered by a plan the config carries rather than by a
-// watch flag — see the `state` group in meta.js, whose flag nothing writes.
-// The plan must be a non-empty list: `[]` is enrollment's witnessed "the plan
-// was read and named nothing", so there is nothing to subscribe to, and a
-// non-list value proves nothing at all. (`Boolean([])` is `true` in JS, which
-// is exactly why this is not a bare truthiness check.)
+// A plan can offer a group whose flag nothing writes (see `state` in meta.js).
+// `[]` is a witnessed empty plan, and `Boolean([])` is true, hence no
+// truthiness check.
 function hasPlanFor(config, group) {
   return (group.planKeys || []).some((key) => Array.isArray(config?.[key]) && config[key].length > 0);
 }
@@ -37,38 +32,23 @@ export function subscriptionEventTypeSet(subscription) {
   return new Set(raw.map((eventType) => String(eventType).toLowerCase()));
 }
 
-// Is this machine a proxy? THREE states, because the payload's two proxy signals
-// can contradict each other and one real row does: contract
-// `0x3c55986cfee455e2533f4d29006634ecf9b7c03f` is `is_proxy: false` with
-// `proxy_type: "beacon"` and has 14 `Upgraded(address)` logs at or before block
-// 25619159. Reading `Boolean(is_proxy)` maps that contract onto the
-// "non-proxy, so there is nothing before the line by construction" path and
-// renders 14 real upgrades as proven absence.
-//
-// `not_determined` is NOT "treat it as a proxy": it means the question is open, so
-// a caller must ask (fetch the history) rather than assert either answer.
+// Three states: the proxy signals can contradict (`0x3c55986c…`: `is_proxy:
+// false`, `proxy_type: "beacon"`, 14 real upgrades). `not_determined` means ask
+// (fetch the history), not assume either answer.
 export function proxyState(machine) {
   if (machine?.is_proxy) return "proxy";
   if (machine?.proxy_type || machine?.implementation) return "not_determined";
   return "not_proxy";
 }
 
-// The monitoring contract-type of a machine, for the entity badge — used only
-// when the MonitoredContract row has no `contract_type` of its own.
-//
-// Four values, because "regular" is a positive claim (a plain contract: not a
-// proxy, cannot be paused, issues no commands) and `is_pausable` is three-state
-// on the payload. A null flag — no ContractSummary row, or the pause detector
-// declining to answer — used to land on "regular" alongside a proven `false`,
-// so a contract nobody had classified was badged as classified-and-plain.
-// `unclassified` is that third state; it is never returned when any positive
-// signal is present.
+// Badge type when the MonitoredContract row has none. "regular" is a positive
+// claim, so a null `is_pausable` yields `unclassified`, never returned when any
+// positive signal is present.
 export function contractTypeForMachine(machine) {
   if (machine?.is_proxy) return "proxy";
   if (machine?.is_pausable === true || machine?.capabilities?.includes("pause")) return "pausable";
   if (machine?.role === "governance") return "governance";
-  // A pause verdict of `false` is an answer and earns "regular"; `null` (and an
-  // absent key, which is what a pre-fix payload carries) does not.
+  // `false` is an answer; `null` or absent is not.
   if (machine?.is_pausable == null) return "unclassified";
   return "regular";
 }

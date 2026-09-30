@@ -11,11 +11,8 @@ import {
   watcherSub,
 } from "./fleetHealth.js";
 
-// Fleet system-health strip. Drives the "all background processes" view of
-// the monitor page from /api/fleet: heartbeat-backed daemons plus the
-// derived-liveness runtime watchers. Health states (running/idle/error/
-// unknown/stale) all render; selecting a pill fills the dock with that
-// process's detail (DaemonDetail.jsx).
+// Health pills for heartbeat daemons and derived-liveness watchers; selecting
+// one opens DaemonDetail.
 
 export function FleetStrip({ fleet, selected, onSelectProcess, rates }) {
   const daemons = fleet?.daemons || [];

@@ -1,4 +1,3 @@
-/* Contract node on canvas */
 .ps-node {
   position: relative;
   padding: 12px 16px;
@@ -16,11 +15,8 @@
   border-color: rgba(148, 163, 184, 0.35);
 }
 
-/* Committed selection: solid gold + soft glow. Same color family as the
-   browse marker so both read as "attention here", but solid-vs-dotted keeps
-   selected and browsing unambiguous (and the audit ring stays green).
-   !important for the same reason as ps-node-focused: the role accent is an
-   inline borderLeftColor that would otherwise win on the left edge. */
+/* Solid gold vs the browse marker's dotted gold. !important beats the inline
+   borderLeftColor role accent. */
 .ps-node-selected {
   border: 2px solid #d4a017 !important;
   box-shadow: 0 0 18px rgba(212, 160, 23, 0.3);
@@ -45,30 +41,6 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.ps-node-risk {
-  font-size: 9px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 2px 6px;
-  border-radius: 4px;
-  flex-shrink: 0;
-}
-
-.ps-node-stats {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 2px 12px;
-  font-size: 11px;
-  color: #64748b;
-}
-
-.ps-node-stat-val {
-  color: #94a3b8;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
 }
 
 .ps-node-addr {
@@ -110,51 +82,6 @@
   flex-shrink: 0;
 }
 
-/* Lane indicator tags on node edges */
-.ps-node-lane-tag {
-  position: absolute;
-  font-size: 7px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  padding: 1px 4px;
-  border-radius: 3px;
-  opacity: 0.7;
-  pointer-events: none;
-  line-height: 1;
-}
-
-.ps-node-lane-top {
-  top: -4px;
-  left: 50%;
-  transform: translate(-50%, -100%);
-  background: #8b92a822;
-  color: #8b92a8;
-}
-
-.ps-node-lane-left {
-  left: -4px;
-  top: 50%;
-  transform: translate(-100%, -50%);
-  background: #6a9e9422;
-  color: #6a9e94;
-}
-
-.ps-node-lane-right {
-  right: -4px;
-  top: 50%;
-  transform: translate(100%, -50%);
-  background: #9a8a6e22;
-  color: #9a8a6e;
-}
-
-.ps-node-lane-bottom {
-  bottom: -4px;
-  left: 50%;
-  transform: translate(-50%, 100%);
-  background: #6b759022;
-  color: #6b7590;
-}
-
 .ps-handle {
   width: 6px !important;
   height: 6px !important;
@@ -166,10 +93,6 @@
   border: none !important;
 }
 
-/* Selection legend — small floating box that appears in bottom-right
-   of the canvas while a contract is selected. Swatch colors match the
-   chip variants so the user reads the legend once and learns the
-   convention. */
 .ps-selection-legend {
   background: #0f1218;
   border: 1px solid #334155;
@@ -197,27 +120,19 @@
   flex-shrink: 0;
 }
 
-/* Deselect button in the legend: quiet ghost style in neutral grays,
-   brightening on hover. The kbd chip names the shortcut. Explicitly zeroes
-   the global button chrome from shell/forms.css — its teal drop shadow
-   (the "blue hue"), bold weight, and hover lift all leak through any button
-   that doesn't override them. */
 .ps-selection-clear {
   margin-top: 2px;
   padding: 3px 6px;
-  background: transparent;
   border: 1px solid #3f3f46;
   border-radius: 3px;
   color: #a1a1aa;
   font-size: 10px;
   font-weight: 400;
   letter-spacing: 0.04em;
-  cursor: pointer;
   align-self: flex-end;
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  box-shadow: none;
 }
 
 .ps-selection-clear kbd {
@@ -234,7 +149,6 @@
 .ps-selection-clear:hover {
   border-color: #71717a;
   color: #e4e4e7;
-  transform: none;
 }
 
 .ps-selection-legend-swatch--out {
@@ -245,42 +159,26 @@
   background: #1e3a8a;
 }
 
-/* Reach legend swatch — a miniature of the chip the reached nodes wear, not a
-   color block: the overlay's only mark IS the chip, so the legend must show
-   that idiom. Violet, so it sits outside the warm/cool acts-on pair rather than
-   reading as a third strength of the same claim: reach is a WEAKER
-   relationship, not a direction. */
+/* A miniature chip, since the chip is the overlay's only mark. Violet sits
+   outside the warm/cool pair: reach is weaker, not a direction. */
 .ps-selection-legend-swatch--reach {
   background: #2e1065;
   border: 1px solid rgba(167, 139, 250, 0.75);
 }
 
-/* Transitive reach on the canvas: the card carries no tint and no fade — a
-   reached node renders exactly as crisp as a directly-connected one, and the
-   chip above it is the whole claim. The violet border is a locator only, so the
-   eye can find the chipped cards in a large graph. */
+/* No tint or fade: the chip is the claim. The border only helps find chipped
+   cards. */
 .ps-node-reach {
   border-color: rgba(167, 139, 250, 0.55);
 }
 
-/* A group box whose own principal is in the closure. Border only — the body
-   stays transparent so React Flow edges keep reading through it (see
-   GroupNode). */
+/* Border only, so edges keep reading through the transparent body. */
 .ps-group-reach {
   border-color: rgba(124, 58, 237, 0.5) !important;
 }
 
-/* Selection chip rendered on each related contract / group container.
-   Positioned OUTSIDE the card with a small gap so it never overlaps
-   the card border:
-     --out (warm) ABOVE the card  — "selected acts on this" / chip near
-                                    the input handle (ctrl-in = top).
-     --in  (cool) BELOW the card  — "this acts on selected" / chip near
-                                    the output handle (ctrl-out = bottom).
-   The top/bottom split also matches the old edge-chip placement, where
-   chips sat at the polyline corner near the non-selected end — that
-   corner was just outside the contract's input handle (top) for OUT
-   chips and just outside the output handle (bottom) for IN chips. */
+/* Outside the card: --out (warm) above near ctrl-in, --in (cool) below near
+   ctrl-out. */
 .ps-node-chip {
   position: absolute;
   left: 50%;
@@ -290,12 +188,8 @@
   font-size: 11px;
   font-weight: 700;
   border-radius: 2px;
-  /* Single-line so the chip never grows tall enough to invade the
-     vertical gap between rows (V_GAP = 70px in elkLayout, and a
-     2-line chip blew past that, causing chip-on-chip overlaps with
-     the row above / below). Horizontal overflow is fine — the
-     H_GAP (50px) leaves ~30px between a chip overhang and the
-     neighbor card's edge even for the longest 5-cap chips. */
+  /* Single line: two-line chips invaded the 70px row gap. Horizontal overhang
+     fits the 50px column gap. */
   white-space: nowrap;
   text-align: center;
   pointer-events: none;
@@ -314,9 +208,7 @@
   color: #dbeafe;
 }
 
-/* Reach chip (violet, above the card): "reach · N hops" over the control graph.
-   Shares the above-the-card slot with --out / --browse; --stacked lifts it one
-   chip-height clear when one of those is also present. */
+/* Shares the above-card slot; --stacked lifts it clear of --out / --browse. */
 .ps-node-chip--reach {
   bottom: calc(100% + 4px);
   background: #2e1065;
@@ -328,11 +220,7 @@
   bottom: calc(100% + 26px);
 }
 
-/* Browse-fallback chip: gold like the other browse markers. Names the
-   off-graph principal being browsed and what it can call on this card.
-   The JS already budgets the text (~55 chars of function names, then
-   "+N more"); the max-width + ellipsis is a safety net so no data shape
-   can stretch the chip past ~1.5 card widths. */
+/* The JS budgets the text; max-width is a safety net. */
 .ps-node-chip--browse {
   bottom: calc(100% + 4px);
   background: #2b2208;

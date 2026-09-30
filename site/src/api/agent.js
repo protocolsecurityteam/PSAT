@@ -1,11 +1,5 @@
-// SSE-over-fetch helper for the agent chat. Browser EventSource only
-// supports GET, but our endpoint takes a JSON body with conversation
-// history, so we POST and parse the body stream manually.
-//
-// Calls onEvent({event, data}) for each parsed SSE record. Returns a
-// promise that resolves when the stream ends and rejects on transport
-// errors. Pass an AbortSignal to cancel mid-stream (caller-controlled
-// cleanup when the component unmounts).
+// SSE over fetch: EventSource only supports GET and the endpoint takes a JSON
+// body. Calls onEvent({event, data}) per record; pass an AbortSignal to cancel.
 
 import { getAdminKey, setAdminKey } from "./client.js";
 
@@ -23,10 +17,8 @@ async function postWithAdminKey(body, signal) {
     });
 
   let res = await send(getAdminKey());
-  // Mirror api/client.js: on 401, prompt for the admin key and retry
-  // once. The streaming endpoint runs auth before the response generator
-  // starts, so 401 here is identical to a plain JSON 401 — safe to retry
-  // the whole POST.
+  // Auth runs before streaming starts, so a 401 is safe to retry like
+  // api/client.js.
   if (res.status === 401) {
     const entered = window.prompt(
       "Admin key required for the agent chat.\nPaste your PSAT admin key:",
@@ -53,8 +45,7 @@ export async function streamAgentChat(body, onEvent, { signal } = {}) {
   const decoder = new TextDecoder();
   let buffer = "";
 
-  // SSE record framing: events are separated by "\n\n". Within a record,
-  // each line is "field: value". We only care about `event:` and `data:`.
+  // Records split on "\n\n"; only `event:` and `data:` fields matter.
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;

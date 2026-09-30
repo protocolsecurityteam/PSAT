@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
 import { api } from "../../../api/client.js";
 import { proxyDisplayName } from "../../../shared/displayName.js";
 import { coalesceChain, entityKey } from "../../entityKey.js";
 import { shortenAddress } from "../../../shared/format.js";
+import { useResource } from "../../../shared/useResource.js";
 import { eventKind, eventKindLabel, eventSalience, salienceAllows } from "./eventClass.js";
 import { decodeEvent, relativeTime, scannerHealth, targetText } from "./format.js";
 
@@ -19,10 +20,8 @@ function earliestEnrollment(contracts) {
   return new Date(Math.min(...stamps));
 }
 
-// Nothing selected → protocol-wide activity: scanner health, a monitored-count
-// summary, and the newest events across every monitored address. Absorbs the
-// standalone monitoring page's overview. The canvas is the spatial protocol map;
-// clicking a recent row selects that contract → the panel switches to entity mode.
+// Nothing selected: scanner health, monitored-count summary and the newest
+// events. Clicking a row selects that contract.
 export function ProtocolActivity({
   protocolId,
   companyName,
@@ -35,63 +34,40 @@ export function ProtocolActivity({
   onHiddenCount,
   nameFor,
 }) {
-  const [events, setEvents] = useState([]);
-  const [labelMap, setLabelMap] = useState({});
   const activeChain = coalesceChain(chain);
 
-  // A chain (or protocol) switch must not leave the previous scope's rows
-  // rendering while the new fetch is in flight — that would be a positive
-  // claim about the wrong chain, the same failure the entity panel pins with
-  // its state-must-not-outlive-selection tests. Clearing alone is not enough:
-  // the previous scope's fetch may still be airborne, so its late resolution
-  // must be dropped (`cancelled`), not written into the new scope's view.
-  useEffect(() => {
-    if (!protocolId) return undefined;
-    let cancelled = false;
-    setEvents([]);
-    const load = async () => {
-      try {
-        // Chain-scoped server-side: the same address is a distinct deployment
-        // per chain, so only the backend (which knows each event's monitored
-        // row) can scope a shared-address protocol's feed correctly.
-        const evs = await api(
-          `/api/protocols/${protocolId}/events?limit=100&chain=${encodeURIComponent(activeChain)}`,
-        );
-        if (!cancelled) setEvents(Array.isArray(evs) ? evs : []);
-      } catch {
-        /* transient — keep the last good feed */
-      }
-    };
-    load();
-    const t = setInterval(load, POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(t);
-    };
-  }, [protocolId, activeChain]);
+  // Cleared on scope change; late responses from the previous scope are
+  // dropped, or old rows render under the new chain. A failed poll keeps the
+  // last good feed. Only the backend knows each event's monitored row, so it
+  // scopes shared-address feeds.
+  const { data: polledEvents } = useResource(
+    () => api(`/api/protocols/${protocolId}/events?limit=100&chain=${encodeURIComponent(activeChain)}`)
+      .then((evs) => (Array.isArray(evs) ? evs : [])),
+    [protocolId, activeChain],
+    { enabled: Boolean(protocolId), poll: POLL_MS },
+  );
+  const events = polledEvents || [];
 
-  useEffect(() => {
-    let cancelled = false;
-    api(`/api/company/${encodeURIComponent(companyName)}/addresses`)
-      .then((addrs) => {
-        if (cancelled) return;
-        // The /addresses payload spans every chain, so key by (chain, address)
-        // (inv. 13): a same-address cross-chain pair otherwise last-wins one
-        // chain's display name onto the other. Rows carry their own chain.
-        const map = {};
-        for (const a of addrs?.all_addresses || []) {
-          if (!a?.address) continue;
-          map[entityKey(a.chain, a.address)] = {
-            name: a.name || null,
-            implName: a.implementation_name || null,
-            isProxy: !!a.is_proxy,
-          };
-        }
-        setLabelMap(map);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [companyName]);
+  const { data: fetchedLabels } = useResource(
+    () => api(`/api/company/${encodeURIComponent(companyName)}/addresses`).then((addrs) => {
+      // (chain, address) keys (inv. 13) so one chain's name doesn't overwrite
+      // another's.
+      const map = {};
+      for (const a of addrs?.all_addresses || []) {
+        if (!a?.address) continue;
+        map[entityKey(a.chain, a.address)] = {
+          name: a.name || null,
+          implName: a.implementation_name || null,
+          isProxy: !!a.is_proxy,
+        };
+      }
+      return map;
+    }),
+    [companyName],
+    { reset: false },
+  );
+  const labelMap = fetchedLabels || {};
+
 
   const machineByAddress = useMemo(() => {
     const map = new Map();
@@ -108,11 +84,8 @@ export function ProtocolActivity({
     return map;
   }, [contracts]);
 
-  // Event/contract rows carry no first-class chain field, and this panel is
-  // rendered per active chain (its contracts + machines are already scoped), so
-  // resolve the label with the row's own chain when known, else the active
-  // chain (never a raw bare-address lookup that could cross chains). Cosmetic —
-  // this drives the display name, not identity.
+  // Rows carry no chain; fall back to the active chain, never a bare-address
+  // lookup. Display only.
   const friendlyName = useCallback((addr, rowChain) => {
     if (!addr) return "Unknown";
     const entry = labelMap[entityKey(rowChain ?? activeChain, addr)];
@@ -129,8 +102,7 @@ export function ProtocolActivity({
   const health = scannerHealth(contracts, now);
   const headBlock = (contracts || []).reduce((max, c) => Math.max(max, c.last_scanned_block || 0), 0);
   const liveSince = earliestEnrollment(contracts);
-  // Filtered before the slice, so the threshold changes WHICH eight rows the
-  // feed shows rather than shortening it.
+  // Filtered before the slice so the threshold changes which rows show.
   const admitted = useMemo(
     () => (events || []).filter((ev) => salienceAllows(eventSalience(ev), minSalience)),
     [events, minSalience],
@@ -159,8 +131,10 @@ export function ProtocolActivity({
         {liveSince ? (
           <div className="ps-activity-kv-line faint">
             Live since <b>{liveSince.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })}</b>
-            {/* TODO(activity): "· upgrade history back to X" needs a protocol-wide
-                earliest-deployment source; not cheaply available client-side. */}
+            {/*
+              TODO(activity): "· upgrade history back to X" needs a
+              protocol-wide earliest-deployment source.
+            */}
           </div>
         ) : null}
       </div>
@@ -168,11 +142,8 @@ export function ProtocolActivity({
       <div>
         <div className="ps-activity-sect-title" style={{ marginBottom: 8 }}>Recent across protocol</div>
         {recent.length === 0 && hidden > 0 ? (
-          // Events exist and the threshold withheld all of them. "The scanner
-          // hasn't seen an event" is a claim about the scanner; this is a
-          // statement about the filter, which is the only thing that happened.
-          // Checked before the absence prose for the same reason the Timeline
-          // checks its own hidden counts first.
+          // The filter withheld every event; say that rather than claim the
+          // scanner saw nothing.
           <div className="ps-activity-empty">
             {hidden === 1
               ? "1 event is hidden by the current filter."
@@ -185,10 +156,8 @@ export function ProtocolActivity({
             {recent.map((ev) => {
               const contract = contractById.get(ev.monitored_contract_id);
               const addr = contract?.address || ev.data?.contract_address;
-              // The event states its own emitter's type (the API joins the
-              // monitored row); the local lookup is only a fresher override.
-              // "regular" is a last-resort default for pre-upgrade payloads,
-              // never a substitute for a stated type the row carries.
+              // The event states its own type; "regular" is only for
+              // pre-upgrade payloads.
               const type = contract?.contract_type || ev.data?.contract_type || "regular";
               const machine = addr ? machineByAddress.get(addr.toLowerCase()) : null;
               const kind = eventKind(ev);
@@ -203,7 +172,7 @@ export function ProtocolActivity({
                 >
                   <div className="ps-activity-recent-main">
                     <div className="ps-activity-recent-id">
-                      <span className={`ps-activity-badge ${type}`}>{type}</span>
+                      <span className={`tag ps-activity-badge ${type}`}>{type}</span>
                       <span className="ps-activity-recent-name">{friendlyName(addr, contract?.chain)}</span>
                     </div>
                     <div className="ps-activity-recent-line">

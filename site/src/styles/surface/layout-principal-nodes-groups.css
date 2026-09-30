@@ -1,18 +1,5 @@
-/* Principal nodes (Safe, EOA, Timelock) */
-/* Shared with the sidebar InspectorCard. The canvas principal/guardian-rail
-   node that also used the other .ps-principal-* node styles was removed with
-   the Controllers accordion, so only this one remains. */
-.ps-principal-addr {
-  font-size: 9px;
-  color: #64748b;
-  font-family: "JetBrains Mono", monospace;
-}
-
-/* Owner-group container — a labeled box that holds every contract a
-   single principal (Safe/Timelock/EOA/proxy admin) owns. Replaces the
-   N principal→child edges that used to fan out across the canvas. The
-   container body is pointer-events:none so clicks fall through to the
-   contract children inside; only the header is interactive. */
+/* Body is pointer-events:none so clicks reach the children; only the header is
+   interactive. */
 .ps-group-node {
   position: relative;
   width: 100%;
@@ -38,22 +25,15 @@
     0 0 0 1px var(--principal-color, #94a3b8);
 }
 
-/* Browsed (not committed) group box: dotted gold, matching ps-node-focused —
-   solid gold is reserved for the committed selection. */
+/* Dotted: solid gold is reserved for the committed selection. */
 .ps-group-focused {
   border-color: #d4a017 !important;
   border-style: dotted;
 }
 
-/* Header band: an absolutely-positioned strip at the top of the group,
-   pinned by GroupNode to exactly the height the layout reserved
-   (data.headerHeight). Holds the colored primary bar + the Controllers
-   accordion (with the open row's detail rendered in-flow below it). The
-   reserved height grows when a row is open and ELK re-packs to match, so the
-   in-flow content fits; overflow:hidden clips only the brief frame before the
-   measured height converges, never letting the accordion bleed onto a card.
-   pointer-events:none here lets the inert gaps fall through; the interactive
-   children opt back in. */
+/* Pinned to the reserved height (data.headerHeight). overflow:hidden only clips
+   until the measured height converges; pointer-events:none lets gaps fall
+   through. */
 .ps-group-head {
   position: absolute;
   top: 0;
@@ -65,14 +45,11 @@
   pointer-events: none;
 }
 
-/* Auto-height wrapper holding the colored bar + accordion. GroupNode measures
-   this (not the clipped outer band) to get the true content height, so wrapped
-   capability summaries and open-row detail are reserved exactly. */
+/* GroupNode measures this, not the clipped band. */
 .ps-group-head-inner {
   display: flex;
   flex-direction: column;
-  /* React Flow defaults nodes to text-align:center; the accordion reads as
-     left-aligned text (badges, addresses, the comma-separated cap summary). */
+  /* React Flow centres node text by default. */
   text-align: left;
 }
 
@@ -133,10 +110,6 @@
   padding-left: 10px;
 }
 
-/* ── Controllers accordion ──────────────────────────────────────────────
-   Lives in the header band below the colored primary bar. Lists every
-   controller with authority inside the box (primary + co-controllers); each
-   row expands to the exact functions it can call per contract. */
 .ps-group-controllers {
   padding: 0 10px;
   background: rgba(13, 17, 23, 0.92);
@@ -167,26 +140,19 @@
   background: color-mix(in srgb, var(--ctrl-accent, #6a9e94) 10%, transparent);
 }
 
-/* Selected controller (its governed contracts are highlighted on the canvas):
-   a soft accent fill + ring so it reads as the active one. */
 .ps-ctrl-row--selected {
   background: color-mix(in srgb, var(--ctrl-accent, #6a9e94) 16%, transparent);
   box-shadow: inset 0 0 0 1px var(--ctrl-accent, #6a9e94);
 }
 
-/* Browsed controller (search ▲/▼ preview — no commit): gold marker matching
-   the node-level browse ring, distinct from --selected so a browsed row and
-   the committed one never read as the same state. */
 .ps-ctrl-row--focused {
   background-color: rgba(212, 160, 23, 0.12);
-  /* Browse marker, not selection. CSS dotted at 1px reads as solid, so the
-     dashes are an inline-SVG rect with an explicit dash/gap (4 on, 7 off);
-     rx matches the row's 5px radius. Background layer → no layout shift. */
+  /* 1px dotted reads solid, so the dashes are an inline SVG (4 on, 7 off). A
+     background layer causes no layout shift. */
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='100%25' height='100%25' fill='none' rx='5' stroke='%23d4a017' stroke-width='2' stroke-dasharray='4 7'/%3E%3C/svg%3E");
 }
 
-/* min-height (not a fixed height) so the row grows when the full capability
-   summary wraps to more than one line — we never truncate the tags. */
+/* min-height so wrapped capability summaries grow the row. */
 .ps-ctrl-head {
   min-height: 30px;
   box-sizing: border-box;
@@ -239,10 +205,7 @@
   flex-shrink: 0;
 }
 
-/* Full capability summary — every tag, comma-separated, never truncated.
-   Wraps to as many lines as it needs (the row grows; the band is measured).
-   overflow-wrap:break-word is a safety net so a lone long tag breaks rather
-   than overflowing + clipping if a group is unusually tight. */
+/* Never truncated; break-word only for a lone long tag in a tight group. */
 .ps-ctrl-caps {
   font-size: 10px;
   color: #c9b08a;
@@ -259,9 +222,7 @@
   flex-shrink: 0;
 }
 
-/* Shared with the sidebar GovernsTab's expandable function lists (see the
-   .ps-governs overrides above). The canvas Controllers accordion no longer
-   renders these directly. */
+/* Shared with the sidebar Governs tab; the canvas no longer renders these. */
 .ps-ctrl-fns {
   display: flex;
   flex-wrap: wrap;

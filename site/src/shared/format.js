@@ -1,7 +1,5 @@
-// Middle-truncation core shared by the three address shorteners. The three
-// call sites keep their historical guard/fallback/joiner semantics (they are
-// NOT interchangeable — "..." vs ".." vs "…", "Unknown" vs "" fallbacks), but
-// the slice geometry lives here once.
+// Slice geometry shared by the three address shorteners; their guards,
+// fallbacks and joiners differ on purpose.
 export function middleSlice(value, joiner) {
   return `${value.slice(0, 6)}${joiner}${value.slice(-4)}`;
 }

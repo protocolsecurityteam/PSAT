@@ -1,9 +1,6 @@
-// Pure timeline assembly for the Activity tab. Merges two stores of
-// different depth into one newest-first list, split at the enrollment
-// boundary:
-//   - monitored_events: captured from the enrollment block forward, ALL kinds.
-//   - upgrade_history:   back-filled to deployment, UPGRADES only (proxy only).
-// No React — unit-testable.
+// Activity timeline assembly, newest first, split at the enrollment boundary:
+// - monitored_events: from enrollment forward, all kinds.
+// - upgrade_history: back-filled to deployment, upgrades only (proxy only).
 
 import { shortenAddress } from "../../../shared/format.js";
 import {
@@ -18,30 +15,20 @@ import { decodeEvent } from "./format.js";
 
 const secToMs = (s) => (s == null ? null : Number(s) * 1000);
 
-// Dedup key for an upgrade across both stores. The upgrade_history artifact
-// carries no tx_hash/log_index, so a post-enrollment upgrade —
-// which appears in BOTH stores — is matched on (block, new-implementation).
+// upgrade_history has no tx_hash/log_index, so upgrades present in both stores
+// match on (block, new impl).
 function upgradeKey(block, implAddr) {
   return `${block == null ? "?" : block}:${String(implAddr || "").toLowerCase()}`;
 }
 
-// [{ from, to, addr }] eras from oldest→newest impls; the current impl runs to ∞.
+// Eras oldest→newest; the current impl runs to ∞.
 //
-// An unknown boundary is `null`, never a boundary VALUE. `block_introduced` folded
-// to 0 made a block-less impl's era start at genesis and swallow the impl
-// attribution of every earlier event; `block_replaced` folded to Infinity made it
-// run to now — the same ±infinity spread that was removed server-side.
-// `synthesize_from_events` emits `block_number: null` for a poll-detected upgrade,
-// so both are reachable.
-//
-// KEY PRESENCE is the successor discriminator, and it comes from the producer, not
-// from a guess: `_build_implementation_timeline`
-// (services/discovery/upgrade_history.py) writes `block_replaced` from the NEXT
-// upgrade event unconditionally, so the key is absent only on the last record —
-// the current impl, which really does run to now — and present-but-null exactly
-// when a successor exists whose block was never determined. Same distinction
-// `services/audits/coverage.ImplWindow.successor` makes: `to == null` alone does
-// NOT mean "still current".
+// Unknown boundaries are `null`, never folded to 0 or Infinity (that spread one
+// era over every other; a poll-detected upgrade has `block_number: null`). The
+// producer writes `block_replaced` whenever a successor exists, so the key is
+// absent only on the current impl and present-but-null when a successor's block
+// is unknown. `to == null` alone does NOT mean current (as in
+// coverage.ImplWindow.successor).
 function implEras(proxy) {
   const impls = Array.isArray(proxy?.implementations) ? proxy.implementations : [];
   return impls.map((im) => {
@@ -56,15 +43,11 @@ function implEras(proxy) {
 
 function implAt(eras, block) {
   if (block == null) return null;
-  // The no-upgrade-events shape: `_build_implementation_timeline` returns the bare
-  // `{address: current_impl}` when there are no events, so this proxy has only ever
-  // had one impl and any block is under it. That is a fact about the LIST, not a
-  // guessed introduction block, which is why it is stated separately from the scan.
+  // No upgrade events: one impl ever, so any block is under it.
   if (eras.length === 1 && eras[0].from == null && eras[0].to === Infinity) return eras[0].addr;
   for (const era of eras) {
-    // An era with an undetermined boundary cannot be SHOWN to contain a block.
-    // Attribution is a positive claim ("this event ran under that implementation")
-    // and it is left off rather than guessed.
+    // An era with an unknown boundary can't be shown to contain a block;
+    // attribution is left off.
     if (era.from == null || era.to == null) continue;
     if (block >= era.from && block < era.to) return era.addr;
   }
@@ -72,15 +55,11 @@ function implAt(eras, block) {
 }
 
 function upgradeSub(im, isFirst) {
-  // The current-impl "current" tag is rendered separately (row.isCurrent), so
-  // the sub line is just the address (first deployment) or an arrow to it.
   const addr = shortenAddress(im.address);
   return isFirst ? addr : `→ ${addr}`;
 }
 
-// The reciprocal half of the backend's same-transaction join (§3.4). Sharing a
-// transaction hash is a witnessed fact, so the row may say what caused it — and
-// it says only what the backend published, with no client-side re-derivation.
+// Same-transaction cause (§3.4), exactly as the backend published it.
 function withCause(sub, ev) {
   const cause = ev?.data?.caused_by;
   if (!cause || typeof cause !== "object" || !cause.event_type) return sub;
@@ -88,28 +67,20 @@ function withCause(sub, ev) {
   return sub ? `${sub} · ${note}` : note;
 }
 
-// buildTimeline({ events, proxy, enrollmentBlock, isProxy }) →
-//   { above, below, boundaryBlock }
-// `above` = live-captured rows (block ≥ enrollment); `below` = upgrade-only
-// backfill rows (dimmed). When enrollmentBlock is null (a row enrolled before
-// the column landed), there is NO boundary — everything renders as-is in
-// `above` and boundaryBlock is null.
+// `above` = live rows (block ≥ enrollment); `below` = dimmed upgrade backfill.
+// No enrollmentBlock means no boundary: everything is `above`.
 export function buildTimeline({ events = [], proxy = null, enrollmentBlock = null, isProxy = false, nameFor = null }) {
   const eras = isProxy ? implEras(proxy) : [];
   const current = String(proxy?.current_implementation || "").toLowerCase();
   const seenUpgrades = new Set();
   const rows = [];
 
-  // 1. Monitored events → rows (all kinds).
   for (const ev of events) {
     const kind = eventKind(ev);
     const decoded = decodeEvent(ev, { nameFor });
     const rawBlock = typeof ev.block_number === "number" ? ev.block_number : null;
-    // Read-witnessed rows (state_changed_poll, value_changed:*) carry
-    // block_number 0 + no tx_hash as a placeholder — there is no on-chain log
-    // to point at. Rendered as a real block 0 they'd fall under the enrollment
-    // boundary and be dropped as pre-enrollment history; blockless rows float
-    // to the top by timestamp instead.
+    // Read-witnessed rows carry block 0 with no tx_hash as a placeholder; as
+    // block 0 they'd fall below the boundary and be dropped.
     const block = rawBlock === 0 && !ev.tx_hash ? null : rawBlock;
     const isUpgrade = kind === "upgrade";
     const implAddr = isUpgrade ? ev.data?.implementation : null;
@@ -134,7 +105,6 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
     });
   }
 
-  // 2. Upgrade-history rows (proxy only), deduped against event-store upgrades.
   if (isProxy && proxy) {
     const impls = Array.isArray(proxy.implementations) ? proxy.implementations : [];
     impls.forEach((im, i) => {
@@ -150,9 +120,8 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
         kind: "upgrade",
         kindLabel: "Upgrade",
         severity: "critical",
-        // A back-filled upgrade is not a monitored_event, so no backend rule
-        // ever rated it. `not_determined` is what that is — and it renders,
-        // where a borrowed `routine` would collapse a real upgrade.
+        // No backend rule rated a back-filled upgrade; a borrowed `routine`
+        // would collapse it.
         salience: SALIENCE_NOT_DETERMINED,
         title: isFirst ? "First deployment" : "Implementation upgraded",
         sub: upgradeSub(im, isFirst),
@@ -166,8 +135,7 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
     });
   }
 
-  // 3. Per-event impl attribution: the implementation live at each non-upgrade
-  //    proxy event's block. Skipped for non-proxies and upgrade rows.
+  // The impl live at each non-upgrade proxy event's block.
   if (isProxy && eras.length) {
     for (const row of rows) {
       if (row.isUpgrade || row.block == null) continue;
@@ -176,7 +144,7 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
     }
   }
 
-  // 4. Newest-first: block desc (null blocks float to the top), timestamp tiebreak.
+  // Null blocks float to the top; timestamp tiebreak.
   rows.sort((a, b) => {
     const ab = a.block == null ? Infinity : a.block;
     const bb = b.block == null ? Infinity : b.block;
@@ -184,7 +152,6 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
     return (b.timestamp || 0) - (a.timestamp || 0);
   });
 
-  // 5. Split at the enrollment boundary. Null → no boundary at all.
   if (enrollmentBlock == null) {
     return { above: rows, below: [], boundaryBlock: null };
   }
@@ -195,22 +162,15 @@ export function buildTimeline({ events = [], proxy = null, enrollmentBlock = nul
     if (block >= enrollmentBlock) {
       above.push(row);
     } else if (row.isUpgrade) {
-      // Only upgrades are back-filled below the line; dim + tag them.
       below.push({ ...row, backfill: true });
     }
   }
   return { above, below, boundaryBlock: enrollmentBlock };
 }
 
-// Apply a salience threshold to a built timeline, returning the surviving rows
-// and how many were withheld. The count is not optional bookkeeping: a view
-// that hides rows without saying how many is the suppression this axis exists
-// to prevent (invariant 4), so every caller renders it.
-// The per-section counts are not bookkeeping either: the Timeline's empty
-// states are claims about what EXISTS (an earned negative, a hedge, or an
-// answer), and a section the filter emptied has not earned any of them. It
-// needs to know which of its empty sections are empty because nothing is there
-// and which are empty because it was told not to draw them.
+// Returns surviving rows plus per-section withheld counts. Every caller shows
+// the count (invariant 4), and the Timeline needs it to tell empty from
+// filtered sections.
 export function filterTimelineBySalience({ above = [], below = [] }, minSalience) {
   const keptAbove = above.filter((row) => salienceAllows(row.salience, minSalience));
   const keptBelow = below.filter((row) => salienceAllows(row.salience, minSalience));

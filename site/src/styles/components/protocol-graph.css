@@ -1,5 +1,3 @@
-/* ── React Flow overrides ── */
-
 .react-flow__controls {
   background: #2D2D2D !important;
   border: 1px solid #3D3D3D !important;
@@ -23,14 +21,9 @@
 .react-flow__edge-text { font-family: "JetBrains Mono", monospace !important; }
 .react-flow__background { background: #1A1A1A !important; }
 
-/* Edges are visual-only: ignore pointer events so clicks/drags on them
-   pass through to the canvas pane and start a pan instead of selecting
-   the edge. !important is required because @xyflow/react's stylesheet
-   ships `.react-flow__edge { pointer-events: visibleStroke }` and
-   `.react-flow__edge.selectable { cursor: pointer }` — same specificity
-   as ours but loaded after (ProtocolSurface is lazy-imported), so its
-   cascade order wins without !important. The interaction handles are
-   on the nodes; users never need to click an edge in this UI. */
+/* Edges ignore pointer events so drags pan the canvas. !important because
+   @xyflow/react's stylesheet has the same specificity and loads later
+   (ProtocolSurface is lazy). */
 .react-flow__edge,
 .react-flow__edge.selectable,
 .react-flow__edge-path,
@@ -40,8 +33,6 @@
   cursor: inherit !important;
 }
 
-/* Empty state for the Detail sidebar tab — the prompt shown before the
-   user clicks anything on the canvas. */
 .ps-detail-empty {
   display: flex;
   flex-direction: column;
@@ -58,8 +49,6 @@
   font-style: italic;
 }
 
-/* Protocol-at-a-glance layout of the same empty state: stat cards stretch
-   full-width instead of centring like the bare prompt. */
 .ps-glance {
   align-items: stretch;
   gap: 12px;
@@ -74,8 +63,8 @@
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 11px 12px;
-  /* Opaque: the sidebar sits over the canvas and a translucent card lets
-     bright group fills bleed through, reading as a phantom hover state. */
+  /* Opaque: a translucent card lets group fills bleed through like a phantom
+     hover. */
   background: var(--panel);
 }
 
@@ -177,14 +166,12 @@
   width: calc(100% + 16px);
   padding: 6px 8px;
   margin: 0 -8px;
-  border: 0;
   border-radius: 7px;
   background: none;
   font: inherit;
   font-size: 11.5px;
   color: var(--ink);
   text-align: left;
-  cursor: pointer;
 }
 .ps-glance-vrow:hover { background: var(--teal-soft); }
 .ps-glance-vrow-name { font-weight: 600; }

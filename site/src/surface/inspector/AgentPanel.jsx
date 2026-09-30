@@ -2,12 +2,8 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import { streamAgentChat } from "../../api/agent.js";
 
-// react-markdown + remark-gfm together are ~80 KB of compiled JS that
-// only matters once the user actually opens the Agent tab AND sends a
-// message. Lazy-load them so cold Surface entry doesn't pay the parse
-// cost. The fallback for the suspense boundary is the raw text — good
-// enough until the chunk arrives, since the bubble already has the
-// content as plain text from the stream.
+// react-markdown + remark-gfm are ~80 KB; lazy-load so cold Surface entry
+// doesn't pay for them. The raw streamed text is the fallback.
 const MarkdownBubble = lazy(() => import("./MarkdownBubble.jsx"));
 
 const SUGGESTIONS = [
@@ -18,11 +14,8 @@ const SUGGESTIONS = [
   "Are there any unaudited upgrades?",
 ];
 
-// Custom markdown renderer that turns the agent's `[label](0xADDR)` links
-// into in-app focus buttons. Any href matching a 40-hex address (with or
-// without 0x prefix, with or without leading #) becomes a click target
-// that highlights the address on the canvas. Anything else falls back to
-// a normal external link.
+// Turns the agent's `[label](0xADDR)` links into canvas focus buttons; other
+// hrefs stay external links.
 const ADDR_HREF = /^#?(0x[a-fA-F0-9]{40})$/;
 
 function makeMarkdownComponents(onFocusAddress) {
@@ -54,8 +47,6 @@ function makeMarkdownComponents(onFocusAddress) {
   };
 }
 
-// Friendly type word for a principal selection's header. Falls back to
-// "Principal" for anything without a dedicated word (proxy_admin, unknown, …).
 function principalTypeWord(type) {
   if (type === "safe") return "Safe";
   if (type === "timelock") return "Timelock";
@@ -64,28 +55,22 @@ function principalTypeWord(type) {
 }
 
 export function AgentPanel({ companyName, selectedMachine, selectedPrincipal, onHighlight, onFocusAddress }) {
-  // Messages are flat for the LLM (role/content), but the UI also
-  // interleaves tool-call cards. Each "turn" is { role, content, toolCalls }
-  // where toolCalls is an ordered list of { id, name, args, result?, error? }.
+  // Each turn is { role, content, toolCalls } so the UI can interleave
+  // tool-call cards; the LLM sees flat role/content.
   const [turns, setTurns] = useState([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState(null);
-  // expandedReasoning: Set<turnIndex> — which assistant turns have their
-  // reasoning section expanded. Reasoning is collapsed by default with a
-  // fixed-height preview so the chat doesn't grow unboundedly.
+  // Collapsed by default so the chat doesn't grow unboundedly.
   const [expandedReasoning, setExpandedReasoning] = useState(() => new Set());
   const abortRef = useRef(null);
   const scrollRef = useRef(null);
-  // Only auto-scroll while the user is parked at the bottom. If they've
-  // scrolled up to read history, leave their position alone — otherwise
-  // every streamed token yanks them back down.
+  // Only auto-scroll while parked at the bottom, or every token yanks a reader
+  // back down.
   const stickToBottomRef = useRef(true);
 
-  // The selection the chat asks about. A principal selection (safe/timelock/
-  // EOA) carries no `machine`, so key off whichever facet is selected — the
-  // backend chat accepts either kind of address. Header + payload both derive
-  // from this so the LLM's context matches what the sidebar shows.
+  // Principal selections carry no `machine`, so key off whichever facet is
+  // selected.
   const selectedAddress = selectedPrincipal?.address || selectedMachine?.address || null;
   let contextName = companyName;
   let contextMeta = null;
@@ -124,25 +109,17 @@ export function AgentPanel({ companyName, selectedMachine, selectedPrincipal, on
   }
 
   function stop() {
-    // AbortController.abort() unwinds the fetch + ReadableStream; the
-    // .catch in send() swallows the AbortError so we don't surface it as
-    // a normal failure. Whatever tokens already streamed stay in the
-    // turn — the user keeps the partial answer.
+    // The AbortError is swallowed in send(); tokens already streamed stay.
     if (abortRef.current) abortRef.current.abort();
   }
 
-  // Reset highlights when the selected entity changes so the previous answer's
-  // mentions don't linger on the canvas. Keyed on the selected ADDRESS (machine
-  // or principal), not selectedMachine alone — a principal selection has no
-  // machine, so the old key never fired for safe→safe transitions. The parent
-  // also clears agent highlights on every committed selection (so the reset
-  // still happens while this panel is unmounted); this covers changes that land
-  // while the tab is open.
+  // Keyed on the selected address: a principal has no machine, so the old key
+  // missed safe→safe changes. The parent clears too while this panel is
+  // unmounted.
   useEffect(() => {
     if (onHighlight) onHighlight(new Set());
   }, [selectedAddress, onHighlight]);
 
-  // Cancel any in-flight request when the panel unmounts.
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const llmHistory = useMemo(
@@ -152,9 +129,6 @@ export function AgentPanel({ companyName, selectedMachine, selectedPrincipal, on
           if (t.role === "user") {
             return t.content ? { role: "user", content: t.content } : null;
           }
-          // Concatenate this turn's text blocks into a single content
-          // string for the LLM — the model doesn't care about visual
-          // interleaving, just the cumulative text.
           const text = (t.blocks || [])
             .filter((b) => b.type === "text")
             .map((b) => b.text)
@@ -171,12 +145,7 @@ export function AgentPanel({ companyName, selectedMachine, selectedPrincipal, on
     setError(null);
     setInput("");
 
-    // Each assistant turn is a sequence of `blocks` interleaved in
-    // chronological order: { type: "text", text } and
-    // { type: "tool", id, name, args, result? }. The view just iterates
-    // blocks top-down so the visual order matches the model's actual
-    // pacing (text → tool → text → tool → text), instead of the prior
-    // "all text first, all tools after" layout.
+    // Blocks interleave text and tool calls in the model's actual order.
     const userTurn = { role: "user", content: trimmed };
     const assistantTurn = { role: "assistant", reasoning: "", blocks: [] };
     setTurns((prev) => [...prev, userTurn, assistantTurn]);
@@ -359,7 +328,7 @@ export function AgentPanel({ companyName, selectedMachine, selectedPrincipal, on
             Stop
           </button>
         ) : (
-          <button type="submit" disabled={!input.trim()}>
+          <button className="btn" type="submit" disabled={!input.trim()}>
             Send
           </button>
         )}

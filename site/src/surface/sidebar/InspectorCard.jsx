@@ -3,11 +3,10 @@ import { GotoArrow } from "../GotoArrow.jsx";
 import { LANE_META, TYPE_META } from "../meta.js";
 import { claimWitnessFacts } from "../../vocab/witnessFacts.js";
 import { sharedDeployerNote, signerOverlapNote, terminalControllerNote } from "../../vocab/principalNotes.js";
+import { clickable } from "../../shared/clickable.js";
 
-// Way-point / terminal-controller copy for a non-terminal principal. Mirrors the
-// backend witness bar: a resolved_type=contract principal is a way-point, never a
-// settled key, so the UI must never imply one where the chain didn't terminate
-// (SCORING plan §4). Renders nothing for a settled key.
+// A contract principal is a way-point, never a settled key (SCORING plan §4);
+// renders nothing for a settled key.
 function TerminalNote({ principal }) {
   const note = terminalControllerNote(principal);
   if (!note) return null;
@@ -19,8 +18,7 @@ function TerminalNote({ principal }) {
     );
   }
   if (note.kind === "multi_plane") {
-    // Per-plane detail so a reviewer sees the weakest plane; header never implies
-    // one settled key.
+    // Per-plane detail so the weakest plane is visible.
     return (
       <div className="ps-principal-terminal ps-principal-terminal-open">
         <div>{note.planes.length} parallel control planes — no single settled key</div>
@@ -51,9 +49,7 @@ function TerminalNote({ principal }) {
   );
 }
 
-// Shared-deployer attribution HINT (Tier-1 on-chain read, but a HEURISTIC for
-// attribution). Inspector-only; the copy always carries the hedge — never phrased
-// as org identity or common control.
+// Always hedged: same deployer is a heuristic, never org identity.
 function SharedDeployerNote({ principal }) {
   const note = sharedDeployerNote(principal);
   if (!note) return null;
@@ -65,8 +61,7 @@ function SharedDeployerNote({ principal }) {
   );
 }
 
-// Signer-overlap attribution CONTEXT (Tier 1, on-chain owner reads). NOT proof of
-// shared organizational identity — the copy stays factual about signers only.
+// Signers only; not proof of shared organization.
 function SignerOverlapNote({ principal }) {
   const note = signerOverlapNote(principal);
   if (!note || !note.strongest) return null;
@@ -79,8 +74,6 @@ function SignerOverlapNote({ principal }) {
   return <div className="ps-principal-overlap">{shareText}</div>;
 }
 
-// Empty-callers copy keyed by the guard's open-path shape, so a one-shot or a
-// denylist/permit reads accurately instead of a flat "marked public".
 const OPEN_CALLER_TEXT = {
   one_shot_consumed: "Consumed one-shot initializer — the open path is spent and can no longer be called.",
   one_shot_live: "Live one-shot initializer — anyone can call it once until it is consumed.",
@@ -122,11 +115,8 @@ function principalDetail(principal) {
   return "Controller path";
 }
 
-// One shared principal reference card for both inspector blocks (Direct Callers
-// and Indirect Control Path). Body previews the principal on the canvas; the
-// arrow commits to its card — the same peek/commit split as lane caller buttons
-// and Governs rows. `indirect` swaps the origin line (governance path vs.
-// direct-caller origins) and dims the card.
+// Shared by Direct Callers and Indirect Control Path: body previews, arrow
+// commits.
 function PrincipalRefCard({ principal, indirect = false, onPreview, onNavigate }) {
   const type = TYPE_META[principal.resolvedType] || TYPE_META.unknown;
   const detail = principalDetail(principal);
@@ -134,15 +124,7 @@ function PrincipalRefCard({ principal, indirect = false, onPreview, onNavigate }
   return (
     <div
       className={`ps-principal-card ps-principal-clickable${indirect ? " ps-principal-indirect" : ""}`}
-      role="button"
-      tabIndex={0}
-      onClick={() => onPreview && onPreview(principal.address)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onPreview && onPreview(principal.address);
-        }
-      }}
+      {...clickable(() => onPreview && onPreview(principal.address))}
     >
       <div className="ps-principal-top">
         <span className="ps-principal-type" style={{ "--principal-accent": type.accent }}>{type.label}</span>
@@ -162,10 +144,8 @@ function PrincipalRefCard({ principal, indirect = false, onPreview, onNavigate }
   );
 }
 
-// Verbose witness facts for the selected function (SCORING plan §7.3): where the
-// funds go + how much, freeze scope/expiry, mint backing, reach upper bound. Each
-// row derives from a present, at-the-bar witness field — nothing renders from
-// absence, so the block is silent when there is no witnessed fact to show.
+// Only present, at-the-bar witness fields render (SCORING plan §7.3); silent
+// otherwise.
 function WitnessFacts({ fn }) {
   const facts = claimWitnessFacts(fn);
   if (!facts.length) return null;
@@ -199,10 +179,10 @@ export function InspectorCard({ selected, onNavigate, onPreview }) {
       </div>
 
       <div className="ps-inspector-badges">
-        <span className="ps-badge" style={{ "--badge-accent": LANE_META[selected.lane].tone }}>{LANE_META[selected.lane].label}</span>
-        <span className="ps-badge" style={{ "--badge-accent": selected.guard.accent }}>{selected.guard.label}</span>
+        <span className="tag tag-md ps-badge" style={{ "--badge-accent": LANE_META[selected.lane].tone }}>{LANE_META[selected.lane].label}</span>
+        <span className="tag tag-md ps-badge" style={{ "--badge-accent": selected.guard.accent }}>{selected.guard.label}</span>
         {selected.effectLabels.map((label) => (
-          <span key={label} className="ps-badge" style={{ "--badge-accent": "#475569" }}>{label}</span>
+          <span key={label} className="tag tag-md ps-badge" style={{ "--badge-accent": "#475569" }}>{label}</span>
         ))}
       </div>
 

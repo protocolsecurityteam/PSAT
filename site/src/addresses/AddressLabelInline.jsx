@@ -6,29 +6,17 @@ import {
   resolveLabelName,
 } from "../api/addressLabels.js";
 
-// Inline "label this address" affordance. Shows the current admin-set name
-// with a pencil for edits; or a "+ label" button when none exists. Uses
-// window.prompt() for simplicity — admin auth is handled by the shared
-// api() client (401 → prompt for key → retry).
+// Inline label editor (window.prompt; auth via the shared api() client).
 //
-// Props:
-// - address: string — the address to label
-// - labels: Map<lowercase-address, name> (legacy, global-only display) OR the
-//   `{ global, byChain }` struct from buildLabelMaps (chain-aware display)
-// - chain: string | null — when set (a contract context), edits/reads the
-//   CHAIN-QUALIFIED override row for that network; when omitted (EOA/Safe-signer
-//   context), edits/reads the GLOBAL row (invariant 12). The display lookup is
-//   chain-specific-wins-else-global via resolveLabelName.
-// - refreshAll: () => void — called after a successful save/delete so the
-//   caller can refresh its labels map
-// - size: "sm" (default) | "xs"
+// `labels` is a legacy Map or buildLabelMaps' `{ global, byChain }`. With
+// `chain` it edits the chain-qualified override (contracts); without, the
+// global row (EOAs/Safe signers, invariant 12). Display is
+// chain-specific-wins-else-global.
 export default function AddressLabelInline({ address, labels, chain = null, refreshAll, size = "sm" }) {
   const isAdmin = useIsAdmin();
   const addrLower = String(address || "").toLowerCase();
   const current = resolveLabelName(labels, addrLower, chain);
 
-  // Non-admins see the label read-only: the name when one is set, and no
-  // edit affordance at all when it isn't.
   if (!isAdmin) {
     if (!current) return null;
     return (

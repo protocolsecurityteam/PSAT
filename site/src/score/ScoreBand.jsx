@@ -25,9 +25,8 @@ function Notice({ title, detail }) {
   );
 }
 
-// The API's two 404s are different facts and get different copy. They are told
-// apart by the pinned detail strings, not by the status alone — collapsing them
-// would tell a user with an unscored protocol that their protocol is unknown.
+// The API's two 404s are different facts, told apart by their pinned detail
+// strings.
 function errorNotice(error) {
   const message = String(error?.message || "");
   if (error?.status === 404 && message.includes("No score has been computed")) {
@@ -79,24 +78,17 @@ function WithheldBanner({ doc }) {
 export default function ScoreBand({ companyName, contracts, score, error, onSelectEntity }) {
   const [open, setOpen] = useState(false);
   const bandRef = useRef(null);
-  // Branch on grade_state before any grade field is read: in the withheld state
-  // grade_lambda / grade_exposure / confidence_pct are null and the findings do
-  // not carry net_points_lambda at all.
+  // Branch before reading any grade field: withheld documents null them and
+  // drop net_points_lambda.
   const state = error ? "error" : !score ? "loading" : score.grade_state || "absent";
   const view = useMemo(
     () => (score && score.findings ? projectScore(score, contracts) : null),
     [score, contracts],
   );
 
-  // A `#score` hash is a request to land ON the breakdown, open — the surface
-  // sidebar's "Full score breakdown →" sets it, whether that click navigated
-  // here or happened further down this very page. Consumed (and cleared) only
-  // once a breakdown can actually open, so a click that raced the score fetch
-  // still opens when the document arrives — and an error/absent band leaves
-  // the hash alone rather than eating the request while showing nothing. The
-  // pushState-based router never fires `hashchange` on its own, so the manual
-  // PopStateEvent the link dispatches is the signal; hashchange covers direct
-  // hash edits.
+  // `#score` asks to land on the open breakdown. Consumed only once a breakdown
+  // can open, so a click that raced the fetch still works. The pushState router
+  // never fires `hashchange`, so the link's PopStateEvent is the signal.
   const ready = (state === "computed" || state === "not_determined") && Boolean(view);
   useEffect(() => {
     function maybeOpen() {
@@ -132,7 +124,6 @@ export default function ScoreBand({ companyName, contracts, score, error, onSele
   }
 
   const withheld = state === "not_determined";
-  // projectScore computes it unconditionally, withheld or not.
   const posture = view.posture;
 
   return (

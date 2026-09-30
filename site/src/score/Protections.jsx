@@ -85,10 +85,10 @@ function AuditCoverage({ posture, earnedNegatives }) {
         )}
       </div>
 
-      {/* posture.provablyDiffers is deliberately not rendered: the classifier's
-          "provably differs" bucket is not proven to the standard the word
-          claims, and a warning line is the wrong place to hedge. The figure
-          stays in the payload and in the projection. */}
+      {/*
+        posture.provablyDiffers is deliberately not rendered: the classifier's
+        bucket isn't proven to the standard the word claims.
+      */}
       {earnedNegatives.length > 0 && (
         <div className="sc-fact-line">
           <b>{earnedNegatives.length}</b> functions proven to have no reach
@@ -101,8 +101,7 @@ function AuditCoverage({ posture, earnedNegatives }) {
 export default function Protections({ doc, view, note, onSelect }) {
   const [tailOpen, setTailOpen] = useState(false);
   const exposure = doc.grade_exposure;
-  // The pot the grade is weighted over. Published only as the number the
-  // document carries — absent stays absent, never $0.
+  // Absent stays absent, never $0.
   const tracked = doc?.provenance?.value?.tracked_total_usd;
   const rows = view.protections;
   return (
@@ -145,25 +144,25 @@ export default function Protections({ doc, view, note, onSelect }) {
               <CapabilityTag capability={row.capability} />
               {row.valueText ? ` on ${row.valueText}` : ""}
             </span>
-            {/* Outside `.sc-prot-what`, which ellipsises: a chip inside it is the
-                first thing a narrow row would cut, and the direction is the part
-                of the band that must not be droppable. */}
+            {/*
+              Outside the ellipsising `.sc-prot-what` so the direction can't be
+              cut.
+            */}
             {row.value.determined ? (
               <BoundBadge direction={row.value.direction} />
             ) : row.provenNoReach ? (
-              // An earned negative, printed in the row's own voice like the
-              // deduction row prints it — not the unknown's italic.
+              // An earned negative in the row's own voice, not the unknown's
+              // italic.
               <span>proven no reach</span>
             ) : (
               <Nd>value not determined</Nd>
             )}
             <span className="sc-prot-saved">+{row.delta.toFixed(1)}</span>
           </div>
-          {/* The same finding's deduction-row anatomy, through the same
-              components: the protected action and the contracts it lives on
-              read identically on both sides of the page. Gated on the content,
-              not the join — an anatomy with no example function has no action
-              line to draw. */}
+          {/*
+            Same components as the deduction row so both sides read
+            identically; gated on content, not the join.
+          */}
           {row.anatomy?.exampleFunction && (
             <div className="sc-who">
               <ActorLine row={row.anatomy} onSelect={onSelect} />
@@ -178,10 +177,8 @@ export default function Protections({ doc, view, note, onSelect }) {
         </div>
       ))}
       {rows.length > PROTECTION_ROWS && (
-        // The label carries no combined figure: each delta is a counterfactual
-        // against the SAME current λ, so a sum of them is a quantity nothing
-        // modeled — the deduction tail may sum because published nets are
-        // additive by construction, and these are the opposite case.
+        // No combined figure: each delta is a counterfactual against the same
+        // λ, so their sum models nothing.
         <TailToggle flush open={tailOpen} onToggle={() => setTailOpen((was) => !was)}>
           + {rows.length - PROTECTION_ROWS} more
         </TailToggle>
