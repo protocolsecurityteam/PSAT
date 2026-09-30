@@ -1,5 +1,3 @@
-"""Discovery package."""
-
 from .activity import enrich_with_activity
 from .audit_reports import merge_audit_reports, search_audit_reports
 from .chain_resolver import resolve_unknown_chains

@@ -1,8 +1,6 @@
-"""GitHub API integration: URL parsing, repo + org enumeration, tree fetch.
+"""GitHub API integration: URL parsing, repo/org enumeration, tree fetch.
 
-Every function that touches ``api.github.com`` or ``raw.githubusercontent.com``
-lives here. Upstream submodules call into this one; this module imports only
-from ``_urls`` so there are no cycles.
+Imports only from ``_urls`` to avoid cycles.
 """
 
 from __future__ import annotations
@@ -30,14 +28,13 @@ from ._urls import (
 
 logger = logging.getLogger(__name__)
 
-# --- URL parsing ----------------------------------------------------------
 
 _GITHUB_TREE_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/tree/([^/]+)/(.+?)/?$")
 _GITHUB_BLOB_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+?)/?$")
 _GITHUB_REPO_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$")
 _GITHUB_ORG_RE = re.compile(r"^https?://github\.com/([^/?#]+)/?$")
 
-# Single-segment GitHub paths that look like orgs but aren't accounts.
+# Single-segment paths that look like orgs but aren't.
 _RESERVED_GITHUB_PATHS = frozenset(
     {
         "orgs",
@@ -74,7 +71,6 @@ _RESERVED_GITHUB_PATHS = frozenset(
 
 
 def _parse_github_url(url: str) -> dict[str, str] | None:
-    """Parse a GitHub URL into owner/repo (and ref/path for tree/blob)."""
     for pattern, kind in [(_GITHUB_TREE_RE, "tree"), (_GITHUB_BLOB_RE, "blob")]:
         m = pattern.match(url)
         if m:
@@ -101,7 +97,7 @@ def _parse_github_url(url: str) -> dict[str, str] | None:
 
 
 def _github_api_headers() -> dict[str, str]:
-    """Standard headers. GITHUB_TOKEN bumps rate limit 60→5000/hr."""
+    """GITHUB_TOKEN raises the rate limit from 60 to 5000/hr."""
     headers = {
         "Accept": "application/vnd.github.v3+json",
         "User-Agent": "PSAT/0.1",
@@ -112,12 +108,7 @@ def _github_api_headers() -> dict[str, str]:
     return headers
 
 
-# --- Branch → commit SHA cache --------------------------------------------
-
-# Process-wide cache keyed on (owner, repo, branch). Values are
-# ``(sha, monotonic_ts)``: a short TTL re-probes because HEAD advances on
-# every push, and a size cap bounds the key count across repeated runs.
-# Misses are not cached so a transient GitHub error retries next call.
+# Keyed (owner, repo, branch) → ``(sha, monotonic_ts)``. Short TTL since HEAD moves; size-capped; misses aren't cached.
 _BRANCH_SHA_CACHE: dict[tuple[str, str, str], tuple[str, float]] = {}
 _BRANCH_SHA_CACHE_LOCK = threading.Lock()
 _BRANCH_SHA_CACHE_MAX = 4096
@@ -125,7 +116,6 @@ _BRANCH_SHA_CACHE_TTL_S = float(os.getenv("PSAT_BRANCH_SHA_CACHE_TTL_S", "300"))
 
 
 def clear_branch_sha_cache() -> None:
-    """Clear the process-wide branch→SHA cache. For tests + manual reset."""
     from utils.memory import reset_cache_pressure_state
 
     with _BRANCH_SHA_CACHE_LOCK:
@@ -134,7 +124,6 @@ def clear_branch_sha_cache() -> None:
 
 
 def _evict_branch_sha_if_needed() -> None:
-    """Drop the oldest 25% of _BRANCH_SHA_CACHE entries when the bound is reached (caller holds the lock)."""
     if len(_BRANCH_SHA_CACHE) < _BRANCH_SHA_CACHE_MAX:
         return
     cutoff = sorted(_BRANCH_SHA_CACHE.values(), key=lambda v: v[1])[len(_BRANCH_SHA_CACHE) // 4][1]
@@ -143,7 +132,6 @@ def _evict_branch_sha_if_needed() -> None:
 
 
 def _log_branch_sha_pressure() -> None:
-    """Log when _BRANCH_SHA_CACHE crosses 50/75/95% of its bound (caller holds the lock)."""
     from utils.memory import cache_pressure_message
 
     msg = cache_pressure_message("branch_sha", len(_BRANCH_SHA_CACHE), _BRANCH_SHA_CACHE_MAX)
@@ -152,10 +140,9 @@ def _log_branch_sha_pressure() -> None:
 
 
 def _resolve_branch_commit(owner: str, repo: str, branch: str, debug: bool = False) -> str | None:
-    """Return the HEAD commit SHA for a branch, or ``None`` on miss.
+    """HEAD commit SHA for a branch, or ``None``.
 
-    Recorded on every GitHub-sourced audit so phase-2 linking can verify
-    the PDF still lives at the same SHA and build stable permalinks.
+    Recorded on GitHub-sourced audits for later verification and stable permalinks.
     """
     key = (owner.lower(), repo.lower(), branch)
     now = time.monotonic()
@@ -197,9 +184,7 @@ def _resolve_branch_commit(owner: str, repo: str, branch: str, debug: bool = Fal
     return sha
 
 
-# --- Audit folder discovery config ----------------------------------------
-
-# Probed in order via the contents API; first hit short-circuits.
+# Probed in order via the contents API; first hit wins.
 _AUDIT_FOLDER_CANDIDATES: tuple[str, ...] = (
     "audits",
     "audit",
@@ -215,7 +200,6 @@ _AUDIT_FOLDER_CANDIDATES: tuple[str, ...] = (
     "security-reports",
 )
 
-# Last-segment folder names we accept when scanning the recursive tree.
 _AUDIT_FOLDER_LAST_SEGMENTS: frozenset[str] = frozenset(
     {
         "audit",
@@ -231,12 +215,10 @@ _AUDIT_FOLDER_LAST_SEGMENTS: frozenset[str] = frozenset(
     }
 )
 
-# Cap per-org enumeration — sorted by pushed_at desc, so recent repos
-# (where current audits live) probe first. morpho-org tops out ~40.
+# Sorted by pushed_at desc so recent repos (current audits) come first.
 _MAX_ORG_REPOS = 100
 
-# Library forks whose ``audits/`` folder belongs to the upstream library,
-# not the protocol that vendored the fork.
+# Library forks whose ``audits/`` belong upstream, not to the vendoring protocol.
 _DEPENDENCY_LIBRARY_PATTERNS: tuple[str, ...] = (
     "openzeppelin-contracts",
     "openzeppelin-contracts-upgradeable",
@@ -256,8 +238,7 @@ _DEPENDENCY_LIBRARY_PATTERNS: tuple[str, ...] = (
     "seaport",
 )
 
-# Path segments that mark a vendored-dep tree. An ``audits/`` under any of
-# these belongs to the dep, not the protocol.
+# An ``audits/`` under these belongs to the vendored dependency.
 _VENDORED_DEP_PATH_SEGMENTS: frozenset[str] = frozenset(
     {
         "lib",
@@ -279,18 +260,14 @@ _VENDORED_DEP_PATH_SEGMENTS: frozenset[str] = frozenset(
 
 
 def _is_dependency_library_repo(repo_name: str) -> bool:
-    """True if the repo name matches a common vendored library fork."""
     lower = repo_name.lower()
     return any(pat in lower for pat in _DEPENDENCY_LIBRARY_PATTERNS)
 
 
 def _is_vendored_dependency_path(path: str) -> bool:
-    """True if path sits under ``lib/``/``vendor/``/etc."""
     parts = path.lower().split("/")
     return any(p in _VENDORED_DEP_PATH_SEGMENTS for p in parts[:-1])
 
-
-# --- LLM-backed filename metadata extraction ------------------------------
 
 _FILENAME_BATCH_SIZE = 12
 
@@ -302,12 +279,10 @@ def _llm_extract_filename_metadata(
     *,
     folder_context: str | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Ask the LLM for auditor / date / title per filename.
+    """Ask the LLM for auditor/date/title per filename.
 
-    Returns ``filename -> {auditor, date, title}``. Filenames the LLM can't
-    classify are absent from the map. Every batch sees the full sibling
-    list as context so the LLM can infer auditors for untagged files (e.g.
-    a ``Final.pdf`` sitting next to Halborn-named siblings).
+    Returns ``filename -> {auditor, date, title}``, omitting unclassifiable ones. Each batch sees all siblings so it can
+    infer auditors for untagged files.
     """
     from ..audit_reports_llm import _KNOWN_AUDITORS, _parse_json_array
 
@@ -355,10 +330,8 @@ def _llm_extract_filename_metadata(
                 temperature=0.0,
             )
         except Exception as exc:
-            # Provider-wide failures (402, expired token) surface here one batch
-            # at a time; at DEBUG the whole discovery run collapses to "no audits
-            # found" with nothing above INFO to triage on. The StageError carries
-            # the provider's own text, which is what distinguishes them.
+            # Provider-wide failures (402, expired token) would otherwise make the run look like "no audits found"; the
+            # StageError carries the provider's text.
             record_degraded(
                 phase="audit_filename_metadata",
                 exc=exc,
@@ -385,9 +358,7 @@ def _llm_extract_filename_metadata(
             _debug_log(debug, f"GitHub tree LLM batch {start}: unparseable response")
             continue
 
-        # Prefer LLM's ``filename`` key; fall back to positional match when
-        # the LLM drops or rewrites the filename (common when models omit
-        # extensions).
+        # Fall back to position when the LLM drops or rewrites the filename.
         for idx, item in enumerate(parsed):
             if not isinstance(item, dict):
                 continue
@@ -407,15 +378,10 @@ def _llm_extract_filename_metadata(
     return out
 
 
-# --- Org / repo / tree enumeration ----------------------------------------
-
-
 def _list_org_repos(owner: str, debug: bool = False) -> list[str]:
-    """List public repo names for a GitHub org or user, by pushed_at desc.
+    """Public repo names for a GitHub org or user by pushed_at desc (``/orgs`` then ``/users``).
 
-    Tries ``/orgs/{owner}/repos`` first, falls back to ``/users/{owner}/repos``.
-    Archived repos are included — protocol teams archive old versions (e.g.
-    ``morpho-optimizers``) that still carry the authoritative audit files.
+    Archived repos included; they often hold the authoritative audits.
     """
     params = f"per_page={_MAX_ORG_REPOS}&sort=pushed&direction=desc&type=public"
     for endpoint in ("orgs", "users"):
@@ -441,10 +407,8 @@ def _list_org_repos(owner: str, debug: bool = False) -> list[str]:
 
 
 def _discover_repo_audit_folders(owner: str, repo: str, debug: bool = False) -> list[dict[str, str]]:
-    """Probe a repo for audit folders. Returns ``[{ref, path}, ...]``.
-
-    Costs one repo-metadata call + one recursive-tree call, with a
-    contents-API fallback when the tree call misses.
+    """Audit folders in a repo, as ``[{ref, path}, ...]``: a metadata call plus a recursive tree call, with a
+    contents-API fallback.
     """
     meta_url = f"https://api.github.com/repos/{owner}/{repo}"
     try:
@@ -480,7 +444,6 @@ def _discover_repo_audit_folders(owner: str, repo: str, debug: bool = False) -> 
             _debug_log(debug, f"GitHub tree truncated for {owner}/{repo}; some folders may be missed")
 
     if not found_paths:
-        # Fallback: probe conventional paths via contents API.
         for candidate in _AUDIT_FOLDER_CANDIDATES:
             probe_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{candidate}?ref={default_branch}"
             try:
@@ -503,13 +466,9 @@ def _fetch_github_tree_as_reports(
     url: str = "",
     debug: bool = False,
 ) -> dict[str, Any] | None:
-    """Fetch a directory via the contents API and build report entries.
+    """Build report entries from a directory via the contents API, with one batched LLM call for filename metadata.
 
-    The API returns structured JSON so we don't need an LLM to parse HTML.
-    A single batched LLM call extracts auditor / date / title per filename.
-    For auditor-publication repos (owner doesn't match company), filenames
-    are filtered to company-named files to avoid pulling in 400+ unrelated
-    audits.
+    For auditor-publication repos (owner ≠ company), only company-named files are kept.
     """
     api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={ref}"
     try:
@@ -581,11 +540,8 @@ def _fetch_github_tree_as_reports(
             title = str(meta.get("title") or "").strip() or base_name
             date = str(meta.get("date") or "").strip() or None
             is_pdf = name.lower().endswith(".pdf")
-            # ``report_url`` keeps each file's own GitHub link so multiple
-            # .md files in the same directory don't collapse onto the tree
-            # URL during URL-keyed dedup. For non-PDF files the html_url is
-            # a /blob/ link that serves HTML — normalize to raw so the text
-            # extraction worker gets the file body.
+            # Each file's own link, so files in one directory don't collapse onto the tree URL; non-PDFs normalized to
+            # raw so the text worker gets the body.
             report_url = f.get("html_url") or f.get("download_url")
             if not is_pdf and report_url:
                 report_url = github_blob_to_raw(report_url)
@@ -616,11 +572,7 @@ def _fetch_github_org_as_reports(
     url: str,
     debug: bool = False,
 ) -> dict[str, Any] | None:
-    """Enumerate every non-library repo in an org and pull audit folders.
-
-    Protocol teams shard across sibling repos with a shared ``audits/``
-    pattern — a bare org URL has to fan out to catch everything.
-    """
+    """Pull audit folders from every non-library repo in an org; teams shard audits across sibling repos."""
     repos = _list_org_repos(owner, debug=debug)
     if not repos:
         return None
@@ -672,11 +624,7 @@ def _expand_blob_to_directory(
     company: str,
     debug: bool = False,
 ) -> dict[str, Any] | None:
-    """List a confirmed blob's parent directory and pull sibling audits.
-
-    Handles the auditor-portfolio case: one confirmed blob expands into
-    every same-company audit in the parent folder.
-    """
+    """Expand a confirmed blob into same-company audits in its parent directory (auditor portfolios)."""
     parent = blob_path.rsplit("/", 1)[0] if "/" in blob_path else ""
     api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{parent}?ref={ref}"
     try:
@@ -760,12 +708,8 @@ def _list_repo_root_for_company(
     company: str,
     debug: bool = False,
 ) -> dict[str, Any] | None:
-    """Recursive tree scan for company-named PDFs/MDs at any depth.
-
-    Fallback for auditor publication repos (``Zellic/publications``,
-    ``spearbit/portfolio``, etc.) that ship per-protocol reports at the
-    root OR nested under category folders that aren't in our
-    audit-folder allowlist. One recursive-tree call + filename filter.
+    """Recursive tree scan for company-named PDFs/MDs at any depth, for auditor publication repos
+    (``Zellic/publications``, ``spearbit/portfolio``) whose folders aren't in the allowlist.
     """
     meta_url = f"https://api.github.com/repos/{owner}/{repo}"
     try:
@@ -806,8 +750,7 @@ def _list_repo_root_for_company(
         name = path.rsplit("/", 1)[-1]
         if name.lower().startswith((".gitkeep", "readme")):
             continue
-        # Match on FILENAME, not path — ``ether-fi-fork/foo.pdf`` whose
-        # filename doesn't mention the company would otherwise slip through.
+        # Match the filename, not the path (a fork directory name would otherwise match).
         if not _filename_mentions_company(name, variants):
             continue
         encoded_path = "/".join(urllib.parse.quote(seg, safe="") for seg in path.split("/") if seg)
@@ -865,7 +808,6 @@ def _list_repo_root_for_company(
 
 
 def _fetch_github_raw(owner: str, repo: str, ref: str, path: str, debug: bool = False) -> str | None:
-    """Fetch raw file content from GitHub for markdown/text files."""
     from ._fetch import _BINARY_CONTENT_TYPES, _MAX_DOWNLOAD_BYTES
     from ._urls import _is_pdf_url
 

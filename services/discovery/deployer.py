@@ -1,27 +1,11 @@
 """Deployer-based contract discovery.
 
-Given a set of known contract addresses (e.g. from the Tavily pipeline), this
-module identifies the deployer wallets via Etherscan's ``getcontractcreation``
-API, fetches every contract each deployer has ever created, optionally resolves
-contract names, and returns entries in the standard inventory entry format so
-they can be merged with Tavily-sourced entries in ``_build_contracts()``.
+From known seed addresses, find their deployers via Etherscan ``getcontractcreation``, fetch every contract each
+deployer created, optionally resolve names, and return standard inventory entries for ``_build_contracts()``.
 
-Deployer filtering
-------------------
-Not every deployer wallet that created a seed contract is a trustworthy
-protocol deployer.  A wallet that deployed 1 out of 79 seeds but has 50 total
-deployments is likely a shared service or unrelated actor.  We filter deployers
-with two thresholds:
-
-- **Minimum seed count** (``min_seed_count``, default 3): the deployer must
-  have created at least this many of the known seed contracts.
-- **Minimum seed share** (``min_seed_share``, default 0.05 = 5%): the seeds
-  created by this deployer must represent at least this fraction of all
-  resolved seed→deployer mappings.
-
-Both conditions must be met for a deployer to be considered a protocol
-deployer.  This filters out factory contracts, multisig wallets, and
-deploy-as-a-service providers while keeping genuine protocol ops wallets.
+A deployer qualifies only if it created at least ``min_seed_count`` seeds (default 3) and those are at least
+``min_seed_share`` (default 5%) of resolved seed→deployer mappings. This filters out factories, multisigs and deploy
+services (e.g. a wallet with 1 of 79 seeds among 50 deployments).
 """
 
 from __future__ import annotations
@@ -41,25 +25,16 @@ logger = logging.getLogger(__name__)
 
 
 def _explorer_base(chain_id: int) -> str:
-    """Explorer origin for ``chain_id`` from the registry (display links only).
-
-    Falls back to Etherscan for a chain the registry doesn't carry so a link is
-    never broken — the value is cosmetic, not a chain-membership claim.
-    """
+    """Explorer origin for display links, falling back to Etherscan; cosmetic only."""
     try:
         return chain_by_id(chain_id).explorer_base_url.rstrip("/")
     except Exception:  # noqa: BLE001 - display-only, never fail loud
         return "https://etherscan.io"
 
 
-# A deployer must have created at least this many seed contracts.
 _MIN_SEED_COUNT = 3
 
-# A deployer's seed contracts must be at least this share of all resolved seeds.
 _MIN_SEED_SHARE = 0.05
-
-
-# -- Etherscan helpers -------------------------------------------------------
 
 
 def _batch_get_creators(
@@ -68,10 +43,7 @@ def _batch_get_creators(
     debug: bool = False,
     chain_id: int = 1,
 ) -> dict[str, str]:
-    """Look up contract creators in batches.
-
-    Returns ``{contract_address: creator_address}`` (both normalised).
-    """
+    """Contract creators in batches, as ``{contract_address: creator_address}``."""
     creators: dict[str, str] = {}
     for i in range(0, len(addresses), batch_size):
         batch = addresses[i : i + batch_size]
@@ -87,13 +59,11 @@ def _batch_get_creators(
                 creator_addr = normalize_address(item["contractCreator"])
                 creators[contract_addr] = creator_addr
         except RuntimeError:
-            # Address(es) may not be contracts or Etherscan returned no data.
             _debug_log(debug, f"getcontractcreation batch failed for {len(batch)} address(es)")
     return creators
 
 
 def _get_deployed_contracts(deployer: str, debug: bool = False, chain_id: int = 1) -> list[str]:
-    """Return all contract addresses created by *deployer* via ``txlist``."""
     try:
         data = etherscan.get(
             "account",
@@ -110,7 +80,6 @@ def _get_deployed_contracts(deployer: str, debug: bool = False, chain_id: int = 
 
     deployed: list[str] = []
     for tx in data.get("result", []):
-        # Contract-creation txs have an empty ``to`` and a ``contractAddress``.
         if tx.get("to") == "" and tx.get("contractAddress"):
             deployed.append(normalize_address(tx["contractAddress"]))
     _debug_log(debug, f"Deployer {deployer} created {len(deployed)} contract(s)")
@@ -118,7 +87,6 @@ def _get_deployed_contracts(deployer: str, debug: bool = False, chain_id: int = 
 
 
 def _get_one_name(addr: str, chain_id: int) -> tuple[str, str | None]:
-    """Fetch the contract name for a single address (rate-limited centrally by etherscan.get)."""
     return addr, etherscan.get_contract_name(addr, chain_id=chain_id)
 
 
@@ -128,15 +96,13 @@ def _batch_get_names(
     *,
     chain_id: int,
 ) -> dict[str, str]:
-    """Best-effort contract name lookup using a thread pool.  Returns ``{address: name}``."""
     if not addresses:
         return {}
 
     names: dict[str, str] = {}
 
     with ThreadPoolExecutor(max_workers=4) as executor:
-        # Per-submission context copy so each rate-limited Etherscan call
-        # inherits the caller's trace_id / job_id contextvars.
+        # Copy context per submission so trace ids survive.
         futures: dict = {}
         for addr in addresses:
             ctx = contextvars.copy_context()
@@ -163,11 +129,7 @@ def _filter_deployers(
     min_seed_share: float = _MIN_SEED_SHARE,
     debug: bool = False,
 ) -> list[str]:
-    """Return deployer addresses that meet the protocol-deployer thresholds.
-
-    A deployer qualifies only if it created at least *min_seed_count* seeds
-    AND those seeds represent at least *min_seed_share* of all resolved seeds.
-    """
+    """Deployers meeting both *min_seed_count* and *min_seed_share*."""
     deployer_seed_counts = Counter(creators.values())
     total_resolved = len(creators)
     if total_resolved == 0:
@@ -191,9 +153,6 @@ def _filter_deployers(
     return qualified
 
 
-# -- Public API --------------------------------------------------------------
-
-
 def expand_from_deployers(
     seed_addresses: list[str],
     resolve_names: bool = True,
@@ -202,17 +161,15 @@ def expand_from_deployers(
     debug: bool = False,
     chain_id: int = 1,
 ) -> list[dict[str, Any]]:
-    """Discover additional contracts by tracing deployer wallets.
+    """Discover more contracts by tracing deployer wallets:
 
-    1. Batch-query ``getcontractcreation`` to identify deployer wallets.
-    2. Filter to deployers that meet the seed-count and seed-share thresholds.
-    3. For each qualified deployer, fetch all creation transactions.
-    4. Resolve contract names for newly-discovered addresses.
-    5. Return entries in the standard inventory entry format
-       (``kind="deployer_expansion"``, ``chain="unknown"``).
+    1. find deployers via batched ``getcontractcreation``;
+    2. filter by seed count and share;
+    3. fetch every creation per qualified deployer;
+    4. resolve names for new addresses;
+    5. return inventory entries (``kind="deployer_expansion"``, ``chain="unknown"``).
 
-    Addresses already present in *seed_addresses* are still emitted so that
-    ``_build_contracts()`` can corroborate them with Tavily evidence.
+    Seeds are emitted too so ``_build_contracts()`` can corroborate them.
     """
     if not seed_addresses:
         return []
@@ -220,13 +177,11 @@ def expand_from_deployers(
     normalized_seeds = sorted({normalize_address(a) for a in seed_addresses})
     _debug_log(debug, f"Deployer expansion: {len(normalized_seeds)} seed address(es)")
 
-    # Step 1 — find deployer wallets
     creators = _batch_get_creators(normalized_seeds, debug=debug, chain_id=chain_id)
     if not creators:
         _debug_log(debug, "No deployer wallets identified")
         return []
 
-    # Step 2 — filter to trusted protocol deployers
     qualified_deployers = _filter_deployers(
         creators,
         min_seed_count=min_seed_count,
@@ -242,7 +197,6 @@ def expand_from_deployers(
         f"Qualified {len(qualified_deployers)} of {len(set(creators.values()))} unique deployer(s)",
     )
 
-    # Step 3 — collect every contract each qualified deployer has created
     seed_set = set(normalized_seeds)
     all_deployed: dict[str, set[str]] = {}  # address → deployers that created it
     for deployer in qualified_deployers:
@@ -255,14 +209,12 @@ def expand_from_deployers(
         f"Qualified deployers created {len(all_deployed)} total contract(s), {len(all_deployed.keys() - seed_set)} new",
     )
 
-    # Step 4 — name resolution for new addresses, on the expansion's own chain.
     new_addresses = sorted(all_deployed.keys() - seed_set)
     names: dict[str, str] = {}
     if resolve_names and new_addresses:
         names = _batch_get_names(new_addresses, debug=debug, chain_id=chain_id)
 
-    # Step 5 — build inventory entries. Explorer links point at the chain the
-    # expansion actually ran on (chain_id), not a hardcoded etherscan.io.
+    # Explorer links use the chain the expansion ran on.
     explorer_base = _explorer_base(chain_id)
     entries: list[dict[str, Any]] = []
     for address, deployers in sorted(all_deployed.items()):

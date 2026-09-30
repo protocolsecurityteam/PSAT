@@ -16,12 +16,9 @@ def build_unified_dependencies(
     classifications: dict | None,
     target_classification: dict | None = None,
 ) -> dict:
-    """Merge static deps, dynamic deps, and classifications into one output.
+    """Merge static deps, dynamic deps and classifications.
 
-    *target_classification* is an optional fallback from an earlier
-    ``classify_single`` call.  When ``classifications`` is ``None`` (e.g.
-    because ``classify_contracts`` was skipped or failed), this ensures the
-    target's proxy type still reaches the unified output.
+    *target_classification* carries the target's proxy type through when ``classifications`` is ``None``.
     """
     target = normalize_address(address)
 
@@ -112,12 +109,7 @@ def enrich_dependency_metadata(
     *,
     chain_id: int,
 ) -> dict:
-    """Resolve contract names and selectors in-place for a unified dependency output.
-
-    If *info_cache* is provided it is used as a pre-populated lookup and is
-    **mutated in-place** — newly fetched entries are added so the caller can
-    persist the updated cache.
-    """
+    """Resolve contract names and selectors in place. *info_cache* is read and mutated so the caller can persist it."""
     deps = unified.get("dependencies", {})
     if not isinstance(deps, dict) or not deps:
         return unified
@@ -140,15 +132,13 @@ def enrich_dependency_metadata(
     if missing:
         from services.clients.etherscan import parallel_get
 
-        # Each ``get_contract_info`` call still routes through the shared
-        # _rate_lock — parallel_get only stacks the inter-call dead time.
+        # Calls still go through the shared rate lock; parallelism only overlaps waits.
         calls = {addr: (lambda a=addr: get_contract_info(a, chain_id=chain_id)) for addr in missing}
         results = parallel_get(calls)
         for addr in missing:
             value = results.get(addr)
             if isinstance(value, BaseException) or not isinstance(value, tuple):
-                # ``get_contract_info`` already swallows Etherscan failures and
-                # returns ``(None, {})``; a raised exception here is unexpected.
+                # ``get_contract_info`` already swallows Etherscan errors; a raise here is unexpected.
                 info_cache[addr] = (None, {})
             else:
                 info_cache[addr] = value

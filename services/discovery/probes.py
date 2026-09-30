@@ -1,11 +1,8 @@
 """Bounded read-only corroboration probes (DISCOVERY_MEMBERSHIP_GATE_SPEC.md §3.5).
 
-One probe = eth_getCode + Etherscan ``getcontractcreation`` + owner() /
-authority() + the EIP-1967 implementation/admin/beacon slots, all pinned at
-one just-read block. Probes may run on ANY eRPC-routable chain regardless of
-``PSAT_SUPPORTED_CHAIN_IDS`` (invariant 10). Every outcome — including a read
-that resolved nowhere — is persisted so a parked candidate is explainable
-(invariant 5). Nothing here commits; the caller does.
+One probe is eth_getCode, Etherscan ``getcontractcreation``, owner()/authority(), and the EIP-1967 slots, pinned at one
+block. Allowed on any eRPC-routable chain regardless of ``PSAT_SUPPORTED_CHAIN_IDS`` (invariant 10). Every outcome is
+persisted so parked candidates are explainable (invariant 5). The caller commits.
 """
 
 from __future__ import annotations
@@ -41,27 +38,26 @@ logger = logging.getLogger(__name__)
 
 AUTHORITY_SELECTOR = selector("authority()")
 
-# Etherscan getcontractcreation accepts at most 5 addresses per call.
 _CREATION_BATCH = 5
 
-#: ``contract_probe_attempts.chain_id`` sentinel for a row whose chain name
-#: does not resolve to a registry chain id (e.g. the ``unknown`` bucket).
-#: 0 is no EVM chain; ``results.status`` carries the raw chain string.
+# ``chain_id`` for rows whose chain doesn't resolve (e.g. ``unknown``); 0 is no EVM chain, and ``results.status`` keeps
+# the raw string.
 UNRESOLVABLE_CHAIN_ID = 0
 
 STATUS_PROBED = "probed"
 STATUS_NOT_ROUTABLE = "not_routable"
 STATUS_RPC_ERROR = "rpc_error"
 
-# The five §3.5 resolution reads, in persisted order.
+# The five §3.5 reads, in persisted order.
 _READS = ("owner", "authority", "implementation", "admin", "beacon")
 
 
 @dataclass(frozen=True)
 class ProbeResult:
-    """One probe's outcome. ``None`` on any field means that read did not
-    determine a value — never that the value is absent; ``attempts`` records
-    which of the two it was, per read."""
+    """One probe's outcome.
+
+    ``None`` means the read determined nothing, never absence; ``attempts`` says which per read.
+    """
 
     contract_id: int
     chain_id: int | None
@@ -88,9 +84,9 @@ def _persist_attempt(
     block_number: int | None,
     results: dict[str, Any],
 ) -> None:
-    """Latest-wins for a successful probe; a FAILED attempt never destroys the
-    last good ``probed`` results (their ``resolved_addresses`` still feed the
-    gate's targeted lookups) — it lands as ``last_error`` on top of them."""
+    """Latest successful probe wins; a failed attempt only adds ``last_error`` and keeps the last good results (their
+    ``resolved_addresses`` still feed targeting).
+    """
     key_chain = UNRESOLVABLE_CHAIN_ID if chain_id is None else chain_id
     row = session.get(ContractProbeAttempt, (contract_id, key_chain))
     if row is None:
@@ -116,11 +112,10 @@ def fetch_creations(
     *,
     chain_id: int,
 ) -> dict[str, tuple[str | None, int | None, str | None, str | None]]:
-    """Etherscan ``getcontractcreation`` for *addresses* (chunked 5/call),
-    persisting ``creation_tx_hash``/``creation_block``/``creation_factory``
-    into ``contract_creation_witnesses``. Returns
-    ``{address: (tx, block, creator, factory)}`` for the addresses the indexer
-    answered; a missing key means no answer, never "no creation"."""
+    """Etherscan ``getcontractcreation`` for *addresses* (5 per call), persisting tx/block/factory into
+    ``contract_creation_witnesses``. Returns ``{address: (tx, block, creator, factory)}`` for answered addresses;
+    missing means no answer, not no creation.
+    """
     wanted = sorted({a.lower() for a in addresses})
     out: dict[str, tuple[str | None, int | None, str | None, str | None]] = {}
     for start in range(0, len(wanted), _CREATION_BATCH):
@@ -133,8 +128,7 @@ def fetch_creations(
                 contractaddresses=",".join(batch),
             )
         except Exception as exc:
-            # WARNING: a systematic auth/quota failure here silently starves
-            # W4 lineage — it must be visible, not per-line DEBUG.
+            # Systematic auth/quota failures here silently starve W4 lineage.
             record_degraded(phase="membership_probe_creation_fetch", exc=exc, context={"chain_id": chain_id})
             logger.warning(
                 "getcontractcreation failed",
@@ -193,11 +187,8 @@ def _coerce_block(value: Any) -> int | None:
 
 
 def _code_verdict(code: Any) -> bool | None:
-    """``eth_getCode`` result → code-present verdict, or None for no verdict.
-
-    Only a well-formed hex string proves anything: ``"0x"`` proves absence,
-    non-empty even-length hex proves presence. None / missing / malformed is a
-    transport artifact and must never mint a code verdict either way.
+    """``eth_getCode`` result to a code-present verdict: ``"0x"`` is absence, non-empty even-length hex is presence,
+    anything else is no verdict.
     """
     if not isinstance(code, str) or not code.startswith("0x"):
         return None
@@ -218,9 +209,9 @@ def _record_code_probe(session: Session, *, chain_id: int, address: str, block_n
 
 
 def run_probe(session: Session, contract: Contract) -> ProbeResult:
-    """Probe *contract* on its own (address, chain) and persist every outcome:
-    code presence into ``contract_creation_witnesses``, resolution reads into
-    ``contract_probe_attempts``."""
+    """Probe *contract* on its own (address, chain) and persist every outcome (code presence to
+    ``contract_creation_witnesses``, reads to ``contract_probe_attempts``).
+    """
     address = (contract.address or "").lower()
     chain_id = chain_id_for_chain_name(contract.chain)
     rpc_url = erpc_url_for_chain_id(chain_id) if chain_enabled(chain_id) else None

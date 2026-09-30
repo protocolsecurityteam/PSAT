@@ -1,17 +1,11 @@
-"""Deployer creation enumeration + coverage honesty (spec §3.3 Class B).
+"""Deployer creation enumeration with coverage honesty (spec §3.3 Class B).
 
-The single Class-B evidence path: the worker-side ladder wire
-(``workers/discovery.py``) and the gate-side fixpoint
-(``membership_gate.evaluate``'s ``deployer_enumerator``) both consume
-``enumerate_with_coverage``, so the two can never disagree on whether an
-enumeration licenses exclusivity.
+The single Class-B evidence path, used by both ``workers/discovery.py`` and ``membership_gate.evaluate``'s
+``deployer_enumerator``, so they can't disagree.
 
-Etherscan attributes a contract to its creation tx's ORIGIN, so the full
-creation history of an EOA is its direct creations (``txlist`` entries with an
-empty ``to``) UNIONED with the ``create``/``create2`` frames inside its own
-sent transactions (``txlistinternal&txhash`` per tx — the by-ADDRESS form
-indexes internal frames under the factory, never the originating EOA, and
-must not be used here).
+Etherscan attributes a contract to its creation tx's origin, so an EOA's full history is its direct creations
+(``txlist`` entries with empty ``to``) plus CREATE/CREATE2 frames inside its own txs (``txlistinternal&txhash`` per tx;
+the by-address form indexes frames under the factory and must not be used).
 """
 
 from __future__ import annotations
@@ -35,36 +29,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Cap on one chain's COMBINED creation set (direct ∪ internal) and on each
-#: Etherscan ``txlist`` window. A window that fills, or a combined set at the
-#: cap, is a truncation, never a complete creation history →
-#: ``history_complete=False`` → Class C (spec §3.3).
+# Cap on one chain's combined creation set and each ``txlist`` window. Hitting it is truncation, so
+# ``history_complete=False`` and Class C (§3.3).
 DEPLOYER_ENUMERATION_CAP = 10_000
 
-#: Per-chain bound on the ``txlistinternal&txhash`` calls one enumeration may
-#: spend resolving internal creations. Exceeding it leaves the chain's history
-#: unresolvable within budget → the chain stays out of scope and
-#: ``history_complete=False`` — a half-enumerated chain must never claim
-#: completeness. (Non-empty responses — and mature empties — are PG-cached, so
-#: a re-enumeration of the same EOA re-pays little beyond the ``txlist``
-#: window.)
+# Per-chain budget for ``txlistinternal&txhash`` calls. Exceeding it drops the chain from scope and makes the history
+# incomplete. Responses are PG-cached, so re-enumeration is cheap.
 INTERNAL_RESOLUTION_TX_BUDGET = 1_000
 
-#: Minimum ``confirmations`` (head − block, straight off the ``txlist``
-#: record) before an EMPTY per-txhash internal-trace answer may be frozen in
-#: the PG cache: Etherscan's trace indexing lags the head, so a fresh tx's
-#: "no internal frames" can be a transient false-empty that would permanently
-#: delete a CREATE frame from the EOA's history — ~an hour of mainnet blocks
-#: sits comfortably past the observed lag. Non-empty answers are immutable
-#: once present and cache unconditionally.
+# Confirmations required before caching an empty internal-trace answer: Etherscan's trace index lags the head, and a
+# cached false-empty would permanently erase a CREATE frame. Non-empty answers cache immediately.
 INTERNAL_TRACE_CACHE_MIN_CONFIRMATIONS = 300
 
 
 def _tx_mature(tx: dict) -> bool:
-    """Whether an empty internal-trace answer for *tx* would be a permanent
-    fact rather than indexing lag. Only a positive ``confirmations`` reading
-    past the floor licenses the cache write — a missing or unparseable field
-    is not_determined, never mature."""
+    """Whether an empty internal-trace answer for *tx* is permanent.
+
+    Only a positive ``confirmations`` past the floor counts; missing or unparseable is not mature.
+    """
     raw = tx.get("confirmations")
     if not isinstance(raw, (str, int)):
         return False
@@ -76,9 +58,11 @@ def _tx_mature(tx: dict) -> bool:
 
 @dataclass(frozen=True)
 class DeployerCreation:
-    """One enumerated creation. ``factory`` is the CREATE/CREATE2 frame's
-    ``from`` for an internal creation; ``None`` = a direct EOA-sent creation,
-    never "factory unknown" (an unresolvable frame fails the whole chain)."""
+    """One enumerated creation.
+
+    ``factory`` is the CREATE frame's ``from`` for internal creations; ``None`` means a direct EOA creation
+    (unresolvable frames fail the whole chain).
+    """
 
     address: str
     chain_id: int
@@ -88,10 +72,9 @@ class DeployerCreation:
 def _internal_creations(
     addr: str, chain_id: int, sent_calls: Sequence[tuple[str, bool]]
 ) -> list[DeployerCreation] | None:
-    """CREATE/CREATE2 frames inside the EOA's own sent txs (``(tx_hash,
-    mature)`` pairs), or ``None`` when any lookup fails — the chain's history
-    is then unresolvable and must not claim completeness. An empty answer is
-    frozen in the PG cache only for a mature tx (``cache_empty``)."""
+    """CREATE/CREATE2 frames in the EOA's own txs, or ``None`` if any lookup fails (then the chain can't claim
+    completeness). Empty answers are cached only for mature txs.
+    """
     found: list[DeployerCreation] = []
 
     for tx_hash, mature in sent_calls:
@@ -135,18 +118,12 @@ def _internal_creations(
 
 
 def enumerate_deployer_creations(deployer: str) -> tuple[list[DeployerCreation], list[int], bool]:
-    """(creations, enumerated chain scope, history_complete) for one EOA,
-    enumerated on every enabled chain (EOAs are chain-agnostic, spec
-    §3.3/§4.3). The scope is recorded so the registry evidence names WHAT was
-    enumerated, never a bare ``complete: True``.
+    """``(creations, enumerated chain scope, history_complete)`` for one EOA across enabled chains (EOAs are
+    chain-agnostic, §3.3/§4.3). The scope is recorded so evidence says what was enumerated.
 
-    Completeness is POSITIVE evidence: any chain whose ``txlist`` fails, whose
-    window or combined creation set hits :data:`DEPLOYER_ENUMERATION_CAP`,
-    whose sent-tx count exceeds :data:`INTERNAL_RESOLUTION_TX_BUDGET`, or
-    whose internal-frame resolution fails yields ``history_complete=False``
-    with that chain out of scope — and an empty enumeration can never license
-    exclusivity (it is also the factory-address shape: a contract "deployer"
-    sends no transactions of its own).
+    Completeness must be positive: a failed ``txlist``, a cap hit, an exceeded internal budget, or a failed internal
+    lookup drops that chain and sets ``history_complete=False``. An empty enumeration never licenses exclusivity (it's
+    also what a factory looks like).
     """
     addr = deployer.lower()
     created: dict[tuple[str, int], DeployerCreation] = {}
@@ -192,9 +169,7 @@ def enumerate_deployer_creations(deployer: str) -> tuple[list[DeployerCreation],
             if not tx.get("to") and isinstance(target, str) and target:
                 chain_created.append(DeployerCreation(address=target.lower(), chain_id=chain_id))
                 continue
-            # Only an EOA-SENT, mined-successful call can hold an internal
-            # creation attributed to this EOA; ``txlist`` also lists received
-            # txs, whose creations belong to their own origins.
+            # Only EOA-sent successful txs can hold its internal creations; ``txlist`` also lists received txs.
             tx_hash = tx.get("hash")
             if (
                 (tx.get("from") or "").lower() == addr
@@ -231,11 +206,10 @@ def enumerate_deployer_creations(deployer: str) -> tuple[list[DeployerCreation],
 def enumeration_coverage_gap(
     session: Session, *, deployer: str, created: set[str], scope_chain_ids: set[int]
 ) -> str | None:
-    """Class B soundness check: every KNOWN creation of the EOA — any contracts
-    row recording it as deployer, member or candidate, any protocol — must lie
-    on an enumerated chain AND appear in the enumerated creation set. A gap is
-    an incomplete enumeration (→ Class C), whether from chain scope or from a
-    ``contractCreator``-vs-``txlist`` attribution mismatch."""
+    """Class B soundness: every known creation of the EOA (any contracts row naming it as deployer) must be on an
+    enumerated chain and in the enumerated set. A gap, from scope or attribution mismatch, means incomplete (Class
+    C).
+    """
     rows = session.execute(select(Contract.address, Contract.chain).where(func.lower(Contract.deployer) == deployer))
     for address, chain in rows:
         chain_id = chain_id_for_chain_name(chain or "ethereum")
@@ -249,14 +223,12 @@ def enumeration_coverage_gap(
 def enumerate_with_coverage(
     session: Session, deployer: str
 ) -> tuple[list[DeployerCreation], list[int], bool, str | None]:
-    """Enumeration with the coverage refusal folded into ``history_complete``
-    — the one place a Class-B-licensing enumeration verdict is minted.
+    """Enumeration with the coverage check folded into ``history_complete``; the one place a Class-B verdict is
+    minted.
 
-    The fourth element distinguishes the two incompleteness shapes (F3): a
-    COVERAGE GAP (the raw windows were complete, yet a known creation is
-    missing or off-scope — positive counterevidence against a standing Class-B
-    license) versus budget/cap/wire incompleteness (absence of evidence,
-    which never revokes)."""
+    The fourth element separates a coverage gap (complete windows but a known creation missing: positive
+    counterevidence, F3) from budget/cap/wire incompleteness (never revokes).
+    """
     addr = deployer.lower()
     creations, scope, complete = enumerate_deployer_creations(addr)
     gap: str | None = None
@@ -274,19 +246,15 @@ def enumerate_with_coverage(
 
 
 def creation_factories(creations: Sequence[DeployerCreation]) -> dict[str, str]:
-    """address → factory for the factory-mediated creations in *creations*."""
+    """address → factory for factory-mediated creations."""
     return {c.address: c.factory for c in creations if c.factory}
 
 
 def session_deployer_enumerator(session: Session) -> DeployerEnumerator:
-    """Gate-facing adapter (``membership_gate.DeployerEnumerator``): the scope
-    stays internal to the coverage check; the gate consumes only what §3.3
-    needs — the creation set and whether it licenses exclusivity. Coverage
-    gaps are recorded on the adapter's ``coverage_gaps`` and the full creation
-    records (chain + factory attribution) on ``creations`` (the same
-    attribute-channel pattern as the re-earn budget's ``exhausted``) so the
-    fixpoint can treat gaps as positive counterevidence (F3) and feed the
-    member-factory mapping."""
+    """Gate-facing adapter (``membership_gate.DeployerEnumerator``): returns only the creation set and whether it
+    licenses exclusivity. Coverage gaps go on ``coverage_gaps`` and full records on ``creations`` for the fixpoint
+    (F3 counterevidence and the member-factory rule).
+    """
     return _SessionEnumerator(session)
 
 

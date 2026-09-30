@@ -1,8 +1,5 @@
-"""HTML parsing and contract entry extraction for the inventory pipeline.
-
-Fetches official protocol pages and extracts contract records (name, address,
-chain) from tables, lists, explorer links, and prose text.  Called by
-inventory.py after inventory_domain.py identifies the pages.
+"""HTML parsing and contract-entry extraction (name, address, chain) from tables, lists, explorer links and prose on
+official pages.
 """
 
 from __future__ import annotations
@@ -105,7 +102,6 @@ def _anchor_to_text(match: re.Match[str]) -> str:
 
 
 def _html_to_lines(page_text: str) -> list[str]:
-    """Convert HTML into line-oriented text while preserving headings and links."""
     cleaned = _SCRIPT_STYLE_RE.sub(" ", page_text)
     cleaned = _HEADING_RE.sub(
         lambda m: f"\n__HEADING__ {TAG_RE.sub(' ', m.group(2))}\n",
@@ -269,7 +265,6 @@ def _build_entries_from_table_row(
 
 
 def _extract_name_from_line(line: str) -> str | None:
-    """Extract the most likely contract label from a line containing one or more addresses."""
     candidates: list[str] = []
     segments = [seg.strip() for seg in line.split("|") if seg.strip()]
     for segment in segments:
@@ -342,7 +337,6 @@ def extract_inventory_entries_from_page_text(
     requested_chain: str | None,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Extract address records from a single official page."""
     lines = _html_to_lines(page_text)
     plain_page = TAG_RE.sub(" ", page_text)
     page_chain = _infer_chain(url, plain_page[:4000])
@@ -413,8 +407,7 @@ def extract_inventory_entries_from_page_text(
                         pending_label = None
                         i += row_len
                         continue
-                    # Stay in schema mode for malformed or incomplete rows so later
-                    # rows in the same table still parse with the correct columns.
+                    # Stay in schema mode on malformed rows so later rows still parse with the right columns.
                     if not any(_header_role(cell) for cell in row_cells):
                         pending_label = None
                         i += row_len
@@ -483,12 +476,7 @@ def extract_inventory_entries_from_pages(
     requested_chain: str | None,
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Fetch selected pages and aggregate extracted inventory entries.
-
-    Page fetches happen concurrently — each URL is an independent HTTP call
-    to a different host so there's no shared rate limit to respect. Iteration
-    over results stays in input order so downstream entry ordering is stable.
-    """
+    """Fetch pages concurrently (independent hosts) and aggregate entries in input order."""
     from services.concurrency import parallel_map
 
     fetch_results = parallel_map(lambda u: _fetch_page(u, debug=debug), urls, max_workers=8)
