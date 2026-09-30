@@ -1,15 +1,5 @@
-"""Typed shapes for the predicate-based access analysis output.
-
-These are the semantic schema types — the static stage emits a
-``PredicateTree`` per guarded function describing the structural gates
-that admit it, and the resolver evaluates that tree. No
-shape-name labels in the routing path; shape labels are diagnostic
-only.
-
-The plan is /tmp/psat-plans/generic-predicate-pipeline-v{4,5,6,7}.md.
-
-These types live in their own module so the runtime predicate builder,
-the schema, and the resolver can import them without circular deps.
+"""Typed shapes for predicate-based access analysis: a ``PredicateTree`` per guarded function, evaluated by the
+resolver. Shape labels are diagnostic only. Separate module to avoid import cycles.
 """
 
 from __future__ import annotations
@@ -17,11 +7,6 @@ from __future__ import annotations
 from typing import Any, Final, Literal, TypedDict, get_args
 
 from typing_extensions import NotRequired
-
-# ---------------------------------------------------------------------------
-# Operand — where a value in a predicate originates.
-# ---------------------------------------------------------------------------
-
 
 OperandSource = Literal[
     "msg_sender",
@@ -49,72 +34,32 @@ class Operand(TypedDict):
     callee_signature: NotRequired[str | None]
     callee_selector: NotRequired[str | None]
     callee_args: NotRequired[list["Operand"]]
-    # Keccak/constant storage slot a getter-less internal address accessor reads
-    # via inline ``sload(<constant>)`` (e.g. Governable ``_pendingGovernor``).
-    # Lets resolution read the live value through ``eth_getStorageAt`` when no
-    # public getter exists. Absent for every other operand.
+    # The constant slot a getter-less address accessor ``sload``s (Governable ``_pendingGovernor``), for
+    # ``eth_getStorageAt``.
     storage_slot: NotRequired[str | None]
-    # Set when ``msg.sender == <mapping>[<param>]`` gates a function on a mapping
-    # value keyed by a function parameter (L1BaseSyncPool ``receivers[originEid]``,
-    # claim #3 group C). ``mapping_name`` is the storage mapping; ``mapping_writer_specs``
-    # are the value-enumeration WriterEventSpecs the contract-wide mapping-event pass
-    # attaches. Resolution enumerates the mapping's VALUE set (the authorized callers)
-    # from those setter events rather than reading a getter. Absent for every other operand.
+    # For ``msg.sender == mapping[param]`` (L1BaseSyncPool ``receivers[originEid]``): the mapping and the setter-event
+    # specs resolution replays to enumerate its value set.
     mapping_name: NotRequired[str | None]
     mapping_writer_specs: NotRequired[list[dict[str, Any]] | None]
     constant_value: NotRequired[str | None]
     value_type: NotRequired[str | None]
     computed_kind: NotRequired[str | None]
     block_context_kind: NotRequired[str | None]
-    # Which origins reached this value through the arguments of the computation
-    # that produced it — the parameters a ``keccak256``/``abi.encode`` commitment
-    # binds, which the digest would otherwise have collapsed. Present on every
-    # ``source == "computed"`` operand and on no other, so absence means the
-    # question does not apply. Three states on a computed operand, and a consumer
-    # must distinguish all three:
-    #   key absent   — not a computed operand
-    #   ``None``     — computed, argument provenance NOT DETERMINED (nothing
-    #                  populated it; today that is every computed operand except
-    #                  the ones a Solidity built-in call produced)
-    #   ``[]``       — computed, determined: only constants reached it
-    #   non-empty    — computed, determined: exactly these origins reached it
-    # ``op.get("derived_from") or []`` therefore reads not-determined as
-    # proven-none and is wrong; test for ``None`` explicitly.
+    # Origins that reached a computed value through its arguments (the parameters a ``keccak256``/``abi.encode``
+    # commitment binds). Only on ``computed`` operands. ``None`` is not determined, ``[]`` means only constants,
+    # non-empty lists the origins. ``op.get("derived_from") or []`` conflates not-determined with none: test for
+    # ``None``.
     derived_from: NotRequired[list["Operand"] | None]
-    # The ONE storage element this operand read, when its def chain is a single
-    # ``<state var>[key](.member)*`` access: the base's canonical
-    # ``Contract.var``, the member path below it, and the entry-parameter slot
-    # the key came from. The builder picks ONE source out of a value's source
-    # set, so ``bids[_bidId].bidderAddress`` publishes either the bare parameter
-    # (``source == "parameter"``) or the bare collection
-    # (``source == "state_variable"``) and the other half of the read is gone.
-    # These name what the pick discarded, on both polarities. They add to
-    # ``source``/``parameter_index``/``parameter_name``; they never restate or
-    # move them.
+    # The one storage element this operand read (``<state var>[key](.member)*``): the canonical base, member path and
+    # the key's entry-parameter slot. The builder publishes one source, so ``bids[_bidId].bidderAddress`` keeps only the
+    # parameter or the collection; these record the half it dropped, adding to ``source`` rather than changing it.
     #
-    # All three are present together or all three are absent — a base without
-    # its key is not a cell, and a consumer joining two reads onto one record
-    # must refuse rather than assume. ABSENCE IS NOT "not an element read": it
-    # is "no element read was resolved here", which is equally what every
-    # operand published before these fields existed says.
-    #
-    # ``element_key_param_index`` is three-valued and a consumer must keep the
-    # three apart:
-    #   key absent — no resolved element read (see above)
-    #   ``None``   — resolved, and the key is PROVEN to be ``msg.sender``: a
-    #                caller-keyed cell, which no entry parameter names. An
-    #                earned negative, never a shrug — a key this pass could not
-    #                pin (a constant, a computed index, a second key level)
-    #                publishes no element fields at all.
-    #   ``int``    — resolved: the key is exactly this entry-parameter slot.
+    # All three or none (a base without its key isn't a cell); absence means no element read was resolved.
+    # ``element_key_param_index``: absent (none resolved), ``None`` (key proven to be ``msg.sender``), or the slot int.
+    # Keys that can't be pinned publish no element fields.
     element_base_variable: NotRequired[str]
     element_member_path: NotRequired[list[str]]
     element_key_param_index: NotRequired[int | None]
-
-
-# ---------------------------------------------------------------------------
-# SetDescriptor — instructions for a membership predicate.
-# ---------------------------------------------------------------------------
 
 
 SetKind = Literal[
@@ -167,18 +112,9 @@ class EventHint(TypedDict):
 
 
 class ValuePredicate(TypedDict):
-    """Filter on the *value* a mapping read returns.
-
-    The static layer used to collapse ``map[k] == const`` into
-    ``truthy_value`` only, dropping both the operator and the RHS
-    structure. ``ValuePredicate`` preserves the polarity-folded form so
-    downstream backends (HyperSync direct replay, durable indexer,
-    trace replay) can filter latest-value state by the predicate the
-    contract actually checks.
-
-    Always describes the **allowed** value(s) — i.e. an
-    ``if (m[k] != 10) revert`` source ends up as
-    ``op="eq", rhs_values=["10"]``.
+    """Filter on the value a mapping read returns, polarity-folded so it states the allowed values (``if (m[k] != 10)
+    revert`` gives ``op="eq", rhs_values=["10"]``), so backends can filter latest values by what the contract
+    checks.
     """
 
     op: Literal["eq", "ne", "lt", "lte", "gt", "gte", "in", "any_nonzero"]
@@ -193,11 +129,7 @@ class SetDescriptor(TypedDict):
     storage_slot: NotRequired[str | None]
     key_sources: list[Operand]
     truthy_value: NotRequired[str | None]
-    # First-class form of the same constraint ``truthy_value`` partially
-    # captured. Adapters that understand value predicates (D.2-D.5)
-    # filter members by ``op``+``rhs_values`` against latest mapping
-    # values; older adapters that only read ``truthy_value`` keep
-    # working unchanged.
+    # Full form of ``truthy_value``; older adapters keep reading ``truthy_value``.
     value_predicate: NotRequired[ValuePredicate | None]
     enumeration_hint: NotRequired[list[EventHint]]
     authority_contract: NotRequired[AuthorityContract | None]
@@ -206,11 +138,6 @@ class SetDescriptor(TypedDict):
     callee_function: NotRequired[str | None]
     callee_signature: NotRequired[str | None]
     callee_selector: NotRequired[str | None]
-
-
-# ---------------------------------------------------------------------------
-# LeafPredicate + PredicateTree.
-# ---------------------------------------------------------------------------
 
 
 LeafKind = Literal[
@@ -233,8 +160,7 @@ LeafOperator = Literal[
     "falsy",
 ]
 
-# The ordering subset of ``LeafOperator`` — the only operators a swap or a
-# ``ValuePredicate.op`` threshold form admits.
+# The ordering operators swaps and threshold predicates allow.
 ComparisonOperator = Literal["lt", "lte", "gt", "gte"]
 
 AuthorityRole = Literal[
@@ -263,41 +189,24 @@ class LeafPredicate(TypedDict):
     parameter_indices: list[int]
     expression: str
     basis: list[str]
-    # external_bool / bool-result provenance (the caller-taint default's
-    # structural discriminators — absent on trees built before they were
-    # stamped, and consumers must tolerate that):
-    # declared callee mutability: "view" / "pure" / "nonview" (effectful
-    # external, incl. wrapper libraries whose body reaches an external
-    # call) / "nonview_library" (effectful library touching only the
-    # contract's own storage).
+    # Caller-taint discriminators, absent on older trees. Callee mutability: ``view``/``pure``, ``nonview`` (effectful
+    # external, including wrapper libraries that make external calls), or ``nonview_library`` (effectful, own storage
+    # only).
     callee_state_mutability: NotRequired[str | None]
-    # The RevertGate kind that produced this leaf ("require",
-    # "external_call_revert", "try_catch_revert", …): a result-checked
-    # require gates on the returned bool; a void statement call gates on
-    # the callee's entire revert surface.
+    # The producing RevertGate kind: a result-checked require gates on the bool; a void statement call on its whole
+    # revert surface.
     gate_kind: NotRequired[str | None]
-    # Canonical ABI signature of the callee (arg TYPES, used e.g. for the
-    # bytes32[] merkle-witness discriminator — never the callee name).
+    # Canonical callee signature (argument types, e.g. the ``bytes32[]`` merkle-witness discriminator), never the name.
     callee_signature: NotRequired[str | None]
-    # Where the one-shot latch this leaf reads lives on-chain, so resolution
-    # can read its live value (consumed vs live) against the deployment
-    # address. Stamped by ``one_shot.apply_one_shot_pass`` on the version-var
-    # leaf of an initializer-family gate; absent everywhere else. Keys:
-    # ``kind`` ("storage"|"getter"), ``slot``/``byte_offset``/``size_bytes``/
-    # ``value_type``/``variable`` for storage reads, ``selector`` for getter
-    # reads, ``expected_version`` (reinitializer target), ``standard``.
+    # Where the one-shot latch lives, so resolution can read consumed vs live (``one_shot.apply_one_shot_pass``, version
+    # leaves only). Keys: ``kind`` (storage|getter), ``slot``/``byte_offset``/``size_bytes``/``value_type``/``variable``
+    # or ``selector``, ``expected_version``, ``standard``.
     one_shot_latch: NotRequired[dict[str, Any] | None]
-    # True when the leaf matched the name-free structural latch detector but
-    # NOT a recognized initializer standard. A candidate never changes the
-    # badge statically — only a confirmed on-chain latch read does.
+    # Matched the name-free latch detector but no initializer standard; only an on-chain read can make it a badge.
     one_shot_candidate: NotRequired[bool]
-    # Operands an ADDITIVE sub-expression fed this comparison and the two-slot
-    # ``operands`` list could not hold (``_stamp_absorbed_operands``). A SIBLING of
-    # ``operands``, never a replacement: consumers of ``operands`` see the same list
-    # they always saw, and a consumer that needs the whole compared expression
-    # (the A7 pause-window reader) takes the union. Absent when the comparison read
-    # no additive sub-expression; an opaque ``computed`` member inside it is a
-    # not-determined marker, not a proof that nothing more was read.
+    # Operands an additive sub-expression fed this comparison that the two-slot ``operands`` couldn't hold
+    # (``_stamp_absorbed_operands``). A sibling list; consumers needing the whole expression take the union. An opaque
+    # ``computed`` member is not determined.
     absorbed_operands: NotRequired[list[Operand]]
 
 
@@ -308,29 +217,20 @@ class PredicateTree(TypedDict, total=False):
     op: PredicateOp
     children: list["PredicateTree"]
     leaf: LeafPredicate | None
-    # ROOT-node-only marker: this tree was built by a builder that runs the
-    # absorbed-operand recorder over every comparison leaf. It exists so that a
-    # MISSING ``absorbed_operands`` is readable. With the marker it means "this
-    # comparison read no additive sub-expression"; WITHOUT it (every tree persisted
-    # before A7) it means "we do not know what the comparison read", because a
-    # two-slot operand list silently drops one side of ``block.timestamp -
-    # pausedUntil < 2592000``. Any reader that concludes something from an operand's
-    # ABSENCE must require this marker — see ``effects.calldata._absorption_recorded``
-    # and the ``no_time_reference`` (proven-indefinite-freeze) state it gates.
+    # Root-only: this tree's builder ran the absorbed-operand recorder, so a missing ``absorbed_operands`` means none.
+    # Older trees silently dropped one side of comparisons, so conclusions from absence (``effects.calldata``'s
+    # ``no_time_reference``) must require this marker.
     operand_absorption: NotRequired[str]
-    # ROOT-node-only: one-shot latch candidate found on a require-bearing
-    # modifier rather than a lowered leaf (the guard saturated in folding), so
-    # it cannot ride a LeafPredicate. Consumed by resolution's one-shot probe.
+    # Root-only: a latch candidate found on a require-bearing modifier whose guard saturated, so it can't ride a leaf.
+    # Read by the one-shot probe.
     one_shot_candidate_latch: NotRequired[dict[str, Any]]
 
 
-# Value of ``PredicateTree.operand_absorption``. A single state, because the only
-# question a reader asks is "did the recorder run"; absence is the other answer.
+# The only question is whether the recorder ran; absence is the other answer.
 OperandAbsorption = Literal["recorded"]
 OPERAND_ABSORPTION_RECORDED: Final[OperandAbsorption] = "recorded"
 
-# What an admin-set state variable's writer set proves about the target: minted
-# by the effects pass, matched by the scoring plane and the calldata prober.
+# Minted by the effects pass, matched by scoring and the calldata prober.
 StateVarTargetKind = Literal["constant", "immutable", "storage_setter", "storage_no_setter"]
 TARGET_KIND_STORAGE_SETTER: Final[StateVarTargetKind] = "storage_setter"
 TARGET_KIND_STORAGE_NO_SETTER: Final[StateVarTargetKind] = "storage_no_setter"
@@ -338,16 +238,9 @@ STATE_VAR_TARGET_KINDS: frozenset[str] = frozenset(get_args(StateVarTargetKind))
 
 
 def mark_operand_absorption_recorded(tree: PredicateTree | None) -> None:
-    """Stamp :data:`OPERAND_ABSORPTION_RECORDED` on a tree ROOT. Idempotent, and
-    applied once per finished tree rather than per node: the marker is a statement
-    about the BUILDER, so one per persisted tree is the whole fact."""
+    """Stamp the absorption marker on a tree root (idempotent; it describes the builder, so once per tree)."""
     if isinstance(tree, dict):
         tree["operand_absorption"] = OPERAND_ABSORPTION_RECORDED
-
-
-# ---------------------------------------------------------------------------
-# Helpers for constructing canonical predicate values.
-# ---------------------------------------------------------------------------
 
 
 def make_leaf_node(leaf: LeafPredicate) -> PredicateTree:

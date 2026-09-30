@@ -47,7 +47,6 @@ from .slither_compat import (
     Variable,
 )
 
-
 # Derived from the published Literal so the two can't drift.
 SOURCE_KINDS: tuple[OperandSource, ...] = get_args(OperandSource)
 

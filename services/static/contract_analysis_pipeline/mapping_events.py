@@ -16,11 +16,8 @@ class WriterEventSpec(TypedDict):
     indexed_positions: list[int]
     direction: Literal["add", "remove", "set"]
     writer_function: str
-    # Position of the assigned value in the event's args (D.1). For
-    # ``add``/``remove`` semantics the assigned value is implicit so
-    # this is ``None``; for ``set`` semantics it points at the topic
-    # / data slot carrying the new value, e.g. ``OwnerSet(addr, val)``
-    # would record ``key_position=0, value_position=1``.
+    # Position of the assigned value in the event's args: ``None`` for ``add``/``remove``; for ``set``, e.g.
+    # ``OwnerSet(addr, val)`` is ``key_position=0, value_position=1``.
     value_position: int | None
 
 
@@ -98,13 +95,8 @@ def _index_base_mapping_name_and_keys(index_ir: Any, definitions: dict[str, Any]
         if left_name:
             visited.add(left_name)
         defining = definitions.get(left_name)
-        # A ``Member`` chain between Index levels either resolves to an inner
-        # Index (nested mapping ``m[k].field[j]`` — keep walking) or bottoms out
-        # at a struct base. When that base is a storage struct reached through a
-        # pointer (OZ v5 / ERC-7201 namespaced storage,
-        # ``$._roles[role][account]``), ``left`` is only a synthetic ref, so the
-        # *field* name (``_roles``) is the logical mapping — capture the field
-        # closest to the Index and prefer it when bottoming out.
+        # Through an ERC-7201 struct pointer (``$._roles[role][account]``), ``left`` is synthetic, so the field nearest
+        # the Index is the logical mapping.
         member_field: str | None = None
         while _ir_name(defining) == "Member":
             if member_field is None:
@@ -123,15 +115,8 @@ def _index_base_mapping_name_and_keys(index_ir: Any, definitions: dict[str, Any]
 
 
 def _direction_of_write(value_var: Any) -> Literal["add", "remove", "set"] | None:
-    """Classify a mapping write by the assigned value.
-
-    Returns ``"add"`` / ``"remove"`` for constant 1/0 (Maker
-    ``wards[u] = 1`` shape) and ``"set"`` for variable assignments
-    (``balances[u] = amount`` shape) where the value has to be
-    decoded from the emitted event / trace at indexing time. PR D's
-    backends consume the ``set`` direction; PR-A-era code paths
-    only check for ``add``/``remove`` so the new value is invisible
-    to them — exactly what we want.
+    """``"add"``/``"remove"`` for constant 1/0 (Maker ``wards[u] = 1``), ``"set"`` for variable values decoded from
+    the event at index time.
     """
     if value_var is None:
         return "remove"
@@ -155,22 +140,13 @@ def _direction_of_write(value_var: Any) -> Literal["add", "remove", "set"] | Non
 
 
 def _abi_type(type_obj: Any) -> str:
-    """Canonical ABI type string used to derive the event topic0.
-
-    The topic0 keccak must hash the *canonical* ABI signature (the one solc
-    emits), where every non-elementary type is collapsed to its ABI head:
-    contract/interface -> ``address``, enum -> ``uint8``, user-defined value
-    type -> its underlying elementary type, array -> ``canonical(elem)[N?]``,
-    struct -> ``(canonical members...)``. Slither's ``str(type)`` and
-    ``Event.full_name`` instead carry the *declared* names (``IGem``,
-    ``Vat.Status``, ``IGem[]``), so they are non-canonical and must not reach
-    the keccak. Recurse so nested shapes (``Foo[]``, ``Foo[][2]``, structs of
-    interfaces) canonicalize fully.
+    """Canonical ABI type for the event topic0: non-elementary types collapse to their ABI head (contract to
+    ``address``, enum to ``uint8``, UDVT to underlying, arrays and structs recursively). Slither's declared names
+    (``IGem``, ``Vat.Status``) would hash to a topic never logged.
     """
     if type_obj is None:
         return "unknown"
-    # Imported lazily to keep this module importable without Slither side
-    # effects, mirroring the rest of the static pipeline's type handling.
+    # Lazy, to keep the module importable without Slither side effects.
     from slither.core.declarations.contract import Contract
     from slither.core.declarations.enum import Enum
     from slither.core.declarations.structure import Structure
@@ -185,7 +161,6 @@ def _abi_type(type_obj: Any) -> str:
             return f"{inner}[{length}]"
         return f"{inner}[]"
     if isinstance(type_obj, TypeAlias):
-        # ``type Foo is uint256`` — collapse to the underlying elementary type.
         return _abi_type(getattr(type_obj, "underlying_type", None))
     if isinstance(type_obj, UserDefinedType):
         underlying = getattr(type_obj, "type", None)
@@ -214,13 +189,8 @@ def _event_metadata(event: Any) -> _EventMetadata | None:
     name = getattr(event, "name", "") or ""
     elems = list(getattr(event, "elems", []) or [])
     arg_types = [_abi_type(getattr(elem, "type", None)) for elem in elems]
-    # Build the canonical signature from ``arg_types`` (Contract->address,
-    # Enum->uint8, recursive arrays/structs/UDVT). ``Event.full_name`` carries
-    # the *declared* type names (``IGem``, ``Vat.Status``, ``IGem[]``), so its
-    # keccak never matches the on-chain topic0 whenever a parameter is a
-    # non-elementary type. Derive from ``elems`` whenever the event has
-    # parameters; only fall back to ``full_name`` when ``elems`` is unavailable
-    # (no params, or a producer that could not introspect them).
+    # Derive the signature from ``elems`` whenever there are parameters: ``Event.full_name`` carries declared type names
+    # that hash wrong.
     if name and elems:
         signature = f"{name}({','.join(arg_types)})"
     else:
@@ -275,10 +245,7 @@ def _extract_event_emissions(
             if _ir_name(ir) != "EventCall":
                 continue
             name = getattr(ir, "name", "") or ""
-            # Slither types ``EventCall.name`` as ``str | Constant``; a Constant
-            # slips through for events emitted via an aliased reference (seen on
-            # Morpho). Coerce so the downstream signature handling never calls
-            # ``.split('(')`` on a non-str.
+            # ``EventCall.name`` may be a Constant (aliased emits, seen on Morpho).
             if not isinstance(name, str):
                 name = str(name)
             arguments = list(getattr(ir, "arguments", []) or [])
@@ -318,10 +285,7 @@ def discover_mapping_writer_events(contract: Any) -> list[WriterEventSpec]:
     for function in _contract_functions(contract):
         if getattr(function, "is_constructor", False):
             continue
-        # ``_extract_index_writes`` is the authoritative signal: it resolves
-        # writes through struct-field / storage-pointer Member chains (OZ v5
-        # namespaced storage) that ``_written_mappings`` — contract-level
-        # mapping state variables only — does not see. Gate on it directly.
+        # ``_extract_index_writes`` also sees namespaced-storage writes that ``_written_mappings`` misses.
         index_writes = _extract_index_writes(function)
         if not index_writes:
             continue
@@ -362,20 +326,9 @@ def discover_mapping_writer_events(contract: Any) -> list[WriterEventSpec]:
 
 
 def member_witness_record(spec: WriterEventSpec) -> dict[str, Any]:
-    """JSON-clean correspondence record for the monitoring plane's F3
-    qualification — the proof that an occurrence of this event names the entry
-    that was written.
-
-    Sibling of ``predicate_artifacts._value_writer_spec`` rather than a reuse of
-    it: that one hard-codes ``direction: "set"`` and requires a non-null
-    ``value_position``, which drops exactly the ``add``/``remove`` specs
-    (``DenyFrom(address)``) whose whole payload is the key. Here the real
-    direction rides and ``value_position`` may be ``None`` — an event that
-    states no value states none, and the consumer publishes a key and a
-    direction without inventing a value.
-
-    ``key_positions_by_index`` is dropped for the same reason it is dropped
-    there: its ``int`` keys do not survive a JSONB round-trip.
+    """JSON-clean correspondence record for monitoring's member qualification: proof an occurrence names the written
+    entry. Unlike ``_value_writer_spec`` it keeps the real direction and allows ``value_position=None``
+    (``DenyFrom(address)``), and drops int-keyed ``key_positions_by_index``.
     """
     value_position = spec.get("value_position")
     return {
@@ -391,15 +344,9 @@ def member_witness_record(spec: WriterEventSpec) -> dict[str, Any]:
 
 
 def multi_entry_writers(contract: Any) -> set[tuple[str, str]]:
-    """``(mapping_name, writer_function)`` pairs where ONE call writes more than
-    one entry of the mapping.
-
-    ``discover_mapping_writer_events`` deduplicates on
-    ``(mapping, event_signature, direction)``, so an ERC-20 ``transfer`` —
-    ``balances[from]`` and ``balances[to]`` under a single ``Transfer`` — keeps
-    only the first of the two writes and yields a record that names one entry.
-    A consumer publishing that record's key would name the sender and say
-    nothing about the recipient, while claiming to describe the event.
+    """``(mapping, writer)`` pairs where one call writes several entries: the writer-event dedup keeps only the first
+    (``transfer`` writes both ``balances[from]`` and ``balances[to]`` under one ``Transfer``), which would name
+    only the sender.
     """
     out: set[tuple[str, str]] = set()
     for function in _contract_functions(contract):
@@ -418,17 +365,9 @@ def multi_entry_writers(contract: Any) -> set[tuple[str, str]]:
 
 
 def member_witness_records(contract: Any) -> dict[tuple[str, str], dict[str, Any]]:
-    """``(mapping_name, event_signature)`` → the one correspondence record that
-    pair proves.
-
-    Two omissions, each because the event does not state a single entry change:
-
-      * a pair matched by several specs that disagree on key/value position or
-        direction — the event says an entry moved without saying which way; and
-      * a pair whose writer changes SEVERAL entries of the mapping in one call
-        (:func:`multi_entry_writers`) — the record names one of them, and a
-        one-entry claim over a two-entry write is a false description of the
-        event, not a partial one.
+    """``(mapping, event signature)`` -> its one correspondence record, omitting pairs whose specs disagree on
+    positions or direction, and pairs whose writer changes several entries in one call (a one-entry claim would
+    misdescribe the event).
     """
     multi_entry = multi_entry_writers(contract)
     by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -454,14 +393,8 @@ def _match_event_value_position(
     event_signature: str,
     key_position: int,
 ) -> int | None:
-    """Locate the value argument's position in the matched event.
-
-    Used by D.1+: when ``map[k] = v`` writes are mirrored by an event
-    like ``OwnerSet(addr indexed, uint256)``, the value lives at a
-    different arg position than the key. We match by identity against
-    the value-var that drove the write; fall back to ``None`` so
-    consumers (durable indexer, on-demand replay) skip value-aware
-    decoding rather than guessing.
+    """The value argument's position in the matched event (by identity with the written value), or ``None`` so
+    consumers skip value decoding rather than guess.
     """
     if value_var is None:
         return None

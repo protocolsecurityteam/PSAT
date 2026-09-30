@@ -1,20 +1,9 @@
-"""Single guarded import boundary for the Slither IR symbols the pipeline uses.
+"""The one guarded import of the Slither IR symbols the pipeline uses; passes gate on ``SLITHER_AVAILABLE`` and
+publish ``not_determined`` when it is false. (Slither is imported unguarded elsewhere, so in practice it's always
+true.)
 
-Every pass gates its analysis on ``SLITHER_AVAILABLE`` and publishes
-``not_determined`` when it is false. Today the flag is effectively always true in
-this codebase — the package ``__init__`` imports slither unguarded via ``core.py``
-and ``shared.py`` — so the fallback below preserves the reach of the seven
-per-module guards it replaced rather than promising a slither-less import of the
-whole package. Routing the names through one module keeps one ``try``/``except``
-instead of seven, and keeps the names unconditionally bound for consumers.
-
-When Slither is absent, attribute lookups on this module hand back a placeholder
-class that raises on any use — including ``isinstance``/``issubclass``,
-attribute access, and calls — and each name resolves to the SAME placeholder on
-every lookup, so identity-based dispatch (``type(ir) in {...}``) cannot silently
-miss. A guard-less use therefore still fails loudly, the way the previous
-``NameError`` did — it must never resolve to a silent ``isinstance`` False, which
-would publish an unwitnessed negative.
+Without Slither, each name resolves to the same placeholder class, which raises on any use including ``isinstance``, so
+a guard-less use fails loudly instead of silently returning False.
 """
 
 from __future__ import annotations

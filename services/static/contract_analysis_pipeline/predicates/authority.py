@@ -10,7 +10,6 @@ from ..predicate_types import (
     SetDescriptor,
 )
 
-
 _CALLER_SOURCES = ("msg_sender", "tx_origin", "signature_recovery")
 # Sources that can carry an address, used only to qualify the other side of ``msg.sender == X``. ``computed``, ``top``
 # and ``block_context`` are opaque, not authorities.
