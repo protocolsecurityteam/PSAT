@@ -1,20 +1,8 @@
-"""Cross-process cache for mapping_enumerator hypersync scans.
+"""Cross-process cache for mapping_enumerator HyperSync scans, one row per ``(chain, address, specs_hash)``, so the
+resolution and policy stages don't repeat the same slow scan.
 
-A row per ``(chain, address, specs_hash)`` holding the
-``EnumerationResult`` from ``services.resolution.mapping_enumerator``.
-Workers running the resolution and policy stages on the same job no
-longer re-pay the 60s hypersync pagination — they hit this row instead.
-
-The module is deliberately small and stateless — every entry point
-opens its own short-lived ``SessionLocal()`` so callers (the
-mapping_enumerator sync wrapper) don't have to plumb a session through
-the resolution graph. Reads and writes commit independently; partial
-results are visible to other processes immediately.
-
-Cache freshness is wall-clock TTL (env
-``PSAT_MAPPING_ENUMERATION_CACHE_TTL_S``, default 1800s) — same default
-as the legacy in-process cache, so behaviour is unchanged for the
-single-process case while the cross-process case stops re-scanning.
+Each entry point opens its own short session; writes commit immediately. Freshness is a wall-clock TTL
+(``PSAT_MAPPING_ENUMERATION_CACHE_TTL_S``, default 1800s), matching the in-process cache.
 """
 
 from __future__ import annotations
@@ -42,9 +30,8 @@ def _ttl_seconds() -> float:
 
 
 def is_enabled() -> bool:
-    """Env-gated kill switch. Defaults ON; tests opt out via
-    ``PSAT_MAPPING_ENUMERATION_DB_CACHE=0`` when they want to drive
-    the in-process layer in isolation.
+    """Env kill switch, default on; tests set ``PSAT_MAPPING_ENUMERATION_DB_CACHE=0`` to exercise the in-process
+    layer alone.
     """
     return os.getenv("PSAT_MAPPING_ENUMERATION_DB_CACHE", "1").lower() in ("1", "true", "yes")
 
@@ -54,21 +41,11 @@ def specs_fingerprint(
     *,
     value_predicate: dict[str, Any] | None = None,
 ) -> str:
-    """Stable SHA-256 of the normalized writer-spec list.
+    """Stable SHA-256 of the normalized writer specs.
 
-    Only the fields that affect the enumeration semantics participate:
-    event_signature, mapping_name, direction, key_position, and the
-    sorted set of indexed_positions. A change to any of these yields a
-    fresh cache row instead of silently returning a stale enumeration
-    keyed off prior config.
-
-    D.1+: ``value_position`` and the ``value_predicate`` (op +
-    rhs_values + value_type) are folded into the hash too so that an
-    "set ev → latest value per key, filter by op" pass can't return a
-    cache row populated by a "set ev → latest value, filter by
-    different op" pass on the same address. ``value_position=None``
-    and ``value_predicate=None`` collapse back to the legacy
-    fingerprint (the JSON keys are just absent in the canonical form).
+    Includes the fields that affect enumeration (event_signature, mapping_name, direction, key_position, sorted
+    indexed_positions) and, since D.1, ``value_position`` and ``value_predicate``, so passes with different predicates
+    don't share rows. When those are None the fingerprint equals the legacy one.
     """
     legacy_specs = [
         {
@@ -82,8 +59,7 @@ def specs_fingerprint(
     ]
     has_new_fields = value_predicate is not None or any(s.get("value_position") is not None for s in writer_specs)
     if not has_new_fields:
-        # Legacy fingerprint — must remain byte-identical to pre-D.1
-        # output so existing cache rows stay valid after the upgrade.
+        # Must stay byte-identical to pre-D.1 so existing rows remain valid.
         canonical = json.dumps(legacy_specs, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     extended_specs = []
@@ -111,15 +87,9 @@ def find_fresh(
     specs_hash: str,
     ttl_s: float | None = None,
 ) -> dict[str, Any] | None:
-    """Return the cached EnumerationResult if a row exists and is fresher
-    than the TTL; ``None`` otherwise. The caller treats ``None`` as a
-    miss and runs the actual hypersync scan.
+    """The cached EnumerationResult if fresher than the TTL, else ``None`` (a miss).
 
-    A stale row is intentionally *not* returned as a degraded fallback —
-    the caller may want partial data, but baking that into the cache
-    layer would hide the policy decision. If a future caller wants a
-    "stale-OK" mode, expose it via a separate ``find_any`` rather than
-    re-purposing this entry point.
+    Stale rows aren't returned as a fallback; add a separate ``find_any`` if that's ever wanted.
     """
     chain_norm = chain_cache_token(chain)
     addr_norm = address.lower()
@@ -160,19 +130,11 @@ def upsert(
     specs_hash: str,
     result: dict[str, Any],
 ) -> None:
-    """Upsert the EnumerationResult for the key. Commits its own
-    short-lived transaction so the row is visible to other processes
-    immediately.
+    """Upsert the result in its own short transaction.
 
-    Transient failures (connection reset, deadlock, statement timeout)
-    are swallowed and logged — the cache is a pure optimization and a
-    lost write must not break the resolution pipeline that just produced
-    a valid enumeration. ``DataError`` is not that: it means the value
-    the code produced does not fit the schema the code declares, so
-    retrying can never help and the *silence* is the damage — a rejected
-    upsert leaves the previous row intact, and an in-TTL ``complete``
-    then outlives the truncated re-scan that should have replaced it.
-    Those raise, after a degraded breadcrumb.
+    Transient DB failures are logged and swallowed (the cache is an optimization). ``DataError`` raises after a degraded
+    breadcrumb: the value doesn't fit the schema, retrying can't help, and a rejected upsert would leave an older in-TTL
+    ``complete`` row serving in place of a truncated re-scan.
     """
     chain_norm = chain_cache_token(chain)
     addr_norm = address.lower()

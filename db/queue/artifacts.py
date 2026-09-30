@@ -1,4 +1,4 @@
-"""Artifact and source-file storage (inline + object-storage backed)."""
+"""Artifact and source-file storage (inline and object-storage backed)."""
 
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ logger = logging.getLogger("db.queue")
 
 
 def count_analysis_children(session: Session, root_job_id: str) -> int:
-    """Count analysis jobs (jobs with an address) linked to a root job."""
     from sqlalchemy import func
 
     count = (
@@ -43,15 +42,13 @@ def count_analysis_children(session: Session, root_job_id: str) -> int:
 
 
 def _artifact_row_to_value(artifact: Artifact) -> dict | list | str | None:
-    """Resolve an Artifact row to its decoded payload (handles inline + storage).
+    """Resolve an Artifact row to its payload (inline or storage).
 
-    Three outcomes, deliberately distinguishable:
-      * a value — the body was read;
-      * ``StorageKeyMissing`` — the row names a key and no object exists at any
-        candidate for it (proven-absent);
-      * ``StorageKeyAbsent`` — the row names no key and holds no inline body, so
-        whether a body exists is not determined.
-    ``None`` is returned only when the row genuinely stores a null payload.
+      * a value: the body was read;
+      * ``StorageKeyMissing``: no object exists at any candidate for the key (proven absent);
+      * ``StorageKeyAbsent``: no key and no inline body (not determined).
+
+    ``None`` only when the row really stores null.
     """
     if artifact.storage_key:
         client = get_storage_client()
@@ -69,8 +66,7 @@ def _artifact_row_to_value(artifact: Artifact) -> dict | list | str | None:
 
 
 def _mirror_contract_flags_to_job(session: Session, job_id: Any, name: str, data: Any) -> None:
-    """Mirror ``contract_flags.is_proxy`` onto ``Job.is_proxy`` so /api/jobs
-    can answer the proxy-flag question without resolving the artifact body."""
+    """Mirror ``contract_flags.is_proxy`` onto ``Job.is_proxy`` for /api/jobs."""
     if name != "contract_flags" or not isinstance(data, dict):
         return
     is_proxy = data.get("is_proxy") is True
@@ -78,16 +74,11 @@ def _mirror_contract_flags_to_job(session: Session, job_id: Any, name: str, data
 
 
 def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, text_data: str | None = None) -> None:
-    """Upsert an artifact for a job (unique on job_id + name).
+    """Upsert an artifact (unique on job_id + name).
 
-    When ``ARTIFACT_STORAGE_*`` env vars are set, the body is written to object
-    storage and only metadata (storage_key, stored_object_size_bytes, content_type) is stored
-    in Postgres. Otherwise, the body lives inline in ``data`` / ``text_data``.
-
-    If the storage put succeeds but the DB write fails, the storage object is
-    deleted — but only if the row did not pre-exist. Overwriting a previously-
-    committed artifact with the same deterministic key and then rolling back
-    leaves the object in place (deleting it would break the previous row).
+    With ``ARTIFACT_STORAGE_*`` set the body goes to object storage and only metadata is stored; otherwise it's inline.
+    If the DB write fails after the put, the object is deleted only if the row didn't already exist (a same-key
+    overwrite would otherwise break the old row).
     """
     client = get_storage_client()
     if client is not None:
@@ -153,7 +144,6 @@ def store_artifact(session: Session, job_id: Any, name: str, data: Any = None, t
 
 
 def get_artifact(session: Session, job_id: Any, name: str) -> dict | list | str | None:
-    """Read an artifact by job_id and name."""
     stmt = select(Artifact).where(Artifact.job_id == job_id, Artifact.name == name)
     artifact = session.execute(stmt).scalar_one_or_none()
     if artifact is None:
@@ -162,33 +152,13 @@ def get_artifact(session: Session, job_id: Any, name: str) -> dict | list | str 
 
 
 def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
-    """Read all artifacts for a job. Returns {name: data_or_text}.
+    """All artifacts for a job as ``{name: data_or_text}``, fetching storage bodies in parallel.
 
-    Storage-backed bodies are fetched in parallel via
-    ``StorageClient.get_many_results`` so a job with N storage artifacts pays
-    one HTTP round-trip's worth of latency instead of N.
-
-    **Fails closed.** If any row's body could not be read this raises rather
-    than returning a short dict. A short dict is byte-identical to "this job
-    produced fewer artifacts", so a bucket outage rendered as *"this analysis
-    has no effective_permissions"* — the substitution of an unanswered question
-    for a proven negative.
-
-    That includes the keyless row — a row with no ``storage_key`` and no inline
-    body, which ``_artifact_row_to_value`` raises ``StorageKeyAbsent`` for on
-    the single-row path. It is the *third* state (nothing was ever addressed,
-    so whether a body exists is not determined), and this function used to drop
-    it from the returned dict with no exception and no shortfall entry — a
-    silence one call away from ``/api/analyses/{id}``, which publishes exactly
-    these two maps.
-
-    Which exception says *why*, and the type is load-bearing because it is all
-    ``workers.retry_policy`` gets to see: ``StorageContentAbsent`` (every
-    shortfall proven absent at every candidate — determined, terminal) or
-    ``StorageContentNotDetermined`` (at least one body we could not ask about —
-    transient). Both carry ``values`` (what did read) plus the two shortfall
-    maps, so a caller that may legitimately degrade opts in explicitly and
-    publishes them beside it; see ``services/aggregations/analysis_detail``.
+    Fails closed: an unreadable body (including a keyless row, the third state) raises rather than returning a short
+    dict, which would look like the job produced fewer artifacts. ``StorageContentAbsent`` when every shortfall is
+    proven absent (terminal), else ``StorageContentNotDetermined`` (transient); ``workers.retry_policy`` classifies by
+    type. Both carry ``values`` and the shortfall maps for callers that opt into degrading (see
+    ``services/aggregations/analysis_detail``).
     """
     stmt = select(Artifact).where(Artifact.job_id == job_id)
     artifacts = session.execute(stmt).scalars().all()
@@ -204,10 +174,7 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
         elif artifact.text_data is not None:
             result[artifact.name] = artifact.text_data
         else:
-            # No key and no inline body: the same row shape ``_artifact_row_to_value``
-            # raises ``StorageKeyAbsent`` for. Not determined, never absent —
-            # dropping it here made a row that exists and a name the job never
-            # emitted the same answer.
+            # No key and no inline body: not determined, never absent.
             not_determined[artifact.name] = (
                 "row records no storage_key and holds no inline body — whether a body exists is not determined"
             )
@@ -220,10 +187,7 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
         for name, (key, content_type) in storage_lookups.items():
             read = reads.get(key)
             if read is None or not read.read:
-                # ``BlobRead`` already separated "the bucket answered, and holds
-                # no such object" from "the bucket could not be asked". Keep them
-                # in separate maps: which one it is decides both what the API may
-                # publish and whether the job is worth retrying.
+                # Keep proven-absent and couldn't-ask apart; it decides what the API may publish and whether to retry.
                 if read is not None and read.proven_absent:
                     proven_absent[name] = f"no object at any candidate for {key}"
                 else:
@@ -257,13 +221,10 @@ def get_all_artifacts(session: Session, job_id: Any) -> dict[str, Any]:
 
 
 def store_source_files(session: Session, job_id: Any, files: dict[str, str]) -> None:
-    """Bulk insert source files for a job (replaces existing).
+    """Replace a job's source files.
 
-    When object storage is configured, every body is uploaded first with the
-    path carried in user-metadata (so the path is recoverable from storage
-    alone). Only after all uploads succeed do we swap the DB rows. If any
-    upload fails, already-uploaded objects are deleted so the bucket does not
-    accumulate orphans pointing at nothing.
+    With object storage, every body is uploaded first (path in user metadata), then the DB rows are swapped; on any
+    upload failure the uploaded objects are deleted.
     """
     client = get_storage_client()
     if client is None:
@@ -273,11 +234,7 @@ def store_source_files(session: Session, job_id: Any, files: dict[str, str]) -> 
         session.commit()
         return
 
-    # Fan out the per-file uploads — Etherscan-verified contracts often have
-    # 30-100 source files and the prior sequential loop was paying one S3/MinIO
-    # RTT per file on the static-stage critical path. Threading-only: each
-    # ``client.put`` is an independent HTTP request to object storage with no
-    # shared session state.
+    # Parallel uploads (sources often have 30-100 files); each ``put`` is independent.
     from services.concurrency import parallel_map
 
     items = list(files.items())
@@ -315,7 +272,6 @@ def store_source_files(session: Session, job_id: Any, files: dict[str, str]) -> 
         raise failure
 
     try:
-        # All uploads succeeded — swap DB rows atomically.
         session.query(SourceFile).filter(SourceFile.job_id == job_id).delete()
         for path, key in entries:
             session.add(SourceFile(job_id=job_id, path=path, content=None, storage_key=key))
@@ -331,23 +287,11 @@ def store_source_files(session: Session, job_id: Any, files: dict[str, str]) -> 
 
 
 def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
-    """Returns {relative_path: file_content} for all source files of a job.
+    """``{relative_path: file_content}`` for a job's source files.
 
-    **Fails closed** on an unreadable body, raising ``StorageContentAbsent``
-    (every unread body proven absent at every candidate — determined, terminal)
-    or ``StorageContentNotDetermined`` (at least one we could not ask about —
-    transient), each carrying ``values`` (the files that did read) plus the
-    ``proven_absent`` / ``not_determined`` maps of path → why.
-
-    A row recording neither a key nor inline content is counted as
-    ``not_determined`` for the same reason: the row is evidence the path
-    belongs to the contract, and nothing was ever addressed for it.
-
-    Silently returning the short dict made "this contract has no source" and
-    "every body failed to load" the same answer, and the consumers act on it:
-    ``workers.static_worker`` compiles whatever it is handed, so a partial read
-    became a static analysis over a partial contract with no record that
-    anything was missing.
+    Fails closed on an unreadable body with ``StorageContentAbsent`` (terminal) or ``StorageContentNotDetermined``
+    (transient), carrying ``values`` and the ``proven_absent``/``not_determined`` maps. A keyless row counts as not
+    determined. A short dict would let ``workers.static_worker`` silently analyse a partial contract.
     """
     stmt = select(SourceFile).where(SourceFile.job_id == job_id)
     rows = session.execute(stmt).scalars().all()
@@ -366,11 +310,7 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
         elif row.content is not None:
             out[row.path] = row.content
         else:
-            # Neither a key nor a body: the row exists, so this path is part of
-            # the contract, but nothing was ever addressed for it. Not
-            # determined. Dropping it handed the static worker a source tree
-            # that silently omits a file — the same shape as the storage
-            # shortfall below, one branch earlier.
+            # The row proves the path belongs to the contract; nothing was addressed for it, so not determined.
             keyless[row.path] = "row records no storage_key and holds no inline content — content is not determined"
 
     if not storage_rows:
@@ -391,21 +331,15 @@ def get_source_files(session: Session, job_id: Any) -> dict[str, str]:
             )
         return out
 
-    # Fan out the storage GETs the same way ``store_source_files`` fans out
-    # the PUTs — these blocked the static + resolution + policy stages on
-    # 30-100 sequential MinIO/S3 RTTs each.
+    # Parallel GETs, mirroring ``store_source_files``.
     from services.concurrency import parallel_map
 
-    # Capture into a non-None local so the closure's type narrows past pyright
-    # (the loop above already raised when client was None for any storage_row).
+    # Narrows the type for the closure.
     storage_client = client
     assert storage_client is not None
 
     def _fetch(item: tuple[str, str]) -> tuple[str, str | StorageError]:
-        # Returns the body, or the storage error itself — the caller sorts by
-        # error type. Flattening a lost object and an unreachable bucket into
-        # one "unreadable" here is what made the whole read report as transient
-        # while the same key read directly reported terminal.
+        # Return the error itself so the caller can distinguish lost objects from an unreachable bucket.
         path, key = item
         try:
             return path, storage_client.get(key).decode("utf-8")
