@@ -1,17 +1,12 @@
 """Offline driver: distil every contract in memory, fold, and diff.
 
-Two feeding modes share one distillation and one fold (strategy §7.5). This CLI
-is the second: it never writes a signal row, so the differential oracle runs
-against a database it only reads. The persisted pipeline path uses the identical
-code with the signals written to ``function_score_signals`` in between.
+Never writes signal rows (except ``dirty``, which queues a re-fold), so the differential oracle runs against a read-only
+database.
 
     python -m services.scoring.cli score --protocol 1 [--out FILE]
     python -m services.scoring.cli differential --protocol 1 \
         --against scoring_prototype/score_v3.json [--out FILE]
     python -m services.scoring.cli dirty --protocol 1
-
-``dirty`` is the one persisting command: it queues the protocol so the score
-loop's next pass re-folds and persists. ``score`` never consumes the mark.
 """
 
 from __future__ import annotations
@@ -34,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 
 def distill_protocol_in_memory(session: Session, protocol_id: int) -> list[FunctionSignal]:
-    """Every contract's signals, distilled without persistence, in fold order."""
     from db.models import Contract
 
     contracts = session.query(Contract).filter(Contract.protocol_id == protocol_id).order_by(Contract.id).all()
@@ -45,15 +39,12 @@ def distill_protocol_in_memory(session: Session, protocol_id: int) -> list[Funct
 
 
 def score(session: Session, protocol_id: int) -> ScoreDocument:
-    # Imported here rather than at module scope so that importing this module —
-    # the differential helpers are used as a library — does not drag in the
-    # monitoring package and the job queue the score loop needs.
+    # Lazy so library use of the differential helpers doesn't import monitoring and the job queue.
     from services.scoring.loop import document_summary
 
     signals = distill_protocol_in_memory(session, protocol_id)
     document = compute_protocol_score(session, protocol_id, signals=signals)
-    # The same summary the score loop emits, so a CLI fold and a persisted one
-    # are the same line in the log stream and comparable against each other.
+    # Same summary line as the score loop, so CLI and persisted folds are comparable.
     logger.info("score document summary", extra=document_summary(document))
     return document
 
@@ -67,17 +58,10 @@ def document_json(document: ScoreDocument) -> dict[str, Any]:
     return payload
 
 
-# ---------------------------------------------------------------- differential
-
-
 def _keys_for(row: dict[str, Any], unit_field: str) -> set[str]:
     """Every address that could identify this row's unit, lowercased.
 
-    A merged Safe unit is named by an arbitrary member, and this scorer and the
-    prototype pick different ones, so matching on the published unit id alone
-    reports one disappearance plus one appearance for a row that never moved.
-    The member set and the gating principal are the identifiers that survive a
-    re-key.
+    Merged Safe units are named by an arbitrary member, and the scorer and prototype pick different ones.
     """
     keys: set[str] = set()
     unit = str(row.get(unit_field) or "").lower()
@@ -94,12 +78,9 @@ def _keys_for(row: dict[str, Any], unit_field: str) -> set[str]:
 
 
 def _identity_key(row: dict[str, Any]) -> tuple[str, str, str]:
-    """The triple that names one row of one document.
+    """The ``(principal_unit, capability, access_path)`` triple, unique per document.
 
-    ``(principal_unit, capability, access_path)`` is unique across a document's
-    findings and subsumed rows, so two rows carrying it are the same row and the
-    address-set match below — which is a *recovery* for units this scorer and the
-    prototype name differently — must never be asked about them.
+    Rows sharing it are never sent to the address-set recovery match.
     """
     return (
         str(row.get("principal_unit") or "").lower(),
@@ -111,17 +92,9 @@ def _identity_key(row: dict[str, Any]) -> tuple[str, str, str]:
 def _oracle_subsumed_rows(oracle: dict[str, Any]) -> tuple[list[dict[str, Any]], str, int | None]:
     """The oracle's subsumed rows, which shape they came from, and what was left.
 
-    The prototype documents in ``scoring_prototype/`` carry them at top level;
-    every document ``document_json`` writes carries them under ``provenance``.
-    Reading one place only mis-reads the other silently — as a whole population
-    of rows that are "added" because they were never looked for. ``absent`` is a
-    third state: an oracle with no subsumed rows is a different fact from one
-    this code failed to find them in, and the two must not spell the same.
-
-    A document carrying BOTH is answered by the top-level list — it is the
-    author's explicit statement about this document — but the population that
-    lost is counted and published, because rows dropped in silence come back as
-    ``added``, and the reader would have no way to tell that from a real one.
+    Prototype documents carry them at top level; ``document_json`` puts them under ``provenance``. ``absent`` is
+    distinct from empty. When both exist the top-level list wins, but the dropped count is published so lost rows don't
+    masquerade as ``added``.
     """
     top = oracle.get("subsumed_rows")
     nested = (oracle.get("provenance") or {}).get("subsumed_rows")
@@ -137,9 +110,7 @@ def _oracle_subsumed_rows(oracle: dict[str, Any]) -> tuple[list[dict[str, Any]],
 def _causes(previous: dict[str, Any], row: dict[str, Any]) -> list[str]:
     """What moved between two rows for the same (unit, capability, access path).
 
-    Analysed for EVERY matched pair, including rows matched only after a unit
-    re-key or an access-path split: a re-key that also changed the arithmetic
-    would otherwise be filed as a cosmetic relabel and its delta never explained.
+    Run for every matched pair, including re-keys and splits, so arithmetic changes aren't filed as relabels.
     """
     causes: list[str] = []
     if abs((row.get("raw_points") or 0) - (previous.get("raw_points") or 0)) > 1e-9:
@@ -163,15 +134,9 @@ def _causes(previous: dict[str, Any], row: dict[str, Any]) -> list[str]:
 def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, Any]:
     """Row-level diff against the prototype oracle, each delta with its cause.
 
-    Not byte-equality by design: this scorer consumes planes the prototype
-    predates and removes its defects, so every delta must be attributable to a
-    named divergence rather than explained away by a version bump.
-
-    Two rows are the same row when ``(principal_unit, capability, access_path)``
-    matches; only where no such twin exists does the address-set match run, and
-    it is a recovery for units the two documents name differently, not the
-    identity test. A document diffed against itself therefore reports nothing —
-    every delta published here is one the evidence moved.
+    Not byte-equality: every delta must be attributable to a named divergence. Rows match on ``(principal_unit,
+    capability, access_path)``; the address-set match is only a recovery for differently-named units. A document diffed
+    against itself reports nothing.
     """
     new_rows = list(document.findings) + list(document.provenance.get("subsumed_rows", []))
     oracle_subsumed, subsumed_source, subsumed_ignored = _oracle_subsumed_rows(oracle)
@@ -187,9 +152,7 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
     matched_new: set[int] = set()
     changed, removed, split = [], [], []
 
-    # Identity first, over ALL old rows, before any address-set match is tried:
-    # a row that is present in both documents must not be consumed as some other
-    # row's fuzzy candidate just because that row came first in the list.
+    # Identity matching first, so a row present in both can't be taken as another row's fuzzy candidate.
     identical: dict[int, dict[str, Any]] = {}
     identity_claimed: set[int] = set()
     for previous in old_rows:
@@ -227,13 +190,8 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
             for row in new_by_key.get((key, capability), []):
                 if id(row) in seen:
                     continue
-                # A row the identity pass claimed belongs to the old row that IS
-                # it. Offering it to a different old row as a recovery candidate
-                # publishes that row as changed — or split — on the strength of a
-                # shared unit address, and hides the disappearance of the row
-                # that actually went away. It stays available only to an old row
-                # carrying the same identity, which is the one case where two old
-                # rows can both name it.
+                # A row claimed by identity is only offered to an old row with the same identity; otherwise a shared
+                # unit address would hide a real disappearance.
                 if id(row) in identity_claimed and _identity_key(row) != prev_identity:
                     continue
                 seen.add(id(row))
@@ -253,9 +211,7 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
             continue
         for row in candidates:
             matched_new.add(id(row))
-        # The causes belong to the row this one IS, when one of the candidates
-        # carries its identity; ``max`` by raw_points otherwise compares against
-        # a different row and reports movement neither row made.
+        # Compare against the identity twin when present; max by raw_points would compare against a different row.
         identity_twin = next((r for r in candidates if _identity_key(r) == prev_identity), None)
         top = identity_twin or max(candidates, key=lambda r: r.get("raw_points") or 0.0)
         causes = _causes(previous, top)
@@ -276,9 +232,7 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
                         for r in sorted(candidates, key=lambda r: -(r.get("raw_points") or 0.0))
                     ],
                     "cause": "one row per ACCESS PATH: delayed value is charged at the delayed rung",
-                    # Computed against one named row as well: a split that ALSO
-                    # moved weakness, severity or the band must not hide behind
-                    # the split label.
+                    # So a split that also moved weakness, severity or band isn't hidden by the split label.
                     "caused_by": causes,
                     "arithmetic_changed": bool(causes),
                     "cause_computed_against": {
@@ -343,10 +297,8 @@ def differential(document: ScoreDocument, oracle: dict[str, Any]) -> dict[str, A
 
 
 def main(argv: list[str] | None = None) -> int:
-    # First, and before anything imports a session: the distiller and the planes
-    # log their degraded reads, and "see log" below names a log that was never
-    # configured otherwise. stdout stays the product — the document — and every
-    # diagnostic goes to stderr as JSON.
+    # First, before any session import, so degraded-read logs go somewhere. stdout is the document; diagnostics go to
+    # stderr as JSON.
     configure_logging()
     parser = argparse.ArgumentParser(prog="services.scoring.cli")
     sub = parser.add_subparsers(dest="command", required=True)

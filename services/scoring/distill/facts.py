@@ -30,19 +30,14 @@ from .self_service import _PROVENANCE_CALLER_GATE
 
 logger = logging.getLogger("services.scoring.distill")
 
-# Why the flow-asset plane produced no receiver map for a contract. A closed
-# vocabulary: the token is published on every refusal the empty map causes, so
-# "the producer stopped writing the artifact" and "the body is not the shape
-# this reader knows" stop spelling the same thing in the document.
+# Why the flow-asset plane produced no receiver map; published on every refusal it causes.
 ASSET_IDENTITY_LOADED = "loaded"
 ASSET_IDENTITY_JOB_ABSENT = "job_absent"
 ASSET_IDENTITY_ARTIFACT_ABSENT = "artifact_absent"
 ASSET_IDENTITY_ARTIFACT_MALFORMED = "artifact_malformed"
 ASSET_IDENTITY_NO_RECEIVERS = "no_receivers"
 
-# The W2 precondition's refusal arms, each naming the conjunct that failed.
-# Ordered by how far the walk got, so a signal that reached the invariant check
-# reports that rather than the coarser miss some other entry took.
+# W2 precondition refusals, ordered by how far the walk got so the furthest one is reported.
 W2_PLANE_ABSENT = "asset_identity_plane_absent"
 W2_NO_STATE_VAR_RECEIVER = "no_state_var_receiver"
 W2_SELECTOR_UNRESOLVED = "selector_unresolved"
@@ -55,12 +50,9 @@ _W2_ARM_RANK = (
     W2_INVARIANT_NOT_DETERMINED,
 )
 
-# How many orphaned contract ids one WARNING carries. A job can hold thousands;
-# the count is the fact and the ids are the sample that makes it actionable.
 _ORPHAN_SAMPLE = 20
 
-# Gate envelopes every signal carries, so the fold can read them without a
-# ``dict.get`` default standing in for an unread witness.
+# So the fold never reads a ``dict.get`` default in place of a witness.
 COMMON_GATES = ("exact_empty_credit", "latch_witness", "reach_magnitude_usd")
 FLOW_GATES = (
     "token_identity",
@@ -74,11 +66,7 @@ PAUSE_SET_GATES = ("pause_effective", "freeze_recovery_principals", "freeze_cove
 DESTINATION_GATES = ("destination_basis",)
 
 
-# The Solmate role mutators by SELECTOR, never by name. The escalation these
-# license asserts that the registry's owner can grant itself any role, and
-# ``setUserRole(bytes32)`` on an unrelated contract is not
-# ``setUserRole(address,uint8,bool)`` — a name match would let any homonym earn
-# the escalation. Keccak-4 of the canonical signatures.
+# By selector, not name, so homonyms like ``setUserRole(bytes32)`` can't earn the escalation.
 _SOLMATE_MUTATOR_SELECTORS: dict[str, str] = {
     "0x67aff484": "setUserRole(address,uint8,bool)",
     "0x0ea9b75b": "setRoleCapability(uint8,bytes4,bool)",
@@ -86,12 +74,7 @@ _SOLMATE_MUTATOR_SELECTORS: dict[str, str] = {
 }
 _TIMELOCK_ENTRYPOINTS = frozenset({"schedule", "scheduleBatch", "execute", "executeBatch"})
 
-# The witness tiers a REPOINT may be admitted on, as an allowlist. A repoint adds
-# a foreign entity to a reach set, so the tier that named it has to be one this
-# scorer can vouch for. Stated positively on purpose: a denylist of
-# ``policy_derived`` admits every tier nobody classified, and an absent or
-# unrecognised ``tier`` token resolves to ``not_determined`` — a witness that
-# proved nothing would have been the easiest of all to pass.
+# Allowlist, not denylist: an absent or unknown tier resolves to ``not_determined`` and must not pass.
 REPOINT_ADMISSIBLE_TIERS = frozenset(
     {WITNESS_TIER_BEHAVIORAL_OBSERVED, WITNESS_TIER_STANDARD_EXACT, WITNESS_TIER_IDIOM_STRUCTURAL}
 )
@@ -106,12 +89,8 @@ def _f(value: Any) -> float | None:
 
 
 def _proven_number(state: str, value: float) -> Tri[float]:
-    """A numeric gate envelope, checked to BE a number at construction.
-
-    The envelope's payload is free-form JSONB with no CHECK behind it, so the
-    only place its type can be established is where it is minted. A string that
-    happens to compare and multiply — ``"1e12"`` — would otherwise travel to the
-    value axis and charge a trillion dollars nobody witnessed.
+    """A numeric gate envelope, type-checked at construction: the JSONB payload is unchecked and a string "1e12"
+    would still multiply.
     """
     number = _f(value)
     if number is None:
@@ -120,7 +99,6 @@ def _proven_number(state: str, value: float) -> Tri[float]:
 
 
 def _is_true(value: Any) -> bool:
-    """A JSON truth that is *witnessed* true, never a truthy default."""
     return value is True or str(value).lower() == "true"
 
 
@@ -130,8 +108,6 @@ def _lower(value: Any) -> str:
 
 @dataclass
 class _ContractFacts:
-    """Everything the distiller reads once per contract."""
-
     contract_id: int
     protocol_id: int
     chain: str
@@ -144,34 +120,25 @@ class _ContractFacts:
     pause_unset_principals: list[dict[str, Any]] = field(default_factory=list)
     licensed_reach_entities: list[dict[str, Any]] = field(default_factory=list)
     asset_identity: dict[str, Any] = field(default_factory=dict)
-    # Why ``asset_identity`` is empty, from the closed vocabulary above. An empty
-    # map with no reason is the collapse this field exists to stop.
+    # Reason from the vocabulary above.
     asset_identity_state: str = ASSET_IDENTITY_JOB_ABSENT
-    # Every entity key this protocol's own ``contracts`` rows name, chain-scoped.
-    # A reach key that names nothing in here names nothing this document can
-    # answer for, and charging it would both invent reach and spend exposure room
-    # belonging to an entity in the perimeter.
+    # Protocol entity keys; a reach key outside this set names nothing this document can answer for.
     protocol_entities: set[str] = field(default_factory=set)
-    # How to read a stored transcript, for a verdict whose ``observed_residue``
-    # predates the execution record. ``None`` is the in-memory feeding mode with
-    # no session to read from, which reads as "not derivable here", never as
-    # "there is no execution".
+    # Recovers executions for verdicts predating the record. ``None`` (in-memory mode) means "not derivable here", not
+    # "no execution".
     transcripts: _TranscriptReader | None = None
 
 
 def distill_job_signals(
     session: Session, job: Any, *, contract_ids: Iterable[int] | None = None
 ) -> dict[int, list[FunctionSignal]]:
-    """One job's planes → its contracts' signal rows, grouped by ``contract_id``.
+    """One job's planes to its contracts' signal rows, grouped by ``contract_id``.
 
-    Grouped by ``contract_id`` and never by ``(contract_id, deployment_address)``:
-    the replace that persists these rows is scoped by contract alone, so a
-    contract whose functions appear at two deployment addresses must arrive in
-    ONE group or the second call would delete the first's rows.
+    Grouped by contract alone because the persisting replace is contract-scoped; splitting by deployment address would
+    make the second call delete the first's rows.
 
-    Targeted effects recovery owns no contracts through Job.id. Its explicit
-    code-contract IDs select complete contracts, including sibling functions,
-    while still requiring membership in the recovery job's protocol.
+    Targeted effects recovery owns no contracts via Job.id; its explicit contract IDs select whole contracts, still
+    restricted to the job's protocol.
     """
     from db.models import Contract
 
@@ -193,9 +160,7 @@ def distill_job_signals(
     orphaned: list[int] = []
     for contract in contracts:
         if contract.protocol_id is None:
-            # A contract with no protocol has no document to be scored into. It
-            # is a known orphaning class rather than a routine skip, so it is
-            # counted where the job can see it instead of vanishing here.
+            # Counted rather than skipped: a protocol-less contract is a known orphaning class.
             orphaned.append(int(contract.id))
             continue
         if contract_ids is None:
@@ -224,11 +189,9 @@ def distill_job_signals(
 def distill_contract_signals(
     session: Session, contract: Any, *, job_id: Any, facts_job_id: Any = None
 ) -> list[FunctionSignal]:
-    """Every signal for one contract. The unit both feeding modes share."""
     from .signals import _signals_for_function
 
-    # A recovery job reruns effects only. Flow-asset artifacts still belong to
-    # the original analysis job; signal provenance belongs to this new pass.
+    # Recovery reruns effects only; flow-asset artifacts belong to the original job.
     facts = _load_contract_facts(session, contract, job_id=facts_job_id or job_id)
     signals: list[FunctionSignal] = []
     for func in facts.functions:
@@ -237,40 +200,21 @@ def distill_contract_signals(
     return signals
 
 
-# ---------------------------------------------------------------- plane reads
-
-
-# Transcript bodies, keyed by the ``(job_id, artifact_name)`` a pointer resolves
-# to. An artifact body is immutable once written — the key is the identity of a
-# stored object, not of a mutable row — so caching it across contracts inside one
-# score run cannot make the fold read two different answers to one question
-# (inv. 11). Cleared by :func:`clear_transcript_cache` for tests that stand up a
-# fresh bucket under the same keys.
+# Artifact bodies are immutable, so caching by ``(job_id, artifact_name)`` can't give two answers (inv. 11). Tests clear
+# it via :func:`clear_transcript_cache`.
 _TRANSCRIPT_CACHE: dict[tuple[str, str], Any] = {}
 
 
 def clear_transcript_cache() -> None:
-    """Drop the process-level transcript cache. For tests, which reuse keys."""
     _TRANSCRIPT_CACHE.clear()
 
 
 class _TranscriptReader:
     """Reads the execution behind a verdict out of the transcript it points at.
 
-    The record belongs on ``effect_verdicts.observed_residue`` and is written
-    there at production time. Every verdict produced before that write existed
-    carries none — which is not a statement that no call was made, because the
-    transcript the verdict already points at holds that call verbatim. This
-    reader recovers it, so a figure that CAN name its execution does, and the
-    typed refusal is reserved for the ones that genuinely cannot.
-
-    The database is not written. Nothing here backfills; the derivation happens
-    on the read path and is discarded with the score run.
-
-    Every failure to reach the body is its own typed reason, and they are not
-    interchangeable: an artifact row that does not exist, a row naming no
-    storage key, and a transport error are three different things to a reader
-    deciding whether to look again.
+    Verdicts written before ``observed_residue`` carried the record still have the call in their transcript; this
+    recovers it on the read path without writing the DB. Missing row, missing storage key and transport errors are
+    distinct reasons.
     """
 
     def __init__(self, session: Session) -> None:
@@ -290,7 +234,6 @@ class _TranscriptReader:
         return EX.from_transcript(blob, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id)
 
     def _body(self, parts: tuple[str, str]) -> Any:
-        """The transcript body, or the typed reason token it could not be read."""
         if parts in _TRANSCRIPT_CACHE:
             return _TRANSCRIPT_CACHE[parts]
         from db.models import Artifact
@@ -303,21 +246,15 @@ class _TranscriptReader:
             if row is None:
                 body: Any = EX.REASON_TRANSCRIPT_UNSTORED
             else:
-                # The STORED key, never a constructed one: the prefix is per-job
-                # on this data (345 keys under one, 34 under another) and a
-                # reader that builds the key would miss a third of the corpus and
-                # report it as absence.
+                # Use the stored key: prefixes vary per job, and a constructed key would miss a third of the corpus.
                 body = _artifact_row_to_value(row)
         except StorageKeyAbsent:
             body = EX.REASON_STORAGE_KEY_MISSING
         except StorageKeyMissing:
             body = EX.REASON_TRANSCRIPT_UNSTORED
         except Exception as exc:
-            # A transport failure says nothing about the call, so it is its own
-            # reason and invites a retry rather than asserting an absence.
-            # ``transcript_job_id`` rather than ``job_id``: the transcript's job
-            # is not always the job this read runs under, and the formatter
-            # would drop a ``job_id`` key the ambient context already bound.
+            # A transport failure is its own, retryable reason. Logged as ``transcript_job_id`` because the ambient
+            # ``job_id`` may differ and the formatter would drop a duplicate key.
             logger.warning(
                 "transcript body unreadable",
                 extra={"transcript_job_id": str(job_id), "artifact_name": name, "exc_type": type(exc).__name__},
@@ -400,15 +337,9 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
         .all()
     }
 
-    # The backlink node is written AT THE GATING CONTRACT'S ADDRESS, on the gated
-    # contract's graph, and its payload names the gated contract. So the node
-    # that licenses THIS contract is the one whose own address is this contract —
-    # matching instead on the payload address selects the nodes whose gated
-    # contract is this one, which is the node's own contract every time and
-    # licenses this contract to reach itself. Protocol-scoped: another protocol's
-    # backlink names an entity outside this perimeter, and charging its value
-    # here would both invent reach and consume exposure room that belongs to this
-    # protocol's own entities.
+    # The backlink node sits at the gating contract's address on the gated contract's graph, so match on the node's own
+    # address; matching the payload would license the contract to reach itself. Protocol-scoped so other protocols'
+    # entities aren't charged.
     backlinks = (
         session.query(ControlGraphNode)
         .join(_Contract, _Contract.id == ControlGraphNode.contract_id)
@@ -425,10 +356,9 @@ def _load_contract_facts(session: Session, contract: Any, *, job_id: Any) -> _Co
 
 
 def _registry_owner(controller_values: list[Any]) -> dict[str, Any] | None:
-    """The Solmate registry's owner, and only where the authority is proven zero.
+    """The Solmate registry's owner, only where the authority is proven zero.
 
-    ``eth_call_impl_fallback`` reads are excluded: implementation storage reads
-    as zero, so an owner sourced from one witnesses nothing about the proxy.
+    ``eth_call_impl_fallback`` reads are excluded: implementation storage reads as zero.
     """
     zero_authority = False
     owner: dict[str, Any] | None = None
@@ -449,7 +379,6 @@ def _registry_owner(controller_values: list[Any]) -> dict[str, Any] | None:
 
 
 def _pause_unset_principals(facts: _ContractFacts) -> list[dict[str, Any]]:
-    """The recovery key sets on this contract, as references for the fold."""
     seen: dict[str, dict[str, Any]] = {}
     for func in facts.functions:
         if not _claim_ids(func).intersection({"pause.unset"}):
@@ -469,13 +398,7 @@ def _pause_unset_principals(facts: _ContractFacts) -> list[dict[str, Any]]:
 
 
 def _function_is_self_gated(facts: _ContractFacts, func: Any) -> bool:
-    """Whether THIS function's own resolved gate is the contract itself.
-
-    Keyed on the function being scored, never on a same-named sibling: a
-    self-gated ``grantRole`` says nothing about who can call the function that
-    sets the delay, and crediting one from the other hands every other path on
-    the contract a pass it never earned.
-    """
+    """Whether this function's own resolved gate is the contract itself. Never read off a same-named sibling."""
     principals = facts.principals.get(func.id, [])
     return bool(principals) and all(_lower(p.address) == facts.address for p in principals)
 
@@ -483,17 +406,9 @@ def _function_is_self_gated(facts: _ContractFacts, func: Any) -> bool:
 def _licensed_reach_entities(session: Session, backlinks: list[Any], address: str, chain: str) -> list[dict[str, Any]]:
     """Entities whose value this contract's gated functions may be charged with.
 
-    The backlink is a REACHABILITY licence and nothing else: it never types the
-    contract it names, it supplies no magnitude, and a mismatch is not an earned
-    negative — the mismatch payload is byte-identical to the never-read one, so
-    only the proven ``true`` arm is consumable and everything else stays
-    ``not_determined``.
-
-    ``backlinks`` are the nodes written AT this contract's address. The payload's
-    ``gated_contract_address`` must name the contract the node belongs to, which
-    is what makes the pair a licence rather than two unrelated facts sharing a
-    row. A licence onto this contract itself is dropped: it names no entity the
-    reach did not already hold.
+    A reachability licence only: no typing, no magnitude, and a mismatch is not a negative (its payload matches the
+    never-read one), so only proven ``true`` counts. The payload's ``gated_contract_address`` must name the node's own
+    contract; self-licences are dropped.
     """
     from db.models import Contract
 
@@ -509,13 +424,11 @@ def _licensed_reach_entities(session: Session, backlinks: list[Any], address: st
         if anchor is None or anchor.protocol_id is None:
             continue
         if _lower(backlink.get("gated_contract_address")) != _lower(anchor.address):
-            # The payload names a contract other than the one whose graph the
-            # node sits on. Two facts in one row is not a licence.
+            # Payload names a different contract: two facts, not a licence.
             continue
         anchor_chain = coalesce_chain(anchor.chain)
         if anchor_chain != chain:
-            # A licence is per chain; charging across one would alias two
-            # deployments that share an address.
+            # Licences are per chain; crossing would alias same-address deployments.
             continue
         key = entity_key(anchor_chain, anchor.address)
         if key == entity_key(chain, address):
@@ -532,14 +445,10 @@ def _licensed_reach_entities(session: Session, backlinks: list[Any], address: st
 
 
 def _asset_identity(session: Session, job_id: Any) -> tuple[dict[str, Any], str]:
-    """``flow_asset_addresses`` receivers by selector, and WHY the map is empty.
+    """``flow_asset_addresses`` receivers by selector, and why the map is empty.
 
-    Absence means the plane did not run for this job — ``not_determined``, never
-    a proven-empty asset set. The three ways an empty map arises are not one
-    fact: no job to read from, an artifact that was never written, and a body
-    whose shape this reader does not recognise are different questions to
-    whoever is deciding whether to look again. They are named apart and the
-    token travels onto every refusal the empty map causes.
+    Absence is ``not_determined``, never a proven-empty set. No job, no artifact and an unrecognised body are distinct
+    reasons carried onto every refusal.
     """
     if job_id is None:
         return {}, ASSET_IDENTITY_JOB_ABSENT

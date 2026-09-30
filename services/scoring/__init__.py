@@ -1,18 +1,9 @@
 """Protocol scoring: per-function signal distillation and the grade fold.
 
-Two layers with different integration shapes. Layer 1 distils one job's planes
-into per-function :class:`~services.scoring.schema.FunctionSignal` rows,
-incrementally, at the end of the effects stage. Layer 2 re-folds ALL of a
-protocol's persisted signals into a
-:class:`~services.scoring.schema.ScoreDocument` on every trigger — a full
-recompute rather than a running total, because value is MAX per (entity, asset),
-principal units are re-keyed by later evidence, and subsumption is only
-decidable with every finding present.
-
-This module exports the contract between them. The fold consumes signal rows and
-nothing else, so the offline CLI (distil every job in memory, then fold) and the
-persisted pipeline (distil at end-of-effects, fold from the table) run the
-identical code.
+Layer 1 distils one job's planes into :class:`~services.scoring.schema.FunctionSignal` rows at the end of the effects
+stage. Layer 2 re-folds all of a protocol's signals into a :class:`~services.scoring.schema.ScoreDocument` on every
+trigger, a full recompute because value is max per (entity, asset), principal units re-key, and subsumption needs every
+finding. The fold reads only signal rows, so the offline CLI and the persisted pipeline run identical code.
 """
 
 from __future__ import annotations

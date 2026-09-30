@@ -25,8 +25,6 @@ from .claims import _static_destination_shape, _tier
 
 logger = logging.getLogger("services.scoring.distill")
 
-# ---------------------------------------------------------------- destination
-
 
 @dataclass(frozen=True)
 class _Destination:
@@ -40,21 +38,11 @@ _UNDETERMINED_DESTINATION = _Destination(tri=Tri[str].not_determined(), severity
 
 
 def _fork_caller_arbitrary_param(verdicts: Iterable[Any]) -> str | None:
-    """The parameter a landed sentinel proved the CALLER chooses, or ``None``.
+    """The parameter a landed sentinel proved the caller chooses, or ``None``.
 
-    A fork ``caller_arbitrary`` verdict is a proof about exactly ONE parameter:
-    the one the sentinel address was substituted into
-    (``services.effects.calldata._value_probe_inputs``). It says nothing about
-    the function's other address parameters, and on this corpus the two are
-    routinely different — an executor-shaped function takes the sentinel in its
-    PAYLOAD slot while its call target keeps the value the base probe passed.
-
-    So the parameter identity is the join key, and the prober is the only thing
-    that can state it: ``witness["sentinel_param"]``. A verdict that does not
-    name its subject is not a weaker proof, it is a proof about an unnamed
-    parameter — unusable here, and refused rather than assumed to be about the
-    destination. Two verdicts naming different parameters likewise yield
-    nothing rather than a picked winner.
+    A fork ``caller_arbitrary`` verdict proves only the parameter the sentinel was substituted into
+    (``witness["sentinel_param"]``), which is often the payload rather than the call target. A verdict that doesn't name
+    its parameter, or two naming different ones, yields nothing.
     """
     named: set[str] = set()
     for verdict in verdicts:
@@ -72,14 +60,8 @@ def _fork_caller_arbitrary_param(verdicts: Iterable[Any]) -> str | None:
 def _exec_destination(claim_id: str, witness: dict[str, Any], fork_param: str | None = None) -> _Destination:
     """The delegatecall/exec destination, and what it licenses.
 
-    An ``indeterminate`` / ``unresolved_operand`` / ``not_determined``
-    destination is NOT ``destination_unconstrained``. It fails to
-    ``not_determined`` and yields no severity, so the row never enters the grade
-    — absence of a resolved constraint is never proof the destination is open.
-
-    ``fork_param`` is the parameter a landed sentinel proved caller-chosen on
-    this function (:func:`_fork_caller_arbitrary_param`). It is consumed only on
-    a proven identity with the destination parameter — see the arm below.
+    An indeterminate/unresolved destination is ``not_determined`` with no severity, never ``destination_unconstrained``.
+    ``fork_param`` (:func:`_fork_caller_arbitrary_param`) is used only when it is the destination parameter.
     """
     destination = witness.get("destination") or {}
     target_kind = destination.get("target_kind") or witness.get("destination_kind")
@@ -88,25 +70,19 @@ def _exec_destination(claim_id: str, witness: dict[str, Any], fork_param: str | 
 
     if target_kind == "self":
         if state == DESTINATION_STATE_UNCONSTRAINED_PROVEN:
-            # Two witnesses that cannot both be true: a destination fixed at
-            # ``address(this)`` and a destination proven unconstrained. A
-            # contradiction is not evidence for either side, and resolving it to
-            # the benign arm would let one forged half buy the 0.0 severity.
+            # Contradictory witnesses (self-bound vs. unconstrained) prove neither; resolving to the benign arm would
+            # let one forged half buy 0.0.
             return _Destination(
                 tri=Tri[str].not_determined(),
                 severity=None,
                 basis="destination_witness_contradiction(self+unconstrained_proven)",
                 notes=("destination_witnesses_contradict",),
             )
-        # Keyed on the target kind, never on the constraint state alone: a
-        # ``constrained`` state says a guard exists, not that the destination is
-        # this contract.
+        # Keyed on target kind: ``constrained`` means a guard exists, not that the destination is this contract.
         severity = (
             K.DEST_SEVERITY_DELEGATECALL_SELF if claim_id == "delegatecall.execute" else K.DEST_SEVERITY_EXEC_SELF
         )
-        # Only a literal self-binding corroborates self-ness. ``destination_operand``
-        # says the guard is bound to the operand, which is equally true of an
-        # operand that is not this contract, so it corroborates nothing here.
+        # Only a literal self-binding corroborates; ``destination_operand`` is equally true of a foreign operand.
         corroborated = constraint.get("binding") in ("literal_self", "self") or constraint.get("guard") in (
             "literal_self",
             "self",
@@ -151,19 +127,8 @@ def _exec_destination(claim_id: str, witness: dict[str, Any], fork_param: str | 
             severity=K.DEST_SEVERITY_UNCONSTRAINED,
             basis="destination_unconstrained_proven",
         )
-    # The fork already answered this question for some functions and nobody
-    # read the answer. Consuming it is a JOIN ON THE PARAMETER, never on the
-    # function: the sentinel proved the caller picks whatever sits in
-    # ``sentinel_param``, and only if that IS the parameter this sink calls
-    # through does the proof say the destination is caller-chosen. The
-    # destination parameter is read from the witness (``destination_param``
-    # under a ``param`` kind), never from the function's name (inv. 1).
-    #
-    # Every other shape of the join refuses and the row stays not_determined:
-    # a verdict about a different parameter licenses nothing here (it is the
-    # ordinary shape of an arbitrary-call executor, whose sentinel rides the
-    # payload while the call target is the prober's own choice), and a
-    # destination that is not a whole parameter has no parameter to be joined on.
+    # Join on the parameter, not the function: the fork proof applies only if ``sentinel_param`` is the parameter this
+    # sink calls through (read from the witness, never the name, inv. 1). Any other shape stays not_determined.
     destination_param = witness.get("destination_param")
     if fork_param is not None and target_kind == "param" and isinstance(destination_param, str) and destination_param:
         if fork_param == destination_param:
@@ -183,49 +148,20 @@ def _exec_destination(claim_id: str, witness: dict[str, Any], fork_param: str | 
 
 
 def _caller_relative_destination(shape: str, basis: str, openness: str) -> _Destination:
-    """A destination the static lattice proved is caller-RELATIVE, and what the
-    gate that decides who may call is worth against it.
+    """A destination the static lattice proved caller-relative, and what the caller gate is worth against it.
 
-    The lattice proof is a UNIVERSAL over every out-flow of the function, so it
-    needs no behavioural existence witness the way the fork's ``caller_arbitrary``
-    arm does (inv. 9). But the two kinds it proves make DIFFERENT claims, and one
-    argument does not cover both:
+    The lattice proof is universal, so it needs no existence witness (inv. 9), but the two kinds differ:
 
-    ``msg_sender`` — the payee IS the caller. The caller names the destination by
-    choosing which address makes the call, so:
+    ``msg_sender``: the payee is the caller. ``open`` makes the destination proven unconstrained, but the price is
+    withheld (a drain and a redemption look the same); ``restricted`` gets the ordinary constrained convention.
 
-    * ``open`` — anyone can be ``msg.sender``, so the destination is proven
-      unconstrained. The PRICE is a second question and this arm does not answer
-      it: an open payout to the caller is the shape of a drain and the shape of a
-      redemption alike, and what the amount is bounded BY has no witness here. So
-      the destination is published and the severity is withheld — the basis says
-      so, and ``_severity`` names the refusal on the row;
-    * ``restricted`` — the recipient is inside the privileged caller set: the
-      ordinary constrained-destination convention, and no stronger than the gate
-      that produces it.
+    ``token_owner``: the payee is the current ``ownerOf`` a caller-passed id. Restricted keeps the constrained
+    convention; open is withheld (open settlement to the rightful owner is the safe shape) pending an owner ruling.
 
-    ``token_owner`` — the payee is the CURRENT OWNER of a token id the caller
-    passed (``ownerOf``, ``contract_analysis_pipeline.effects._TOKEN_OWNER_SELECTOR``).
-    The caller chooses the id; the token's transfer history chooses the address.
-    That is a real constraint and it is NOT the caller gate, so the restricted arm
-    keeps the constrained convention but says what actually holds it. The OPEN
-    arm is WITHHELD rather than escalated: "anyone may trigger the settlement,
-    the funds go to the rightful owner" is the canonical safe shape of this
-    pattern, so an open gate here is not evidence the destination is the
-    attacker's to choose, and publishing ``unconstrained_proven`` off it would be
-    a positive fact the producer's own witness refutes. Whether the open-caller
-    ruling extends to this kind is the owner's to decide; until it does, the row
-    is not_determined.
-
-    Either kind with ``openness`` ``not_determined`` — the gate is UNREAD, which
-    is neither open nor restricted. Both arms would price an unread witness, so
-    the row stays not_determined and earns no severity.
+    Unread openness withholds for either kind.
     """
     if openness == OPENNESS_OPEN:
-        # Named positively and failing closed: the escalation belongs to the one
-        # kind whose payee the caller can name, and any kind added to
-        # ``CALLER_RELATIVE_TARGET_KINDS`` later withholds until someone argues
-        # it through rather than inheriting an escalation by default.
+        # Fail closed: only ``msg_sender`` escalates; new caller-relative kinds withhold until argued through.
         if shape != "msg_sender":
             return _Destination(
                 tri=Tri[str].not_determined(),
@@ -233,11 +169,8 @@ def _caller_relative_destination(shape: str, basis: str, openness: str) -> _Dest
                 basis=f"{basis}+open_caller_does_not_name_the_payee",
                 notes=(f"destination_{shape}_open_gate_licenses_no_escalation",),
             )
-        # The refusal token is NOT stamped here: what a withheld price means is
-        # ``_severity``'s to say, on the row it actually withheld. A destination
-        # travels through ``_meet_destinations``, which borrows a sibling site's
-        # severity, so a note fixed to this half could ride onto a row that ends
-        # up priced and graded.
+        # The refusal note is added by ``_severity``, since ``_meet_destinations`` can move this destination onto a row
+        # that ends up priced.
         return _Destination(
             tri=Tri.proven(DESTINATION_STATE_UNCONSTRAINED_PROVEN, "caller_arbitrary"),
             severity=None,
@@ -250,11 +183,8 @@ def _caller_relative_destination(shape: str, basis: str, openness: str) -> _Dest
             if shape == "msg_sender"
             else "destination_is_the_current_owner_of_a_caller_chosen_token_id"
         )
-        # The incoming ``basis`` is not carried here, and its absence costs
-        # nothing: neither kind can arrive from the fork (the simulation's shape
-        # vocabulary has no caller-relative member), so the static provenance the
-        # open and unread arms preserve would only restate the kind that is
-        # already in this string. What the constraint IS, is in ``notes``.
+        # No fork basis to carry: the fork's shape vocabulary has no caller-relative kind. The constraint is in
+        # ``notes``.
         return _Destination(
             tri=Tri.proven(DESTINATION_STATE_CONSTRAINED_PROVEN, f"constrained:{shape}"),
             severity=K.DEST_SEVERITY_CONSTRAINED_OTHER,
@@ -270,7 +200,6 @@ def _caller_relative_destination(shape: str, basis: str, openness: str) -> _Dest
 
 
 def _flow_destination(claim: dict[str, Any], all_claims: list[dict[str, Any]], openness: str) -> _Destination:
-    """The out-flow destination: fork shape first, static lattice second."""
     witness = claim.get("witness") or {}
     observed = witness.get("observed") or {}
     proved_by = observed.get("shape_proved_by")
@@ -283,8 +212,7 @@ def _flow_destination(claim: dict[str, Any], all_claims: list[dict[str, Any]], o
 
     if shape == "caller_arbitrary":
         if _tier(claim) != WITNESS_TIER_BEHAVIORAL_OBSERVED:
-            # An existential needs a behavioural existence proof; without one
-            # the escalation is withheld rather than assumed.
+            # An existential needs a behavioural existence proof.
             return _Destination(
                 tri=Tri[str].not_determined(),
                 severity=None,
@@ -332,12 +260,7 @@ _DESTINATION_MEET_RANK = {
 
 
 def _meet_destinations(parts: list[_Destination]) -> _Destination:
-    """The MEET over every site: one unread destination makes the fold unread.
-
-    Never last-wins. A function whose second delegatecall site could not be
-    resolved has an unread destination as a whole, and the proven first site
-    cannot vouch for it.
-    """
+    """The meet over every site: one unread destination makes the whole function unread. Never last-wins."""
     if not parts:
         return _UNDETERMINED_DESTINATION
     if any(not part.tri.is_determined for part in parts):
