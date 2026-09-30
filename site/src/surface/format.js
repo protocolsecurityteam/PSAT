@@ -1,5 +1,3 @@
-// Pure formatters + small predicates used across the surface tree.
-// No React, no closures — safe to import from anywhere.
 
 import { middleSlice } from "../shared/format.js";
 
@@ -8,11 +6,8 @@ export function shortAddr(address) {
   return middleSlice(address, "..");
 }
 
-// Display name for a principal. The server label is sometimes just the bare
-// type token (e.g. label "safe" on a type "safe" principal), which renders as
-// "safe safe" beside the type badge. When the label adds nothing over the
-// type, fall back to the short address. Shared by the search preview and
-// the entity card so the fallback can't drift between them.
+// The server label is sometimes just the type token ("safe safe" beside the
+// badge); then fall back to the short address.
 export function principalLabel(label, type, address) {
   const l = String(label || "").trim();
   if (l && l.toLowerCase() !== String(type || "").trim().toLowerCase()) return l;
@@ -27,10 +22,7 @@ export function formatDelay(seconds) {
   return `${Math.round(value / 60)}m`;
 }
 
-// Short type badge for a principal — "6/10 SAFE", "TL · 2d", or the bare
-// type ("EOA", "PROXY_ADMIN"). Shared by the group header, the controllers
-// accordion rows, and anywhere a principal needs a one-glance label so they
-// never drift apart.
+// "6/10 SAFE", "TL · 2d", or the bare type.
 export function principalBadge(p) {
   const owners = Array.isArray(p?.details?.owners) ? p.details.owners : [];
   const threshold = p?.details?.threshold;
@@ -51,11 +43,7 @@ export function functionName(signature) {
   return String(signature || "?").split("(")[0] || "?";
 }
 
-// Light category tint for a function chip — upgrade/ownership, pause, and
-// fund movements get a hint of color so the dangerous powers pop out of a
-// long list. Everything else stays neutral. Polish, not load-bearing. Shared
-// by the Controllers accordion and the contract card's Governs tab so the
-// chips never drift apart.
+// Tints the dangerous powers in long lists.
 export function fnChipClass(fn) {
   if (/upgrade|transferownership|renounceownership|setowner|changeadmin/i.test(fn)) return "ps-ctrl-fnchip--upgrade";
   if (/pause/i.test(fn)) return "ps-ctrl-fnchip--pause";
@@ -77,14 +65,8 @@ export function isRoleIdAddress(address) {
   return leadingZeros >= 24;
 }
 
-// Reader-facing words for the payload's edge vocabulary. The DATA keeps its
-// witness-plane names — flow type `principal` means a FunctionPrincipal row
-// proved the from-address can call the target's gated functions; `controller`
-// means a control-plane edge (slot value, role grant) the scorer's reach
-// closure walks — and those names are shared with the backend and scorer, so
-// only the display layer translates. A token outside the map renders
-// verbatim: showing the raw witness name beats inventing a friendlier one for
-// vocabulary this map has never seen.
+// Display words only; the data keeps witness-plane names shared with the
+// backend and scorer. Unknown tokens render verbatim.
 const FLOW_TYPE_WORDS = {
   principal: "can call",
   controller: "controls",
@@ -116,7 +98,7 @@ export function formatUsd(value) {
 }
 
 export function dedupeShas(list) {
-  const fulls = new Map(); // prefix(7) → full sha
+  const fulls = new Map();
   const shorts = new Set();
   for (const raw of list || []) {
     const sha = String(raw || "").trim().toLowerCase();

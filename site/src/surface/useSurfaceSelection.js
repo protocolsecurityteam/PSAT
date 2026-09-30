@@ -1,10 +1,5 @@
-// Single-source-of-truth selection reducer for the Surface page.
-//
-// State is KEYS ONLY (addresses + a guard key + sub-mode flags); every entity
-// object is derived per render through the entity index, so a snapshot can
-// never go stale (the class of bug the old selectedMachine/selectedPrincipal
-// useState pair produced). All selection transitions and their invariants live
-// in the reducer, not at the seven former call sites.
+// The Surface selection reducer. State holds keys only; entities are derived
+// per render through the entity index, so nothing goes stale.
 
 import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 
@@ -14,11 +9,8 @@ import { resolveEntity } from "./layout/entities.js";
 
 const INITIAL = { selection: null, guardKey: null, radar: null, focus: null, reach: null };
 
-// A selection request may name where it was REACHED FROM — the score page's
-// deduction rows click through to contracts a controller only reaches
-// transitively, and the host it acts on directly is not derivable from the
-// target alone. Stored as keys (addresses) like the rest of this state; the
-// path itself is walked per render from the payload's control edges.
+// Score-page click-throughs can reach a contract transitively; the direct host
+// isn't derivable from the target, so it's stored.
 function reachFrom(action) {
   const hosts = (Array.isArray(action.reachedFrom) ? action.reachedFrom : action.reachedFrom ? [action.reachedFrom] : [])
     .map((a) => String(a || "").toLowerCase())
@@ -26,16 +18,13 @@ function reachFrom(action) {
   return hosts.length ? { hosts } : null;
 }
 
-// Camera one-shot: a monotonic counter (NOT Date.now) so identical repeat
-// focuses still register as a new request for the canvas effect.
+// A counter, not Date.now, so repeated focuses still register.
 function bumpFocus(state, address) {
   return { address: address ? address.toLowerCase() : null, key: (state.focus?.key || 0) + 1 };
 }
 
-// A clear (deselect / reset) drops the focus *address* but must PRESERVE the
-// monotonic counter — otherwise the key rolls back to 0 and re-selecting the
-// same entity produces the identical key the canvas already consumed, so the
-// camera never re-centers (FocusOnNode dedupes on the key).
+// Keep the counter: rolling back to 0 repeats a key FocusOnNode already
+// consumed, and the camera never re-centers.
 function clearedFocus(state) {
   return state.focus ? { address: null, key: state.focus.key } : null;
 }
@@ -43,12 +32,9 @@ function clearedFocus(state) {
 function reducer(state, action) {
   switch (action.type) {
     case "select": {
-      // select(null) === full clear (pane-click / deselect path).
       if (action.address == null) return { ...INITIAL, focus: clearedFocus(state) };
       const address = action.address.toLowerCase();
-      // Entity change always clears the guard + radar sub-mode. Applied
-      // unconditionally (matches the old handleSelectMachine/Principal, which
-      // cleared on every select, even a re-select of the same entity).
+      // Always clears guard and radar, even on re-selecting the same entity.
       return {
         selection: { address, hint: action.hint ?? null },
         guardKey: null,
@@ -58,16 +44,11 @@ function reducer(state, action) {
       };
     }
     case "guard": {
-      // Opening a guard exits radar mode (matches today's handleSelectGuard).
       return { ...state, guardKey: action.key ?? null, radar: null };
     }
     case "radar": {
-      // Contract selection + score-arrival sub-mode (what the sidebar card
-      // highlights); guardKey == the example fn. callerAddress is the one
-      // caller chip inside that row the score row named — verified against the
-      // function's own caller list before it gets here, and dropped outright
-      // when no function resolved, since a marked chip with no marked row would
-      // claim a pair the card is not showing.
+      // guardKey is the example function; callerAddress is dropped when no
+      // function resolved (a chip without a row would claim an unshown pair).
       const address = action.address ? action.address.toLowerCase() : null;
       const functionKey = action.functionKey ?? null;
       return {
@@ -82,8 +63,7 @@ function reducer(state, action) {
       };
     }
     case "focusPreview": {
-      // Browsing / contract-pager: bump the camera one-shot ONLY. Never
-      // touches selection, guard, or radar.
+      // Camera only; never touches selection.
       return { ...state, focus: bumpFocus(state, action.address) };
     }
     case "reset":
@@ -93,11 +73,8 @@ function reducer(state, action) {
   }
 }
 
-// Derive the fnView for a guard key. Guard keys are globally unique
-// (`${contract.address}:${selector||function}`, buildMachines.js), so the
-// owning contract is the key's prefix — look it up in the index and scan its
-// functions. Addresses never contain ':' and neither do selectors/signatures,
-// so splitting on the first ':' is unambiguous.
+// Guard keys are `${address}:${selector||function}`; neither part contains ':',
+// so split on the first.
 function guardFromKey(index, guardKey, chain = "ethereum") {
   if (!guardKey || !index) return null;
   const sep = guardKey.indexOf(":");
@@ -108,15 +85,10 @@ function guardFromKey(index, guardKey, chain = "ethereum") {
   return machineFunctions(machine).find((fn) => fn.key === guardKey) || null;
 }
 
-// entityIndex: Map<addrLc, {address, machine|null, principal|null}> (built by
-//   buildEntityIndex). machines: the machine list resolveEntity uses to
-//   synthesize controls for off-index navigate targets. companyName: switching
-//   it clears ALL selection state.
 export function useSurfaceSelection({ entityIndex, machines = [], companyName, chain = "ethereum" } = {}) {
   const [state, dispatch] = useReducer(reducer, INITIAL);
 
-  // Clear everything on a real company change. Skip the first mount so a
-  // URL-restore select() (fired from a later, machines-gated effect) survives.
+  // Skip the first mount so a URL-restore select() survives.
   const firstCompany = useRef(true);
   useEffect(() => {
     if (firstCompany.current) {
@@ -154,9 +126,7 @@ export function useSurfaceSelection({ entityIndex, machines = [], companyName, c
     [entityIndex, machines, state.selection, chain],
   );
 
-  // At most one facet is ever non-null: the machine card is strictly richer, so
-  // it wins whenever the entity has one; a principal card renders only for a
-  // principal-only entity. No stored view can contradict the entity's facets.
+  // The machine card wins whenever the entity has one.
   const selectedMachine = selectedEntity?.machine ?? null;
   const selectedPrincipal = selectedEntity?.machine ? null : selectedEntity?.principal ?? null;
   const selectedGuard = useMemo(
@@ -165,21 +135,16 @@ export function useSurfaceSelection({ entityIndex, machines = [], companyName, c
   );
 
   return {
-    // raw keyed state
     selection: state.selection,
     guardKey: state.guardKey,
     radarSelection: state.radar,
-    // Addresses the current selection was reached FROM (score-page click-through
-    // on a transitive target). null whenever the selection did not carry one.
     reachHosts: state.reach?.hosts || null,
-    focus: state.focus, // { address, key } — the canvas camera one-shot
-    // derived-per-render entities (staleness impossible)
+    focus: state.focus,
     selectedEntity,
     selectedMachine,
     selectedPrincipal,
     selectedGuard,
     focusedAddress: state.focus?.address ?? null,
-    // actions (stable identities)
     select,
     guard,
     radar,

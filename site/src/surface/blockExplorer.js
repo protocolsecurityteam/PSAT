@@ -1,20 +1,14 @@
-// Block-explorer links, driven by the generated chain registry
-// (`chains.json`, emitted from utils/chains.py by scripts/gen_chains_json.py —
-// chains.json is the single source of chain truth on the frontend). No
-// hand-maintained chain map here: adding a chain to the registry + regenerating
-// the JSON is all it takes for links to work.
+// Explorer links from the generated chain registry (`chains.json`, via
+// scripts/gen_chains_json.py); no hand-maintained map.
 
 import CHAINS from "./chains.json";
 
-// canonical name (lowercased) → { base, name }. `base` is the explorer origin
-// with no trailing slash (e.g. "https://etherscan.io"); `name` is the human
-// label derived from the explorer hostname's domain label (etherscan.io →
-// "Etherscan", optimistic.etherscan.io → "Etherscan", basescan.org →
-// "Basescan"), so a link labels itself per chain without a second map.
+// `name` comes from the explorer hostname (optimistic.etherscan.io →
+// "Etherscan"), so no second map.
 function explorerName(baseUrl) {
   try {
-    const host = new URL(baseUrl).hostname; // e.g. "optimistic.etherscan.io"
-    const domain = host.split(".").at(-2) || host; // "etherscan"
+    const host = new URL(baseUrl).hostname;
+    const domain = host.split(".").at(-2) || host;
     return domain.charAt(0).toUpperCase() + domain.slice(1);
   } catch {
     return "Explorer";
@@ -28,9 +22,8 @@ for (const c of CHAINS) {
   CHAIN_INFO.set(c.name.toLowerCase(), { base, name: explorerName(base) });
 }
 
-// "mainnet" is the one documented alias for ethereum (the registry carries it
-// but chains.json only emits canonical names). Keep it resolvable so callers
-// passing the legacy alias still land on Etherscan.
+// chains.json only emits canonical names; keep the legacy "mainnet" alias
+// working.
 const ETHEREUM = CHAIN_INFO.get("ethereum");
 if (ETHEREUM) CHAIN_INFO.set("mainnet", ETHEREUM);
 
@@ -45,8 +38,6 @@ export function blockExplorerAddressUrl(address, chain = "ethereum") {
   return `${info.base}/address/${address}`;
 }
 
-// Human name of the explorer a `blockExplorerAddressUrl` link lands on, so a
-// link labels itself correctly per chain instead of hardcoding "Etherscan".
 export function blockExplorerName(chain = "ethereum") {
   const info = infoFor(chain);
   return info ? info.name : "Explorer";

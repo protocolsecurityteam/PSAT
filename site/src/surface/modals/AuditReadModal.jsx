@@ -4,23 +4,18 @@ import { createPortal } from "react-dom";
 import { formatAuditDate } from "../../audits/auditUi.jsx";
 import { dedupeShas } from "../format.js";
 
-// Proof-first read modal (Prototype C, C5). A light, single-column view of the
-// verified content only: the reviewed commit(s), the audit's declared scope,
-// and the report document served through our own PDF proxy.
+// Proof-first read modal: reviewed commits, declared scope, and the report via
+// our own PDF proxy.
 //
-// Nothing here links out. Every external URL an audit carries — its document
-// AND its `referenced_repos` — comes from AI-driven discovery, so we can't
-// cryptographically vouch that it belongs to this protocol. Even a
-// hardcoded-host `https://github.com/${repo}` link would embed an unverified,
-// attacker-influenceable repo path, so commit SHAs render as plain chips, not
-// links. The only document we show is the one streamed through our own proxy.
+// Nothing links out. Every external URL an audit carries (document and
+// `referenced_repos`) comes from AI-driven discovery and can't be vouched for;
+// even a fixed-host GitHub link would embed an attacker-influenceable path. So
+// SHAs render as plain chips.
 
-// commit label → accent (reviewed is the proof anchor; fix/cited are context).
+// Reviewed is the proof anchor; fix/cited are context.
 const COMMIT_ACCENT = { reviewed: "#4ade80", fix: "#2dd4bf", cited: "#94a3b8" };
 
-// Reviewed commit chips from the audit's LLM-classified commit list, falling
-// back to the raw reviewed_commits scrape. Cited/unclear commits are dropped —
-// they are context, not proof.
+// Cited/unclear commits are context, not proof.
 function reviewedCommits(detail) {
   const classified = Array.isArray(detail?.classified_commits) ? detail.classified_commits : [];
   const out = [];
@@ -49,7 +44,6 @@ export function AuditReadModal({ audit, coveredCount, onClose }) {
   const [scope, setScope] = useState(null);
   const [text, setText] = useState(null);
   const [textLoading, setTextLoading] = useState(false);
-  // PDF embed failure → flip to text fallback.
   const [pdfFailed, setPdfFailed] = useState(false);
 
   useEffect(() => {
@@ -74,8 +68,7 @@ export function AuditReadModal({ audit, coveredCount, onClose }) {
     return () => { cancelled = true; };
   }, [audit.audit_id]);
 
-  // Declared scope — the contracts the audit itself named as in-scope. 409 when
-  // scope extraction never completed; treat that as "no declared scope".
+  // 409 means scope extraction never completed: treat as no declared scope.
   useEffect(() => {
     let cancelled = false;
     fetch(`/api/audits/${encodeURIComponent(audit.audit_id)}/scope`)
@@ -89,7 +82,6 @@ export function AuditReadModal({ audit, coveredCount, onClose }) {
     return () => { cancelled = true; };
   }, [audit.audit_id]);
 
-  // Close on Escape
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -106,8 +98,7 @@ export function AuditReadModal({ audit, coveredCount, onClose }) {
   const showPdf = !!pdfUrl && !pdfFailed;
   const needsText = !detailLoading && !showPdf;
 
-  // Only fetch the extracted text when there's no embeddable PDF (or it
-  // failed) — it's the fallback view, not the default.
+  // Text is only the fallback when there's no embeddable PDF.
   useEffect(() => {
     if (!needsText) return undefined;
     let cancelled = false;
@@ -126,10 +117,8 @@ export function AuditReadModal({ audit, coveredCount, onClose }) {
 
   const commits = useMemo(() => reviewedCommits(detail), [detail]);
 
-  // Portal to <body>: the surface sidebar sets `backdrop-filter`, which makes
-  // it a containing block for our `position:fixed` overlay — without the portal
-  // the modal is trapped inside the ~380px sidebar instead of centering over
-  // the viewport.
+  // The sidebar's `backdrop-filter` makes it the containing block for
+  // position:fixed; without the portal the modal is trapped in the sidebar.
   return createPortal(
     <div className="ps-audit-modal-backdrop" onClick={onClose}>
       <div className="ps-audit-modal ps-audit-modal--read" onClick={(e) => e.stopPropagation()}>

@@ -1,6 +1,4 @@
-// Isolated module so Vite/Rollup can split react-markdown + remark-gfm
-// out of the main ProtocolSurface bundle. Loaded lazily by AgentPanel
-// only after the user actually opens the Agent tab and a turn renders.
+// Separate module so react-markdown + remark-gfm split out of the main bundle.
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 

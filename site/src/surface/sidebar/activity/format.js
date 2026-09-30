@@ -1,9 +1,8 @@
 import { shortenAddress } from "../../../shared/format.js";
 import { tagsForEvent, witnessedSlot } from "./eventClass.js";
 
-// Rendering half of the Activity vocabulary: relative/scalar formatters and
-// the per-write-target renderers that turn an event row into prose. The
-// classification half (kind / salience) lives in eventClass.js.
+// Relative/scalar formatters and per-write-target renderers; classification
+// lives in eventClass.js.
 
 export function relativeTime(iso, now = Date.now()) {
   if (!iso) return "—";
@@ -42,17 +41,14 @@ function arrowSub(from, to) {
   return from && to ? `${shortenAddress(from)} → ${shortenAddress(to)}` : null;
 }
 
-// Addresses and hashes shorten; numbers, booleans and names render whole —
-// truncating a uint would state a different value.
+// Truncating a uint would state a different value.
 function shortenIfHex(value) {
   const s = String(value);
   return /^0x[0-9a-f]{40}$/i.test(s) ? shortenAddress(s) : s;
 }
 
-// Unbounded numeric scalars (uint256 supplies/balances) are unreadable raw,
-// but the producer doesn't know the token's decimals, so no unit may be
-// assumed. Big integers render in scientific notation; the relative delta is
-// derivable from the pair alone and carries the meaning a unit would.
+// Token decimals are unknown, so no unit: big integers go scientific, with a
+// relative delta.
 const DECIMAL_INT = /^-?\d+$/;
 const COMPACT_OVER_DIGITS = 12;
 
@@ -74,7 +70,7 @@ function pctDelta(before, after) {
   if (!DECIMAL_INT.test(b) || !DECIMAL_INT.test(a)) return null;
   const bi = BigInt(b);
   const ai = BigInt(a);
-  if (bi === 0n) return null; // no base to be relative to
+  if (bi === 0n) return null;
   const base = bi < 0n ? -bi : bi;
   const milliPct = ((ai - bi) * 100000n) / base;
   const sign = ai >= bi ? "+" : "-";
@@ -83,9 +79,6 @@ function pctDelta(before, after) {
   return `${sign}${abs / 1000n}.${(abs % 1000n).toString().padStart(3, "0")}%`;
 }
 
-// old→new detail line shared by the read-witnessed renderers. Small values
-// stay verbatim; wei-scale integers compact, with the relative delta appended
-// since compaction is what hid it.
 function diffSub(before, after) {
   if (before == null || after == null) return null;
   const b = String(before);
@@ -95,18 +88,11 @@ function diffSub(before, after) {
   return `${fmtScalar(b)} → ${fmtScalar(a)}${delta ? ` (${delta})` : ""}`;
 }
 
-// Per-write-target renderers. Each renderer is ``(data, event_type) → {
-// title, sub }``. The event_type is passed so paired events (paused vs
-// unpaused, granted vs revoked, scheduled vs executed, success vs
-// failure) can swap verbs without exploding into separate write-target
-// entries.
-//
-// Underscore-prefixed targets render activity events (no addressable
-// slot); the renderer surfaces the meaningful tx args.
+// Renderers are ``(data, event_type) → { title, sub }``; event_type lets paired
+// events swap verbs. Underscore targets are activity events with no slot.
 
-// Why a Safe execution carries no decoded call. Mirrors the backend's
-// ``safe_exec.status`` values (``services/monitoring/enrichment.py``); an
-// unknown status renders verbatim rather than as silence.
+// Mirrors ``safe_exec.status`` (services/monitoring/enrichment.py); unknown
+// statuses render verbatim.
 const SAFE_EXEC_STATUS_SUB = {
   not_top_level_call: "not a direct execTransaction on this Safe — inner call not witnessed",
   over_budget: "not decoded this pass (transaction budget)",
@@ -115,48 +101,36 @@ const SAFE_EXEC_STATUS_SUB = {
     "this Safe executed more than once in this transaction — which call these arguments describe is not witnessed",
 };
 
-// Which layer of a batch failed to expand. Mirrors ``batch_status_reason``.
 const SAFE_EXEC_BATCH_REASON = {
   malformed_payload: "payload did not decode",
   nested_payload_undecodable: "a nested payload did not decode",
   nested_depth_exceeded: "nested deeper than the decoder expands",
 };
 
-// A signature's display form: the function name alone. The parameter-type
-// list is a fact about the ABI, not about what happened — it goes in the
-// tooltip (`titleDetail`), never in the row. A selector stays raw: it is a
-// real fact and no name is invented to replace it.
+// The type list goes in the tooltip. Selectors stay raw rather than get an
+// invented name.
 function fnDisplay(signature) {
   const s = String(signature || "");
   const paren = s.indexOf("(");
   return paren > 0 ? `${s.slice(0, paren)}()` : s || null;
 }
 
-// Display-only address naming. `nameFor` is the caller's map of the
-// protocol's own contracts (surface machines / principals) — a rendering
-// convenience, never a witness: it changes what a row SAYS an address is
-// called, never what was claimed or how salient it is.
+// Display-only; never changes what's claimed or its salience.
 function addrDisplay(addr, opts) {
   if (!addr) return null;
   const name = opts?.nameFor ? opts.nameFor(addr) : null;
   return name || shortenAddress(addr);
 }
 
-// Structured call target for rows that have one (Safe executions, timelock
-// operations, module calls). `label` is the resolved graph name or null;
-// `onGraph` is stated only when a resolver was supplied — without one the
-// question "is this on the graph" was never asked, and null (not false)
-// says so. Consumers render an off-graph target with its FULL address: a
-// contract this protocol's graph cannot name deserves the whole witness,
-// not a truncation.
+// `onGraph` is null (not false) when no resolver was supplied. Off-graph
+// targets render the full address.
 function callTarget(addr, opts, prep = "on") {
   if (!addr) return null;
   const label = opts?.nameFor ? opts.nameFor(addr) : null;
   return { address: addr, label, prep, onGraph: opts?.nameFor ? Boolean(label) : null };
 }
 
-// Plain-text form of a call target, for single-line contexts (the protocol
-// feed row is itself a <button>, so it cannot nest an interactive chip).
+// Plain text because the feed row is itself a <button>.
 export function targetText(target) {
   if (!target?.address) return null;
   const prep = target.prep || "on";
@@ -231,8 +205,7 @@ const RENDER_BY_WRITE_TARGET = {
   },
   _safe_op: (d, type, opts) => {
     const executed = type === "safe_tx_executed";
-    // Pre-enrichment shape, and the shape a row keeps when the transaction was
-    // never fetched: the Safe-internal hash is all that was witnessed.
+    // Never fetched: the Safe-internal hash is all that was witnessed.
     const unenriched = {
       title: executed ? "Safe transaction executed" : "Safe transaction reverted",
       sub: d.safe_tx_hash
@@ -242,8 +215,7 @@ const RENDER_BY_WRITE_TARGET = {
     const se = d.safe_exec;
     if (!se || typeof se !== "object") return unenriched;
 
-    // A stated decode gap renders AS one. Falling back to the bare hash here
-    // would make "we could not examine this" look like the whole story.
+    // A stated decode gap renders as one, not as the bare hash.
     if (se.status !== "decoded") {
       return { ...unenriched, sub: SAFE_EXEC_STATUS_SUB[se.status] || `not decoded (${se.status})` };
     }
@@ -262,10 +234,8 @@ const RENDER_BY_WRITE_TARGET = {
     const batch = Array.isArray(se.batch) ? se.batch : null;
     const head = batch && batch.length ? batch[0] : null;
     const call = head || se;
-    // A resolved signature when one exists, the raw selector otherwise — a
-    // selector is a real fact, and a name is never invented to replace it.
-    // The row shows the function NAME; the full signature rides in
-    // `titleDetail` for the tooltip.
+    // The row shows the name; the full signature is in the tooltip. Selectors
+    // stay raw.
     const signature = head ? head.signature : se.target_function?.signature;
     const name = fnDisplay(signature) || call.selector || null;
     const title = executed
@@ -275,8 +245,7 @@ const RENDER_BY_WRITE_TARGET = {
       : `Reverted: ${name || "Safe transaction"}`;
 
     const parts = [];
-    // `call` is the default operation — only a delegatecall is worth ink,
-    // and an unrecognized one says so out loud (it is what the alert is).
+    // Only delegatecall is worth ink; unknown operations say so.
     if (call.operation === 1 || call.operation_label === "delegatecall") {
       parts.push(
         se.multisend_recognized === false && !batch
@@ -300,8 +269,6 @@ const RENDER_BY_WRITE_TARGET = {
   }),
   _timelock_op: (d, type, opts) => {
     const scheduled = type === "timelock_scheduled";
-    // The backend's fleet-internal resolution when it found one; the raw
-    // selector otherwise. Never a name this side invented.
     const signature = d.target_function?.signature || null;
     const name = fnDisplay(signature) || (d.selector ? `sel ${d.selector}` : null);
     const delay = fmtSeconds(d.delay);
@@ -316,31 +283,19 @@ const RENDER_BY_WRITE_TARGET = {
   },
 };
 
-// Per-event_type title overrides. Used for the one case where the same
-// write target produces a distinct title — GnosisSafe's
-// ``changed_master_copy`` writes ``implementation`` (same as a proxy
-// upgrade) but the user-facing label is "Safe singleton swapped"
-// because the contract isn't a generic proxy. Kept as a small map
-// rather than baking into the write-target renderer so the renderer
-// table stays generic.
+// ``changed_master_copy`` writes ``implementation`` like a proxy upgrade but
+// reads "Safe singleton swapped".
 const TITLE_OVERRIDES = {
   changed_master_copy: "Safe singleton (mastercopy) swapped",
 };
 
-// Turn an event row into a human sentence for the right pane. Returns
-// { title, sub } — title is the short prose summary, sub is the supporting
-// detail line (hash, target, etc.). Falls back to a generic shape rather
-// than throwing on unknown types so future event_types still render.
-// `opts.nameFor(address) → name|null` is an optional display-only resolver
-// (the surface's own contract/principal names). It never affects which
-// renderer runs or what is claimed — only how an address reads.
+// Event row → { title, sub }; unknown types fall back to a generic shape.
+// `opts.nameFor` is display-only.
 export function decodeEvent(evt, opts = undefined) {
   const d = evt?.data || {};
   const type = evt?.event_type || "unknown";
 
-  // Synthetic poll event — no decoder, no tags, render directly. The poller
-  // writes `old_value`/`new_value`; the shorter keys are read too because the
-  // read-verified path below and older rows use them.
+  // No decoder or tags. Older rows use the shorter keys.
   if (type === "state_changed_poll") {
     const field = d.field || "state";
     const rawBefore = d.old != null ? d.old : d.old_value;
@@ -351,11 +306,8 @@ export function decodeEvent(evt, opts = undefined) {
     };
   }
 
-  // Witnessed types. `value_changed:<controller_id>` carries a read-verified
-  // old→new diff; `member_changed:<mapping_var>` carries a qualified entry
-  // change with the key/value/direction in data. Both are handled ahead of
-  // the tag-driven table on purpose: the proven payload is the claim, and the
-  // emitter's donated write set must not re-title it as something else.
+  // Handled before the tag table: the proven payload is the claim, and the
+  // emitter's write set must not re-title it.
   const witnessed = witnessedSlot(type);
   if (witnessed?.stem === "value") {
     return {
@@ -365,8 +317,7 @@ export function decodeEvent(evt, opts = undefined) {
   }
   if (witnessed?.stem === "member") {
     const key = d.key != null ? shortenIfHex(d.key) : null;
-    // `direction` is the event's own statement about what happened to the
-    // entry; without one the honest rendering names no verb.
+    // Without a direction, name no verb.
     const verb = { add: "added", remove: "removed", set: "set" }[d.direction] || "changed";
     const parts = [];
     if (key) parts.push(key);
@@ -377,10 +328,7 @@ export function decodeEvent(evt, opts = undefined) {
     };
   }
 
-  // Tag-driven: walk effect_tags.writes (with synthesis fallback for
-  // legacy events). First matching write target's renderer wins —
-  // priority comes from the order tags emit writes (commit-phase
-  // owner before intent-phase pendingOwner, etc.).
+  // First matching write target wins; tags emit writes in priority order.
   const tags = tagsForEvent(evt);
   const writes = tags.writes || [];
   for (const wt of writes) {
@@ -394,9 +342,6 @@ export function decodeEvent(evt, opts = undefined) {
     }
   }
 
-  // Unknown event type / unrecognized write target — surface raw
-  // key-value pairs so the user sees something useful instead of an
-  // opaque event name.
   const entries = Object.entries(d)
     .filter(([k]) => !["contract_address", "contract_type", "chain", "effect_tags"].includes(k))
     .slice(0, 3);
@@ -409,13 +354,8 @@ export function decodeEvent(evt, opts = undefined) {
         .join(" · ")
     : null;
 
-  // The producer's terminal fallback (services/monitoring/event_topics.py
-  // `_resolve_event_type`) carries the tracked controller_id after the stem.
-  // The stem is the claim and must survive verbatim into the prose: only
-  // `controller_changed:` says an authority binding moved;
-  // `state_changed:` says a tracked slot was written and nothing more.
-  // Mangling the whole type string (`replace(/_/g, " ")`) turned the second
-  // into the first's wording, so match the stem explicitly.
+  // Keep the stem verbatim: only `controller_changed:` claims an authority
+  // binding moved (event_topics._resolve_event_type).
   const terminal = /^(controller|state)_changed:(.+)$/.exec(type);
   if (terminal) {
     const slot = terminal[2].split(":").pop();
@@ -428,9 +368,7 @@ export function decodeEvent(evt, opts = undefined) {
   return { title: type.replace(/_/g, " "), sub };
 }
 
-// Convert a MonitoredContract's last_known_state + monitoring_config into
-// rows for the left-rail card. Returns [{ k, v, tone }] where tone is one
-// of "ok" | "warn" | "muted" | null.
+// Returns [{ k, v, tone }], tone "ok" | "warn" | "muted" | null.
 export function stateRows(contract) {
   const s = contract?.last_known_state || {};
   const cfg = contract?.monitoring_config || {};
@@ -467,8 +405,7 @@ export function stateRows(contract) {
     rows.push({ k: "Min delay", v: f, tone: null });
   }
 
-  // Always show what we're watching, even if last_known_state is empty —
-  // tells the user this row isn't broken, just hasn't seen state yet.
+  // Shown even with no state yet, so the row doesn't look broken.
   const watching = [];
   if (cfg.watch_upgrades) watching.push("upgrades");
   if (cfg.watch_ownership) watching.push("owner");
@@ -476,9 +413,7 @@ export function stateRows(contract) {
   if (cfg.watch_roles) watching.push("roles");
   if (cfg.watch_safe_signers || cfg.watch_signers) watching.push("safe");
   if (cfg.watch_timelock) watching.push("timelock");
-  // Same phantom flag as the `state` alert group: nothing writes `watch_state`,
-  // so a polled contract used to render as not watched for state at all. The
-  // polling plan is the witness that it is.
+  // `watch_state` is a phantom flag; the polling plan is the witness.
   if (cfg.watch_state || (Array.isArray(cfg.polling_plan) && cfg.polling_plan.length > 0)) watching.push("state");
   if (watching.length === 0) watching.push("nothing");
   rows.push({ k: "Watching", v: watching.join(" · "), tone: "muted" });
@@ -486,10 +421,7 @@ export function stateRows(contract) {
   return rows;
 }
 
-// Pick the freshness state for the global status bar. Returns
-//   { tone: "ok"|"warn"|"err", label }
-// based on the youngest updated_at across contracts (scanner bumps
-// updated_at every scan, so a recent timestamp means it's alive).
+// Youngest updated_at across contracts (bumped every scan) → { tone, label }.
 export function scannerHealth(contracts, now = Date.now()) {
   if (!contracts || contracts.length === 0) {
     return { tone: "muted", label: "no contracts" };
@@ -502,8 +434,7 @@ export function scannerHealth(contracts, now = Date.now()) {
   if (stamps.length === 0) return { tone: "muted", label: "no scan yet" };
   const youngest = Math.max(...stamps);
   const ageS = Math.round((now - youngest) / 1000);
-  // Production scanner cadence is hourly while RPC spend is being reduced.
-  // Treat 2× as "lagging", 5× as "stalled".
+  // Hourly cadence: 2× is lagging, 5× stalled.
   let tone = "ok";
   if (ageS > 3600 * 2) tone = "warn";
   if (ageS > 3600 * 5) tone = "err";

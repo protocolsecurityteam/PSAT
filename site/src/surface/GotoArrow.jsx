@@ -1,10 +1,6 @@
-// The one "go to" commit affordance shared by every in-card entity reference:
-// lane caller buttons (FunctionPort), Governs rows (GovernsTab), and Guard
-// Inspector principal cards (InspectorCard). In all three the row/button BODY
-// previews the target on the canvas (a light camera peek, no selection change);
-// this arrow is the single control that COMMITS — it selects the target and
-// swaps the sidebar to its card. stopPropagation keeps an arrow click from also
-// firing the body's peek.
+// The shared "go to" commit on in-card entity references. The row body only
+// previews; this arrow selects and swaps the sidebar card. stopPropagation
+// keeps it from also firing the preview.
 export function GotoArrow({ onCommit, label = "Go to" }) {
   return (
     <button

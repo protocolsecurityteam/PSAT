@@ -4,14 +4,8 @@ import { shortAddr } from "../../format.js";
 import { contractTypeForMachine } from "./helpers.js";
 import { relativeTime, stateRows } from "./format.js";
 
-// Monitoring status strip — the entity header in Activity's entity mode. Shows
-// monitoring STATE only (type badge, live state grid, scan freshness), never
-// analysis facts (TVL / role / audit) that live on Detail / Audits.
-// `eventsState` is the per-contract event read's outcome (present / pending /
-// not_determined). "none recorded" is a positive claim about the contract, so it
-// is only made when the read actually answered — which is why the default for an
-// OMITTED prop is "pending", not "present": a call site that never says the read
-// answered must not inherit the proven state.
+// Monitoring state only, never analysis facts. "none recorded" is only said
+// when the read answered, so an omitted `eventsState` defaults to pending.
 export function StatusStrip({ machine, contract, lastEventAt, now, eventsState = "pending" }) {
   const name = machine?.name || shortAddr(machine?.address);
   const type = contract?.contract_type || contractTypeForMachine(machine);

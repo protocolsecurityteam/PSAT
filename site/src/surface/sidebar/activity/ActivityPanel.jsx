@@ -9,17 +9,9 @@ import { eventTypesFromGroupKeys } from "./helpers.js";
 
 const POLL_MS = 30_000;
 
-// Two positions, expressed as the MINIMUM salience each admits. A middle
-// "Notable+" tier existed and was removed as redundant: its only distinct
-// effect was hiding proven-routine rows, which the Timeline already
-// collapses into a single "N routine events — show" disclosure inside All.
-//
-// Default is `alert` — an owner decision (2026-08-05): the timeline's
-// non-alert traffic is overwhelmingly routine operations, so the tab opens
-// on what needs eyes. The tradeoff is stated, not hidden: `notable` and
-// `not_determined` (unrated) rows are behind the filter by default, and the
-// always-rendered hidden count plus one-click All is what keeps that from
-// being silent suppression.
+// Minimum salience admitted. Default `alert` is an owner decision (2026-08-05):
+// most non-alert traffic is routine. The always-shown hidden count and
+// one-click All keep that from being silent suppression.
 const SALIENCE_MODES = [
   { key: "routine", label: "All" },
   { key: "alert", label: "Alerts" },
@@ -27,9 +19,7 @@ const SALIENCE_MODES = [
 
 const DEFAULT_MIN_SALIENCE = "alert";
 
-// The hidden count is rendered unconditionally, including when it is zero:
-// a filter that silently withholds rows is the failure this axis exists to
-// prevent, and "0 hidden" is the statement that it is not doing so.
+// Shown even at zero: "0 hidden" says the filter is withholding nothing.
 function SalienceControl({ value, onChange, hiddenCount }) {
   return (
     <div className="ps-activity-salience" role="group" aria-label="Salience filter">
@@ -49,12 +39,8 @@ function SalienceControl({ value, onChange, hiddenCount }) {
   );
 }
 
-// Activity tab — the collapsed Monitor + Upgrades tabs. Two modes:
-//   - nothing selected → protocol-wide feed (ProtocolActivity)
-//   - a contract selected → status strip + alerts + unified timeline (EntityActivity)
-// A principal (safe/timelock/EOA that isn't itself a monitored contract row —
-// selectedMachine null) points the user at its contracts, mirroring the other
-// sidebar panels. Reading is public; alert writes gate on isAdmin.
+// Nothing selected → protocol feed; a contract → its timeline. A principal
+// without a monitored row points at its contracts.
 export function ActivityPanel({
   companyData,
   companyName,
@@ -75,18 +61,15 @@ export function ActivityPanel({
   const [subscriptions, setSubscriptions] = useState([]);
   const [savingAddr, setSavingAddr] = useState(null);
   const [now, setNow] = useState(() => Date.now());
-  // Owned here so the choice survives switching selection; the count comes
-  // back UP from whichever mode is mounted, because only it knows its rows.
+  // The count comes up from the mounted mode, which owns the rows.
   const [minSalience, setMinSalience] = useState(DEFAULT_MIN_SALIENCE);
   const [hiddenCount, setHiddenCount] = useState(0);
 
-  // Display-only address→name resolver for the row renderers: the surface's
-  // own contracts and principals. Never a witness — it changes how an address
-  // READS in a sub line, not what any row claims.
+  // Display-only naming; never a witness.
   const nameFor = useMemo(() => {
     const byAddr = new Map();
-    // companyData.contracts is the unfiltered set — machines drops
-    // zero-function contracts, which are still legitimate call targets.
+    // Unfiltered: machines drop zero-function contracts, which are still call
+    // targets.
     for (const c of companyData?.contracts || []) {
       if (c?.address && c?.name) byAddr.set(String(c.address).toLowerCase(), c.name);
     }
@@ -125,16 +108,13 @@ export function ActivityPanel({
     return () => clearInterval(t);
   }, [refresh]);
 
-  // "X ago" ticker — refreshes relative-time labels without a re-fetch.
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), POLL_MS);
     return () => clearInterval(t);
   }, []);
 
-  // The /monitoring payload spans every chain the protocol monitors. Key by
-  // (chain, address) (inv. 13) so a contract selected on the active chain
-  // resolves ITS enrollment row, not the other chain's row at the same address
-  // (F4). Monitoring rows carry their own chain (NULL≡ethereum via entityKey).
+  // Monitoring spans chains; key by (chain, address) (inv. 13) so the active
+  // chain's row resolves.
   const contractByAddress = useMemo(() => {
     const map = new Map();
     for (const c of contracts) {
@@ -143,16 +123,13 @@ export function ActivityPanel({
     return map;
   }, [contracts]);
 
-  // Protocol-wide feed is scoped to the active chain, matching the rest of the
-  // chain-scoped Surface page — the other chain's monitored rows don't leak in.
   const chainScopedContracts = useMemo(
     () => contracts.filter((c) => coalesceChain(c.chain) === activeChain),
     [contracts, activeChain],
   );
 
-  // Attach a Discord delivery target for this contract's watched events. The
-  // watch set itself is fixed at enrollment (by contract type + capabilities),
-  // so the only operator control here is WHERE alerts are delivered.
+  // The watch set is fixed at enrollment; only the delivery target is
+  // configurable.
   const attachWebhook = useCallback(async (contract, url, label, groupKeys) => {
     if (!protocolId || !url) return;
     const eventTypes = eventTypesFromGroupKeys(groupKeys);
@@ -164,21 +141,14 @@ export function ActivityPanel({
         body: JSON.stringify({
           discord_webhook_url: url,
           label,
-          // `groups` states which alert groups this filter was saved against —
-          // what tells the notifier the save used the post-split vocabulary, so
-          // it will be taken at its word rather than folded into the legacy
-          // grouping that put Safe executions under `signers`
-          // (notifier._FILTER_GROUPS_KEY). It changes nothing today: the Alerts
-          // control passes the WHOLE offered group set, so this save always
-          // names every group the contract offers. It is written now because a
-          // save made before the key existed and one made after it are
-          // otherwise indistinguishable forever; a per-group selector is what
-          // would make it bite.
+          // `groups` tells the notifier the filter uses the post-split
+          // vocabulary (notifier._FILTER_GROUPS_KEY). Always the whole group
+          // set today, but written now because pre- and post-key saves are
+          // otherwise indistinguishable forever.
           event_filter: eventTypes.length ? { event_types: eventTypes, groups: groupKeys } : null,
         }),
       });
     } catch {
-      /* swallow */
     } finally {
       await refresh();
       setSavingAddr(null);
@@ -193,11 +163,8 @@ export function ActivityPanel({
     );
   }
 
-  // Resolve the entity to time-line. A machine is the direct case. A principal
-  // (safe/timelock) is normally not a machine — but safes/timelocks ARE enrolled
-  // for monitoring, so if the selected principal has a MonitoredContract row,
-  // show its timeline (the prototype's "Safe selected" column). Only a principal
-  // with no monitored row (e.g. an EOA) shows a "monitoring not enabled" notice.
+  // Safes and timelocks are enrolled for monitoring, so a principal with a
+  // monitored row shows its timeline.
   const principalContract = selectedPrincipal
     ? contractByAddress.get(entityKey(activeChain, selectedPrincipal.address || "")) || null
     : null;

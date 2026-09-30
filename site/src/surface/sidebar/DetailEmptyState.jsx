@@ -1,9 +1,6 @@
-// Detail tab's empty state — the protocol at a glance when nothing is
-// selected. Every figure is a projection of published data: the score card
-// re-uses the score page's own derivations (projectScore / gradeBands) over
-// the canonical score document, the posture tiles count exactly what the
-// type filter counts (buildSearchResults), and anything the data does not
-// witness renders as not-determined — never as zero and never invented.
+// Detail tab's empty state: protocol at a glance. Figures reuse the score
+// page's derivations and the type filter's counts; anything unwitnessed renders
+// not-determined.
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../../api/client.js";
@@ -12,15 +9,13 @@ import { letterFor } from "../../score/gradeBands.js";
 import { formatUsd } from "../format.js";
 import { buildSearchResults } from "../layout/search.js";
 
-// Module-level caches so deselect → reselect → deselect doesn't refetch the
-// (large) score document every time the panel remounts. Keyed by company /
-// protocol; entries hold promises so concurrent mounts share one request.
+// Promises cached per company so remounts and concurrent mounts share one
+// request.
 const scoreCache = new Map();
 const monitorCache = new Map();
 
-// Sentinel for "could not find out" — a distinct third state from a score doc
-// and from a witnessed absence (404 / shapeless payload). Never cached: a
-// transient failure must not pin a false "no score" for the whole session.
+// Could not find out, distinct from a witnessed absence. Never cached, so a
+// transient failure can't pin "no score".
 const SCORE_FETCH_FAILED = Symbol("score-fetch-failed");
 
 function fetchScoreDoc(companyName) {
@@ -28,10 +23,9 @@ function fetchScoreDoc(companyName) {
     scoreCache.set(
       companyName,
       api(`/api/company/${encodeURIComponent(companyName)}/score`, { silent: true })
-        // An empty or shapeless payload is "no score published", not a score.
         .then((doc) => (doc && typeof doc === "object" && doc.grade_state ? doc : null))
         .catch((e) => {
-          if (e?.status === 404) return null; // witnessed absence
+          if (e?.status === 404) return null;
           scoreCache.delete(companyName);
           return SCORE_FETCH_FAILED;
         }),
@@ -48,7 +42,7 @@ function fetchMonitoring(protocolId) {
         api(`/api/protocols/${protocolId}/monitoring`, { silent: true }).catch(() => null),
         api(`/api/protocols/${protocolId}/events?limit=1`, { silent: true }).catch(() => null),
       ]).then(([contracts, events]) => ({
-        // A non-list payload is "not determined", distinct from a proven-empty list.
+        // Not determined, distinct from a proven-empty list.
         watched: Array.isArray(contracts) ? contracts.filter((c) => c?.is_active).length : null,
         lastEventAt: Array.isArray(events) ? events[0]?.detected_at || null : null,
       })),
@@ -71,9 +65,8 @@ function daysAgo(iso) {
   return days === 0 ? "today" : `${days}d ago`;
 }
 
-// The newest witnessed upgrade and how many contracts share that exact
-// timestamp — batch upgrades land as one tx across many proxies, and naming
-// one of them would be an arbitrary pick the data never made.
+// Batch upgrades land in one tx across many proxies; naming one would be an
+// arbitrary pick.
 export function lastUpgradeBatch(contracts) {
   let newest = null;
   for (const c of contracts || []) {
@@ -90,9 +83,8 @@ export function lastUpgradeBatch(contracts) {
 }
 
 function GlanceScoreCard({ companyName, scoreDoc, scoreState, projection }) {
-  // The #score hash asks the overview's ScoreBand to open its breakdown and
-  // scroll itself into view — meaningful both when this click navigates to the
-  // overview and when the surface is embedded further down that same page.
+  // Opens ScoreBand's breakdown, whether this navigates or the surface is
+  // embedded on that page.
   const scoreHref = `/company/${encodeURIComponent(companyName)}#score`;
   const goScore = (e) => {
     e.preventDefault();
@@ -104,7 +96,6 @@ function GlanceScoreCard({ companyName, scoreDoc, scoreState, projection }) {
   if (scoreState === "loading") {
     body = <div className="ps-glance-dim">Score loading…</div>;
   } else if (scoreState === "error") {
-    // "Could not find out" — a different fact from a witnessed absence.
     body = <div className="ps-glance-dim">Score not available right now.</div>;
   } else if (!scoreDoc || !projection) {
     body = <div className="ps-glance-dim">No score published for this protocol.</div>;
@@ -188,8 +179,7 @@ export function DetailEmptyState({
 
   useEffect(() => {
     if (!companyName) return undefined;
-    // The embedded overview owns this request, including pending/error states.
-    // Standalone surfaces retain their own fetch; undefined means no owner.
+    // The embedded overview owns this request; undefined means standalone.
     if (initialScore !== undefined) {
       const doc = initialScore.data;
       setScoreDoc(doc?.grade_state ? doc : null);
@@ -219,7 +209,7 @@ export function DetailEmptyState({
   useEffect(() => {
     if (protocolId == null) return undefined;
     let cancelled = false;
-    setMonitor(null); // never show the previous protocol's coverage
+    setMonitor(null);
     fetchMonitoring(protocolId).then((m) => {
       if (!cancelled) setMonitor(m);
     });
@@ -228,9 +218,8 @@ export function DetailEmptyState({
     };
   }, [protocolId]);
 
-  // The same counter the type filter uses — timelocks especially are a UNION
-  // of timelock principals and timelock-typed contract nodes, and counting
-  // either alone under-reports (see buildSearchResults).
+  // Same counter as the type filter: timelocks are a union of principals and
+  // contract nodes.
   const counts = useMemo(() => {
     const out = {};
     for (const mode of ["eoa", "safe", "timelock"]) {
@@ -375,8 +364,10 @@ export function DetailEmptyState({
           )}
           {tops.length > 0 && (
             <>
-              {/* Custodied token balances — derivative claims are NOT netted
-                  against TVL, so these are not fractions of the figure above. */}
+              {/*
+                Derivative claims aren't netted against TVL, so these aren't
+                fractions of it.
+              */}
               <div className="ps-glance-vsub">Largest tracked balances</div>
               {tops.map((c) => (
                 <button
