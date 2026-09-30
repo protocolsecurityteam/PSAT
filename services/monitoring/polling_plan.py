@@ -1,34 +1,9 @@
-"""Polling-plan projection — turns the static analyzer's tracking plan
-into a flat, watcher-shaped list of pollable slots.
+"""Project the analyzer's tracking plan into a flat list of pollable slots.
 
-The poller used to branch on ``contract_type`` and hardcode a handful of
-function selectors (``owner()``, ``paused()``, ``getThreshold()``,
-``getMinDelay()``) plus the EIP-1967 implementation slot. That left
-custom-named slots (``protocolAdmin``, ``feeRecipient``) invisible to the
-poll path even when the analyzer correctly identified them.
-
-This module derives entries from three sources, mirroring how the event
-side splits work between vendored standards and per-contract analyzer
-output:
-
-  1. **Per-contract entries** from ``tracking_plan.tracked_controllers``.
-     Any controller whose ``read_spec.strategy == "getter_call"`` and
-     whose ``type_kind`` is poll-decodable (``address``, ``contract``,
-     or a ``primitive`` bool/uint) becomes a getter_call entry. This is
-     the path that unlocks custom slots without code changes.
-  2. **Vendored proxy storage-slot entries** keyed on ``proxy_type``
-     (EIP-1967, EIP-1822, OZ legacy, Beacon, Gnosis Safe slot 0). Same
-     justification as ``services/discovery/upgrade_history.py``'s
-     vendored topic registry — the slot is a fixed standard and proxy
-     shells often skip Slither, so the analyzer can't surface it.
-  3. **Vendored contract-type templates** for Safe (``getThreshold()``)
-     and Timelock (``getMinDelay()``) — same rationale; vendored
-     bytecode whose ABI is standard but whose source isn't always
-     re-analyzed per protocol.
-
-Per-entry ``suppress_when_scan_event_types`` lists are derived from the
-contract's per-contract ``tracked_topics`` so the poll-vs-scan dedupe is
-self-describing instead of keyed off a global field→event_type table.
+Entries come from three sources: getter_call controllers in ``tracking_plan.tracked_controllers`` with a decodable type
+(so custom slots like ``protocolAdmin`` need no code); vendored proxy storage slots keyed on ``proxy_type`` (proxy
+shells often skip Slither); and vendored Safe/Timelock getters. Each entry's ``suppress_when_scan_event_types`` comes
+from the contract's own tracked topics.
 """
 
 from __future__ import annotations
@@ -55,34 +30,15 @@ from utils.evm import (
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Hand-rolled write-target → event_type fan-out
-# ---------------------------------------------------------------------------
-
-# Inverted view of ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` — for each write
-# target the canonical hand-rolled registry covers, the canonical
-# event_types that observe a mutation of that target. Used to seed
-# ``suppress_when_scan_event_types`` for analyzer-derived poll entries
-# whose field overlaps a hand-rolled tag.
-#
-# Lazily built on first access so a circular import between this module
-# and event_topics is impossible at import time (event_topics doesn't
-# import this one today, but the inversion lives here to keep the
-# polling-plan module self-contained).
+# Write target -> hand-rolled event_types that mutate it, inverted lazily from ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` to
+# avoid an import cycle.
 _HANDROLLED_WRITE_TARGET_TO_EVENT_TYPES: dict[str, list[str]] | None = None
 
 
 def _handrolled_events_for_write_target(write_target: str) -> list[str]:
-    """Return canonical hand-rolled event_types whose effect_tags claim
-    they write *write_target*.
-
-    Returns ``[]`` for targets the hand-rolled registry doesn't know
-    about — custom slots flow through the per-contract tracked_topics
-    derivation instead.
-    """
+    """Hand-rolled event_types whose tags write *write_target*; ``[]`` for custom slots."""
     global _HANDROLLED_WRITE_TARGET_TO_EVENT_TYPES
     if _HANDROLLED_WRITE_TARGET_TO_EVENT_TYPES is None:
-        # Local import to avoid event_topics → polling_plan cycles.
         from services.monitoring.event_topics import _HANDROLLED_EVENT_TYPE_TO_TAGS
 
         inverted: dict[str, list[str]] = {}
@@ -98,24 +54,11 @@ def _handrolled_events_for_write_target(write_target: str) -> list[str]:
     return list(_HANDROLLED_WRITE_TARGET_TO_EVENT_TYPES.get(write_target, ()))
 
 
-# ---------------------------------------------------------------------------
-# Vendored standards
-# ---------------------------------------------------------------------------
+# Safe module-list head (``modules[address(0x1)]``, slot 1) and guard slot; canonical in ``utils.evm``, re-exported for
+# tests.
 
-
-# Safe module linked list head — ``modules[SENTINEL_MODULES]`` with the mapping
-# at storage slot 1 and ``SENTINEL_MODULES == address(0x1)`` — and the guard
-# slot, ``keccak256("guard_manager.guard.address")``, the literal the 1.3.0 and
-# 1.4.1 singletons carry. Canonical values live in ``utils.evm``
-# (re-exported here for the monitoring tests that import them); the
-# preimage-recompute drift test is tests/test_safe_module_guard_monitoring.py.
-
-# proxy_type → polling entry that resolves the current implementation.
-# Mirrors ``services/monitoring/proxy_watcher._RESOLVE_BY_TYPE`` but
-# emits the unified poll_plan entry shape. ``custom`` / ``compound`` /
-# ``synthetix`` proxies use an eth_call getter rather than a slot read;
-# those are emitted with ``kind: "getter_call"`` so the poll loop's
-# single dispatcher handles them.
+# proxy_type -> the poll entry resolving its implementation, mirroring ``proxy_watcher._RESOLVE_BY_TYPE``. Getter-based
+# proxies emit ``getter_call`` entries.
 _VENDORED_PROXY_ENTRIES: dict[str, dict[str, Any]] = {
     "eip1967": {
         "field": "implementation",
@@ -175,9 +118,7 @@ _VENDORED_PROXY_ENTRIES: dict[str, dict[str, Any]] = {
     },
 }
 
-# Standard event_types that signal the same underlying mutation a vendored
-# poll entry observes. Used to seed ``suppress_when_scan_event_types`` so
-# the poll/scan dedupe survives the projection.
+# Standard event_types for the same mutation, so poll/scan dedupe survives projection.
 _VENDORED_IMPL_SCAN_EVENTS = (
     "upgraded",
     "new_implementation",
@@ -186,10 +127,7 @@ _VENDORED_IMPL_SCAN_EVENTS = (
     "beacon_upgraded",
 )
 
-# contract_type → list of vendored polling entries. Safe and Timelock
-# ship standard ABIs whose source isn't always re-analyzed per protocol;
-# the analyzer-derived path can't see ``getThreshold`` / ``getMinDelay``
-# unless Slither walked the vendored Safe / TimelockController source.
+# Safe and Timelock ABIs are standard but their source isn't always analyzed, so the analyzer can't see these getters.
 _VENDORED_CONTRACT_TYPE_ENTRIES: dict[str, list[dict[str, Any]]] = {
     "safe": [
         {
@@ -201,10 +139,7 @@ _VENDORED_CONTRACT_TYPE_ENTRIES: dict[str, list[dict[str, Any]]] = {
             "source": "vendored:safe",
             "suppress_when_scan_event_types": ["threshold_changed"],
         },
-        # Head of the Safe module linked list. The poll observes CHANGE, not
-        # membership: the head alone cannot enumerate the list (see the
-        # resolution-plane probe), so a moved head means "the module set
-        # changed", never "the module set is [head]".
+        # The head only shows that the module set changed; it can't enumerate the list.
         {
             "field": "modules_head",
             "kind": "storage_slot",
@@ -236,52 +171,21 @@ _VENDORED_CONTRACT_TYPE_ENTRIES: dict[str, list[dict[str, Any]]] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Decoding + selector helpers
-# ---------------------------------------------------------------------------
-
-
 def selector_for(target_name: str) -> str:
-    """Return the 4-byte selector for a no-arg getter named *target_name*.
+    """The 4-byte selector of a no-arg getter named *target_name*.
 
-    ``read_spec``-derived poll entries are admitted only for
-    ``strategy == "getter_call"`` specs (``_is_poll_decodable``), whose
-    target the analyzer resolved to a compiled getter: a public state
-    var's auto-getter or a discovered no-parameter view function
-    (``_build_getter_index`` only keeps parameterless functions). A var
-    with no getter carries ``strategy == "unknown"`` and never reaches
-    here. ``keccak(name + "()")[:4]`` is therefore the selector of a
-    real function for every entry built from a current-schema plan;
-    plans persisted before the ``unknown`` strategy existed may still
-    name a private var as a getter target, and the poll loop surfaces
-    those as per-entry ``error`` (revert) or ``no_value`` (empty return
-    from a permissive fallback) status rather than silence.
+    Current plans only admit analyzer-resolved getters. Older plans may name a private var; the poll loop reports those
+    as ``error`` or ``no_value`` rather than silence.
     """
     return "0x" + keccak(text=f"{target_name}()").hex()[:8]
 
 
 def decode_poll_outcome(raw: str | None, type_kind: str | None, type_str: str | None) -> tuple[object | None, bool]:
-    """Decode a raw answered-RPC return for a polling entry.
+    """Decode an answered return for *entry* as ``(value, parsed)``.
 
-    Returns ``(value, parsed)``. ``parsed`` is True iff the response body
-    parsed as the entry's declared type — the wire yielded an observation.
-    ``value`` is what the value plane stores; it is ``None`` either when
-    nothing parsed (``parsed=False``: absent / empty ``0x`` / short body /
-    undecodable type) or when the parse produced the type's conventional
-    empty — the zero address — which the poll loop's "old_value=None means
-    first observation" rule keeps out of ``last_known_state`` by
-    convention. An answered zero address is therefore ``(None, True)``, an
-    observed outcome, never conflated with an unparseable answer's
-    ``(None, False)``.
-
-    Shapes handled:
-      * ``address`` / ``contract`` — right-20-byte address; the zero
-        address parses (``parsed=True``) but yields ``value=None``
-        (matches ``parse_address_result``'s storage convention).
-      * ``primitive`` + ``type="bool"`` — non-zero word → True, zero
-        word → False (both parse and both store).
-      * ``primitive`` + ``type`` starting with ``uint`` / ``int`` —
-        decode as integer (zero stores as 0).
+    ``parsed`` is whether the body parsed as the declared type. The zero address parses but yields ``value=None`` (the
+    "None means first observation" convention), so an answered zero is ``(None, True)`` and never ``(None, False)``.
+    Bools and ints store their zero values.
     """
     if raw is None:
         return None, False
@@ -291,8 +195,7 @@ def decode_poll_outcome(raw: str | None, type_kind: str | None, type_str: str | 
 
     kind = (type_kind or "").lower()
     if kind in ("address", "contract"):
-        # parse_address_result lives in services.clients.rpc but its shape is
-        # tiny — inlined here to keep this module decoupled.
+        # Inlined ``parse_address_result`` to keep this module decoupled.
         body = raw_str[2:] if raw_str.startswith("0x") else raw_str
         if len(body) < 40:
             return None, False
@@ -307,8 +210,7 @@ def decode_poll_outcome(raw: str | None, type_kind: str | None, type_str: str | 
         if t == "bool":
             if not body:
                 return None, False
-            # bool encodes as 32-byte word — non-zero anywhere in the
-            # word means True. Match the existing poller semantics.
+            # Nonzero anywhere in the word is True, matching the poller.
             return any(c != "0" for c in body), True
         if t.startswith("uint") or t.startswith("int"):
             try:
@@ -319,32 +221,15 @@ def decode_poll_outcome(raw: str | None, type_kind: str | None, type_str: str | 
     return None, False
 
 
-# ---------------------------------------------------------------------------
-# Plan builder
-# ---------------------------------------------------------------------------
-
-# read_spec.type_kind values the poller knows how to decode. ``unknown`` /
-# ``struct`` / ``mapping`` / ``array`` / ``enum`` are deliberately
-# excluded — the first two would need struct-decoding (the analyzer
-# already projects struct fields via member_path; we drop those because
-# decoding a struct return is ABI-heavy and no current consumer needs
-# it) and the others aren't single-value reads.
+# Single-value types the poller can decode. Structs are only reachable via member projection.
 _DECODABLE_TYPE_KINDS = frozenset({"address", "contract", "primitive"})
 
-# When the analyzer emits an entry whose type matches a vendored standard
-# already in the polling plan, the vendored entry wins and the analyzer
-# duplicate drops. Field-name overlap is the dedupe key. This keeps the
-# storage-slot fast path (EIP-1967) from being shadowed by a slower
-# ``implementation()`` getter the analyzer might have surfaced from the
-# UUPS pattern's ``_getImplementation`` view.
+# Vendored entries win these fields, so the EIP-1967 slot read isn't shadowed by an analyzer-found ``implementation()``
+# getter.
 _VENDORED_FIELD_WINS = frozenset({"implementation", "threshold", "min_delay"})
 
 
-# ABI types that occupy exactly one 32-byte word in a return. A struct getter's
-# return is projectable by word index only when EVERY member is one of these:
-# a dynamic member (``string`` / ``bytes`` / an array / a nested struct) puts an
-# offset in the head instead of the value, and the word at the member's index
-# would then be a pointer published as an address.
+# One-word ABI types. A dynamic member puts an offset in the head, which would be published as an address.
 _STATIC_WORD_ABI_TYPE = re.compile(
     r"^(address|bool"
     r"|u?int(8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128"
@@ -354,22 +239,10 @@ _STATIC_WORD_ABI_TYPE = re.compile(
 
 
 def _member_word_index(read_spec: Mapping[str, Any]) -> int | None:
-    """Index of the word a struct getter's return holds this controller's
-    member in, or ``None`` when the projection is not provably that word.
+    """The word index holding this controller's member in a struct getter's return, or ``None`` unless provable.
 
-    A public struct variable's compiler-generated getter returns the members as
-    a flat tuple, so member *i* is word *i* — but only under two conditions the
-    analyzer's ``components`` list lets us check:
-
-      * every member is a single static word (see ``_STATIC_WORD_ABI_TYPE``),
-        which also makes the flattened auto-getter and an explicit
-        ``returns (S memory)`` getter encode identically; and
-      * no member is a mapping or array — the auto-getter OMITS those, which
-        shifts every later member's index and would publish a neighbouring
-        member's value under this controller's name.
-
-    Both are refusals to decode, not fallbacks: an unprojectable controller
-    stays unreadable, which the taxonomy already has a state for.
+    Requires every member to be one static word and no mapping or array members (the auto-getter omits those, shifting
+    later indexes). Otherwise the controller stays unreadable.
     """
     member_path = read_spec.get("member_path")
     if not isinstance(member_path, list) or len(member_path) != 1:
@@ -390,37 +263,23 @@ def _member_word_index(read_spec: Mapping[str, Any]) -> int | None:
     return index
 
 
-# ---------------------------------------------------------------------------
-# E5 — signal classification (§3.6)
-# ---------------------------------------------------------------------------
+# What one diff on this entry means to an operator; stamped at enrollment, read by ``salience.assign_salience``. The
+# basis rides along so a re-analysis can upgrade ``metric`` to ``config`` visibly.
 
-# What ONE diff on this entry tells an operator. Stamped at enrollment, read
-# at mint time by ``salience.assign_salience``. The split is total over the
-# entries this builder emits — there is no third state here — but the BASIS
-# rides along so a consumer can see why, and so a later re-analysis can
-# upgrade ``metric`` → ``config`` without a silent behaviour change.
-
-# Basis codes. ``vendored:*`` is the entry's own ``source`` verbatim (the
-# provenance the plan already carried); the other three are stated here.
+# ``vendored:*`` bases are the entry's own ``source``.
 SIGNAL_BASIS_CALLER_GATE: ControllerProvenance = "caller_gate"
 SIGNAL_BASIS_NO_GATE_PROVENANCE = "no_gate_provenance"
 SIGNAL_BASIS_TYPE_KIND_REFERENCE = "type_kind_reference"
 
-# The one ``authority_provenance`` value that PROVES the controller behind an
-# entry gates callers; the annotation pins it inside the schema vocabulary.
+# The one provenance that proves the controller gates callers.
 _PROVEN_GATE_PROVENANCE: ControllerProvenance = "caller_gate"
 
-# Reference-typed reads name a binding, not a quantity: a moved address or
-# contract reference is a control-plane fact whatever the analyzer proved
-# about its writers.
+# A moved reference is a control-plane fact regardless of its writers.
 _REFERENCE_TYPE_KINDS = frozenset({"address", "contract"})
 
 
 def _signal_class_for_vendored(entry: Mapping[str, Any]) -> tuple[str, str]:
-    """Vendored entries are config by construction: every one of them is a
-    proxy implementation slot, a Safe guard / module head / threshold, or a
-    timelock delay. The basis is the vendored provenance the entry already
-    carries (``vendored:safe``, ``vendored:eip1967``, …)."""
+    """Vendored entries are config by construction; the basis is their vendored provenance."""
     source = entry.get("source")
     basis = source if isinstance(source, str) and source.startswith("vendored:") else "vendored"
     return SIGNAL_CLASS_CONFIG, basis
@@ -429,18 +288,9 @@ def _signal_class_for_vendored(entry: Mapping[str, Any]) -> tuple[str, str]:
 def _signal_class_for_analyzer(type_kind: str, authority_provenance: str | None) -> tuple[str, str]:
     """Classify an analyzer-derived entry.
 
-    A reference-typed read is config. A primitive is config only when the
-    plan PROVES its controller gates callers; otherwise it is ``metric`` with
-    ``no_gate_provenance`` — the honest default, because an unclassified
-    number is not presumed to be a control parameter.
-
-    ``no_gate_provenance`` is a POSITIVE basis, not an absent input: the
-    derivation completed for this entry (it has a target, a selector and a
-    type) and carried no gate proof. That is a measured fact about a finished
-    analysis, and it is what lets ``metric`` collapse to ``routine`` at render
-    without suppressing anything on ignorance — a later re-analysis that
-    attaches ``caller_gate`` upgrades the entry with the basis change on the
-    record.
+    References are config. Primitives are config only with proven caller-gate provenance, else ``metric`` with
+    ``no_gate_provenance``: a positive basis from a completed derivation, which is what lets ``metric`` render as
+    routine.
     """
     if type_kind in _REFERENCE_TYPE_KINDS:
         return SIGNAL_CLASS_CONFIG, SIGNAL_BASIS_TYPE_KIND_REFERENCE
@@ -450,14 +300,10 @@ def _signal_class_for_analyzer(type_kind: str, authority_provenance: str | None)
 
 
 def _is_poll_decodable(read_spec: Mapping[str, Any]) -> bool:
-    """A controller becomes a polling entry only when we can both call its
-    getter (strategy == getter_call) and decode the result (type_kind in the
-    supported set).
+    """Pollable iff the getter is callable (getter_call) and the type decodable.
 
-    A member-path controller qualifies through the same door with one extra
-    proof: the word its member occupies in the parent getter's return must be
-    known (:func:`_member_word_index`). Without that the projection would be a
-    guess at an offset, so the controller stays unreadable."""
+    Member-path controllers also need a proven word index.
+    """
     if (read_spec.get("strategy") or "").lower() != "getter_call":
         return False
     type_kind = (read_spec.get("type_kind") or "").lower()
@@ -471,13 +317,7 @@ def _is_poll_decodable(read_spec: Mapping[str, Any]) -> bool:
 
 
 def project_entry_return(raw: str | None, entry: Mapping[str, Any]) -> str | None:
-    """The single ABI word *entry* reads, sliced out of a getter's return.
-
-    A no-op for every entry without a member projection. For one with a
-    projection, a body too short to hold that word yields ``None`` — the answer
-    did not contain the member, which ``decode_poll_outcome`` reports as
-    unparsed rather than as a value.
-    """
+    """The one ABI word *entry* reads from a getter's return; ``None`` if the body is too short to hold it."""
     index = entry.get("member_word_index")
     if not isinstance(index, int) or isinstance(index, bool) or index < 0:
         return raw
@@ -490,21 +330,14 @@ def project_entry_return(raw: str | None, entry: Mapping[str, Any]) -> str | Non
 
 
 def _entry_field_name(read_spec: Mapping[str, Any], controller_id: str | None) -> str:
-    """Pick the ``field`` key the poller writes into ``last_known_state``.
-
-    Prefer ``state_variable_name`` — matches what
-    ``_update_state_from_event`` writes on the event side, so the event
-    and poll paths converge on the same key per slot. Falls back to the
-    bare ``target`` (getter name) and finally the controller_id's
-    state-var portion if the read spec is sparse.
+    """The ``last_known_state`` key for this entry: ``state_variable_name`` (matching the event side), else the
+    getter name, else the controller id's var part.
     """
     name = read_spec.get("state_variable_name")
     if isinstance(name, str) and name:
         member_path = read_spec.get("member_path")
         if isinstance(member_path, list) and member_path:
-            # A projected member is its own field. Sharing the parent's name
-            # would file one member's value under the whole struct — and
-            # collide with any entry the parent variable itself produced.
+            # A projected member is its own field; sharing the parent's name would collide.
             return ".".join([name, *(str(part) for part in member_path)])
         return name
     target = read_spec.get("target")
@@ -516,21 +349,10 @@ def _entry_field_name(read_spec: Mapping[str, Any], controller_id: str | None) -
 
 
 def _derive_suppress_event_types(field: str, tracked_topics: Iterable[Mapping[str, Any]] | None) -> list[str]:
-    """Return canonical event_types whose ``effect_tags.writes`` includes
-    *field*, drawn from both:
+    """Canonical event_types whose ``effect_tags.writes`` includes *field*.
 
-      * the hand-rolled registry (``_HANDROLLED_EVENT_TYPE_TO_TAGS``) —
-        covers OZ/Safe/Timelock/proxy events whose topic0s are NOT
-        included in per-contract ``tracked_topics`` (the global registry
-        owns them, per ``extract_governance_topics``). Without this an
-        analyzer-derived ``owner`` poll entry would never know that a
-        scanner ``ownership_transferred`` event is the same mutation.
-      * per-contract ``tracked_topics`` — covers non-OZ ABIs the global
-        registry doesn't know about (Solmate OwnerUpdated, DSAuth,
-        Compound NewAdmin, custom-named slots).
-
-    Replaces the global ``_POLL_FIELD_TO_SCAN_EVENTS`` table the prior
-    poller used.
+    Both the hand-rolled registry (OZ/Safe/Timelock/proxy topics, which aren't in per-contract ``tracked_topics``) and
+    the contract's own tracked topics (non-OZ ABIs).
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -564,25 +386,15 @@ def build_polling_plan(
     tracking_plan: Mapping[str, Any] | None = None,
     tracked_topics: Iterable[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Project per-contract polling intent into a flat list of entries.
+    """Project a contract's polling intent into the entries enrollment stores under
+    ``monitoring_config["polling_plan"]``.
 
-    The returned list is what enrollment stores under
-    ``monitoring_config["polling_plan"]`` and what
-    ``poll_for_state_changes`` walks each tick.
-
-    Vendored entries (proxy slot, safe/timelock getters) take precedence
-    over analyzer-derived duplicates for fields in
-    ``_VENDORED_FIELD_WINS`` — the storage-slot fast path beats an
-    analyzer's ``implementation()`` getter discovery and the standard
-    Safe/Timelock ABIs beat any local re-discovery.
+    Vendored entries beat analyzer duplicates for ``_VENDORED_FIELD_WINS`` fields.
     """
-    # Local import for the same acyclicity reason as
-    # ``_handrolled_events_for_write_target``.
     from services.monitoring.event_topics import MAX_EVENT_TYPE_LENGTH, value_changed_event_type
 
     by_field: dict[str, dict[str, Any]] = {}
 
-    # Vendored proxy storage-slot or getter entry, keyed on proxy_type.
     if contract_type == "proxy" and proxy_type:
         vendored_proxy = _VENDORED_PROXY_ENTRIES.get((proxy_type or "").lower())
         if vendored_proxy:
@@ -591,14 +403,12 @@ def build_polling_plan(
             entry["signal_class"], entry["signal_class_basis"] = _signal_class_for_vendored(entry)
             by_field[entry["field"]] = entry
 
-    # Vendored contract-type templates (safe.getThreshold, timelock.getMinDelay).
     for entry in _VENDORED_CONTRACT_TYPE_ENTRIES.get(contract_type, []):
         copy = dict(entry)
         copy.setdefault("suppress_when_scan_event_types", list(copy.get("suppress_when_scan_event_types") or []))
         copy["signal_class"], copy["signal_class_basis"] = _signal_class_for_vendored(copy)
         by_field.setdefault(copy["field"], copy)
 
-    # Analyzer-derived entries from the tracking plan.
     if isinstance(tracking_plan, Mapping):
         for tc in tracking_plan.get("tracked_controllers") or []:
             if not isinstance(tc, Mapping):
@@ -611,17 +421,13 @@ def build_polling_plan(
             field = _entry_field_name(read_spec, tc.get("controller_id"))
             if not field:
                 continue
-            # Vendored standards always win for their canonical fields.
             if field in by_field and field in _VENDORED_FIELD_WINS:
                 continue
             target = read_spec.get("target") or field
             type_kind = (read_spec.get("type_kind") or "").lower()
             type_str = read_spec.get("type") or ""
             suppress = _derive_suppress_event_types(field, tracked_topics)
-            # A hint occurrence on this controller resolves through a
-            # verification read against this very entry, so the witnessed
-            # ``value_changed`` it mints and this entry's own poll report the
-            # same mutation from the same read. Suppress the duplicate.
+            # A hint on this controller resolves through a verification read of this same entry; suppress the duplicate.
             verified_type = value_changed_event_type(tc.get("controller_id"))
             if len(verified_type) <= MAX_EVENT_TYPE_LENGTH and verified_type not in suppress:
                 suppress.append(verified_type)
@@ -638,20 +444,15 @@ def build_polling_plan(
             }
             member_word_index = _member_word_index(read_spec)
             if member_word_index is not None:
-                # The parent getter answers with the whole struct; this names
-                # the one word that is this controller. ``member_path`` rides
-                # along so a persisted entry says what it projects.
+                # The parent getter returns the whole struct; this names this controller's word.
                 entry["member_word_index"] = member_word_index
                 entry["member_path"] = list(read_spec.get("member_path") or [])
             if suppress:
                 entry["suppress_when_scan_event_types"] = suppress
-            # First-write-wins for analyzer entries so the deterministic
-            # tracking_plan iteration order (already sorted by label)
-            # doesn't churn between runs.
+            # First write wins, so sorted plan order keeps results stable.
             by_field.setdefault(field, entry)
 
-    # Pre-resolve the selector for every getter_call entry so the poll
-    # hot path is a flat dict lookup instead of a per-tick keccak.
+    # Pre-resolve selectors so the poll hot path skips per-tick keccak.
     plan: list[dict[str, Any]] = []
     for entry in by_field.values():
         if entry.get("kind") == "getter_call" and "selector" not in entry:
@@ -659,12 +460,9 @@ def build_polling_plan(
             if isinstance(target, str) and target:
                 entry["selector"] = selector_for(target)
             else:
-                # An entry without a target can't be polled — skip rather
-                # than persist garbage.
                 continue
         plan.append(entry)
 
-    # Sort deterministically so the persisted JSON is stable across
-    # re-enrollments and diffs cleanly in DB inspections.
+    # Stable order so the persisted JSON diffs cleanly.
     plan.sort(key=lambda e: e.get("field") or "")
     return plan

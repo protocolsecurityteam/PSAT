@@ -1,12 +1,4 @@
-"""Protocol-wide TVL tracking — periodic balance refresh and snapshots.
-
-Combines two data sources:
-1. DefiLlama protocol TVL (one HTTP call per protocol, gives chain breakdown)
-2. On-chain per-contract balances via Etherscan (existing utils)
-
-Stores historical snapshots in the ``tvl_snapshots`` table and refreshes
-the ``contract_balances`` table with the latest values.
-"""
+"""Protocol-wide TVL tracking: DefiLlama TVL plus on-chain per-contract balances, snapshotted into ``tvl_snapshots``."""
 
 from __future__ import annotations
 
@@ -52,31 +44,17 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 logger = logging.getLogger(__name__)
 
 DEFAULT_TVL_INTERVAL = int(os.getenv("PROTOCOL_TVL_INTERVAL", "3600"))
-# Minimum seconds between snapshots for the same protocol.  Prevents
-# duplicate rows when the loop is retriggered quickly (restart, signal, etc.).
+# Prevents duplicate rows when the loop retriggers quickly.
 MIN_SNAPSHOT_INTERVAL = int(os.getenv("PROTOCOL_TVL_MIN_INTERVAL", "300"))
-# Protocols refreshed per tick, oldest-snapshot-first — bounds the per-tick
-# Etherscan/DefiLlama fan-out (design §2.7).
+# Oldest first; bounds per-tick Etherscan/DefiLlama fan-out.
 DEFAULT_TVL_PROTOCOLS_PER_PASS = 10
-# The protocol's signers and capability principals use a daily balance cadence.
-# The shared collector still deduplicates physical reads across protocols.
+# Daily cadence for signers and principals; the shared collector dedupes reads across protocols.
 DEFAULT_ENTITY_BALANCE_INTERVAL = int(os.getenv("PSAT_ENTITY_BALANCE_INTERVAL", "86400"))
 DEFILLAMA_PROTOCOL_URL = "https://api.llama.fi/protocol"
 
 
-# ---------------------------------------------------------------------------
-# DefiLlama TVL
-# ---------------------------------------------------------------------------
-
-
 def fetch_defillama_tvl(protocol_name: str) -> dict | None:
-    """Fetch current TVL from DefiLlama for a protocol.
-
-    Uses ``resolve_protocol`` (cached in-memory) to map the protocol name
-    to a slug, then calls the DefiLlama protocol endpoint.
-
-    Returns ``{"tvl": float, "chain_breakdown": dict}`` or ``None``.
-    """
+    """Current DefiLlama TVL as ``{"tvl": float, "chain_breakdown": dict}``, or ``None``."""
     from services.discovery.protocol_resolver import resolve_protocol
 
     resolved = resolve_protocol(protocol_name)
@@ -94,7 +72,6 @@ def fetch_defillama_tvl(protocol_name: str) -> dict | None:
 
     tvl = data.get("tvl")
     if isinstance(tvl, list):
-        # Historical time series — grab the latest entry
         point = tvl[-1] if tvl and isinstance(tvl[-1], dict) else {}
         tvl = point.get("totalLiquidityUSD")
     elif not isinstance(tvl, (int, float)):
@@ -109,7 +86,7 @@ def fetch_defillama_tvl(protocol_name: str) -> dict | None:
     if not isinstance(chain_breakdown, dict):
         chain_breakdown = {}
 
-    # Filter out borrowed/staking/pool2 keys — keep only chain names
+    # Drop borrowed/staking/pool2 keys; keep chains.
     chain_breakdown = {
         k: v
         for k, v in chain_breakdown.items()
@@ -125,18 +102,9 @@ def fetch_defillama_tvl(protocol_name: str) -> dict | None:
     }
 
 
-# ---------------------------------------------------------------------------
-# On-chain balance refresh
-# ---------------------------------------------------------------------------
-
-
 def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract]:
-    """Select current balance subjects, normally excluding proxy implementations.
-
-    Include implementations with a truncated stored page or whose proxy still
-    carries a legacy scan observation. Refreshing these accounts avoids leaving
-    old evidence permanently attached to the folded entity. These exceptions
-    schedule current balance reads only; historical scans are never resumed.
+    """Current balance subjects, excluding proxy implementations unless their stored page was truncated or their
+    proxy carries a legacy scan (so old evidence doesn't stick to the entity). Current reads only.
     """
     from services.aggregations.company_overview.entity_keys import _entity_key
     from services.monitoring.balance_reads import winning_asset_fetches
@@ -160,23 +128,16 @@ def _get_protocol_addresses(session: Session, protocol_id: int) -> list[Contract
         for c in contracts
         if c.is_proxy and c.implementation and _entity_key(c.chain, c.address) in legacy_scanned_entities
     }
-    # The IMPLEMENTATION rows of those proxies, matched the same chain-scoped way
-    # the exclusion below is built.
     legacy_scanned_impl_tokens = {
         _entity_key(by_id[cid].chain, by_id[cid].implementation) for cid in folded_into_a_legacy_scanned_sheet
     }
 
-    # Impl-behind-proxy tokens, keyed by the composite "<chain>::<address>": an
-    # EIP-1967 impl lives on its proxy's chain, so exclude it only there. A bare
-    # address set would also drop a standalone contract that merely shares an
-    # address with some other chain's impl (a CREATE2 twin) from balance
-    # collection entirely.
+    # Keyed by "<chain>::<address>": a bare address would also drop a CREATE2 twin on another chain.
     impl_tokens: set[str] = set()
     for c in contracts:
         if c.is_proxy and c.implementation:
             impl_tokens.add(_entity_key(c.chain, c.implementation))
 
-    # Keep proxy contracts (they hold the funds) and non-impl regular contracts
     return [
         c
         for c in contracts
@@ -220,11 +181,8 @@ def refresh_contract_balances(
 
 @dataclass(frozen=True)
 class ExcludedHolder:
-    """One entity the current observation population did NOT take, and why.
-
-    Published rather than dropped. A population that quietly shrinks is
-    indistinguishable from one that was never that size, and every exclusion
-    here is a decision a reader is entitled to check.
+    """An entity excluded from the observation population, and why; published so the population can't silently
+    shrink.
     """
 
     entity_key: str
@@ -258,21 +216,12 @@ def proven_codeless_holders(
     *,
     entity_keys: set[str] | None = None,
 ) -> tuple[list[EntityHolder], list[ExcludedHolder]]:
-    """The protocol's proven-codeless principals, as observation subjects.
+    """The protocol's proven-codeless principals as observation subjects; returns ``(holders, excluded)``.
 
-    The membership witness is the scorer's own
-    :func:`services.scoring.planes.load_proven_eoa_entities` — imported here
-    rather than re-expressed, because the producer's population and the plane's
-    idea of "proven codeless" must be ONE predicate. ``resolved_type == 'eoa'``
-    is only ever written after an empty ``eth_getCode``; a node that was never
-    probed carries ``unknown`` and is not in this set, and treating it as an EOA
-    would be a name standing in for a witness.
-
-    Returns ``(holders, excluded)``. Nothing is dropped silently: an entity this
-    producer cannot read is returned with the reason it cannot.
+    Uses the scorer's own ``load_proven_eoa_entities`` so both sides share one predicate. Never-probed nodes
+    (``unknown``) are not EOAs.
     """
-    # Local import: the scorer reads the monitoring plane, so a module-level
-    # import here would close the cycle. Nothing about the predicate is copied.
+    # Local import: the scorer reads this plane.
     from services.scoring.planes import load_proven_eoa_entities
     from services.scoring.schema import coalesce_chain
     from services.scoring.schema import entity_key as make_entity_key
@@ -282,11 +231,8 @@ def proven_codeless_holders(
         wanted = {k.lower() for k in entity_keys}
         keys = [k for k in keys if k.lower() in wanted]
 
-    # An address this protocol already has a ``contracts`` row for is observed
-    # through that row. Two subjects reading one address would fold two accounts
-    # onto one entity key, and the sheet's "every account scanned at itself"
-    # conjunct would then be asking about an account that is the same account
-    # twice.
+    # Addresses with a ``contracts`` row are observed through it; two subjects on one address would double-count the
+    # entity.
     contract_keys = {
         make_entity_key(chain, address)
         for address, chain in session.execute(
@@ -358,14 +304,8 @@ def refresh_entity_balances_if_due(
     session: Session,
     protocol_id: int,
 ) -> EntityObservationReport:
-    # Due eligibility is per physical holder/read class and last SUCCESS, not a
-    # cohort aggregate that hides never-read holders or counts failed attempts.
+    # Due-ness is per physical holder and read class by last success, not a cohort aggregate.
     return refresh_entity_balances(session, protocol_id)
-
-
-# ---------------------------------------------------------------------------
-# Snapshot orchestration
-# ---------------------------------------------------------------------------
 
 
 def _read_existing_balances(session: Session, protocol_id: int) -> tuple[dict[str, dict], bool]:
@@ -426,24 +366,12 @@ def take_tvl_snapshot(
     *,
     counters: dict[str, int] | None = None,
 ) -> tuple[TvlSnapshot | None, bool]:
-    """Take a combined TVL snapshot for a protocol.
+    """Take a combined TVL snapshot for a protocol; returns ``(snapshot, partial)``.
 
-    1. Collects and commits current balances, or reads existing observations
-       when *refresh_balances* is False.
-    2. Fetches external DefiLlama TVL with no open database transaction.
-       (used by the pipeline where the resolution stage already
-       fetched them).
-    3. Writes a ``TvlSnapshot`` row.
-
-    Returns ``(snapshot, partial)``. ``snapshot`` is ``None`` (and no work is
-    done) when a snapshot for this protocol already exists within the last
-    ``MIN_SNAPSHOT_INTERVAL`` seconds. ``partial`` is True when the snapshot
-    completed but some contract's value is missing from it — because its chain's
-    native coin could not be priced, because a balance read failed
-    (see :func:`refresh_contract_balances`), or, on the read-existing branch,
-    because a contract has no non-failed fetch for some row class
-    (see :func:`_read_existing_balances`). It is never hardcoded: a headline
-    money figure that silently omits a contract must say so.
+    Collects balances (or reads existing ones when *refresh_balances* is False), then fetches DefiLlama with no
+    transaction open, then writes a ``TvlSnapshot``. ``snapshot`` is ``None`` if one exists within
+    ``MIN_SNAPSHOT_INTERVAL``. ``partial`` is True when any contract's value is missing (unpriced native coin, failed
+    read, or no non-failed fetch), so a headline figure never silently omits one.
     """
     from datetime import datetime, timezone
 
@@ -451,7 +379,6 @@ def take_tvl_snapshot(
     if protocol is None:
         return None, False
 
-    # Dedup guard — skip if a recent snapshot already exists
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=MIN_SNAPSHOT_INTERVAL)
     recent = session.execute(
         select(TvlSnapshot)
@@ -472,20 +399,17 @@ def take_tvl_snapshot(
 
     protocol_name = protocol.name
     session.commit()
-    # Tier 2: on-chain per-contract
     if refresh_balances:
         contract_breakdown, partial = refresh_contract_balances(session, protocol_id, counters=counters)
     else:
         contract_breakdown, partial = _read_existing_balances(session, protocol_id)
-    # Acquire external TVL after durable quantities, with no database transaction
-    # held over the HTTP request. An external failure cannot undo balance work.
+    # No transaction held over HTTP; an external failure can't undo balance work.
     session.commit()
     dl_result = fetch_defillama_tvl(protocol_name)
     dl_tvl = dl_result["tvl"] if dl_result else None
     chain_breakdown = dl_result["chain_breakdown"] if dl_result else None
     on_chain_total = sum(entry.get("total_usd") or 0 for entry in contract_breakdown.values())
 
-    # Determine source and headline number
     if dl_tvl is not None and contract_breakdown:
         source = "both"
     elif dl_tvl is not None:
@@ -493,7 +417,7 @@ def take_tvl_snapshot(
     else:
         source = "on_chain"
 
-    # Gross tracked holdings and external protocol TVL have different scopes.
+    # Gross holdings and external TVL have different scopes.
     total_usd = (
         round(on_chain_total, 2) if any(e.get("total_usd") is not None for e in contract_breakdown.values()) else None
     )
@@ -527,10 +451,8 @@ def take_tvl_snapshot(
 
 
 def refresh_all_protocols(session: Session) -> int:
-    """Refresh a bounded slice in oldest-attempt order, including failed protocols.
-
-    Recording attempts independently of snapshots prevents a persistent failure
-    from monopolizing the front of every subsequent rotation.
+    """Refresh a bounded slice in oldest-attempt order, including failures, so a persistent failure can't hog the
+    front.
     """
     started = time.monotonic()
     cap = int(os.getenv("PSAT_TVL_PROTOCOLS_PER_PASS", str(DEFAULT_TVL_PROTOCOLS_PER_PASS)))
@@ -544,8 +466,7 @@ def refresh_all_protocols(session: Session) -> int:
     count = 0
     failures = 0
     partials = 0
-    # The cycle's own degradation tally, shared by every protocol in the slice:
-    # what failed to be observed, once per cycle rather than once per contract.
+    # Shared across the slice: degradations counted once per cycle.
     cycle_counts: dict[str, int] = {}
     identities = [(p.id, p.name) for p in protocols]
     session.commit()
@@ -566,8 +487,7 @@ def refresh_all_protocols(session: Session) -> int:
                 partials += 1
         except Exception as exc:
             failures += 1
-            # Discard any partial writes the failed snapshot staged on the shared
-            # session so they can't ride the next protocol's commit.
+            # Don't let a failed snapshot's writes ride the next commit.
             session.rollback()
             logger.warning(
                 "TVL snapshot failed for protocol %s: %s",
@@ -575,11 +495,7 @@ def refresh_all_protocols(session: Session) -> int:
                 exc,
                 extra={"exc_type": type(exc).__name__},
             )
-        # The daily arm, after the snapshot and in a try of its own. These
-        # holders are the protocol's principals, not its deployments: they
-        # contribute nothing to the snapshot, so neither pass's failure may be
-        # reported as the other's and the snapshot cycle's counters stay a
-        # statement about the snapshot.
+        # Principals, not deployments: kept separate so neither pass's failure is reported as the other's.
         try:
             entity_report = refresh_entity_balances_if_due(session, protocol_id)
             if entity_report is not None:
@@ -611,12 +527,8 @@ def refresh_all_protocols(session: Session) -> int:
     for protocol_id, _name in identities:
         reconcile_pending_effects(session, protocol_id=protocol_id)
     session.commit()
-    # One unconditional per-cycle summary even when nothing snapshotted, so a
-    # wedged TVL tracker is detectable. ``contracts_scanned`` carries the
-    # protocol count (TVL has no block range -> ``blocks_scanned=0``);
-    # ``events_found`` is snapshots written. Cycle is partial if a protocol
-    # raised OR a snapshot completed with a contract skipped for want of a
-    # native-coin price.
+    # One summary per cycle even when idle. ``contracts_scanned`` is protocols, ``events_found`` is snapshots; partial
+    # if a protocol raised or skipped an unpriced contract.
     notes = []
     if failures:
         notes.append(f"{failures}_failed")
@@ -630,24 +542,13 @@ def refresh_all_protocols(session: Session) -> int:
         events_found=count,
         partial=failures > 0 or partials > 0,
         note=",".join(notes) if notes else None,
-        # Distinguish durable progress, retries and incomplete observations.
         extra_detail={"protocols_failed": failures, "protocols_partial": partials, **cycle_counts},
     )
     return count
 
 
-# ---------------------------------------------------------------------------
-# Loop
-# ---------------------------------------------------------------------------
-
-
 def run_tvl_loop(interval: float = DEFAULT_TVL_INTERVAL, stop_event: Event | None = None) -> None:
-    """Run the TVL tracking loop.
-
-    ``stop_event`` (supplied by the thread supervisor) breaks the inter-pass
-    wait mid-interval on shutdown; omitting it keeps the original
-    blocking-forever behaviour.
-    """
+    """Run the TVL loop; *stop_event* interrupts the wait on shutdown."""
     stop_event = stop_event or Event()
     logger.info("Starting TVL tracker (interval=%ss)", interval)
     while not stop_event.is_set():
@@ -658,8 +559,7 @@ def run_tvl_loop(interval: float = DEFAULT_TVL_INTERVAL, stop_event: Event | Non
                     logger.info("TVL refresh complete: %d protocol(s) snapshotted", count)
         except Exception as exc:
             logger.warning("TVL refresh cycle failed: %s", exc, extra={"exc_type": type(exc).__name__})
-            # ``refresh_all_protocols`` raised before it could emit its own
-            # cycle summary — still beat so the fleet view sees a degraded cycle.
+            # It raised before its own summary; still beat so the fleet view sees the degraded cycle.
             record_heartbeat(
                 HEARTBEAT_PROTOCOL_TVL,
                 status="degraded",

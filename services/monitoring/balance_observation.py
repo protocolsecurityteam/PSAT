@@ -1,8 +1,4 @@
-"""Publish current balance observations at each subject's own address.
-
-Shared by resolution and TVL collection. Historical scan provenance remains on
-old observations, but this module performs no historical discovery.
-"""
+"""Publish current balance observations at each subject's own address. Shared by resolution and TVL collection."""
 
 from __future__ import annotations
 
@@ -44,11 +40,7 @@ class NativeReading:
 
 @dataclass(frozen=True)
 class RecordedObservation:
-    """What :func:`record_observation` persisted, for a caller that must report it.
-
-    The caller reads its own cycle summary off these rows rather than off the
-    inputs: what was written is the observation.
-    """
+    """What :func:`record_observation` persisted; callers report from this, not their inputs."""
 
     fetch: ContractBalanceFetch
     asset_set_status: str
@@ -64,16 +56,10 @@ def observation_contract(
     chain_id: int,
     requested_address: str | None,
 ) -> Contract:
-    """The contract row an observation of *requested_address* belongs to.
+    """The row an observation of *requested_address* belongs to, scoped to the producing protocol.
 
-    The single ``observed_address`` policy is enforced by construction: whoever
-    owns the address owns the fetch row. Selection is scoped to the PRODUCING
-    protocol — a row belonging to another tenant is never adopted, because
-    writing a fetch against it (and pruning its history) would let one
-    protocol's job mutate another's balance plane. When no row of this
-    protocol's owns the address the read falls back to *fallback*'s own address:
-    an address nobody here owns is not read at all, which loses an observation
-    and is the direction that cannot corrupt a neighbour.
+    Another tenant's row is never adopted (that would let one protocol prune another's history). Unowned addresses fall
+    back to *fallback*'s address.
     """
     from services.monitoring.chain_rpc import chain_id_for
 
@@ -98,15 +84,10 @@ def observation_contract(
 
 
 def fetch_asset_page(address: str, *, chain_id: int) -> TokenBalancePage:
-    """Etherscan's answer, with a raise turned into the recorded failure state.
-
-    ``get_token_balances_page`` already swallows the common failure into a
-    ``fetch_failed`` page; this catches everything else so a producer cycle can
-    never end with an asset class that has neither rows nor a status.
+    """Etherscan's answer, with any raise turned into the recorded failure state so no asset class ends with neither
+    rows nor a status.
     """
-    # Imported at call time, not bound at import time: this is the single wire
-    # both producers reach Etherscan through, and a module-level binding would
-    # make it unstubbable from the outside.
+    # Call-time import keeps the single Etherscan wire stubbable.
     from services.clients.etherscan import get_token_balances_page
 
     try:
@@ -136,11 +117,10 @@ def record_observation(
     writer: str,
     observed_at: datetime | None = None,
 ) -> RecordedObservation:
-    """Publish one current-state result. Caller commits; no provider work here.
+    """Publish one current-state result; caller commits.
 
-    Unattempted classes do not replace observations. Partial token prefixes are
-    retained independently by the shared projection policy, never merged into an
-    invented complete portfolio. Historical discovery is not a prerequisite.
+    Unattempted classes don't replace observations, and partial token prefixes are never merged into an invented
+    complete portfolio.
     """
     from utils.balance_status import STATUS_UNATTEMPTED
 
@@ -166,8 +146,7 @@ def record_observation(
     )
     session.add(fetch)
     session.flush()
-    # NUMERIC(38,18) cannot represent arbitrary uint256 quantities in dollars.
-    # Keep the raw quantity even when a value is outside the monetary column.
+    # NUMERIC(38,18) can't hold arbitrary uint256 dollar values; keep the raw quantity regardless.
     import math
 
     native_usd = None

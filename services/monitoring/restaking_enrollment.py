@@ -1,32 +1,12 @@
 """Node enumeration for the restaking plane: one event fold, one cursor.
 
-The live EtherFiNode instances are BeaconProxy deployments and are not
-``contracts`` rows — measured: zero rows for the probed node and its pod. They
-are enumerated instead from a single event at a single address:
+EtherFiNode instances are BeaconProxies with no ``contracts`` rows, so they are enumerated from ``PubkeyLinked(bytes32
+indexed pubkeyHash, address indexed etherFiNode, uint256 indexed legacyId, bytes pubkey)`` (``topics[2]`` is the node).
+``EigenPodManager.PodDeployed`` is EigenLayer-wide and BeaconProxy creation emits nothing.
 
-    PubkeyLinked(bytes32 indexed pubkeyHash, address indexed etherFiNode,
-                 uint256 indexed legacyId, bytes pubkey)
-
-``topics[2]`` is the node. Measured at block 25643300: 33 logs and **26 distinct
-nodes** in the preceding 200,000 blocks alone.
-
-**Why not the obvious sources.** ``EigenPodManager.PodDeployed`` is
-EigenLayer-wide (``numPods()`` = 34,704 at that block) and is not scoped to any
-protocol; BeaconProxy creation emits no event at all.
-
-**What the fold can and cannot prove.** It proves a node EXISTS. It can never
-prove one does not: its cursor is asserted by this code rather than derived from
-a descriptor, so it carries the incomplete-coverage ceiling and licenses no
-earned negative. The node set is a LOWER BOUND, which is why every record
-carries ``node_set_completeness = 'not_determined'``.
-
-**Emitter discovery is a log witness, not a name and not an ABI declaration.**
-The schema stores no ABI, and selecting the emitter by ``contract_name`` would
-be exactly the name inference this project bans. Instead one ``eth_getLogs``
-carries the whole protocol's contract addresses and the topic filter, and the
-emitters are the addresses that actually appear in the results — a positive
-witness that this address emitted this event, which is strictly stronger than a
-declaration that it could.
+The fold proves a node exists, never that one doesn't, so the node set is a lower bound (``node_set_completeness =
+'not_determined'``). Emitters are found by log witness (one ``eth_getLogs`` over the protocol's addresses), not by
+contract name.
 """
 
 from __future__ import annotations
@@ -46,19 +26,14 @@ from workers.event_log_indexer import enroll_event_cursor
 logger = logging.getLogger(__name__)
 
 PUBKEY_LINKED_SIGNATURE = "PubkeyLinked(bytes32,address,uint256,bytes)"
-# Derived, never written as a literal: a mistyped topic silently folds nothing
-# and the absence would look like "this protocol has no nodes".
+# Derived, not a literal: a mistyped topic would silently fold nothing.
 PUBKEY_LINKED_TOPIC0 = "0x" + keccak(text=PUBKEY_LINKED_SIGNATURE).hex()
 
-# The basis this cursor's enrollment carries. It is asserted by code rather than
-# read off a descriptor, so it takes the same coverage ceiling as the
-# ``tracked_topics`` surface: enrolled, never complete, never licensing an
-# absence claim. Aliased from the column's home so no second literal exists.
+# Asserted by code, not a descriptor, so it takes the ``tracked_topics`` coverage ceiling: never complete, never
+# licensing absence.
 RESTAKING_FOLD_ENROLLMENT_BASIS = ENROLLMENT_BASIS_TRACKED_TOPICS
 
-# How far back the emitter probe looks. A shorter window can only find FEWER
-# emitters, which can only shrink the node set — the safe direction, and already
-# covered by ``node_set_completeness``.
+# A shorter window only finds fewer emitters, the safe direction.
 DEFAULT_EMITTER_PROBE_SPAN = 200_000
 
 LogFetcher = Callable[[list[str], str, int, int], Sequence[Any]]
@@ -71,14 +46,9 @@ def discover_emitters(
     to_block: int,
     fetch_logs: LogFetcher,
 ) -> set[str]:
-    """The subset of ``addresses`` that actually emitted the fold's topic.
+    """The subset of ``addresses`` that emitted the fold's topic, in one request.
 
-    One request: ``eth_getLogs`` takes an address ARRAY, so the whole protocol is
-    one filter rather than one probe per contract.
-
-    A fetch failure surfaces as an exception from ``fetch_logs`` and is left to
-    the caller — an emitter set silently narrowed by a transport error would
-    enroll nothing and read downstream as "this protocol has no nodes".
+    Fetch failures propagate: a silently narrowed emitter set would read as "no nodes".
     """
     if not addresses:
         return set()
@@ -92,13 +62,8 @@ def discover_emitters(
 
 
 def protocol_contract_addresses(session: Session, *, protocol_id: int) -> list[str]:
-    """Every distinct address this protocol owns, lower-cased.
-
-    Both proxy and implementation rows are included: which of the two emits is
-    exactly what the log witness decides, and pre-filtering to one of them would
-    reintroduce the implementation-vs-proxy keying defect — the manager's
-    ``contracts`` row is keyed at the implementation while the logs are emitted
-    at the proxy.
+    """Every distinct address this protocol owns, lower-cased, proxies and implementations both: the log witness
+    decides which emits (the manager's row is keyed at the implementation, its logs at the proxy).
     """
     rows = session.execute(
         select(distinct(func.lower(Contract.address))).where(Contract.protocol_id == protocol_id)
@@ -112,30 +77,13 @@ def enroll_restaking_fold(
     chain_id: int,
     emitters: Sequence[str],
 ) -> int:
-    """Enroll one cursor per proven emitter, seeded one block below creation.
+    """Enroll one cursor per proven emitter at ``creation - 1``; returns cursors created.
 
-    Returns the number of cursors newly created.
+    An unresolvable creation block skips enrollment for a later retry rather than seeding at genesis.
 
-    The seed is ``creation - 1`` so the first window opens at the deploy block.
-    Where the creation block cannot be resolved the cursor is NOT enrolled and a
-    later pass retries: seeding at genesis on a transient lookup failure would
-    pin the cursor to a full-chain backfill.
-
-    **Stated deferral (measured).** The EtherFiNodesManager proxy
-    ``0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f`` already carries two warm
-    cursors at block 25641245 with ``backfill_complete = true``, on
-    ``UserAllowedForwardedEigenpodCallsUpdated`` and
-    ``UserAllowedForwardedExternalCallsUpdated`` — the forwarded-call allowlist
-    topics. ``index_event_group_step`` takes ``start = min(last_indexed_block)``
-    over the group's ACTIVE cursors, so adding a cold cursor seeded at 17174452
-    (proxy creation 17174453) drags the shared window back over 8,468,848 blocks
-    = 17 windows at a 500,000-block span, roughly one pass at the 50-window
-    per-cursor budget. The siblings do NOT regress — the advance is guarded by
-    ``window_end > last`` — and ``backfill_complete`` is cleared only by a reorg
-    rewind. The cost is that those two cursors stop ADVANCING for that period
-    while still reporting themselves complete: the stale-warm shape, accepted
-    here as a bounded, measured deferral rather than papered over with a later
-    seed that no read witnesses.
+    Known cost: the EtherFiNodesManager proxy already has two warm cursors, and a cold cursor drags their shared window
+    back ~8.5M blocks (about one pass of windows). They don't regress, but stop advancing meanwhile while reporting
+    complete. Accepted as bounded.
     """
     created = 0
     for emitter in emitters:
@@ -163,18 +111,10 @@ def enroll_restaking_fold(
 
 
 def node_addresses_from_fold(session: Session, *, chain_id: int, event_address: str | None = None) -> list[str]:
-    """Distinct node addresses folded so far, sorted.
+    """Distinct node addresses folded so far, sorted. A lower bound: empty means "none folded yet".
 
-    A LOWER BOUND on the node set, never the set. Callers publish
-    ``node_set_completeness = 'not_determined'`` beside anything derived from it,
-    and an empty result means "none folded yet", never "this protocol has no
-    nodes".
-
-    ``event_address`` narrows the fold to one proven emitter. A caller that
-    attributes what it publishes to an enumerating contract must pass it: the
-    chain-wide result mixes every emitter's nodes, so pinning a single
-    ``manager_contract_id`` over it would name a contract that did not enumerate
-    the node — provenance by proximity rather than by witness.
+    Pass ``event_address`` when attributing results to an enumerating contract; the chain-wide result mixes every
+    emitter's nodes.
     """
     filters = [
         IndexedEventLog.chain_id == chain_id,
@@ -185,9 +125,7 @@ def node_addresses_from_fold(session: Session, *, chain_id: int, event_address: 
     rows = session.execute(select(IndexedEventLog.topics).where(*filters)).all()
     nodes: set[str] = set()
     for (topics,) in rows:
-        # ``topics[2]`` is the indexed node. A log whose topic list is short is
-        # skipped rather than guessed at: there is no other position the node
-        # could be read from.
+        # A short topic list is skipped; the node can't be read from anywhere else.
         if isinstance(topics, list) and len(topics) >= 3 and isinstance(topics[2], str) and len(topics[2]) == 66:
             nodes.add("0x" + topics[2][-40:].lower())
     return sorted(nodes)
