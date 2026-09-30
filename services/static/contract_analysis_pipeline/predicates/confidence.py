@@ -4,15 +4,9 @@ from __future__ import annotations
 
 from ..predicate_types import Confidence, LeafPredicate, PredicateTree
 
-# ---------------------------------------------------------------------------
-# Confidence
-# ---------------------------------------------------------------------------
-
 
 def apply_confidence_to_tree(tree: PredicateTree | None) -> None:
-    """Walk a PredicateTree in place and stamp ``confidence`` on
-    every leaf using ``_derive_confidence``. Idempotent — safe to
-    call after every pass that mutates ``authority_role``."""
+    """Stamp ``confidence`` on every leaf in place. Idempotent; re-run after passes that change ``authority_role``."""
     if tree is None:
         return
     op = tree.get("op")
@@ -26,33 +20,12 @@ def apply_confidence_to_tree(tree: PredicateTree | None) -> None:
 
 
 def _derive_confidence(leaf: LeafPredicate) -> Confidence:
-    """Map a fully-classified leaf to HIGH/MEDIUM/LOW confidence.
+    """HIGH/MEDIUM/LOW confidence from a classified leaf's structure.
 
-    Rules (structural):
-      HIGH — shape-tight matches with no indirect inference:
-        • equality/eq with caller-source operand vs address-typed
-          state/view/parameter/sig_recovery operand (Rule A direct).
-        • signature_auth (ecrecover-then-equality, shape-tight by
-          construction).
-        • multi-key (≥2) membership with caller key (Rule B direct
-          promote — permission table by structure).
-        • time (block_context comparison without caller).
-        • reentrancy/pause (cross-referenced via dedicated analyzer).
-        • EIP-1271 magic-value match (caller_authority on F3 path).
-
-      MEDIUM — inferred / dependent on writer or
-      threshold analysis:
-        • 1-key caller-keyed membership promoted by writer-gate
-          Path 1 (rules b.i/b.ii — depends on writer side analysis).
-        • F2 threshold-promote (comparison kind, authority-derived
-          counter inference).
-        • delegated_authority via external_bool (depends on the
-          oracle resolving correctly at evaluation time).
-
-      LOW — residual / no auth signal:
-        • business default for residual leaves.
-        • bare-bool truthy leaves with no caller / state context.
-        • unsupported leaves (we tried but couldn't classify).
+    HIGH: direct shape matches (caller equality vs an address operand, ``signature_auth``, multi-key caller membership,
+    time gates, reentrancy/pause, EIP-1271). MEDIUM: inferred (single-key membership promoted by the writer gate,
+    threshold promotion, ``delegated_authority`` via external bool). LOW: business residuals, bare bools, unsupported
+    leaves.
     """
     role = leaf.get("authority_role", "business")
     kind = leaf.get("kind")
@@ -88,22 +61,16 @@ def _derive_confidence(leaf: LeafPredicate) -> Confidence:
             keys = descriptor.get("key_sources", []) or []
             caller_key = any(k.get("source") in ("msg_sender", "tx_origin", "signature_recovery") for k in keys)
             if len(keys) >= 2 and caller_key:
-                # Multi-key permission table — Rule B direct promote.
                 return "high"
             if len(keys) == 1 and "self-administered" in basis_text:
-                # Rule b.ii — writer reads the same map (Maker-wards
-                # canonical self-admin ACL). Tight structural match.
+                # Writer reads the same map (Maker-wards self-admin ACL).
                 return "high"
             if len(keys) == 1 and "writers are authority-gated" in basis_text:
-                # Rule b.i — writer has some other auth. Transitive,
-                # so the auth signal is weaker than direct shape.
+                # Writer has other auth: transitive.
                 return "medium"
-            # 1-key direct (no writer-gate basis) — could be member /
-            # KYC / personal flag. Don't claim HIGH without writer
-            # context; codex round on this called it out explicitly.
+            # Single key with no writer-gate basis could be a member list or a personal flag.
             return "medium"
         if kind == "comparison":
-            # threshold-promote (F2) is an inferred authority signal.
             return "medium"
         return "medium"
 
