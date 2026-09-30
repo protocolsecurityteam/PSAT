@@ -15,67 +15,34 @@ from services.scoring.schema import coalesce_chain, entity_key, is_entity_key
 from utils.execution_record import GATE_CLAIM_NOT_CORROBORATED
 from utils.scoring_status import TRACE_STEP_SOLMATE_ROLES_AUTHORITY
 
-# --- authority deletability --------------------------------------------------
-# Can this principal DELETE the authority that gates this destination function?
+# Can this principal delete the authority gating a destination function?
 #
-# A composed magnitude is a figure proven by a call the principal did not make:
-# the proof is a direct impersonated call to the destination, the published
-# route runs through a wrapper that authors the call's arguments. The figure
-# transfers to the principal only where the principal can author that calldata
-# itself — which it can if it can repoint or rewrite the authority the
-# destination's gate consults, because then there is no gate left to satisfy.
+# A composed magnitude was proven by a direct impersonated call; it transfers to the principal only if the principal can
+# author that calldata itself, i.e. repoint or rewrite the authority the destination's gate consults. Answered per
+# (principal, destination, selector) from ``function_principals`` rows on four setters, never from hop counts or names
+# (``len(act_as_chain) == 1`` correlates perfectly on the corpus but isn't a witness).
 #
-# The question is asked per (principal, destination, selector) and answered from
-# ``function_principals`` rows on the four setters below. It is NEVER answered
-# from a hop count, a selector name or a contract shape: on the corpus this was
-# calibrated against, ``len(act_as_chain) == 1`` partitions the population
-# identically, and shipping that correlation would publish an abstraction above
-# an available witness (inv. 16).
-#
-# THREE OUTCOMES, none collapsible (inv. 1):
-#   * a qualifying row exists                     -> ``deletable``
-#   * the join ran and returned no row            -> ``proven_not_deletable``
-#   * the join could not be run, or was run on a  -> ``not_determined``
-#     witness that proves less than membership
-# The third is not the second. An unresolvable authority failing to "not
-# deletable" mints an earned negative out of an absence; failing to "deletable"
-# republishes a figure on an unproven control claim. Both are banned, so the
-# third state carries its own typed reason all the way to the consumer.
+# Three outcomes: a qualifying row (``deletable``), the join ran and found none (``proven_not_deletable``), or it
+# couldn't run or proves less than membership (``not_determined``). The third collapses to neither.
 
-# The two arms, each INDEPENDENTLY sufficient — arm (a) is not a relaxation of
-# arm (b). HOST: ``setAuthority`` repoints the destination's own authority
-# pointer and ``transferOwnership`` takes the owner slot that may repoint it.
-# AUTHORITY: the role-writing setters ON the authority the destination is
-# witnessed to consult let the principal write itself the admitting role.
-#
-# Matched on ``effective_functions.function_name``, which is what the ruling
-# this implements specifies and what its 28/12 partition was measured against.
-# A name is not a signature, so the matched row's own selector is published in
-# the basis rather than assumed: measured on this snapshot, ``transferOwnership``
-# carries TWO selectors (``0xf2fde38b`` x122, ``0x078dfbe7`` x4) and a reader
-# who needs to know which one proved the control can read it off the basis.
+# Two independently sufficient arms. Host: ``setAuthority`` repoints the destination's authority, ``transferOwnership``
+# takes the owner slot. Authority: role-writing setters on the authority the destination consults. Matched on function
+# name, so the row's own selector is published (``transferOwnership`` has two).
 DELETABILITY_HOST_SETTERS = ("setAuthority", "transferOwnership")
 DELETABILITY_AUTHORITY_SETTERS = ("setRoleCapability", "setUserRole")
 DELETABILITY_SETTERS = tuple(sorted(DELETABILITY_HOST_SETTERS + DELETABILITY_AUTHORITY_SETTERS))
 
-# ``membership_quality`` is NOT a column — it lives at
-# ``details->>'membership_quality'``, domain measured as
-# {lower_bound: 26493, exact: 2196}. Only ``exact`` proves this address is in
-# the admitting set; ``lower_bound`` proves the set has at least these members,
-# which is a floor on the SET and not a proof about this address. Measured cost
-# of requiring it on the four setters: zero — all 262 rows are already exact.
+# ``details->>'membership_quality'``: only ``exact`` proves this address is in the set; ``lower_bound`` only floors the
+# set.
 MEMBERSHIP_QUALITY_EXACT = "exact"
 
-# ``principal_type`` is NEVER a filter here: it is ``'controller'`` on 28,689 of
-# 28,689 rows, so a join carrying it fails open while looking scoped.
+# ``principal_type`` is never a filter: it is ``controller`` on every row, so filtering would fail open.
 
-# The NORMATIVE authority witness: the destination function's own resolution
-# record, per (destination, selector). The corroborating one is contract-scoped
-# and cannot separate two selectors on one host that consult different
-# authorities, so it is admitted as a cross-check and never as the source.
+# The normative witness is the destination function's own resolution record; the contract-scoped one can't separate
+# selectors and is only a cross-check.
 SOLMATE_ROLES_AUTHORITY_STEP = TRACE_STEP_SOLMATE_ROLES_AUTHORITY
 AUTHORITY_CONTROLLER_ID = "external_contract:authority"
-# The gate's own admission that it could not resolve the authority it consults.
+# The gate admitted it couldn't resolve its authority.
 CALLER_TAINTED_AUTHORITY_UNRESOLVED = "caller_tainted_authority_unresolved"
 
 DELETABILITY_DELETABLE = "deletable"
@@ -91,9 +58,7 @@ DELETABILITY_ARM_HOST = "host"
 DELETABILITY_ARM_GATING_AUTHORITY = "gating_authority"
 DELETABILITY_ARMS = (DELETABILITY_ARM_HOST, DELETABILITY_ARM_GATING_AUTHORITY)
 
-# One reason per evidential situation. The consumer counts refusals by these
-# tokens, so two situations sharing one token would publish a count nobody can
-# decompose.
+# One reason per evidential situation, so refusal counts decompose.
 DELETABILITY_NO_SETTER_ROW = "no_setter_row_names_this_principal_at_the_host_or_at_the_gating_authority"
 DELETABILITY_MEMBERSHIP_NOT_EXACT = "every_setter_row_naming_this_principal_is_a_lower_bound_on_the_admitting_set"
 DELETABILITY_AUTHORITY_UNRESOLVED = "no_witness_names_the_authority_this_destination_selector_consults"
@@ -113,9 +78,8 @@ DELETABILITY_REASONS = (
     DELETABILITY_NO_SETTER_ROW,
 )
 
-# What the contract-scoped cross-check had to say. ``not_corroborated`` and
-# ``disagrees`` are different facts: the first is a witness that did not answer,
-# the second is one that answered differently, and only the second is evidence.
+# ``not_corroborated`` (didn't answer) and ``disagrees`` (answered differently) are different; only the second is
+# evidence.
 CROSSCHECK_AGREES = "agrees"
 CROSSCHECK_DISAGREES = "disagrees"
 CROSSCHECK_NOT_CORROBORATED = GATE_CLAIM_NOT_CORROBORATED
@@ -124,11 +88,9 @@ CROSSCHECK_NOT_COMPARED = "not_compared"
 
 @dataclass(frozen=True, order=True)
 class SetterPrincipal:
-    """One ``function_principals`` row on a setter of one contract.
+    """One ``function_principals`` row on a setter.
 
-    ``membership_quality`` is carried raw, including ``None``: an absent quality
-    is an unread witness, and reading it as ``exact`` would let a row that
-    proves nothing about this address prove control.
+    ``membership_quality`` is raw including ``None`` (unread, never treated as exact).
     """
 
     function_principal_id: int
@@ -146,13 +108,9 @@ class SetterPrincipal:
 
 @dataclass(frozen=True)
 class DeletabilityVerdict:
-    """The three-state answer for one (principal set, destination, selector).
+    """The three-state verdict for one (principal set, destination, selector).
 
-    ``reason`` is populated in exactly the two withholding states and is the
-    token a consumer counts refusals by; ``basis`` is populated in exactly the
-    deletable state and names the row that proved it. The two authority witness
-    fields are published in every state, because "which authority did you even
-    ask about" is the first question a reader of a refusal has.
+    ``reason`` only when withheld, ``basis`` only when deletable; the authority witnesses are published in every state.
     """
 
     state: str
@@ -167,9 +125,7 @@ class DeletabilityVerdict:
     crosscheck: str = CROSSCHECK_NOT_COMPARED
 
     def __post_init__(self) -> None:
-        # The pairing is the whole point of the type: a deletable verdict with
-        # no basis is a control claim with no witness, and a withheld one with
-        # no reason is a refusal a consumer cannot publish or count.
+        # A deletable verdict without basis or a withheld one without reason is malformed.
         if self.state not in DELETABILITY_STATES:
             raise ValueError(f"unknown deletability state: {self.state!r}")
         if self.state == DELETABILITY_DELETABLE:
@@ -183,16 +139,9 @@ class DeletabilityVerdict:
         return self.state == DELETABILITY_DELETABLE
 
     def disclosure(self) -> dict[str, Any]:
-        """The verdict as a publishable block — the whole verdict, every state.
-
-        Published on WITHHELD entries too, and that is not decoration: under
-        this rule a protocol whose gating authority cannot be resolved lands on
-        ``not_determined``, its figure is withheld, and its published exposure
-        FALLS. Obscuring evidence must not pay (inv. 13), so the withheld entry
-        discloses the state, the typed reason, the authority it asked about and
-        which witnesses answered — a suppressed authority then presents as a
-        disclosed unknown rather than as an absent finding. The caller pairs
-        this with its own ``refused`` counter, keyed on ``reason``.
+        """The whole verdict as a publishable block, including on withheld entries: an unresolvable authority
+        withholds the figure and lowers exposure, so the withheld entry must disclose the state, reason, authority
+        asked about and witnesses, and obscuring evidence can't pay.
         """
         block: dict[str, Any] = {
             "state": self.state,
@@ -210,12 +159,7 @@ class DeletabilityVerdict:
         return block
 
     def basis_block(self) -> dict[str, Any] | None:
-        """What proved it: the arm, the setter row, and the row's own id.
-
-        ``function_principal_id`` and the setter's own selector are the two
-        fields a reader needs to re-run this join by hand, which is what makes
-        the republished figure checkable rather than asserted.
-        """
+        """What proved it: the arm, the setter row and its id, enough to re-run the join by hand."""
         if self.basis is None:
             return None
         return {
@@ -231,11 +175,8 @@ class DeletabilityVerdict:
 
 @dataclass
 class DeletabilityPlane:
-    """The rows :func:`authority_deletability` decides from, loaded once.
-
-    Every map is keyed on ``(chain, lowercased address)`` — chain-scoped,
-    because the same address on two chains is two contracts and an unscoped key
-    would let one chain's setter row prove control on the other.
+    """The rows :func:`authority_deletability` decides from, keyed by ``(chain, address)`` (the same address on two
+    chains is two contracts).
     """
 
     setters: dict[tuple[str, str], tuple[SetterPrincipal, ...]] = field(default_factory=dict)
@@ -250,11 +191,8 @@ class DeletabilityPlane:
         function_names: Iterable[str],
         principal_addresses: Iterable[str],
     ) -> tuple[SetterPrincipal, ...]:
-        """Setter rows at one contract naming one of these principals.
-
-        Membership quality is NOT filtered here: the caller has to be able to
-        tell "no row names this principal" from "a row does, and it proves less
-        than membership", because those are different published states.
+        """Setter rows at one contract naming these principals, unfiltered by quality so "no row" and "a row proving
+        less" stay distinguishable.
         """
         wanted = frozenset(function_names)
         principals = frozenset(_lower(a) for a in principal_addresses)
@@ -262,7 +200,6 @@ class DeletabilityPlane:
         return tuple(r for r in rows if r.function_name in wanted and r.principal_address in principals)
 
     def counts(self) -> dict[str, int]:
-        """Row counts, for the provenance block."""
         return {
             "setter_principal_rows": sum(len(rows) for rows in self.setters.values()),
             "setter_contracts": len(self.setters),
@@ -273,11 +210,8 @@ class DeletabilityPlane:
 
 
 def _authority_address(value: Any) -> str:
-    """A stored authority value as a plain lowercased address, or ``""``.
-
-    Only the two shapes the column is known to carry are read: a 42-character
-    address, and a 66-character 32-byte word whose low 20 bytes are one.
-    Anything else is left unread rather than sliced into a plausible address.
+    """A stored authority as a lowercased address, or ``""``: only a 42-char address or a 32-byte word with a 20-byte
+    address is read.
     """
     token = _lower(value)
     if not token.startswith("0x"):
@@ -292,22 +226,9 @@ def _authority_address(value: Any) -> str:
 def load_deletability_plane(session: Session) -> DeletabilityPlane:
     """Every witness :func:`authority_deletability` reads, in four queries.
 
-    NOT protocol-scoped, deliberately, and this is the one scoping decision in
-    this plane that could go wrong in a way nothing downstream would show. The
-    join asks about specific ``(chain, address)`` contracts — the destination a
-    figure was proven at, and the authority its gate is witnessed to consult —
-    and a ``(chain, address)`` is a global on-chain identity, not a
-    protocol-relative one. Measured on this snapshot: 51 of the 262 setter rows
-    sit on 33 contracts whose ``protocol_id`` is NULL, and a protocol-scoped
-    read would drop them. Dropping a witness here does not fail safe: the join
-    would return no row and the entry would publish ``proven_not_deletable`` —
-    an earned negative minted from our own scoping, which is exactly the defect
-    class this plane exists to close. The population is a pure function of the
-    database state, so replay (inv. 11) is unaffected.
-
-    The queries are narrow by construction — four setter names, one trace step,
-    one controller id, one basis tag — so "unscoped" is a few hundred rows, not
-    a table scan of ``function_principals``.
+    Deliberately not protocol-scoped: a ``(chain, address)`` is a global identity, and 51 of 262 setter rows sit on
+    contracts with no ``protocol_id``. Dropping them would publish ``proven_not_deletable`` from our own scoping. The
+    queries are narrow (four setters, one step, one controller id), so a few hundred rows.
     """
     from db.models import Contract, ControllerValue, EffectiveFunction, FunctionPrincipal
 
@@ -345,9 +266,7 @@ def load_deletability_plane(session: Session) -> DeletabilityPlane:
             )
         )
 
-    # The gating authority, per (destination, selector). The LIKE is a prefilter
-    # only — the step name is matched exactly, in Python, below; a row whose
-    # trace merely mentions the string contributes nothing.
+    # The LIKE is only a prefilter; the step name is matched exactly below.
     gating: dict[tuple[str, str, str], set[str]] = defaultdict(set)
     for details, selector, address, chain in (
         session.query(
@@ -411,22 +330,11 @@ def authority_deletability(
 ) -> DeletabilityVerdict:
     """Can this principal author a call to ``destination_key.selector`` itself?
 
-    ``principal_addresses`` is the ROW's ``principal_addresses`` list, never its
-    ``principal_unit``. The two differ wherever a row is reached through an
-    ``access_path``: measured on the reference corpus, the row whose unit is a
-    Safe but whose addresses name the timelock it acts through holds all four
-    setters at its destination under the timelock and NONE under the Safe, so
-    keying on the unit withholds a $11.36M figure the evidence supports and
-    publishes no diagnostic saying why. Any one of the addresses qualifying is
-    enough; the row that qualified is named in the basis.
-
-    Destination-scoped, and that scope is load-bearing in the other direction:
-    unscoped ("does this principal hold a setter ANYWHERE"), the EOA of the
-    reference corpus holds all four setters on solver contracts it has nothing
-    to do with these vaults, and every withheld entry is republished.
-
-    Deterministic: the arms are asked in a fixed order and the basis is the
-    lowest-id qualifying row, so the same database state answers identically.
+    Uses the row's ``principal_addresses``, not ``principal_unit``: a row whose unit is a Safe but whose addresses name
+    the timelock it acts through holds all four setters under the timelock and none under the Safe (keying on the unit
+    withheld an $11.36M figure). Any address qualifying is enough. Destination-scoped: unscoped, an unrelated EOA
+    holding setters elsewhere would republish every withheld entry. Deterministic: fixed arm order, lowest-id qualifying
+    row.
     """
     addresses = tuple(sorted({_lower(a) for a in (principal_addresses or ()) if _lower(a)}))
     selector = _lower(selector)
@@ -448,8 +356,7 @@ def authority_deletability(
     chain, _, host = destination_key.partition("::")
     chain = coalesce_chain(chain)
 
-    # Arm (a), the HOST arm, first: it asks nothing about the gating authority,
-    # so it stands whatever the authority witnesses do or do not say.
+    # The host arm first: it doesn't depend on the authority witnesses.
     host_rows = plane.setter_rows(chain, host, DELETABILITY_HOST_SETTERS, addresses)
     exact_host = [row for row in host_rows if row.is_membership_exact]
     if exact_host:
@@ -465,7 +372,7 @@ def authority_deletability(
             crosscheck=CROSSCHECK_NOT_COMPARED,
         )
 
-    # Arm (b) needs to know WHICH authority the destination's own gate consults.
+    # Which authority the destination's gate consults.
     normative: tuple[str, ...] = plane.gating.get((chain, _lower(host), selector)) or ()
     corroborating: tuple[str, ...] = plane.crosscheck.get((chain, _lower(host))) or ()
     if not normative:
@@ -483,16 +390,12 @@ def authority_deletability(
     }
 
     if (chain, _lower(host), selector) in plane.tainted:
-        # The gate itself records that it could not resolve the authority it
-        # consults. A trace that names one anyway is naming a candidate, not the
-        # gate's answer, and control over a candidate proves nothing.
+        # The gate couldn't resolve its authority; a trace naming one names a candidate.
         return withheld(DELETABILITY_NOT_DETERMINED, DELETABILITY_AUTHORITY_TAINTED, **witnesses)
     if not normative:
         return withheld(DELETABILITY_NOT_DETERMINED, DELETABILITY_AUTHORITY_UNRESOLVED, **witnesses)
     if len(normative) > 1:
-        # Two answers to "which authority gates this selector" is no answer.
-        # Asking the arm over each in turn would take the union — control over
-        # any candidate read as control over the real one.
+        # Two authorities is no answer; the union would treat control of any as control of the real one.
         return withheld(DELETABILITY_NOT_DETERMINED, DELETABILITY_AUTHORITY_NOT_UNIQUE, **witnesses)
     if crosscheck_state == CROSSCHECK_DISAGREES:
         return withheld(DELETABILITY_NOT_DETERMINED, DELETABILITY_AUTHORITY_SOURCES_DISAGREE, **witnesses)
@@ -511,10 +414,7 @@ def authority_deletability(
             **witnesses,
         )
     if host_rows or authority_rows:
-        # Rows DO name this principal on a setter; none of them proves
-        # membership. That is not "the join found nothing" and must not be
-        # published as the earned negative.
+        # Rows name the principal but none proves membership: not the earned negative.
         return withheld(DELETABILITY_NOT_DETERMINED, DELETABILITY_MEMBERSHIP_NOT_EXACT, **witnesses)
-    # Both arms were asked, on witnesses that answered, and neither returned a
-    # row. This is the earned negative.
+    # Both arms asked on answering witnesses, no row: the earned negative.
     return withheld(DELETABILITY_PROVEN_NOT_DELETABLE, DELETABILITY_NO_SETTER_ROW, **witnesses)

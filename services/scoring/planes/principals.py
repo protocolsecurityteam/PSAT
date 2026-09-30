@@ -12,13 +12,8 @@ from sqlalchemy.orm import Session
 from services.scoring.planes._shared import _chain_name, _float, _lower
 from services.scoring.schema import coalesce_chain, entity_key
 
-# Confined to the I/O-EDGE loaders in this module — the handlers that swallow a
-# database error while reading a plane. The resolution work itself publishes
-# every refusal into the document (inv. 11/12: the fold must replay from the
-# document alone), so nothing on a compute path logs. These WARNINGs carry no
-# ``record_degraded`` because no accumulator is bound here today: the fold runs
-# on the score loop's monitor thread and under the offline CLI, and the call
-# would be a permanent no-op rather than a record of anything.
+# Only the I/O-edge loaders log: compute paths publish refusals into the document. No ``record_degraded``: nothing binds
+# an accumulator here.
 logger = logging.getLogger("services.scoring.planes")
 
 
@@ -42,7 +37,6 @@ class PrincipalFacts:
 
 
 def load_principal_plane(session: Session, refs: list[Any]) -> dict[int, PrincipalFacts]:
-    """``function_principals`` rows behind the signals' references."""
     from db.models import FunctionPrincipal
 
     ids = sorted({int(ref.function_principal_id) for ref in refs})
@@ -80,15 +74,10 @@ def _int(value: Any) -> int | None:
 
 
 def _safe_protection_verdict(details: dict[str, Any]) -> tuple[bool, str]:
-    """Whether the k/n demotion is WITHHELD, and on what basis.
+    """Whether the Safe k/n credit is withheld, and why.
 
-    k/n is an upper bound on protection, and only a PROVEN bypass denies the
-    credit: a witnessed module (``protection_is_upper_bound`` true, or an
-    enumerated non-empty module set) or a witnessed guard address. Everything
-    else — an absent plane, an unreadable head word, a basis that proves nothing
-    — leaves the credit standing, annotated. Withholding on an unreadable witness
-    would be a demotion claim minted from an absence, which the ruling for this
-    plane forbids in both directions.
+    k/n is an upper bound, denied only by a proven bypass (a witnessed module or guard); an absent plane or unreadable
+    word leaves the credit standing, annotated.
     """
     protection = details.get("safe_protection")
     if not isinstance(protection, dict):
@@ -120,12 +109,9 @@ def _resolver_bases(details: dict[str, Any]) -> tuple[str, ...]:
 
 
 def _role_bindings(details: dict[str, Any]) -> tuple[tuple[str, str], ...]:
-    """(registry, role_hash) pairs this principal's resolution is bound to.
+    """(registry, role_hash) pairs this principal's resolution binds to.
 
-    Only a trace step naming exactly ONE role hash binds: a fold that published
-    several role labels says which roles the registry has, not which one gates
-    this function, and attributing a holder floor on that basis would import a
-    different role's breadth.
+    Only steps naming exactly one role bind; several labels describe the registry, not the gate.
     """
     out: set[tuple[str, str]] = set()
     for step in details.get("trace") or []:
@@ -140,21 +126,11 @@ def _role_bindings(details: dict[str, Any]) -> tuple[tuple[str, str], ...]:
 
 
 def load_role_holder_floors(session: Session, protocol_id: int) -> dict[tuple[str, str, str], dict[str, Any]]:
-    """Proven holder floors per (chain, registry, role hash), protocol-scoped.
+    """Proven holder floors per (chain, registry, role hash).
 
-    ``holders`` is a LOWER BOUND and ``len(holders)`` is never a count; the floor
-    may raise breadth concern and may never lower it. ``holder_set_exhaustive``
-    is always ``not_determined``.
-
-    Scoped to the registries THIS protocol's own resolution names — the
-    ``authority``/``registry`` of a ``function_principals`` trace step, which is
-    the only key the consumer ever looks a floor up by. ``role_holder_planes`` is
-    keyed by ``(chain_id, registry_address, role_hash)`` with no protocol column,
-    so an unscoped read makes this plane's population a function of which OTHER
-    protocols have been analysed: the same protocol scored twice would carry
-    different floors, which is a purity break (inv. 11) before it is anything
-    else. Scoping loses no floor the fold could have consumed, because a registry
-    no trace names has no binding to join to.
+    ``holders`` is a lower bound: it may raise breadth concern, never lower it; ``holder_set_exhaustive`` is always
+    ``not_determined``. Scoped to registries this protocol's own traces name, since ``role_holder_planes`` has no
+    protocol column and an unscoped read would vary with which other protocols were analysed.
     """
     from db.models import Contract, EffectiveFunction, FunctionPrincipal, RoleHolderPlane
 
@@ -183,10 +159,7 @@ def load_role_holder_floors(session: Session, protocol_id: int) -> dict[tuple[st
         .order_by(RoleHolderPlane.chain_id, RoleHolderPlane.registry_address, RoleHolderPlane.role_hash)
         .all()
     )
-    # A row whose chain id maps to no chain is drift, not an admission rule
-    # firing: the registry it names may well be one a trace points at, and the
-    # floor it would have carried is lost. Counted apart from the rules below,
-    # which are this loader's own scoping and holders-basis tests.
+    # An unknown chain id is drift, counted apart from the loader's own rules.
     unknown_chain = 0
     for row in rows:
         chain = _chain_name(row.chain_id)
@@ -206,9 +179,7 @@ def load_role_holder_floors(session: Session, protocol_id: int) -> dict[tuple[st
             "holder_set_exhaustive": "not_determined",
         }
     if unknown_chain:
-        # This loader's return shape is a floor lookup with nowhere to publish a
-        # census, so the drift is announced at the boundary instead of silently
-        # shortening the floors a unit resolves on.
+        # No census to publish into, so the drift is logged.
         logger.warning(
             "role holder floors dropped %d row(s) whose chain id maps to no chain",
             unknown_chain,
