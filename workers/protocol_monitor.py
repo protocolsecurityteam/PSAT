@@ -1,16 +1,7 @@
-"""Unified protocol monitor worker — one supervised single-process daemon.
+"""Unified protocol monitor: scanner, poller and TVL loops as supervised threads in one process (design §2.5).
 
-Default mode (no flags) runs the scanner, poller, and TVL loops as three
-supervised daemon threads inside a single interpreter (design §2.5). The
-Supervisor restarts any loop that dies with exponential backoff and never lets
-one loop's death touch its siblings or the process; a crash-loop degrades and
-pages (via the ``status="error"`` heartbeat + fly ``[[restart]] policy="always"``)
-but never permanently stops. SIGTERM/SIGINT set a shared stop event and the
-threads are joined within a bounded timeout.
-
-The ``--poll`` / ``--tvl`` / ``--reconcile`` flags remain as rollback levers
-and as the workers-group reconciler entrypoint; each still runs its single loop
-in the foreground.
+One loop's death never touches its siblings; a crash-loop pages via the error heartbeat but never stops. ``--poll`` /
+``--tvl`` / ``--reconcile`` run a single loop in the foreground as rollback levers and the reconciler entrypoint.
 """
 
 from __future__ import annotations
@@ -45,13 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 def _default_rpc_seed() -> str:
-    """The mainnet eRPC seed the monitor loops start from, resolved at call time.
-
-    The scan / poll / enrollment / TVL loops resolve each contract's own chain
-    RPC internally from this seed (``services.monitoring.chain_rpc``), so this is
-    only the mainnet base + local-fork override. Resolved on demand rather than
-    at import so ``ERPC_BASE_URL`` / test env changes are honored, not frozen at
-    module load."""
+    """Mainnet eRPC seed, resolved at call time so env changes are honored; loops derive per-chain RPCs from it."""
     return default_rpc_url(chain_id=1) or ""
 
 
@@ -65,19 +50,12 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-# A loop target takes the shared stop event and blocks until it is set (or
-# until it dies — the Supervisor restarts it either way).
 LoopTarget = Callable[[threading.Event], None]
 
 
 class Supervisor:
-    """Runs each named loop in its own daemon thread and restarts it on death.
-
-    Each loop body runs inside a wrapper that catches *any* escape, records an
-    error heartbeat carrying the exception type, and restarts the loop after an
-    exponential backoff (``base`` → ``max`` cap). A loop that survives a healthy
-    stretch resets its own backoff. One loop crashing — even repeatedly — never
-    interrupts its siblings and never propagates to the process.
+    """Runs each named loop in a daemon thread, restarting on death with exponential backoff; a healthy stretch
+    resets the backoff.
     """
 
     def __init__(
@@ -98,9 +76,6 @@ class Supervisor:
         self.max_backoff_s = (
             max_backoff_s if max_backoff_s is not None else _env_float("PSAT_MONITOR_SUPERVISOR_MAX_BACKOFF_S", 300.0)
         )
-        # A run lasting at least this long is "healthy" and resets the backoff,
-        # so an occasional crash after a long healthy period doesn't inherit the
-        # penalty accrued during an earlier crash-loop.
         self.healthy_stretch_s = (
             healthy_stretch_s
             if healthy_stretch_s is not None
@@ -131,8 +106,7 @@ class Supervisor:
                 ran_for = time.monotonic() - started
                 if self.stop_event.is_set():
                     return
-                # A clean return without a stop request means the loop fell
-                # through unexpectedly — restart it, but it isn't an error.
+                # Fell through without a stop request: restart, but not an error.
                 logger.warning(
                     "monitor daemon %s returned unexpectedly after %.1fs; restarting",
                     name,
@@ -161,7 +135,6 @@ class Supervisor:
         self.stop_event.set()
 
     def join(self, timeout: float | None = None) -> None:
-        """Join all supervisor threads within a bounded overall budget."""
         deadline = time.monotonic() + (self.join_timeout_s if timeout is None else timeout)
         for thread in self._threads:
             remaining = deadline - time.monotonic()
@@ -170,21 +143,16 @@ class Supervisor:
             thread.join(remaining)
 
     def run_forever(self) -> None:
-        """Start the loops and block the calling thread until stop is requested."""
         self.start()
-        # Poll rather than a single blocking wait so a signal delivered to the
-        # main thread is observed promptly on the next tick.
+        # Poll so a signal to the main thread is observed promptly.
         while not self.stop_event.is_set():
             self.stop_event.wait(0.5)
         self.join()
 
 
 def _build_default_supervisor(rpc_url: str, interval: float | None) -> Supervisor:
-    """Build (but do not start) the default-mode Supervisor.
-
-    The restaking and role-holder planes are sibling loops, not phases of the TVL
-    refresh: the Supervisor's per-loop isolation is what keeps one plane's read
-    failure out of another cycle's failure domain.
+    """Restaking and role-holder planes are sibling loops so one plane's read failure stays out of another's failure
+    domain.
     """
     from services.monitoring.restaking_cycle import DEFAULT_RESTAKING_INTERVAL, run_restaking_loop
     from services.monitoring.role_holder_cycle import DEFAULT_ROLE_PLANE_INTERVAL, run_role_holder_plane_loop
@@ -210,9 +178,7 @@ def _build_default_supervisor(rpc_url: str, interval: float | None) -> Superviso
         (HEARTBEAT_PROTOCOL_TVL, lambda ev: run_tvl_loop(tvl_interval, stop_event=ev)),
         (HEARTBEAT_PROTOCOL_RESTAKING, lambda ev: run_restaking_loop(restaking_interval, stop_event=ev)),
         (HEARTBEAT_ROLE_HOLDER_PLANE, lambda ev: run_role_holder_plane_loop(role_plane_interval, stop_event=ev)),
-        # A sibling loop, not a phase of any other: the grade is a
-        # whole-protocol fold and a plane read failing in it must degrade this
-        # heartbeat alone.
+        # A plane read failing in the grade fold must degrade this heartbeat alone.
         (HEARTBEAT_PROTOCOL_SCORE, lambda ev: run_score_loop(score_interval, stop_event=ev)),
     ]
     return Supervisor(loops)
@@ -222,9 +188,7 @@ def _run_supervised_default(rpc_url: str, interval: float | None) -> None:
     supervisor = _build_default_supervisor(rpc_url, interval)
 
     def handle_signal(signum, _frame):
-        # Identified: every daemon in the stack logs this line as ``__main__``,
-        # so without the name and pid a shutdown sweep is N byte-identical lines
-        # and no way to tell which process is still up.
+        # Every daemon logs this as ``__main__``; the name and pid say which one is still up.
         logger.info(
             "Received signal %s, shutting down",
             signum,
@@ -278,9 +242,6 @@ def main():
     if args.rpc_url is None:
         args.rpc_url = _default_rpc_seed()
 
-    # The flag modes run a single loop in the foreground and exit cleanly on a
-    # signal. The default (no-flag) mode installs its own signal handlers around
-    # the Supervisor, so it is handled separately below.
     mode = "tvl" if args.tvl else "poll" if args.poll else "reconcile" if args.reconcile else "scan"
 
     def handle_signal(signum, frame):
@@ -312,8 +273,6 @@ def main():
         )
 
         interval = args.interval if args.interval is not None else DEFAULT_RECONCILE_INTERVAL_S
-        # Explicit daemon-edge fallback chain (inv. 6); each protocol's real chain
-        # is still derived per-protocol inside the loop.
         logger.info(
             "Enrollment reconciler starting (interval=%ss, fallback chain=%s)",
             interval,
@@ -331,11 +290,10 @@ def main():
 
         interval = args.interval if args.interval is not None else DEFAULT_POLL_INTERVAL
         logger.info("Unified protocol poller starting (rpc=%s, interval=%ss)", sanitize_url(args.rpc_url), interval)
-        # No co-scheduled scanner in this process, so nothing to de-phase from.
+        # No co-scheduled scanner here, so nothing to de-phase from.
         run_poll_loop(args.rpc_url, interval, startup_offset_s=0.0)
         return
 
-    # Default mode: scanner + poller + TVL as supervised daemon threads.
     _run_supervised_default(args.rpc_url, args.interval)
 
 

@@ -1,12 +1,7 @@
-"""DefiLlama worker — discovers contract addresses from DefiLlama adapter source code.
+"""Discovers contract addresses from DefiLlama adapter source.
 
-Calls the integrated defillama crawler directly (no subprocess) to scan
-adapter source for contract addresses and writes every discovered
-address into the ``contracts`` table tagged
-``discovery_source='defillama'``. Analysis child jobs are created
-later by the ``SelectionWorker`` so this scan's discoveries can
-compete with inventory and DApp-crawl hits for the shared
-``analyze_limit`` budget on equal footing.
+Writes every address to ``contracts`` (``discovery_source='defillama'``); ``SelectionWorker`` creates analysis jobs so
+all sources compete for ``analyze_limit`` equally.
 """
 
 from __future__ import annotations
@@ -50,11 +45,8 @@ class DefiLlamaWorker(BaseWorker):
 
         no_clone = os.getenv("DEFILLAMA_NO_CLONE", "").lower() in ("1", "true", "yes")
 
-        # Derive / create Protocol row from company or slug. Route the
-        # name through the resolver so the row is keyed on the same family
-        # slug the discovery worker used — without this the per-sibling
-        # DefiLlama scan would create a separate row keyed on the sibling's
-        # slug instead of attaching to the parent protocol.
+        # Resolve so the row is keyed on the family slug; otherwise a sibling scan creates its own row instead of
+        # attaching to the parent.
         protocol_name = job.company or str(protocol)
         resolved = resolve_protocol(protocol_name)
         canonical_slug = pick_family_slug(resolved)
@@ -75,7 +67,6 @@ class DefiLlamaWorker(BaseWorker):
         def report(detail: str) -> None:
             self.update_detail(session, job, detail)
 
-        # Call crawler directly — no subprocess
         with log_timed_phase(logger, "defillama_scan") as ph:
             result = scan_protocol(
                 protocol_name=protocol,
@@ -88,7 +79,6 @@ class DefiLlamaWorker(BaseWorker):
         addresses = result["addresses"]
         logger.info("DefiLlama scan found %d addresses for job %s", len(addresses), job.id)
 
-        # Store full scan details as artifact
         store_artifact(
             session,
             job.id,
@@ -100,7 +90,6 @@ class DefiLlamaWorker(BaseWorker):
             },
         )
 
-        # Store raw results
         store_artifact(
             session,
             job.id,
@@ -112,7 +101,6 @@ class DefiLlamaWorker(BaseWorker):
             },
         )
 
-        # Build chain lookup from detailed results
         chain_by_address: dict[str, str | None] = {}
         for entry in result.get("address_details", []):
             addr = entry.get("address", "").lower()
@@ -120,11 +108,8 @@ class DefiLlamaWorker(BaseWorker):
             if addr and chain:
                 chain_by_address[addr] = chain
 
-        # Write ALL discovered addresses to contracts table. Addresses the scan
-        # couldn't chain-attribute inherit the job's chain (default_chain) rather
-        # than persisting chain=NULL, which would duplicate against a sibling
-        # writer's 'ethereum' stub (NULL ≠ NULL defeats uq_contract_address_chain
-        # — invariants 1/6/12). A chainless company scan is the mainnet edge.
+        # Unattributed addresses inherit the job chain rather than chain=NULL, which would duplicate a sibling's
+        # 'ethereum' stub (NULL ≠ NULL defeats uq_contract_address_chain; inv. 1/6/12).
         protocol_id = protocol_row.id
         chain_id = request.get("chain_id") or 1
         try:
@@ -143,10 +128,8 @@ class DefiLlamaWorker(BaseWorker):
                     "new_sources": [DEFILLAMA_SOURCE_TAG],
                 }
             )
-        # The listing's OWN ``address`` field, per family sibling — the adapter
-        # scan reads TVL token addresses out of adapter source and never sees
-        # it. Same provenance, same tag, same W6 seed path: the code probe
-        # still decides whether any of these become members.
+        # The listing's own ``address`` per family sibling; the adapter scan never sees it. The code probe still decides
+        # membership.
         listed = listing_nominations(resolved)
         for entry in listed:
             bulk_entries.append(

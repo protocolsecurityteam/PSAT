@@ -45,19 +45,14 @@ from workers.retry_policy import classify, compute_next_attempt, max_retries
 
 logger = logging.getLogger(__name__)
 
-# Bumped to 600 alongside the threaded fan-outs: any single fan-out section can now legitimately go
-# minutes without a status/detail write, so the previous 180s default would requeue live jobs.
-# Mid-fan-out heartbeats (``BaseWorker._heartbeat``) keep ``updated_at`` fresh inside the long sections.
+# Fan-out sections can go minutes without a status write; mid-fan-out heartbeats keep ``updated_at`` fresh.
 STALE_JOB_TIMEOUT = int(os.getenv("PSAT_STALE_JOB_TIMEOUT", "600"))  # seconds
 
-# Per-worker throttle for the stuck-job sweep; default 30s keeps fleet sweeps well under the 900s stale_timeout while
-# cutting per-poll DB load.
+# Per-worker throttle for the stuck-job sweep, well under the stale timeout.
 RECLAIM_INTERVAL_S = float(os.getenv("PSAT_RECLAIM_INTERVAL_S", "30"))
 
 
 class IdlePollDelay:
-    """Back off empty queues; reset as soon as any useful work is claimed."""
-
     def __init__(self, base: float) -> None:
         self.base = max(0.0, base)
         try:
@@ -77,7 +72,6 @@ class IdlePollDelay:
 
 
 def _job_heartbeat_interval_s() -> float:
-    """Resolve the max wait between background job heartbeats."""
     try:
         value = float(os.getenv("PSAT_JOB_HEARTBEAT_INTERVAL_S", os.getenv("PSAT_PARALLEL_HEARTBEAT_INTERVAL_S", "30")))
     except ValueError:
@@ -86,14 +80,9 @@ def _job_heartbeat_interval_s() -> float:
 
 
 def _resolve_job_concurrency(stage_value: str) -> int:
-    """Resolve K (max concurrent jobs per worker process) for *stage_value*.
-
-    Precedence: per-stage env (``PSAT_<STAGE>_JOB_CONCURRENCY``) → global
-    ``PSAT_JOB_CONCURRENCY`` → 1. K=1 takes a fast path that's behaviourally
-    identical to the pre-concurrency loop; K>1 opts into the futures-based
-    dispatcher. Subclasses that override ``_claim_job`` (coverage,
-    selection — readiness-gated) stay K=1 implicitly: the per-stage env is
-    just never set for them in production.
+    """Max concurrent jobs per process for *stage_value*: ``PSAT_<STAGE>_JOB_CONCURRENCY``, then
+    ``PSAT_JOB_CONCURRENCY``, then 1. K=1 uses the original single-job loop; K>1 the futures dispatcher.
+    Readiness-gated stages (coverage, selection) stay at 1 in production.
     """
 
     def _read(name: str) -> int | None:
@@ -112,14 +101,8 @@ def _resolve_job_concurrency(stage_value: str) -> int:
 
 
 def _job_chain_log_value(job: Any, request: dict[str, Any]) -> str | None:
-    """Chain label for the ``chain`` logging contextvar (invariant 4).
-
-    Prefers the human-readable chain *name* in ``request['chain']`` so existing
-    Loki filters (``chain="ethereum"``) keep working. Falls back to the canonical
-    name of the job's first-class ``chain_id`` (M0.2) so a job that carries a
-    chain_id but whose request omits ``chain`` still tags every log line. Returns
-    ``None`` when neither is available (e.g. an address-less company job whose
-    request has no chain), which ``bind_trace_context`` treats as "don't bind".
+    """Chain label for the ``chain`` logging contextvar (invariant 4): ``request['chain']`` so existing Loki filters
+    work, else the name of the job's ``chain_id``, else ``None`` (not bound).
     """
     chain = request.get("chain")
     if chain:
@@ -136,38 +119,29 @@ def _job_chain_log_value(job: Any, request: dict[str, Any]) -> str | None:
 
 
 class JobHandledDirectly(Exception):
-    """Raised by process() when it has already completed/failed the job itself."""
-
     pass
 
 
 class BaseWorker:
-    """Poll-based worker that claims jobs for a specific pipeline stage."""
-
     stage: JobStage
     next_stage: JobStage
     poll_interval: float = 2.0
 
     def __init__(self) -> None:
-        # Idempotent — the per-worker ``main()`` may have already called
-        # this, but a bare ``BaseWorker()`` constructed in tests still
-        # gets the JSON formatter installed so emitted log lines parse.
+        # Idempotent; ensures bare ``BaseWorker()`` in tests still logs JSON.
         configure_logging()
         self.worker_id = f"{self.__class__.__name__}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._running = True
-        # -inf = "never swept; sweep now"; throttles _claim_job to RECLAIM_INTERVAL_S between sweeps.
+        # -inf means sweep now.
         self._last_reclaim_at: float = float("-inf")
-        # Retain claim identity until execution, subprocesses and uploads finish.
+        # Held until execution, subprocesses and uploads finish.
         self._inflight_jobs: dict[uuid.UUID, uuid.UUID] = {}
         self._inflight_lock = threading.Lock()
         signal.signal(signal.SIGTERM, self._handle_sigterm)
         signal.signal(signal.SIGINT, self._handle_sigterm)
 
-        # In-process job concurrency: K=1 keeps the legacy single-job loop
-        # byte-identical; K>1 spins up a per-worker thread pool so RPC waits
-        # in one job overlap with another job's CPU work. Resolved once at
-        # boot so per-stage env tuning (e.g. PSAT_RESOLUTION_JOB_CONCURRENCY=2)
-        # is visible in the boot banner below.
+        # K>1 runs jobs in a thread pool so one job's RPC waits overlap another's CPU. Resolved once so the boot banner
+        # shows it.
         stage_attr = getattr(self, "stage", None)
         stage_str = stage_attr.value if stage_attr is not None else "?"
         self._job_concurrency = _resolve_job_concurrency(stage_str)
@@ -179,11 +153,7 @@ class BaseWorker:
                 thread_name_prefix=f"{self.__class__.__name__}-job",
             )
 
-        # One-line boot banner per worker process so a fly-log scrape can
-        # reconstruct the fleet shape that hit OOM. Captures stage + RSS at
-        # boot + the cgroup memory limit + sibling python proc count.
-        # `stage` is a class attribute set by subclasses; default to "?"
-        # so bare BaseWorker() in unit tests doesn't trip AttributeError.
+        # One boot banner per process (stage, RSS, cgroup limit, sibling count) so OOMs can be diagnosed from logs.
         logger.info(
             "[BOOT] worker=%s pid=%d stage=%s rss_mb=%s cgroup_used_mb=%s/%s python_siblings=%d job_concurrency=%d",
             self.worker_id,
@@ -199,16 +169,14 @@ class BaseWorker:
     def _handle_sigterm(self, signum: int, frame: object) -> None:
         logger.info("Worker %s received signal %s, shutting down gracefully", self.worker_id, signum)
         self._running = False
-        # Keep renewing the lease until active work and its subprocesses finish.
-        # Releasing here would let another worker execute the same live job.
-        # A forced VM kill leaves the lease for normal expiry/recovery.
+        # Keep renewing the lease until work and subprocesses finish, or another worker could run the same job. A forced
+        # kill leaves it to expire.
 
     def process(self, session: Session, job: Job) -> None:
-        """Subclasses implement this to run their pipeline stage."""
         raise NotImplementedError
 
     def _claim_job(self, session: Session) -> Job | None:
-        """Throttled stuck-job sweep + claim; override for readiness-gated or multi-phase claim patterns."""
+        """Throttled stuck-job sweep plus claim; override for readiness-gated claims."""
         now = time.monotonic()
         if now - self._last_reclaim_at >= RECLAIM_INTERVAL_S:
             reclaim_stuck_jobs(session)
@@ -216,7 +184,6 @@ class BaseWorker:
         return claim_job(session, self.stage, self.worker_id)
 
     def _recover_stale_jobs(self, session: Session) -> None:
-        """Requeue jobs stuck in 'processing' for longer than STALE_JOB_TIMEOUT."""
         from datetime import datetime, timedelta, timezone
 
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=STALE_JOB_TIMEOUT)
@@ -246,20 +213,12 @@ class BaseWorker:
             session.commit()
 
     def _execute_job(self, session: Session, job: Job) -> None:
-        """Run a single claimed job to completion: process → record timing → advance/complete/fail.
+        """Run one claimed job to completion: process, record timing, then advance, complete or fail.
 
-        Owns the full lifecycle of one (session, job) pair. Caller is
-        responsible for closing *session* afterwards. Both the legacy
-        single-job loop and the K>1 dispatcher route through here so the
-        success/JobHandledDirectly/exception branches stay in one place.
-
-        The whole body runs inside a ``bind_trace_context`` so every
-        log line emitted from any helper called by ``process()`` carries
-        the same ``trace_id`` / ``job_id`` / ``stage`` / ``worker_id``
-        without callers having to thread them through.
+        Shared by the single and K>1 loops. Runs inside ``bind_trace_context`` so every log line carries
+        trace/job/stage/worker ids.
         """
-        # ``getattr`` defaults guard the test stubs that pass a bare
-        # ``SimpleNamespace`` job without a request/trace_id field.
+        # Test stubs may lack these fields.
         raw_request = getattr(job, "request", None)
         request = raw_request if isinstance(raw_request, dict) else {}
         with bind_trace_context(
@@ -270,32 +229,20 @@ class BaseWorker:
             address=getattr(job, "address", None),
             chain=_job_chain_log_value(job, request),
         ):
-            # Per-job accumulator for ``record_degraded`` calls. Reset
-            # alongside ``bind_trace_context`` so K>1 jobs running in
-            # parallel pool threads don't share a list (each thread's
-            # context is a copy from the dispatcher).
+            # Per-job ``record_degraded`` accumulator, reset per job so parallel jobs don't share it.
             degraded_accumulator: list[StageError] = []
             accumulator_token = degraded_errors_var.set(degraded_accumulator)
-            # Per-job accumulator for ``record_stage_metric`` calls. Bound and
-            # reset alongside the degraded accumulator (same per-thread reasons)
-            # and folded into this stage's ``stage_timing_<stage>`` artifact by
+            # Per-job ``record_stage_metric`` accumulator, folded into ``stage_timing_<stage>`` by
             # ``_record_stage_timing``.
             stage_metrics: dict[str, Any] = {}
             metrics_token = stage_metrics_var.set(stage_metrics)
-            # Snapshot the lease at claim time so every mutating queue
-            # write threads it through. ``getattr`` keeps test stubs that
-            # build a bare SimpleNamespace job from tripping AttributeError.
+            # The claim-time lease, threaded through every mutating queue write.
             claim_job_id = getattr(job, "id")
             claim_lease_id = getattr(job, "lease_id", None)
-            # Heartbeats run from background/parallel helper threads. Keep
-            # them on the immutable claim-time token instead of rereading ORM
-            # attributes from a long-lived worker session.
+            # Heartbeat threads use the immutable claim token rather than rereading ORM attributes.
             setattr(job, "_heartbeat_job_id", claim_job_id)
             setattr(job, "_heartbeat_lease_id", claim_lease_id)
-            # Track the live claim through graceful shutdown. SIGTERM leaves
-            # this token and its heartbeat intact until execution finishes.
-            # The ``finally`` below removes the entry whether the job completes,
-            # advances, or errors so a stale id never lingers.
+            # Tracked until execution finishes, through SIGTERM; removed in ``finally``.
             inflight_registered = False
             if claim_lease_id is not None:
                 with self._inflight_lock:
@@ -339,8 +286,7 @@ class BaseWorker:
                 rss_before = rss_span.start_bytes
 
                 def finish_memory_span() -> None:
-                    # A shared process can run K jobs concurrently: this is
-                    # process RSS observed during the job, not its allocation.
+                    # Process RSS during the job, not its allocation (K jobs may share the process).
                     stage_metrics.update(rss_span.finish())
 
                 started_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -367,8 +313,7 @@ class BaseWorker:
                             "rss_delta_mb": round(rss_delta_mb, 1),
                         },
                     )
-                    # Record timing before advancing — otherwise the next-stage worker can race read-modify-write on the
-                    # shared stage_timings artifact.
+                    # Before advancing, or the next stage could race the shared stage_timings artifact.
                     self._record_stage_timing(
                         session,
                         job,
@@ -377,15 +322,11 @@ class BaseWorker:
                         elapsed_s=elapsed,
                         status="success",
                     )
-                    # Drain degraded entries before advancing so a stage_errors
-                    # artifact is visible to the next-stage worker at its claim.
+                    # Before advancing, so the next stage sees stage_errors at its claim.
                     if degraded_accumulator:
                         self._persist_stage_errors(job, degraded_accumulator)
-                    # Flip JobDependency rows where this job is the provider
-                    # and its just-completed stage meets-or-exceeds the
-                    # depender's required_stage. Queued in the same tx as
-                    # advance_job/complete_job below so dependents become
-                    # claimable atomically with the stage change.
+                    # Satisfy dependents in the same transaction as the stage change so they become claimable
+                    # atomically.
                     self._satisfy_dependencies(session, job, completed_stage=self.stage)
                     if self.next_stage == JobStage.done:
                         from db.queue import complete_job
@@ -410,7 +351,7 @@ class BaseWorker:
                     elapsed = time.monotonic() - t0
                     ended_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
                     finish_memory_span()
-                    # Fresh session — process() may have left the original in an inconsistent state.
+                    # Fresh session: process() may have left the original inconsistent.
                     try:
                         fresh_for_timing = SessionLocal()
                         self._record_stage_timing(
@@ -439,12 +380,7 @@ class BaseWorker:
                     )
                 except LeaseLost as lease_exc:
                     finish_memory_span()
-                    # The row's lease has rolled to a sibling worker (e.g.
-                    # the long-task heartbeat tripped the sweep, then a
-                    # sibling claim_job acquired the row). Bailing here
-                    # rather than continuing through the requeue/terminal
-                    # path is the whole point: any further write would
-                    # corrupt the sibling's view of the job.
+                    # The lease moved to a sibling; any further write would corrupt its view.
                     logger.warning(
                         "Worker %s: lease lost for job %s — abandoning attempt: %s",
                         self.worker_id,
@@ -457,16 +393,9 @@ class BaseWorker:
                     finish_memory_span()
                     from utils.secrets import sanitize_string
 
-                    # A failed flush/commit inside ``process()`` leaves the
-                    # session in a pending-rollback state and can leave ``job``
-                    # with expired attributes. Roll back BEFORE reading any ORM
-                    # attribute (``job.retry_count`` just below): on an
-                    # un-rolled-back session that lazy-load re-raises
-                    # PendingRollbackError, which escapes this handler so the
-                    # job is never marked failed/requeued. It stays 'processing'
-                    # and only the stale-job sweep recovers it — never bumping
-                    # retry_count — i.e. an unbounded poison-retry loop that
-                    # stalls the whole pipeline.
+                    # Roll back before reading ``job.retry_count``: on a pending-rollback session the lazy load
+                    # re-raises, the job is never requeued, and only the stale sweep recovers it without bumping
+                    # retry_count, an unbounded poison loop.
                     try:
                         session.rollback()
                     except Exception:
@@ -480,12 +409,8 @@ class BaseWorker:
                     ended_at_iso = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
                     error = sanitize_string(traceback.format_exc())
                     exc_message = sanitize_string(str(exc))
-                    # Decide retry vs terminal up front. ``prior_retry_count``
-                    # is the count of attempts that had ALREADY failed before
-                    # the current one — i.e. what we tag the just-failed
-                    # attempt with in the StageErrors history. ``new_retry_count``
-                    # is what the row's ``retry_count`` becomes after this
-                    # attempt is recorded.
+                    # Decide retry vs terminal up front. ``prior_retry_count`` tags the failed attempt;
+                    # ``new_retry_count`` is the row's new count.
                     kind = classify(exc)
                     prior_retry_count = getattr(job, "retry_count", 0) or 0
                     new_retry_count = prior_retry_count + 1
@@ -493,19 +418,8 @@ class BaseWorker:
                     next_attempt_at = compute_next_attempt(prior_retry_count) if will_retry else None
                     outcome = "requeued" if will_retry else "failed_terminal"
                     exc_type_str = f"{type(exc).__module__}.{type(exc).__name__}"
-                    # WARNING for retry (the job will run again, so it's not a
-                    # failure); ERROR for terminal so ops alerts still fire on
-                    # real failures. One line: worker/job/stage already ride the
-                    # bound contextvars and everything else is an ``extra``
-                    # field, so this groups by template instead of being 27
-                    # unique multi-line blobs a run. The traceback rides
-                    # ``exc_info`` where the formatter puts it in its own JSON
-                    # key rather than inside ``message`` — but only on the
-                    # terminal branch: this file's own level-contract note says a
-                    # traceback on a non-failure line mislevels the site, and a
-                    # requeued job has not failed. ``exc_type``/``exc_message``
-                    # still name the cause, and the full traceback is on the
-                    # StageError appended just below either way.
+                    # WARNING when retrying, ERROR when terminal. The traceback goes in ``exc_info`` only on the
+                    # terminal branch (a requeued job hasn't failed); the StageError below carries it either way.
                     log_fn = logger.warning if will_retry else logger.error
                     log_fn(
                         "worker failure: job %s %s (%s)",
@@ -519,8 +433,7 @@ class BaseWorker:
                             "outcome": outcome,
                             "exc_type": exc_type_str,
                             "exc_message": exc_message,
-                            # ``worker_id``/``job_id``/``stage``/``address`` are
-                            # already bound contextvars; only the job's name is not.
+                            # The other identifiers are bound contextvars.
                             "job_name": getattr(job, "name", None),
                             "retry_count": new_retry_count if will_retry else prior_retry_count,
                             "next_attempt_at": next_attempt_at.isoformat() if next_attempt_at else None,
@@ -528,13 +441,8 @@ class BaseWorker:
                             **rss_span.finish(),
                         },
                     )
-                    # Append the job-failing exception alongside any degraded
-                    # entries the run produced before the crash, tagged with
-                    # the just-failed attempt's ``retry_count`` so the
-                    # accumulator history reads chronologically (0, 1, 2, …).
-                    # Persist via a fresh session inside ``_persist_stage_errors``
-                    # so a poisoned primary transaction can't take the
-                    # artifact down with it.
+                    # Append the failure after any degraded entries, tagged with its attempt number. Persisted via a
+                    # fresh session so a poisoned transaction can't lose it.
                     degraded_accumulator.append(
                         StageError(
                             stage=self.stage.value,
@@ -551,11 +459,8 @@ class BaseWorker:
                         )
                     )
                     self._persist_stage_errors(job, degraded_accumulator)
-                    # On retries-exhaustion (kind=transient but no more
-                    # retries left), the row records the full attempt count;
-                    # on deterministic terminal (kind=terminal), retry_count
-                    # stays at its current value because no retry slot was
-                    # consumed by this attempt — we never even scheduled one.
+                    # Retries exhausted: record the full count. Deterministic terminal: unchanged (no retry slot was
+                    # used).
                     terminal_retry_count = new_retry_count if kind == "transient" else None
                     try:
                         session.rollback()
@@ -570,12 +475,8 @@ class BaseWorker:
                                 lease_id=claim_lease_id,
                             )
                         else:
-                            # Terminal failure → flip pending deps where this
-                            # job is the provider to ``degraded`` so dependents
-                            # short-circuit instead of blocking forever, then
-                            # mark the row failed_terminal. Routed through an
-                            # overridable finalizer so a fail-forward stage
-                            # (effects, inv. 15) can advance instead of terminal.
+                            # Terminal: degrade dependents so they don't block, then mark failed_terminal, via an
+                            # overridable finalizer so fail-forward stages (effects, inv. 15) can advance instead.
                             self._finalize_terminal_failure(
                                 session,
                                 job,
@@ -593,9 +494,7 @@ class BaseWorker:
                             status="failed",
                         )
                     except LeaseLost as lease_exc:
-                        # Same bail as the success path: a sibling owns
-                        # the row now; persisting our failure would
-                        # corrupt their state.
+                        # A sibling owns the row now.
                         logger.warning(
                             "Worker %s: lease lost during failure path for job %s: %s",
                             self.worker_id,
@@ -663,15 +562,8 @@ class BaseWorker:
                         self._inflight_jobs.pop(claim_job_id, None)
 
     def _run_one_job(self, job_id) -> None:
-        """K>1 dispatcher entry point: open a per-job session, re-fetch the job
-        ORM object inside that session, run it through ``_execute_job``, close.
-
-        The claim happened on a different (claim-loop) session that's already
-        been closed; using ``session.get`` here re-binds the row to *this*
-        thread's session so all heartbeats and DB writes belong to one
-        identity map. Errors inside the job are absorbed by ``_execute_job``;
-        anything that escapes is logged and dropped to keep the dispatcher
-        loop alive.
+        """K>1 dispatcher entry: open a per-job session, re-fetch the job into it (the claim session is closed), run
+        ``_execute_job``, close. Escaping errors are logged so the dispatcher survives.
         """
         session = SessionLocal()
         try:
@@ -699,7 +591,6 @@ class BaseWorker:
         logger.info("Worker %s shut down", self.worker_id)
 
     def _run_loop_single(self) -> None:
-        """One in-flight job; empty queues back off without slowing recovery."""
         idle = IdlePollDelay(self.poll_interval)
         recovery_interval = max(60.0, 30 * self.poll_interval)
         recover_at = time.monotonic() + recovery_interval
@@ -726,26 +617,19 @@ class BaseWorker:
                 session.close()
 
     def _run_loop_concurrent(self) -> None:
-        """K>1 loop: claim jobs on a short-lived claim session and dispatch
-        each into a per-worker ``ThreadPoolExecutor``. The pool is bounded
-        at ``self._job_concurrency``; when full, the loop waits on
-        ``FIRST_COMPLETED`` for back-pressure instead of polling.
-
-        SIGTERM stops new claims and waits for every in-flight job. A voluntary
-        idle shutdown never abandons live futures; a forced machine kill leaves
-        leases for normal recovery.
+        """K>1 loop: claim on short-lived sessions and dispatch into a bounded ``ThreadPoolExecutor``, waiting on
+        ``FIRST_COMPLETED`` when full. SIGTERM stops claims and waits for in-flight jobs; idle shutdown never
+        abandons futures.
         """
         assert self._job_pool is not None
         idle = IdlePollDelay(self.poll_interval)
         recovery_interval = max(60.0, 30 * self.poll_interval)
         recover_at = time.monotonic() + recovery_interval
         while self._running:
-            # Drain finished futures so the slot count is accurate.
             self._reap_finished_futures()
 
             if len(self._inflight) >= self._job_concurrency:
-                # Pool is full: block until any future finishes (with a
-                # ceiling so we still notice SIGTERM in time).
+                # Pool full: wait for a slot, with a ceiling so SIGTERM is noticed.
                 wait(self._inflight, timeout=self.poll_interval, return_when=FIRST_COMPLETED)
                 continue
 
@@ -759,9 +643,7 @@ class BaseWorker:
 
                 job_to_dispatch = self._claim_job(claim_session)
                 if job_to_dispatch is not None:
-                    # Capture the id before the session closes — the ORM
-                    # object will be expired/detached on the dispatcher
-                    # thread and we rebuild it via session.get there.
+                    # Capture the id before the session closes; the dispatcher re-fetches it.
                     job_id_for_dispatch = job_to_dispatch.id
             except Exception:
                 logger.exception("Worker %s encountered error in claim loop", self.worker_id)
@@ -769,8 +651,6 @@ class BaseWorker:
                 claim_session.close()
 
             if job_id_for_dispatch is None:
-                # Nothing to claim — sleep just enough to avoid hammering
-                # Postgres while still letting in-flight futures progress.
                 if self._inflight:
                     idle.reset()
                     wait(self._inflight, timeout=self.poll_interval, return_when=FIRST_COMPLETED)
@@ -779,65 +659,33 @@ class BaseWorker:
                 continue
 
             idle.reset()
-            # ``ThreadPoolExecutor.submit`` does not propagate contextvars
-            # by default; wrap with ``copy_context().run`` so the dispatched
-            # job inherits the claim-loop's contextvar state. The per-job
-            # ``bind_trace_context`` inside ``_execute_job`` then layers on
-            # the job-specific bind once the row is loaded.
+            # ``ThreadPoolExecutor.submit`` doesn't propagate contextvars, so run under a copied context.
             ctx = contextvars.copy_context()
             future = self._job_pool.submit(ctx.run, self._run_one_job, job_id_for_dispatch)
             self._inflight.add(future)
 
-        # A voluntary idle stop has no deadline: finish all work, artifact
-        # uploads and child processes before the launcher may exit successfully.
+        # An idle stop finishes all work before exiting.
         if self._job_pool is not None:
             self._job_pool.shutdown(wait=True)
         self._inflight.clear()
 
     def _reap_finished_futures(self) -> None:
-        """Drop completed futures from ``self._inflight`` to free dispatch slots."""
         finished = {f for f in self._inflight if f.done()}
         if finished:
             self._inflight -= finished
 
     def update_detail(self, session: Session, job: Job, detail: str) -> None:
-        """Update the job's progress detail message."""
         update_job_detail(session, job.id, detail)
 
     def _heartbeat(self, session: Session, job: Job) -> None:  # noqa: ARG002 — session kept for caller back-compat
-        """Extend the row's lease past now+ttl using a fresh session.
+        """Extend the row's lease using a fresh session (the *session* argument is ignored).
 
-        The *session* arg is intentionally ignored. Callers pass their
-        worker's main ORM session by reflex, but we open a fresh
-        ``SessionLocal()`` for the actual write — see the bug below.
+        Keeps the stale sweep from requeuing live work. ``heartbeat_job`` only matches the claim-time lease; a reclaimed
+        worker gets ``LeaseLost``, which is deliberately not swallowed so ``_execute_job`` stops.
 
-        Used inside long parallel sections so the stale-job sweep doesn't
-        requeue live work. The conditional UPDATE inside ``heartbeat_job``
-        only matches when ``lease_id`` still equals the row's claim-time
-        lease — a reclaimed worker's heartbeat is a no-op and ``LeaseLost``
-        is raised so the caller can bail.
-
-        Why a fresh session: the worker's main session sits idle for
-        minutes during long parallel sections (forge build fan-outs run
-        in the executor pool while the worker thread blocks in semaphore
-        / ``as_completed``). Neon's pooler-side SSL idle timeout closes
-        that idle connection. If we issued the heartbeat UPDATE through
-        the worker's session, ``session.execute`` raises
-        ``OperationalError``; the previous version of this method
-        swallowed that at DEBUG level — ``updated_at`` never refreshed,
-        the stale-job sweep requeued live work to a sibling worker, and
-        the symptom looked just like the old materialize_or_wait SSL
-        bug. A fresh session goes through the pool with
-        ``pool_pre_ping=True`` so dead connections are replaced on
-        checkout; the heartbeat write is a single short UPDATE so the
-        new session's lifecycle is sub-second.
-
-        ``LeaseLost`` is intentionally NOT swallowed: the catch site in
-        ``_execute_job`` needs to see it so the worker stops doing
-        further work on a job a sibling now owns. Other exceptions are
-        logged at WARNING (used to be DEBUG) — the heartbeat is
-        load-bearing for stall detection, and silent failures on a
-        critical path is what hid this bug across multiple PR previews.
+        Fresh session because the worker's session idles for minutes during parallel sections and Neon's pooler drops
+        idle SSL connections; heartbeats through it failed silently and live jobs were requeued. The pool's
+        ``pool_pre_ping`` replaces dead connections. Other errors log at WARNING since stall detection depends on this.
         """
         missing = object()
         job_id = getattr(job, "_heartbeat_job_id", missing)
@@ -847,9 +695,7 @@ class BaseWorker:
         if lease_id is missing:
             lease_id = getattr(job, "lease_id", None)
         if lease_id is None:
-            # Pre-migration row, or a job claimed by an out-of-process
-            # legacy claim path; fall back to bumping updated_at so the
-            # legacy sweep predicate still keeps the row alive.
+            # Pre-migration rows or legacy claims: bump updated_at for the legacy sweep.
             from sqlalchemy import update as sa_update
 
             try:
@@ -874,21 +720,9 @@ class BaseWorker:
             logger.warning("heartbeat write failed (non-fatal)", exc_info=True)
 
     def _satisfy_dependencies(self, session: Session, job: Job, *, completed_stage: JobStage) -> int:
-        """Mark every pending ``JobDependency`` row whose provider is this
-        job as ``satisfied`` when the just-completed stage meets-or-exceeds
-        the depender's ``required_stage``.
-
-        Stage ordering follows the natural ``JobStage`` enum order
-        (discovery < dapp_crawl < ... < policy < coverage < done). Mutates
-        rows IN this session WITHOUT committing — the caller's
-        ``advance_job`` / ``complete_job`` commit flushes them in the same
-        transaction so dependents become claimable atomically with the
-        provider's stage change.
-
-        Returns the count of rows flipped (mostly for logging / tests).
-        Best-effort: a query failure logs and returns 0 rather than
-        propagating; the success path of stage advancement should not be
-        blocked by a dependency-bookkeeping bug.
+        """Mark this job's pending ``JobDependency`` rows ``satisfied`` when the completed stage meets their
+        ``required_stage`` (``JobStage`` order). Doesn't commit; the caller's advance/complete commits it
+        atomically. Returns rows flipped. Best-effort: failures log and return 0.
         """
         chain = self._provider_chain_for(job)
         addr = (getattr(job, "address", None) or "").lower()
@@ -929,12 +763,8 @@ class BaseWorker:
             return 0
 
     def _degrade_dependencies(self, session: Session, job: Job) -> int:
-        """Mark every pending ``JobDependency`` row whose provider is this
-        job as ``degraded`` after the provider terminally fails.
-
-        Dependents short-circuit cross-contract authority leaves to
-        ``external_check_only`` rather than block forever. Same
-        non-committing semantics as ``_satisfy_dependencies``.
+        """Mark this job's pending dependencies ``degraded`` after a terminal failure, so dependents fall back to
+        ``external_check_only``. Doesn't commit.
         """
         chain = self._provider_chain_for(job)
         addr = (getattr(job, "address", None) or "").lower()
@@ -979,15 +809,10 @@ class BaseWorker:
         retry_count: int | None,
         lease_id: uuid.UUID | None,
     ) -> None:
-        """Finalize a job whose retries are exhausted (or that failed
-        terminally). Default: degrade pending dependents, then mark the row
-        ``failed_terminal``.
+        """Finalize an exhausted or terminal failure: degrade dependents and mark ``failed_terminal``.
 
-        Overridable so a fail-forward stage advances the job to ``next_stage``
-        instead of terminating one whose upstream artifacts are already complete
-        and correct (the effects stage, inv. 15). Called from both the primary-
-        and fresh-session failure paths, so ``session`` is whichever succeeded a
-        rollback and the same commit discipline as ``fail_job_terminal`` applies.
+        Overridable so fail-forward stages (effects, inv. 15) can advance instead. Called from both failure paths with
+        whichever session rolled back successfully.
         """
         self._degrade_dependencies(session, job)
         fail_job_terminal(
@@ -1001,13 +826,9 @@ class BaseWorker:
 
     @staticmethod
     def _provider_chain_for(job: Job) -> str | None:
-        """Pull the provider's chain identifier out of the job's request
-        payload. Mirrors the convention ``_queue_discovered_contracts``
-        uses when stamping ``request['chain']`` on spawned children.
-
-        ``getattr`` over direct attribute access so test doubles
-        (SimpleNamespace fakes that omit ``request``) don't trigger
-        AttributeError on the dependency hooks."""
+        """The provider's chain from the job request (as ``_queue_discovered_contracts`` stamps it); ``getattr``
+        tolerates test doubles.
+        """
         request = getattr(job, "request", None)
         if not isinstance(request, dict):
             return None
@@ -1015,19 +836,9 @@ class BaseWorker:
         return chain if isinstance(chain, str) and chain else None
 
     def _persist_stage_errors(self, job: Job, errors: list[StageError]) -> None:
-        """Write the ``stage_errors`` artifact via a fresh session, merging
-        with any pre-existing artifact so retries accumulate per-attempt.
+        """Write ``stage_errors`` via a fresh session, merged with the existing artifact so retries accumulate.
 
-        Used on both the success and failure paths so the artifact survives a
-        broken primary transaction. ``store_artifact`` does its own commit, so
-        the only state to clean up is the fresh session itself. Best-effort —
-        we never want a stage_errors write failure to mask the underlying job
-        failure or block the success advance.
-
-        Accumulation matters for retries: a job that fails transiently three
-        times before succeeding ends up with three error entries plus any
-        degraded entries from each attempt. Without the merge step every
-        retry would overwrite the prior attempt's history.
+        Used on both paths so it survives a broken transaction; best-effort.
         """
         if not errors:
             return
@@ -1040,11 +851,7 @@ class BaseWorker:
                 try:
                     merged = list(StageErrors.model_validate(existing).errors)
                 except Exception:
-                    # Corrupt body shouldn't block the new write, but it
-                    # also shouldn't be silently dropped: pin the raw payload
-                    # onto a degraded breadcrumb so an operator forensically
-                    # reading the audit log via /api/jobs/{id}/errors can
-                    # still see what was there before this attempt.
+                    # Keep a corrupt prior body on a degraded breadcrumb rather than dropping it.
                     merged = []
                     corrupt_prior = existing
             if corrupt_prior is not None:
@@ -1091,8 +898,9 @@ class BaseWorker:
         elapsed_s: float,
         status: str,
     ) -> None:
-        """Write this stage's timing as a ``stage_timing_<stage>`` artifact (one slot per stage avoids cross-stage RMW
-        races); best-effort with session rollback on failure."""
+        """Write this stage's ``stage_timing_<stage>`` artifact (one per stage avoids cross-stage races); best-effort
+        with rollback.
+        """
         artifact_name = f"stage_timing_{self.stage.value}"
         payload = {
             "schema_version": "2",
@@ -1103,11 +911,8 @@ class BaseWorker:
             "worker_id": self.worker_id,
             "status": status,
         }
-        # Fold in any progress metrics the stage recorded via
-        # ``record_stage_metric`` (deps discovered, principals resolved, …).
-        # Additive within schema v2 — the key is omitted when empty so legacy
-        # readers (bench harness reads ``elapsed_s``) are unaffected. Copied so
-        # a later reset of the contextvar can't mutate the stored payload.
+        # Include ``record_stage_metric`` values (omitted when empty for legacy readers); copied so resetting the
+        # contextvar can't mutate it.
         metrics = stage_metrics_var.get()
         if metrics:
             payload["metrics"] = dict(metrics)
@@ -1115,8 +920,7 @@ class BaseWorker:
             store_artifact(session, job.id, artifact_name, data=payload)
         except Exception:
             logger.exception("Worker %s: failed to record %s (non-fatal)", self.worker_id, artifact_name)
-            # Mid-transaction failure leaves the session needing rollback or the success path's advance_job will raise
-            # PendingRollbackError.
+            # Roll back or the success path's advance raises PendingRollbackError.
             try:
                 session.rollback()
             except Exception:

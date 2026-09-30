@@ -1,4 +1,4 @@
-"""Resolution worker — builds control snapshot and resolves control graph."""
+"""Resolution worker: builds the control snapshot and resolves the control graph."""
 
 from __future__ import annotations
 
@@ -65,10 +65,9 @@ RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 
 
 def _rpc_url_for_job(job: Job) -> str:
-    """eRPC URL for the job's own chain, resolved via the first-class
-    ``jobs.chain_id`` column (``_chain_id_for_job``), not the request JSONB —
-    a chainless ``/api/analyze`` submission carries the mainnet edge default
-    only in the column, so a request-only read fails loud on every such job."""
+    """eRPC URL for the job's chain via ``jobs.chain_id`` (``_chain_id_for_job``); the request lacks the mainnet
+    default for chainless submissions.
+    """
     request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
     return require_rpc_url(
@@ -79,10 +78,7 @@ def _rpc_url_for_job(job: Job) -> str:
 
 
 def _chain_id_for_job(job: Job) -> int:
-    """The job's first-class ``chain_id`` (invariant 1). Prefers the populated
-    ``jobs.chain_id`` column and falls back to deriving it from
-    ``request["chain"]`` via the canonical registry; mainnet (1) is the last
-    resort for a chain-less row so behaviour is unchanged there."""
+    """The job's ``chain_id`` (invariant 1): the column, else derived from ``request["chain"]``, else mainnet."""
     chain_id = getattr(job, "chain_id", None)
     if isinstance(chain_id, int):
         return chain_id
@@ -91,12 +87,10 @@ def _chain_id_for_job(job: Job) -> int:
 
 
 def _chain_name_for_job(job: Job) -> str:
-    """Canonical chain name for the job's first-class ``chain_id``.
+    """Canonical chain name for the job, stamped on spawned jobs so chain never cascades as ``None``.
 
-    Stamped onto spawned child/dependency-provider jobs so a discovered
-    contract inherits the parent's chain instead of cascading as ``None`` when
-    the request payload lacks a chain (a chainless ``/api/analyze`` submission).
-    Mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
+    Mainnet is ``"ethereum"``.
+    """
     try:
         return chain_by_id(_chain_id_for_job(job)).name
     except UnknownChainError:
@@ -109,7 +103,6 @@ def _build_root_artifacts(
     snapshot: ControlSnapshot,
     predicate_trees: dict | None = None,
 ) -> LoadedArtifacts:
-    """Package the root job's in-memory artifacts for the recursive resolver."""
     return {
         "analysis": contract_analysis,
         "tracking_plan": tracking_plan,
@@ -129,14 +122,11 @@ def _membership_gate_controller_hook(
     *,
     removed_values: set[str] | frozenset[str] = frozenset(),
 ) -> None:
-    """Membership-gate event-2 hook for the resolution stage's ControllerValue
-    commit (spec §3.4 event 2b). Targeted delta, best-effort — a gate failure
-    never fails the stage.
+    """Membership-gate event-2 hook for the ControllerValue commit (spec §3.4 event 2b); best-effort.
 
-    ``removed_values`` (F5): controller addresses the rewrite dropped. A
-    Class-A registry row anchored on a removed value must be re-checked in the
-    SAME evaluate — the removed addresses ride as changed deployers (stratum-ii
-    ladder re-check) and as edge names (revocation-stratum vias)."""
+    ``removed_values`` (F5) are controller addresses the rewrite dropped; Class-A rows anchored on them are re-checked
+    in the same evaluate (as changed deployers and edge names).
+    """
     from services.discovery.membership_gate import FactsDelta, evaluate_committed
 
     values: set[str] = set()
@@ -170,12 +160,10 @@ class ResolutionWorker(BaseWorker):
         rpc_url = _rpc_url_for_job(job)
         chain_id = _chain_id_for_job(job)
 
-        # Read control_tracking_plan from DB
         tracking_plan = get_artifact(session, job.id, "control_tracking_plan")
         if not isinstance(tracking_plan, dict):
             raise RuntimeError("control_tracking_plan artifact not found")
 
-        # Read contract_analysis from DB (needed for recursive resolution)
         contract_analysis = get_artifact(session, job.id, "contract_analysis")
         if not isinstance(contract_analysis, dict):
             raise RuntimeError("contract_analysis artifact not found")
@@ -183,22 +171,17 @@ class ResolutionWorker(BaseWorker):
         if not isinstance(predicate_trees, dict):
             predicate_trees = None
 
-        # For impl jobs, read storage from the proxy address (where state lives)
+        # Impl jobs read storage from the proxy.
         request = job.request if isinstance(job.request, dict) else {}
         proxy_address = request.get("proxy_address")
-        # An UpgradeableBeacon governs this instance: its owner() is the
-        # instance's upgrade authority and is read live from the beacon below.
+        # An UpgradeableBeacon's owner() is this instance's upgrade authority, read live below.
         beacon_address = proxy_address if request.get("proxy_type") == "beacon" else None
-        # Deployment this resolution is attributed to (proxy for an impl in proxy
-        # context, else NULL) so a shared impl can hold per-proxy result sets.
+        # The proxy for an impl in proxy context, else NULL, so a shared impl holds per-proxy sets.
         deployment_address = normalize_deployment(proxy_address)
         getter_fallback_address: str | None = None
         if proxy_address:
-            # Reading impl state via the proxy is correct for storage-backed
-            # vars, but immutable authority addresses live in the impl bytecode
-            # and revert when the proxy doesn't delegatecall to this impl
-            # (beacon / per-instance patterns, e.g. EtherFiNode). Keep the impl
-            # address as a getter fallback so those reverting reads recover.
+            # Immutable authority addresses live in impl bytecode and revert through beacon/per-instance proxies (e.g.
+            # EtherFiNode), so keep the impl as a getter fallback.
             getter_fallback_address = tracking_plan.get("contract_address")
             tracking_plan = {**tracking_plan, "contract_address": proxy_address}
             contract_analysis = {
@@ -211,7 +194,6 @@ class ResolutionWorker(BaseWorker):
                 proxy_address,
             )
 
-        # Build control snapshot via RPC calls
         self.update_detail(session, job, "Reading current controller state")
         t0 = time.monotonic()
         snapshot = build_control_snapshot(
@@ -226,12 +208,9 @@ class ResolutionWorker(BaseWorker):
             "resolution phase complete: control snapshot",
             extra={"duration_ms": int((time.monotonic() - t0) * 1000), "phase": "control_snapshot"},
         )
-        # Keep as artifact — policy stage reads it as JSON
+        # The policy stage reads this artifact.
         store_artifact(session, job.id, "control_snapshot", data=snapshot)
-        # A reverting controller read is recorded as an ``eth_call_error`` NULL
-        # entry (see build_control_snapshot); counting those as resolved hid the
-        # etherfi NULL-controller incident. Split the count so the resolved metric
-        # reflects only real values and the read errors chart on their own.
+        # Reverting reads are NULL ``eth_call_error`` entries; count them separately so the resolved metric is honest.
         _controller_values = snapshot.get("controller_values", {})
         _controllers_errored = sum(
             1 for cv in _controller_values.values() if cv.get("observed_via") == "eth_call_error"
@@ -242,11 +221,9 @@ class ResolutionWorker(BaseWorker):
         if snapshot.get("block_number") is not None:
             record_stage_metric("block_number", snapshot.get("block_number"))
 
-        # Write to controller_values table
         contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
         if contract_row:
-            # F5: the values the rewrite is about to drop — registry rows
-            # anchored on them must be re-checked by the same gate pass.
+            # F5: values about to be dropped, re-checked by the same gate pass.
             pre_rewrite_values = {
                 v.lower()
                 for (v,) in session.execute(
@@ -273,15 +250,12 @@ class ResolutionWorker(BaseWorker):
                         block_number=snapshot.get("block_number"),
                         details=cv.get("details"),
                         observed_via=cv.get("observed_via"),
-                        # Absent in the snapshot => NULL, not a guessed value.
+                        # Absent means NULL, not a guess.
                         authority_provenance=cv.get("authority_provenance"),
                     )
                 )
             session.commit()
-            # §3.4 event 2b: the freshly committed ControllerValue rows are the
-            # gate's W3 fuel — resolved controller addresses as a fact delta,
-            # plus the subject itself (its own controllers may now resolve to
-            # perimeter entities). The static stage never sees these.
+            # §3.4 event 2b: committed controllers are the gate's W3 fuel (plus the subject itself).
             _membership_gate_controller_hook(
                 session, contract_row, snapshot.get("controller_values", {}), removed_values=pre_rewrite_values
             )
@@ -293,7 +267,6 @@ class ResolutionWorker(BaseWorker):
             job.name or "Contract",
         )
 
-        # Fetch token balances
         self._fetch_balances(
             session, job, contract_row, chain_id=chain_id, heartbeat=lambda: self._heartbeat(session, job)
         )
@@ -302,10 +275,7 @@ class ResolutionWorker(BaseWorker):
 
         self.update_detail(session, job, "Resolving recursive control graph")
         t0 = time.monotonic()
-        # Cache classify_resolved_address results so the policy stage can
-        # short-circuit its refresh + labeling passes (the dominant cost
-        # on cascade workloads — see PSAT_BENCH_NOTES in
-        # services/resolution/recursive.py).
+        # Cached classifications let the policy stage skip its most expensive passes.
         classify_cache: dict[str, tuple[str, dict[str, object]]] = {}
         resolved_graph, nested_artifacts = resolve_control_graph(
             root_artifacts=root_artifacts,
@@ -328,14 +298,10 @@ class ResolutionWorker(BaseWorker):
         record_stage_metric("graph_nodes", graph_nodes)
         record_stage_metric("graph_edges", graph_edges)
         if resolved_graph:
-            # Persist each nested contract's artifacts so the policy stage can
-            # read them back by address (no local filesystem).
+            # Per-address nested artifacts for the policy stage.
             store_nested_artifacts(session, job.id, nested_artifacts)
-            # Keep as artifact — policy stage reads it as JSON
             store_artifact(session, job.id, "resolved_control_graph", data=resolved_graph)
-            # Persist the classify cache so the policy stage skips re-running
-            # the 6-10 RPC fan-out per address. dict[str, tuple] → JSON-friendly
-            # dict[str, list] for storage.
+            # Saves several RPCs per address in the policy stage.
             if classify_cache:
                 store_artifact(
                     session,
@@ -350,10 +316,7 @@ class ResolutionWorker(BaseWorker):
                 job.name or "Contract",
             )
 
-            # Write to control_graph_nodes and control_graph_edges tables.
-            # Shared with the policy stage's graph-refresh rewrite: the same
-            # replace keeps the table plane equal to whichever graph artifact
-            # was stored last, instead of freezing it at the pre-refresh walk.
+            # Same replace the policy refresh uses, so tables match the latest graph artifact.
             if contract_row:
                 replace_control_graph_rows(
                     session,
@@ -363,15 +326,10 @@ class ResolutionWorker(BaseWorker):
                 )
                 session.commit()
 
-            # Queue analysis jobs for contracts discovered during resolution
             self._queue_discovered_contracts(session, job, cast(dict, resolved_graph), rpc_url)
 
-        # Emit JobDependency edges so the policy stage waits for any
-        # external authority contract referenced by this job's predicate
-        # trees (e.g. EtherFiAdmin.upgradeTo's roleRegistry call).
-        # Defensive: a failure to enumerate deps must not block the
-        # resolution stage from completing — the depender just won't
-        # benefit from cross-contract inlining at policy time.
+        # Dependency edges so policy waits for external authority contracts in the predicate trees (e.g. a roleRegistry
+        # call). Failure only loses cross-contract inlining.
         try:
             self._emit_dependency_edges_from_predicate_trees(session, job, snapshot, rpc_url)
         except Exception as exc:
@@ -387,9 +345,7 @@ class ResolutionWorker(BaseWorker):
                 extra={"exc_type": type(exc).__name__},
             )
 
-        # Isolated for the same reason as the dependency edges above: this plane
-        # publishes only lower bounds, so it must never be able to fail a stage
-        # that proved something else.
+        # Isolated: this plane publishes only lower bounds and must not fail the stage.
         try:
             self._resolve_role_holder_plane(
                 session,
@@ -412,10 +368,7 @@ class ResolutionWorker(BaseWorker):
                 extra={"exc_type": type(exc).__name__},
             )
 
-        # Isolated on the same terms as the two steps above, and for the same
-        # reason: this plane can only ADD addresses to sinks that had none, so a
-        # failure here costs pricing coverage and proves nothing false. It must
-        # never fail a stage that already resolved a control graph.
+        # Isolated: it only adds addresses, so failure costs pricing coverage and proves nothing false.
         try:
             self._resolve_flow_asset_addresses(
                 session,
@@ -460,28 +413,12 @@ class ResolutionWorker(BaseWorker):
         rpc_url: str,
         registry_address: str | None,
     ) -> int:
-        """Publish this registry's role floors. Returns the rows written.
+        """Publish this registry's role floors; returns rows written.
 
-        The opportunistic fast path: it refreshes whatever this job's own
-        registry can prove while the stage is already here. The periodic
-        refresher (``services.monitoring.role_holder_cycle``) is what guarantees
-        a registry is reached at all, on a clock that does not depend on a job
-        arriving for it.
-
-        The gate is cursor EXISTENCE on both AccessControl topics, not warmth. A
-        cold cursor still mints a row whose floor is withheld (``holders`` NULL,
-        ``coverage`` partial); skipping it instead would erase the distinction
-        between a registry with no roles and a registry nothing was read from.
-        Everything past that precondition is the module's to refuse.
-
-        Every outcome is recorded — a closed gate, an open gate that resolved
-        nothing, and N rows written. They are three different facts, and a metric
-        that fires only on the third makes the first two indistinguishable from
-        the stage never running.
-
-        The registry is the RUNTIME address — the proxy an impl job's logs are
-        actually emitted at, never the implementation its ``contracts`` row is
-        keyed to.
+        An opportunistic fast path; ``services.monitoring.role_holder_cycle`` guarantees coverage on its own clock.
+        Gated on the two AccessControl cursors existing, not being warm: a cold cursor still writes a withheld row,
+        distinguishing "no roles" from "not read". Every outcome is recorded (closed gate, nothing resolved, N rows).
+        The registry is the runtime (proxy) address.
         """
         if not registry_address:
             self._record_role_plane_outcome(job, None, OUTCOME_NO_REGISTRY, 0)
@@ -501,9 +438,7 @@ class ResolutionWorker(BaseWorker):
             return 0
         written = persist_role_holder_planes(session, rows)
         session.commit()
-        # §3.4 event 2: the rewritten plane is a controller-fact delta the gate
-        # must see — role holders are anchor-chain links, so a grant/revoke
-        # here can make or break a standing W3-D1 witness.
+        # §3.4 event 2: role holders are anchor-chain links, so a grant/revoke can make or break a W3-D1 witness.
         from services.discovery.membership_gate import evaluate_role_plane_change
 
         evaluate_role_plane_change(
@@ -517,7 +452,6 @@ class ResolutionWorker(BaseWorker):
 
     @staticmethod
     def _record_role_plane_outcome(job: Job, registry_address: str | None, outcome: str, written: int) -> None:
-        """One metric and one log line per pass, whatever the pass concluded."""
         record_stage_metric("role_holder_planes", written)
         record_stage_metric("role_holder_plane_outcome", outcome)
         logger.info(
@@ -543,19 +477,11 @@ class ResolutionWorker(BaseWorker):
         deployment_address: str | None,
         proven_proxied: bool,
     ) -> int:
-        """Dereference this job's flow-sink asset getters. Returns rows published.
+        """Dereference this job's flow-sink asset getters; returns rows published.
 
-        The address read at is the RUNTIME one — the proxy for an implementation
-        in proxy context, else the job's own address. That is also the sole basis
-        for ``proven_proxied``: an implementation job carries its proxy in the
-        request, and that is an earned fact about where this code executes. A job
-        with no proxy in its request is NOT thereby proven unproxied, which is
-        exactly why the invariant's other value is ``not_determined``.
-
-        The height comes from ``pin_probe_block`` — confirmation-depth-deep and
-        hash-witnessed. When it cannot be pinned nothing is read: falling back to
-        ``"latest"`` would publish an address at an unrecorded, unrepeatable
-        height, and every row here is a now-fact that lives or dies by its block.
+        Read at the runtime address (the proxy in proxy context), which is also the only basis for ``proven_proxied``;
+        no proxy in the request doesn't prove unproxied. The height comes from ``pin_probe_block``; without one nothing
+        is read.
         """
         if not deployment_address:
             return 0
@@ -580,9 +506,7 @@ class ResolutionWorker(BaseWorker):
             proven_proxied=proven_proxied,
             probe_block=probe_block,
         )
-        # Upsert on (job_id, name): a re-run replaces the payload wholesale at a
-        # new pinned height rather than accumulating, so no stale address ever
-        # sits beside a fresh one pretending to share its block.
+        # Replaced wholesale at a new height, so stale and fresh addresses never mix.
         store_artifact(session, job.id, "flow_asset_addresses", data=payload)
         session.commit()
         resolved = count_resolved(payload)
@@ -611,7 +535,7 @@ class ResolutionWorker(BaseWorker):
         chain_id: int,
         heartbeat: Callable[[], None] | None = None,
     ) -> None:
-        """Bounded current holdings stay before effects; no history scans."""
+        """Bounded current holdings only (before effects); no history scans."""
         from sqlalchemy.orm import sessionmaker
 
         from services.monitoring.balance_collection import CollectionSubject, collect_balances
@@ -628,8 +552,7 @@ class ResolutionWorker(BaseWorker):
         target = CollectionSubject(ObservationSubject.of_contract(contract), chain_id)
         factory = sessionmaker(bind=session.get_bind(), expire_on_commit=False)
         self.update_detail(session, job, "Refreshing current balances")
-        # Release the pipeline connection before provider calls. Collection owns
-        # its small transactions; successful classes survive subsequent job errors.
+        # Release the connection before provider calls; collection commits its own small transactions.
         session.commit()
         report = collect_balances(
             [target], writer=BALANCE_WRITER_RESOLUTION, session_factory=factory, heartbeat=heartbeat
@@ -645,10 +568,9 @@ class ResolutionWorker(BaseWorker):
         session.expire_all()
 
     def _queue_discovered_contracts(self, session: Session, job: Job, resolved_graph: dict, rpc_url: str) -> None:
-        """Queue analysis jobs for contracts found during resolution that have no existing job.
+        """Queue jobs for contracts found during resolution without one.
 
-        No budget: the walk's own ``max_depth`` already bounds this graph. The
-        policy-stage refresh, which is recursive, passes one.
+        No budget (``max_depth`` bounds it); the recursive policy refresh passes one.
         """
         queue_discovered_contracts(
             session,
@@ -666,31 +588,14 @@ class ResolutionWorker(BaseWorker):
         snapshot: ControlSnapshot,
         rpc_url: str,
     ) -> None:
-        """Insert ``JobDependency`` rows for every external contract A's
-        predicate trees reference as an authority source.
+        """Insert ``JobDependency`` rows for external contracts A's predicate trees use as authority.
 
-        Walks the static stage's ``predicate_trees`` artifact, finds
-        leaves whose ``set_descriptor.authority_contract.address_source``
-        traces to a state variable, resolves that variable's value via
-        the just-written ``controller_values`` snapshot, then inserts an
-        edge ``(A, provider_address, required_stage=policy)`` so A's
-        policy stage waits until B's policy stage completes (whereupon
-        ``BaseWorker._satisfy_dependencies`` flips the row). For proxies,
-        ``provider_address`` is the implementation child job when known,
-        because that is where semantic policy artifacts are produced.
+        Finds leaves whose ``authority_contract.address_source`` is a state variable, resolves it via the
+        controller_values snapshot, and inserts ``(A, provider, required_stage=policy)``; ``_satisfy_dependencies``
+        flips it later. For proxies the provider is the impl job when known.
 
-        Provider B jobs that don't yet exist are spawned via
-        ``create_job`` under a ``(chain, address)`` advisory lock so
-        concurrent A workers can't race-create duplicate B jobs. This
-        mirrors the existing ``_queue_discovered_contracts`` pattern but
-        keys on the predicate-tree-referenced address rather than the
-        resolved-graph node list.
-
-        Idempotent: re-running resolution on the same A is a no-op
-        because ``ON CONFLICT DO NOTHING`` deduplicates on the unique
-        edge key. Safe to call before B exists, before B has predicate
-        trees, before B has reached any particular stage — the gate
-        itself blocks A from advancing until B is ready.
+        Missing provider jobs are created under a ``(chain, address)`` advisory lock. Idempotent (ON CONFLICT DO
+        NOTHING) and safe before B exists; the claim gate does the waiting.
         """
         from sqlalchemy import text as _sa_text
         from sqlalchemy.dialects.postgresql import insert as _pg_insert
@@ -709,10 +614,7 @@ class ResolutionWorker(BaseWorker):
             return
 
         controller_values = (snapshot or {}).get("controller_values") or {}
-        # Build a {state-variable-name: address} map from controller_values.
-        # Rows look like ``"state_variable:_owner": {"value": "0xabc..."}``;
-        # strip the ``state_variable:`` prefix so the predicate-tree
-        # operand-name lookup matches.
+        # ``state_variable:<name>`` rows to ``{name: address}``.
         state_var_addresses: dict[str, str] = {}
         for cid, payload in controller_values.items():
             if not isinstance(cid, str) or not isinstance(payload, dict):
@@ -723,9 +625,6 @@ class ResolutionWorker(BaseWorker):
             name = cid.split(":", 1)[1] if ":" in cid else cid
             state_var_addresses.setdefault(name, value.lower())
 
-        # Walk every predicate tree and collect referenced authority
-        # contract state-vars. Worth doing once — the same registry can
-        # be referenced from many functions on A.
         referenced: set[str] = set()
         for tree_map in tree_maps:
             for tree in tree_map.values():
@@ -733,23 +632,14 @@ class ResolutionWorker(BaseWorker):
         if not referenced:
             return
 
-        # Resolve each referenced state-variable name to a concrete
-        # address. Missing values are skipped — the snapshot may not
-        # have populated the row yet (e.g. private state-var without a
-        # public getter, or RPC failure during the snapshot pass).
+        # Missing values are skipped (not captured yet, private var, RPC failure).
         target_addresses = sorted({state_var_addresses[name] for name in referenced if name in state_var_addresses})
         if not target_addresses:
             return
 
-        # Dependency provider B is on the same chain as A (v1 is chain-as-island).
-        # Derive from the job's first-class chain so the edge's
-        # provider_chain and any spawned provider job are chain-stamped even when
-        # the request payload carries no chain.
+        # Same chain as A (chain-as-island), stamped even when the request has none.
         chain = _chain_name_for_job(job)
-        # Defense in depth: A's chain equals every provider B's chain, so
-        # a gated parent implies gated providers — but a disabled chain must spawn
-        # no provider jobs, so gate the whole emission here. In practice A is always
-        # enabled (it is running), so this never fires on mainnet-only.
+        # Defence in depth: a disabled chain spawns no provider jobs.
         if not chain_enabled(chain):
             logger.info(
                 "Skipping dependency-edge emission: chain not enabled for this deployment",
@@ -768,13 +658,10 @@ class ResolutionWorker(BaseWorker):
         n_pending = 0
         n_cycle = 0
         for target_addr in target_addresses:
-            # Self-references — A's own state-var resolves to A's address
-            # — never form a useful dependency. Skip.
+            # Self-references aren't dependencies.
             if target_addr == (job.address or "").lower():
                 continue
-            # Advisory xact-lock keyed on (chain, address) so two
-            # concurrent A jobs spawning the same B don't double-insert.
-            # Mirrors the generic event indexer's insert pattern.
+            # Serializes concurrent A jobs spawning the same B.
             lock_key = _stable_lock_key(chain, target_addr)
             session.execute(_sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
 
@@ -800,7 +687,6 @@ class ResolutionWorker(BaseWorker):
                 session.commit()
                 dependency_provider_addr = target_addr
 
-            # Don't depend on yourself.
             if provider_job.id == job.id:
                 continue
 
@@ -817,13 +703,8 @@ class ResolutionWorker(BaseWorker):
                 dependency_provider_addr = (provider_job.address or dependency_provider_addr).lower()
                 already_satisfied = True
 
-            # Cycle detection: would inserting (A → B) close a path
-            # that's already (B → ... → A)? If so we'd have A waiting on
-            # B which is (transitively) waiting on A — deadlock under
-            # the claim gate. Insert with status='cycle_degraded'
-            # instead so the gate doesn't block A and the resolver
-            # short-circuits the leaf to external_check_only at
-            # evaluation time.
+            # An edge closing a cycle would deadlock the claim gate; insert it as ``cycle_degraded`` so it doesn't block
+            # and the leaf resolves to external_check_only.
             cycle_path = None
             if not already_satisfied:
                 cycle_path = _detect_dep_cycle(
@@ -855,20 +736,14 @@ class ResolutionWorker(BaseWorker):
                 )
             )
             result = session.execute(stmt)
-            # ``Result.rowcount`` is on the concrete ``CursorResult``
-            # but the generic ``Result[Any]`` Protocol pyright sees
-            # doesn't expose it. Same ``getattr`` pattern as
-            # ``workers.event_log_indexer._bulk_insert_logs``.
+            # ``rowcount`` isn't on the generic Result type pyright sees.
             if (getattr(result, "rowcount", 0) or 0) > 0:
                 edges_inserted += 1
                 if edge_status == "satisfied":
                     n_satisfied += 1
                 elif edge_status == "cycle_degraded":
                     n_cycle += 1
-                    # A dependency cycle is a degraded outcome — the edge is
-                    # inserted non-blocking so the depender doesn't deadlock under
-                    # the claim gate. Surface it instead of letting a real stall
-                    # condition land silently.
+                    # A cycle is a degraded outcome; surface it.
                     logger.warning(
                         "Job %s: dependency cycle on provider %s — edge inserted as cycle_degraded (path=%s)",
                         job.id,
@@ -902,11 +777,7 @@ class ResolutionWorker(BaseWorker):
 
 
 def _collect_authority_contract_state_vars(node: dict, out: set[str]) -> None:
-    """Walk a predicate-tree node and add every state-variable name that
-    appears as an ``authority_contract.address_source`` to ``out``. The
-    address source is what the semantic builder writes when a leaf's external
-    call's destination traced back to a state variable (e.g.
-    ``authority.check(...)`` — the ``authority`` storage var)."""
+    """Add every state-variable name used as an ``authority_contract.address_source`` in a predicate tree to ``out``."""
     if not isinstance(node, dict):
         return
     if node.get("op") == "LEAF":
@@ -929,17 +800,11 @@ def _detect_dep_cycle(
     proposed_depender_id,
     proposed_provider_id,
 ) -> list[str] | None:
-    """If adding edge ``(depender → provider)`` would close a cycle,
-    return the dep-chain path through job IDs (most-recent-first) for
-    ops debugging. Otherwise return ``None`` and the edge is safe.
+    """If edge ``(depender → provider)`` would close a cycle, return the path of job ids for debugging, else
+    ``None``.
 
-    Uses a recursive CTE walking forward from ``proposed_provider_id``:
-    each hop joins ``job_dependencies.depender_job_id`` to the previous
-    row's provider via ``Job.address`` (we don't carry job-id pointers
-    on the dep row's provider side — only chain+address — so the join
-    goes through the ``jobs`` table). Bounded by ``ARRAY[…]`` cycle
-    elimination on ``path``. The CTE answer is "is the proposed
-    depender reachable from the proposed provider?"
+    A recursive CTE walks forward from the provider, joining via ``Job.address`` (dependency rows store only
+    chain+address for the provider), with path-based cycle elimination.
     """
     from sqlalchemy import text as _sa_text
 
@@ -988,17 +853,13 @@ def _detect_dep_cycle(
     if row is None:
         return None
     path = list(row[0]) if row[0] is not None else []
-    # Append the closing edge so the path reads "B → ... → A → B".
+    # Close the path: B → ... → A → B.
     path.append(str(proposed_provider_id))
     return path
 
 
 def _stable_lock_key(chain: str | None, address: str) -> int:
-    """Hash ``(chain, address)`` to a 63-bit int for ``pg_advisory_xact_lock``.
-
-    Postgres advisory-lock keys are bigint; collapsing to 63 bits keeps
-    us inside the signed range. Stable across processes — two workers
-    racing to spawn the same provider job acquire the same lock."""
+    """Hash ``(chain, address)`` to a stable 63-bit ``pg_advisory_xact_lock`` key."""
     import hashlib
 
     h = hashlib.sha256(f"{chain or 'ethereum'}:{address.lower()}".encode()).digest()

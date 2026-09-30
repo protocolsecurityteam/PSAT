@@ -1,10 +1,8 @@
-"""Discovery worker — fetches verified source from Etherscan and stores in DB.
+"""Discovery worker: fetches verified source from Etherscan and stores it.
 
-For address-mode jobs: fetches source, stores files + metadata, advances to static.
-For company-mode jobs: discovers contracts via protocol inventory, writes them
-to the ``contracts`` table, spawns DApp / DefiLlama sibling jobs, then advances
-to the ``selection`` stage. The ``SelectionWorker`` ranks the unified contract
-set and creates the top-N analysis child jobs once the siblings settle.
+Address mode: fetch source, store files and metadata, advance to static. Company mode: discover contracts from the
+protocol inventory into ``contracts``, spawn DApp/DefiLlama sibling jobs, and advance to ``selection``, where
+``SelectionWorker`` ranks everything and spawns the top-N analysis jobs.
 """
 
 from __future__ import annotations
@@ -78,13 +76,10 @@ logger = logging.getLogger("workers.discovery")
 
 
 def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[dict]) -> None:
-    """Upsert audit report rows into the relational table.
+    """Upsert audit report rows.
 
-    Two shapes make an artifact entry produce no row of its own: a missing
-    identity field, and a ``url`` another entry in the same batch already
-    claimed (the upsert is keyed on ``(protocol_id, url)``, so the later entry
-    overwrites the earlier one). Both are reported — the artifact's entry count
-    and the table's row count disagreeing is otherwise invisible.
+    Entries missing an identity field, or duplicating a ``url`` in the batch (the upsert key is ``(protocol_id, url)``),
+    produce no row of their own; both are reported so the counts don't silently disagree.
     """
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -125,7 +120,7 @@ def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[
             date=report.get("date"),
             confidence=report.get("confidence"),
             source_url=report.get("source_url"),
-            # Needed by services/audits/source_equivalence for GitHub lookup.
+            # For services/audits/source_equivalence's GitHub lookup.
             source_repo=report.get("source_repo"),
             reviewed_commits=report.get("reviewed_commits") or None,
             referenced_repos=report.get("referenced_repos") or None,
@@ -148,8 +143,7 @@ def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[
         )
         session.execute(stmt)
     session.commit()
-    # Core upserts do not synchronize SQLAlchemy's identity map. Keep the
-    # worker/test session consistent for callers that read audit rows next.
+    # Core upserts bypass the identity map.
     session.expire_all()
 
     if incomplete or collisions:
@@ -177,20 +171,18 @@ def _sync_audit_reports_to_db(session: Session, protocol_id: int, reports: list[
         )
 
 
-#: ``ops_kv`` key for the chain-enable boot sweep (spec §3.4 event 4).
+# ``ops_kv`` key for the chain-enable boot sweep (spec §3.4 event 4).
 ENABLED_CHAINS_SEEN_KEY = "enabled_chains_seen"
 
 
-#: Class C verdict reasons that are COUNTEREVIDENCE against an existing A/B
-#: registry row (not mere absence of proof) — they revoke it (invariant 8).
+# Class C reasons that are counterevidence against an existing A/B row and revoke it (invariant 8).
 _DEPLOYER_COUNTEREVIDENCE_REASONS = frozenset(
     {"cross_protocol_collision", "foreign_or_unknown_creations", "enumeration_coverage_gap"}
 )
 
 
 def _snapshot_covers(row: ProtocolDeployer, contract_address: str) -> bool:
-    """Whether the registry row's recorded enumeration snapshot already names
-    *contract_address* as one of the EOA's creations."""
+    """Whether the registry row's enumeration snapshot already names *contract_address*."""
     evidence = row.evidence if isinstance(row.evidence, dict) else {}
     enumeration = evidence.get("enumeration")
     addresses = enumeration.get("addresses") if isinstance(enumeration, dict) else None
@@ -205,14 +197,12 @@ def _register_protocol_deployer(
     contract_address: str | None = None,
     reprobe_sink: set[int] | None = None,
 ) -> ProtocolDeployer | None:
-    """§3.3 ladder wire: classify the EOA; register A/B; Class C registers
-    nothing. An unrevoked Class B row whose recorded enumeration snapshot
-    already covers *contract_address* is reused without re-enumerating; any
-    other path re-classifies, and a Class C verdict carrying counterevidence
-    revokes the stale row (``gate.demote``). The Etherscan enumeration is paid
-    only when Class B is reachable (≥2 member rows already claim the deployer,
-    or a registry row exists to re-verify) — a recall-only pre-check; the
-    verdict is ``classify_deployer``'s alone."""
+    """§3.3 ladder wiring: classify the EOA and register A/B (Class C registers nothing).
+
+    An unrevoked Class B row whose snapshot already covers *contract_address* is reused; otherwise reclassify, and a
+    counterevidence Class C revokes the stale row. The Etherscan enumeration is only paid when Class B is reachable (two
+    or more members claim the deployer, or a row needs re-verifying).
+    """
     addr = deployer.lower()
     existing = session.execute(
         select(ProtocolDeployer).where(
@@ -250,8 +240,7 @@ def _register_protocol_deployer(
             )
     if verdict.trust_class is None:
         reason = verdict.evidence.get("reason")
-        # F3: a coverage gap on a standing Class-B row is positive
-        # counterevidence — budget/cap incompleteness is not.
+        # F3: a coverage gap on a standing Class B row is counterevidence.
         if reason == "no_complete_enumeration" and coverage_gap is not None and existing is not None:
             if existing.trust_class == "B":
                 reason = "enumeration_coverage_gap"
@@ -274,8 +263,10 @@ def _register_protocol_deployer(
 
 
 def _write_deployer_witness(session: Session, *, contract: Contract, registry_row: ProtocolDeployer) -> bool:
-    """W4 for one deployed contract: the persisted creation tx + the registry
-    row it rests on. No creation tx on record → no witness (invariant 2)."""
+    """W4 for one deployed contract: the persisted creation tx and the registry row.
+
+    No creation tx, no witness (invariant 2).
+    """
     if (contract.deployer or "").lower() != registry_row.address:
         return False
     chain_id = chain_id_for_chain_name(contract.chain)
@@ -315,9 +306,7 @@ def _write_deployer_witness(session: Session, *, contract: Contract, registry_ro
     return True
 
 
-#: Bound on one reprobe pass. The tail is never lost state: reprobe ids are
-#: re-derived from stored evidence at every evaluate, and the probe pass's
-#: revocation-staleness targeting re-finds demoted members at the next event.
+# Bounds one reprobe pass; the rest are re-derived at later events.
 _REPROBE_PASS_CAP = 25
 
 
@@ -328,10 +317,10 @@ def _consume_reprobes(
     context: str,
     exclude: Collection[int] = (),
 ) -> None:
-    """Invariant-8 consumer for the gate's ``reprobe_contract_ids``: probe the
-    re-queued candidates (bounded), then evaluate once with the fresh probe
-    facts. One round only — a still-blocked candidate settles at a later
-    event. Degrades; never raises into the caller."""
+    """Consume the gate's ``reprobe_contract_ids`` (invariant 8): probe them (bounded), then evaluate once.
+
+    Still-blocked candidates settle later. Never raises.
+    """
     ids = [cid for cid in dict.fromkeys(contract_ids) if cid not in set(exclude)][:_REPROBE_PASS_CAP]
     if not ids:
         return
@@ -379,12 +368,10 @@ def run_probe_pass(
     *,
     heartbeat: Callable[[], None] | None = None,
 ) -> gate.PromotionResult:
-    """§3.4 event 1: settle the protocol's fresh candidates near-line. Bounded
-    to the current protocol's candidates AND to ``PSAT_PROBE_PASS_MAX`` wire
-    probes per pass (lowest ids first); commits before evaluating. The pass is
-    idempotent — ``needs_probe`` re-selects the deferred tail on the next pass,
-    and the deferral is recorded, never silent. *heartbeat*, when given, is
-    called after each wire probe so a long pass stays visibly leased."""
+    """§3.4 event 1: settle this protocol's fresh candidates, bounded to ``PSAT_PROBE_PASS_MAX`` probes (lowest ids
+    first); commits before evaluating. Idempotent: ``needs_probe`` picks up the deferred tail next pass.
+    *heartbeat* is called after each probe to keep the lease.
+    """
     probe_budget = int(os.getenv("PSAT_PROBE_PASS_MAX", "200"))
     candidates = list(
         session.execute(
@@ -401,9 +388,7 @@ def run_probe_pass(
     resolved: set[str] = set()
     deferred = 0
     for contract in candidates:
-        # Revocation staleness re-targets demoted members whose completed
-        # attempt ``needs_probe`` would skip (invariant 8 pickup for
-        # request/queue-context demotions, e.g. the protocol-merge cascade).
+        # Also re-target demoted members whose completed probe predates a revocation (invariant 8).
         if needs_probe(session, contract) or probe_predates_revocation(session, contract):
             if len(probed) >= probe_budget:
                 deferred += 1
@@ -414,8 +399,7 @@ def run_probe_pass(
             resolved.update(result.resolved_addresses)
             if heartbeat is not None:
                 heartbeat()
-        # W6 rides on the persisted code fact, so an already-probed candidate
-        # a fresh defillama nomination just tagged is seeded here too.
+        # W6 rides on the persisted code fact, so already-probed candidates get seeded too.
         if gate.seed_llama_witness(session, contract=contract):
             seeded.append(contract)
     if deferred:
@@ -433,8 +417,7 @@ def run_probe_pass(
         if gate.promote(session, contract=contract, protocol_id=protocol_id):
             promoted.append(contract.id)
     session.commit()
-    # Seeded-but-unprobed rows carry no W1 witness row yet; the fixpoint's
-    # admission binds W1 from the persisted code probe on recheck.
+    # The fixpoint binds W1 from the persisted probe for seeded-but-unwitnessed rows.
     delta = gate.FactsDelta(
         new_member_contract_ids=tuple(promoted),
         new_edge_addresses=tuple(sorted(resolved)),
@@ -442,10 +425,7 @@ def run_probe_pass(
     )
     cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
     session.commit()
-    # After the gate's commit: create_job commits, so enqueuing first would
-    # land the cascade durably ahead of its own commit point. Residual: a crash
-    # in between delays the pass to the next event, never loses it — selection
-    # ranks the full unanalyzed set, so a later pass covers these members.
+    # After the gate's commit (``create_job`` commits). A crash in between only delays the pass.
     enqueue_selection_for_promotions(
         session, tuple(promoted) + cascade.promoted_contract_ids, reason="membership_promotion"
     )
@@ -464,9 +444,9 @@ def run_probe_pass(
 
 
 def _structural_intake(session: Session, job: Job, contract: Contract, request: dict) -> bool:
-    """W2 from the cascade-spawn edge hint: the request only says WHERE to
-    look — the witness is earned by re-verifying the stored resolution on the
-    parent's own row (``produce_structural_witness``), never by the flag."""
+    """W2 from a cascade edge hint: the request says where to look, and the witness is earned by re-verifying the
+    parent's stored resolution (``produce_structural_witness``).
+    """
     relationship = request.get("discovery_relationship")
     if relationship not in ("implementation", "proxy", "beacon"):
         return False
@@ -491,9 +471,10 @@ def _structural_intake(session: Session, job: Job, contract: Contract, request: 
 
 
 def _gate_intake(session: Session, job: Job, contract: Contract | None, request: dict) -> None:
-    """Route one fetched/cached Contract row through the membership gate:
-    nomination, W2/W4 witnesses, the event-1 probe, then a promotion attempt.
-    Commits; never stamps ``protocol_id`` itself (invariant 1)."""
+    """Route one Contract row through the gate: nomination, W2/W4 witnesses, the event-1 probe, promotion.
+
+    Commits; never stamps ``protocol_id`` (invariant 1).
+    """
     protocol_id = job.protocol_id
     if not protocol_id or contract is None:
         return
@@ -506,8 +487,7 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
         tags = [discovered_by] if isinstance(discovered_by, str) and discovered_by else [""]
     with log_timed_phase(logger, "gate_nomination", log_failure=True):
         for tag in tags:
-            # The gate consumes the W5 assertion at nomination (invariant 14);
-            # the witness upsert is idempotent across tags.
+            # The W5 assertion is consumed at nomination (invariant 14).
             gate.nominate(
                 session, contract=contract, protocol_id=protocol_id, source_tag=tag, human_assertion=human_assertion
             )
@@ -538,10 +518,7 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
         promoted = gate.promote(session, contract=contract, protocol_id=protocol_id)
         session.commit()
 
-    # A demote-only registration (registry_row None, sink non-empty) is still
-    # a deployer fact change the cascade must see. A W6 seeded onto an
-    # already-probed row has no W1 witness row yet; the fixpoint's admission
-    # binds W1 from the persisted code probe on recheck.
+    # A demote-only registration is still a deployer fact change.
     deployer_changed = deployer is not None and (registry_row is not None or bool(reprobe_sink))
     delta = gate.FactsDelta(
         new_member_contract_ids=(contract.id,) if promoted else (),
@@ -552,9 +529,7 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
         with log_timed_phase(logger, "gate_cascade_commit", log_failure=True):
             cascade = gate.evaluate(session, delta, deployer_enumerator=session_deployer_enumerator(session))
             session.commit()
-        # Enqueue after the commit (create_job commits). Residual: a crash in
-        # between delays the pass to the next event, never loses it — selection
-        # ranks the full unanalyzed set.
+        # After the commit; a crash in between only delays the pass.
         with log_timed_phase(logger, "gate_selection_enqueue", log_failure=True):
             enqueue_selection_for_promotions(
                 session,
@@ -567,8 +542,7 @@ def _gate_intake(session: Session, job: Job, contract: Contract | None, request:
 
 
 def _sweep_candidates(session: Session, chain_id: int) -> list[Contract]:
-    """Parked / probe-pending candidates on one chain. Pruned rows are
-    excluded — only re-nomination re-runs W1 (§3.4 event 1)."""
+    """Parked or probe-pending candidates on one chain, excluding pruned rows (only re-nomination re-runs W1)."""
     try:
         info = chain_by_id(chain_id)
     except UnknownChainError:
@@ -593,23 +567,19 @@ def _sweep_candidates(session: Session, chain_id: int) -> list[Contract]:
 
 
 def _enqueue_selection_pass(session: Session, protocol_id: int) -> None:
-    """Chain-enable sweep's own enqueue (§3.4 event 4). Shares the dedupe with
-    the promotion-triggered path so a sweep and a promotion never double-fire."""
+    """The chain-enable sweep's enqueue, sharing dedup with the promotion path."""
     enqueue_selection_pass(session, protocol_id, reason="chain_enable")
 
 
 def run_chain_enable_sweep(session: Session) -> None:
-    """§3.4 event 4: compare ``PSAT_SUPPORTED_CHAIN_IDS`` against the persisted
-    ``enabled_chains_seen`` marker; for each newly enabled chain, probe-sweep
-    its parked/probe-pending candidates and enqueue a selection pass for every
-    protocol that gained promoted members. The marker tracks the CURRENT
-    enabled set, so a chain disabled and later re-enabled sweeps again."""
+    """§3.4 event 4: compare ``PSAT_SUPPORTED_CHAIN_IDS`` with the ``enabled_chains_seen`` marker; for each newly
+    enabled chain, probe its parked candidates and enqueue selection for protocols that gained members.
+    Re-enabling a chain sweeps again.
+    """
     enabled = sorted(supported_chain_ids())
     marker = session.get(OpsKv, ENABLED_CHAINS_SEEN_KEY)
     if marker is None:
-        # Race-safe first-boot seed: a concurrent boot's insert wins and this
-        # one no-ops (a doubled sweep is the accepted residual, an
-        # IntegrityError crash is not).
+        # A concurrent first boot wins the insert and this one no-ops.
         from sqlalchemy.dialects.postgresql import insert as pg_insert
 
         session.execute(
@@ -679,12 +649,10 @@ class DiscoveryWorker(BaseWorker):
             raise ValueError("Job has neither address nor company")
 
     def _process_company(self, session: Session, job: Job) -> None:
-        """Discover contracts for a company and advance to the selection stage.
+        """Discover a company's contracts and advance to selection.
 
-        All three discovery sources (this inventory pass, plus the DApp
-        and DefiLlama siblings spawned below) write into ``contracts``
-        without queuing analysis jobs. The ``SelectionWorker`` ranks the
-        unified set and spends the ``analyze_limit`` budget in one pass.
+        All sources (this inventory plus the DApp/DefiLlama siblings) only write ``contracts``; ``SelectionWorker``
+        ranks and spends ``analyze_limit``.
         """
         company = job.company
         if company is None:
@@ -693,7 +661,6 @@ class DiscoveryWorker(BaseWorker):
         chain = request.get("chain")
         root_job_id = str(job.id)
 
-        # Load previous inventory from a prior completed company job (same chain)
         prev_inventory: dict | None = None
         prev_job = find_previous_company_inventory(session, company, exclude_job_id=job.id, chain=chain)
         if prev_job:
@@ -701,13 +668,8 @@ class DiscoveryWorker(BaseWorker):
             if isinstance(_raw, dict):
                 prev_inventory = _raw
 
-        # Evidence-based chain membership (invariant 3): the declared chain set
-        # narrows discovery's ``eth_getCode`` probe so it CONFIRMS membership on
-        # chains the protocol is known to use rather than ORIGINATING it on any
-        # chain an address happens to have code on. Sourced from the requested
-        # chain plus the persisted ``Protocol.chains`` of a prior run (read here,
-        # written back below). Always a list — never ``None`` — so the pipeline
-        # is always narrowed; ``None`` would re-enable the legacy all-chain probe.
+        # Invariant 3: the declared chain set (requested chain plus the persisted ``Protocol.chains``) narrows the
+        # ``eth_getCode`` probe to confirming membership. Always a list; ``None`` would re-enable the all-chain probe.
         declared_chains: list[str] = []
         seen_declared: set[str] = set()
         requested = canonical_chain(chain) if chain else None
@@ -725,9 +687,7 @@ class DiscoveryWorker(BaseWorker):
         self.update_detail(session, job, f"Discovering contracts + audits for {company}")
         logger.info("Discovery started for job %s: company=%s, chain=%s", job.id, company, chain)
 
-        # Premium+Deps unified discovery (see services/discovery/run_discovery.py).
-        # Runs audit + address pipelines in one call, including Deep Research seeds,
-        # dependency two-pass for BoringVault-class components, and SPA-bait overrides.
+        # Unified audit and address discovery (see services/discovery/run_discovery.py).
         from services.discovery.run_discovery import run_discovery
 
         try:
@@ -750,18 +710,14 @@ class DiscoveryWorker(BaseWorker):
             audit_result_raw = None
             discovery_meta = {"fallback": True, "error": str(exc)}
 
-        # Merge with previous inventory if available
         if prev_inventory and isinstance(prev_inventory, dict):
             inventory = merge_inventory(prev_inventory, inventory)
 
         store_artifact(session, job.id, "contract_inventory", data=inventory)
         store_artifact(session, job.id, "discovery_meta", data=discovery_meta)
 
-        # Resolve to a DefiLlama family slug FIRST so the Protocol upsert is
-        # keyed on a stable canonical id. Without this, the same protocol
-        # discovered via different free-text spellings (e.g. "ether fi" vs
-        # "etherfi") splits into duplicate rows. The resolved struct is
-        # reused below for the parallel-discovery sibling spawns.
+        # Resolve the DefiLlama family slug first so spellings ("ether fi"/"etherfi") share one Protocol row; reused for
+        # sibling spawns.
         resolved = resolve_protocol(company)
         canonical_slug = pick_family_slug(resolved)
 
@@ -774,12 +730,8 @@ class DiscoveryWorker(BaseWorker):
         )
         job.protocol_id = protocol_row.id
 
-        # Persist the protocol's declared chain set (invariant 3): the union of
-        # what a prior run already recorded, the requested chain, and every
-        # chain a discovered contract is now confirmed on (candidates excluded —
-        # they carry no corroborating evidence). Written here so the next run
-        # reads it back above and narrows its probe accordingly. Never shrinks:
-        # a chain proven once stays declared.
+        # Persist the declared chains (invariant 3): prior, requested, and newly confirmed ones (not candidates). Never
+        # shrinks.
         proven_chains: set[str] = set(declared_chains)
         for entry in inventory.get("contracts", []):
             for ch in canonical_chain_list(entry.get("chains")) or []:
@@ -791,7 +743,6 @@ class DiscoveryWorker(BaseWorker):
             protocol_row.chains = merged_chains
         session.commit()
 
-        # --- Audit report discovery ---
         self.update_detail(session, job, f"Persisting audit reports for {company}")
         prev_audits: dict | None = None
         if prev_job:
@@ -801,7 +752,7 @@ class DiscoveryWorker(BaseWorker):
 
         try:
             if audit_result_raw is None:
-                # Legacy fallback path (unified discovery failed above)
+                # Legacy fallback when unified discovery failed.
                 audit_result_raw = search_audit_reports(
                     company,
                     official_domain=inventory.get("official_domain"),
@@ -828,18 +779,9 @@ class DiscoveryWorker(BaseWorker):
         discovered = [e for e in inventory.get("contracts", []) if e.get("address")]
         record_stage_metric("contracts_discovered", len(discovered))
 
-        # Write ALL discovered addresses to contracts table. Ranking and
-        # job creation happen later in the selection stage, once DApp
-        # crawl and DefiLlama results are also in the table — that way
-        # every source competes for the analyze_limit budget on equal
-        # footing instead of the first-to-arrive claiming everything.
-        # The upsert unions ``discovery_sources`` so a contract that's
-        # already in the table from a prior source gains this one as
-        # corroboration rather than being dropped.
-        # Build the bulk payload in one pass. Inventory entries carry their
-        # own ``source`` list (e.g. ``["ai_inventory", "deployer_expansion"]``)
-        # when multiple inventory signals agreed; preserve that granularity
-        # so ranking sees the richer corroboration story.
+        # Write every discovered address; ranking waits for selection so all sources compete for ``analyze_limit``. The
+        # upsert unions ``discovery_sources``, and inventory entries keep their own source lists for richer
+        # corroboration.
         bulk_entries: list[dict] = []
         for entry in discovered:
             entry_chains = entry.get("chains")
@@ -857,12 +799,8 @@ class DiscoveryWorker(BaseWorker):
                     "chains": entry.get("chains"),
                 }
             )
-        # One SELECT for all existing rows + a single bulk add for new ones —
-        # collapses 100-300 sequential SELECTs that delayed the cascade kickoff
-        # into roughly one round-trip. Inventory entries without their own chain
-        # inherit the company discovery's chain (inv. 6, mainnet edge default)
-        # rather than persisting chain=NULL and duplicating against sibling
-        # writers' 'ethereum' stubs.
+        # One SELECT plus a bulk add instead of hundreds of round-trips. Chainless entries inherit this discovery's
+        # chain (inv. 6) rather than writing NULL and duplicating.
         inventory_default_chain = canonical_chain(chain) or "ethereum"
         bulk_upsert_discovered_contracts(
             session,
@@ -872,9 +810,7 @@ class DiscoveryWorker(BaseWorker):
         )
         session.commit()
 
-        # §3.4 event 1: settle this protocol's fresh nominations near-line —
-        # probe, then let probe-derived facts promote. Degrades, never blocks
-        # discovery: candidates stay explainably parked until the next event.
+        # §3.4 event 1: probe fresh nominations and let them promote. Never blocks discovery.
         try:
             with log_timed_phase(logger, "membership_probe_pass") as probe_ph:
                 probe_result = run_probe_pass(session, protocol_row.id)
@@ -905,8 +841,7 @@ class DiscoveryWorker(BaseWorker):
             job.name = company
             session.commit()
 
-        # Run unconditionally: DApp crawl + DefiLlama scans are independent
-        # sources, and empty primary inventory is the case that most needs them.
+        # Always: DApp crawl and DefiLlama are independent, and most needed when the inventory is empty.
         self._spawn_parallel_discovery(session, job, company, request, root_job_id, resolved=resolved)
 
         self.update_detail(
@@ -915,10 +850,7 @@ class DiscoveryWorker(BaseWorker):
             f"Discovered {len(discovered)} contracts; awaiting parallel discovery before ranking",
         )
 
-        # Hand off to the selection stage. The SelectionWorker waits for
-        # DApp/DefiLlama siblings to settle, then ranks the full set of
-        # unanalyzed contracts for this protocol and creates the top-N
-        # analysis child jobs under the shared analyze_limit budget.
+        # Selection waits for the siblings, then ranks and spawns the top-N jobs.
         advance_job(
             session,
             job.id,
@@ -936,7 +868,6 @@ class DiscoveryWorker(BaseWorker):
         root_job_id: str,
         resolved: dict | None = None,
     ) -> None:
-        """Spawn DApp crawl and DefiLlama scan jobs if we can resolve the protocol."""
         protocol = resolved if resolved is not None else resolve_protocol(company)
         if not protocol.get("slug") and not protocol.get("url"):
             logger.info("Job %s: no DefiLlama match for '%s', skipping parallel discovery", job.id, company)
@@ -950,12 +881,8 @@ class DiscoveryWorker(BaseWorker):
             protocol.get("url"),
         )
 
-        # Seed both sibling scans with the discovery job's chain (inv. 6): derive
-        # chain_id from the request's chain string via the registry rather than a
-        # bare ``or 1``. A company discovery with no chain defaults to mainnet —
-        # an explicit, documented choice. Each scan still attributes each address's
-        # own chain from its own results; this is only the per-address fallback, so
-        # a non-mainnet company's addresses inherit its chain instead of mainnet.
+        # Seed sibling scans with the discovery's chain via the registry (inv. 6); scans still attribute each address's
+        # own chain.
         spawn_chain = request.get("chain")
         spawn_chain_id = request.get("chain_id")
         if not spawn_chain_id:
@@ -964,7 +891,7 @@ class DiscoveryWorker(BaseWorker):
             except UnknownChainError:
                 spawn_chain_id = 1
 
-        # Spawn DefiLlama adapter scans — one per sub-protocol
+        # One DefiLlama adapter scan per sub-protocol.
         all_slugs = protocol.get("all_slugs", [])
         if not all_slugs and protocol.get("slug"):
             all_slugs = [protocol["slug"]]
@@ -984,7 +911,6 @@ class DiscoveryWorker(BaseWorker):
             dl_job = create_job(session, defillama_request, initial_stage=JobStage.defillama_scan)
             logger.info("Job %s: spawned DefiLlama scan job %s (slug=%s)", job.id, dl_job.id, slug)
 
-        # Spawn DApp crawl
         dapp_url = protocol.get("url")
         if dapp_url:
             dapp_request = {
@@ -1004,13 +930,12 @@ class DiscoveryWorker(BaseWorker):
             logger.info("Job %s: spawned DApp crawl job %s (url=%s)", job.id, crawl_job.id, dapp_url)
 
     def _process_address(self, session: Session, job: Job) -> None:
-        """Fetch verified source for a single address."""
         address = job.address
         if address is None:
             raise ValueError("Address job missing address")
 
-        # Check for cached static data from a previously completed job (same chain).
-        # `force` is the bench-mode escape hatch — see AnalyzeRequest.force in api.py.
+        # Reuse cached static data from a completed job on the same chain; ``force`` bypasses it (see
+        # AnalyzeRequest.force).
         request = job.request if isinstance(job.request, dict) else {}
         if request.get("force"):
             cached_job = None
@@ -1021,12 +946,10 @@ class DiscoveryWorker(BaseWorker):
             self.update_detail(session, job, f"Reusing cached static data for {address}")
             new_contract_id = copy_static_cache(session, cached_job.id, job.id)
             if new_contract_id is not None:
-                # Mark the job so downstream workers know static data was cached
                 req = job.request if isinstance(job.request, dict) else {}
                 job.request = {**req, "static_cached": True, "cache_source_job_id": str(cached_job.id)}
                 session.commit()
 
-                # Set job name from the cached contract if not already set
                 if not job.name:
                     from sqlalchemy import select as sa_select
 
@@ -1037,11 +960,7 @@ class DiscoveryWorker(BaseWorker):
                         job.name = f"{contract_row.contract_name}_{address[2:10]}"
                         session.commit()
 
-                # Membership gate — the cache hit reuses ANALYSIS, not protocol
-                # membership. The row is nominated and evaluated here so an
-                # explicit address+company submit of an already-analyzed
-                # contract still enters the gate (promotion marks the dirty
-                # queues internally).
+                # A cache hit reuses analysis, not membership; still nominate and evaluate.
                 cached_row = session.get(Contract, new_contract_id)
                 _gate_intake(session, job, cached_row, request)
 
@@ -1060,11 +979,8 @@ class DiscoveryWorker(BaseWorker):
             )
 
         self.update_detail(session, job, f"Fetching verified source for {address}")
-        # Both calls hit Etherscan. parallel_get routes each thunk through
-        # _wait_rate_limit, so the 5/sec global limit is preserved while the
-        # serial RTT between them goes away.
-        # Address-scoped discovery jobs always carry a chain (Phase-0 dual-write
-        # + backfill); one that can't resolve is a data bug — fail loud (inv. 6).
+        # Both Etherscan calls in parallel under the global rate limit. An address job without a resolvable chain is a
+        # data bug (inv. 6).
         fetch_chain = require_chain(
             getattr(job, "chain_id", None),
             chain=request.get("chain") if isinstance(request, dict) else None,
@@ -1088,10 +1004,8 @@ class DiscoveryWorker(BaseWorker):
         sources = parse_sources(result)
         remappings = parse_remappings(result)
 
-        # Stamp the source content hash + analyzer version so a later same-source
-        # deployment on another chain can reuse this job's code-plane analysis
-        # (invariant 1). Written unconditionally here: a cache-hit job returned
-        # before ever reaching this fetch, so every hashed job did real analysis.
+        # Stamp the source hash and analyzer version for cross-chain reuse (invariant 1); cache-hit jobs never reach
+        # here.
         from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 
         this_source_hash = source_content_hash(result)
@@ -1106,7 +1020,6 @@ class DiscoveryWorker(BaseWorker):
         raw_evm = result.get("EVMVersion", "") or ""
         evm_version = raw_evm if raw_evm.lower() not in ("", "default") else "shanghai"
 
-        # Look up deployer wallet via Etherscan
         deployer = None
         creators_or_exc = fan_out.get("creators")
         if isinstance(creators_or_exc, dict):
@@ -1114,30 +1027,20 @@ class DiscoveryWorker(BaseWorker):
         elif isinstance(creators_or_exc, BaseException):
             logger.debug("Could not fetch deployer for %s: %s", address, creators_or_exc)
 
-        # Write to contracts table — upsert to handle pre-existing discovered rows.
-        # Chain identity comes from the job's first-class chain_id (resolved above
-        # via the registry), never the request payload: a chainless /api/analyze
-        # submission would otherwise write chain=NULL and, because NULL ≠ NULL
-        # defeats uq_contract_address_chain, duplicate against 'ethereum' stubs
-        # (inv. 1/6/12).
+        # Chain from the job's chain_id, never the request: a chainless submission would write NULL and duplicate
+        # against ``'ethereum'`` rows (inv. 1/6/12).
         request = job.request if isinstance(job.request, dict) else {}
         chain_name = fetch_chain.name
         existing = session.execute(
             select(Contract).where(
                 Contract.address == address.lower(),
-                # Legacy NULL-chain rows are mainnet by convention; coalescing lets
-                # a mainnet write dedup against them instead of minting a duplicate,
-                # while a non-mainnet write (coalesce → 'ethereum' ≠ its own name)
-                # correctly never matches a NULL/mainnet row at the same address.
+                # Legacy NULL-chain rows are mainnet.
                 func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name,
             )
         ).scalar_one_or_none()
 
-        # Membership gate (invariant 1): a job's ``protocol_id`` — inherited
-        # from its parent selection/cascade job — is a NOMINATION, never a
-        # stamp. WETH9 pulled in as a dependency of a confirmed etherfi
-        # contract is still WETH9; membership is earned through witnesses in
-        # ``_gate_intake`` after the row is committed.
+        # Invariant 1: a job's ``protocol_id`` is a nomination, never a stamp (a dependency like WETH9 isn't a member);
+        # membership is earned in ``_gate_intake``.
         request_sources = [s for s in (request.get("discovery_sources") or []) if isinstance(s, str)]
 
         gate_row: Contract | None = existing
@@ -1152,8 +1055,7 @@ class DiscoveryWorker(BaseWorker):
             existing.source_format = "standard_json" if "sources" in str(result.get("SourceCode", ""))[:10] else "flat"
             existing.source_file_count = len(sources)
             existing.license = result.get("LicenseType", "")
-            # None means the creators fetch answered nothing for this chain,
-            # never that the contract has no deployer — keep prior evidence.
+            # ``None`` means no answer, not no deployer; keep prior evidence.
             if deployer:
                 existing.deployer = deployer
             existing.remappings = remappings or []
@@ -1164,8 +1066,7 @@ class DiscoveryWorker(BaseWorker):
                 address=address.lower(),
                 chain=chain_name,
                 protocol_id=None,
-                # Nomination recorded at write so a terminal intake failure
-                # cannot strand an unclaimed row (spec §3.1 orphan amnesia).
+                # Recorded at write so a failed intake can't strand an unclaimed row (spec §3.1).
                 nominated_protocol_id=job.protocol_id,
                 contract_name=contract_name,
                 compiler_version=result.get("CompilerVersion", ""),
@@ -1189,9 +1090,7 @@ class DiscoveryWorker(BaseWorker):
         with log_timed_phase(logger, "discovery_contract_commit"):
             session.commit()
 
-        # Membership gate intake for the row this fetch touched: nominate,
-        # earn witnesses, probe (event 1), attempt promotion. Promotion and
-        # demotion mark the enrollment + scoring dirty queues inside the gate.
+        # Membership gate intake; promotion/demotion mark the dirty queues inside the gate.
         with log_timed_phase(logger, "membership_gate_intake", log_failure=True):
             _gate_intake(session, job, gate_row, request)
 
@@ -1199,12 +1098,8 @@ class DiscoveryWorker(BaseWorker):
             job.name = f"{contract_name}_{address[2:10]}"
             session.commit()
 
-        # Cross-chain code-plane reuse (invariant 1): the exact (address, chain)
-        # cache missed above (else we'd have returned), but if a completed job
-        # analyzed this same verified source on another chain, reuse its analysis
-        # onto this deployment's own Contract row instead of re-running the static
-        # forge+Slither pass. State (proxy impl, controllers, balances, events) is
-        # still resolved per (chain, address) downstream — reuse is code-plane only.
+        # Cross-chain reuse (invariant 1): if a completed job analysed the same source on another chain, reuse its
+        # code-plane analysis. State is still resolved per (chain, address).
         if not request.get("force"):
             donor = find_completed_static_cache(
                 session, address, chain=request.get("chain"), source_content_hash=this_source_hash
@@ -1212,12 +1107,8 @@ class DiscoveryWorker(BaseWorker):
             if donor is not None and donor.id != job.id:
                 copied = copy_static_cache_cross_chain(session, donor.id, job.id, target_address=address)
                 if copied is not None:
-                    # ``static_cached`` skips the static worker's forge+Slither pass,
-                    # but deliberately WITHOUT ``cache_source_job_id`` — that key
-                    # drives ``_check_proxy_cache`` to validate the donor's
-                    # implementation address, which is per-chain state. Proxy
-                    # classification must re-resolve on this chain, so we leave it
-                    # unset and record provenance under a distinct key.
+                    # ``static_cached`` skips forge+Slither, but without ``cache_source_job_id``, which would validate
+                    # the donor's per-chain implementation address. Proxy classification re-resolves here.
                     job.request = {
                         **request,
                         "static_cached": True,
@@ -1243,8 +1134,7 @@ def main():
         force=True,
     )
     worker = DiscoveryWorker()
-    # §3.4 event 4 fires at boot; a sweep failure leaves the marker unchanged
-    # (the next boot retries) and must not crash-loop the worker.
+    # §3.4 event 4 at boot; a failure leaves the marker for the next boot and must not crash-loop.
     session = SessionLocal()
     try:
         run_chain_enable_sweep(session)

@@ -55,13 +55,13 @@ PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
 # commit. ``test_allow_list_entries_still_present`` fails when an entry stops matching a real violation.
 ALLOW_LIST: dict[str, dict[int, str]] = {
     "services/resolution/indexer_scheduler.py": {
-        88: "Indexer daemon has no job accumulator; failed enrollment remains in its durable retry queue.",
-        155: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
+        87: "Indexer daemon has no job accumulator; failed enrollment remains in its durable retry queue.",
+        152: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
     },
     "workers/discovery.py": {
         # Boot-time chain-enable sweep in main(): no job is claimed yet, so no
         # accumulator is bound and record_degraded would be a no-op.
-        1252: "Boot-time sweep failure; runs before any job context exists.",
+        1142: "Boot-time sweep failure; runs before any job context exists.",
     },
     "workers/policy_worker.py": {
         # Reanalysis-completion notifier: the reanalysis itself completed
@@ -69,28 +69,28 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         # doesn't change the job's stage output. record_degraded would
         # mislead callers of /api/jobs/{id}/errors into thinking the
         # reanalysis was degraded.
-        1104: "Notifier side-effect; reanalysis already completed before this fired.",
+        929: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
         # Fork-close cleanup: the anvil subprocess close failing is a resource
         # side-effect (port/memory), not a degradation of the stage's verdict
         # output. record_degraded would mislead /monitor into flagging a healthy
         # job's effects stage as degraded.
-        634: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
+        480: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
     },
     "services/effects/anvil.py": {
         # Same fork-close-cleanup exemption class as the effects_worker entry
         # above: SubprocessAnvil.close() escalating SIGTERM → SIGKILL is a
         # resource outcome (port/pid), not a change to the stage's verdicts.
-        852: "Fork-close cleanup side-effect; SIGKILL escalation does not degrade the verdicts.",
-        863: "Fork-close cleanup side-effect; an unreaped pid does not degrade the verdicts.",
+        714: "Fork-close cleanup side-effect; SIGKILL escalation does not degrade the verdicts.",
+        723: "Fork-close cleanup side-effect; an unreaped pid does not degrade the verdicts.",
     },
     "services/resolution/repos/event_logs_rpc.py": {
         # Env-var parse, evaluated per call on every job of every worker in the
         # process. A malformed cap is a deployment misconfiguration, not a
         # per-job partial outcome, and recording it would stamp every job's
         # stage_errors with the same process-level fact.
-        62: "Process-level env parse; a bad cap is a misconfiguration, not a per-job degradation.",
+        42: "Process-level env parse; a bad cap is a misconfiguration, not a per-job degradation.",
     },
 }
 
