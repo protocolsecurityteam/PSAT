@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, cast
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_KEY_SOURCES
 
 from ..capabilities import CapabilityExpr, ExternalCheck
+from ..event_tail import TailScanner, tail_scanner_for
+from ..repos.event_logs_pg import BEHIND_PARTIAL_REASONS
 from . import EnumerationResult, EvaluationContext
 
 if TYPE_CHECKING:
@@ -20,9 +22,10 @@ logger = logging.getLogger(__name__)
 
 _ZERO_ADDRESS = "0x" + "0" * 40
 
-# ok: a resolved finite_set. cold: no backfill_complete cursor; caller defers. absent: structural (no repo, no event
-# address, repo error); caller falls through to live replay.
-_FoldStatus = Literal["ok", "cold", "absent"]
+# ok: a resolved finite_set. cold: no backfill_complete cursor; caller defers. behind: warm but unproven past the
+# frontier; caller fails closed. absent: structural (no repo, no event address, repo error); caller falls through to
+# live replay.
+_FoldStatus = Literal["ok", "cold", "behind", "absent"]
 
 
 def _descriptor_is_caller_keyed(descriptor: dict) -> bool:
@@ -137,9 +140,11 @@ class EventIndexedAdapter:
             return self._external_check(descriptor, primary_hint, ctx, ["event_indexed_no_add_hint"])
 
         key_sources = _contextual_key_sources(descriptor.get("key_sources") or [], ctx)
+        tail = tail_scanner_for(ctx)
         merged: list[str] = []
         worst_confidence = "enumerable"
         last_block: int | None = None
+        trace: list[dict[str, Any]] = []
         for event_address, event_hints in grouped_hints.items():
             first_hint = event_hints[0]
             try:
@@ -150,9 +155,19 @@ class EventIndexedAdapter:
                     event_hints=event_hints,
                     key_sources=key_sources,
                     block=ctx.block,
+                    tail=tail,
                 )
             except Exception:
                 return self._external_check(descriptor, first_hint, ctx, ["event_log_backend_error"])
+            if (
+                result.confidence == "partial"
+                and result.partial_reason in BEHIND_PARTIAL_REASONS
+                and any(hint.get("direction") == "remove" for hint in event_hints)
+            ):
+                # A removal past the frontier could evict a member, so the durable rows bound nothing.
+                return CapabilityExpr.unsupported("event_fold_tail_unavailable")
+            if result.scan_window is not None:
+                trace.append({"step": "event_fold_tail", "event_address": event_address, **result.scan_window})
             if result.confidence == "partial" and result.partial_reason in {
                 "event_history_fold_unavailable",
                 "unresolved_event_key",
@@ -197,6 +212,7 @@ class EventIndexedAdapter:
             quality="exact" if worst_confidence == "enumerable" else "lower_bound",
             confidence=worst_confidence,
             last_indexed_block=last_block,
+            trace=trace or None,
         )
 
     def _external_check(
@@ -262,6 +278,9 @@ class EventIndexedAdapter:
             return durable
         if status == "cold":
             return self._deferred_value_check(descriptor, ctx, event_address)
+        if status == "behind":
+            # The durable rows are warm but unproven past their frontier; a full live re-scan is never the fallback.
+            return CapabilityExpr.unsupported("event_fold_tail_unavailable")
         return self._live_value_fold(descriptor, set_hints, value_predicate, ctx, event_address, fold_key_position)
 
     def _deferred_value_check(
@@ -299,8 +318,9 @@ class EventIndexedAdapter:
     ) -> tuple[_FoldStatus, CapabilityExpr | None]:
         """Fold the value predicate over the durable index:
 
-        - ``("ok", finite_set)``: rows resolved (warm exact, or populated cold lower bound);
+        - ``("ok", finite_set)``: exact, the rows proven through the evaluated block (directly or by a complete tail);
         - ``("cold", None)``: backfill incomplete, caller defers;
+        - ``("behind", None)``: warm but behind the evaluated block with no complete tail, caller fails closed;
         - ``("absent", None)``: structural (no repo, no nonzero event address, repo error), caller uses live replay.
         """
         repo = ctx.event_log_repo or (ctx.meta.get("event_log_repo") if ctx.meta else None)
@@ -320,6 +340,7 @@ class EventIndexedAdapter:
             for hint in set_hints
         ]
         typed_fold_values = cast(Callable[..., "ValueFoldResult"], fold_values)
+        tail = tail_scanner_for(ctx)
         try:
             result = typed_fold_values(
                 chain_id=ctx.chain_id,
@@ -328,22 +349,29 @@ class EventIndexedAdapter:
                 key_sources=key_sources,
                 fold_key_position=fold_key_position,
                 block=ctx.block,
+                **({"tail": tail} if tail is not None else {}),
             )
         except Exception:
             return "absent", None
-        if not result.entries and not result.complete:
-            # A cold index defers; any other partial reason is structural and falls through to live replay.
+        if not result.complete:
             if result.partial_reason == "no_index_cursor":
                 return "cold", None
+            if result.partial_reason in BEHIND_PARTIAL_REASONS:
+                return "behind", None
+            # Any other partial reason is structural and falls through to live replay.
             return "absent", None
 
         from ..mapping_enumerator import filter_value_entries
 
         keys = filter_value_entries(cast(Any, result.entries), value_predicate)
+        if result.scan_window is None:
+            return "ok", CapabilityExpr.finite_set(keys, quality="exact", confidence="enumerable")
         return "ok", CapabilityExpr.finite_set(
             keys,
-            quality="exact" if result.complete else "lower_bound",
-            confidence="enumerable" if result.complete else "partial",
+            quality="exact",
+            confidence="enumerable",
+            last_indexed_block=result.last_indexed_block,
+            trace=[{"step": "event_fold_tail", "event_address": event_address, **result.scan_window}],
         )
 
     def _live_value_fold(
@@ -516,7 +544,10 @@ def _fold_event_history(
     event_hints: list[dict],
     key_sources: list[dict],
     block: int | None,
+    tail: TailScanner | None = None,
 ) -> EnumerationResult:
+    # Only repos that can complete a lagging fold are handed a scanner.
+    tail_kwargs: dict[str, Any] = {"tail": tail} if tail is not None else {}
     fold_history = getattr(repo, "fold_event_history", None)
     if callable(fold_history):
         typed_fold_history = cast(Callable[..., EnumerationResult], fold_history)
@@ -526,6 +557,7 @@ def _fold_event_history(
             event_hints=event_hints,
             key_sources=key_sources,
             block=block,
+            **tail_kwargs,
         )
     if len(event_hints) != 1:
         return EnumerationResult(members=[], confidence="partial", partial_reason="event_history_fold_unavailable")
@@ -544,4 +576,5 @@ def _fold_event_history(
         key_sources=key_sources,
         direction=hint.get("direction"),
         block=block,
+        **tail_kwargs,
     )

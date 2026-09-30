@@ -345,3 +345,25 @@ def test_pin_keeps_keeping_up_cursor_exact_per_chain(
         assert (result.confidence, result.partial_reason) == ("enumerable", None)
     else:
         assert (result.confidence, result.partial_reason) == ("partial", "cursor_behind_block")
+
+
+def test_adapter_block_past_cursor_completes_with_a_tail(db_session, monkeypatch):
+    from tests.support.tail_wire import install_tail_wire, raw_log
+
+    _seed_cursor(db_session, last_indexed_block=1000)
+    db_session.add(_grant_row(TOPIC_ADD, ADMIN_A, 900))
+    db_session.flush()
+    wire = install_tail_wire(monkeypatch, [raw_log(EVENT_ADDRESS, [TOPIC_ADD, _pad(ADMIN_B)], 1030)])
+    ctx = EvaluationContext(
+        chain_id=CHAIN_ID,
+        contract_address=EVENT_ADDRESS,
+        block=1050,
+        rpc_url="http://tail.stub",
+        event_log_repo=PostgresEventLogRepo(db_session),
+    )
+
+    cap = EventIndexedAdapter().enumerate(_allowlist_descriptor(), ctx)
+    assert wire.calls == [(1001, 1050)]
+    assert (cap.kind, cap.membership_quality) == ("finite_set", "exact")
+    assert cap.members == sorted([ADMIN_A.lower(), ADMIN_B.lower()])
+    assert cap.last_indexed_block == 1050

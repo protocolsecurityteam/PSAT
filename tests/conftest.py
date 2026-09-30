@@ -520,6 +520,22 @@ def _stub_role_store_wire(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _stub_event_tail_wire(monkeypatch):
+    """Keep the offline suite hermetic against the event-fold tail scan.
+
+    A warm cursor behind a pinned resolution block is completed by a live
+    ``eth_getLogs`` over ``(cursor, pin]`` whenever the pass has an ``rpc_url``.
+    Raising here reproduces the tail-failure path (fail closed), so no resolver
+    test dials the wire. Dedicated tail tests monkeypatch this binding in the
+    test body (which runs after this fixture) to feed canned logs."""
+
+    def _no_wire(*a, **k):
+        raise RuntimeError("offline: event tail wire read stubbed (see tests/conftest.py)")
+
+    monkeypatch.setattr("services.resolution.event_tail.rpc_request", _no_wire)
+
+
+@pytest.fixture(autouse=True)
 def _stub_seed_witness_wire(monkeypatch):
     """Keep the offline suite hermetic against the indexer's floor witness.
 

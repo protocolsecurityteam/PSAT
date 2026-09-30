@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -14,6 +14,9 @@ from db.models import IndexedEventCursor, IndexedEventLog, enrollment_basis_perm
 from services.resolution.adapters import EnumerationResult
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from utils.logging import record_stage_metric
+
+if TYPE_CHECKING:
+    from services.resolution.event_tail import TailScan, TailScanner
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +52,41 @@ def _note_partial_reason(partial_reason: str | None, *, event_address: str, repo
 @dataclass(frozen=True)
 class ValueFoldResult:
     """Latest value per caller: ``entries`` maps each key to its last ``value_hex``; ``complete`` only when every
-    topic's backfill reached head.
+    topic's rows are proven through the evaluated block.
     """
 
     entries: list[dict[str, Any]] = field(default_factory=list)
     complete: bool = False
     partial_reason: str | None = None
+    last_indexed_block: int | None = None
+    scan_window: dict[str, Any] | None = None
+
+
+# A warm fold behind the evaluated block: ``cursor_behind_block`` without a tail scanner, ``tail_scan_failed`` when the
+# tail could not prove ``(frontier, block]``. Either way the durable rows are proven only through the frontier.
+BEHIND_PARTIAL_REASONS = frozenset({"cursor_behind_block", "tail_scan_failed"})
+
+
+def _row_topic0(row: Any) -> str:
+    topic0 = getattr(row, "topic0", None)
+    if isinstance(topic0, str):
+        return topic0.lower()
+    topics = getattr(row, "topics", None) or []
+    return str(topics[0]).lower() if topics else ""
+
+
+def _complete_with_tail(
+    tail: "TailScanner | None",
+    *,
+    event_address: str,
+    topic0s: list[str],
+    frontier: int,
+    block: int | None,
+) -> "TailScan | None":
+    """The tail over ``(frontier, block]``, or ``None`` when there is no scanner or no pinned block."""
+    if tail is None or not isinstance(block, int):
+        return None
+    return tail(event_address, topic0s, frontier, block)
 
 
 def _cursor_covers_block(cursor_block: int | None, block: int | None) -> bool:
@@ -98,7 +130,11 @@ class PostgresEventLogRepo:
         key_sources: list[dict[str, Any]],
         direction: str,
         block: int | None = None,
+        tail: "TailScanner | None" = None,
     ) -> EnumerationResult:
+        """Members written by one topic. A warm cursor behind ``block`` is completed by ``tail`` over
+        ``(cursor, block]``; without a complete tail the result stays partial.
+        """
         member_key = _caller_key_index(key_sources)
         if member_key is None:
             return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
@@ -126,14 +162,18 @@ class PostgresEventLogRepo:
             q = q.where(IndexedEventLog.block_number <= row_ceiling)
 
         state: dict[str, bool] = {}
-        for row in self.session.execute(q).scalars():
-            event_keys = _event_keys(row.topics or [], row.data_words or [], topics_to_keys, data_to_keys)
-            if any(event_keys.get(idx) != expected for idx, expected in key_filters.items()):
-                continue
-            member = _word_to_address(event_keys.get(member_key))
-            if member is None:
-                continue
-            state[member] = True
+
+        def _apply(rows: Iterable[Any]) -> None:
+            for row in rows:
+                event_keys = _event_keys(row.topics or [], row.data_words or [], topics_to_keys, data_to_keys)
+                if any(event_keys.get(idx) != expected for idx, expected in key_filters.items()):
+                    continue
+                member = _word_to_address(event_keys.get(member_key))
+                if member is None:
+                    continue
+                state[member] = True
+
+        _apply(self.session.execute(q).scalars())
 
         # Cursors are seeded at deploy, so trust only ``backfill_complete``, not a positive block.
         if cursor_block is None or not complete:
@@ -145,11 +185,23 @@ class PostgresEventLogRepo:
                 last_indexed_block=None,
             )
         if not _cursor_covers_block(cursor_block, block):
-            _note_partial_reason("cursor_behind_block", event_address=event_address, repo="postgres")
+            scan = _complete_with_tail(
+                tail, event_address=event_address, topic0s=[topic0.lower()], frontier=cursor_block, block=block
+            )
+            if scan is not None and scan.complete:
+                _apply(scan.logs)
+                return EnumerationResult(
+                    members=sorted(addr for addr, present in state.items() if present),
+                    confidence="enumerable",
+                    last_indexed_block=block,
+                    scan_window=scan.trace_fields(),
+                )
+            reason = "cursor_behind_block" if scan is None else "tail_scan_failed"
+            _note_partial_reason(reason, event_address=event_address, repo="postgres")
             return EnumerationResult(
                 members=sorted(addr for addr, present in state.items() if present),
                 confidence="partial",
-                partial_reason="cursor_behind_block",
+                partial_reason=reason,
                 last_indexed_block=cursor_block,
             )
         return EnumerationResult(
@@ -166,7 +218,14 @@ class PostgresEventLogRepo:
         event_hints: list[dict[str, Any]],
         key_sources: list[dict[str, Any]],
         block: int | None = None,
+        tail: "TailScanner | None" = None,
     ) -> EnumerationResult:
+        """Add/remove fold into the current member set.
+
+        When every cursor is warm but the least advanced (``warm_block``) is behind ``block``, rows are cut at exactly
+        ``warm_block`` and ``tail`` completes ``(warm_block, block]`` in log order; a removal in that range is never
+        left out of a published set.
+        """
         member_key = _caller_key_index(key_sources)
         if member_key is None:
             return EnumerationResult(members=[], confidence="partial", partial_reason="unresolved_event_key")
@@ -187,8 +246,17 @@ class PostgresEventLogRepo:
 
         topic0s = sorted(hints_by_topic)
         cursor_states = {topic0: self._cursor_state(chain_id, event_address, topic0) for topic0 in topic0s}
-        # The max per-topic frontier admits every indexed row and no phantom ones.
-        frontier = max((b for b, _ in cursor_states.values() if b is not None), default=None)
+        # Indexed means backfill complete, not just an advanced cursor.
+        complete_blocks = [block for block, complete in cursor_states.values() if block is not None and complete]
+        warm_block = min(complete_blocks) if len(complete_blocks) == len(topic0s) else None
+        behind = warm_block is not None and not _cursor_covers_block(warm_block, block)
+        if behind:
+            # Rows past the least advanced cursor would be applied again, out of order, by the tail.
+            row_ceiling = warm_block
+        else:
+            # The max per-topic frontier admits every indexed row and no phantom ones.
+            frontier = max((b for b, _ in cursor_states.values() if b is not None), default=None)
+            row_ceiling = _row_ceiling(frontier, block)
 
         q = (
             select(IndexedEventLog)
@@ -201,73 +269,89 @@ class PostgresEventLogRepo:
                 IndexedEventLog.log_index.asc(),
             )
         )
-        row_ceiling = _row_ceiling(frontier, block)
         if row_ceiling is not None:
             q = q.where(IndexedEventLog.block_number <= row_ceiling)
 
         state: dict[str, bool] = {}
-        undecidable_row = False
-        for row in self.session.execute(q).scalars():
-            topic0 = str(row.topic0).lower()
-            mode = fold_modes.get(topic0)
-            if mode is None:
-                continue
-            mode_kind, value_hint = mode
-            topics = row.topics or []
-            data_words = row.data_words or []
-            # Payload mode reads one hint (the value word decides); uniform mode unions every hint's keys.
-            row_hints = [value_hint] if mode_kind == "payload" else hints_by_topic.get(topic0, [])
-            for hint in row_hints:
-                event_keys = _event_keys(
-                    topics,
-                    data_words,
-                    hint.get("topics_to_keys") or {},
-                    hint.get("data_to_keys") or {},
-                )
-                if any(event_keys.get(idx) != expected for idx, expected in key_filters.items()):
+
+        def _apply(rows: Iterable[Any]) -> bool:
+            """Fold rows into ``state``; False when a row is undecidable."""
+            for row in rows:
+                topic0 = _row_topic0(row)
+                mode = fold_modes.get(topic0)
+                if mode is None:
                     continue
-                member = _word_to_address(event_keys.get(member_key))
-                if member is None:
-                    continue
-                if mode_kind == "payload":
-                    present = _payload_membership(topics, data_words, hint)
-                    if present is None:
-                        # An unreadable payload word leaves the var's member set undetermined.
-                        undecidable_row = True
-                        break
-                else:
-                    present = hint["direction"] == "add"
-                state[member] = present
-            if undecidable_row:
-                break
-        if undecidable_row:
+                mode_kind, value_hint = mode
+                topics = list(row.topics or [])
+                data_words = list(row.data_words or [])
+                # Payload mode reads one hint (the value word decides); uniform mode unions every hint's keys.
+                row_hints = [value_hint] if mode_kind == "payload" else hints_by_topic.get(topic0, [])
+                for hint in row_hints:
+                    event_keys = _event_keys(
+                        topics,
+                        data_words,
+                        hint.get("topics_to_keys") or {},
+                        hint.get("data_to_keys") or {},
+                    )
+                    if any(event_keys.get(idx) != expected for idx, expected in key_filters.items()):
+                        continue
+                    member = _word_to_address(event_keys.get(member_key))
+                    if member is None:
+                        continue
+                    if mode_kind == "payload":
+                        present = _payload_membership(topics, data_words, hint)
+                        if present is None:
+                            # An unreadable payload word leaves the var's member set undetermined.
+                            return False
+                    else:
+                        present = hint["direction"] == "add"
+                    state[member] = present
+            return True
+
+        def _ambiguous() -> EnumerationResult:
             _note_partial_reason("ambiguous_event_direction", event_address=event_address, repo="postgres")
             return EnumerationResult(members=[], confidence="partial", partial_reason="ambiguous_event_direction")
 
-        # Indexed means backfill complete, not just an advanced cursor.
-        complete_blocks = [block for block, complete in cursor_states.values() if block is not None and complete]
-        last_indexed_block = min(complete_blocks) if complete_blocks else None
-        if len(complete_blocks) != len(topic0s):
+        if not _apply(self.session.execute(q).scalars()):
+            return _ambiguous()
+
+        def _members() -> list[str]:
+            return sorted(addr for addr, present in state.items() if present)
+
+        if warm_block is None:
             _note_partial_reason("no_index_cursor", event_address=event_address, repo="postgres")
             return EnumerationResult(
-                members=sorted(addr for addr, present in state.items() if present),
+                members=_members(),
                 confidence="partial",
                 partial_reason="no_index_cursor",
-                last_indexed_block=last_indexed_block,
+                last_indexed_block=min(complete_blocks) if complete_blocks else None,
             )
 
-        if not _cursor_covers_block(last_indexed_block, block):
-            _note_partial_reason("cursor_behind_block", event_address=event_address, repo="postgres")
+        if behind:
+            scan = _complete_with_tail(
+                tail, event_address=event_address, topic0s=topic0s, frontier=warm_block, block=block
+            )
+            if scan is not None and scan.complete:
+                if not _apply(scan.logs):
+                    return _ambiguous()
+                return EnumerationResult(
+                    members=_members(),
+                    confidence="enumerable",
+                    last_indexed_block=block,
+                    scan_window=scan.trace_fields(),
+                )
+            reason = "cursor_behind_block" if scan is None else "tail_scan_failed"
+            _note_partial_reason(reason, event_address=event_address, repo="postgres")
             return EnumerationResult(
-                members=sorted(addr for addr, present in state.items() if present),
+                members=_members(),
                 confidence="partial",
-                partial_reason="cursor_behind_block",
-                last_indexed_block=last_indexed_block,
+                partial_reason=reason,
+                last_indexed_block=warm_block,
             )
         return EnumerationResult(
-            members=sorted(addr for addr, present in state.items() if present),
+            members=_members(),
             confidence="enumerable",
-            last_indexed_block=last_indexed_block,
+            last_indexed_block=warm_block,
         )
 
     def fold_event_values(
@@ -279,6 +363,7 @@ class PostgresEventLogRepo:
         key_sources: list[dict[str, Any]],
         fold_key_position: int | None,
         block: int | None = None,
+        tail: "TailScanner | None" = None,
     ) -> "ValueFoldResult":
         """Latest value per caller over the durable index.
 
@@ -286,8 +371,10 @@ class PostgresEventLogRepo:
         the caller's arg position (then other args are unconstrained); ``None`` uses the hint's key map with
         constant-key filtering.
 
-        If any topic is cold, returns an empty ``no_index_cursor`` result without scanning. ``complete`` only when every
-        topic reached head. No live reads.
+        If any topic is cold, returns an empty ``no_index_cursor`` result without scanning. When every topic is warm
+        but the least advanced cursor (``warm_block``) is behind ``block``, rows are cut at exactly ``warm_block`` and
+        ``tail`` completes ``(warm_block, block]``; without a complete tail the durable entries come back partial with
+        ``last_indexed_block=warm_block``.
         """
         member_key: int | None = None
         key_filters: dict[int, str] = {}
@@ -314,52 +401,71 @@ class PostgresEventLogRepo:
             return ValueFoldResult(entries=[], complete=False, partial_reason="no_index_cursor")
         # Warm cursors prove completeness only up to their height.
         warm_block = min(c_block for c_block, _done in cursor_states.values() if c_block is not None)
-        if not _cursor_covers_block(warm_block, block):
-            _note_partial_reason("cursor_behind_block", event_address=event_address, repo="postgres")
-            return ValueFoldResult(entries=[], complete=False, partial_reason="cursor_behind_block")
-
-        # Scan to the frontier (max cursor); exactness was gated above (min cursor).
-        frontier = max(c_block for c_block, _done in cursor_states.values() if c_block is not None)
-        rows = self.iter_event_rows(chain_id=chain_id, event_address=event_address, topic0s=topic0s, block=frontier)
+        behind = not _cursor_covers_block(warm_block, block)
+        # Covered: scan to the frontier (max cursor), exactness is gated on the min. Behind: cut at the min so the tail
+        # never applies a row twice.
+        row_ceiling = (
+            warm_block if behind else max(c_block for c_block, _done in cursor_states.values() if c_block is not None)
+        )
 
         # member -> (value_hex, block, tx_index, log_index)
         state: dict[str, tuple[str, int, int, int]] = {}
-        for row in rows:
-            topic0 = str(row.topic0).lower()
-            topics = list(row.topics or [])
-            data_words = list(row.data_words or [])
-            for hint in hints_by_topic.get(topic0, []):
-                if fold_key_position is not None:
-                    member = _word_to_address(_word_at_event_arg(topics, data_words, fold_key_position, hint))
-                else:
-                    topics_to_keys = hint.get("topics_to_keys") or {}
-                    data_to_keys = hint.get("data_to_keys") or {}
-                    event_keys = _event_keys(topics, data_words, topics_to_keys, data_to_keys)
-                    if any(event_keys.get(idx) != expected for idx, expected in key_filters.items()):
-                        continue
-                    member = _word_to_address(event_keys.get(member_key)) if member_key is not None else None
-                if member is None:
-                    continue
-                value_position = hint.get("value_position")
-                if value_position is None:
-                    continue
-                value_hex = _word_at_event_arg(topics, data_words, int(value_position), hint)
-                if value_hex is None:
-                    continue
-                position = (
-                    int(row.block_number),
-                    int(row.transaction_index),
-                    int(row.log_index),
-                )
-                prior = state.get(member)
-                if prior is None or position > (prior[1], prior[2], prior[3]):
-                    state[member] = (value_hex, position[0], position[1], position[2])
 
-        entries = [
-            {"key": member, "value_hex": value_hex, "last_block": last_block}
-            for member, (value_hex, last_block, _tx, _log) in state.items()
-        ]
-        return ValueFoldResult(entries=entries, complete=True, partial_reason=None)
+        def _apply(rows: Iterable[Any]) -> None:
+            for row in rows:
+                topic0 = _row_topic0(row)
+                topics = list(row.topics or [])
+                data_words = list(row.data_words or [])
+                for hint in hints_by_topic.get(topic0, []):
+                    if fold_key_position is not None:
+                        member = _word_to_address(_word_at_event_arg(topics, data_words, fold_key_position, hint))
+                    else:
+                        topics_to_keys = hint.get("topics_to_keys") or {}
+                        data_to_keys = hint.get("data_to_keys") or {}
+                        event_keys = _event_keys(topics, data_words, topics_to_keys, data_to_keys)
+                        if any(event_keys.get(idx) != expected for idx, expected in key_filters.items()):
+                            continue
+                        member = _word_to_address(event_keys.get(member_key)) if member_key is not None else None
+                    if member is None:
+                        continue
+                    value_position = hint.get("value_position")
+                    if value_position is None:
+                        continue
+                    value_hex = _word_at_event_arg(topics, data_words, int(value_position), hint)
+                    if value_hex is None:
+                        continue
+                    position = (
+                        int(row.block_number),
+                        int(row.transaction_index),
+                        int(row.log_index),
+                    )
+                    prior = state.get(member)
+                    if prior is None or position > (prior[1], prior[2], prior[3]):
+                        state[member] = (value_hex, position[0], position[1], position[2])
+
+        def _entries() -> list[dict[str, Any]]:
+            return [
+                {"key": member, "value_hex": value_hex, "last_block": last_block}
+                for member, (value_hex, last_block, _tx, _log) in state.items()
+            ]
+
+        _apply(self.iter_event_rows(chain_id=chain_id, event_address=event_address, topic0s=topic0s, block=row_ceiling))
+
+        if behind:
+            scan = _complete_with_tail(
+                tail, event_address=event_address, topic0s=topic0s, frontier=warm_block, block=block
+            )
+            if scan is not None and scan.complete:
+                _apply(scan.logs)
+                return ValueFoldResult(
+                    entries=_entries(), complete=True, last_indexed_block=block, scan_window=scan.trace_fields()
+                )
+            reason = "cursor_behind_block" if scan is None else "tail_scan_failed"
+            _note_partial_reason(reason, event_address=event_address, repo="postgres")
+            return ValueFoldResult(
+                entries=_entries(), complete=False, partial_reason=reason, last_indexed_block=warm_block
+            )
+        return ValueFoldResult(entries=_entries(), complete=True, partial_reason=None, last_indexed_block=warm_block)
 
     def iter_event_rows(
         self,
