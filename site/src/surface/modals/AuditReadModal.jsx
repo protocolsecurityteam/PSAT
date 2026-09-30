@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { createPortal } from "react-dom";
 
 import { formatAuditDate } from "../../audits/auditUi.jsx";
+import { Modal } from "../../shared/Modal.jsx";
 import { useResource } from "../../shared/useResource.js";
 import { dedupeShas } from "../format.js";
 
@@ -63,12 +63,6 @@ export function AuditReadModal({ audit, coveredCount, onClose }) {
   const [pdfFailed, setPdfFailed] = useState(false);
   useEffect(() => setPdfFailed(false), [auditPath]);
 
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   const sourceUrl = detail?.url || null;
   const rawPdfUrl = detail?.pdf_url || null;
   const urlLooksLikePdf =
@@ -86,95 +80,92 @@ export function AuditReadModal({ audit, coveredCount, onClose }) {
 
   const commits = useMemo(() => reviewedCommits(detail), [detail]);
 
-  // The sidebar's `backdrop-filter` makes it the containing block for
-  // position:fixed; without the portal the modal is trapped in the sidebar.
-  return createPortal(
-    <div className="ps-audit-modal-backdrop" onClick={onClose}>
-      <div className="ps-audit-modal ps-audit-modal--read" onClick={(e) => e.stopPropagation()}>
-        <header className="ps-audit-modal-header">
-          <div className="ps-audit-modal-header-left">
-            <div className="ps-audit-modal-auditor">{audit.auditor || "Unknown auditor"}</div>
-            <div className="ps-audit-modal-title">{audit.title || "Untitled audit"}</div>
-            <div className="ps-audit-modal-meta">
-              {formatAuditDate(audit.date)} · covers {coveredCount} contract
-              {coveredCount === 1 ? "" : "s"}
-            </div>
+  // The sidebar's `backdrop-filter` would trap a fixed overlay, hence the portal.
+  return (
+    <Modal
+      portal
+      className="ps-audit-modal--read"
+      onClose={onClose}
+      header={
+        <div className="ps-audit-modal-header-left">
+          <div className="ps-audit-modal-auditor">{audit.auditor || "Unknown auditor"}</div>
+          <div className="ps-audit-modal-title">{audit.title || "Untitled audit"}</div>
+          <div className="ps-audit-modal-meta">
+            {formatAuditDate(audit.date)} · covers {coveredCount} contract
+            {coveredCount === 1 ? "" : "s"}
           </div>
-          <div className="ps-audit-modal-actions">
-            <button className="ps-audit-modal-btn" onClick={onClose} aria-label="Close">✕</button>
-          </div>
-        </header>
-
-        <div className="ps-audit-read-body">
-          <section>
-            <div className="ps-audit-read-sec-h">Reviewed commits</div>
-            {commits.length ? (
-              <div className="ps-audit-read-commits">
-                {commits.map(({ sha, label }) => {
-                  const accent = COMMIT_ACCENT[label] || "#94a3b8";
-                  return (
-                    <span key={sha} className="ps-audit-read-commit" title={sha}>
-                      <span
-                        className="ps-audit-read-commit-lbl"
-                        style={{ color: accent, background: `${accent}22` }}
-                      >
-                        {label}
-                      </span>
-                      {sha.slice(0, 7)}
-                    </span>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="ps-audit-modal-empty" style={{ padding: 0, textAlign: "left" }}>
-                No reviewed commit recorded.
-              </div>
-            )}
-          </section>
-
-          {scope && scope.length > 0 && (
-            <section>
-              <div className="ps-audit-read-sec-h">Declared scope ({scope.length})</div>
-              {scope.map((name, i) => (
-                <div key={`${name}-${i}`} className="ps-audit-read-scope-row">
-                  <span>{name}</span>
-                  <span className="ps-audit-read-scope-tie">✓ in scope</span>
-                </div>
-              ))}
-            </section>
-          )}
-
-          <section>
-            <div className="ps-audit-read-sec-h">Report document</div>
-            <div className="ps-audit-read-doc">
-              {detailLoading && <div className="ps-audit-modal-empty">Loading audit…</div>}
-              {!detailLoading && showPdf && (
-                <iframe
-                  className="ps-audit-read-iframe"
-                  title="Audit PDF"
-                  src={pdfUrl}
-                  onError={() => setPdfFailed(true)}
-                />
-              )}
-              {!detailLoading && !showPdf && (
-                <>
-                  {textLoading && <div className="ps-audit-modal-empty">Loading audit text…</div>}
-                  {!textLoading && text && <pre className="ps-audit-modal-pre">{text}</pre>}
-                  {!textLoading && !text && (
-                    <div className="ps-audit-modal-empty">
-                      No verified document available for this audit.
-                    </div>
-                  )}
-                </>
-              )}
-              {detailError && (
-                <div className="ps-audit-modal-empty">Failed to load audit: {detailError}</div>
-              )}
-            </div>
-          </section>
         </div>
+      }
+    >
+
+      <div className="ps-audit-read-body">
+        <section>
+          <div className="ps-audit-read-sec-h">Reviewed commits</div>
+          {commits.length ? (
+            <div className="ps-audit-read-commits">
+              {commits.map(({ sha, label }) => {
+                const accent = COMMIT_ACCENT[label] || "#94a3b8";
+                return (
+                  <span key={sha} className="ps-audit-read-commit" title={sha}>
+                    <span
+                      className="ps-audit-read-commit-lbl"
+                      style={{ color: accent, background: `${accent}22` }}
+                    >
+                      {label}
+                    </span>
+                    {sha.slice(0, 7)}
+                  </span>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="ps-audit-modal-empty" style={{ padding: 0, textAlign: "left" }}>
+              No reviewed commit recorded.
+            </div>
+          )}
+        </section>
+
+        {scope && scope.length > 0 && (
+          <section>
+            <div className="ps-audit-read-sec-h">Declared scope ({scope.length})</div>
+            {scope.map((name, i) => (
+              <div key={`${name}-${i}`} className="ps-audit-read-scope-row">
+                <span>{name}</span>
+                <span className="ps-audit-read-scope-tie">✓ in scope</span>
+              </div>
+            ))}
+          </section>
+        )}
+
+        <section>
+          <div className="ps-audit-read-sec-h">Report document</div>
+          <div className="ps-audit-read-doc">
+            {detailLoading && <div className="ps-audit-modal-empty">Loading audit…</div>}
+            {!detailLoading && showPdf && (
+              <iframe
+                className="ps-audit-read-iframe"
+                title="Audit PDF"
+                src={pdfUrl}
+                onError={() => setPdfFailed(true)}
+              />
+            )}
+            {!detailLoading && !showPdf && (
+              <>
+                {textLoading && <div className="ps-audit-modal-empty">Loading audit text…</div>}
+                {!textLoading && text && <pre className="ps-audit-modal-pre">{text}</pre>}
+                {!textLoading && !text && (
+                  <div className="ps-audit-modal-empty">
+                    No verified document available for this audit.
+                  </div>
+                )}
+              </>
+            )}
+            {detailError && (
+              <div className="ps-audit-modal-empty">Failed to load audit: {detailError}</div>
+            )}
+          </div>
+        </section>
       </div>
-    </div>,
-    document.body,
+    </Modal>
   );
 }
