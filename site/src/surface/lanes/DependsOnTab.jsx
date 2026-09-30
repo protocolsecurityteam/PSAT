@@ -5,19 +5,10 @@ import { fnChipClass, shortAddr } from "../format.js";
 import { GotoArrow } from "../GotoArrow.jsx";
 import { buildDependencyView, fetchDependencyGraphViz } from "../layout/dependencies.js";
 
-// The "Depends on" tab: the selected contract's outbound call surface. External
-// integrations (off-canvas — the trust surface shown nowhere else) sit up top
-// as elevated cards; internal calls collapse to one row per sibling contract.
-//
-// Interaction mirrors the rest of the card (same peek/commit split as Governs
-// rows): clicking a name previews the contract on the canvas, the → commits to
-// its card, and the count toggle expands the function chips. External rows are
-// off-canvas so they have neither a node nor a card — their only action is the
-// block explorer.
-//
-// Function chips reuse .ps-ctrl-fnchip + fnChipClass verbatim, so their size,
-// font, and semantic tint match the Governs tab exactly; the read/write/
-// delegatecall distinction is carried by the colored verb label, not the chip.
+// The selected contract's outbound calls: external integrations (the trust
+// surface shown nowhere else) as cards, internal calls one row per sibling.
+// Name previews, → commits, the count expands chips. Chips reuse the Governs
+// styling; the verb label carries read/write/delegatecall.
 
 const VERB_TONES = {
   writes: "#d6bd8c",
@@ -68,10 +59,8 @@ function countSummary(row) {
   return parts.join(" · ");
 }
 
-// Off-canvas dependency: no node to preview, no card to open, so the address
-// and the trailing affordance both link to the block explorer. Dep-graph nodes
-// carry no chain, so fall back to the selected contract's chain — an external
-// integration is reached in the same transaction, hence the same chain.
+// Off-canvas: only the block explorer. Dep-graph nodes carry no chain; an
+// external integration is on the selected contract's chain.
 function ExternalCard({ row, chain }) {
   const explorerChain = row.chain || chain;
   const url = blockExplorerAddressUrl(row.explorerAddress, explorerChain);
@@ -94,8 +83,6 @@ function ExternalCard({ row, chain }) {
   );
 }
 
-// On-canvas dependency: collapsed by default. Body (name+addr) previews on the
-// canvas; the count toggle expands the chips; the → commits to its card.
 function InternalRow({ row, onPreview, onNavigate }) {
   const [open, setOpen] = useState(false);
   const preview = () => onPreview && onPreview(row.onCanvasAddress);

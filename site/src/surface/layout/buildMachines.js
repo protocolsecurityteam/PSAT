@@ -1,6 +1,5 @@
-// Group functions per contract into the four lanes (control / ops / inflow /
-// outflow), sort within each lane, and project the contract → "machine" view
-// the canvas + sidebar consume. Pure — no React.
+// Contract → "machine" view: functions grouped into control / ops / inflow /
+// outflow lanes.
 
 import { functionName, isRoleConstant } from "../format.js";
 import { entityKey } from "../entityKey.js";
@@ -19,8 +18,7 @@ import {
 import { guardSummary } from "./guardSummary.js";
 
 export function buildMachines(companyData, functionData, { functionsLoading = false, activeChain = null } = {}) {
-  // Node-type index over every contract's control_graph; used to flag
-  // passthrough timelock contracts (their own node is typed "timelock").
+  // Flags passthrough timelocks (their own node is typed "timelock").
   const nodeInfo = buildControlNodeIndex(companyData);
   const indirectCtx = buildIndirectCallerContext(companyData, activeChain);
   return companyData.contracts
@@ -45,11 +43,9 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
           effectLabels: fn.effect_labels || [],
           claims: fn.claims || [],
           guard: guardSummary(fn, companyData),
-          // `principals` is the direct-callers list — exactly who can fire
-          // msg.sender on this function right now. `indirectPrincipals` are
-          // the principals whose witnessed-agency reach can stand on a
-          // contract-typed direct caller — secondary context in the inspector
-          // (never used to claim call rights).
+          // `principals` is who can call now; `indirectPrincipals` are
+          // agency-reach standing above contract-typed callers (never used to
+          // claim call rights).
           principals: direct,
           indirectPrincipals: indirect,
           authorityPublic: Boolean(fn.authority_public),
@@ -72,9 +68,8 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
         ...contract,
         totalFunctions,
         lanes,
-        // Passthrough timelock contracts: typed "timelock" in the control
-        // graph but owned by a Safe (still credited via primary_for). Flagged
-        // so the card + Timelocks filter can identify them.
+        // Typed timelock but Safe-owned; flagged for the card and Timelocks
+        // filter.
         isTimelock,
         timelockDelay: isTimelock ? tlNode?.details?.delay ?? null : null,
       };
@@ -82,9 +77,8 @@ export function buildMachines(companyData, functionData, { functionsLoading = fa
     .filter((machine) =>
       machine.totalFunctions > 0
       || machine.is_proxy
-      // While /functions is in flight, every analyzed contract has
-      // totalFunctions=0 — don't hide them from the canvas in that
-      // window or only proxies render.
+      // Every analyzed contract has totalFunctions=0 until /functions lands;
+      // don't hide them meanwhile.
       || (functionsLoading && machine.contract_id != null)
     )
     .sort((left, right) => {

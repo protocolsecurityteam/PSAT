@@ -19,32 +19,21 @@ import { buildControlsDetailMap } from "./controlsDetail.js";
 import { SelectionLegend } from "./SelectionLegend.jsx";
 import { REACH_EDGE_STROKE, edgeOnReachPath, reachChipText } from "./reachOverlay.js";
 
-// Co-controllers live inside the owning group's Controllers accordion now, so
-// the canvas only renders contract cards and their owning group boxes — there
-// is no standalone "principal"/guardian-rail node type any more.
+// Co-controllers live in group accordions; there is no standalone principal
+// node type.
 const nodeTypes = { contract: ContractNode, group: GroupNode };
 const edgeTypes = { channeled: ChanneledStepEdge };
 
-// Multichain (inv. 13): every entity this canvas receives — machines,
-// principals, fund-flow endpoints — belongs to the single active `chain` (the
-// page is chain-scoped upstream in ProtocolSurface). So bare-address keys in
-// the graph-topology sets below (connectedNodes, edge endpoint comparisons) are
-// collision-free by construction: two chains never share this dataset. The
-// entity-identity lookups (principal resolution, per-entity detail maps) key by
-// (chain, address) via entityKey so they carry chain explicitly regardless.
+// Everything here is on the single active chain, so bare-address topology sets
+// are collision-free; entity lookups still key by (chain, address) (inv. 13).
 export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethereum", selectedAddress, focusAddress, focusedAddress, highlightedAddresses, reachDistances, reachPathEdges, onSelectMachine, onSelectPrincipal }) {
   const [initNodes, setInitNodes] = useState([]);
   const [initEdges, setInitEdges] = useState([]);
 
-  // Measured header-band height per group (keyed by group id). It feeds
-  // elkLayout so each group reserves exactly the space its colored bar +
-  // Controllers accordion render, and ELK packs the canvas to fit — a row
-  // whose capability summary wraps to several lines grows the band rather than
-  // clipping. GroupNode reports the real band height via onMeasureBand; we only
-  // re-store (and thus re-layout) when it actually changes, so it converges.
+  // Measured band height per group, so ELK reserves exactly what renders. Only
+  // re-stored on change, so it converges.
   const [bandHeights, setBandHeights] = useState({});
 
-  // Run elk layout (async)
   useEffect(() => {
     let cancelled = false;
     elkLayout(machines, fundFlows, principals, bandHeights, chain).then(({ nodes: n, edges: e }) => {
@@ -63,12 +52,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
     });
   }, []);
 
-  // Clicking a controller row selects that principal so the existing logic
-  // highlights the contracts it governs (dims everything else + chips them),
-  // opens its sidebar, and pans the camera to its aggregation — FocusOnNode
-  // fits the principal's own group, or the group(s) holding its touch set
-  // when it owns no node. Looks the full principal up from the list so the
-  // sidebar gets every field.
+  // Uses the full principal from the list so the sidebar gets every field.
   const selectController = useCallback((addr) => {
     const key = entityKey(chain, addr);
     const p = (principals || []).find((x) => entityKey(chain, x.address) === key);
@@ -81,39 +65,20 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
   useEffect(() => {
     if (!initNodes.length) return;
     const selLc = selectedAddress?.toLowerCase();
-    // Relatedness anchor: the COMMITTED selection only. A browse preview
-    // (search ▲/▼, contract pager) pans the camera and paints the gold
-    // focused ring — it never re-anchors the dim/chips, so the selected
-    // view stays put until the user commits a different entity.
+    // Only the committed selection anchors dimming; browse previews never
+    // re-anchor it.
     const sel = selLc;
-    // Find all nodes connected to the selected node AND, in the same
-    // pass, the per-contract chip data. Owner-grouping moves the
-    // principal→contract relationship from an edge into the
-    // parent/child hierarchy — so the parent group of the selected
-    // node AND every child of a selected group both count as
-    // "connected" even though no edge exists between them.
+    // Connected nodes and per-contract chips in one pass. Group containment
+    // replaces principal→contract edges, so parent and children count as
+    // connected.
     //
-    // selectionChips: Map<addrLc, { out?: string, in?: string }> —
-    // each related contract can carry up to two chips, one per
-    // direction, because bidirectional relationships are common in
-    // this data (101 pairs in the etherfi protocol). "out" means
-    // `sel` acts on this contract, "in" means this contract acts on
-    // `sel`. Renders as banners above (out) and below (in) the card,
-    // restoring what the old per-edge chip layout showed when two
-    // edges existed between the same pair.
+    // selectionChips: Map<addrLc, { out?, in? }> ("out": `sel` acts on it;
+    // "in": it acts on `sel`); bidirectional pairs are common.
     const connectedNodes = new Set();
     const selectionChips = new Map();
-    // Cross-group contract selection state (populated in the block below).
-    // The contract→group-bottom stubs themselves are permanent layout edges
-    // now (see elkLayout) and highlight through the normal edge logic; this
-    // pair just makes the shared bundle the stub feeds light up with it:
-    //   relatedEdgeIds — the SPECIFIC group→group bundles the contract feeds,
-    //                    force-highlighted by id (not via group membership in
-    //                    connectedNodes, which would also light unrelated
-    //                    bundles between two groups the contract happens to
-    //                    touch separately)
-    //   brightGroups  — target group boxes to un-dim, kept out of connectedNodes
-    //                    so it doesn't leak into the edge-relatedness check
+    // Stubs light through the normal edge logic; relatedEdgeIds force-lights
+    // the specific bundles the contract feeds, and brightGroups un-dims their
+    // boxes without leaking into edge relatedness.
     const relatedEdgeIds = new Set();
     const brightGroups = new Set();
     if (sel) {
@@ -127,9 +92,7 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         }
         const existing = entry[direction];
         if (existing) {
-          // Same direction seen twice — happens when the same
-          // (other, sel) pair surfaces through multiple aggregated
-          // bundles. Union the caps within the direction.
+          // The same pair can surface through several bundles.
           const set = new Set(existing.split(", ").filter(Boolean));
           for (const c of caps.split(", ")) if (c) set.add(c);
           entry[direction] = [...set].join(", ");
@@ -137,14 +100,9 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
           entry[direction] = caps;
         }
       };
-      // Aggregated edges carry the underlying sample list in
-      // data.samples; walk those instead of the bundle endpoints so
-      // clicking a child contract still lights up the actual contracts
-      // it touches, not just the parent groups. Each chip's caps come
-      // from its OWN sample, not the bundle's union — bundles can mix
-      // flow shapes (e.g. one sample has `value-in`, another has
-      // `ownership`) and a union'd chip would falsely imply every child
-      // has the same relationship to the selected node.
+      // Walk the bundle's samples so chips land on the actual contracts, each
+      // with its own sample's caps: a union would imply every child shares the
+      // relationship.
       for (const e of initEdges) {
         const samples = e.data?.samples;
         const fallbackCaps = e.data?.capabilities || [];
@@ -163,9 +121,8 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
               flowType: fallbackFlowType,
             }];
         for (const { from, to, caps, flowType } of items) {
-          // Cap-less edges name themselves by flow type; project the payload
-          // token through the reader-facing word map (format.js) so a chip
-          // says "can call", never the internal `principal`.
+          // Through the display word map, so a chip says "can call", never
+          // `principal`.
           const capsText = (caps || []).join(", ") || flowTypeWord(flowType) || "";
           if (from === sel) {
             connectedNodes.add(to);
@@ -177,21 +134,12 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
           }
         }
       }
-      // Principal clicks: chips on every child the principal owns.
-      // The principal-source fund-flow edges were pruned at
-      // elkLayout's fundFlow loop ("if (principalByAddr.has(from))
-      // continue") to keep the canvas clean, so the sample walk above
-      // can't see these relationships — synthesize them from the
-      // parent/child hierarchy instead, with cap text derived from the
-      // principal's type (safe-controlled / timelock-controlled / ...).
+      // Principal-source flows are pruned in elkLayout, so synthesize chips
+      // from the group hierarchy.
       const selPrincipal = (principals || []).find(
         (p) => entityKey(chain, p.address) === entityKey(chain, sel),
       );
-      // Per-contract capability detail for the selected principal
-      // (server-computed principal.controls_detail, passthrough-resolved), so a
-      // chip says what the controller can actually DO ("pause, fund-out", or
-      // concrete function names) rather than a generic "<type>-controlled".
-      // Used for both the group children (primary) and the co-controlled set.
+      // Chips say what the controller can actually do, from controls_detail.
       const detailByContract = buildControlsDetailMap(selPrincipal?.controls_detail, chain);
       const capsTextFor = (addrLc) => {
         const d = detailByContract.get(entityKey(chain, addrLc));
@@ -203,12 +151,8 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
           ? fns.slice(0, 3).join(", ") + (fns.length > 3 ? ` +${fns.length - 3}` : "")
           : `${selPrincipal?.type || "principal"}-controlled`;
       };
-      // Box membership alone is NOT authority: a grouped_with machinery
-      // contract lives in this principal's box because of what IT operates,
-      // so the box owner gets no chip and no highlight on it unless
-      // primary_for / co_controls / controls actually name it. Left dimmed,
-      // the placement-only member reads as exactly what it is: in the box,
-      // not under this controller.
+      // Box membership isn't authority: a grouped_with machinery contract gets
+      // no chip unless primary_for / co_controls / controls names it.
       const authorityAddrs = new Set(
         [
           ...(Array.isArray(selPrincipal?.primary_for) ? selPrincipal.primary_for : []),
@@ -230,21 +174,10 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         if (nid === sel && pid) connectedNodes.add(pid);
       }
 
-      // Controller reach: the selected principal may hold authority on
-      // contracts outside its own group — co_controls always, and plain
-      // controls when it owns no group box (a node-less safe/EOA whose owned
-      // contracts live under other primaries). Light those contracts — and
-      // their containing groups, so a highlighted child isn't dimmed along
-      // with its box — and chip them with what the controller can do. This is
-      // the same dim+chip highlight a primary gets for its own children. We
-      // deliberately draw NO edges: the cross-group dashed lines read as the
-      // fanout spaghetti the owner-grouping removed, and the highlight alone
-      // conveys the reach.
-      // primary_for is included because a grouped_with relocation can place a
-      // primary-owned contract in ANOTHER principal's box: its parentId no
-      // longer matches the owner, and passthrough-won contracts appear in
-      // primary_for without a direct `controls` row — without this the owner's
-      // own contract would neither chip nor un-dim.
+      // Light (and chip) contracts the principal controls outside its box:
+      // co_controls, plain controls when it owns no box, and primary_for
+      // (grouped_with can move an owned contract into another box). No edges:
+      // the cross-group lines were the spaghetti grouping removed.
       const reach = [
         ...(Array.isArray(selPrincipal?.primary_for) ? selPrincipal.primary_for : []),
         ...(Array.isArray(selPrincipal?.controls) ? selPrincipal.controls : []),
@@ -262,14 +195,8 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         }
       }
 
-      // Cross-group contract selection: a grouped contract's permanent stub
-      // runs down to its group's bottom edge and the shared group→group bundle
-      // carries on from there. The stub lights via the normal directly-connected
-      // rule (its source IS the selected contract); here we just make the bundle
-      // it feeds light up too, so the whole path reads as one highlighted line.
-      // We match the bundle by id (not by adding the groups to connectedNodes,
-      // which would also light unrelated bundles between them) and separately
-      // un-dim the two group boxes it joins via brightGroups.
+      // Light the bundle a selected contract's stub feeds, matched by id;
+      // adding the groups to connectedNodes would light unrelated bundles.
       const selNode = initNodes.find((n) => n.id?.toLowerCase() === sel);
       if (selNode && selNode.type === "contract" && selNode.parentId) {
         const groupAddrs = new Set(
@@ -278,7 +205,6 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         for (const e of initEdges) {
           const eSrc = e.source?.toLowerCase();
           const eTgt = e.target?.toLowerCase();
-          // cross-group bundles only (both endpoints are group boxes)
           if (!groupAddrs.has(eSrc) || !groupAddrs.has(eTgt) || eSrc === eTgt) continue;
           let touchesC = false;
           for (const s of e.data?.samples || []) {
@@ -292,28 +218,16 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
       }
     }
 
-    // Audit-coverage highlight takes precedence when active: non-covered
-    // nodes dim, covered ones get a green ring so the user sees exactly
-    // which contracts an audit touched. Falls back to the connected-node
-    // dimming when no audit is selected.
+    // An audit/agent highlight takes precedence over connected-node dimming.
     const hiActive = highlightedAddresses && highlightedAddresses.size > 0;
 
     const foc = focusedAddress?.toLowerCase();
-    // Browse marker: gold treatment on the browsed ENTITY only — its group
-    // box or contract card when it owns a node, and its row(s) in the
-    // Controllers accordions otherwise (focusedControllerAddr below). Never
-    // the contracts it controls: that treatment belongs to an actual commit.
-    // Suppressed while it matches the committed selection so the committed
-    // node keeps just the selected ring.
+    // Gold marks the browsed entity only, never what it controls; suppressed on
+    // the committed selection.
     const browseLc = foc && foc !== selLc ? foc : null;
-    // Footprint-less fallback: an "authorized caller" principal (plain
-    // `controls`, no `co_controls`) owns no node and appears in no group's
-    // accordion — there is nothing of ITSELF to mark. Fall back to dotting
-    // the contracts it touches (the set FocusOnNode zooms to), each with a
-    // gold chip naming the browsed principal, saying it isn't drawn on the
-    // graph, and listing what it can call here (controls_detail).
-    // Strictly a fallback: any real footprint (node or row) suppresses it,
-    // so a browsed co-controller still marks its row, never its reach.
+    // Fallback for a principal with no node or accordion row: dot the contracts
+    // it touches, each with a chip naming it. Any real footprint suppresses
+    // this.
     let browseFallback = null;
     let browseChips = null;
     if (browseLc) {
@@ -334,19 +248,15 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
           browseFallback = new Set(touched);
           browseChips = new Map();
           const detailByAddr = buildControlsDetailMap(bp?.controls_detail, chain);
-          // Identity is the badge only — the search preview card is already
-          // naming the browsed principal (with address) while this chip is
-          // visible, so repeating the address just stretches the line.
+          // The search preview already shows the address.
           const who = principalBadge(bp);
           for (const t of browseFallback) {
             const d = detailByAddr.get(entityKey(chain, t));
             const fns = d?.functions || [];
             let what;
             if (fns.length) {
-              // Greedy name budget keeps the chip glanceable: names up to
-              // ~55 chars then "+N more"; if even the first name blows the
-              // budget, degrade to a count. The full list is one commit
-              // (Enter) away in the principal's sidebar card.
+              // Names up to ~55 chars then "+N more"; a count if even the first
+              // is too long.
               const names = [];
               for (const f of fns) {
                 if ([...names, f].join(", ").length > 55) break;
@@ -363,17 +273,10 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
         }
       }
     }
-    // Reach overlay: nodes the selection reaches transitively wear a purple chip
-    // naming the hop distance, and NO card treatment of their own — a tint or a
-    // fade would be a second, weaker encoding of the same fact and (at the far
-    // tiers) an unreadable card. Two sets come out of this:
-    //   reachChips  — chip text per node, hop >= 2 only (hop 1 already carries
-    //                 the acts-on chip)
-    //   reachBright — every closure member with a node here, plus the group
-    //                 boxes holding them: exempt from the selection dim, so a
-    //                 reached contract renders exactly as crisp as a direct one.
-    // Suppressed entirely under an audit/agent highlight overlay — that set is
-    // the answer to a different question and already owns the dim.
+    // Reached nodes get a hop chip and no card treatment (a tint would be a
+    // weaker duplicate). reachChips: hop >= 2 only (hop 1 has the acts-on
+    // chip). reachBright: closure nodes and their groups, exempt from the dim.
+    // Suppressed under an audit/agent overlay.
     const reachActive = !hiActive && sel && reachDistances && reachDistances.size > 0;
     const reachChips = new Map();
     const reachBright = new Set();
@@ -391,12 +294,8 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
       }
     }
 
-    // Reach ROUTES: the drawn edges lying on the closure's BFS tree, so each hop
-    // chip has a visible line back to the selection instead of a bare number.
-    // Two endpoint sets fall out of the pair list and carry the highlight onto
-    // the per-contract stubs — a bundled hop is drawn as
-    // (out-stub → group bundle → in-stub), and lighting only the middle segment
-    // would break the route in exactly the places grouping hid it.
+    // Light the drawn edges on the reach tree, including the stubs, so a
+    // bundled hop isn't broken at the groups.
     const reachPathActive = Boolean(reachActive && reachPathEdges && reachPathEdges.size);
     const reachPathSources = new Set();
     const reachPathTargets = new Set();
@@ -411,15 +310,9 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
       initNodes.map((n) => {
         const nid = n.id?.toLowerCase();
         const inAudit = hiActive && highlightedAddresses.has(nid);
-        // The selected node is never dimmed by a highlight overlay — a
-        // selection must always outrank a highlight set (agent highlights are
-        // cleared on selection, but an audit overlay can legitimately coexist,
-        // and the thing the user clicked must stay visible).
-        // Browse-marked nodes are exempt from every dim source — a preview
-        // you can't read is useless — but the dim itself stays anchored on
-        // the committed selection (or the active highlight set). A group
-        // whose accordion lists the browsed principal counts too: that row is
-        // the entity's only canvas footprint when it owns no node of its own.
+        // The selection is never dimmed by an overlay. Browse-marked nodes (and
+        // groups listing the browsed principal) are exempt from every dim
+        // source.
         const isFoc = (foc && nid === foc) || (browseFallback != null && browseFallback.has(nid));
         const hasBrowsedRow =
           browseLc &&
@@ -427,12 +320,8 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
           (n.data.controllers || []).some((c) => c.address?.toLowerCase() === browseLc);
         const dimmed = !isFoc && !hasBrowsedRow && !reachBright.has(nid) &&
           (hiActive ? (!inAudit && nid !== sel) : (sel && !connectedNodes.has(nid) && !brightGroups.has(nid)));
-        // Gold dotted ring = "browsing this" only. The committed node keeps
-        // just the selected ring, so the two states read as different colors.
         const focused = isFoc && nid !== selLc;
-        // Merge — don't replace — n.style. Group containers carry
-        // ELK-computed width/height in n.style and we'd otherwise blow
-        // them away each time selection changes.
+        // Merge, don't replace: groups carry ELK width/height in n.style.
         const baseStyle = n.style || {};
         const style = dimmed
           ? { ...baseStyle, opacity: 0.2 }
@@ -449,19 +338,11 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
             reachChip: reachChips.get(nid) || null,
             selectionChip: selectionChips.get(nid) || null,
             browseChip: browseChips?.get(nid) || null,
-            // Dispatch by node kind: contract nodes carry .machine,
-            // principal AND group nodes both carry .principal. A click on
-            // a group's header (the only pointer-events-active region)
-            // opens the principal detail just like a standalone
-            // PrincipalNode click, so users get the same drill-in either
-            // way.
+            // Contract nodes carry .machine; principal and group nodes carry
+            // .principal.
             onSelect: n.data.principal
               ? () => onSelectPrincipal && onSelectPrincipal(n.data.principal)
               : () => onSelectMachine(n.data.machine),
-            // Controllers-accordion wiring for group nodes: which controller is
-            // currently selected (so the row reads as active) or browse-focused,
-            // plus the select / measure callbacks that drive highlighting and
-            // the band-height reservation.
             ...(n.type === "group"
               ? {
                   selectedControllerAddr: sel || null,
@@ -478,38 +359,26 @@ export function SurfaceCanvas({ machines, fundFlows, principals, chain = "ethere
     const nextEdges = initEdges.map((e) => {
       const src = e.source?.toLowerCase();
       const tgt = e.target?.toLowerCase();
-      // Aggregated bundles already terminate at group endpoints, so
-      // the simple endpoint check matches even when the underlying
-      // sample edges have different addresses. The both-in-connected
-      // clause keeps intra-group child↔child edges visible when the
-      // group itself is selected — without it, clicking a group dims
-      // every internal wire because none of them touch the group
-      // address directly.
+      // Bundles terminate at groups, so the endpoint check works; the
+      // both-connected clause keeps intra-group edges lit when the group is
+      // selected.
       const edgeInAudit = hiActive && highlightedAddresses.has(src) && highlightedAddresses.has(tgt);
       const directlyConnected = src === sel || tgt === sel;
-      // A cross-group stub belongs to its CONTRACT endpoint (the other end is
-      // just the group box where the bundle joins). Light it whenever that
-      // contract is in the connected set — so selecting either end of a
-      // cross-group link lights the whole path: source's outbound stub → the
-      // shared bundle → the target's inbound stub. (Checking only the contract
-      // end avoids lighting every stub that merely shares the selected
-      // contract's group box.)
+      // A stub belongs to its contract end; lighting on that alone makes a
+      // cross-group path light end to end without lighting every stub in the
+      // box.
       const stubContractEnd = e.data?.stub ? (e.data.inbound ? tgt : src) : null;
       const stubRelated = stubContractEnd != null && connectedNodes.has(stubContractEnd);
-      // A stub is on a route when its contract end plays the matching ROLE in
-      // one: the outbound stub is where a hop leaves that contract, the inbound
-      // stub where a hop lands on it. Checking the role (not mere membership)
-      // keeps a stub that only carries unrelated traffic out of the highlight.
+      // Match the role (outbound = hop leaves, inbound = hop lands), not mere
+      // membership.
       const stubOnReachPath =
         reachPathActive &&
         stubContractEnd != null &&
         (e.data.inbound ? reachPathTargets.has(stubContractEnd) : reachPathSources.has(stubContractEnd));
       const onReachPath =
         reachPathActive && (stubOnReachPath || edgeOnReachPath(e, reachPathEdges));
-      // Edges the existing selection treatment already owns (directly connected,
-      // the selected contract's own bundles, its stubs) keep it: a hop-1 edge is
-      // stated by the acts-on chips, and restyling it violet would demote the
-      // stronger claim to the weaker one.
+      // Hop-1 edges keep the selection style; violet would demote the stronger
+      // claim.
       const selectionOwned = directlyConnected || relatedEdgeIds.has(e.id) || stubRelated;
       const related = hiActive
         ? edgeInAudit

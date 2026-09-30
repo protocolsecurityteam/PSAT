@@ -12,12 +12,9 @@ import { LaneColumn } from "./LaneColumn.jsx";
 import { ReachPath } from "./ReachPath.jsx";
 import { OpsLane } from "./OpsLane.jsx";
 
-// The one card for every surface selection. A `machine` facet (function lanes)
-// yields the full five-tab contract card; a `principal` facet (safe/EOA/
-// timelock) contributes identity badges, a signers list, and — for a
-// principal-only entity — collapses the card to the Governs tab alone. A
-// timelock/safe the server emits as BOTH renders the contract card with the
-// principal facet folded into its header + capability tags.
+// One card for every selection: a machine facet gives the five-tab contract
+// card; a principal-only entity collapses to Governs; dual-facet entities fold
+// the principal into the contract card's header.
 export function EntityCard({
   machine = null,
   principal = null,
@@ -36,10 +33,7 @@ export function EntityCard({
 }) {
   const isMachine = Boolean(machine);
   const address = (machine?.address || principal?.address || "").toLowerCase();
-  // Deployment chain of this entity. A machine carries its own chain; a
-  // principal has none, so it falls back to the page's active chain. Only
-  // surfaced (showChain) for multi-chain protocols — a badge on every card of a
-  // single-chain protocol would be noise.
+  // Principals carry no chain. Shown only on multichain protocols.
   const entityChain = machine?.chain || chain;
 
   const machineByAddr = useMemo(() => {
@@ -51,8 +45,7 @@ export function EntityCard({
     return map;
   }, [machines]);
 
-  // Can Call rows (authority OUT): client-inverted governed set, deduped and
-  // proxy/impl-tagged. Works for machine-only authorities (not just principals).
+  // Client-inverted so machine-only authorities work too.
   const canCallRows = useMemo(() => {
     const rows = (governsIndex?.get(address) || []).map((row) => {
       const m = machineByAddr.get(row.contractAddress);
@@ -67,12 +60,8 @@ export function EntityCard({
     return dedupeAndTagRows(rows);
   }, [governsIndex, address, machineByAddr]);
 
-  // Governance-path rows: the SERVER's reached set for this entity — the same
-  // record the canvas reach chips render, so tab and canvas cannot disagree.
-  // No record means no rows (fail closed: absence of the witness is not
-  // reach); the not_determined frontier is never mixed in — it surfaces as
-  // the count line GovernsTab renders from reachFrontierCount. Filtered to
-  // known machines (so we can name + focus them), deduped, proxy/impl-tagged.
+  // The server's reached set, same as the canvas chips; no record means no
+  // rows. The not_determined frontier is only the count line.
   const pathRows = useMemo(() => {
     const rows = [];
     for (const addr of reachDistances ? reachDistances.keys() : []) {
@@ -88,9 +77,6 @@ export function EntityCard({
     [isMachine, machine, highlightedFunctionKey],
   );
 
-  // Open on the default tab — Control for a contract, Governs for a
-  // principal-only card (its sole tab). Navigating in via a "go to" arrow lands
-  // here too, matching a direct canvas click.
   const [activeTab, setActiveTab] = useState(() => (isMachine ? "control" : "governs"));
 
   useEffect(() => {
@@ -112,11 +98,9 @@ export function EntityCard({
         control: machine.lanes.top.length + machine.lanes.ops.length,
         inflows: machine.lanes.left.length,
         outflows: machine.lanes.right.length,
-        // The count is of HOLDINGS. A balance the backend WITHHELD is still
-        // listed on the tab and still published, but counting it here would
-        // present it as a position this contract took. The predicate is the
-        // backend's own `disposition_state` — see BalanceTable: the withholding
-        // rule is a conjunction and a consumer that re-derives it carries half.
+        // Counts holdings: a withheld balance is listed but not counted. Uses
+        // the backend's `disposition_state`; re-deriving the conjunction would
+        // carry half of it.
         balances: (machine.balances || []).length,
         governs: canCallRows.length,
       }
@@ -148,10 +132,10 @@ export function EntityCard({
           {isMachine && (
             <>
               <span className="ps-badge" style={{ "--badge-accent": (ROLE_META[machine.role] || ROLE_META.utility).color }}>{(ROLE_META[machine.role] || ROLE_META.utility).singular}</span>
-              {/* Deposit-destination call-out for value_handler contracts that
-                  actually hold funds — plain-language answer to "where does my
-                  money go?" Gated on total_usd>0 so a pull-then-forward router
-                  isn't mislabeled. */}
+              {/*
+                Gated on total_usd>0 so a pull-then-forward router isn't
+                mislabeled.
+              */}
               {machine.role === "value_handler" && Number(machine.total_usd) > 0 ? (
                 <span className="ps-badge" style={{ "--badge-accent": "#22c55e" }}>Deposit destination</span>
               ) : null}
@@ -159,12 +143,11 @@ export function EntityCard({
               {machine.upgrade_count != null ? <span className="ps-badge" style={{ "--badge-accent": "#8b92a8" }}>{machine.upgrade_count} upgrades</span> : null}
               <span className="ps-badge" style={{ "--badge-accent": "#6b7590" }}>{machine.totalFunctions} functions</span>
               {usdLabel && <span className="ps-badge" style={{ "--badge-accent": "#f59e0b" }}>{usdLabel}</span>}
-              {/* Machine-facet timelock identity (canvas ContractNode's
-                  TIMELOCK marker uses the same fields). A machine-only
-                  timelock like EtherFiTimelock has no principals entry, so
-                  without this the node says TIMELOCK · 10D DELAY while the
-                  card says nothing. Skipped when a principal-facet timelock
-                  badge renders below, so dual-facet cards don't double-badge. */}
+              {/*
+                Machine-only timelocks (EtherFiTimelock) have no principal
+                entry; skipped when the principal badge renders, to avoid
+                double-badging.
+              */}
               {machine.isTimelock && principal?.type !== "timelock" ? (
                 <>
                   <span className="ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>Timelock</span>
@@ -175,8 +158,6 @@ export function EntityCard({
               ) : null}
             </>
           )}
-          {/* Identity badges for the principal facet (type + threshold/delay).
-              Same slot for a principal-only card and a dual-facet contract. */}
           {principal && (
             <>
               <span className="ps-badge" style={{ "--badge-accent": principalType.accent }}>{principalType.label}</span>
@@ -191,8 +172,7 @@ export function EntityCard({
         </div>
       </header>
 
-      {/* Above the tabs, not inside one: the route is why this card is open at
-          all, so it must be readable before any tab choice is made. */}
+      {/* Above the tabs: the route is why this card is open. */}
       <ReachPath reachPath={reachPath} />
 
       {principal?.type === "safe" && owners.length > 0 && (

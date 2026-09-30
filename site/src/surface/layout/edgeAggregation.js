@@ -1,20 +1,9 @@
-// Edge bundling + lane assignment for the surface canvas. Split from
-// elkLayout.js: aggregateEdges collapses raw contract→contract edges into one
-// bundle per endpoint pair; assignEdgeLanes fans bundles out across each
-// node side after positioning.
+// Edge bundling (aggregateEdges) and lane assignment (assignEdgeLanes) for the
+// canvas.
 
-// Collapse the raw edge list into one bundle per (endpoint-group,
-// endpoint-group) pair. The "endpoint" for an address is its
-// containing group's id if it's a child of a group, otherwise the
-// address itself. Intra-group edges (both endpoints resolve to the
-// same group) and self-loops get dropped entirely — they're invisible
-// at the macro view we're optimising for.
-//
-// The bundle preserves the underlying sample list under `data.samples`
-// so selection-dimming in SurfaceCanvas can drill back into which
-// specific contract→contract pair lit up. Width grows logarithmically
-// with the bundled count so a 20-edge bundle reads heavier than a
-// 2-edge bundle without dwarfing the canvas.
+// One bundle per (endpoint group, endpoint group) pair; intra-group edges and
+// self-loops are dropped at this macro view. `data.samples` keeps the
+// underlying pairs for selection; width grows logarithmically with count.
 export function aggregateEdges(rawEdges, contractToGroup, principalList, machines) {
   const canonicalByLc = new Map();
   for (const m of machines || []) {
@@ -24,12 +13,8 @@ export function aggregateEdges(rawEdges, contractToGroup, principalList, machine
     if (p.address) canonicalByLc.set(p.address.toLowerCase(), p.address);
   }
 
-  // Set of addresses that render as a GroupNode. Those nodes only
-  // carry ctrl-in (top) / ctrl-out (bottom) handles — if an
-  // aggregated value-flow edge keeps its original value-in/value-out
-  // handle on a group endpoint, React Flow can't resolve it and falls
-  // back to the node centre, drawing the edge from somewhere inside
-  // the container. Force ctrl handles for group endpoints to fix that.
+  // Groups only have ctrl-in/ctrl-out handles; a value handle on a group
+  // endpoint makes React Flow draw from the centre.
   const groupAddrs = new Set();
   for (const g of contractToGroup.values()) {
     if (g) groupAddrs.add(String(g).toLowerCase());
@@ -85,19 +70,8 @@ export function aggregateEdges(rawEdges, contractToGroup, principalList, machine
         strokeWidth: width,
       },
       animated: false,
-      // The shared-trunk routing from routeOrthogonal carries the
-      // "many connections" signal visually — every edge leaving a
-      // handle overlaps on the same perpendicular stub before forking,
-      // so the cable thickness at the bus column already reads as
-      // weight. A numeric count label on top of that was redundant and
-      // out of style with the rest of the page; selection chips
-      // (added later) communicate the per-edge specifics on click.
-      //
-      // Per-sample capabilities + flowType are preserved so chips can
-      // describe the SPECIFIC (from, to) flow rather than the bundle's
-      // union — bundles can mix flow shapes (e.g. controller vs
-      // principal, different cap sets per target) and a union'd chip
-      // misleadingly suggests every child has the same relationship.
+      // No count label: the shared trunk shows weight. Per-sample caps/flowType
+      // are kept so chips describe each specific pair.
       data: {
         flowType: b.samples[0]?.data?.flowType,
         capabilities: Array.from(
@@ -115,10 +89,7 @@ export function aggregateEdges(rawEdges, contractToGroup, principalList, machine
   return out;
 }
 
-// Handle id → axis the side runs along. Used by assignEdgeLanes to
-// know whether to compare endpoints by x or y when sorting members of
-// a single side bucket. Keep this in sync with the Handle <Position>
-// in ContractNode / GroupNode / PrincipalNode.
+// Keep in sync with the Handle positions in ContractNode / GroupNode.
 const HANDLE_AXIS = {
   "ctrl-in": "x",   // Position.Top
   "ctrl-out": "x",  // Position.Bottom
@@ -126,16 +97,9 @@ const HANDLE_AXIS = {
   "value-out": "y", // Position.Right
 };
 
-// After ELK has positioned every node, group edges by the (node,
-// handle) side they exit / enter and assign each one a lane index so
-// that the custom ChanneledStepEdge can fan them out across the side
-// rather than stacking on the handle centre. Lane 0 is centred, ±1 is
-// one slot away, etc.
-//
-// All members of a single bucket live in the same coordinate space —
-// either both top-level (cross-group bundles) or both children of the
-// same group (intra-group bundles). So a raw position.x/y comparison
-// is enough; we don't need to walk parent chains.
+// After ELK positions nodes, assign each edge a lane per (node, handle) side so
+// ChanneledStepEdge can fan them out. Bucket members share a coordinate space,
+// so raw position comparison suffices.
 export function assignEdgeLanes(nodes, edges) {
   const nodeById = new Map();
   for (const n of nodes) nodeById.set(n.id, n);

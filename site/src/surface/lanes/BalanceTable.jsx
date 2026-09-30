@@ -2,31 +2,22 @@ import { useState } from "react";
 
 import { formatUsd } from "../format.js";
 
-// The USD cell for one holding. Three states, and the two that used to render
-// identically are the point: `usd_value: 0` is PRICED and worth less than half a
-// cent, `usd_value: null` is "nobody determined what this is worth" — 1,001 of
-// 1,376 local rows — and `0` is falsy in JS, so both printed the same em dash.
-// `formatUsd` itself returns null below a cent, so a measured zero cannot be
-// routed through it either.
+// `usd_value: 0` is priced (under half a cent); `null` is unpriced (most rows).
+// Both are falsy in JS and used to print the same dash; `formatUsd` also
+// returns null below a cent.
 function usdCell(row) {
   const determined = row?.usd_value_state
     ? row.usd_value_state === "measured"
-    // Pre-fix payloads carry no state key. `usd_value` is the producer's own
-    // discriminator and encodes unpriced correctly as null, so fall back to it
-    // rather than treating a key-less row as either answer.
+    // Pre-fix payloads have no state key; `usd_value` null already means
+    // unpriced.
     : row?.usd_value != null;
   if (!determined) return { text: "not priced", className: "ps-balance-usd unpriced" };
   const formatted = formatUsd(row.usd_value);
-  // A measured value under a cent (including exactly 0) is still a measurement.
   return { text: formatted || "$0.00", className: "ps-balance-usd" };
 }
 
-// Whether this contract's holdings list can be reported as the whole set.
-// `holdings_coverage.state` is two-valued by construction — the backend cannot
-// prove completeness (see company_overview) — so this only ever answers
-// "cannot rule truncation out". Truncation is about assets that were never read;
-// pricing coverage is a separate fact, and it is carried per row by the "not
-// priced" cell rather than by a sentence here.
+// `holdings_coverage.state` can only say truncation isn't ruled out
+// (completeness is unprovable). Pricing coverage is shown per row.
 function coverageNote(machine) {
   const cov = machine?.holdings_coverage;
   if (cov?.state !== "may_be_incomplete") return null;
@@ -66,16 +57,13 @@ export function BalanceTable({ machine }) {
   const holdings = machine.balances || [];
   const partialObservations = machine.partial_balance_observations || [];
   if (holdings.length === 0 && partialObservations.length === 0) {
-    // An empty list is not "holds nothing": the fetch conflates no-tokens with a
-    // failed or unattempted class. Say only what was recorded.
+    // Not "holds nothing": the fetch conflates no tokens with failed or
+    // unattempted.
     return <div className="ps-lane-empty">No token balances recorded</div>;
   }
 
-  // Unpriced rows are KEPT by the dust filter on the strength of their price
-  // alone — a holding of unknown value is not known to be under $10, and hiding
-  // it for being unpriced would be the same null-as-zero fold this table just
-  // stopped making in the value cell. The button label below names every ground
-  // it is acting on, and each kept row carries its own "not priced" cell.
+  // The dust filter keeps unpriced rows: unknown value isn't known to be under
+  // $10.
   const isUnpriced = (b) => (b?.usd_value_state ? b.usd_value_state !== "measured" : b?.usd_value == null);
   const isDust = (b) => !isUnpriced(b) && b.usd_value < 10;
   const filtered = hideDust ? holdings.filter((b) => !isDust(b)) : holdings;
@@ -100,9 +88,7 @@ export function BalanceTable({ machine }) {
           <BalanceRow key={i} row={b} />
         ))}
         {filtered.length === 0 && (
-          // Says what the FILTER did, not what the contract holds: with the
-          // reference ground folding rows too, "nothing above $10" would be a
-          // false statement about a list that may also be hiding unpriced rows.
+          // Describes the filter, not the holdings.
           <div className="ps-lane-empty">
             {hiddenCount > 0 ? "Every holding is hidden by the filter above" : "No holdings to list"}
           </div>
