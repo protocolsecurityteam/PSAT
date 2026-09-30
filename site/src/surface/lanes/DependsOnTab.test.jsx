@@ -76,7 +76,7 @@ describe("DependsOnTab", () => {
     fireEvent.click(name);
     expect(onPreview).toHaveBeenCalledWith(LP_PROXY);
     // The GotoArrow commit → onNavigate with the canvas address
-    const row = name.closest(".ps-depends-row");
+    const row = name.closest(".ref-row");
     fireEvent.click(within(row).getByRole("button", { name: /Go to LiquidityPool/ }));
     expect(onNavigate).toHaveBeenCalledWith(expect.objectContaining({ address: LP_PROXY, type: "contract" }));
   });

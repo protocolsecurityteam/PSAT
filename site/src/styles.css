@@ -19,6 +19,7 @@
 @import "./styles/surface/layout-search.css";
 @import "./styles/surface/layout-chain-switcher.css";
 @import "./styles/surface/layout-governs.css";
+@import "./styles/surface/ref-row.css";
 @import "./styles/surface/layout-depends.css";
 @import "./styles/surface/layout-integration-witness.css";
 @import "./styles/surface/layout-principal-nodes-groups.css";

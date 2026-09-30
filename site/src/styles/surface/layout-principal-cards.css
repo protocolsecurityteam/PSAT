@@ -29,8 +29,7 @@
 }
 
 .ps-principal-clickable:hover .ps-goto-arrow,
-.ps-caller-btn:hover .ps-goto-arrow,
-.ps-governs-head:hover .ps-goto-arrow {
+.ps-caller-btn:hover .ps-goto-arrow {
   color: #94a3b8;
 }
 

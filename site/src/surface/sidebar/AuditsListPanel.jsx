@@ -1,12 +1,10 @@
 import { useState } from "react";
-
 import { isBytecodeVerifiedAudit } from "../../audits/auditCoverage.js";
 import { formatAuditDate } from "../../audits/auditUi.jsx";
 import { AuditReadModal } from "../modals/AuditReadModal.jsx";
-import { GotoArrow } from "../GotoArrow.jsx";
 import { entityKey } from "../entityKey.js";
 import { principalLabel, shortAddr } from "../format.js";
-import { clickable } from "../../shared/clickable.js";
+import { EntityRef } from "../EntityRef.jsx";
 
 // Picked-audit state is one radio: null, an audit_id, or ALL_PROVEN.
 const ALL_PROVEN = "all";
@@ -144,22 +142,7 @@ function ProtocolAuditsView({
         {allActive && canExpand && (
           <div className="ps-audits-covlist">
             {provenList.map((c) => (
-              <div
-                key={c.address}
-                className="ps-audits-covrow"
-                {...clickable(() => onPreview?.(c.address))}
-              >
-                <span className="ps-audits-covrow-name">{c.name}</span>
-                <span className="ps-audits-covrow-addr">{shortAddr(c.address)}</span>
-                {onNavigate && (
-                  <GotoArrow
-                    onCommit={() =>
-                      onNavigate({ type: "contract", address: c.address, label: c.name })
-                    }
-                    label={`Go to ${c.name}`}
-                  />
-                )}
-              </div>
+              <EntityRef key={c.address} address={c.address} name={c.name} onPreview={onPreview} onNavigate={onNavigate} />
             ))}
           </div>
         )}

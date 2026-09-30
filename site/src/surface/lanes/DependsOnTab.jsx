@@ -1,11 +1,9 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useResource } from "../../shared/useResource.js";
-
 import { blockExplorerAddressUrl, blockExplorerName } from "../blockExplorer.js";
-import { fnChipClass, shortAddr } from "../format.js";
-import { GotoArrow } from "../GotoArrow.jsx";
+import { fnChipClass } from "../format.js";
 import { buildDependencyView, fetchDependencyGraphViz } from "../layout/dependencies.js";
-import { clickable } from "../../shared/clickable.js";
+import { EntityRef } from "../EntityRef.jsx";
 
 // The selected contract's outbound calls: external integrations (the trust
 // surface shown nowhere else) as cards, internal calls one row per sibling.
@@ -86,43 +84,16 @@ function ExternalCard({ row, chain }) {
 }
 
 function InternalRow({ row, onPreview, onNavigate }) {
-  const [open, setOpen] = useState(false);
-  const preview = () => onPreview && onPreview(row.onCanvasAddress);
   return (
-    <div className={`ps-depends-row${open ? " open" : ""}`}>
-      <div className="ps-depends-head">
-        <span
-          className="ps-depends-preview"
-          {...clickable(preview)}
-        >
-          <span className="ps-depends-name">{row.name}</span>
-          <span className="ps-depends-addr">{shortAddr(row.onCanvasAddress)}</span>
-        </span>
-        <button
-          type="button"
-          className="ps-depends-toggle"
-          aria-expanded={open}
-          onClick={(e) => {
-            e.stopPropagation();
-            setOpen((v) => !v);
-          }}
-        >
-          {countSummary(row)}
-          <span className="ps-depends-caret">{open ? "▾" : "▸"}</span>
-        </button>
-        {onNavigate && (
-          <GotoArrow
-            onCommit={() => onNavigate({ type: "contract", address: row.onCanvasAddress, label: row.name })}
-            label={`Go to ${row.name}`}
-          />
-        )}
-      </div>
-      {open && (
-        <div className="ps-depends-body">
-          <VerbLines row={row} />
-        </div>
-      )}
-    </div>
+    <EntityRef
+      address={row.onCanvasAddress}
+      name={row.name}
+      summary={countSummary(row)}
+      onPreview={onPreview}
+      onNavigate={onNavigate}
+    >
+      <VerbLines row={row} />
+    </EntityRef>
   );
 }
 

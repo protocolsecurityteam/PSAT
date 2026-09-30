@@ -90,41 +90,6 @@
   border-top: 1px solid rgba(74, 222, 128, 0.16);
 }
 
-.ps-audits-covrow {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 5px 6px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.ps-audits-covrow:hover {
-  background: rgba(74, 222, 128, 0.06);
-}
-
-.ps-audits-covrow-name {
-  flex: 1;
-  min-width: 0;
-  font-weight: 700;
-  font-size: 12px;
-  color: #cbd5e1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ps-audits-covrow-addr {
-  flex: none;
-  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
-  font-size: 9.5px;
-  color: #64748b;
-}
-
-.ps-audits-covrow:hover .ps-goto-arrow {
-  color: #94a3b8;
-}
-
 .ps-audits-summary-big {
   font-weight: 800;
   color: #e2e8f0;

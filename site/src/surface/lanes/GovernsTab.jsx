@@ -1,55 +1,26 @@
-import { useState } from "react";
-
-import { fnChipClass, formatUsd, shortAddr } from "../format.js";
-import { GotoArrow } from "../GotoArrow.jsx";
-import { clickable } from "../../shared/clickable.js";
+import { fnChipClass, formatUsd } from "../format.js";
+import { EntityRef } from "../EntityRef.jsx";
 
 // Shared row: head previews, arrow commits. The "N fns" button appears only on
 // Can Call rows (path rows are reachability-only).
 function GovernsRow({ row, onPreview, onNavigate }) {
-  const [open, setOpen] = useState(false);
-  const label = row.name || shortAddr(row.address);
   const functions = Array.isArray(row.functions) ? row.functions : [];
-  const usd = formatUsd(row.total_usd);
-
   return (
-    <div className="ps-governs-row">
-      <div
-        className="ps-governs-head"
-        {...clickable(() => onPreview && onPreview(row.address))}
-      >
-        <span className="ps-governs-name">
-          {label}
-          {row.tag ? <span className="ps-governs-tag"> ({row.tag})</span> : null}
-        </span>
-        <span className="ps-governs-addr">{shortAddr(row.address)}</span>
-        {usd ? <span className="ps-governs-value">{usd}</span> : null}
-        {functions.length > 0 ? (
-          <button
-            type="button"
-            className="ps-governs-expand"
-            aria-expanded={open}
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen((v) => !v);
-            }}
-          >
-            {functions.length} fns
-            <span className="ps-governs-caret">{open ? "▾" : "▸"}</span>
-          </button>
-        ) : null}
-        {onNavigate && (
-          <GotoArrow onCommit={() => onNavigate({ type: "contract", address: row.address, label })} label={`Go to ${label}`} />
-        )}
+    <EntityRef
+      address={row.address}
+      name={row.name}
+      tag={row.tag}
+      value={formatUsd(row.total_usd)}
+      summary={functions.length > 0 ? `${functions.length} fns` : null}
+      onPreview={onPreview}
+      onNavigate={onNavigate}
+    >
+      <div className="ps-ctrl-fns">
+        {functions.map((fn) => (
+          <span className={`ps-ctrl-fnchip ${fnChipClass(fn)}`} key={fn}>{fn}</span>
+        ))}
       </div>
-      {open && functions.length > 0 && (
-        <div className="ps-ctrl-fns">
-          {functions.map((fn) => (
-            <span className={`ps-ctrl-fnchip ${fnChipClass(fn)}`} key={fn}>{fn}</span>
-          ))}
-        </div>
-      )}
-    </div>
+    </EntityRef>
   );
 }
 

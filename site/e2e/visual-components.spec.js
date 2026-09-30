@@ -178,7 +178,7 @@ test.describe("component visual baselines", () => {
     await expect(sidebar(page)).toHaveScreenshot("card-balances.png", SHOT);
     await cardTab(page, "Depends");
     await page.waitForTimeout(300);
-    await page.locator(".ps-depends-toggle").first().click();
+    await page.locator(".ref-toggle").first().click();
     await expect(sidebar(page)).toHaveScreenshot("card-depends.png", SHOT);
   });
 
@@ -187,7 +187,7 @@ test.describe("component visual baselines", () => {
     await page.locator(".ps-group-header").first().click();
     await page.waitForTimeout(300);
     await sidebarTab(page, "Detail");
-    const expand = page.locator(".ps-governs-expand").first();
+    const expand = page.locator(".ref-toggle").first();
     if (await expand.count()) await expand.click();
     await expect(sidebar(page)).toHaveScreenshot("card-governs.png", SHOT);
   });
