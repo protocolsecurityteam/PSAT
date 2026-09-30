@@ -1,5 +1,3 @@
-"""The confidence term."""
-
 from __future__ import annotations
 
 from collections import defaultdict
@@ -18,17 +16,10 @@ def _entities_outside_perimeter(
     perimeter: dict[str, float],
     value_plane: P.ValuePlane,
 ) -> list[str]:
-    """Deployment AND reach keys the confidence denominator never asked about.
+    """Deployment and reach keys the confidence denominator never asked about.
 
-    A signal answers questions about the entity it was distilled on, and it
-    charges value against the entities it REACHES. Checking only the first left
-    a reach key that no denominator accounts for invisible to the disclosure
-    that exists to name it — value carried into a finding by an entity whose
-    unanswered weight is nowhere. The keys the closure walk ADDS to a reach are
-    admitted to the perimeter by construction (every principal and everything it
-    controls), so the witnessed keys are the ones that can fall outside. The zero
-    address is refused by an admission rule with its own published count, so its
-    absence is a decision rather than a gap and it is not reported here.
+    Closure-added keys are in the perimeter by construction, so only witnessed keys can fall outside. The zero address
+    has its own admission count and isn't reported.
     """
     outside = {key for key in answered if key not in perimeter}
     for signal in signals:
@@ -39,12 +30,8 @@ def _entities_outside_perimeter(
     return sorted(outside)
 
 
-# The three ways the reach-magnitude term counts a signal as ANSWERED, as
-# tokens, so the reading below is assembled from the same names the loop counts
-# under. Each clause states which evidence supplied the answer, because that is
-# the fact a consumer subtracting one class from the term needs: they are three
-# different proofs of three different strengths and one word for all of them
-# ("witnessed") is what made the split necessary in the first place.
+# The three ways the reach-magnitude term counts a signal as answered. Named separately because they are proofs of
+# different strength.
 CREDIT_PATH_OWN = "own_call_witness"
 
 
@@ -73,10 +60,7 @@ _CREDIT_PATH_CLAUSES = {
 def _credit_path_reading(counts: dict[str, int]) -> str:
     """How the answered population splits across the three credit paths.
 
-    Every registered path is named whatever it counted, including zero. A clause
-    dropped for having no carriers would leave a reader unable to tell a path
-    that did not fire on this corpus from one this model does not have, and the
-    counts are the whole point of publishing the split.
+    Every path is named even at zero so "didn't fire" is distinguishable from "doesn't exist".
     """
     parts = [f"{counts.get(path, 0)} from {clause}" for path, clause in _CREDIT_PATH_CLAUSES.items()]
     return (
@@ -88,15 +72,9 @@ def _credit_path_reading(counts: dict[str, int]) -> str:
 
 
 def _mixed_witness_cause(mixed: int, composed: int, ceiling: int, fold_only: int) -> str:
-    """What put entities in the mixed population, counted rather than asserted.
+    """What put entities in the mixed population, as counts, so a mechanism that didn't fire isn't implied.
 
-    An answer the FOLD supplied is what turns a 0/n entity into a mixed one, and
-    there are now two of those. The sentence names the counts of each because
-    naming only the mechanism would keep reading as though both fired on a corpus
-    where one of them has no carriers. The empty case is an earned negative: the
-    edge exists on its own, from entities that carry a call witness of their own
-    at some signals and not at others, and saying so is a different fact from
-    saying nothing.
+    The empty case still names entities mixed by their own witnesses.
     """
     if not mixed:
         return (
@@ -127,62 +105,19 @@ def _confidence(
     composed_signals: set[tuple[Any, ...]] | None = None,
     ceiling_signals: set[tuple[Any, ...]] | None = None,
 ) -> dict[str, Any]:
-    """Monotone in resolution work: the denominator is the PERIMETER.
+    """Monotone in resolution work: the denominator is the perimeter.
 
-    The perimeter's base population is the protocol's ``contracts`` rows, unioned
-    with the value plane and the control closure. Discovery fixes that base, so it
-    does not move with what has been analysed — losing a contract's signals cannot
-    drop its unanswered weight out of its own denominator — while an unpriced
-    contract outside the closure still carries ``band(None)`` of unanswered
-    weight rather than vanishing. Seeding it from the signal population instead
-    is what let LESS analysis publish MORE confidence. Four figures, and the
-    headline is the MINIMUM — knowing who can call something, knowing what it
-    does, being able to price what it reaches, and knowing HOW MUCH the reach
-    moves are different questions.
+    The perimeter is the protocol's ``contracts`` rows plus the value plane and the control closure. Discovery fixes it,
+    so losing analysis can't raise confidence. ``discovery_entities`` adds every endpoint of every discovered relation,
+    walked or not, so declining a relation can only charge confidence (inv. 6). The headline is the minimum of four
+    terms: reachability, capability, pricing, and reach magnitude.
 
-    The closure the scorer WALKS is a subset of the relations discovery proved
-    exist, so seeding the perimeter from the walked closure alone let declining a
-    relation FREE confidence: the entities that relation proved are principals of
-    gated functions never entered the denominator. ``discovery_entities`` carries
-    every endpoint of every relation in the DB's own authority vocabulary, walked
-    or not, so declining one charges confidence and can never relieve it (inv. 6).
+    Reach magnitude counts a proven reach with no proven magnitude as unanswered. Its denominator is the whole
+    perimeter, the only shape monotone under lost work. ``ceiling_signals`` is the third credit path (sheet ceilings),
+    used as the fold built it: only ceilings that are the standing published figure, ties included.
 
-    The fourth term is the honest home for an unproven magnitude. A signal that
-    proved reach but not how much value that reach moves is UNANSWERED here — the
-    unknown that otherwise has nowhere to land but the grade. Its denominator is
-    the whole perimeter, exactly as the reachability and capability terms', which
-    is the only shape monotone under losing work: an entity whose signals vanish
-    contributes zero either way, while a denominator scoped to entities that
-    happen to carry a signal would RISE when a signal is lost.
-
-    ``ceiling_signals`` is the fold's OTHER answer to the magnitude question and
-    the THIRD credit path: the signals whose controlled node was priced from its
-    own SHEET. It is consumed exactly as the fold built it and is never
-    re-derived here — a second derivation of "which signals got an answer" is
-    precisely what drifts from the rows that publish one.
-
-    What that population IS matters as much as that it is credited. It is
-    per-entity and STANDING: the signals whose sheet ceiling is the figure the
-    row actually publishes at that entity. A ceiling a larger contribution
-    displaced is not in it, and neither is one the per-key sheet reconciliation
-    withdrew, so every credited answer has a carrier in the published document
-    rather than a number the fold computed and then discarded. Ties keep their
-    credit — several calls on one node read the same sheet and each of them
-    proved the figure the row publishes — and only a ceiling strictly beaten
-    loses it.
-
-    Every key is admitted through ``value_plane.canonical``: an implementation
-    is the same entity as the proxy that deploys it, and admitting both hands
-    the impl a second copy of the proxy's value band that no signal can ever
-    answer (signals are distilled at the proxy address). The alias map comes
-    from the same discovery-fixed ``contracts`` rows as the base population, so
-    folding through it keeps the denominator independent of analysis. The zero
-    address is excluded outright — it is a burn sentinel, not an assessable
-    entity (``msg.sender != 0x0``). A perimeter entity proven codeless
-    (``resolved_type == 'eoa'``, earned from an empty ``eth_getCode``) has no
-    capability surface to leave unanswered: its reach and capability terms are
-    vacuously answered, while its pricing term is untouched — holding value is
-    a question code-lessness does not answer.
+    Keys go through ``value_plane.canonical`` so an implementation doesn't get a second copy of its proxy's band. The
+    zero address is excluded. A proven-codeless entity answers reach and capability vacuously but not pricing.
     """
     perimeter: dict[str, float] = {}
     folded: set[str] = set()
@@ -205,10 +140,7 @@ def _confidence(
         admit(key)
         for controlled in closure.controlled_by(key):
             admit(controlled)
-    # Everything above is what the scorer WALKED. Everything below is what
-    # discovery PROVED exists, per relation — counted against the walked base so
-    # each relation's own contribution is visible rather than assigned to
-    # whichever relation happened to be admitted first.
+    # Below here is what discovery proved exists, counted per relation against the walked base.
     walked = set(perimeter)
     discovery = discovery_entities or {}
     discovery_admitted: dict[str, int] = {}
@@ -228,14 +160,9 @@ def _confidence(
     magnitude_census: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     composed_census: dict[str, int] = defaultdict(int)
     ceiling_census: dict[str, int] = defaultdict(int)
-    # Counted rather than subtracted. The three credit paths are exclusive by the
-    # order they are tried below, and a count taken directly cannot report a
-    # population that an arithmetic residual would silently absorb if that ever
-    # stopped being true.
+    # Counted directly rather than as a residual, so a broken exclusivity assumption would show.
     own_witness_signals = 0
-    # Which of the three paths answered at each entity, so the mixed-entity
-    # reading below can say what put an entity in that population instead of
-    # asserting a cause. Kept per key because "mixed" is a per-entity fact.
+    # Per key, so the mixed-entity reading can name its cause.
     credit_paths_by_key: dict[str, set[str]] = defaultdict(set)
     for signal in signals:
         key = value_plane.canonical(entity_key(signal.chain, signal.deployment_address))
@@ -251,9 +178,7 @@ def _confidence(
         if answered and signal.enters_grade:
             scored[key][0] += 1
         if signal.claim_id == "flow.out":
-            # The pricing term: an unpriceable reach is a real gap in what the
-            # grade could measure, and leaving it out of confidence would make
-            # unpriceable value free.
+            # Unpriceable reach is a real gap; omitting it would make unpriceable value free.
             priced[key][1] += 1
             asset_class = _gate(signal, "asset_class")
             decidable = not _gate(signal, "token_identity").is_determined and (
@@ -264,43 +189,13 @@ def _confidence(
             if decidable and value_plane.total(key) is not None:
                 priced[key][0] += 1
         if signal.value_state == VALUE_STATE_PROVEN_REACH:
-            # The reach-magnitude term. A proven reach whose magnitude has no
-            # witness is the unknown that otherwise lands in the grade as the
-            # entity's whole balance sheet; here it lands as UNANSWERED, which is
-            # the only place it can sit without being published as a number.
+            # The reach-magnitude term. Every proven-reach signal is in the denominator (a per-capability exclusion list
+            # was removed: dropping signals raised the term).
             #
-            # EVERY proven-reach signal is in the denominator. A per-capability
-            # exclusion list was tried and removed: a capability that publishes
-            # proven_reach is claiming it can move value, and its only live effect
-            # was on entities carrying both an excluded and an admitted signal,
-            # where dropping the excluded one RAISED the term by discarding a real
-            # unanswered question — the shape this term exists to stop.
-            #
-            # A magnitude the fold COMPOSED counts as answered here on the same
-            # terms as one the signal carried itself: the answer is a witness
-            # either way (the destination function's own flow.out figure), and
-            # the whole point of composing it is that the question stops being
-            # open. It is counted separately below so a reader can see which of
-            # the two supplied it, and composed answers are recorded per signal
-            # rather than per entity — an entity carrying two proven reaches of
-            # which one composed is 1/2 answered, not answered.
-            #
-            # A SHEET CEILING is the third path, credited on the same terms and
-            # counted apart for the same reason. "How much can this reach move"
-            # has been given a proven bound — the controlled node's own priced
-            # holdings, which bound it because the code that would have stood in
-            # the way is the code the principal can replace — and a question
-            # answered with an at-most is not the same as one nobody answered.
-            # The credit is NOT vacuous: unlike the codeless credit below it
-            # rests on a balance observation, which is why it moves the witnessed
-            # term without moving the vacuous share published beside it.
-            #
-            # The three paths are tried in a fixed order and each signal takes at
-            # most one, so the three counters partition the answered population
-            # instead of overlapping it. Composition and the sheet ceiling are
-            # disjoint by construction anyway — one fires only for gate control
-            # and the other only for code control — and the order is what keeps
-            # that a property of this loop rather than of a rule elsewhere.
+            # A signal is answered by its own witness, a composed destination witness, or a sheet ceiling (an at-most
+            # bound from a balance observation, so not vacuous). Paths are tried in fixed order and each signal takes at
+            # most one, so the counters partition the answered set. Credit is per signal: one composed of two reaches is
+            # 1/2.
             own = _gate(signal, "reach_magnitude_usd").is_determined
             identity = _signal_identity(signal)
             by_composition = not own and identity in (composed_signals or set())
@@ -332,11 +227,8 @@ def _confidence(
     for key in codeless_answered:
         reach[key] = [1, 1]
         scored[key] = [1, 1]
-        # No code is no capability, and no capability moves no value: there is no
-        # reach magnitude here to leave unwitnessed. Same earned getCode witness,
-        # same VACUOUS answer — counted in the term and disclosed separately as
-        # ``reach_magnitude_vacuous_credit_pct``, because a vacuous answer is not
-        # a witness. The pricing term still stands alone.
+        # Codeless means no capability and no magnitude to witness: a vacuous answer, disclosed as
+        # ``reach_magnitude_vacuous_credit_pct``. Pricing still stands alone.
         magnitude[key] = [1, 1]
 
     outside = _entities_outside_perimeter(signals, reach, perimeter, value_plane)
@@ -345,19 +237,10 @@ def _confidence(
     priced_weight = sum(perimeter[k] for k in sorted(perimeter) if value_plane.total(k) is not None)
     priced_pct = round(100.0 * priced_weight / denominator, 1) if denominator else 0.0
     magnitude_pct = round(100.0 * weighted(magnitude) / denominator, 1) if denominator else 0.0
-    # The share of the denominator this term could reach at its best: every entity
-    # already answered vacuously, plus every reach-carrying entity if all of its
-    # proven reaches carried a magnitude witness. Without it a consumer cannot
-    # tell how much of the gap is unwitnessed magnitude from how much is perimeter
-    # the signal population never covered — two different pieces of work.
+    # The best this term could reach, separating unwitnessed magnitude from perimeter no signal covered.
     magnitude_ceiling = sum(perimeter[k] for k in sorted(magnitude) if magnitude[k][1] and k in perimeter)
     magnitude_ceiling_pct = round(100.0 * magnitude_ceiling / denominator, 1) if denominator else 0.0
-    # Most of this term can be VACUOUS: a proven-codeless entity answers it with
-    # no magnitude witness at all. Publishing the headline alone would let a
-    # perimeter full of EOAs read as answered magnitude, so the vacuous share is
-    # published beside it (term minus this is the witness-backed share of the
-    # denominator) together with the witnessed share of the weight that actually
-    # carries a proven reach — the figure that only rises when W3/W4b do work.
+    # Vacuous (codeless) credit is published beside the headline so EOAs don't read as answered magnitude.
     vacuous = {key for key in codeless_answered if key in perimeter}
     vacuous_weight = sum(perimeter[key] for key in sorted(vacuous))
     vacuous_pct = round(100.0 * vacuous_weight / denominator, 1) if denominator else 0.0
@@ -365,37 +248,13 @@ def _confidence(
     reaching_weight = sum(perimeter[key] for key in reaching)
     reaching_answered = sum(perimeter[key] * (magnitude[key][0] / magnitude[key][1]) for key in reaching)
     witnessed_of_reaching_pct = round(100.0 * reaching_answered / reaching_weight, 1) if reaching_weight else 0.0
-    # Counted off the census, not off the weighted table: the table also carries
-    # the vacuous credit for proven-codeless entities, which are not signals.
+    # From the census, since the weighted table includes codeless entities.
     signals_seen = sum(v[1] for v in magnitude_census.values())
     signals_witnessed = sum(v[0] for v in magnitude_census.values())
-    # The term is a per-entity FRACTION, so an entity carrying one witnessed and
-    # one unwitnessed proven reach sits at 1/2 — and removing the unwitnessed
-    # signal moves it to 1/1, RAISING the term for having proven less.
-    #
-    # RE-EXAMINED at W4b and WAIVED again, now with a measured bound instead of
-    # an argument. Two facts decided it. First, the shape is not this term's: all
-    # four terms are the same per-entity answered/seen fraction over the same
-    # signal population, so deleting an unanswered signal raises the
-    # reachability and capability terms identically — it is a property of the
-    # model's shape, and closing it here alone would leave the headline (a MIN
-    # over the four) moving on the others anyway. Second, no denominator closes
-    # it: every ratio whose denominator counts only the questions that were POSED
-    # rises when an unanswered one is deleted, and a denominator that does not
-    # shrink would have to count magnitude questions an entity owes independently
-    # of its signals — a population nothing in the schema supplies. Denominating
-    # over signals rather than entities (the alternative named in the W3 review)
-    # has the identical algebra and additionally breaks the min() comparability
-    # with the other three terms.
-    #
-    # So the exposure is SIZED and published rather than closed. An answer the
-    # FOLD supplied — a composed destination witness or a sheet ceiling — widens
-    # it, because that is what turns a 0/n entity into a mixed one, and the two
-    # figures below say by exactly how much: the largest single deletion that
-    # could move the term, and the move if every unwitnessed signal at every
-    # mixed entity vanished at once. Which of the two did it is MEASURED rather
-    # than asserted: the reading names the counts, so a corpus where only one of
-    # them fires does not read as though both did.
+    # Known monotonicity edge: deleting an unwitnessed signal at a mixed entity (e.g. 1/2 to 1/1) raises the term.
+    # Waived: all four terms share this per-entity fraction shape, and any posed-questions denominator has it. Instead
+    # the exposure is sized: the largest single-deletion gain and the all-deletions gain, with counts of which fold
+    # answer (composed or ceiling) created the mixed entities.
     mixed = [key for key in sorted(magnitude) if key not in vacuous and 0 < magnitude[key][0] < magnitude[key][1]]
     single_gain = total_gain = 0.0
     for key in mixed:
@@ -409,11 +268,7 @@ def _confidence(
     mixed_paths = {key: credit_paths_by_key.get(key, set()) for key in mixed}
     mixed_composed = sum(1 for paths in mixed_paths.values() if CREDIT_PATH_COMPOSED in paths)
     mixed_ceiling = sum(1 for paths in mixed_paths.values() if CREDIT_PATH_SHEET_CEILING in paths)
-    # The entities the fold's own answer is the ONLY thing that moved off 0/n:
-    # no signal at them carried a magnitude witness of its own, so without the
-    # composed figure or the sheet ceiling they would not be in this population
-    # at all. A stronger claim than "carries a fold-supplied answer" and the one
-    # worth publishing, so it is tested rather than inferred from the counts.
+    # Entities moved off 0/n only by a fold-supplied answer; tested directly, not inferred.
     mixed_fold_only = sum(1 for paths in mixed_paths.values() if paths and CREDIT_PATH_OWN not in paths)
     return {
         "pct": min(reach_pct, capability_pct, priced_pct, magnitude_pct),
@@ -422,31 +277,18 @@ def _confidence(
         "value_priced_pct": priced_pct,
         "reach_magnitude_witnessed_pct": magnitude_pct,
         "reach_magnitude_ceiling_pct": magnitude_ceiling_pct,
-        # Both in the same units as the term (share of the perimeter denominator),
-        # so ``witnessed_pct - vacuous_credit_pct`` is the witness-backed share.
+        # Same units as the term, so ``witnessed_pct - vacuous_credit_pct`` is the witness-backed share.
         "reach_magnitude_vacuous_credit_pct": vacuous_pct,
-        # Of the perimeter weight that actually carries a proven reach, the share
-        # whose magnitude is witnessed. No vacuous credit is in this figure.
+        # No vacuous credit in this one.
         "reach_magnitude_witnessed_of_reaching_pct": witnessed_of_reaching_pct,
         "reach_magnitude_signals": {
             "proven_reach_in_denominator": signals_seen,
             "magnitude_witnessed": signals_witnessed,
-            # Of those, the ones answered by COMPOSING the destination
-            # function's witness rather than by a witness on the signal's own
-            # call. Published apart because they are the same kind of answer
-            # arrived at through one more join, and a reader sizing the
-            # pipeline's own magnitude coverage needs to be able to subtract
-            # them.
+            # Composed answers, published apart so a reader can subtract them from own-call coverage.
             "magnitude_composed": sum(composed_census.values()),
             "composed_by_capability": {k: v for k, v in sorted(composed_census.items())},
-            # The THIRD answer, counted apart from both for the reason the
-            # composed one is: it carries no call witness at all. The controlled
-            # node's own priced sheet bounds the move from above, which is a
-            # different and weaker claim than either of the other two, so a
-            # reader sizing what the pipeline MEASURED has to be able to
-            # subtract it. The name says which ceiling this is —
-            # reach_magnitude_ceiling_pct beside it is the term's HEADROOM and
-            # is a different quantity entirely.
+            # Sheet-ceiling answers carry no call witness and are a weaker claim, so they're published apart. Not the
+            # same as reach_magnitude_ceiling_pct (the term's headroom).
             "magnitude_sheet_ceiling": sum(ceiling_census.values()),
             "sheet_ceiling_by_capability": {k: v for k, v in sorted(ceiling_census.items())},
             "credit_path_reading": _credit_path_reading(
@@ -463,10 +305,8 @@ def _confidence(
                 CREDIT_PATH_SHEET_CEILING: mixed_ceiling,
                 "no_own_call_witness_at_all": mixed_fold_only,
             },
-            # The size of the monotonicity edge below, in the term's own units.
-            # The first is the most the term could rise from deleting ONE
-            # unwitnessed proven-reach signal; the second from deleting every
-            # unwitnessed signal at every mixed entity.
+            # Size of the monotonicity edge: max gain from deleting one unwitnessed signal, and from deleting all of
+            # them at mixed entities.
             "mixed_witness_max_single_deletion_gain_pct": mixed_single_pct,
             "mixed_witness_total_deletion_gain_pct": mixed_total_pct,
             "mixed_witness_reading": (
@@ -498,16 +338,11 @@ def _confidence(
         },
         "flow_pricing_decidable": {k: v for k, v in sorted(priced.items()) if v[1]},
         "perimeter_entities": len(perimeter),
-        # Entities a signal answers FOR or reaches INTO that the denominator
-        # never asked about, so the work is invisible to this figure and, for a
-        # reach key, the value is charged into a finding while its own
-        # unanswered weight sits in no denominator. With the contracts base
-        # population this should be empty; a non-empty list is a discovery gap,
-        # published rather than absorbed.
+        # Entities a signal answers for or reaches into that the denominator never asked about. Should be empty;
+        # non-empty is a discovery gap.
         "signal_entities_outside_perimeter": outside,
         "perimeter_value_weighted_denominator": denominator,
-        # Each admission rule, counted where it fired, so a consumer can see
-        # what the denominator folded or refused rather than inferring it.
+        # Each admission rule is counted where it fired.
         "implementation_entities_folded": len(folded),
         "zero_address_entities_excluded": len(zero_excluded),
         "proven_codeless_answered": len(codeless_answered),
