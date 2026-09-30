@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { formatAuditDate } from "../../audits/auditUi.jsx";
+import { useResource } from "../../shared/useResource.js";
 import { dedupeShas } from "../format.js";
 
 // Proof-first read modal: reviewed commits, declared scope, and the report via
@@ -38,49 +39,29 @@ function reviewedCommits(detail) {
 }
 
 export function AuditReadModal({ audit, coveredCount, onClose }) {
-  const [detail, setDetail] = useState(null);
-  const [detailLoading, setDetailLoading] = useState(true);
-  const [detailError, setDetailError] = useState(null);
-  const [scope, setScope] = useState(null);
-  const [text, setText] = useState(null);
-  const [textLoading, setTextLoading] = useState(false);
-  const [pdfFailed, setPdfFailed] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    setDetail(null);
-    setDetailLoading(true);
-    setDetailError(null);
-    setScope(null);
-    setText(null);
-    setPdfFailed(false);
-    fetch(`/api/audits/${encodeURIComponent(audit.audit_id)}`)
-      .then((r) => {
-        if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-        return r.json();
-      })
-      .then((d) => {
-        if (!cancelled) { setDetail(d); setDetailLoading(false); }
-      })
-      .catch((e) => {
-        if (!cancelled) { setDetailError(String(e.message || e)); setDetailLoading(false); }
-      });
-    return () => { cancelled = true; };
-  }, [audit.audit_id]);
+  const auditPath = `/api/audits/${encodeURIComponent(audit.audit_id)}`;
+  const detailRes = useResource(
+    () => fetch(auditPath).then((r) => {
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json();
+    }),
+    [auditPath],
+  );
+  const detail = detailRes.data;
+  const detailLoading = detailRes.loading;
+  const detailError = detailRes.error ? String(detailRes.error.message || detailRes.error) : null;
 
   // 409 means scope extraction never completed: treat as no declared scope.
-  useEffect(() => {
-    let cancelled = false;
-    fetch(`/api/audits/${encodeURIComponent(audit.audit_id)}/scope`)
+  const { data: scope } = useResource(
+    () => fetch(`${auditPath}/scope`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (!cancelled) setScope(Array.isArray(d?.contracts) ? d.contracts : []);
-      })
-      .catch(() => {
-        if (!cancelled) setScope([]);
-      });
-    return () => { cancelled = true; };
-  }, [audit.audit_id]);
+      .then((d) => (Array.isArray(d?.contracts) ? d.contracts : []))
+      .catch(() => []),
+    [auditPath],
+  );
+
+  const [pdfFailed, setPdfFailed] = useState(false);
+  useEffect(() => setPdfFailed(false), [auditPath]);
 
   useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -92,28 +73,16 @@ export function AuditReadModal({ audit, coveredCount, onClose }) {
   const rawPdfUrl = detail?.pdf_url || null;
   const urlLooksLikePdf =
     !rawPdfUrl && typeof sourceUrl === "string" && sourceUrl.toLowerCase().endsWith(".pdf");
-  const pdfUrl = (rawPdfUrl || urlLooksLikePdf)
-    ? `/api/audits/${encodeURIComponent(audit.audit_id)}/pdf`
-    : null;
+  const pdfUrl = rawPdfUrl || urlLooksLikePdf ? `${auditPath}/pdf` : null;
   const showPdf = !!pdfUrl && !pdfFailed;
   const needsText = !detailLoading && !showPdf;
 
   // Text is only the fallback when there's no embeddable PDF.
-  useEffect(() => {
-    if (!needsText) return undefined;
-    let cancelled = false;
-    setTextLoading(true);
-    setText(null);
-    fetch(`/api/audits/${encodeURIComponent(audit.audit_id)}/text`)
-      .then((r) => (r.ok ? r.text() : null))
-      .then((t) => {
-        if (!cancelled) { setText(t); setTextLoading(false); }
-      })
-      .catch(() => {
-        if (!cancelled) { setText(null); setTextLoading(false); }
-      });
-    return () => { cancelled = true; };
-  }, [audit.audit_id, needsText]);
+  const { data: text, loading: textLoading } = useResource(
+    () => fetch(`${auditPath}/text`).then((r) => (r.ok ? r.text() : null)).catch(() => null),
+    [auditPath],
+    { enabled: needsText },
+  );
 
   const commits = useMemo(() => reviewedCommits(detail), [detail]);
 

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
 import { api } from "../../../api/client.js";
 import { proxyDisplayName } from "../../../shared/displayName.js";
 import { coalesceChain, entityKey } from "../../entityKey.js";
 import { shortenAddress } from "../../../shared/format.js";
+import { useResource } from "../../../shared/useResource.js";
 import { eventKind, eventKindLabel, eventSalience, salienceAllows } from "./eventClass.js";
 import { decodeEvent, relativeTime, scannerHealth, targetText } from "./format.js";
 
@@ -33,57 +34,40 @@ export function ProtocolActivity({
   onHiddenCount,
   nameFor,
 }) {
-  const [events, setEvents] = useState([]);
-  const [labelMap, setLabelMap] = useState({});
   const activeChain = coalesceChain(chain);
 
-  // Clear on scope change and drop late responses from the previous scope, or
-  // old rows render under the new chain.
-  useEffect(() => {
-    if (!protocolId) return undefined;
-    let cancelled = false;
-    setEvents([]);
-    const load = async () => {
-      try {
-        // Only the backend knows each event's monitored row, so it scopes
-        // shared-address feeds.
-        const evs = await api(
-          `/api/protocols/${protocolId}/events?limit=100&chain=${encodeURIComponent(activeChain)}`,
-        );
-        if (!cancelled) setEvents(Array.isArray(evs) ? evs : []);
-      } catch {
-        /* transient — keep the last good feed */
-      }
-    };
-    load();
-    const t = setInterval(load, POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(t);
-    };
-  }, [protocolId, activeChain]);
+  // Cleared on scope change; late responses from the previous scope are
+  // dropped, or old rows render under the new chain. A failed poll keeps the
+  // last good feed. Only the backend knows each event's monitored row, so it
+  // scopes shared-address feeds.
+  const { data: polledEvents } = useResource(
+    () => api(`/api/protocols/${protocolId}/events?limit=100&chain=${encodeURIComponent(activeChain)}`)
+      .then((evs) => (Array.isArray(evs) ? evs : [])),
+    [protocolId, activeChain],
+    { enabled: Boolean(protocolId), poll: POLL_MS },
+  );
+  const events = polledEvents || [];
 
-  useEffect(() => {
-    let cancelled = false;
-    api(`/api/company/${encodeURIComponent(companyName)}/addresses`)
-      .then((addrs) => {
-        if (cancelled) return;
-        // (chain, address) keys (inv. 13) so one chain's name doesn't overwrite
-        // another's.
-        const map = {};
-        for (const a of addrs?.all_addresses || []) {
-          if (!a?.address) continue;
-          map[entityKey(a.chain, a.address)] = {
-            name: a.name || null,
-            implName: a.implementation_name || null,
-            isProxy: !!a.is_proxy,
-          };
-        }
-        setLabelMap(map);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [companyName]);
+  const { data: fetchedLabels } = useResource(
+    () => api(`/api/company/${encodeURIComponent(companyName)}/addresses`).then((addrs) => {
+      // (chain, address) keys (inv. 13) so one chain's name doesn't overwrite
+      // another's.
+      const map = {};
+      for (const a of addrs?.all_addresses || []) {
+        if (!a?.address) continue;
+        map[entityKey(a.chain, a.address)] = {
+          name: a.name || null,
+          implName: a.implementation_name || null,
+          isProxy: !!a.is_proxy,
+        };
+      }
+      return map;
+    }),
+    [companyName],
+    { reset: false },
+  );
+  const labelMap = fetchedLabels || {};
+
 
   const machineByAddress = useMemo(() => {
     const map = new Map();

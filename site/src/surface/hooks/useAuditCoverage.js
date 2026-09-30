@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 import { getCoverage } from "../../api/audits.js";
 import { isBytecodeVerifiedAudit } from "../../audits/auditCoverage.js";
+import { useResource } from "../../shared/useResource.js";
 import { coalesceChain } from "../entityKey.js";
 
 // Coverage rows span chains; only the active chain's contribute, so a twin
@@ -22,28 +23,15 @@ export function auditHighlightSet(coverage, activeAuditId, activeChain) {
 
 // Skips the fetch when CompanyOverview supplies initialCoverage.
 export function useAuditCoverage({ companyName, initialCoverage, sidebarMode, activeChain }) {
-  const [coverageData, setCoverageData] = useState(initialCoverage);
-  const [coverageError, setCoverageError] = useState(null);
-  const [coverageLoading, setCoverageLoading] = useState(false);
+  const fetched = useResource(() => getCoverage(companyName), [companyName], {
+    enabled: Boolean(companyName) && !initialCoverage,
+    reset: false,
+  });
+  const coverageData = initialCoverage || fetched.data;
+  const coverageError = initialCoverage || !fetched.error ? null : fetched.error.message || "Failed";
+  const coverageLoading = !initialCoverage && fetched.loading;
 
   const [activeAuditId, setActiveAuditId] = useState(null);
-
-  useEffect(() => {
-    if (!companyName) return undefined;
-    if (initialCoverage) {
-      setCoverageData(initialCoverage);
-      setCoverageError(null);
-      setCoverageLoading(false);
-      return undefined;
-    }
-    let cancelled = false;
-    setCoverageLoading(true);
-    setCoverageError(null);
-    getCoverage(companyName)
-      .then((d) => { if (!cancelled) { setCoverageData(d); setCoverageLoading(false); } })
-      .catch((e) => { if (!cancelled) { setCoverageError(e?.message || "Failed"); setCoverageLoading(false); } });
-    return () => { cancelled = true; };
-  }, [companyName, initialCoverage]);
 
   const auditHighlights = useMemo(() => {
     // Only while the Audits tab is open; activeAuditId persists so returning

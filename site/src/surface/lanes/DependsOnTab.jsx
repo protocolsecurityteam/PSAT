@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useResource } from "../../shared/useResource.js";
 
 import { blockExplorerAddressUrl, blockExplorerName } from "../blockExplorer.js";
 import { fnChipClass, shortAddr } from "../format.js";
@@ -133,29 +134,14 @@ function InternalRow({ row, onPreview, onNavigate }) {
 }
 
 export function DependsOnTab({ machine, machines, onPreview, onNavigate }) {
-  const [graphState, setGraphState] = useState({ loading: true, error: null, graph: null });
-
-  useEffect(() => {
-    let cancelled = false;
-    setGraphState({ loading: true, error: null, graph: null });
-    fetchDependencyGraphViz(machine)
-      .then((graph) => {
-        if (!cancelled) setGraphState({ loading: false, error: null, graph });
-      })
-      .catch((e) => {
-        if (!cancelled) setGraphState({ loading: false, error: e?.message || String(e), graph: null });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [machine]);
+  const graphState = useResource(() => fetchDependencyGraphViz(machine), [machine]);
 
   const view = useMemo(
     () =>
-      graphState.graph
-        ? buildDependencyView(graphState.graph, { machines, targetAddress: machine?.address })
+      graphState.data
+        ? buildDependencyView(graphState.data, { machines, targetAddress: machine?.address })
         : null,
-    [graphState.graph, machines, machine],
+    [graphState.data, machines, machine],
   );
 
   if (graphState.loading) return <div className="ps-lane-empty">Loading dependencies…</div>;

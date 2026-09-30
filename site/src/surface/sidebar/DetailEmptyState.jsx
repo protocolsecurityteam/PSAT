@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api/client.js";
 import { projectScore } from "../../score/derive.js";
 import { letterFor } from "../../score/gradeBands.js";
+import { useResource } from "../../shared/useResource.js";
 import { formatUsd } from "../format.js";
 import { buildSearchResults } from "../layout/search.js";
 
@@ -175,7 +176,6 @@ export function DetailEmptyState({
 }) {
   const [scoreDoc, setScoreDoc] = useState(null);
   const [scoreState, setScoreState] = useState("loading");
-  const [monitor, setMonitor] = useState(null);
 
   useEffect(() => {
     if (!companyName) return undefined;
@@ -206,17 +206,9 @@ export function DetailEmptyState({
   }, [companyName, initialScore]);
 
   const protocolId = companyData?.protocol_id;
-  useEffect(() => {
-    if (protocolId == null) return undefined;
-    let cancelled = false;
-    setMonitor(null);
-    fetchMonitoring(protocolId).then((m) => {
-      if (!cancelled) setMonitor(m);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [protocolId]);
+  const { data: monitor } = useResource(() => fetchMonitoring(protocolId), [protocolId], {
+    enabled: protocolId != null,
+  });
 
   // Same counter as the type filter: timelocks are a union of principals and
   // contract nodes.
