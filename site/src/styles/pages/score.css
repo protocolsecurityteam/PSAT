@@ -94,18 +94,10 @@
 }
 
 .sc-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   margin-top: 8px;
-  font-size: 10.5px;
-  font-weight: 600;
-  padding: 3px 9px;
-  border-radius: 999px;
   border: 1px solid rgba(245, 158, 11, 0.35);
   color: var(--status-warn);
   background: rgba(245, 158, 11, 0.08);
-  white-space: nowrap;
 }
 
 .sc-grade-mid {
@@ -414,19 +406,6 @@ h2.sc-band-title {
   color: var(--ink);
 }
 
-.sc-kchip {
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  padding: 2px 6px;
-  border-radius: 5px;
-  flex-shrink: 0;
-  background: rgba(148, 163, 184, 0.10);
-  color: var(--muted);
-  border: 1px solid rgba(148, 163, 184, 0.16);
-}
-
 .sc-kchip-eoa,
 .sc-kchip-anyone { color: #fca5a5; background: rgba(239, 68, 68, 0.10); border-color: rgba(239, 68, 68, 0.25); }
 .sc-kchip-safe { color: #93c5fd; background: rgba(59, 130, 246, 0.10); border-color: rgba(59, 130, 246, 0.25); }
@@ -618,17 +597,10 @@ h2.sc-band-title {
 .scz-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 26px; }
 
 .scz-tag {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
   color: var(--faint);
   border: 1px dashed rgba(148, 163, 184, 0.35);
-  border-radius: 5px;
-  padding: 2px 7px;
   margin-left: 9px;
   vertical-align: 2px;
-  white-space: nowrap;
 }
 
 .scz-intro { margin: 2px 0 12px; }
@@ -722,19 +694,11 @@ h2.sc-band-title {
 .scz-unbounded { color: var(--status-warn); font-weight: 700; }
 
 .scz-poolchip {
-  display: inline-flex;
   align-items: baseline;
-  gap: 5px;
   margin-top: 4px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
   color: #7dd3fc;
   background: rgba(56, 189, 248, 0.1);
   border: 1px solid rgba(56, 189, 248, 0.45);
-  border-radius: 6px;
-  padding: 3px 8px;
-  white-space: nowrap;
 }
 
 .scz-ref {

@@ -100,13 +100,13 @@ export function DaemonDetail({ daemonKey, fleet, onClose, rates }) {
       </header>
 
       <div className="job-panel-meta">
-        <span className="job-panel-tag" style={{ color: TONE_DOT[tone], borderColor: `${TONE_DOT[tone]}66` }}>
+        <span className="tag tag-md tag-pill job-panel-tag" style={{ color: TONE_DOT[tone], borderColor: `${TONE_DOT[tone]}66` }}>
           {d.status}
         </span>
-        <span className="job-panel-tag job-panel-next">
+        <span className="tag tag-md tag-pill tag-plain job-panel-tag job-panel-next">
           last beat {d.last_beat_at ? `${humanAge(d.beat_age_s)} ago` : "never"}
         </span>
-        {interval && <span className="job-panel-tag job-panel-next">interval {interval}s</span>}
+        {interval && <span className="tag tag-md tag-pill tag-plain job-panel-tag job-panel-next">interval {interval}s</span>}
       </div>
 
       {alert && (

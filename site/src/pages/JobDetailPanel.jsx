@@ -346,34 +346,34 @@ export function JobDetail({ job, onClose, refreshTick, now = Date.now() }) {
       </header>
 
       <div className="job-panel-meta">
-        <span className="job-panel-tag" style={{ color: stageColor, borderColor: `${stageColor}55` }}>
+        <span className="tag tag-md tag-pill job-panel-tag" style={{ color: stageColor, borderColor: `${stageColor}55` }}>
           {formatStageLabel(job.stage)}
         </span>
         <span
-          className={`job-panel-tag job-panel-status${isTerminal ? " terminal" : ""}`}
+          className={`tag tag-md tag-pill job-panel-tag job-panel-status${isTerminal ? " terminal" : ""}`}
           style={{ color: isTerminal ? "#fca5a5" : statusColor, borderColor: isTerminal ? "#b91c1c88" : `${statusColor}66` }}
         >
           {statusLabel}
         </span>
         {isCompleted && (
-          <span className="job-panel-tag job-panel-next">
+          <span className="tag tag-md tag-pill tag-plain job-panel-tag job-panel-next">
             {recordedCount > 0
               ? `total ${totalElapsed.toFixed(1)}s · ${recordedCount} stage${recordedCount === 1 ? "" : "s"}`
               : `${timelineRows.length} stages`}
           </span>
         )}
         {isProcessing && (
-          <span className="job-panel-tag job-panel-next">
+          <span className="tag tag-md tag-pill tag-plain job-panel-tag job-panel-next">
             running {formatSeconds((now - parseIsoMs(job.created_at)) / 1000 || 0)}
           </span>
         )}
         {(job.retry_count || 0) > 0 && (
-          <span className="job-panel-tag job-panel-retry">
+          <span className="tag tag-md tag-pill job-panel-tag job-panel-retry">
             ↻ {job.retry_count}× retried{job.last_failure_kind ? ` · ${job.last_failure_kind}` : ""}
           </span>
         )}
         {job.next_attempt_at && isFailed && (
-          <span className="job-panel-tag job-panel-next">next attempt {formatTime(job.next_attempt_at)}</span>
+          <span className="tag tag-md tag-pill tag-plain job-panel-tag job-panel-next">next attempt {formatTime(job.next_attempt_at)}</span>
         )}
       </div>
 
@@ -432,7 +432,7 @@ export function JobDetail({ job, onClose, refreshTick, now = Date.now() }) {
               return (
                 <li key={i} className={`job-panel-error job-panel-error-${sev}`}>
                   <div className="job-panel-error-head">
-                    <span className={`job-panel-error-badge job-panel-error-badge-${sev}`}>{sev.toUpperCase()}</span>
+                    <span className={`tag job-panel-error-badge job-panel-error-badge-${sev}`}>{sev.toUpperCase()}</span>
                     <span className="job-panel-error-stage" style={{ color: STAGE_COLORS[e.stage] || "#cbd5e1" }}>
                       {formatStageLabel(e.stage)}
                     </span>

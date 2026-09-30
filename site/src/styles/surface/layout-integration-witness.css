@@ -42,16 +42,8 @@
 }
 
 .ps-depends-ext-tag {
-  flex-shrink: 0;
-  white-space: nowrap;
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   color: #f0b45f;
   border: 1px solid rgba(224, 145, 63, 0.4);
-  border-radius: 4px;
-  padding: 2px 6px;
 }
 
 .ps-depends-ext-lib .ps-depends-ext-tag {

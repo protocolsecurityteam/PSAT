@@ -398,8 +398,8 @@ export default function PipelineDashboard() {
                 <h2>{liveActive} in flight</h2>
               </div>
               <div className="chips">
-                <span className="chip" style={{ background: "rgba(245,158,11,.12)", color: "#fbbf24" }}>{liveProcessing} running</span>
-                <span className="chip" style={{ background: "rgba(148,163,184,.12)", color: "#cbd5e1" }}>{liveQueued} queued</span>
+                <span className="tag tag-md tag-pill tag-plain" style={{ background: "rgba(245,158,11,.12)", color: "#fbbf24" }}>{liveProcessing} running</span>
+                <span className="tag tag-md tag-pill tag-plain" style={{ background: "rgba(148,163,184,.12)", color: "#cbd5e1" }}>{liveQueued} queued</span>
               </div>
             </div>
             <div className="runs zone-active">

@@ -14,7 +14,7 @@ const TARGETS_SHORT = 3;
 export function KindChip({ chip, chain, controller, onSelect }) {
   if (chip.members?.length) {
     return (
-      <span className={`sc-kchip sc-kchip-${chip.kind}`}>
+      <span className={`tag sc-kchip sc-kchip-${chip.kind}`}>
         {"Safes "}
         {chip.members.map((member, i) => (
           <Fragment key={member.address}>
@@ -42,7 +42,7 @@ export function KindChip({ chip, chain, controller, onSelect }) {
         title: controller ? `Show ${shortAddress(controller)} on the control surface` : undefined,
       });
   return (
-    <span className={`sc-kchip sc-kchip-${chip.kind}${props ? " sc-lnk" : ""}`} {...(props || {})}>
+    <span className={`tag sc-kchip sc-kchip-${chip.kind}${props ? " sc-lnk" : ""}`} {...(props || {})}>
       {chip.label}
     </span>
   );

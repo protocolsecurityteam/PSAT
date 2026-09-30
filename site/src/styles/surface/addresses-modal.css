@@ -210,19 +210,6 @@
   font-family: "JetBrains Mono", monospace;
 }
 
-.ps-addresses-modal-chip {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: 9.5px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  background: rgba(148, 163, 184, 0.12);
-  color: #94a3b8;
-  border: 1px solid rgba(148, 163, 184, 0.20);
-}
-
 .ps-addresses-modal-chip.ok {
   background: rgba(45, 212, 191, 0.12);
   color: #2dd4bf;

@@ -139,7 +139,7 @@ function CeilingCell({ entry }) {
       )}
       {pool && (
         <div>
-          <span className="scz-poolchip">
+          <span className="tag tag-md tag-plain scz-poolchip">
             ⬡ POOL {pool.name} · {pool.contracts} contracts
           </span>
         </div>
@@ -206,7 +206,7 @@ export default function ConfidenceZone({ doc, view, onSelect, withheld = false }
             No λ when the grade is withheld; naming one would republish it. The
             points ceilings stay (same shape as raw points).
           */}
-          <span className="scz-tag">
+          <span className="tag scz-tag">
             {withheld ? "not determined · not in the grade" : "not determined · not in λ"}
           </span>
         </h2>

@@ -172,7 +172,7 @@ export function ProtocolActivity({
                 >
                   <div className="ps-activity-recent-main">
                     <div className="ps-activity-recent-id">
-                      <span className={`ps-activity-badge ${type}`}>{type}</span>
+                      <span className={`tag ps-activity-badge ${type}`}>{type}</span>
                       <span className="ps-activity-recent-name">{friendlyName(addr, contract?.chain)}</span>
                     </div>
                     <div className="ps-activity-recent-line">

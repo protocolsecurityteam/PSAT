@@ -70,7 +70,7 @@ function ExternalCard({ row, chain }) {
       <div className="ps-depends-ext-top">
         <span className="ps-depends-ext-dot" />
         <span className="ps-depends-ext-name">{row.name}</span>
-        <span className="ps-depends-ext-tag">{isLib ? "library" : "off-protocol"}</span>
+        <span className="tag ps-depends-ext-tag">{isLib ? "library" : "off-protocol"}</span>
         <span className="ps-depends-spacer" />
         <a className="ps-depends-explorer" href={url} target="_blank" rel="noreferrer">{blockExplorerName(explorerChain)} ↗</a>
       </div>

@@ -76,7 +76,7 @@ export default function GradeHeader({ doc, view, open, onToggle }) {
             <div className="sc-uncal">bands uncalibrated for this model version</div>
           )}
           {typeof confidence === "number" && confidence < 50 && (
-            <div className="sc-badge">⚠ provisional · confidence {confidence.toFixed(1)}%</div>
+            <div className="tag tag-md tag-pill tag-plain sc-badge">⚠ provisional · confidence {confidence.toFixed(1)}%</div>
           )}
         </div>
       </div>

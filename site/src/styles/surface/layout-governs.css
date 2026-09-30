@@ -67,30 +67,12 @@
 
 .ps-badge {
   --badge-accent: #94a3b8;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: rgba(148, 163, 184, 0.1);
-  border: 1px solid rgba(148, 163, 184, 0.18);
   color: var(--badge-accent);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
 .ps-governs {
   display: flex;
   flex-direction: column;
-}
-
-/* .ps-ctrl-fnchip is tiny for the canvas accordion; readable size in the
-   sidebar only. */
-.ps-governs .ps-ctrl-fnchip {
-  font-size: 11px;
-  padding: 2px 8px;
 }
 
 .ps-governs .ps-ctrl-fns {

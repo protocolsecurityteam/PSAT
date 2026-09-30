@@ -104,6 +104,7 @@
   gap: 5px;
 }
 
+/* .ps-ctrl-fnchip is tiny for the canvas accordion; readable size here. */
 .ref-body .ps-ctrl-fnchip {
   font-size: 11px;
   padding: 2px 8px;

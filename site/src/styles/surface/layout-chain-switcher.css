@@ -49,10 +49,6 @@
   opacity: 0.6;
 }
 
-.ps-badge-chain {
-  gap: 5px;
-}
-
 .ps-badge-chain .ps-chain-dot {
   width: 7px;
   height: 7px;

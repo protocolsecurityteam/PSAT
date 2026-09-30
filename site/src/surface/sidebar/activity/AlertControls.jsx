@@ -83,12 +83,12 @@ export function AlertControls({ contract, subscriptions, isAdmin, saving, onAtta
           <div className="ps-activity-webhook-row">
             {matches.length ? (
               matches.map((sub) => (
-                <span key={sub.id} className="ps-activity-webhook-chip">
+                <span key={sub.id} className="tag tag-md tag-mono ps-activity-webhook-chip">
                   {sub.label || maskWebhook(sub.discord_webhook_url)}
                 </span>
               ))
             ) : (
-              <span className="ps-activity-webhook-chip none">no webhook</span>
+              <span className="tag tag-md tag-mono ps-activity-webhook-chip none">no webhook</span>
             )}
             <button type="button" className="ps-activity-link-btn" onClick={() => setAttaching(true)}>
               {matches.length ? "attach another" : "attach Discord"}

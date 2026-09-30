@@ -16,7 +16,7 @@ export function StatusStrip({ machine, contract, lastEventAt, now, eventsState =
     <div className="ps-activity-strip">
       <div className="ps-activity-strip-top">
         <span className="ps-activity-strip-name" title={name}>{name}</span>
-        <span className={`ps-activity-badge ${type}`}>{type}</span>
+        <span className={`tag ps-activity-badge ${type}`}>{type}</span>
         {contract ? (
           <span className={`ps-activity-strip-active${contract.is_active ? "" : " off"}`}>
             {contract.is_active ? "● active" : "○ paused"}

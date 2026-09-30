@@ -89,7 +89,7 @@ function AuditRow({ audit, contracts, open, onToggle, onRead }) {
               </div>
               <div className="ps-audits-cc-badges">
                 <ProvenVerdict />
-                {c.sha && <span className="ps-audits-shabadge">{String(c.sha).slice(0, 7)}</span>}
+                {c.sha && <span className="tag tag-mono ps-audits-shabadge">{String(c.sha).slice(0, 7)}</span>}
               </div>
             </div>
           ))}
@@ -236,7 +236,7 @@ function SelectedContractAuditsView({ machine, byAudit, onClear, onRead }) {
               {audit.title && <div className="ps-audits-arow-title">{audit.title}</div>}
               <div className="ps-audits-cc-badges" style={{ marginTop: 2 }}>
                 <ProvenVerdict />
-                {sha && <span className="ps-audits-shabadge">{String(sha).slice(0, 7)}</span>}
+                {sha && <span className="tag tag-mono ps-audits-shabadge">{String(sha).slice(0, 7)}</span>}
               </div>
             </div>
             <button

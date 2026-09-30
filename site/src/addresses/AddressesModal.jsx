@@ -337,10 +337,10 @@ export default function AddressesModal({ companyName, onClose }) {
           <div className="ps-addresses-modal-compare-summary">
             {compareSummary && compareSummary.total > 0 ? (
               <>
-                <span className="ps-addresses-modal-chip ok">
+                <span className="tag tag-pill ps-addresses-modal-chip ok">
                   {compareSummary.matched} matched
                 </span>
-                <span className="ps-addresses-modal-chip err">
+                <span className="tag tag-pill ps-addresses-modal-chip err">
                   {compareSummary.missing} missing
                 </span>
                 <span style={{ color: "#94a3b8", fontSize: 11 }}>
@@ -460,7 +460,7 @@ export default function AddressesModal({ companyName, onClose }) {
                             </span>
                           )}
                         </span>
-                        {r.is_proxy && <span className="ps-addresses-modal-chip">proxy</span>}
+                        {r.is_proxy && <span className="tag tag-pill ps-addresses-modal-chip">proxy</span>}
                       </div>
                       {!isMissing && (
                         <div
@@ -481,18 +481,18 @@ export default function AddressesModal({ companyName, onClose }) {
                     <td>
                       {compareOpen ? (
                         isMissing ? (
-                          <span className="ps-addresses-modal-chip err">missing</span>
+                          <span className="tag tag-pill ps-addresses-modal-chip err">missing</span>
                         ) : r._compareStatus === "pruned" ? (
-                          <span className="ps-addresses-modal-chip" title={prunedReasonText(r)}>
+                          <span className="tag tag-pill ps-addresses-modal-chip" title={prunedReasonText(r)}>
                             pruned
                           </span>
                         ) : (
-                          <span className="ps-addresses-modal-chip ok">matched</span>
+                          <span className="tag tag-pill ps-addresses-modal-chip ok">matched</span>
                         )
                       ) : r.analyzed ? (
-                        <span className="ps-addresses-modal-chip ok">analyzed</span>
+                        <span className="tag tag-pill ps-addresses-modal-chip ok">analyzed</span>
                       ) : (
-                        <span className="ps-addresses-modal-chip pending">discovered</span>
+                        <span className="tag tag-pill ps-addresses-modal-chip pending">discovered</span>
                       )}
                     </td>
                     {isAdmin && (
@@ -546,7 +546,7 @@ export default function AddressesModal({ companyName, onClose }) {
                     </td>
                     <td className="ps-addresses-modal-addr mono">{r.address}</td>
                     <td>
-                      <span className="ps-addresses-modal-chip pending">candidate</span>{" "}
+                      <span className="tag tag-pill ps-addresses-modal-chip pending">candidate</span>{" "}
                       <span style={{ color: "#94a3b8", fontSize: 11 }}>{candidateReasonText(r)}</span>
                     </td>
                   </tr>
@@ -582,7 +582,7 @@ export default function AddressesModal({ companyName, onClose }) {
                       </td>
                       <td className="ps-addresses-modal-addr mono">{r.address}</td>
                       <td>
-                        <span className="ps-addresses-modal-chip err">pruned</span>{" "}
+                        <span className="tag tag-pill ps-addresses-modal-chip err">pruned</span>{" "}
                         <span style={{ color: "#94a3b8", fontSize: 11 }}>{prunedReasonText(r)}</span>
                       </td>
                     </tr>

@@ -312,11 +312,6 @@
 }
 
 .ps-audits-shabadge {
-  padding: 1.5px 6px;
-  border-radius: 5px;
-  font-family: "JetBrains Mono", "SFMono-Regular", monospace;
-  font-size: 9.5px;
-  font-weight: 700;
   color: #2dd4bf;
   background: rgba(45, 212, 191, 0.10);
   border: 1px solid rgba(45, 212, 191, 0.30);

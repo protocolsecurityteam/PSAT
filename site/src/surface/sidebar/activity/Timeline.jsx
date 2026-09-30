@@ -205,7 +205,7 @@ export function Timeline({
 
       {hasBoundary ? (
         <div className="ps-activity-boundary">
-          <span className="ps-activity-boundary-pill">
+          <span className="tag tag-pill ps-activity-boundary-pill">
             ◔ Monitoring started{dateLabel ? ` · ${dateLabel}` : ""}
           </span>
           {isProxy && below.length ? (

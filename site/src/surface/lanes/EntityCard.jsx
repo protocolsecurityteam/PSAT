@@ -124,25 +124,25 @@ export function EntityCard({
         </div>
         <div className="ps-machine-badges">
           {showChain && (
-            <span className="ps-badge ps-badge-chain" style={{ "--badge-accent": chainColor(entityChain), "--chain-color": chainColor(entityChain) }}>
+            <span className="tag tag-md ps-badge ps-badge-chain" style={{ "--badge-accent": chainColor(entityChain), "--chain-color": chainColor(entityChain) }}>
               <span className="ps-chain-dot" />
               {chainLabel(entityChain)}
             </span>
           )}
           {isMachine && (
             <>
-              <span className="ps-badge" style={{ "--badge-accent": (ROLE_META[machine.role] || ROLE_META.utility).color }}>{(ROLE_META[machine.role] || ROLE_META.utility).singular}</span>
+              <span className="tag tag-md ps-badge" style={{ "--badge-accent": (ROLE_META[machine.role] || ROLE_META.utility).color }}>{(ROLE_META[machine.role] || ROLE_META.utility).singular}</span>
               {/*
                 Gated on total_usd>0 so a pull-then-forward router isn't
                 mislabeled.
               */}
               {machine.role === "value_handler" && Number(machine.total_usd) > 0 ? (
-                <span className="ps-badge" style={{ "--badge-accent": "#22c55e" }}>Deposit destination</span>
+                <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#22c55e" }}>Deposit destination</span>
               ) : null}
-              {machine.is_proxy ? <span className="ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>{machine.proxy_type || "proxy"}</span> : null}
-              {machine.upgrade_count != null ? <span className="ps-badge" style={{ "--badge-accent": "#8b92a8" }}>{machine.upgrade_count} upgrades</span> : null}
-              <span className="ps-badge" style={{ "--badge-accent": "#6b7590" }}>{machine.totalFunctions} functions</span>
-              {usdLabel && <span className="ps-badge" style={{ "--badge-accent": "#f59e0b" }}>{usdLabel}</span>}
+              {machine.is_proxy ? <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>{machine.proxy_type || "proxy"}</span> : null}
+              {machine.upgrade_count != null ? <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#8b92a8" }}>{machine.upgrade_count} upgrades</span> : null}
+              <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#6b7590" }}>{machine.totalFunctions} functions</span>
+              {usdLabel && <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#f59e0b" }}>{usdLabel}</span>}
               {/*
                 Machine-only timelocks (EtherFiTimelock) have no principal
                 entry; skipped when the principal badge renders, to avoid
@@ -150,9 +150,9 @@ export function EntityCard({
               */}
               {machine.isTimelock && principal?.type !== "timelock" ? (
                 <>
-                  <span className="ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>Timelock</span>
+                  <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>Timelock</span>
                   {machine.timelockDelay > 0 ? (
-                    <span className="ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>{formatDelay(machine.timelockDelay)} delay</span>
+                    <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>{formatDelay(machine.timelockDelay)} delay</span>
                   ) : null}
                 </>
               ) : null}
@@ -160,12 +160,12 @@ export function EntityCard({
           )}
           {principal && (
             <>
-              <span className="ps-badge" style={{ "--badge-accent": principalType.accent }}>{principalType.label}</span>
+              <span className="tag tag-md ps-badge" style={{ "--badge-accent": principalType.accent }}>{principalType.label}</span>
               {principal.type === "safe" && threshold ? (
-                <span className="ps-badge" style={{ "--badge-accent": "#6a9e94" }}>{threshold}/{owners.length} threshold</span>
+                <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#6a9e94" }}>{threshold}/{owners.length} threshold</span>
               ) : null}
               {principal.type === "timelock" && delay > 0 ? (
-                <span className="ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>{formatDelay(delay)} delay</span>
+                <span className="tag tag-md ps-badge" style={{ "--badge-accent": "#9a8a6e" }}>{formatDelay(delay)} delay</span>
               ) : null}
             </>
           )}

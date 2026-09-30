@@ -124,7 +124,7 @@ export default function AuditsAdminModal({ companyName, onClose }) {
     else if (value === "processing") tone = "processing";
     else if (value === "skipped") tone = "pending";
     return (
-      <span className={`ps-addresses-modal-chip ${tone}`} title={value || "pending"}>
+      <span className={`tag tag-pill ps-addresses-modal-chip ${tone}`} title={value || "pending"}>
         {label}: {value || "pending"}
       </span>
     );
