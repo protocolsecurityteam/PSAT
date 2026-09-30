@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
-"""Exa (formerly Metaphor) search client — drop-in shape-compatible with
-``services.clients.tavily``.
+"""Exa search client, shape-compatible with ``services.clients.tavily`` (``{title, url, content, score}``).
 
-Exa's neural/auto search mode embeds the query semantically which is a
-much better fit for our use case than Tavily's phrase-match: "ether fi"
-and "ether.fi" cluster together in embedding space, so quoted / spaced
-/ dotted slug variants all return the same high-quality on-protocol
-URLs. See ``/tmp/exa_vs_tavily.py`` for the benchmark that motivated
-adding this.
-
-Returns objects shaped like Tavily's — ``{title, url, content, score}``
-— so the rest of the pipeline (domain-picker, page-picker, classifier)
-is agnostic to the backend.
+Neural search clusters slug variants ("ether fi" / "ether.fi") that Tavily's phrase matching splits.
 """
 
 from __future__ import annotations
@@ -36,18 +26,13 @@ REQUEST_TIMEOUT_SECONDS = 30
 DEEP_RESEARCH_POLL_INTERVAL_SECONDS = 5
 DEEP_RESEARCH_MAX_POLL_SECONDS = 600
 
-# When ``PSAT_EXA_CACHE`` is set, search() and deep_research() look up the
-# request in the artifact-storage bucket before hitting Exa. Misses fall through
-# to a live call whose response is persisted; later identical requests in any
-# environment sharing the bucket skip Exa entirely. Bump _CACHE_SCHEMA when
-# changing the envelope or canonical request shape to bulk-invalidate.
+# Cache in the artifact bucket, shared across environments. Bump _CACHE_SCHEMA to bulk-invalidate.
 _CACHE_KEY_PREFIX = "exa-cache"
 _CACHE_SCHEMA = 1
 _CACHE_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
 
 def _cache_key(payload: dict[str, Any]) -> str:
-    """Hash the request shape (api_key excluded) into a stable storage key."""
     canonical = {k: v for k, v in payload.items() if k != "api_key"}
     canonical["__schema__"] = _CACHE_SCHEMA
     blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
@@ -55,12 +40,7 @@ def _cache_key(payload: dict[str, Any]) -> str:
 
 
 def _cache_read(key: str) -> Any | None:
-    """Return cached payload if present, fresh, and well-formed; else None.
-
-    Storage failures (missing bucket creds, transport errors, malformed
-    envelope, expired TTL) all degrade to None — the caller falls through
-    to a live API call.
-    """
+    """Any storage or envelope problem degrades to None (live call)."""
     try:
         from db.storage import StorageKeyMissing, get_storage_client
     except Exception as exc:
@@ -92,11 +72,7 @@ def _cache_read(key: str) -> Any | None:
 
 
 def _cache_write(key: str, payload: Any) -> None:
-    """Persist payload to the cache. Best-effort: errors are logged, not raised.
-
-    Empty / falsy payloads are skipped to avoid poisoning the cache for 30
-    days when an upstream blip returns nothing.
-    """
+    """Empty payloads are skipped so an upstream blip doesn't poison the cache for 30 days."""
     if not payload:
         return
     try:
@@ -121,8 +97,6 @@ def _cache_write(key: str, payload: Any) -> None:
 
 
 class ExaError(RuntimeError):
-    """Raised when Exa cannot return a usable response."""
-
     def __init__(self, error: dict[str, Any]):
         super().__init__(error.get("error", "Exa request failed"))
         self.error = error
@@ -170,15 +144,10 @@ def search(
     mode: str = "auto",
     include_text: bool = True,
 ) -> list[dict[str, Any]]:
-    """Search Exa and return Tavily-compatible result dicts.
+    """Tavily-compatible results.
 
-    Supported modes:
-
-    - Native `/search` types: ``auto``, ``neural``, ``keyword``, ``fast``,
-      ``deep-lite``, ``deep``, ``deep-reasoning``
-    - Legacy aliases kept for backwards-compat with older benchmarks:
-      ``regular`` → ``auto``, ``instant`` → ``keyword``. (Note: ``deep``
-      is now the Exa-native deep search, NOT the old ``neural`` alias.)
+    Modes: ``auto``, ``neural``, ``keyword``, ``fast``, ``deep-lite``, ``deep``, ``deep-reasoning``; legacy ``regular``
+    -> ``auto``, ``instant`` -> ``keyword``.
     """
     clean_query = query.strip()
     if not clean_query:
@@ -197,8 +166,7 @@ def search(
         "type": resolved_mode,
     }
     if include_text:
-        # Short snippet is enough for the classifier / domain picker — we
-        # fetch full pages directly when we need their body.
+        # Snippets suffice; full pages are fetched directly.
         payload["contents"] = {"text": {"maxCharacters": 300}}
 
     cache_key: str | None = None
@@ -252,7 +220,6 @@ def search(
             {
                 "url": url,
                 "title": (item.get("title") or "").strip(),
-                # Tavily consumers read ``content``; keep that field name.
                 "content": str(text)[:1000],
                 "score": item.get("score"),
             }
@@ -293,12 +260,7 @@ def deep_research(
     schema: dict[str, Any] | None = None,
     timeout_seconds: int = DEEP_RESEARCH_MAX_POLL_SECONDS,
 ) -> dict[str, Any]:
-    """Run Exa's Deep Research endpoint (multi-step search + synthesis).
-
-    Returns ``{"data": <schema-typed>, "task_id": str, "status": str}``.
-    Pass ``schema`` to constrain output; defaults to an audit-report schema
-    suitable for this benchmark.
-    """
+    """Exa Deep Research. Returns ``{"data", "task_id", "status"}``; ``schema`` defaults to an audit-report schema."""
     api_key = _get_api_key()
     headers = {"x-api-key": api_key, "Content-Type": "application/json"}
 
