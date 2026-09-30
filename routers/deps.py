@@ -1,11 +1,4 @@
-"""Shared FastAPI dependencies, constants, and external symbols.
-
-Every router references external symbols via attribute access on this
-module (``deps.SessionLocal``, ``deps.create_job``, ...) rather than
-``from db.models import SessionLocal``. That gives tests a single patch
-point per symbol — patching ``routers.deps.SessionLocal`` once affects
-every router instead of each router's own local binding.
-"""
+"""Shared FastAPI dependencies. Routers use ``deps.X`` attribute access so tests have one patch point per symbol."""
 
 from __future__ import annotations
 
@@ -45,10 +38,7 @@ if not ADMIN_KEY:
         "Set PSAT_ADMIN_KEY in the environment to enable admin operations."
     )
 
-# Mainnet-scoped default RPC for the admin/API dependency layer:
-# these endpoints serve mainnet paths today, and a required chain param at the
-# FastAPI dependency is impractical. An explicit, documented mainnet choice —
-# not a buried default — logged so the assumption is visible in startup logs.
+# Explicit mainnet default: a required chain param at this layer is impractical.
 DEFAULT_RPC_URL = default_rpc_url(chain_id=1) or ""
 logger.info("routers.deps: DEFAULT_RPC_URL bound to mainnet (chain_id=1) eRPC route")
 MAX_TVL_HISTORY_DAYS = 90
@@ -57,12 +47,7 @@ _ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 
 def require_admin_key(request: Request, x_psat_admin_key: str | None = Header(default=None)) -> None:
-    """Gate the depending route on a valid ``X-PSAT-Admin-Key`` header.
-
-    Wired via ``dependencies=[Depends(require_admin_key)]`` on every operator
-    route — admin mutations and ops/internal GET reads alike. Raises 401 unless
-    a key is configured and the supplied header matches it.
-    """
+    """Raises 401 unless an admin key is configured and the header matches."""
     if not ADMIN_KEY:
         reason = "admin_key_not_configured"
     elif not x_psat_admin_key:
@@ -71,8 +56,7 @@ def require_admin_key(request: Request, x_psat_admin_key: str | None = Header(de
         reason = "key_mismatch"
     else:
         return
-    # The rejection itself is the fact worth alerting on (admin-key drift,
-    # probing). Never log the supplied key — only the discriminating reason.
+    # Never log the supplied key.
     logger.warning(
         "admin key rejected on %s",
         request.url.path,
@@ -82,23 +66,12 @@ def require_admin_key(request: Request, x_psat_admin_key: str | None = Header(de
 
 
 def admin_key_valid(x_psat_admin_key: str | None) -> bool:
-    """True when *x_psat_admin_key* matches the configured admin key.
-
-    Non-raising, non-logging companion to :func:`require_admin_key` for the
-    endpoints that broaden their *response* for an authenticated caller
-    (e.g. extra fields) rather than rejecting an anonymous one outright.
-    """
+    """Non-raising variant for endpoints that broaden their response for admins."""
     return bool(ADMIN_KEY) and bool(x_psat_admin_key) and hmac.compare_digest(x_psat_admin_key, ADMIN_KEY)
 
 
 def log_admin_mutation(action: str, **fields: Any) -> None:
-    """Emit one INFO audit line per successful admin mutation.
-
-    ``action`` names the operation (e.g. ``"job_retry"``); ``fields`` carry the
-    affected id(s)/counts. All go in ``extra`` so the audit trail (who changed
-    what) is a queryable stream, correlatable by ``trace_id`` to the request
-    line emitted by the API middleware.
-    """
+    """One INFO audit line per successful admin mutation, fields in ``extra``."""
     extra: dict[str, Any] = {"action": action, **fields}
     tid = trace_id_var.get()
     if tid is not None:

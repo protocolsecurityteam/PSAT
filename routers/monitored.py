@@ -1,5 +1,3 @@
-"""MonitoredContract listing and updates + MonitoredEvent listing."""
-
 from __future__ import annotations
 
 import logging
@@ -25,20 +23,11 @@ router = APIRouter()
 
 
 def _current_head_block(chain: str | None) -> int | None:
-    """Current head on the enrolled contract's OWN chain, used to seed a
-    manually-added contract's scan cursor and enrollment floor. ``None`` when
-    the read did not answer.
+    """Head on the contract's own chain, seeding a manual add's cursor and enrollment floor; ``None`` if unanswered.
 
-    ``chain`` selects the RPC route: mainnet (and any unresolvable chain) keeps
-    ``deps.DEFAULT_RPC_URL`` verbatim, a second chain resolves its own eRPC route
-    from the registry (same ``rpc_for_chain`` the scanner uses). Without this a
-    non-mainnet enrollment seeded ``enrollment_block`` from the MAINNET head — a
-    wrong, immutable pre-watch floor.
-
-    A failed read is not-determined and block 0 is not its stand-in: it seeds a
-    cursor claiming the whole chain as backlog and a floor that licenses every
-    historical event as live. The caller refuses the enrollment instead (same
-    rule as ``enrollment._block_for``)."""
+    A mainnet head on another chain gave a wrong immutable floor. Block 0 is never a stand-in (whole chain as backlog,
+    all history as live); the caller refuses.
+    """
     try:
         return int(
             rpc_request(
@@ -58,16 +47,8 @@ def _current_head_block(chain: str | None) -> int | None:
         return None
 
 
-#: Stamped into every caller-supplied ``monitoring_config``. The auto-enrollment
-#: path (``services/monitoring/enrollment._build_monitoring_config``) always
-#: emits a positive tracking-plan token: ``tracked_topics`` present = the plan
-#: was read (a non-empty list is the witnessed plan, ``[]`` the witnessed
-#: read-and-named-nothing finding); ``tracking_plan_not_determined`` present =
-#: the plan was not read and the reason token says why. A config authored by an
-#: API caller has none of that provenance, and storing it verbatim with neither
-#: key would read as a builder output that never existed. This token is the
-#: honest answer for the caller-authored case and keeps the builder's states
-#: earned; NEITHER key survives only on rows that predate the discriminant.
+# Caller-authored configs lack the builder's provenance (``tracked_topics`` / ``tracking_plan_not_determined``); this
+# token says so rather than letting them pose as builder output.
 CALLER_SUPPLIED_TRACKING_PLAN = CONFIG_SUPPLIED_BY_CALLER
 
 
@@ -75,25 +56,11 @@ def _stamp_caller_supplied(
     monitoring_config: dict[str, Any] | None,
     existing_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The stored config for a caller-authored enrollment, provenance-stamped.
+    """Stamp a caller-authored config's provenance.
 
-    The route OWNS ``tracking_plan_not_determined`` here: a caller value is
-    overwritten, not merged, so the token cannot be forged into asserting some
-    analyzer reason (``plan_not_readable``, ``contract_not_analyzed``, …) for a
-    config no analyzer produced. Overwriting rather than rejecting also keeps a
-    read-modify-write of an already-stamped row working.
-
-    The two analyzer-owned keys — ``tracked_topics`` and ``polling_plan`` — are
-    rejected upstream in ``schemas.api_requests`` rather than dropped here: each
-    drives the monitor on the wire, so silently discarding one would tell the
-    caller their topics are being scanned / their slots polled. The stamp cannot
-    substitute for that rejection: it marks the CONFIG's provenance, while the
-    event a caller-authored ``polling_plan`` would mint carries none.
-
-    *existing_config* supplies the row's scan-plane record (``scan_gaps``),
-    which is carried across the overwrite: it states which block intervals this
-    row's scanner never covered, and no caller authored it. Dropping it would
-    let the row present continuous coverage over an interval nothing read.
+    The route owns ``tracking_plan_not_determined`` (overwritten, never merged) so a caller can't forge an analyzer
+    reason. ``tracked_topics`` / ``polling_plan`` are rejected upstream in ``schemas.api_requests``. ``scan_gaps`` from
+    *existing_config* is carried over, or the row would claim coverage nothing read.
     """
     stamped = dict(monitoring_config or {})
     stamped["tracking_plan_not_determined"] = CALLER_SUPPLIED_TRACKING_PLAN
@@ -126,7 +93,6 @@ def list_monitored_contracts(
     protocol_id: int | None = None,
     chain: str | None = None,
 ) -> list[MonitoredContractItem]:
-    """List all MonitoredContract rows, optionally filtered."""
     with deps.SessionLocal() as session:
         stmt = select(MonitoredContract).order_by(MonitoredContract.created_at.desc())
         if protocol_id is not None:
@@ -141,10 +107,7 @@ def list_monitored_contracts(
     "/api/protocols/{protocol_id}/monitoring", dependencies=[Depends(deps.require_admin_key)], response_model=None
 )
 def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContractRequest) -> MonitoredContractItem:
-    """Create or update one monitored contract for a protocol."""
-    # Allowlist enforcement (inv. 14): enrolling a contract on a chain takes
-    # scanner leases and RPC on that chain, so a chain this deployment has not
-    # enabled is rejected here (the default 'ethereum' is supported everywhere).
+    # Allowlist (inv. 14): enrollment takes scanner leases and RPC on that chain.
     try:
         require_supported_chain(chain=request.chain, context="monitored-contract enrollment")
     except UnsupportedChainError as exc:
@@ -170,11 +133,7 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
         ).scalar_one_or_none()
 
         if existing is None:
-            # Start watching from the current head, not block 0: this is a
-            # "monitor from now on" add, so scanning from 0 would replay years
-            # of history. enrollment_block records the same head as the floor
-            # below which the scanner records events as pre-watch history
-            # without notifying (consistent with the auto-enrollment inserts).
+            # Monitor from now on; scanning from 0 would replay years. ``enrollment_block`` is the pre-watch floor.
             head_block = _current_head_block(request.chain)
             if head_block is None:
                 raise HTTPException(
@@ -215,7 +174,6 @@ def upsert_protocol_monitoring(protocol_id: int, request: UpsertMonitoredContrac
     "/api/monitored-contracts/{contract_id}", dependencies=[Depends(deps.require_admin_key)], response_model=None
 )
 def update_monitored_contract(contract_id: str, request: UpdateMonitoredContractRequest) -> MonitoredContractItem:
-    """Update monitoring_config, is_active, or needs_polling on a MonitoredContract."""
     try:
         parsed = uuid.UUID(contract_id)
     except (ValueError, TypeError) as exc:
@@ -246,15 +204,8 @@ def list_monitored_events(
     event_type: str | None = None,
     limit: int = Query(default=50, ge=1, le=500),
 ) -> list[MonitoredEventItem]:
-    """List MonitoredEvent rows, optionally filtered.
-
-    Filter modes (apply additively):
-      - ``contract_id``: by MonitoredContract.id (uuid)
-      - ``address`` (+ optional ``chain``): resolves to monitored_contract_id
-        on the fly so the front-end can query by address — useful for
-        rendering a Safe/Timelock 'recent activity' panel without first
-        having to look up the MonitoredContract row.
-      - ``event_type``: filter to a single event_type
+    """MonitoredEvent rows, filters additive: ``contract_id``, ``address`` (+ ``chain``) resolved to contracts on the
+    fly, ``event_type``.
     """
     parsed_contract_id: uuid.UUID | None = None
     if contract_id is not None:
@@ -263,18 +214,8 @@ def list_monitored_events(
         except (ValueError, TypeError) as exc:
             raise HTTPException(status_code=422, detail="contract_id is not a valid UUID") from exc
     with deps.SessionLocal() as session:
-        # Multi-key sort. detected_at desc is the primary axis, but the
-        # column has a now()-default that ties events written in the
-        # same scan pass — so block_number desc disambiguates within a
-        # tie (newer-block-first matches the recency story). id desc
-        # is the final fallback purely for *deterministic* output —
-        # MonitoredEvent.id is a UUIDv4 and carries no insertion or
-        # log-order semantics, but a deterministic tiebreaker beats
-        # exposing arbitrary DB scan order to clients.
-        # If exact log-order ever becomes user-visible (e.g. step #4c
-        # historical backfill rendering each batch CallScheduled
-        # individually), promote log_index from the data JSON to a
-        # real column and sort on it before id.
+        # detected_at ties within a scan pass (now() default), so block_number then id (deterministic only; UUIDv4 has
+        # no order).
         stmt = (
             select(MonitoredEvent)
             .order_by(
@@ -286,10 +227,6 @@ def list_monitored_events(
         )
         if parsed_contract_id is not None:
             stmt = stmt.where(MonitoredEvent.monitored_contract_id == parsed_contract_id)
-        # address and/or chain — resolve to a set of MonitoredContract ids
-        # then narrow events. Either filter alone is supported; together
-        # they intersect at the contract level. Without either, we don't
-        # touch the contracts table.
         if address is not None or chain is not None:
             mc_q = select(MonitoredContract.id)
             if address is not None:
@@ -298,9 +235,6 @@ def list_monitored_events(
                 mc_q = mc_q.where(MonitoredContract.chain == chain)
             mc_ids = session.execute(mc_q).scalars().all()
             if not mc_ids:
-                # No matching MonitoredContract → no events to return.
-                # Avoids scanning the events table when the answer is
-                # structurally empty.
                 return []
             stmt = stmt.where(MonitoredEvent.monitored_contract_id.in_(mc_ids))
         if event_type is not None:

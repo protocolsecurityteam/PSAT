@@ -1,5 +1,3 @@
-"""Company / protocol overview + audit views."""
-
 from __future__ import annotations
 
 import logging
@@ -80,12 +78,7 @@ def _inherit_verified_dependency_coverage(
 
 
 def _log_endpoint(route: str, *, company: str, started: float, **extras: Any) -> None:
-    """Emit one structured log line per endpoint hit with elapsed time.
-
-    Pairs with the ``x-psat-trace-id`` middleware so each line is grepable
-    by trace_id in Loki. Matches the ``duration_ms`` field already used by
-    ``workers/base.py`` for stage timings.
-    """
+    """One line per hit with elapsed time, grepable by trace_id."""
     elapsed_ms = int((time.monotonic() - started) * 1000)
     logger.info(
         "%s elapsed_ms=%d company=%s",
@@ -98,7 +91,6 @@ def _log_endpoint(route: str, *, company: str, started: float, **extras: Any) ->
 
 @router.get("/api/company/{company_name}", response_model=None)
 def company_overview(company_name: str, response: Response, request: Request) -> CompanyOverviewResponse | Response:
-    """Aggregated governance overview for all contracts in a company."""
     started = time.monotonic()
     with deps.SessionLocal() as session:
         if enabled():
@@ -107,9 +99,6 @@ def company_overview(company_name: str, response: Response, request: Request) ->
         response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
         response.headers["Cache-Tag"] = cache_tag(company_name)
         try:
-            # cast: assemble_company_payload provably builds exactly this
-            # shape; the annotation belongs on the producer once
-            # services/aggregations adopts it.
             payload = build_company_overview(session, company_name)
         except CompanyNotFound:
             _log_endpoint("/api/company/{name}", company=company_name, started=started, outcome="not_found")
@@ -126,12 +115,7 @@ def company_overview(company_name: str, response: Response, request: Request) ->
 
 @router.get("/api/company/{company_name}/addresses", response_model=None)
 def company_addresses(company_name: str, response: Response) -> CompanyAddressesResponse:
-    """Full inventory of contract addresses for a protocol.
-
-    Split out from the main ``/api/company/{name}`` payload so the
-    167 KB list isn't shipped on every page-load — ``AddressesModal``
-    fetches this lazily when the user opens it.
-    """
+    """Split out so the ~167 KB list isn't shipped on every page load."""
     started = time.monotonic()
     response.headers["X-PSAT-Fresh-Until"] = str(time.time() + 60)
     response.headers["Cache-Tag"] = cache_tag(company_name)
@@ -153,17 +137,9 @@ def company_addresses(company_name: str, response: Response) -> CompanyAddresses
 
 @router.get("/api/company/{company_name}/functions", response_model=None)
 def company_functions(company_name: str, response: Response, request: Request) -> CompanyFunctionsResponse | Response:
-    """Per-contract function entries for a protocol, keyed by the composite
-    ``"<chain>::<address>"`` entity token (invariant 13) so a same-address
-    cross-chain pair keeps each chain's own analysis. The frontend indexes this
-    map with the matching ``entityKey(chain, address)``.
+    """Function entries keyed by ``"<chain>::<address>"`` (invariant 13).
 
-    Split out of the main ``/api/company/{name}`` payload — the
-    ``EffectiveFunction`` table accounts for ~2.13 MB of payload and
-    120-290ms of TTFB on ether.fi, neither of which the Surface canvas
-    needs to render. ``ProtocolSurface`` fetches this in parallel with
-    the main payload and populates the function inspector when it
-    arrives.
+    Split out: ~2 MB and 120-290ms TTFB the canvas doesn't need to render.
     """
     started = time.monotonic()
     with deps.SessionLocal() as session:
@@ -190,7 +166,6 @@ def company_functions(company_name: str, response: Response, request: Request) -
 
 @router.get("/api/company/{company_name}/audits", response_model=None)
 def company_audits(company_name: str) -> CompanyAuditsResponse:
-    """List all known audit reports for a company."""
     started = time.monotonic()
     with deps.SessionLocal() as session:
         protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
@@ -225,28 +200,13 @@ def company_audits(company_name: str) -> CompanyAuditsResponse:
 
 @router.get("/api/company/{company_name}/audit_coverage", response_model=None)
 def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
-    """For each contract in the company's inventory, list audits covering it.
+    """Audits covering each inventory contract, from ``audit_contract_coverage``.
 
-    Reads from the persisted ``audit_contract_coverage`` join table — rows
-    are written proxy-aware by ``services.audits.coverage`` when scope
-    extraction completes or a live upgrade event is detected. The
-    ``last_audit`` pointer is the most recent matching audit by ``date``
-    (nulls last, then id desc to break ties). Each audit entry carries
-    ``match_type`` + ``match_confidence`` so the UI can flag low-confidence
-    links differently.
+    ``last_audit`` is newest by date (nulls last, then id desc).
 
-    Two top-level counts, deliberately distinct:
-
-    - ``audit_count`` — every audit report on file for the protocol,
-      unfiltered. Must equal ``/api/company/{name}/audits``'s count and the
-      chat plane's ``protocol_brief`` count: the hero stat renders this
-      number and one click opens the reports modal, so the two surfaces must
-      agree.
-    - ``scoped_audit_count`` — the subset with
-      ``scope_extraction_status == 'success'``, i.e. the reports whose
-      contract scope was extracted and which can therefore contribute
-      coverage rows below. A report can be on file (counted above) while its
-      scope extraction was skipped or failed.
+    - ``audit_count`` — every report on file. Must match ``/audits`` and the chat ``protocol_brief``: the hero stat
+    links to that modal.
+    - ``scoped_audit_count`` — reports with successful scope extraction, which can contribute coverage.
     """
     started = time.monotonic()
     with deps.SessionLocal() as session:
@@ -279,8 +239,6 @@ def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
         )
         audits_by_id = {a.id: a for a in audit_rows}
 
-        # Pull every coverage row for the protocol in one query, then
-        # bucket in Python — cheaper than N queries for N contracts.
         coverage_rows = (
             session.execute(
                 select(AuditContractCoverage).where(
@@ -294,10 +252,8 @@ def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
         for row in coverage_rows:
             coverage_by_contract.setdefault(row.contract_id, []).append(row)
 
-        # Reuse strict proofs already established for the same deployed
-        # contract under another protocol. This lets dependency rows such as
-        # Lido/WETH/LayerZero carry their own verified audits when they appear
-        # in a dependent protocol, without crediting heuristic matches.
+        # Reuse strict proofs for the same deployed contract from another protocol (Lido/WETH dependencies), never
+        # heuristic matches.
         target_contract_ids_by_key: dict[tuple[str, str], set[int]] = {}
         for c in contracts:
             if key := _coverage_key(c.chain, c.address):
@@ -336,11 +292,7 @@ def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
             date = (audit.date if audit else None) or ""
             return (date, row.audit_report_id)
 
-        # Proxy rows don't hold their own coverage rows — the scope
-        # matcher writes against the impl Contract row. For the
-        # company-level "is this contract audited?" view the user really
-        # means "is the code this address is running audited?", so union
-        # the proxy's entries with its current implementation's.
+        # Coverage rows sit on the impl; union the proxy's with its current impl's.
         contracts_by_addr = {c.address.lower(): c for c in contracts if c.address}
 
         coverage: list[AuditCoverageEntry] = []
@@ -366,11 +318,8 @@ def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
                     brief["inherited_from_protocol"] = getattr(e, "_inherited_from_protocol", None)
                     brief["inherited_contract_address"] = getattr(e, "_inherited_contract_address", None)
                 matching.append(brief)
-            # Inventory-only entries (discovered but never analyzed) have no
-            # name and no audits — they contribute nothing to the coverage
-            # view and otherwise inflate the payload (~67% of rows for a
-            # mature protocol). Drop them at the serializer rather than at
-            # the query, so analyzed contracts without audits still surface.
+            # Inventory-only entries (~67% of rows) add nothing; filtered here so analyzed-but-unaudited contracts still
+            # show.
             if not c.contract_name and not matching:
                 continue
             coverage.append(
@@ -406,23 +355,11 @@ def company_audit_coverage(company_name: str) -> CompanyAuditCoverageResponse:
 
 @router.get("/api/company/{company_name}/score", response_model=None)
 def company_score(company_name: str) -> CompanyScoreResponse:
-    """The protocol's latest score, served as the ledger payload verbatim.
+    """The latest score document, verbatim: every projection tried collapsed a three-state into two.
 
-    No projection into any other shape. Every projection attempted so far has
-    been where a three-state collapsed back into two — the payload's
-    ``grade_state``, ``perimeter_state`` and per-finding states are the
-    contract, and a consumer must branch on them rather than assume a grade.
-    In particular ``grade_state = not_determined`` is a computed verdict (the
-    fold ran and could not determine a grade), which is why the numbers are
-    ``null`` beside it instead of zeroed.
+    ``grade_state = not_determined`` is a computed verdict, hence null figures.
 
-    Two distinct 404s, told apart by ``detail`` because they are different
-    facts and a client that treats them alike will report a typo'd protocol as
-    "not scored yet": ``Company not found`` (no such protocol) versus ``No
-    score has been computed for this protocol yet`` (the protocol exists and
-    the fold has not run). Neither is the answer for an unreadable spilled
-    document — that is a 503, because a document that could not be fetched is
-    not an absent score.
+    Two 404s told apart by ``detail`` (no such protocol vs not scored yet); an unreadable spilled document is 503.
     """
     from db.models import ProtocolScoreLatest
     from services.scoring.persist import ScoreDocumentUnavailable, load_score_document
@@ -460,9 +397,7 @@ def company_score(company_name: str) -> CompanyScoreResponse:
             "computed_at": row.computed_at.isoformat() if row.computed_at else None,
             "trigger": row.trigger,
             "trigger_job_id": str(row.trigger_job_id) if row.trigger_job_id else None,
-            # The three grade figures come from the document, not the columns:
-            # the columns are Numeric and would arrive as Decimal strings, and
-            # the document is what the fold actually emitted.
+            # From the document: the Numeric columns would arrive as Decimal strings.
             "grade_state": document.get("grade_state"),
             "grade_lambda": document.get("grade_lambda"),
             "grade_exposure": document.get("grade_exposure"),

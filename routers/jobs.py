@@ -1,5 +1,3 @@
-"""Job lifecycle: list, create, fetch, cancel, stage timings."""
-
 from __future__ import annotations
 
 import logging
@@ -42,9 +40,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-#: W5 actor identity at this edge. Admin auth is one shared key
-#: (``deps.require_admin_key``), so the key itself is the only provable actor
-#: — never a fabricated per-person identity.
+# Admin auth is one shared key, so it's the only provable actor.
 W5_ADMIN_ACTOR = "admin_api_key"
 
 
@@ -58,19 +54,8 @@ def list_jobs() -> list[JobDict]:
 
 @router.post("/api/analyze", dependencies=[Depends(deps.require_admin_key)], response_model=None)
 def analyze_address(request: AnalyzeRequest) -> JobDict:
-    # Address shape is enforced by the ``AnalyzeRequest`` field validator (422);
-    # any address reaching here is a canonical 0x-prefixed 20-byte hex string.
-    # Allowlist enforcement (inv. 14): the edge keeps its mainnet default, but a
-    # submission that resolves to a chain this deployment has not enabled is
-    # rejected before a job is spawned. Enforce on the *resolved* chain — the same
-    # ``derive_job_chain_id`` value the job carries — so a chainless/mainnet
-    # default is unaffected and an address-less company/dapp/defillama submission
-    # (no chain identity; it fans out to the protocol's declared chains during
-    # discovery, an internal derivation not gated here) is left alone.
-    # An address-scoped submission that *names* a chain must name a registered
-    # one. ``derive_job_chain_id``'s unknown-chain fallback (warn + mainnet) is
-    # an internal-writer edge, not an ingress contract — the string is stored
-    # verbatim on the job, so it must resolve here or be rejected.
+    # Allowlist (inv. 14) on the resolved chain, so chainless and company/dapp submissions are unaffected. An address
+    # submission naming a chain must name a registered one: the string is stored verbatim.
     if request.address and request.chain and request.chain.strip():
         try:
             chain_by_name(request.chain)
@@ -83,19 +68,10 @@ def analyze_address(request: AnalyzeRequest) -> JobDict:
         except UnsupportedChainError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     with deps.SessionLocal() as session:
-        # Workers honor ``request["rpc_url"]`` only as a local-node override
-        # (Anvil / test fork) via ``default_rpc_url``; a hosted URL here is
-        # ignored in favor of eRPC, so a pinned provider can't shadow the
-        # proxy. Stored verbatim and sanitized by ``Job.to_dict`` at output.
+        # ``rpc_url`` is honored only as a local-node override, so a hosted URL can't shadow eRPC. Sanitized on output.
         req_dict = request.model_dump()
-        # Optional protocol context: an address submission that also names a
-        # company links to the EXISTING protocol row — lookup-only, so a typo'd
-        # name 404s instead of minting a duplicate protocol (company-only
-        # submissions keep resolving/creating theirs during discovery). The
-        # admin's membership claim rides on the request as an ATTRIBUTED W5
-        # human assertion (membership gate, invariant 14) — never a source
-        # tag; the gate consumes it at nomination time. Address-only
-        # submissions stay standalone.
+        # Lookup-only, so a typo 404s instead of minting a protocol. The membership claim rides as an attributed W5
+        # assertion for the gate (invariant 14), never a source tag.
         if request.address and request.company:
             protocol_row = session.execute(
                 select(Protocol).where(func.lower(Protocol.name) == request.company.lower()).limit(1)
@@ -122,17 +98,12 @@ def analyze_address(request: AnalyzeRequest) -> JobDict:
     response_model=None,
 )
 def analyze_remaining(company_name: str) -> AnalyzeRemainingResponse:
-    """Queue analysis jobs for all discovered-but-not-analyzed contracts in a company."""
     with deps.SessionLocal() as session:
         protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
         if protocol_row is None:
             raise HTTPException(status_code=404, detail="Company not found")
 
-        # Exclude backfilled *superseded* historical impls — those rows exist
-        # only to anchor audit-coverage matching, not to be re-analyzed. The
-        # proxy's CURRENT impl is kept (it carries the live marker), since that
-        # is where the real functions live. Single source of truth for the
-        # anchor predicate: services/discovery/ranking.not_superseded_impl_clause.
+        # Superseded historical impls only anchor audit coverage; single predicate in services/discovery/ranking.
         unanalyzed = (
             session.execute(
                 select(Contract).where(
@@ -147,23 +118,18 @@ def analyze_remaining(company_name: str) -> AnalyzeRemainingResponse:
 
         queued: list[QueuedJobRef] = []
         for contract in unanalyzed:
-            # Re-check inside the loop so concurrent calls (double-click or
-            # duplicate request) don't each create a job for the same contract.
+            # Guards against double-clicks creating duplicate jobs.
             session.refresh(contract, attribute_names=["job_id"])
             if contract.job_id is not None:
                 continue
-            # Allowlist gate (inv. 14), mirroring the selection worker: a stub
-            # on a chain this deployment has not enabled is skipped — its
-            # discovery evidence stays for a future widened scan, no job spawns.
+            # Allowlist gate (inv. 14), mirroring the selection worker.
             if not chain_enabled(contract.chain):
                 logger.info(
                     "analyze-remaining: skipping stub on non-enabled chain",
                     extra={"address": contract.address, "chain": contract.chain, "reason": "chain_not_enabled"},
                 )
                 continue
-            # Coalesce NULL→"ethereum" (legacy convention): a NULL-chain contract
-            # must still dedup within mainnet, not skip chain filtering entirely
-            # and match a job on any chain at the same address (F8).
+            # Coalesce NULL to ethereum so dedup stays within mainnet (F8).
             existing = deps.find_existing_job_for_address(session, contract.address, chain=contract.chain or "ethereum")
             if existing is not None:
                 contract.job_id = existing.id
@@ -191,7 +157,6 @@ def analyze_remaining(company_name: str) -> AnalyzeRemainingResponse:
     response_model=None,
 )
 def cancel_queued_company_jobs(company_name: str) -> CancelQueuedJobsResponse:
-    """Cancel queued jobs for a company; leaves processing/completed/failed untouched."""
     with deps.SessionLocal() as session:
         protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
         if protocol_row is None:
@@ -222,14 +187,10 @@ def delete_company_address(
     address: str,
     chain: str = Query(default="ethereum"),
 ) -> DeleteCompanyAddressResponse:
-    """Remove a Contract row from a protocol.
+    """Remove a Contract row.
 
-    Scoped to the protocol AND chain: the same address can host a contract on
-    two chains within one protocol, so keying by address alone used to raise
-    ``MultipleResultsFound`` (a 500). ``chain`` disambiguates and defaults to
-    mainnet at this admin edge (inv. 12) so existing single-chain callers are
-    unchanged. FK cascades on ``contracts.id`` clean up the audit coverage rows
-    and any upgrade-event attribution.
+    Scoped by chain (defaults to mainnet, inv. 12): address alone raised ``MultipleResultsFound``. FK cascades clean up
+    coverage and upgrade attribution.
     """
     if not deps._ADDRESS_RE.match(address):
         raise HTTPException(status_code=400, detail="Invalid address")
@@ -245,8 +206,6 @@ def delete_company_address(
             select(Contract).where(
                 Contract.protocol_id == protocol_row.id,
                 Contract.address == address,
-                # ``Contract.chain`` is nullable; a legacy NULL row is mainnet, so
-                # coalesce keeps the mainnet default matching those rows exactly.
                 func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name,
             )
         ).scalar_one_or_none()
@@ -268,8 +227,6 @@ def get_job(job_id: str) -> JobDict:
 
 
 class JobErrorsResponse(BaseModel):
-    """Response shape for ``GET /api/jobs/{job_id}/errors``."""
-
     job_id: str
     trace_id: str | None
     status: str
@@ -283,15 +240,8 @@ class JobErrorsResponse(BaseModel):
     dependencies=[Depends(deps.require_admin_key)],
 )
 def get_job_errors(job_id: str) -> JobErrorsResponse:
-    """Return the deserialized ``stage_errors`` artifact for a job.
-
-    Returns an empty list when the artifact is missing — every job either
-    has zero degraded events and zero failures, or it has the artifact
-    documenting them. A 404 is reserved for "no such job".
-    """
-    # Job.id is a UUID column; a non-UUID string would otherwise raise
-    # ``DataError`` at the dialect level — surface as 404 instead so the
-    # endpoint matches the rest of the job-routes' behaviour for bad ids.
+    """Empty list when the artifact is missing; 404 means no such job."""
+    # A non-UUID would raise ``DataError``; 404 like the other job routes.
     import uuid as _uuid
 
     try:
@@ -308,9 +258,6 @@ def get_job_errors(job_id: str) -> JobErrorsResponse:
             try:
                 errors = StageErrors.model_validate(raw).errors
             except Exception as exc:
-                # Legacy/corrupt payloads shouldn't 500 the endpoint —
-                # return them empty and let the operator inspect the
-                # underlying artifact directly.
                 logger.warning(
                     "stage_errors artifact for job %s did not validate: %s",
                     job.id,
@@ -342,19 +289,8 @@ def get_job_errors(job_id: str) -> JobErrorsResponse:
 
 @router.post("/api/jobs/{job_id}/retry", dependencies=[Depends(deps.require_admin_key)], response_model=None)
 def retry_job(job_id: str) -> JobDict:
-    """Operator-initiated retry of a ``failed_terminal`` job.
-
-    Resets ``status`` to ``queued``, ``retry_count`` to 0, ``next_attempt_at``
-    to NULL, and ``last_failure_kind`` to NULL so the row looks like a fresh
-    submission to the worker fleet. Appends a ``severity="degraded"``
-    ``StageError`` to the per-job ``stage_errors`` artifact tagging the manual
-    retry — without it the audit log would silently show the job recovering
-    on its own.
-
-    409 (not 400) for non-``failed_terminal`` jobs because the request itself
-    is well-formed; the conflict is with the job's current state. Done jobs,
-    queued jobs, and processing jobs are all rejected so an operator can't
-    accidentally clobber an in-flight run.
+    """Operator retry of a ``failed_terminal`` job: reset to a fresh-looking queued row and append a degraded
+    ``manual_retry`` StageError so the log doesn't show a silent recovery. 409 for any other state.
     """
     import uuid as _uuid
 
@@ -363,12 +299,8 @@ def retry_job(job_id: str) -> JobDict:
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=404, detail="Job not found") from exc
     with deps.SessionLocal() as session:
-        # ``with_for_update`` serializes concurrent admin retries against the
-        # same row: without it, two operators hitting this endpoint at once
-        # both observe ``failed_terminal``, both flip to ``queued``, and the
-        # artifact-append below would see them race on ``store_artifact``'s
-        # upsert (last writer clobbers the first writer's manual_retry entry).
-        # The lock is held until the outer ``session.commit()`` below.
+        # Serializes concurrent retries; otherwise both flip to queued and race on the artifact upsert. Held until the
+        # final commit.
         job = session.execute(select(Job).where(Job.id == parsed).with_for_update()).scalar_one_or_none()
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
@@ -383,20 +315,9 @@ def retry_job(job_id: str) -> JobDict:
         job.last_failure_kind = None
         job.detail = "Manual retry requested by operator"
         job.worker_id = None
-        # Drop the prior ``error`` text — it referred to the now-superseded
-        # terminal failure. The audit log preserves it via the manual_retry
-        # entry below + the prior failure entries already in stage_errors.
         job.error = None
-        # Read + append + upsert the audit-log artifact in the same
-        # transaction as the status flip. The FOR UPDATE row lock above
-        # covers everything until the final commit, so a concurrent admin
-        # retry blocks here and observes ``queued`` (→ 409) instead of
-        # racing on the upsert.
-        #
-        # Append the manual retry entry so /api/jobs/{id}/errors shows
-        # operator intervention as part of the per-job history. Severity
-        # ``degraded`` (not ``error``) so consumers don't treat it as a
-        # failed attempt — it's a recovery signal.
+        # Same transaction as the status flip, under the row lock. ``degraded`` so consumers don't read it as a failed
+        # attempt.
         existing = deps.get_artifact(session, job.id, "stage_errors")
         prior: list[StageError] = []
         corrupt_prior: dict[str, Any] | None = None
@@ -410,9 +331,7 @@ def retry_job(job_id: str) -> JobDict:
                     exc,
                     extra={"exc_type": type(exc).__name__},
                 )
-                # Preserve the raw bytes via a degraded breadcrumb so the
-                # audit log isn't lossy when an operator retries a job whose
-                # prior body fell out of schema (legacy/partial-write/etc.).
+                # Keep the unparseable prior body as a breadcrumb so the log isn't lossy.
                 prior = []
                 corrupt_prior = existing
         if corrupt_prior is not None:
@@ -459,21 +378,11 @@ def retry_job(job_id: str) -> JobDict:
 
 @router.get("/api/jobs/{job_id}/stage_timings", dependencies=[Depends(deps.require_admin_key)], response_model=None)
 def get_job_stage_timings(job_id: str) -> JobStageTimingsResponse:
-    """Return all per-stage timing artifacts the worker fleet wrote for
-    this job, keyed by stage name. Schema-v2 layout (one
-    ``stage_timing_<stage>`` artifact per stage). Used by the bench
-    harness to populate ``worker_elapsed_seconds`` reliably without
-    scraping Fly logs.
-
-    Admin-gated: the payload is operator execution telemetry (per-stage
-    durations, status, metric counts, worker_id) served only to the monitor
-    dashboard, not part of the public consumer surface.
-    """
+    """Per-stage timing artifacts keyed by stage, for the bench harness. Admin-gated operator telemetry."""
     with deps.SessionLocal() as session:
         job = session.get(Job, job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
-        # Escape `_` so the legacy `stage_timings` artifact doesn't match this prefix scan.
         rows = (
             session.execute(
                 select(Artifact).where(
@@ -484,9 +393,7 @@ def get_job_stage_timings(job_id: str) -> JobStageTimingsResponse:
             .scalars()
             .all()
         )
-        # Read everything we need off the rows before releasing the session
-        # so the storage fan-out below doesn't pin a DB connection during
-        # slow HTTP I/O.
+        # Release the session before slow storage I/O.
         resolved_job_id = str(job.id)
         inline_values: dict[str, Any] = {}
         storage_lookups: dict[str, tuple[str, str | None]] = {}
@@ -503,8 +410,6 @@ def get_job_stage_timings(job_id: str) -> JobStageTimingsResponse:
     if storage_lookups:
         client = deps.get_storage_client()
         if client is None:
-            # Storage env stripped after rows were written. Degrade to inline-only
-            # rather than 500 — the SPA copes with a partial timings map.
             logger.warning(
                 "stage_timings on job %s reference storage_key but storage is not configured; "
                 "returning inline timings only",
@@ -515,9 +420,7 @@ def get_job_stage_timings(job_id: str) -> JobStageTimingsResponse:
             for stage, (key, content_type) in storage_lookups.items():
                 body = bodies.get(key)
                 if body is None:
-                    # A stage_timing row points at a storage key whose object
-                    # is gone — distinct from a stage that never ran. Surface it
-                    # so a lost artifact doesn't silently read as "no timing".
+                    # Distinct from a stage that never ran.
                     logger.warning(
                         "stage_timing body missing from storage for job %s stage %s",
                         resolved_job_id,

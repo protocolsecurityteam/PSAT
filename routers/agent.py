@@ -1,5 +1,3 @@
-"""Agent chat endpoints for the protocol surface sidebar."""
-
 from __future__ import annotations
 
 import json
@@ -37,7 +35,6 @@ class AgentChatRequest(BaseModel):
 
 @router.post("/api/agent/chat", dependencies=[Depends(deps.require_admin_key)])
 def agent_chat(req: AgentChatRequest):
-    """Stream a chat completion as server-sent events."""
     ctx = AgentContext(
         company=req.company,
         selected_address=req.selected_address,
@@ -72,13 +69,9 @@ def agent_address_touches(
     address: str,
     chain: str | None = Query(default=None),
 ) -> AddressTouchesResponse:
-    """Return contracts an address has function-level authority over.
+    """Contracts an address has function-level authority over.
 
-    ``chain`` scopes the returned contracts to one deployment (inv. 12): the same
-    address can govern contracts on two chains within one protocol, and the
-    chain-scoped Surface page wants only the active chain's touch set. Optional —
-    omitted returns every chain (legacy behavior). Legacy NULL-chain rows are
-    mainnet, so the coalesce keeps a ``chain=ethereum`` filter matching them.
+    Optional ``chain`` scopes to one deployment (inv. 12); legacy NULL-chain rows count as mainnet.
     """
     addr_lc = (address or "").lower()
     chain_name: str | None = None
