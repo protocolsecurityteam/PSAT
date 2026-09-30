@@ -25,9 +25,10 @@ from db.models import (
     IndexedEventLog,
     Protocol,
     RoleHolderPlane,
+    enrollment_basis_permits_exactness,
 )
 from db.queue import HEARTBEAT_PROTOCOL_RESTAKING
-from services.monitoring import restaking_cycle, restaking_enrollment
+from services.monitoring import restaking_cycle
 from services.monitoring.restaking_cycle import refresh_restaking_plane, run_restaking_loop
 from services.monitoring.restaking_enrollment import (
     PUBKEY_LINKED_TOPIC0,
@@ -36,6 +37,7 @@ from services.monitoring.restaking_enrollment import (
     node_addresses_from_fold,
 )
 from services.resolution.role_holder_plane import ROLE_GRANTED_TOPIC0, ROLE_REVOKED_TOPIC0
+from tests.support.witness_wire import stub_seed_witness
 from workers.resolution_worker import ResolutionWorker
 
 # The measured EtherFiNodesManager PROXY. Its ``contracts`` row is keyed at the
@@ -617,11 +619,7 @@ class TestRestakingFailureDomain:
 
 class TestEnrollmentBasis:
     def test_new_cursors_carry_the_asserted_basis(self, db_session, monkeypatch):
-        monkeypatch.setattr(
-            restaking_enrollment,
-            "get_contract_creation_block",
-            lambda addr, *, chain_id: EFNM_CREATION_BLOCK,
-        )
+        stub_seed_witness(monkeypatch, creation_block=EFNM_CREATION_BLOCK)
 
         assert enroll_restaking_fold(db_session, chain_id=1, emitters=[EFNM_PROXY]) == 1
 
@@ -633,8 +631,9 @@ class TestEnrollmentBasis:
         ).scalar_one()
         assert cursor.enrollment_basis == RESTAKING_FOLD_ENROLLMENT_BASIS
         assert cursor.enrollment_basis == "tracked_topics_asserted"
-        # The basis records provenance; it still licenses no exact empty.
-        assert cursor.first_indexed_block_basis == "not_determined"
+        # A witnessed floor records provenance; the asserted basis still licenses no exact empty.
+        assert cursor.first_indexed_block_basis == "creation_block_minus_one"
+        assert not enrollment_basis_permits_exactness(cursor.enrollment_basis)
         db_session.rollback()
 
 

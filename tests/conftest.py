@@ -519,6 +519,21 @@ def _stub_role_store_wire(monkeypatch):
     monkeypatch.setattr("services.resolution.creation_block_floor.get_contract_creation_block", lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _stub_seed_witness_wire(monkeypatch):
+    """Keep the offline suite hermetic against the indexer's floor witness.
+
+    Every enrolment source, restaking included, grades its seed with three
+    pinned reads (two ``eth_getCode``, one ``eth_getLogs``). Raising here
+    reproduces the witness-failure path (``not_determined``). Witness tests
+    patch this binding in the test body (``tests/support/witness_wire.py``)."""
+
+    def _no_wire(*a, **k):
+        raise RuntimeError("offline: seed witness wire read stubbed (see tests/conftest.py)")
+
+    monkeypatch.setattr("workers.event_log_indexer.rpc_request", _no_wire)
+
+
 class SessionFactory:
     """Stand-in for sessionmaker that yields a single shared Session.
 

@@ -13,8 +13,8 @@ import pytest
 from eth_utils.crypto import keccak
 from sqlalchemy import select
 
-from db.models import Contract, IndexedEventCursor, IndexedEventLog, Protocol
-from services.monitoring import restaking_enrollment
+from db.floor_witnesses import read_floor_witness
+from db.models import FIRST_INDEXED_BASIS_CREATION, Contract, IndexedEventCursor, IndexedEventLog, Protocol
 from services.monitoring.restaking_enrollment import (
     PUBKEY_LINKED_SIGNATURE,
     PUBKEY_LINKED_TOPIC0,
@@ -24,6 +24,7 @@ from services.monitoring.restaking_enrollment import (
     protocol_contract_addresses,
 )
 from tests.conftest import requires_postgres
+from tests.support.witness_wire import stub_seed_witness
 
 # The measured emitter: the EtherFiNodesManager PROXY. Its ``contracts`` row is
 # keyed at the implementation (0xcf5928ea…), which emits nothing — the same
@@ -93,9 +94,7 @@ class TestEmitterDiscovery:
 @requires_postgres
 class TestEnrollment:
     def test_cursor_seeded_one_below_creation(self, db_session, monkeypatch):
-        monkeypatch.setattr(
-            restaking_enrollment, "get_contract_creation_block", lambda addr, *, chain_id: EFNM_CREATION_BLOCK
-        )
+        stub_seed_witness(monkeypatch, creation_block=EFNM_CREATION_BLOCK)
         assert enroll_restaking_fold(db_session, chain_id=1, emitters=[EFNM_PROXY]) == 1
         cursor = db_session.execute(
             select(IndexedEventCursor).where(
@@ -108,8 +107,35 @@ class TestEnrollment:
         assert cursor.backfill_complete is False
         db_session.rollback()
 
+    def test_cursor_carries_the_witnessed_floor_when_the_three_reads_agree(self, db_session, monkeypatch):
+        wire = stub_seed_witness(monkeypatch, creation_block=EFNM_CREATION_BLOCK)
+        assert enroll_restaking_fold(db_session, chain_id=1, emitters=[EFNM_PROXY]) == 1
+        cursor = db_session.execute(
+            select(IndexedEventCursor).where(IndexedEventCursor.event_address == EFNM_PROXY)
+        ).scalar_one()
+        assert (cursor.first_indexed_block, cursor.first_indexed_block_basis) == (
+            EFNM_CREATION_BLOCK - 1,
+            FIRST_INDEXED_BASIS_CREATION,
+        )
+        assert [method for method, _ in wire.calls] == ["eth_getCode", "eth_getCode", "eth_getLogs"]
+        assert read_floor_witness(db_session, chain_id=1, address=EFNM_PROXY) == (
+            EFNM_CREATION_BLOCK - 1,
+            FIRST_INDEXED_BASIS_CREATION,
+        )
+        db_session.rollback()
+
+    def test_failed_witness_is_recorded_as_attempted_not_determined(self, db_session, monkeypatch):
+        stub_seed_witness(monkeypatch, creation_block=EFNM_CREATION_BLOCK, prior_logs=[{"blockNumber": "0x1"}])
+        assert enroll_restaking_fold(db_session, chain_id=1, emitters=[EFNM_PROXY]) == 1
+        cursor = db_session.execute(
+            select(IndexedEventCursor).where(IndexedEventCursor.event_address == EFNM_PROXY)
+        ).scalar_one()
+        assert (cursor.first_indexed_block, cursor.first_indexed_block_basis) == (None, "not_determined")
+        assert read_floor_witness(db_session, chain_id=1, address=EFNM_PROXY) == (None, "not_determined")
+        db_session.rollback()
+
     def test_unresolved_creation_block_enrolls_nothing(self, db_session, monkeypatch):
-        monkeypatch.setattr(restaking_enrollment, "get_contract_creation_block", lambda addr, *, chain_id: None)
+        stub_seed_witness(monkeypatch, creation_block=None)
         assert enroll_restaking_fold(db_session, chain_id=1, emitters=[EFNM_PROXY]) == 0
         assert db_session.execute(select(IndexedEventCursor)).all() == []
         db_session.rollback()
@@ -118,7 +144,9 @@ class TestEnrollment:
         def boom(addr, *, chain_id):
             raise RuntimeError("etherscan")
 
-        monkeypatch.setattr(restaking_enrollment, "get_contract_creation_block", boom)
+        import workers.event_log_indexer as eli
+
+        monkeypatch.setattr(eli, "get_contract_creation_block", boom)
         assert enroll_restaking_fold(db_session, chain_id=1, emitters=[EFNM_PROXY]) == 0
         assert db_session.execute(select(IndexedEventCursor)).all() == []
         db_session.rollback()
@@ -144,9 +172,7 @@ class TestEnrollment:
             )
         db_session.flush()
 
-        monkeypatch.setattr(
-            restaking_enrollment, "get_contract_creation_block", lambda addr, *, chain_id: EFNM_CREATION_BLOCK
-        )
+        stub_seed_witness(monkeypatch, creation_block=EFNM_CREATION_BLOCK)
         enroll_restaking_fold(db_session, chain_id=1, emitters=[EFNM_PROXY])
 
         for topic0 in warm_topics:
