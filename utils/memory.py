@@ -1,12 +1,4 @@
-"""Lightweight memory introspection helpers (Linux /proc + cgroups, no extra deps).
-
-Used by the logging bootstrap and worker lifecycle to sample process RSS and
-record the process peak observed while each job ran, without pulling in psutil.
-
-All functions return ``None`` (or an empty/zero default) on non-Linux hosts
-or when the relevant proc/cgroup file is unreadable, so callers can use them
-unconditionally.
-"""
+"""Memory introspection from /proc and cgroups, without psutil. Everything degrades to ``None``/0 off Linux."""
 
 from __future__ import annotations
 
@@ -21,27 +13,21 @@ from pathlib import Path
 _PROC_STATUS = Path("/proc/self/status")
 _PROC_MEMINFO = Path("/proc/meminfo")
 
-# cgroup v2 paths (modern hosts)
 _CGROUP_V2_MAX = Path("/sys/fs/cgroup/memory.max")
 _CGROUP_V2_CURRENT = Path("/sys/fs/cgroup/memory.current")
 
-# cgroup v1 paths (Fly machines as of 2026, plus older Linux containers)
+# Fly machines are cgroup v1.
 _CGROUP_V1_MAX = Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")
 _CGROUP_V1_CURRENT = Path("/sys/fs/cgroup/memory/memory.usage_in_bytes")
 
-# v1 unset-sentinel: kernel reports a near-2^63 value when no limit is set
-# at this level (the actual cap lives on a parent cgroup). Treat anything
-# above this as "no limit visible here, look at /proc/meminfo instead".
+# v1 reports ~2^63 when the limit lives on a parent; fall back to /proc/meminfo.
 _CGROUP_V1_UNSET_SENTINEL = 1 << 60
 
 
 def _vmrss_bytes(status_path: Path) -> int:
-    """VmRSS from a ``/proc/<pid>/status`` file in bytes; 0 if the file is
-    unreadable (process gone, non-Linux) or has no VmRSS line."""
     try:
         for line in status_path.read_text().splitlines():
             if line.startswith("VmRSS:"):
-                # "VmRSS:    13648 kB"
                 return int(line.split()[1]) * 1024
     except Exception:
         return 0
@@ -49,13 +35,11 @@ def _vmrss_bytes(status_path: Path) -> int:
 
 
 def current_rss_bytes() -> int:
-    """RSS of this process in bytes; 0 if /proc/self/status is unreadable."""
     return _vmrss_bytes(_PROC_STATUS)
 
 
 def rss_bytes_for_pid(pid: int) -> int:
-    """RSS of process *pid* in bytes; 0 if the process is gone, /proc is
-    unreadable, or the host is non-Linux. Never raises."""
+    """Never raises."""
     return _vmrss_bytes(Path(f"/proc/{pid}/status"))
 
 
@@ -73,7 +57,6 @@ def _read_cgroup_int(path: Path) -> int | None:
 
 
 def _meminfo_kb(field: str) -> int | None:
-    """Parse a kB value from /proc/meminfo. None if unreadable / field absent."""
     try:
         for line in _PROC_MEMINFO.read_text().splitlines():
             if line.startswith(f"{field}:"):
@@ -84,9 +67,7 @@ def _meminfo_kb(field: str) -> int | None:
 
 
 def cgroup_memory_max_bytes() -> int | None:
-    """Container memory limit. Tries cgroup v2 → cgroup v1 → /proc/meminfo
-    MemTotal (which reflects the cgroup cap on most container runtimes).
-    Returns None only on hosts where none of these are readable."""
+    """cgroup v2, then v1, then MemTotal (which reflects the cap on most runtimes)."""
     v2 = _read_cgroup_int(_CGROUP_V2_MAX)
     if v2 is not None:
         return v2
@@ -100,7 +81,7 @@ def cgroup_memory_max_bytes() -> int | None:
 
 
 def cgroup_memory_current_bytes() -> int | None:
-    """Cgroup memory charge, including file cache; not a sum of process RSS."""
+    """Includes file cache; not a sum of process RSS."""
     v2 = _read_cgroup_int(_CGROUP_V2_CURRENT)
     if v2 is not None:
         return v2
@@ -115,7 +96,6 @@ def cgroup_memory_current_bytes() -> int | None:
 
 
 def cgroup_anon_file_bytes() -> tuple[int | None, int | None]:
-    """Anonymous and file-backed portions of the cgroup charge, when visible."""
     for path, anon_key, file_key in (
         (Path("/sys/fs/cgroup/memory.stat"), "anon", "file"),
         (Path("/sys/fs/cgroup/memory/memory.stat"), "total_rss", "total_cache"),
@@ -130,7 +110,6 @@ def cgroup_anon_file_bytes() -> tuple[int | None, int | None]:
 
 
 def descendant_rss_samples(parent_pid: int) -> list[tuple[int, int, str, str, int]]:
-    """Visible descendants as (pid, ppid, name, start-ticks, RSS)."""
     children: dict[int, list[tuple[int, str, str]]] = {}
     try:
         entries = os.listdir("/proc")
@@ -162,8 +141,6 @@ def descendant_rss_samples(parent_pid: int) -> list[tuple[int, int, str, str, in
 
 
 class JobRssSpan:
-    """Sampled process RSS while a job runs, shared by concurrent jobs."""
-
     def __init__(self, sampler: "ProcessMemorySampler | None") -> None:
         self._sampler = sampler
         self.start_bytes = current_rss_bytes()
@@ -190,8 +167,6 @@ class JobRssSpan:
 
 
 class ProcessMemorySampler:
-    """One passive sampler per Python process; no DB writes or supervisor."""
-
     def __init__(self, interval_s: float) -> None:
         self.pid = os.getpid()
         self.generation = uuid.uuid4().hex[:12]
@@ -204,7 +179,6 @@ class ProcessMemorySampler:
     def _run(self) -> None:
         logger = logging.getLogger(__name__)
         while True:
-            # Forked children get their own sampler on configure_logging().
             if os.getpid() != self.pid:
                 return
             rss = current_rss_bytes()
@@ -228,9 +202,8 @@ class ProcessMemorySampler:
                     "cgroup_file_bytes": file,
                 },
             )
-            # Worker-owned forge/Slither/Chromium children are outside Python's
-            # own RSS. The machine-runtime parent skips this traversal because
-            # its Python children sample themselves and their own descendants.
+            # Worker children (forge/Slither/Chromium) are outside Python's RSS. machine_runtime skips this; its Python
+            # children sample themselves.
             if Path(sys.argv[0]).stem != "machine_runtime":
                 for pid, ppid, name, start_ticks, child_rss in descendant_rss_samples(self.pid):
                     logger.info(
@@ -254,7 +227,6 @@ _sampler_lock = threading.Lock()
 
 
 def start_memory_sampler() -> ProcessMemorySampler | None:
-    """Start idempotently when the deployment enables cadence sampling."""
     global _sampler
     raw = os.getenv("PSAT_MEMORY_SAMPLE_INTERVAL_S", "")
     try:
@@ -274,8 +246,6 @@ def start_job_rss_span() -> JobRssSpan:
 
 
 def count_sibling_python_procs() -> int:
-    """Number of python processes visible in /proc — approximation of the
-    fleet shape inside this VM. Returns 0 on non-Linux / restricted /proc."""
     n = 0
     try:
         for entry in os.listdir("/proc"):
@@ -293,26 +263,16 @@ def count_sibling_python_procs() -> int:
 
 
 def mb(bytes_value: int | None) -> str:
-    """Format bytes as MB (no decimals); '?' for None."""
     if bytes_value is None:
         return "?"
     return f"{bytes_value / (1024 * 1024):.0f}"
 
 
-# ---------------------------------------------------------------------------
-# Cache-pressure threshold tracking
-# ---------------------------------------------------------------------------
-
-# {cache_name: highest_threshold_pct_logged}; reset via reset_cache_pressure_state.
 _CACHE_PRESSURE_STATE: dict[str, int] = {}
 
 
 def cache_pressure_message(name: str, current: int, max_size: int) -> str | None:
-    """Return a one-line pressure message when *current* crosses 50/75/95% of
-    *max_size* for the first time; None otherwise. Per-name state, in-memory.
-
-    Caller should ``logger.info("[CACHE_PRESSURE] %s", msg)`` when non-None.
-    """
+    """One-line message the first time *current* crosses 50/75/95% of *max_size*, else None."""
     if max_size <= 0:
         return None
     pct = (current / max_size) * 100
@@ -325,9 +285,7 @@ def cache_pressure_message(name: str, current: int, max_size: int) -> str | None
 
 
 def reset_cache_pressure_state(name: str | None = None) -> None:
-    """Forget the last threshold for *name* (or clear all if None). Call from
-    cache ``clear_*`` helpers so post-test/manual resets don't suppress the
-    next genuine pressure event."""
+    """Call from cache ``clear_*`` helpers so resets don't suppress the next real pressure event."""
     if name is None:
         _CACHE_PRESSURE_STATE.clear()
     else:

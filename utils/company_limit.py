@@ -77,7 +77,6 @@ class CompanyReadLimit:
                 owned = False
                 raise
             finally:
-                # A disconnect/timeout/cancellation can race with a released slot.
                 if not owned and acquire.done() and not acquire.cancelled() and acquire.exception() is None:
                     self.slots.release()
 
@@ -86,8 +85,7 @@ class CompanyReadLimit:
         self.slots.release()
         self.admitted -= 1
         if not task.cancelled():
-            # Also retrieve exceptions when the caller disconnected/cancelled.
-            # Connected callers still receive the exception through shield().
+            # Retrieve even when the caller left; connected callers still get it via shield().
             task.exception()
 
     async def _busy(self, scope: Scope, receive: Receive, send: Send) -> None:

@@ -145,7 +145,6 @@ class AccessVerifier:
             header = jwt.get_unverified_header(token)
             if header.get("alg") != "RS256" or not isinstance(header.get("kid"), str) or not header["kid"]:
                 raise jwt.InvalidTokenError("Invalid signing header")
-            # Serialise refreshes; PyJWKClient refreshes once on an unknown kid.
             with self.lock:
                 key = self.jwks.get_signing_key_from_jwt(token).key
             claims = jwt.decode(
@@ -250,7 +249,6 @@ class CloudflareBoundary:
                         headers["Cache-Control"] = f"public, max-age=0, s-maxage={ttl}, must-revalidate"
                 elif target.startswith("/api/") or operator or message["status"] >= 400 or has_credentials(request):
                     headers["Cache-Control"] = PRIVATE
-                # Credentials are never response headers.
                 for name in (
                     "x-psat-origin-secret",
                     "x-psat-health-secret",

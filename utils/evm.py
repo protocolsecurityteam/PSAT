@@ -1,9 +1,4 @@
-"""EVM proxy-introspection constants.
-
-A leaf module (imports nothing) so every plane can share one copy: the same
-slot spelled in two files is a divergence vector, and these values are
-protocol-frozen — a change here is a correctness event, never a refactor.
-"""
+"""EVM proxy-introspection constants. Protocol-frozen: a change here is a correctness event."""
 
 from __future__ import annotations
 
@@ -36,7 +31,6 @@ IMPLEMENTATION_SELECTOR = "0x5c60da1b"
 COMPTROLLER_IMPL_SELECTOR = "0xbb82aa5e"
 # target() — Synthetix
 TARGET_SELECTOR = "0xd4b83992"
-# owner()
 OWNER_SELECTOR = "0x8da5cb5b"
 
 # Solmate Authority / OZ AccessManager share this signature; signature alone
