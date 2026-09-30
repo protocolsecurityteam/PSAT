@@ -39,7 +39,6 @@ def test_analyze_with_company_links_existing_protocol(api_client, db_session, co
 
     job = db_session.query(Job).filter_by(id=resp.json()["job_id"]).one()
     assert job.protocol_id == proto.id
-    # W5 rides the request as an attributed assertion — never a source tag.
     assertion = job.request.get("human_assertion")
     assert isinstance(assertion, dict)
     assert assertion["actor"] == "admin_api_key"
@@ -78,8 +77,7 @@ def test_analyze_address_only_stays_unlinked(api_client, db_session):
 
 @requires_postgres
 def test_analyze_normalizes_address_case(api_client, db_session):
-    """A checksummed submission stores the lowercase address, so every exact-
-    match consumer (spawn dedup, listing joins) sees one canonical form."""
+    """Exact-match consumers (spawn dedup, listing joins) need one canonical form."""
     from db.models import Job
 
     lower = _addr()
@@ -92,8 +90,7 @@ def test_analyze_normalizes_address_case(api_client, db_session):
 
 @requires_postgres
 def test_analyze_company_only_submission_unaffected(api_client, db_session):
-    """Company-only submissions mint/resolve their protocol during discovery —
-    no ingress lookup, no 404 for a company that doesn't exist yet."""
+    """Company-only submissions mint their protocol during discovery, so there is no ingress 404."""
     from db.models import Job
 
     name = f"newco-{uuid.uuid4().hex[:10]}"

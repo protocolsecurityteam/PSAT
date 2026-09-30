@@ -80,7 +80,7 @@ def test_membership_state_four_states():
 
 def test_membership_state_unprobed_never_prunes():
     row = Contract(address=ADDR(5), nominated_protocol_id=7)
-    # None = not probed; absence of a probe is not proof of absence.
+    # Absence of a probe is not proof of absence.
     assert gate.membership_state(row, code_absent_at_probe=None) == "candidate"
     assert gate.membership_state(row, code_absent_at_probe=False) == "candidate"
 
@@ -141,7 +141,6 @@ def test_w3_evidence_d1_requires_transitive_proof():
 def test_w3_evidence_d2_entry_is_non_transitive_by_construction():
     ev = gate.w3_evidence(direction="d2", source="probe", via_address=ADDR(3))
     assert ev["perimeter_entry_transitive"] is False
-    # The caller may not assert transitivity on a d2 edge.
     with pytest.raises(ValueError):
         gate.w3_evidence(direction="d2", source="probe", via_address=ADDR(3), via_transitive=True)
     with pytest.raises(ValueError):
@@ -160,17 +159,11 @@ def test_w4_w5_w6_evidence_shapes():
         gate.w5_evidence(actor="  ", asserted_at=datetime.now(timezone.utc))
     ev6 = gate.w6_evidence(adapter_slug="ether.fi-stake", chain_id=1, code_probe_block=7)
     assert ev6["code_probe_block"] == 7
-    # W6 requires W1: no constructible llama-seed evidence without a code probe.
     with pytest.raises(TypeError):
         kwargs: dict = {"adapter_slug": "ether.fi-stake", "chain_id": 1}
         gate.w6_evidence(**kwargs)
     with pytest.raises(ValueError):
         gate.w6_evidence(adapter_slug=" ", chain_id=1, code_probe_block=7)
-
-
-# ---------------------------------------------------------------------------
-# Nomination
-# ---------------------------------------------------------------------------
 
 
 def test_nominate_sets_nominated_never_protocol_id(db_session):
@@ -202,11 +195,6 @@ def test_nominate_first_nominator_wins(db_session):
     gate.nominate(db_session, contract=row, protocol_id=p2.id, source_tag="exa_deep_research")
     assert row.nominated_protocol_id == p1.id
     assert "exa_deep_research" in (row.discovery_sources or [])
-
-
-# ---------------------------------------------------------------------------
-# Witness primitives
-# ---------------------------------------------------------------------------
 
 
 def test_write_witness_idempotent(db_session):
@@ -275,7 +263,6 @@ def test_revoke_preserves_row_and_reobservation_rearms(db_session):
     assert gate.revoke_witness(db_session, witness, reason="edge_no_longer_holds") is True
     assert witness.revoked_at is not None
     assert gate.revoke_witness(db_session, witness, reason="again") is False
-    # Re-observation of the same fact re-arms the SAME row.
     rearmed = gate.write_witness(
         db_session,
         contract_id=member.id,
@@ -286,11 +273,6 @@ def test_revoke_preserves_row_and_reobservation_rearms(db_session):
     )
     assert rearmed.id == witness.id
     assert rearmed.revoked_at is None
-
-
-# ---------------------------------------------------------------------------
-# Promotion / demotion
-# ---------------------------------------------------------------------------
 
 
 def _dirty_protocols(db_session) -> tuple[set[int], set[int]]:
@@ -330,15 +312,13 @@ def test_promote_requires_admitting_witness(db_session):
         rule=WITNESS_RULE_W1_CODE,
         evidence=gate.w1_evidence(chain_id=1, code_probe_block=5),
     )
-    # W1 alone admits nothing.
     assert gate.promote(db_session, contract=row, protocol_id=protocol.id) is False
     assert row.protocol_id is None
 
 
 def test_promote_with_w1_and_admitting_marks_dirty(db_session):
     protocol = _protocol(db_session)
-    # The member's STORED pointer must actually resolve to the candidate:
-    # promote re-verifies the W2 edge, never trusting the witness row alone.
+    # promote re-verifies the W2 edge rather than trusting the witness row.
     member = _contract(db_session, ADDR(43), protocol_id=protocol.id, implementation=ADDR(44))
     row = _contract(db_session, ADDR(44), nominated_protocol_id=protocol.id)
     gate.write_witness(
@@ -387,7 +367,6 @@ def test_promote_requires_w1_on_contracts_own_chain(db_session):
             via_address=member.address,
         )
 
-    # W1 probed on a DIFFERENT chain than the contract's own row proves nothing.
     wrong_chain = _contract(db_session, ADDR(48), nominated_protocol_id=protocol.id)
     gate.write_witness(
         db_session,
@@ -400,7 +379,6 @@ def test_promote_requires_w1_on_contracts_own_chain(db_session):
     assert gate.promote(db_session, contract=wrong_chain, protocol_id=protocol.id) is False
     assert wrong_chain.protocol_id is None
 
-    # A row whose chain never resolves can never satisfy W1.
     no_chain = _contract(db_session, ADDR(49), chain="unknown", nominated_protocol_id=protocol.id)
     gate.write_witness(
         db_session,
@@ -423,7 +401,6 @@ def test_promote_never_overwrites_other_membership(db_session):
 
 def test_demote_member_preserves_nomination_and_history(db_session):
     protocol = _protocol(db_session)
-    # Legacy member shape: protocol_id set, nomination never recorded.
     row = _contract(db_session, ADDR(46), protocol_id=protocol.id)
     witness = gate.write_witness(
         db_session,
@@ -497,7 +474,6 @@ def test_classify_deployer_class_a_safe_signer(db_session):
     assert verdict.trust_class == "A"
     assert verdict.evidence["perimeter_fact"]["kind"] == "safe_owner"
     assert verdict.evidence["perimeter_fact"]["safe_address"] == ADDR(54)
-    # A signer of a NON-member's Safe earns nothing.
     other = gate.classify_deployer(db_session, protocol_id=_protocol(db_session).id, address=eoa)
     assert other.trust_class is None
 
@@ -520,13 +496,11 @@ def test_classify_deployer_principal_fact_requires_authority_derivation(db_sessi
     )
     db_session.add(principal)
     db_session.flush()
-    # Membership of an enumerated caller set is not control: no perimeter
-    # fact, no Class-A verdict, no registry row for the EOA.
+    # Membership of an enumerated caller set is not control.
     assert gate._perimeter_fact(db_session, protocol_id=protocol.id, address=eoa) is None
     verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa)
     assert verdict.trust_class is None
 
-    # The identical shape with an authority derivation still mints Class A.
     principal.details = {"resolver_path": ["live_getter_resolution"]}
     db_session.flush()
     verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa)
@@ -570,15 +544,13 @@ def test_classify_deployer_class_b_needs_positive_exclusivity(db_session):
 
 
 def test_classify_deployer_db_local_exclusivity_is_not_proof(db_session):
-    # The Veda shape: every LOCAL row maps to this protocol, but no complete
-    # enumeration exists — absence of counterevidence, not proof. Class C.
+    # The Veda shape: no complete enumeration exists, so absence of counterevidence is not proof.
     protocol = _protocol(db_session)
     eoa = ADDR(63)
     _seed_class_b_members(db_session, protocol, eoa)
     verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa)
     assert verdict.trust_class is None
     assert verdict.evidence["reason"] == "no_complete_enumeration"
-    # An enumeration that exceeded the cap is the same verdict.
     verdict = gate.classify_deployer(
         db_session, protocol_id=protocol.id, address=eoa, creation_history=[], history_complete=False
     )
@@ -662,7 +634,6 @@ def test_classify_deployer_nominated_creation_never_maps(db_session):
     assert WITNESS_RULE_W4_DEPLOYER not in rules
     assert rules <= {"w1_code", "w4h_deployer_affinity"}
 
-    # The same creation holding a real W2 witness maps in — Class B allowed.
     anchor = _contract(db_session, ADDR(0x512), protocol_id=protocol.id)
     _seed_w2_witness(db_session, foreign, anchor, protocol.id)
     verdict = gate.classify_deployer(
@@ -703,7 +674,6 @@ def test_classify_deployer_non_member_factory_child_does_not_map(db_session):
     child = ADDR(0x559)
     history = [m.address for m in members] + [child]
 
-    # The factory has no contracts row at all — foreign machinery.
     verdict = gate.classify_deployer(
         db_session,
         protocol_id=protocol.id,
@@ -718,8 +688,6 @@ def test_classify_deployer_non_member_factory_child_does_not_map(db_session):
 
 
 def test_classify_deployer_foreign_protocol_member_factory_does_not_map(db_session):
-    # A factory that is a MEMBER — of another protocol. Its children are that
-    # protocol's family, never this one's.
     protocol = _protocol(db_session)
     other = _protocol(db_session)
     eoa = ADDR(0x560)
@@ -766,10 +734,7 @@ def test_classify_deployer_d2_only_member_factory_does_not_map(db_session):
 
 
 def test_exclusivity_tolerates_member_factory_children(db_session):
-    """Operator-exclusivity arm of the member-factory rule: a controlled row
-    whose STORED creation attribution names this protocol's anchoring member
-    factory is a protocol-family observation. NULL attribution stays a
-    refusal — not-determined licenses nothing."""
+    """NULL attribution stays a refusal."""
     from db.models import ContractCreationWitness
     from services.discovery.membership_gate import _controller_is_exclusive
 
@@ -787,7 +752,6 @@ def test_exclusivity_tolerates_member_factory_children(db_session):
         )
     db_session.flush()
 
-    # No creation attribution recorded → the observation stays foreign.
     assert not _controller_is_exclusive(
         db_session,
         protocol_id=protocol.id,
@@ -889,9 +853,7 @@ def test_exclusivity_tolerates_only_evidenced_candidates(db_session):
 
 
 def test_exclusivity_scopes_controlled_set_to_the_controllers_chain(db_session):
-    """Control is observed on a deployment, and a deployment is (address,
-    chain): a same-address row on another chain belonging elsewhere is an
-    observation on THAT chain and must not refuse exclusivity on this one."""
+    """A same-address row on another chain is an observation on that chain."""
     from services.discovery.membership_gate import _controller_is_exclusive
 
     protocol = _protocol(db_session)
@@ -916,7 +878,6 @@ def test_exclusivity_scopes_controlled_set_to_the_controllers_chain(db_session):
         chain_key="ethereum",
         exclude_contract_ids=set(),
     )
-    # On base the only controlled row is the foreign twin — nothing licenses.
     assert not _controller_is_exclusive(
         db_session, protocol_id=protocol.id, controller_address=operator, chain_key="base", exclude_contract_ids=set()
     )
@@ -948,7 +909,6 @@ def test_classify_deployer_d2_only_member_never_anchors_class_a(db_session):
     verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa)
     assert verdict.trust_class != "A"
 
-    # With an independent non-D2 witness the same member anchors Class A.
     anchor = _contract(db_session, ADDR(0x533), protocol_id=protocol.id)
     _seed_w2_witness(db_session, member, anchor, protocol.id)
     verdict = gate.classify_deployer(db_session, protocol_id=protocol.id, address=eoa)
@@ -1016,7 +976,6 @@ def test_classify_deployer_cross_protocol_collision_is_class_c(db_session):
     verdict = gate.classify_deployer(db_session, protocol_id=p1.id, address=eoa)
     assert verdict.trust_class is None
     assert verdict.evidence["reason"] == "cross_protocol_collision"
-    # A foreign MEMBER deployed by the EOA is the same collision.
     _contract(db_session, ADDR(72), protocol_id=p2.id, deployer=ADDR(73))
     verdict3 = gate.classify_deployer(db_session, protocol_id=p1.id, address=ADDR(73))
     assert verdict3.trust_class is None
@@ -1044,8 +1003,7 @@ def test_demote_deployer_single_level(db_session):
     registry = ProtocolDeployer(protocol_id=protocol.id, address=eoa, trust_class="B", evidence={"x": 1})
     db_session.add(registry)
     db_session.flush()
-    # Stored pointer backs the survivor's W2 edge — the cascade's survival
-    # check re-verifies the edge, not mere witness presence.
+    # The cascade's survival check re-verifies the edge, not mere witness presence.
     anchor = _contract(db_session, ADDR(81), protocol_id=protocol.id, implementation=ADDR(83))
 
     def _w4(member: Contract) -> None:
@@ -1092,7 +1050,6 @@ def test_demote_deployer_single_level(db_session):
     assert lineage_only.protocol_id is None
     assert lineage_only.nominated_protocol_id == protocol.id
     assert independent.protocol_id == protocol.id
-    # Witness history preserved, revoked not deleted.
     rows = db_session.query(ContractMembershipWitness).filter_by(contract_id=lineage_only.id).all()
     assert len(rows) == 1 and rows[0].revoked_at is not None
 

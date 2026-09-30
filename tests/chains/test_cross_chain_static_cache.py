@@ -62,7 +62,6 @@ def _make_donor(
     with_analysis: bool = True,
     extra_artifacts: dict | None = None,
 ):
-    """A completed job with a full static artifact set, stamped with a source hash."""
     job = create_job(session, {"address": address, "chain": chain, "name": "Vault"})
     job.status = JobStatus.completed
     job.stage = JobStage.done
@@ -101,7 +100,6 @@ def _make_donor(
         store_artifact(session, job.id, "predicate_trees", data=dict(_PREDICATE_TREES))
         store_artifact(session, job.id, "effects", data=dict(_EFFECTS))
     else:
-        # Proxy donor: contract_flags, no contract_analysis.
         store_artifact(session, job.id, "contract_flags", data={"is_proxy": True, "proxy_type": "eip1967"})
     for name, data in (extra_artifacts or {}).items():
         store_artifact(session, job.id, name, data=data)
@@ -109,7 +107,6 @@ def _make_donor(
 
 
 def _make_target(session, *, address: str = ADDR_BASE, chain: str = "base"):
-    """A discovery-created target: job + its own per-chain Contract row (no analysis yet)."""
     job = create_job(session, {"address": address, "chain": chain, "name": "Vault"})
     session.commit()
     contract = Contract(
@@ -127,16 +124,10 @@ def _make_target(session, *, address: str = ADDR_BASE, chain: str = "base"):
     return job, contract
 
 
-# ---------------------------------------------------------------------------
-# copy_static_cache_cross_chain — restamp + scoping + donor isolation
-# ---------------------------------------------------------------------------
-
-
 def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_session):
     donor_job, donor_contract = _make_donor(
         db_session,
         extra_artifacts={
-            # Deployment/chain-specific artifacts that must NOT be reused cross-chain.
             "static_dependencies": {"address": ADDR_MAINNET.lower(), "dependencies": ["0x" + "42" * 20]},
             "enrichment_cache": {"0x" + "42" * 20: {"name": "MainnetDep"}},
             "upgrade_history": {"target_address": ADDR_MAINNET.lower(), "total_upgrades": 3},
@@ -157,7 +148,6 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
     assert get_artifact(db_session, target_job.id, "predicate_trees") == _PREDICATE_TREES
     assert get_artifact(db_session, target_job.id, "effects") == _EFFECTS
 
-    # Deployment/chain-specific artifacts NOT copied — re-derived per chain.
     assert get_artifact(db_session, target_job.id, "static_dependencies") is None
     assert get_artifact(db_session, target_job.id, "enrichment_cache") is None
     assert get_artifact(db_session, target_job.id, "upgrade_history") is None
@@ -174,8 +164,7 @@ def test_copy_restamps_address_scopes_artifacts_and_leaves_donor_untouched(db_se
     )
     assert [r.role_name for r in roles] == ["ADMIN_ROLE"]
 
-    # Donor untouched: its analysis still points at its own address, its contract
-    # still belongs to the donor job (NOT reassigned like same-chain copy).
+    # Unlike same-chain copy, the donor keeps its contract.
     donor_ca = get_artifact(db_session, donor_job.id, "contract_analysis")
     assert isinstance(donor_ca, dict)
     assert donor_ca["subject"]["address"] == ADDR_MAINNET.lower()
@@ -190,20 +179,13 @@ def test_copy_returns_none_without_target_contract(db_session):
     assert copy_static_cache_cross_chain(db_session, donor_job.id, empty_target.id, target_address=ADDR_BASE) is None
 
 
-# ---------------------------------------------------------------------------
-# find_completed_static_cache — fallback semantics
-# ---------------------------------------------------------------------------
-
-
 def test_fallback_fires_only_on_primary_miss(db_session):
-    # A same-(address, chain) completed job AND a cross-chain hash donor both exist.
     primary_job, _ = _make_donor(db_session, address=ADDR_MAINNET, chain="ethereum", source_content_hash=HASH)
     hash_donor, _ = _make_donor(db_session, address=ADDR_OTHER, chain="base", source_content_hash=HASH)
 
     hit = find_completed_static_cache(db_session, ADDR_MAINNET, chain="ethereum", source_content_hash=HASH)
     assert hit is not None and hit.id == primary_job.id
 
-    # Primary miss (unknown address) + hash present → fallback returns the hash donor.
     fb = find_completed_static_cache(db_session, ADDR_BASE, chain="base", source_content_hash=HASH)
     assert fb is not None and fb.id == hash_donor.id
 
@@ -212,9 +194,8 @@ def test_fallback_fires_only_on_primary_miss(db_session):
     ("donor_kwargs", "lookup_hashes"),
     [
         pytest.param({"schema_version": ANALYSIS_SCHEMA_VERSION + 1000}, [HASH], id="version_mismatch"),
-        # A hash lookup can't match a NULL-hash row, and no hash supplied means no fallback at all.
         pytest.param({"source_content_hash": None, "schema_version": None}, [HASH, None], id="legacy_null_hash"),
-        # A donor with the hash but only contract_flags (a proxy, no analysis) is not a code-plane reuse source.
+        # A proxy donor (contract_flags only) is not a code-plane reuse source.
         pytest.param({"with_analysis": False}, [HASH], id="proxy_donor"),
     ],
 )
@@ -222,11 +203,6 @@ def test_ineligible_cross_chain_donor_is_not_reused(db_session, donor_kwargs, lo
     _make_donor(db_session, address=ADDR_OTHER, chain="base", **{"source_content_hash": HASH, **donor_kwargs})
     for lookup_hash in lookup_hashes:
         assert find_completed_static_cache(db_session, ADDR_BASE, chain="base", source_content_hash=lookup_hash) is None
-
-
-# ---------------------------------------------------------------------------
-# Discovery wiring: a Base job with a mainnet same-source donor reuses it
-# ---------------------------------------------------------------------------
 
 
 def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
@@ -246,10 +222,8 @@ def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
     }
     donor_hash = source_content_hash(stub_result)
 
-    # Mainnet donor analyzed the same source.
     donor_job, _ = _make_donor(db_session, address=ADDR_MAINNET, chain="ethereum", source_content_hash=donor_hash)
 
-    # A fresh Base job at a DIFFERENT address (weETH mainnet vs Base pattern).
     target_job = create_job(db_session, {"address": ADDR_BASE, "chain": "base"})
     db_session.commit()
 
@@ -266,14 +240,12 @@ def test_discovery_reuses_cross_chain_donor(db_session, monkeypatch):
     assert isinstance(req, dict)
     assert req.get("static_cached") is True
     assert req.get("cross_chain_cache_source_job_id") == str(donor_job.id)
-    # No same-chain proxy-cache key: proxy state must re-resolve on Base.
+    # Proxy state must re-resolve on Base.
     assert "cache_source_job_id" not in req
     assert target_job.source_content_hash == donor_hash
 
-    # The reused analysis is re-stamped to the Base deployment.
     ca = get_artifact(db_session, target_job.id, "contract_analysis")
     assert isinstance(ca, dict)
     assert ca["subject"]["address"] == ADDR_BASE.lower()
-    # The Base deployment got its own per-chain Contract row.
     base_contract = db_session.execute(select(Contract).where(Contract.job_id == target_job.id)).scalar_one()
     assert base_contract.chain == "base"

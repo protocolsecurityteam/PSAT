@@ -1,4 +1,3 @@
-"""Tests for discovery worker cache hit/miss and company mode."""
 
 from __future__ import annotations
 
@@ -17,7 +16,6 @@ from tests.cache_helpers import (
 # offline: stub the DefiLlama protocol-list fetch done during company resolution
 pytestmark = [requires_postgres, pytest.mark.usefixtures("_stub_defillama_protocols")]
 
-# Extra addresses used in inventory merge / dedup tests
 ADDR_C = "0x1111111111111111111111111111111111111111"
 
 
@@ -25,11 +23,6 @@ ADDR_C = "0x1111111111111111111111111111111111111111"
 def _stub_membership_probe(monkeypatch):
     """Stub-the-wire: the gate intake's near-line probe never leaves the machine."""
     monkeypatch.setattr("services.discovery.membership_gate.probe", lambda session, contract: None)
-
-
-# ---------------------------------------------------------------------------
-# Discovery worker cache hit
-# ---------------------------------------------------------------------------
 
 
 def test_discovery_worker_cache_hit_skips_fetch(db_session, monkeypatch):
@@ -68,13 +61,7 @@ def test_discovery_worker_cache_hit_skips_fetch(db_session, monkeypatch):
     assert len(sources) == 2
 
 
-# ---------------------------------------------------------------------------
-# _merge_inventory unit tests
-# ---------------------------------------------------------------------------
-
-
 def test_merge_inventory_new_and_previous():
-    """Previous has A, B. New has B, C. Merged has all three with correct handling."""
     from services.discovery.inventory import merge_inventory as _merge_inventory
 
     prev = {
@@ -99,38 +86,32 @@ def test_merge_inventory_new_and_previous():
     merged = _merge_inventory(prev, new)
     contracts_by_addr = {c["address"].lower(): c for c in merged["contracts"]}
 
-    # A: only in prev, decayed 0.9 * 0.8 = 0.72
+    # A: only in prev, decayed 0.9 * 0.8 = 0.72.
     assert ADDR_A.lower() in contracts_by_addr
     assert abs(contracts_by_addr[ADDR_A.lower()]["confidence"] - 0.72) < 0.001
 
-    # B: in both, new entry used but higher confidence kept (0.7 > 0.6)
+    # B: in both, the higher confidence is kept.
     assert ADDR_B.lower() in contracts_by_addr
     assert contracts_by_addr[ADDR_B.lower()]["confidence"] == 0.7
     assert contracts_by_addr[ADDR_B.lower()]["name"] == "ContractB_v2"  # new entry
 
-    # C: only in new, as-is
     assert ADDR_C.lower() in contracts_by_addr
     assert contracts_by_addr[ADDR_C.lower()]["confidence"] == 0.85
 
-    # Sorted by confidence descending
     confs = [c["confidence"] for c in merged["contracts"]]
     assert confs == sorted(confs, reverse=True)
 
-    # official_domain: prefer new
     assert merged["official_domain"] == "new.example.com"
 
-    # pages_considered: union by URL
     urls = {p["url"] for p in merged["pages_considered"]}
     assert urls == {"https://old.example.com/page1", "https://new.example.com/page2"}
 
-    # sources: merged
     assert merged["sources"] == {"etherscan": True, "tavily": True}
 
 
 def test_merge_inventory_confidence_decay_removes_stale():
     from services.discovery.inventory import merge_inventory as _merge_inventory
 
-    # Start with confidence 0.5, decay 5 times
     confidence = 0.5
     prev = {
         "contracts": [{"address": ADDR_A, "name": "Stale", "confidence": confidence}],
@@ -156,11 +137,6 @@ def test_merge_inventory_confidence_decay_gradual():
     merged2 = _merge_inventory(merged, {"contracts": []})
     a2 = [c for c in merged2["contracts"] if c["address"].lower() == ADDR_A.lower()][0]
     assert abs(a2["confidence"] - _CONFIDENCE_DECAY**2) < 0.001
-
-
-# ---------------------------------------------------------------------------
-# Company-mode integration tests (inventory caching + child job dedup)
-# ---------------------------------------------------------------------------
 
 
 def _make_company_job(session, company="TestProtocol", **extra):
@@ -264,28 +240,17 @@ def test_rerun_merges_with_previous_inventory(db_session, monkeypatch):
     assert isinstance(stored, dict)
     contracts_by_addr = {c["address"].lower(): c for c in stored["contracts"]}
 
-    # A: decayed from 0.9 → 0.72
     assert ADDR_A.lower() in contracts_by_addr
     assert abs(contracts_by_addr[ADDR_A.lower()]["confidence"] - 0.72) < 0.001
 
-    # B: in both, higher confidence kept (0.7)
     assert ADDR_B.lower() in contracts_by_addr
     assert contracts_by_addr[ADDR_B.lower()]["confidence"] == 0.7
 
-    # C: new
     assert ADDR_C.lower() in contracts_by_addr
     assert contracts_by_addr[ADDR_C.lower()]["confidence"] == 0.85
 
 
-# ---------------------------------------------------------------------------
-# Child-job dedup / confidence-threshold filtering moved to SelectionWorker; see
-# tests/discovery/test_selection_worker.py.
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# is_known_proxy unit tests
-# ---------------------------------------------------------------------------
+# Child-job dedup and confidence filtering live in tests/discovery/test_selection_worker.py.
 
 
 @pytest.mark.parametrize(
@@ -330,8 +295,3 @@ def test_is_known_proxy(db_session, name, proxy_fields, lookups, expected):
         assert is_known_proxy(db_session, lookup) is expected
 
 
-# ---------------------------------------------------------------------------
-# Company-mode proxy dedup moved to SelectionWorker; see
-# tests/discovery/test_selection_worker.py::test_existing_non_proxy_job_skips_address
-# and ::test_proxy_with_existing_job_is_re_queued.
-# ---------------------------------------------------------------------------

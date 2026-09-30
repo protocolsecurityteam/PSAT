@@ -1,18 +1,7 @@
-"""``authority_roles`` keeps its three states across BOTH published surfaces.
+"""``authority_roles`` is three-state on both published surfaces: a list is witnessed, jsonb ``null`` is
+role-gated with the role not determined, ``[]`` is proven not role-gated.
 
-``effective_functions.authority_roles`` is three-state (see
-``schemas/effective_permissions.EffectiveFunctionPermission``): a non-empty list is a WITNESSED
-role requirement, jsonb ``null`` is role-gated with the role NOT determined, ``[]`` is proven not
-role-gated (the NEGATION of ``null``, not a coarsening of it).
-
-``/api/analyses/{job}`` passed the column through, but ``/api/company/{name}/functions``
-(``services/governance/principals._build_company_function_entry``) seeded its result with
-``list(authority_roles_by_key.values())`` — a list on every path, including the "witnessed
-nothing" one every row takes (``principal_type`` is ``controller`` on 100% of rows) — so ``null``
-never reached the payload (ether.fi preview: 0 nulls over 1,109 rows whose pool holds 324).
-
-These tests pin the POSITIVE case of all three states on both endpoints, and that the two
-agree row-for-row.
+``/functions`` used to seed a list on every path, so ``null`` never reached it.
 """
 
 from __future__ import annotations
@@ -29,10 +18,7 @@ COMPANY = "three_state_roles_co"
 ADDR = "0x" + "5a" * 20
 ROLE_MEMBER = "0x" + "b1" * 20
 
-# The column values under test, keyed by the function that carries each: the
-# three states plus the unreadable shape (a non-empty list of non-objects),
-# which both surfaces must serve as the not-determined ``None`` — it cannot
-# support the witnessed state it would otherwise read as.
+# The three states plus an unreadable shape, which both surfaces must serve as not-determined.
 COLUMN_BY_FUNCTION: dict[str, Any] = {
     "roleGated()": None,  # role-gated, role NOT determined
     "ownerOnly()": [],  # proven not role-gated
@@ -40,8 +26,6 @@ COLUMN_BY_FUNCTION: dict[str, Any] = {
     "unreadable()": ["admin"],  # non-object members: unreadable, NOT witnessed
 }
 
-# The state each row must publish on BOTH surfaces. For the first three this
-# is the column's own state; the unreadable shape degrades to not-determined.
 EXPECTED_STATE: dict[str, str] = {
     "roleGated()": "not_determined",
     "ownerOnly()": "proven_absent",
@@ -95,11 +79,8 @@ def three_state_rows(db_session):
         )
         db_session.add(ef)
         db_session.flush()
-        # A controller principal on every row: ``principal_type='controller'``
-        # is what 100% of production rows carry, and it is the shape that made
-        # the company endpoint's role fold witness nothing and fall through to
-        # the column. Without it the test would exercise a path production
-        # never takes.
+        # ``principal_type='controller'`` is on 100% of production rows and makes the role fold fall through to the
+        # column.
         db_session.add(
             FunctionPrincipal(
                 function_id=ef.id,
@@ -126,9 +107,7 @@ def _by_signature(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def test_company_functions_serves_all_three_authority_roles_states(api_client, three_state_rows):
-    """The POSITIVE case for each state, not just the hedge: the ``null`` row
-    must serve ``null``, the ``[]`` row must serve ``[]``, and the witnessed row
-    must serve its grant. Collapsing any pair passes only one of these."""
+    """Collapsing any pair of states passes only one of these."""
     _job, _contract = three_state_rows
 
     body = api_client.get(f"/api/company/{COMPANY}/functions")
@@ -141,16 +120,11 @@ def test_company_functions_serves_all_three_authority_roles_states(api_client, t
     witnessed = entries["witnessed()"]["authority_roles"]
     assert isinstance(witnessed, list) and [g["role"] for g in witnessed] == [7]
     assert [p["address"] for g in witnessed for p in g["principals"]] == [ROLE_MEMBER]
-    # Unreadable, not witnessed: a non-empty column of non-objects enriches
-    # to nothing and must serve the not-determined ``None``.
     assert entries["unreadable()"]["authority_roles"] is None
 
 
 def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
-    """The contradiction this file exists for: the same DB row served two ways.
-    Compared as the three STATES rather than by deep equality — the company
-    endpoint enriches a witnessed grant's principals with their classified type,
-    which analysis_detail does not do."""
+    """Compared as states, since the company endpoint also enriches principals with their type."""
     job, _contract = three_state_rows
 
     company = _by_signature(
@@ -168,21 +142,8 @@ def test_the_two_surfaces_agree_on_every_row(api_client, three_state_rows):
         assert state(company[signature]["authority_roles"]) == EXPECTED_STATE[signature], signature
 
 
-# ---------------------------------------------------------------------------
-# The storage encoding the column comment asserts. Both halves are load-bearing:
-# a query written against the wrong one returns an empty result that reads as
-# "nothing is undetermined".
-# ---------------------------------------------------------------------------
-
-
 def test_undetermined_roles_are_jsonb_null_not_sql_null(db_session, three_state_rows):
-    """``mapped_column(JSONB)`` without ``none_as_null`` writes a Python ``None``
-    as the jsonb SCALAR ``null``, so ``IS NULL`` never finds the undetermined
-    rows. This is what the column comment tells a reader to use instead.
-
-    Both predicates share one statement deliberately: it is the discriminating
-    form ``test_jsonb_null_predicates`` exempts, and running them side by side
-    over the same rows is the comparison."""
+    """Without ``none_as_null`` a Python ``None`` is stored as jsonb ``null``, so ``IS NULL`` never finds it."""
     _job, contract = three_state_rows
 
     sql_null, jsonb_null = db_session.execute(

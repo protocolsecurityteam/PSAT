@@ -1,10 +1,7 @@
-"""Tier-2 fork recipe tests for the pause recipe.
+"""The pause recipe runs against a stubbed ``AnvilTransport`` and, when foundry is installed, a local non-forking
+anvil.
 
-The pause recipe is exercised two ways: against a stubbed ``AnvilTransport``
-(hermetic, always runs) for the revert-set-diff logic and the transcript rules, and
-against a real LOCAL NON-FORKING anvil with a checked-in fixture (gated behind an
-anvil-availability probe — auto-skips on a clone without foundry). A forking
-anvil / real RPC is NEVER used here (that is the user's preview step).
+A forking anvil or real RPC is never used.
 """
 
 from __future__ import annotations
@@ -77,7 +74,6 @@ def test_pause_recipe_observes_blast_radius_and_expiry():
     assert eff.details["latch_flip"] is True
     assert eff.details["auto_expiry"] is True
     assert eff.details["duration_bound_seconds"] == 3600
-    # A7: the bound never travels without saying where it came from.
     assert eff.details["duration_bound_source"] == "guard_constant"
     assert transport.paused is False
     assert transport.impersonated == [PRINCIPAL]
@@ -87,12 +83,9 @@ def test_pause_recipe_observes_blast_radius_and_expiry():
 
 
 def test_pause_recipe_separates_a_proven_indefinite_latch_from_an_unread_window():
-    """A7 / R1: ``duration_bound_seconds: None`` is TWO facts and the proven row
-    must say which. The severe reading (indefinite latch) may only ship when
-    static PROVED the latch is read beside no clock (``no_time_reference``); the
-    etherfi ``pauseUntil`` shape yields ``not_determined``, yet both published a
-    bare ``None`` and the inspector rendered the severe sentence for all four
-    proven verdicts in the corpus."""
+    """A7 / R1: ``duration_bound_seconds: None`` is two facts; the indefinite-latch reading needs static to prove no
+    clock is read.
+    """
     for source in ("no_time_reference", "not_determined"):
         transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
         eff = pause_recipe(
@@ -110,15 +103,13 @@ def test_pause_recipe_separates_a_proven_indefinite_latch_from_an_unread_window(
         assert eff.verdict == VERDICT_PROVEN
         assert eff.details["duration_bound_seconds"] is None
         assert eff.details["duration_bound_source"] == source
-        # No bound => no warp in BOTH states: an unread window must not be
-        # probed as though known.
+        # An unread window must not be probed as though known.
         assert eff.details["auto_expiry"] is None
         assert transport.warped == 0
 
 
 def test_pause_recipe_defaults_the_bound_source_to_not_determined():
-    """A caller that passes no source can never assert the severe reading by
-    omission — the default is the unknown state, not the indefinite one."""
+    """The default is the unknown state, not the indefinite one."""
     transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
     eff = pause_recipe(
         transport=transport,
@@ -150,14 +141,11 @@ def test_pause_recipe_no_blast_radius_is_unknown():
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "no_blast_radius_observed"
     assert eff.details["pause_effective"] is True
-    # The pause RAN, so the empty blast radius is a measurement.
     assert eff.details["observation"] == "executed"
 
 
 class IneffectivePauseAnvil(StubAnvil):
-    """Models a pauser the principal cannot enact: the pause calldata reverts on
-    ``call`` (missing authority / an active cooldown), so ``send`` never flips the
-    latch. Everything else inherits from :class:`StubAnvil`."""
+    """The pause calldata reverts, so the latch never flips."""
 
     def call(self, tx: dict) -> EthCallResult:
         if tx.get("data") == self._pause_calldata:
@@ -189,8 +177,6 @@ def test_pause_recipe_ineffective_pause_is_distinct_unknown():
     assert eff.reason == "pause_ineffective"
     assert eff.details["pause_effective"] is False
     assert eff.details["observed_blast_radius"] == []
-    # The pause call REVERTED, so the empty radius above describes a probe that
-    # never happened — the discriminator every consumer of ``witness`` joins on.
     assert eff.details["observation"] == "reverted"
     assert eff.details["scored_denominator"] == ["foo"]
     assert transport.paused is False
@@ -198,9 +184,7 @@ def test_pause_recipe_ineffective_pause_is_distinct_unknown():
 
 
 class DeadSurfaceAnvil(StubAnvil):
-    """Every entry point already reverts on its OWN precondition — an unfunded
-    caller, an unmet business rule — pause or no pause. The pause itself enacts
-    fine. Nothing was live to freeze."""
+    """Every entry point reverts on its own precondition, pause or not."""
 
     def call(self, tx: dict) -> EthCallResult:
         if tx.get("data") == self._pause_calldata:
@@ -209,11 +193,7 @@ class DeadSurfaceAnvil(StubAnvil):
 
 
 def test_a_dead_entry_point_surface_is_not_a_cacheable_no_blast():
-    """``observed_blast = pre - post``, so an empty PRE set makes the empty radius
-    true by construction: it measures the probe set, not the latch. Sharing the
-    ``no_blast_radius_observed`` reason let that transfer on the behavioral hash,
-    publishing "this pause froze nothing" to every bytecode twin on the strength
-    of a surface that happened to be dead at this block."""
+    """An empty pre-set makes the empty radius true by construction, so it must not transfer to bytecode twins."""
     eff = pause_recipe(
         transport=DeadSurfaceAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None),
         store=RecordingStore(),
@@ -234,8 +214,6 @@ def test_a_dead_entry_point_surface_is_not_a_cacheable_no_blast():
 
 
 def test_a_live_surface_the_pause_leaves_alone_is_still_a_cacheable_no_blast():
-    """The control the split exists for: points WERE live and the pause froze
-    none of them. That IS an observation about the latch, and a twin inherits it."""
     eff = pause_recipe(
         transport=StubAnvil(guarded=set(), pause_calldata=PAUSE, duration=None),
         store=RecordingStore(),
@@ -254,11 +232,7 @@ def test_a_live_surface_the_pause_leaves_alone_is_still_a_cacheable_no_blast():
 
 
 def test_every_pause_row_carries_an_observation_discriminator():
-    """The fork tier writes ``witness=details`` like every other effect class, so
-    it owes the same discriminator; a REVERTED pause probe published
-    ``{"pause_effective": false, "observed_blast_radius": []}`` with nothing
-    saying the freeze was never tested. ``pause_effective`` happened to separate
-    them, but only as a class-local stand-in for a stage-wide contract."""
+    """A reverted probe published an empty blast radius with nothing saying the freeze was never tested."""
 
     def _run(transport):
         return pause_recipe(
@@ -281,7 +255,6 @@ def test_every_pause_row_carries_an_observation_discriminator():
 
     assert {row.details["observation"] for row in rows} == {"executed", "reverted"}
     for row in rows:
-        # An empty blast radius is only readable as a measurement on a row that ran.
         if row.details.get("observed_blast_radius") == []:
             assert row.details["observation"] in ("executed", "reverted")
         if row.details["observation"] == "reverted":
@@ -303,10 +276,7 @@ UNAUTHORIZED = "0xe2517d3f"  # AccessControlUnauthorizedAccount(address,bytes32)
 
 
 class TimelockAnvil:
-    """Models an OZ TimelockController on a fork: ``schedule`` records a pending
-    operation whose ``execute`` reverts ``TimelockUnexpectedOperationState`` until
-    ``delay`` seconds pass; a ready ``execute`` runs the inner op (a transfer that
-    credits the sentinel). snapshot/revert restore the whole state machine."""
+    """``execute`` reverts until ``delay`` passes."""
 
     def __init__(self, *, delay: int, proposer_ok: bool = True, moves_value: bool = True, hardfork: str = "prague"):
         self.delay = delay
@@ -416,12 +386,10 @@ def test_timelock_schedule_advance_execute_proves_a_caller_arbitrary_move():
     assert eff.details["value_moved"] is True
     assert eff.details["destination_shape"] == SHAPE_CALLER_ARBITRARY
     assert eff.details["shape_proved_by"] == "simulation"
-    # STATE-DEPENDENT (schedule landed + time advanced), so it must NEVER transfer
-    # on the kernel hash — even though a proven verdict is otherwise cacheable.
+    # State-dependent, so it must never transfer on the kernel hash.
     assert eff.state_dependent is True
     assert not _is_cacheable(eff)
-    # The premature execute (before the warp) must have reverted on the not-ready
-    # gate — that is what proves the recipe ADVANCED time rather than side-stepping.
+    # Proves the recipe advanced time.
     labels = {r["label"]: r for r in store.stored[-1]["results"]}
     assert labels["execute_premature"]["success"] is False
     assert labels["execute"]["success"] is True
@@ -444,10 +412,7 @@ def test_timelock_execution_that_moves_nothing_stays_unknown_but_records_executi
     assert eff.reason == "no_value_observed"
     assert eff.details["timelock_executed"] is True
     assert eff.details["observation"] == "executed"
-    # The soundness invariant: no_value_observed is in _CACHEABLE_UNKNOWN_REASONS,
-    # but a TIMELOCK no_value_observed is state-dependent (it required schedule +
-    # time advance), so it must NOT be cacheable — else it transfers a
-    # "moves nothing" negative to a bytecode twin whose op was never scheduled.
+    # no_value_observed is normally cacheable, but a timelock one required schedule + warp.
     assert eff.state_dependent is True
     assert not _is_cacheable(eff)
     assert eff.details["witness_asset_held"] is True
@@ -476,17 +441,12 @@ def test_a_timelock_holding_no_asset_says_so_rather_than_moving_nothing():
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "timelock_holds_no_witness_asset"
     assert eff.details["witness_asset_held"] is False
-    # The delayed execution path itself still ran, which is the thing Tier 1
-    # cannot reach and the thing this row is entitled to claim.
     assert eff.details["timelock_executed"] is True
     assert eff.details["observation"] == "executed"
     assert not _is_cacheable(eff)
 
 
-# ---------------------------------------------------------------------------
-# fork-header wiring — eRPC (and any authenticated upstream) needs a header, not
-# URL auth. Non-forking spawns carry no fork flags.
-# ---------------------------------------------------------------------------
+# eRPC needs a header, not URL auth.
 
 
 def test_build_anvil_cmd_nonforking_has_no_fork_flags():
@@ -538,14 +498,7 @@ def test_deploy_times_out_when_the_receipt_never_appears(monkeypatch):
         anvil.deploy("0xsender", "0xbytecode")
 
 
-# ---------------------------------------------------------------------------
-# rss_mb — anvil subprocess RSS sampling (feeds peak_anvil_rss_mb)
-# ---------------------------------------------------------------------------
-
-
 def _anvil_with_proc(proc: object) -> SubprocessAnvil:
-    """A SubprocessAnvil whose only wired dependency is ``_proc`` — no real
-    subprocess spawned, so ``rss_mb`` is exercised in isolation."""
     anvil = SubprocessAnvil.__new__(SubprocessAnvil)
     anvil._proc = proc  # pyright: ignore[reportAttributeAccessIssue]
     return anvil
@@ -566,18 +519,15 @@ def test_rss_mb_measures_a_live_pid_and_answers_none_when_it_cannot():
         def poll(self):
             return 0  # exited
 
-    # A live process reports whole MB and never raises. ``None`` on a non-Linux
-    # host where /proc is absent — the read did not answer, which is not zero.
+    # ``None`` when /proc is absent: unknown, not zero.
     live = _anvil_with_proc(_LiveProc()).rss_mb()
     assert live is None or live >= 0
-    # An exited process is never sampled (guards against a reused pid), and the
-    # answer is NOT KNOWN rather than "used no memory".
+    # An exited process is never sampled (the pid may be reused).
     assert _anvil_with_proc(_DeadProc()).rss_mb() is None
 
 
 @pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH")
 def test_rss_mb_on_real_subprocess():
-    """A live NON-FORKING anvil reports positive RSS; unknown once closed."""
     anvil = SubprocessAnvil(port=8548, hardfork_name="prague")
     try:
         measured = anvil.rss_mb()
@@ -654,15 +604,7 @@ def test_section8_rule8_scored_denominator_is_static_not_observed():
     assert eff.discrepancy.detail["unpredicted_members"] == ["foo"]
 
 
-# ---------------------------------------------------------------------------
-# Read-back-verified storage fixtures (_apply_fixtures)
-# ---------------------------------------------------------------------------
-
-
 class VerifyStub(StubAnvil):
-    """Scripted transport for the verified-application path: ``call`` returns a
-    fixed word (or raises), and reverts are recorded. Inherits the full
-    :class:`AnvilTransport` surface from :class:`StubAnvil`."""
 
     def __init__(self, *, echo: str = "0x", raise_on_call: bool = False) -> None:
         super().__init__(guarded=set(), pause_calldata="0x", duration=None)
@@ -736,16 +678,8 @@ def test_verified_fixtures_are_applied_after_plain_ones():
     assert transport.balances == {PRINCIPAL: "0x64"}
 
 
-# ---------------------------------------------------------------------------
-# Localhost NON-FORKING anvil integration — GATED behind availability
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.skipif(not anvil_available(), reason="anvil not on PATH")
 def test_pause_revert_set_diff_on_real_nonforking_anvil():
-    """Deploy the checked-in pausable fixture to a fresh NON-FORKING anvil and
-    prove the revert-set diff end-to-end: foo() succeeds pre-pause, reverts
-    post-pause, and its key is exactly the observed blast radius."""
     with SubprocessAnvil(port=8547, hardfork_name="prague") as anvil:
         owner = anvil.accounts()[0]
         addr = anvil.deploy(owner, FIXTURE["creation_bytecode"])

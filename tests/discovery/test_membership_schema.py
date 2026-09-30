@@ -55,8 +55,7 @@ def test_witness_table_shape(db_session):
 
 
 def test_witness_unique_covers_null_via(db_session):
-    # Postgres NULL != NULL would admit duplicate via-less rows under a plain
-    # composite unique; the partial-index pair must reject them.
+    # NULL != NULL would admit duplicate via-less rows under a plain composite unique.
     protocol = _protocol(db_session)
     row = Contract(address=ADDR(0x300), chain="ethereum", nominated_protocol_id=protocol.id)
     db_session.add(row)

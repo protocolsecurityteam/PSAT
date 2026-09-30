@@ -1,11 +1,7 @@
 """Allowlist enforcement at user-facing chain-accepting edges.
 
-The registry validates a chain *exists*; ``PSAT_SUPPORTED_CHAIN_IDS`` gates whether the deployment *enabled*
-it. Work-spawning edges (``/api/analyze``, monitored enrollment, protocol re-enroll) must 400 a
-registered-but-unsupported chain before any job/lease is created; the mainnet default and chainless
-submissions stay unaffected.
-
-No DB: the accept path is proven by the handler advancing past the chain gate to the mocked session's "not found".
+14: work-spawning edges 400 a registered-but-unsupported chain before any job is created. The accept path is proven by
+the handler reaching the mocked session's "not found".
 """
 
 from __future__ import annotations
@@ -30,11 +26,6 @@ def _client() -> TestClient:
 def _mock_session_ctx(mock_session_cls, mock_session):
     mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
     mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
-
-
-# ---------------------------------------------------------------------------
-# require_supported_chain — the shared helper the routers translate to 400
-# ---------------------------------------------------------------------------
 
 
 def test_helper_accepts_supported_chain():
@@ -67,11 +58,6 @@ def test_helper_rejects_unknown_chain(monkeypatch):
 
     with pytest.raises(UnsupportedChainError):
         require_supported_chain(chain="nonexistent-chain", context="t")
-
-
-# ---------------------------------------------------------------------------
-# /api/analyze — enforce on the resolved chain; keep the mainnet edge default
-# ---------------------------------------------------------------------------
 
 
 @patch("routers.deps.create_job")
@@ -111,7 +97,6 @@ def test_analyze_default_mainnet_unaffected(mock_session_cls, mock_create_job, m
     mock_create_job.return_value = _fake_job(address=_ADDR)
     _mock_session_ctx(mock_session_cls, MagicMock())
 
-    # No chain supplied → resolves to mainnet → unaffected on every deployment.
     resp = client.post("/api/analyze", json={"address": _ADDR, "name": "t"})
 
     assert resp.status_code == 200
@@ -124,8 +109,7 @@ def test_analyze_rejects_unregistered_chain_string(mock_session_cls, mock_create
     monkeypatch.delenv(_ENV, raising=False)
     client = _client()
 
-    # A typo'd chain name must be rejected at ingress, not silently resolved
-    # to mainnet by derive_job_chain_id's internal-writer fallback.
+    # A typo must not resolve to mainnet via derive_job_chain_id's internal fallback.
     resp = client.post("/api/analyze", json={"address": _ADDR, "name": "t", "chain": "arbtrum"})
 
     assert resp.status_code == 400
@@ -153,16 +137,10 @@ def test_analyze_chainless_company_submission_unaffected(mock_session_cls, mock_
     mock_create_job.return_value = _fake_job(company="etherfi")
     _mock_session_ctx(mock_session_cls, MagicMock())
 
-    # Address-less company submission carries no chain identity → not gated.
     resp = client.post("/api/analyze", json={"company": "etherfi"})
 
     assert resp.status_code == 200
     mock_create_job.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# monitored-contract enrollment
-# ---------------------------------------------------------------------------
 
 
 @patch("routers.deps.SessionLocal")
@@ -194,11 +172,6 @@ def test_monitoring_enroll_passes_chain_gate_when_allowlisted(mock_session_cls, 
     )
 
     assert resp.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# protocol re-enroll
-# ---------------------------------------------------------------------------
 
 
 @patch("routers.deps.SessionLocal")
@@ -234,7 +207,6 @@ def test_re_enroll_default_ethereum_passes_gate(mock_session_cls, monkeypatch):
     mock_session.get.return_value = None
     _mock_session_ctx(mock_session_cls, mock_session)
 
-    # No chain param → admin-edge default 'ethereum' → supported everywhere.
     resp = client.post("/api/protocols/1/re-enroll")
 
     assert resp.status_code == 404

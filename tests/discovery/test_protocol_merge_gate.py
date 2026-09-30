@@ -134,7 +134,6 @@ def test_merge_moves_membership_and_nominations(db_session, two_protocols):
     db_session.expire_all()
     assert db_session.get(Protocol, src.id) is None
     assert db_session.get(Contract, member.id).protocol_id == dst.id
-    # nominated_protocol_id is rewritten, never SET-NULLed by the src delete.
     assert db_session.get(Contract, member.id).nominated_protocol_id == dst.id
     assert db_session.get(Contract, candidate.id).nominated_protocol_id == dst.id
 
@@ -189,15 +188,13 @@ def test_merge_witness_collision_active_src_rearms_revoked_dst(db_session, two_p
     member = _contract(db_session, ADDR(0x3D01), protocol_id=dst.id)
     subject = _contract(db_session, ADDR(0x3D02), nominated_protocol_id=src.id)
     src_row = _w2(db_session, contract=subject, protocol_id=src.id, member=member, via=member.address)
-    # Same key, distinguishable evidence — proves the surviving row carries
-    # the active observation's evidence, not its own stale copy.
+    # Distinguishable evidence proves which observation the survivor carries.
     dst_row = _w2(
         db_session, contract=subject, protocol_id=dst.id, member=member, via=member.address, edge_kind="beacon"
     )
     assert gate.revoke_witness(db_session, dst_row, reason="test_setup")
     revoked_at = dst_row.revoked_at
     assert revoked_at is not None
-    # Re-arm requires the live observation to POSTDATE the revocation.
     src_row.observed_at = revoked_at + timedelta(minutes=5)
     db_session.flush()
     src_evidence = dict(src_row.evidence)
@@ -208,8 +205,6 @@ def test_merge_witness_collision_active_src_rearms_revoked_dst(db_session, two_p
     db_session.expire_all()
     survivor = db_session.get(ContractMembershipWitness, dst_row.id)
     assert survivor is not None
-    # The postdating active observation wins: the surviving dst row is
-    # re-armed with the src row's evidence rather than staying revoked.
     assert survivor.revoked_at is None
     assert survivor.evidence == src_evidence
     assert db_session.get(ContractMembershipWitness, src_row.id) is None
@@ -226,8 +221,7 @@ def test_merge_witness_collision_stale_active_src_keeps_dst_revoked(db_session, 
     assert gate.revoke_witness(db_session, dst_row, reason="test_setup")
     revoked_at = dst_row.revoked_at
     assert revoked_at is not None
-    # An observation OLDER than the revocation cannot overturn it — a fresh
-    # observation re-earns later via write_witness instead.
+    # An older observation cannot overturn a revocation.
     src_row.observed_at = revoked_at - timedelta(minutes=5)
     db_session.flush()
 
@@ -289,8 +283,6 @@ def test_merge_witness_collision_revoked_src_keeps_active_dst_untouched(db_sessi
 
 
 def test_merge_witness_collision_on_via_less_rule(db_session, two_protocols):
-    # The no-via partial unique key ((contract, protocol, rule) where
-    # via IS NULL) collides exactly like the with-via key.
     src, dst = two_protocols
     subject = _contract(db_session, ADDR(0x3F01), nominated_protocol_id=src.id)
     src_row = _w5(db_session, contract=subject, protocol_id=src.id, actor="admin-src")

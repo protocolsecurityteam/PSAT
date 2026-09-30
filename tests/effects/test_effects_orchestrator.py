@@ -1,8 +1,5 @@
-"""Tier-0 code-upgrade current-state check.
-
-An indexed UpgradeEvent proves only PAST capability; a present-tense claim also needs a non-zero
-impl slot AND a resolved, non-renounced upgrade authority (freezing does not zero the slot).
-Drives ``_code_upgrade_plans`` against a stubbed session; no anvil, no RPC.
+"""A historical UpgradeEvent proves only past capability; the present-tense claim also needs a non-zero impl slot and
+a live upgrade authority.
 """
 
 from __future__ import annotations
@@ -37,8 +34,6 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """Returns queued ``scalar_one_or_none`` values in call order: the prober's
-    two reads are (proxy Contract, then the UpgradeEvent id)."""
 
     def __init__(self, *values):
         self._values = list(values)
@@ -68,7 +63,7 @@ def _candidate(principals: tuple[str, ...]) -> Candidate:
 
 
 def _ctx() -> ProbeContext:
-    # A MagicMock that raises if called: simulate must never be touched on the Tier-0 path.
+    # Simulate must never be touched on the Tier-0 path.
     return ProbeContext(
         chain_id=1,
         block=21_000_000,
@@ -94,9 +89,7 @@ def test_impl_nonzero_with_resolved_principal_is_proven_now():
     assert eff.concrete["current_check_passed"] is True
 
 
-# A historically-upgraded proxy with NO resolved upgrade authority (renounced/frozen) must
-# WITHHOLD: unknown, never proven. A renounced authority resolves to the zero address, which
-# counts as no authority.
+# A renounced authority resolves to the zero address, which counts as none, so the verdict is withheld.
 @pytest.mark.parametrize(
     "principals",
     [

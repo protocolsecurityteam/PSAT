@@ -1,6 +1,4 @@
-"""The event-log indexer enrolls Solmate RolesAuthority role events directly off a ``canCall`` descriptor,
-so it works on ``predicate_trees`` materialized before the enumeration-hint pass existed (the bytecode-keyed cache lacks
-the hints)."""
+"""Enrolls directly off a ``canCall`` descriptor, so it works on trees materialized before enumeration hints existed."""
 
 from __future__ import annotations
 
@@ -56,20 +54,16 @@ def test_is_solmate_cancall_descriptor(descriptor, expected):
     assert _is_solmate_cancall_descriptor(descriptor) is expected
 
 
-# F2: the Solmate enroll path resolves the authority strictly — it must never
-# enroll the role events at the protected contract (job.address), which can't
-# emit them.
+# F2: never at the protected contract, which can't emit role events.
 
 
 def test_solmate_enroll_does_not_fall_back_to_job_address():
     job = _job()
-    # Authority unresolved (not in ControllerValue feed) + no job fallback → None.
     assert _event_address_for_descriptor(_CANCALL_DESCRIPTOR, {}, job, {}, allow_job_fallback=False) is None
 
 
 def test_generic_path_still_falls_back_to_job_address():
-    # The generic enroll path (mapping events on the contract itself) keeps the
-    # job.address fallback — only the Solmate authority path opts out.
+    # Only the Solmate authority path opts out of the job fallback.
     job = _job()
     assert _event_address_for_descriptor(_CANCALL_DESCRIPTOR, {}, job, {}, allow_job_fallback=True) == _PROTECTED
 

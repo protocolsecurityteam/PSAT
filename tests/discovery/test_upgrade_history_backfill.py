@@ -1,12 +1,7 @@
-"""Integration tests for the historical-impl backfill.
+"""Runs against real Postgres so uniqueness, case handling and idempotency are exercised.
 
-Exercises ``project_to_events`` (artifact -> UpgradeEvent rows) and
-``backfill_historical_impl_contracts`` (Contract row per historical impl) from
-``services.discovery.upgrade_history`` against real Postgres, so uniqueness,
-case handling and idempotency run. Etherscan is stubbed. ``_run_pipeline``
-wires them as ``static_worker._resolve_upgrade_history`` does. Also covers the
-pollution-guard consumers: analyze-remaining must not enqueue backfilled rows,
-and ``upsert_coverage_for_protocol`` must link audits to them.
+Also covers the pollution guards: analyze-remaining must not enqueue backfilled rows, and coverage must link audits to
+them.
 """
 
 from __future__ import annotations
@@ -25,11 +20,6 @@ pytestmark = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Shared fixtures
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(autouse=True)
 def _stub_membership_probe(monkeypatch):
     """Stub-the-wire: the backfill's near-line probe never leaves the
@@ -39,7 +29,6 @@ def _stub_membership_probe(monkeypatch):
 
 @pytest.fixture()
 def worker():
-    """No-op fixture kept for source-compatibility with existing tests."""
     yield None
 
 
@@ -72,9 +61,7 @@ def _seed_code_fact(session, addr, *, chain_id=1, block=90, absent=False):
 
 
 def _run_pipeline(session, *, contract, artifact_data, protocol_id=None):
-    """Project an artifact into UpgradeEvent rows + backfill impl Contracts,
-    mirroring ``static_worker._finalize_upgrade_history``. Impls promote only
-    with a member-proxy UpgradeEvent edge AND a persisted code fact."""
+    """Mirrors ``static_worker._finalize_upgrade_history``."""
     from services.discovery.upgrade_history import (
         backfill_historical_impl_contracts,
         project_to_events,
@@ -100,8 +87,7 @@ def _run_pipeline(session, *, contract, artifact_data, protocol_id=None):
 
 @pytest.fixture()
 def seed_protocol(db_session):
-    """Fresh protocol + cascading cleanup that also sweeps jobs/contracts seeded
-    during the test (the default db_session cleanup misses unlinked Contracts)."""
+    """The default db_session cleanup misses unlinked Contracts."""
     from db.models import (
         AuditContractCoverage,
         AuditReport,
@@ -138,8 +124,7 @@ def seed_protocol(db_session):
 
 @pytest.fixture()
 def stub_etherscan(monkeypatch):
-    """Dict the test can mutate to control get_contract_info; defaults to
-    ('StubImpl-<short>', {}), set a value to ``_RAISE`` to raise."""
+    """Set a value to ``_RAISE`` to raise."""
     _RAISE = object()
     names: dict[str, object] = {}
 
@@ -163,11 +148,6 @@ def types_namespace(**kwargs):
     return SimpleNamespace(**kwargs)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _addr(n: int) -> str:
     return "0x" + hex(n)[2:].zfill(40)
 
@@ -179,11 +159,6 @@ def _add_contract(session, **fields):
     session.add(c)
     session.commit()
     return c
-
-
-# ---------------------------------------------------------------------------
-# 1. _backfill_historical_impls — the core unit
-# ---------------------------------------------------------------------------
 
 
 def test_backfill_creates_rows_as_candidates_without_evidence(db_session, seed_protocol, worker, stub_etherscan):
@@ -218,9 +193,7 @@ def test_backfill_creates_rows_as_candidates_without_evidence(db_session, seed_p
 
 
 def test_backfill_adopts_orphan_row(db_session, seed_protocol, worker, stub_etherscan):
-    """Pre-existing Contract with protocol_id=None: with a member-proxy
-    UpgradeEvent edge and a code fact, the gate re-earns membership; name
-    preserved, no duplicate row."""
+    """The gate re-earns membership; name preserved, no duplicate row."""
     from db.models import Contract, ContractMembershipWitness, UpgradeEvent
 
     protocol_id, _ = seed_protocol
@@ -265,7 +238,6 @@ def test_backfill_adopts_orphan_row(db_session, seed_protocol, worker, stub_ethe
     assert "upgrade_history" in (row.discovery_sources or [])
     assert row.contract_name == "ExistingName"
     assert db_session.query(Contract).filter_by(address=addr).count() == 1
-    # Membership carries the W2 historical-impl witness with the upgrade tx.
     witnesses = db_session.query(ContractMembershipWitness).filter_by(contract_id=orphan.id, revoked_at=None).all()
     by_rule = {w.rule: w for w in witnesses}
     assert set(by_rule) == {"w1_code", "w2_structural"}
@@ -274,8 +246,7 @@ def test_backfill_adopts_orphan_row(db_session, seed_protocol, worker, stub_ethe
 
 
 def test_backfill_does_not_stomp_foreign_protocol_row(db_session, seed_protocol, worker, stub_etherscan):
-    """Historical impl already owned by a DIFFERENT protocol is left alone
-    (warning logged); reassigning would corrupt the other protocol's inventory."""
+    """Reassigning would corrupt the other protocol's inventory."""
     from db.models import Contract, Protocol
 
     our_protocol_id, _ = seed_protocol
@@ -329,13 +300,10 @@ def test_backfill_is_idempotent(db_session, seed_protocol, worker, stub_ethersca
 
 
 def test_backfill_treats_cross_chain_same_address_as_distinct(db_session, seed_protocol, worker, stub_etherscan):
-    """Same address on a different chain is NOT an existing row: the natural key
-    is ``(address, chain)`` and CREATE2 deployments repeat addresses across chains."""
+    """CREATE2 repeats addresses across chains."""
     from db.models import Contract, Protocol
 
     our_protocol_id, _ = seed_protocol
-    # Polygon row of a different protocol: backfill on ethereum must neither
-    # touch it nor treat it as a collision.
     other = Protocol(name=f"other-chain-{uuid.uuid4().hex[:8]}")
     db_session.add(other)
     db_session.commit()
@@ -377,8 +345,6 @@ def test_backfill_treats_cross_chain_same_address_as_distinct(db_session, seed_p
 
 
 def test_backfill_degrades_gracefully_on_etherscan_failure(db_session, seed_protocol, worker, stub_etherscan):
-    """Etherscan raising mid-backfill: that row lands as 'UnknownImpl', the rest
-    of the batch still gets real names."""
     from db.models import Contract
 
     protocol_id, _ = seed_protocol
@@ -402,11 +368,6 @@ def test_backfill_degrades_gracefully_on_etherscan_failure(db_session, seed_prot
     assert bad.contract_name == "UnknownImpl"
     assert bad.source_verified is False
     assert "upgrade_history" in (bad.discovery_sources or [])
-
-
-# ---------------------------------------------------------------------------
-# 2. _run_upgrade_history — the caller that pulls everything together
-# ---------------------------------------------------------------------------
 
 
 def test_run_upgrade_history_writes_events_and_backfills_impls(
@@ -439,7 +400,6 @@ def test_run_upgrade_history_writes_events_and_backfills_impls(
     impl_b = _addr(0xB)
     stub_etherscan.names[impl_a] = "ImplA"
     stub_etherscan.names[impl_b] = "ImplB"
-    # W1 fuel: the gate promotes an impl only with a persisted code fact.
     _seed_code_fact(db_session, impl_a)
     _seed_code_fact(db_session, impl_b)
 
@@ -484,17 +444,12 @@ def test_run_upgrade_history_writes_events_and_backfills_impls(
 def test_run_upgrade_history_keys_events_to_proxy_not_subject(
     db_session, seed_protocol, worker, stub_etherscan, monkeypatch
 ):
-    """Regression: when the subject Contract isn't the proxy in the artifact,
-    ``UpgradeEvent.contract_id`` must point at the PROXY's row. Previously a
-    non-proxy subject (EtherFiRewardsRouter) got 20+ phantom events for
-    unrelated proxies, so ``/api/contracts/{id}/audit_timeline`` emitted bogus
-    ``impl_windows`` and the Audits tab rendered non-existent eras."""
+    """A non-proxy subject (EtherFiRewardsRouter) got 20+ phantom events, rendering non-existent audit eras."""
     from db.models import Contract, Job, JobStage, JobStatus, UpgradeEvent
 
     protocol_id, _ = seed_protocol
 
-    # Non-proxy subject whose artifact includes other contracts' proxies
-    # (static-worker snapshots dependencies).
+    # The static worker snapshots dependencies, including other contracts' proxies.
     subject_job = Job(
         id=uuid.uuid4(),
         address=_addr(0xAAA),
@@ -565,7 +520,6 @@ def test_run_upgrade_history_keys_events_to_proxy_not_subject(
 
     _run_pipeline(db_session, contract=subject, artifact_data=artifact)
 
-    # The non-proxy subject must get zero UpgradeEvent rows.
     subject_events = db_session.query(UpgradeEvent).filter_by(contract_id=subject.id).all()
     assert subject_events == []
 
@@ -581,9 +535,7 @@ def test_run_upgrade_history_keys_events_to_proxy_not_subject(
 def test_run_upgrade_history_skips_proxies_not_in_inventory(
     db_session, seed_protocol, worker, stub_etherscan, monkeypatch
 ):
-    """An artifact proxy with no Contract row is skipped: nothing to key events
-    to (NULL contract_id violates NOT NULL); the next run after discovery
-    picks them up."""
+    """NULL contract_id violates NOT NULL; the next run after discovery picks them up."""
     from db.models import Job, JobStage, JobStatus, UpgradeEvent
 
     protocol_id, _ = seed_protocol
@@ -626,19 +578,7 @@ def test_run_upgrade_history_skips_proxies_not_in_inventory(
     assert db_session.query(UpgradeEvent).filter_by(contract_id=subject.id).count() == 0
 
 
-# The "skip when job has no Contract row" test was removed: that guard is
-# structural in ``static_worker._resolve_upgrade_history`` and unreachable from
-# these service entry points; static-worker tests cover it.
-
-
-# ---------------------------------------------------------------------------
-# 3. Pollution guard — /api/company/{name}/analyze-remaining
-# ---------------------------------------------------------------------------
-
-
 def test_analyze_remaining_skips_backfilled_historical_impls(api_client, db_session, seed_protocol, stub_etherscan):
-    """analyze-remaining enqueues a job only for the normal Contract, not the
-    backfilled historical impl."""
     from db.models import Contract
 
     protocol_id, name = seed_protocol
@@ -668,7 +608,6 @@ def test_analyze_remaining_skips_backfilled_historical_impls(api_client, db_sess
     assert body["queued"] == 1
     assert body["jobs"][0]["address"] == _addr(0x777)
 
-    # Clean up the job the endpoint created (outside our seed_protocol cleanup path).
     db_session.expire_all()
     normal_row = db_session.query(Contract).filter_by(address=_addr(0x777)).one()
     if normal_row.job_id:
@@ -679,14 +618,8 @@ def test_analyze_remaining_skips_backfilled_historical_impls(api_client, db_sess
         db_session.commit()
 
 
-# ---------------------------------------------------------------------------
-# 4. Coverage matcher — the payoff
-# ---------------------------------------------------------------------------
-
-
 def test_coverage_matcher_links_audit_to_backfilled_impl(db_session, seed_protocol):
-    """A backfilled historical-impl Contract lets an audit whose scope names it
-    produce a coverage row (the motivation for the backfill)."""
+    """The motivation for the backfill."""
     from db.models import AuditContractCoverage, AuditReport, UpgradeEvent
     from services.audits.coverage import upsert_coverage_for_protocol
 
@@ -738,21 +671,14 @@ def test_coverage_matcher_links_audit_to_backfilled_impl(db_session, seed_protoc
     row = db_session.query(AuditContractCoverage).filter_by(protocol_id=protocol_id).one()
     assert row.contract_id == historical_impl.id
     assert row.match_type == "impl_era"
-    # Audit dated 2024-03-01 is in the open-ended [100, None) window → high.
     assert row.match_confidence == "high"
     assert row.covered_from_block == 100
 
 
-# ---------------------------------------------------------------------------
-# 5. Regression — backfill must trigger a coverage refresh for the new rows
-# ---------------------------------------------------------------------------
-
-
 def test_backfill_triggers_coverage_refresh_for_created_rows(db_session, seed_protocol, worker, stub_etherscan):
-    """Regression for "RoleRegistry shows unaudited": scope extraction ran before
-    the historical-impl row existed and nothing re-ran the matcher after the
-    backfill created it, so coverage for existing audits naming that impl must
-    be upserted in the same pass."""
+    """Scope extraction ran before the impl row existed, so the backfill must upsert coverage itself ("RoleRegistry
+    shows unaudited").
+    """
     from db.models import (
         AuditContractCoverage,
         AuditReport,
@@ -763,7 +689,6 @@ def test_backfill_triggers_coverage_refresh_for_created_rows(db_session, seed_pr
 
     protocol_id, _ = seed_protocol
 
-    # Proxy exists, impl not yet backfilled — the race behind the bug.
     proxy = _add_contract(
         db_session,
         protocol_id=protocol_id,
@@ -773,7 +698,6 @@ def test_backfill_triggers_coverage_refresh_for_created_rows(db_session, seed_pr
         is_proxy=True,
     )
     impl_addr = _addr(0xAAAA)
-    # Block 100 = currently-active window (no successor).
     db_session.add(
         UpgradeEvent(
             contract_id=proxy.id,
@@ -785,7 +709,6 @@ def test_backfill_triggers_coverage_refresh_for_created_rows(db_session, seed_pr
         )
     )
 
-    # Audit scope names the impl; scope extraction already ran pre-backfill.
     audit = AuditReport(
         protocol_id=protocol_id,
         url=f"https://example.com/{uuid.uuid4().hex}.pdf",
@@ -798,7 +721,6 @@ def test_backfill_triggers_coverage_refresh_for_created_rows(db_session, seed_pr
     db_session.add(audit)
     db_session.commit()
 
-    # Scope extraction matched zero contracts: none was named HistoricalImpl yet.
     inserted = upsert_coverage_for_audit(db_session, audit.id)
     db_session.commit()
     assert inserted == 0
@@ -819,7 +741,6 @@ def test_backfill_triggers_coverage_refresh_for_created_rows(db_session, seed_pr
     assert created.contract_name == "HistoricalImpl"
     assert "upgrade_history" in (created.discovery_sources or [])
 
-    # After backfill a coverage row must link the audit to the new impl (0 pre-fix).
     rows = db_session.query(AuditContractCoverage).filter_by(protocol_id=protocol_id, contract_id=created.id).all()
     assert len(rows) == 1, (
         "backfill created the Contract row but did not refresh coverage — audit ↔ historical-impl link is missing"
@@ -827,7 +748,6 @@ def test_backfill_triggers_coverage_refresh_for_created_rows(db_session, seed_pr
     r = rows[0]
     assert r.audit_report_id == audit.id
     assert r.matched_name == "HistoricalImpl"
-    # Open-ended current window -> impl_era / high, same as the fresh path.
     assert r.match_type == "impl_era"
     assert r.match_confidence == "high"
     assert r.covered_from_block == 100
@@ -835,8 +755,6 @@ def test_backfill_triggers_coverage_refresh_for_created_rows(db_session, seed_pr
 
 
 def test_backfill_coverage_refresh_covers_adopted_rows_too(db_session, seed_protocol, worker, stub_etherscan):
-    """The adoption branch (pre-existing orphan adopted into the protocol) must
-    also trigger a coverage refresh."""
     from db.models import AuditContractCoverage, AuditReport, UpgradeEvent
     from services.audits.coverage import upsert_coverage_for_audit
 
@@ -850,7 +768,6 @@ def test_backfill_coverage_refresh_covers_adopted_rows_too(db_session, seed_prot
         contract_name="Proxy2",
         is_proxy=True,
     )
-    # Orphan (protocol_id=None) matching a scope name; backfill adopts it.
     orphan_addr = _addr(0xBBBB)
     orphan = _add_contract(
         db_session,
@@ -882,7 +799,6 @@ def test_backfill_coverage_refresh_covers_adopted_rows_too(db_session, seed_prot
     db_session.add(audit)
     db_session.commit()
 
-    # Pre-adoption the matcher can't link the orphan.
     inserted = upsert_coverage_for_audit(db_session, audit.id)
     db_session.commit()
     assert inserted == 0
@@ -909,17 +825,10 @@ def test_backfill_coverage_refresh_covers_adopted_rows_too(db_session, seed_prot
     assert rows[0].matched_name == "OrphanImpl"
 
 
-# ---------------------------------------------------------------------------
-# 6. Regression — UpgradeEvent.timestamp must be persisted from the artifact
-# ---------------------------------------------------------------------------
-
-
 def test_run_upgrade_history_persists_event_timestamp(db_session, seed_protocol, worker, stub_etherscan, monkeypatch):
-    """Regression for "LiquidityPool shows no audit coverage": the artifact's
-    unix-seconds timestamp must be persisted to ``UpgradeEvent.timestamp``.
-    Otherwise ``ImplWindow.from_ts`` is None and ``_confidence_for_impl_era``
-    skips every window, collapsing post-upgrade audits to ``low`` with NULL
-    block bounds."""
+    """Without the timestamp ``ImplWindow.from_ts`` is None and every window is skipped ("LiquidityPool shows no
+    audit coverage").
+    """
     from db.models import Contract, Job, JobStage, JobStatus, UpgradeEvent
 
     protocol_id, _ = seed_protocol
@@ -946,7 +855,6 @@ def test_run_upgrade_history_persists_event_timestamp(db_session, seed_protocol,
     impl_addr = _addr(0xFEE1)
     stub_etherscan.names[impl_addr] = "LiquidityPool"
 
-    # Known unix-seconds timestamp → datetime(2023, 11, 14, 22, 13, 20, tzinfo=UTC).
     unix_ts = 1700000000
     expected_dt = datetime(2023, 11, 14, 22, 13, 20, tzinfo=timezone.utc)
 
@@ -978,8 +886,6 @@ def test_run_upgrade_history_persists_event_timestamp(db_session, seed_protocol,
     )
     assert evt.timestamp == expected_dt
 
-    # Downstream: ImplWindow.from_ts must be non-None for
-    # _confidence_for_impl_era's grace-zone branch.
     impl_contract = db_session.query(Contract).filter_by(address=impl_addr).one()
     from services.audits.coverage import _compute_impl_windows_for_contract
 
@@ -990,8 +896,6 @@ def test_run_upgrade_history_persists_event_timestamp(db_session, seed_protocol,
 
 
 def test_run_upgrade_history_handles_missing_timestamp(db_session, seed_protocol, worker, stub_etherscan, monkeypatch):
-    """Defensive: an artifact with no timestamp (older artifact, RPC None) still
-    writes with a NULL timestamp instead of raising on ``fromtimestamp(None)``."""
     from db.models import Job, JobStage, JobStatus, UpgradeEvent
 
     protocol_id, _ = seed_protocol
@@ -1027,7 +931,6 @@ def test_run_upgrade_history_handles_missing_timestamp(db_session, seed_protocol
                         "event_type": "upgraded",
                         "implementation": impl_addr,
                         "block_number": 100,
-                        # no timestamp key at all
                         "tx_hash": "0x" + "c" * 64,
                     },
                 ],
@@ -1051,12 +954,7 @@ def test_run_upgrade_history_handles_missing_timestamp(db_session, seed_protocol
 def test_backfill_coverage_refresh_defers_source_equivalence(
     db_session, seed_protocol, worker, stub_etherscan, monkeypatch
 ):
-    """Backfill enqueues verifiable coverage rows for ``CoverageVerifyWorker``
-    instead of running source-equivalence inline (#82). Inline verify fanned out
-    4-way Etherscan + GitHub bursts per impl, 429'd the global rate limit and
-    cascaded into Resolution / Static. Rows land ``equivalence_status='pending'``;
-    promotion is covered by
-    ``tests/audits/test_coverage_verify_worker.py::test_process_row_proves_pending_to_proven``."""
+    """#82: inline verify fanned out Etherscan + GitHub bursts that 429'd the global limit; rows now land 'pending'."""
     from db.models import (
         AuditContractCoverage,
         AuditReport,
@@ -1086,8 +984,7 @@ def test_backfill_coverage_refresh_defers_source_equivalence(
             tx_hash="0x" + "a" * 64,
         )
     )
-    # Audit has reviewed_commits + source_repo, so ``_stamp_pending_when_verifiable``
-    # lands the row 'pending' (else it terminal-stamps and the worker skips).
+    # Otherwise the row is terminal-stamped and the worker skips it.
     audit = AuditReport(
         protocol_id=protocol_id,
         url=f"https://example.com/{uuid.uuid4().hex}.pdf",
@@ -1102,9 +999,7 @@ def test_backfill_coverage_refresh_defers_source_equivalence(
     db_session.add(audit)
     db_session.commit()
 
-    # Trip-wires: the inline verify seams must not be touched during backfill
-    # (guards a ``verify_source_equivalence=True`` regression re-introducing the
-    # rate-limit cascade).
+    # Trip-wires against reintroducing inline verify.
     import services.audits.source_equivalence as se_mod
 
     inline_calls: list[str] = []
@@ -1141,8 +1036,7 @@ def test_backfill_coverage_refresh_defers_source_equivalence(
         "impl pair for verification — the deferred-verify hand-off is broken"
     )
     r = rows[0]
-    # Verifiable audit -> 'pending'; equivalence_checked_at stays NULL (a NOW()
-    # stamp on a never-attempted row would lie).
+    # A NOW() stamp on a never-attempted row would lie.
     assert r.equivalence_status == "pending", (
         f"verifiable audit landed with status={r.equivalence_status!r}, expected 'pending' for deferred verification"
     )

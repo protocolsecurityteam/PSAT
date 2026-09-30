@@ -228,7 +228,6 @@ def test_private_proxy_starts_and_stops_expected_process(tmp_path: Path) -> None
     assert (state / "fly-proxy.pid").is_file()
     subprocess.run([PREVIEW / "private_proxy.sh", "stop", *args], env=env, check=True, timeout=10)
     assert not (state / "fly-proxy.pid").exists()
-    # Stopping again is a no-op that still succeeds.
     subprocess.run([PREVIEW / "private_proxy.sh", "stop", *args], env=env, check=True, timeout=10)
     assert not (state / "fly-proxy.pid").exists()
 

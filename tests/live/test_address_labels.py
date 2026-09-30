@@ -1,4 +1,3 @@
-"""Address-label CRUD: list/put/delete in isolation."""
 
 from __future__ import annotations
 
@@ -34,14 +33,12 @@ def test_label_put_returns_normalized_row(created_label):
 def test_label_visible_in_list(created_label, live_client: LiveClient):
     listing = live_client.list_address_labels()
     labels = listing.get("labels") or {}
-    # Handler normalizes on read + write, so either case should resolve.
     row = labels.get(TEST_LABEL_ADDRESS.lower()) or labels.get(TEST_LABEL_ADDRESS)
     assert row is not None, f"created label not present in /api/address_labels list (got {len(labels)} rows)"
     assert row["name"] == TEST_LABEL_NAME
 
 
 def test_label_update_is_idempotent(created_label, live_client: LiveClient):
-    # Second PUT must overwrite, not 409.
     updated = live_client.put_address_label(TEST_LABEL_ADDRESS, {"name": "psat-live-test-renamed"})
     assert updated["name"] == "psat-live-test-renamed"
     listing = live_client.list_address_labels()
@@ -50,7 +47,7 @@ def test_label_update_is_idempotent(created_label, live_client: LiveClient):
 
 
 def test_label_delete(live_client: LiveClient):
-    # Own address — not entangled with the shared fixture's finalizer.
+    # Not entangled with the shared fixture's finalizer.
     address = "0x00000000000000000000000000000000decafbad"
     live_client.put_address_label(address, {"name": "psat-live-test-delete"})
     live_client.delete_address_label(address)

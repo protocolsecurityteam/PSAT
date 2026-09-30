@@ -1,4 +1,3 @@
-"""Live gate for the semantic predicate pipeline on a guarded company child."""
 
 from __future__ import annotations
 

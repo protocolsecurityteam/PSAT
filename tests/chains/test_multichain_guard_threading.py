@@ -27,11 +27,6 @@ def _addr(prefix: str) -> str:
     return "0x" + (prefix * 40)[:40]
 
 
-# ---------------------------------------------------------------------------
-# monitoring — proxy_watcher.resolve_current_implementation
-# ---------------------------------------------------------------------------
-
-
 def test_proxy_watcher_resolve_impl_threads_chain_id(monkeypatch):
     from services.monitoring import proxy_watcher
 
@@ -39,18 +34,12 @@ def test_proxy_watcher_resolve_impl_threads_chain_id(monkeypatch):
 
     def _rpc(url, method, params, *a, chain_id=None, **kw):
         seen.append(chain_id)
-        # eth_getStorageAt for the eip1967 slot → a real impl word.
         return "0x" + "0" * 24 + _addr("f")[2:]
 
     monkeypatch.setattr(proxy_watcher, "rpc_request", _rpc)
 
     proxy_watcher.resolve_current_implementation(_addr("a"), BASE_URL, proxy_type="eip1967", chain_id=BASE_CHAIN_ID)
     assert seen == [BASE_CHAIN_ID]
-
-
-# ---------------------------------------------------------------------------
-# routers/monitored — _current_head_block
-# ---------------------------------------------------------------------------
 
 
 def test_router_current_head_block_threads_chain_id(monkeypatch):
@@ -69,11 +58,6 @@ def test_router_current_head_block_threads_chain_id(monkeypatch):
     assert seen == [BASE_CHAIN_ID]
 
 
-# ---------------------------------------------------------------------------
-# event repos — RpcEventLogFetcher
-# ---------------------------------------------------------------------------
-
-
 def test_event_log_fetcher_threads_constructor_chain_id(monkeypatch):
     from services.resolution.repos import event_logs_rpc
 
@@ -90,11 +74,6 @@ def test_event_log_fetcher_threads_constructor_chain_id(monkeypatch):
     assert seen == [BASE_CHAIN_ID]
 
 
-# ---------------------------------------------------------------------------
-# resolution — tracking.classify_resolved_address
-# ---------------------------------------------------------------------------
-
-
 def test_tracking_classify_threads_chain_id(monkeypatch):
     from services.resolution import tracking
 
@@ -107,15 +86,10 @@ def test_tracking_classify_threads_chain_id(monkeypatch):
 
     monkeypatch.setattr(tracking, "_rpc_request", _rpc)
 
-    # Unique non-zero address so the process-wide classify cache never hits.
+    # A unique address keeps the process-wide classify cache from hitting.
     kind, _details = tracking.classify_resolved_address(BASE_URL, _addr("b"), chain_id=BASE_CHAIN_ID)
     assert kind == "eoa"
     assert seen and all(c == BASE_CHAIN_ID for c in seen)
-
-
-# ---------------------------------------------------------------------------
-# discovery — static_dependencies.discover_dependencies
-# ---------------------------------------------------------------------------
 
 
 def test_static_dependencies_thread_chain_id(monkeypatch):
@@ -133,11 +107,6 @@ def test_static_dependencies_thread_chain_id(monkeypatch):
     assert seen and all(c == BASE_CHAIN_ID for c in seen)
 
 
-# ---------------------------------------------------------------------------
-# discovery — secondary_impl.resolve_secondary_impl_addresses
-# ---------------------------------------------------------------------------
-
-
 def test_secondary_impl_threads_chain_id(monkeypatch):
     from services.discovery import secondary_impl
 
@@ -147,7 +116,6 @@ def test_secondary_impl_threads_chain_id(monkeypatch):
         seen.append(chain_id)
         return "0x" + "0" * 24 + _addr("d")[2:]
 
-    # resolve_secondary_impl_addresses imports rpc_request from services.clients.rpc at call time.
     monkeypatch.setattr("services.clients.rpc.rpc_request", _rpc)
 
     out = secondary_impl.resolve_secondary_impl_addresses(
@@ -159,11 +127,6 @@ def test_secondary_impl_threads_chain_id(monkeypatch):
     )
     assert out  # the storage read decoded to an address
     assert seen == [BASE_CHAIN_ID]
-
-
-# ---------------------------------------------------------------------------
-# discovery — classifier.classify_single
-# ---------------------------------------------------------------------------
 
 
 def test_classifier_classify_single_threads_chain_id(monkeypatch):
@@ -182,16 +145,10 @@ def test_classifier_classify_single_threads_chain_id(monkeypatch):
     monkeypatch.setattr(classifier, "rpc_batch_request_with_status", _batch)
     monkeypatch.setattr(classifier, "rpc_call", _rpc_call)
 
-    # Non-proxy bytecode (no eip1167 prefix, no DELEGATECALL) so classification
-    # runs the slot batch + getter probes then settles on "regular".
+    # Non-proxy bytecode runs the slot batch and getter probes.
     info = classifier.classify_single(_addr("a"), BASE_URL, bytecode="0x6001", chain_id=BASE_CHAIN_ID)
     assert info["type"] == "regular"
     assert seen and all(c == BASE_CHAIN_ID for c in seen)
-
-
-# ---------------------------------------------------------------------------
-# monitoring — enrollment seed-block read
-# ---------------------------------------------------------------------------
 
 
 def test_enrollment_seed_block_threads_chain_id(db_session, monkeypatch):
@@ -228,7 +185,7 @@ def test_enrollment_seed_block_threads_chain_id(db_session, monkeypatch):
 
     monkeypatch.setattr("services.monitoring.enrollment.rpc_request", _rpc)
 
-    # Seeded with the mainnet URL; the base contract must declare its OWN chain id.
+    # Seeded with the mainnet URL; the base contract must declare its own chain id.
     enroll_protocol_contracts(db_session, proto.id, MAINNET_SEED, "ethereum")
 
     wp = db_session.execute(select(WatchedProxy).where(WatchedProxy.proxy_address == proxy_addr)).scalar_one()
@@ -239,14 +196,8 @@ def test_enrollment_seed_block_threads_chain_id(db_session, monkeypatch):
     assert seen and all(c == BASE_CHAIN_ID for c in seen)
 
 
-# ---------------------------------------------------------------------------
-# Negative — the guard fires THROUGH a threaded path
-# ---------------------------------------------------------------------------
-
-
 def test_threaded_path_guard_raises_on_mismatch(monkeypatch):
-    """A fetcher for chain 1 handed a base-routed eRPC URL must raise via ``_assert_url_chain_id`` — the
-    declaration reaches the guard, not just the guard in isolation."""
+    """Proves the declaration reaches the guard through the threading."""
     from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
 
     monkeypatch.setenv("ERPC_BASE_URL", ERPC_BASE)

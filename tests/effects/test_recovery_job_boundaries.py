@@ -1,4 +1,3 @@
-"""An effects-input retry is not a replacement for a full contract analysis."""
 
 import uuid
 from datetime import datetime, timedelta, timezone

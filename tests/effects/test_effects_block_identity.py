@@ -1,10 +1,7 @@
-"""The height an effects verdict was observed at, and the honest absence of it.
+"""The height an effects verdict was observed at, and its honest absence.
 
-Pins two defects: (1) ``_build_anvil_cmd`` never passed ``--fork-block-number``, so a Tier-2 fork
-sat at whatever head was served at spawn while the transcript recorded the preflight's height
-(PR-161 run: 274 verdicts, 0 with ``block_number``). Argv asserts are exact LIST compares so a
-dropped pin fails here. (2) ``0`` is not a height: failure arms assert the witness keys are ABSENT,
-and B5 pins a LABEL only: ``freeze_pause`` windows stay not_determined and never reduce severity.
+``_build_anvil_cmd`` never passed ``--fork-block-number``, so Tier-2 forks sat at an unrecorded head (PR-161:
+274 verdicts, 0 with ``block_number``). ``0`` is not a height, so failure arms assert the keys are absent.
 """
 
 from __future__ import annotations
@@ -54,9 +51,7 @@ PRINCIPAL = "0x" + "22" * 20
 
 
 class PinnedStubAnvil(StubAnvil):
-    """A stub fork that can answer what height it was pinned at — the optional
-    capability :func:`fork_block_pin` reads. ``None`` models the fork we shipped
-    until now: forked, but at an unrecorded head."""
+    """``None`` models a fork at an unrecorded head."""
 
     def __init__(self, *, fork_block: int | None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -100,11 +95,6 @@ def _stub_seams(*, block_number: Any = None) -> _Seams:
     )
 
 
-# ---------------------------------------------------------------------------
-# B3 — the anvil command line. Exact list compares, on purpose.
-# ---------------------------------------------------------------------------
-
-
 def test_a_forking_spawn_pins_the_block_on_the_command_line():
     assert _build_anvil_cmd("anvil", 8546, "prague", "http://upstream", None, PINNED_BLOCK) == [
         "anvil",
@@ -121,7 +111,6 @@ def test_a_forking_spawn_pins_the_block_on_the_command_line():
 
 
 def test_the_pin_survives_the_authenticated_upstream_form():
-    # The production spawn carries eRPC's auth header; the pin must survive it.
     assert _build_anvil_cmd(
         "anvil", 8600, "prague", "https://erpc/main/evm/1", {"X-ERPC-Secret-Token": "sec"}, PINNED_BLOCK
     ) == [
@@ -142,15 +131,13 @@ def test_the_pin_survives_the_authenticated_upstream_form():
 
 @pytest.mark.parametrize("unpinnable", [None, 0, -1, False])
 def test_an_unpinnable_head_forks_unpinned_rather_than_at_genesis(unpinnable):
-    """``0`` is ``_preflight``'s failure sentinel. Passing it would fork at block
-    0 and then RECORD 0 as the observation height — a wrong answer with a real
-    height's shape. The flag is omitted instead."""
+    """``0`` is ``_preflight``'s failure sentinel; forking at it would record genesis as the observation height."""
     cmd = _build_anvil_cmd("anvil", 8546, "prague", "http://upstream", None, unpinnable)
     assert cmd == ["anvil", "--port", "8546", "--hardfork", "prague", "--silent", "--fork-url", "http://upstream"]
 
 
 def test_a_non_forking_spawn_never_pins():
-    # No fork, no fork height: a pin on the empty-chain offline anvil would claim state it lacks.
+    # A pin on the empty-chain offline anvil would claim state it lacks.
     assert _build_anvil_cmd("anvil", 8546, "prague", None, {"X": "y"}, PINNED_BLOCK) == [
         "anvil",
         "--port",
@@ -162,8 +149,7 @@ def test_a_non_forking_spawn_never_pins():
 
 
 def test_the_worker_spawns_its_fork_at_the_preflight_pin(monkeypatch):
-    """The factory is BUILT before the head is pinned and CALLED after, so the
-    plumbing that carries the pin across that gap is what this holds."""
+    """The factory is built before the head is pinned and called after."""
     spawns: list[dict[str, Any]] = []
 
     class _FakeAnvil:
@@ -194,15 +180,13 @@ def test_the_worker_spawns_its_fork_at_the_preflight_pin(monkeypatch):
     ctx.anvil_factory()
     assert spawns[0]["fork_block_number"] == PINNED_BLOCK
 
-    # The pin dies with the fork: the next job pins its own head, and a stale one
-    # would spawn a fork at a block that job never observed.
+    # A stale pin would fork the next job at a block it never observed.
     worker._close_anvil()
     assert worker._fork_block_pin is None
 
 
 def test_a_failed_head_pin_leaves_the_fork_unpinned(monkeypatch):
-    """FAIL-CLOSED. The seam raises ⇒ Tier 1 is off ⇒ the fork is spawned with no
-    height rather than with the ``0`` sentinel."""
+    """Fail closed: no height rather than the ``0`` sentinel."""
     from utils.logging import degraded_errors_var
 
     spawns: list[dict[str, Any]] = []
@@ -249,11 +233,6 @@ def test_a_failed_head_pin_leaves_the_fork_unpinned(monkeypatch):
     assert spawns[0]["fork_block_number"] is None
 
 
-# ---------------------------------------------------------------------------
-# B3 — what reaches the witness.
-# ---------------------------------------------------------------------------
-
-
 def test_tier1_publishes_the_pinned_height_and_the_scope_of_the_pin():
     ctx = ProbeContext(
         chain_id=1,
@@ -279,7 +258,6 @@ def test_tier1_publishes_the_pinned_height_and_the_scope_of_the_pin():
         simulate_supported=True,
     )
     assert eff.verdict == VERDICT_PROVEN
-    # Simulation ran at hex(block_number), so the recorded height IS the observation height.
     assert eff.details["block_number"] == PINNED_BLOCK
     assert eff.details["block_source"] == BLOCK_SOURCE_INVOCATION_PIN
     assert eff.witness_payload["block_number"] == PINNED_BLOCK
@@ -288,8 +266,7 @@ def test_tier1_publishes_the_pinned_height_and_the_scope_of_the_pin():
 
 
 def test_an_unpinnable_head_publishes_no_height_on_tier1():
-    """The ``0`` sentinel names no scope, so both keys are absent — the third
-    state. A ``block_number`` of 0 would read as genesis."""
+    """A ``block_number`` of 0 would read as genesis."""
     ctx = ProbeContext(
         chain_id=1,
         block=0,
@@ -309,9 +286,7 @@ def test_an_unpinnable_head_publishes_no_height_on_tier1():
 
 
 def test_tier0_publishes_no_height_because_it_observed_no_single_block():
-    """Tier 0 decides from an indexed event history plus a current-state check
-    (``observation: not_run``). ``ctx.block`` is a bystander there, so stamping it
-    would publish a height nothing was read at."""
+    """``ctx.block`` is a bystander for Tier 0, so stamping it would publish a height nothing was read at."""
     ctx = ProbeContext(
         chain_id=1,
         block=PINNED_BLOCK,
@@ -342,8 +317,7 @@ def test_tier2_publishes_the_height_the_fork_was_actually_pinned_at():
     transport = PinnedStubAnvil(fork_block=PINNED_BLOCK, guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
     assert fork_block_pin(transport) == PINNED_BLOCK
     store = RecordingStore()
-    # The caller's ctx carries a DIFFERENT height on purpose: the fork's own pin
-    # is the witness, and the preflight number must not stand in for it.
+    # The fork's own pin is the witness, not the preflight number.
     eff = _pause(transport, SimContext(chain_id=1, block=PINNED_BLOCK - 495, hardfork="prague"), store)
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["block_number"] == PINNED_BLOCK
@@ -353,8 +327,7 @@ def test_tier2_publishes_the_height_the_fork_was_actually_pinned_at():
 
 @pytest.mark.parametrize("fork_block", [None, 0])
 def test_an_unpinned_fork_publishes_height_not_determined_never_zero(fork_block):
-    """This is the shape of the 78 existing Tier-2 rows. Their real height is
-    unrecoverable, so the honest published value is nothing at all."""
+    """The shape of the 78 existing Tier-2 rows, whose real height is unrecoverable."""
     transport = PinnedStubAnvil(fork_block=fork_block, guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
     assert fork_block_pin(transport) is None
     eff = _pause(transport, SimContext(chain_id=1, block=PINNED_BLOCK, hardfork="prague"), RecordingStore())
@@ -365,8 +338,7 @@ def test_an_unpinned_fork_publishes_height_not_determined_never_zero(fork_block)
 
 
 def test_a_transport_that_cannot_answer_publishes_nothing():
-    # The plain stub has no ``fork_block_number`` at all — absence of the
-    # capability is absence of the witness, not a licence to use ``ctx.block``.
+    # Absence of the capability is absence of the witness, not a licence to use ``ctx.block``.
     transport = StubAnvil(guarded={GUARDED}, pause_calldata=PAUSE, duration=None)
     assert fork_block_pin(transport) is None
     eff = _pause(transport, SimContext(chain_id=1, block=PINNED_BLOCK, hardfork="prague"), RecordingStore())
@@ -384,9 +356,7 @@ def test_a_raising_transport_publishes_nothing():
 
 
 def test_the_height_never_rides_the_behavioral_cache_onto_a_twin():
-    """One deployment's observation height is a world state, not a property of
-    the bytecode. Served from the cache it would tell a twin its verdict was
-    observed at a block it was never probed at."""
+    """The observation height is world state, not a property of the bytecode."""
     assert "block_number" in DEPLOYMENT_PLANE_KEYS
     assert "block_source" in DEPLOYMENT_PLANE_KEYS
     stripped = code_plane_details(
@@ -411,7 +381,6 @@ def test_the_claims_consumer_receives_the_height_or_its_absence():
     carried = _observed_summary(_V({"pause_effective": True, "block_number": PINNED_BLOCK, "block_source": "run_pin"}))
     assert carried["block_number"] == PINNED_BLOCK
     assert carried["block_source"] == "run_pin"
-    # Absent on the witness => absent on the projection.
     blank = _observed_summary(_V({"pause_effective": True}))
     assert "block_number" not in blank
     assert "block_source" not in blank
@@ -419,10 +388,7 @@ def test_the_claims_consumer_receives_the_height_or_its_absence():
 
 @pytest.mark.parametrize("bad_block", [0, -1, None, "25643300", True])
 def test_the_publication_point_refuses_a_height_that_is_not_one(bad_block):
-    """Belt-and-braces on the stamp itself. ``new_transcript`` already refuses to
-    certify these, but the stamp is the last gate before the witness and must not
-    depend on its caller having been careful — a stringly height or a ``True``
-    that ``isinstance(_, int)`` would accept is not a block."""
+    """The stamp is the last gate before the witness; a string or ``True`` is not a block."""
     from services.effects.harness import _stamp_observation_height, proven
 
     eff = proven(
@@ -436,23 +402,13 @@ def test_the_publication_point_refuses_a_height_that_is_not_one(bad_block):
 
 
 def test_the_pin_scope_vocabulary_is_closed():
-    # Membership-gated: a typo'd or invented scope publishes nothing.
     assert BLOCK_SOURCES == ("invocation_pin", "job_pin", "run_pin")
     ctx = SimContext(chain_id=1, block=PINNED_BLOCK, hardfork="prague", block_source="head_minus_12")
     assert "block_source" not in new_transcript(ctx, feature="f", tier="tier1", effect_class="supply")
 
 
-# ---------------------------------------------------------------------------
-# B5 — a label, and nothing that touches severity.
-# ---------------------------------------------------------------------------
-
-# The four proven freeze rows, and the on-chain facts that keep their window
-# not_determined. Read at block 25643300 and reproduced by the adversarial pass:
-# pauseUntilDuration() answers 172800 / 86400 / 28800 / 28800 and
-# setPauseUntilDuration(uint256) DISPATCHES on all four (it reverts with guard
-# data 0xadb09821, where a bogus selector reverts with none). A window its own
-# holder can raise, on a latch nothing stops re-arming, bounds one call and not
-# the freeze — so none of it may be published as a bound.
+# All four proven freeze rows have a window their own holder can raise (read at block 25643300), so the window bounds
+# one call, not the freeze.
 FREEZE_ROWS = (
     ("0x1b7a4c3797236a1c37f8741c0be35c2c72736fff", 172800),
     ("0x308861a430be4cce5502d0a12724771fc6daf216", 86400),
@@ -471,9 +427,7 @@ BANNED_BOUND_KEYS = (
 
 @pytest.mark.parametrize("address,readable_window", FREEZE_ROWS)
 def test_a_readable_window_is_still_published_as_not_determined(address, readable_window):
-    """The etherfi ``pauseUntil`` shape. The window is READABLE on-chain
-    (``readable_window`` seconds at 25643300) and is still not a bound on the
-    freeze, so the recipe warps nothing and publishes no expiry either way."""
+    """The etherfi ``pauseUntil`` shape: readable on-chain and still not a bound."""
     transport = PinnedStubAnvil(
         fork_block=PINNED_BLOCK, guarded={GUARDED}, pause_calldata=PAUSE, duration=readable_window
     )

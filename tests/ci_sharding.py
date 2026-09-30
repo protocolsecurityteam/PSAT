@@ -1,4 +1,3 @@
-"""Offline CI shards and their coverage handoff."""
 
 from __future__ import annotations
 

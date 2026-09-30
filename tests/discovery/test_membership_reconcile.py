@@ -63,7 +63,6 @@ def _code_fact(session, address: str, *, absent: bool = False, tx: str | None = 
 
 
 def _gate_member(session, protocol: Protocol, address: str, **fields) -> Contract:
-    """A member earned through the gate itself: W5 nomination + fixpoint."""
     row = _contract(session, address, nominated_protocol_id=protocol.id, **fields)
     _code_fact(session, row.address)
     gate.write_witness(
@@ -79,7 +78,6 @@ def _gate_member(session, protocol: Protocol, address: str, **fields) -> Contrac
 
 
 def _freshly_gated(session):
-    """Members + a parked candidate, all through gate paths."""
     protocol = _protocol(session)
     anchor = _gate_member(session, protocol, ADDR(1))
     proxy = _contract(session, ADDR(2), nominated_protocol_id=protocol.id, implementation=anchor.address)
@@ -118,8 +116,6 @@ def test_full_ladder_gated_db_reconciles_zero_drift(db_session):
     result = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(anchor.id, impl.id)))
     assert {anchor.id, impl.id} <= set(result.promoted_contract_ids)
 
-    # The ladder itself earns the Class-A row (perimeter fact = the anchor's
-    # controller value), then W4 admits the deployer's creation.
     w4_member = _contract(db_session, ADDR(22), nominated_protocol_id=protocol.id, deployer=deployer)
     _code_fact(db_session, w4_member.address, tx=_TX)
     result = gate.evaluate(
@@ -146,7 +142,6 @@ def test_full_ladder_gated_db_reconciles_zero_drift(db_session):
 
 def test_audit_is_read_only(db_session):
     protocol, anchor, proxy, parked = _freshly_gated(db_session)
-    # Seed drift so the savepoint verdict paths actually run.
     anchor.protocol_id = None
     db_session.flush()
     db_session.commit()
@@ -217,8 +212,7 @@ def test_cleared_stamp_with_valid_witnesses_repromoted(db_session):
 
     apply_fixes(db_session, drifts)
     assert anchor.protocol_id == protocol.id
-    # The proxy's transient member_without_evidence drift resolved when the
-    # anchor re-promoted within the same pass — it must not be demoted.
+    # The anchor re-promotes in the same pass, so the proxy must not be demoted.
     assert _proxy.protocol_id == protocol.id
     assert audit(db_session) == []
 
@@ -277,11 +271,6 @@ def test_parked_candidate_is_not_drift(db_session):
     assert audit(db_session) == []
 
 
-# ---------------------------------------------------------------------------
-# CLI exit codes (report drift = 1; apply residual = 1; clean = 0)
-# ---------------------------------------------------------------------------
-
-
 def _bind_cli_session(monkeypatch):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
@@ -318,7 +307,6 @@ def test_cli_exit_1_when_drift_remains_after_apply_passes(db_session, monkeypatc
     row.protocol_id = protocol.id
     db_session.commit()
 
-    # A fix pass that fixes nothing leaves residual drift — the loop must
-    # surface it as a failure, never a green exit.
+    # A fix pass that fixes nothing must exit non-zero.
     monkeypatch.setattr(reconcile_module, "apply_fixes", lambda session, drifts: 0)
     assert reconcile_module.main(["--apply"]) == 1

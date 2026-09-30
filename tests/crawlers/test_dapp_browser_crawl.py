@@ -1,8 +1,4 @@
-"""Step 4 parallelism: DAppCrawler.crawl visits URLs concurrently.
-
-The browser stack is mocked end-to-end (no Playwright needed). Verifies every URL is visited once, concurrency
-is capped by PSAT_DAPP_PARALLEL (semaphore), and fast URLs don't block slower ones from starting.
-"""
+"""The browser stack is mocked end to end; concurrency is capped by PSAT_DAPP_PARALLEL."""
 
 from __future__ import annotations
 
@@ -54,7 +50,6 @@ def _build_fake_async_playwright(page_factory):
 
 def test_crawl_visits_every_url_concurrently(browser_module, monkeypatch):
     monkeypatch.setenv("PSAT_DAPP_PARALLEL", "2")
-    # Re-import so the module-level constant picks up the env var.
     sys.modules.pop("services.crawlers.dapp.browser", None)
     browser_module = importlib.import_module("services.crawlers.dapp.browser")
 
@@ -108,7 +103,6 @@ def test_crawl_visits_every_url_concurrently(browser_module, monkeypatch):
 
 
 def test_crawl_one_url_failure_does_not_abort_siblings(browser_module, monkeypatch):
-    """A page.goto exception on one URL must not cancel the others (the original loop swallowed per URL)."""
     monkeypatch.setenv("PSAT_DAPP_PARALLEL", "3")
     sys.modules.pop("services.crawlers.dapp.browser", None)
     browser_module = importlib.import_module("services.crawlers.dapp.browser")
@@ -147,5 +141,4 @@ def test_crawl_one_url_failure_does_not_abort_siblings(browser_module, monkeypat
     asyncio.run(crawler.crawl(urls, wait_seconds=0))
 
     assert sorted(visit_log) == sorted(urls)
-    # And every page should have been closed (finally clause runs even on raise).
     assert sorted(closed) == sorted(urls)

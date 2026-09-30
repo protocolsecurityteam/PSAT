@@ -1,7 +1,6 @@
-"""End-to-end audit-coverage pipeline against real infra: PostgreSQL (TEST_DATABASE_URL), S3-compatible
-storage (TEST_ARTIFACT_STORAGE_*), LLM stubbed via PSAT_LLM_STUB_DIR. Seed: proxy with 3 impl eras
-(A -> B -> A) plus a standalone contract; three audits straddle the upgrades. The scope worker is driven
-directly (not the poll loop) for determinism. Skips cleanly when docker isn't running.
+"""Seed: a proxy with impl eras A -> B -> A plus a standalone contract, with audits straddling the upgrades.
+
+The scope worker is driven directly for determinism.
 """
 
 from __future__ import annotations
@@ -33,16 +32,8 @@ AUDITS_DIR = FIXTURE_DIR / "audits"
 STUB_DIR = FIXTURE_DIR / "llm_responses"
 
 
-# ---------------------------------------------------------------------------
-# Re-use the scope-extraction fixtures + worker plumbing
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def llm_stub_dir(monkeypatch, tmp_path):
-    """Committed ``_default.json`` stub returns Pool/Vault/Strategy/Registry; every audit fixture mentions Pool +
-    Vault.
-    """
     committed = STUB_DIR / "_default.json"
     assert committed.exists(), f"missing fixture: {committed}"
     (tmp_path / "_default.json").write_text(committed.read_text())
@@ -58,7 +49,6 @@ def _fixture_text(name: str) -> str:
 
 @pytest.fixture()
 def worker(monkeypatch):
-    """Scope worker bound to the test DB (SessionLocal swapped so worker sessions see fixture data)."""
     from unittest.mock import patch
 
     from sqlalchemy import create_engine
@@ -95,20 +85,13 @@ def api_with_storage(monkeypatch, db_session, storage_bucket):
         api_module.app.dependency_overrides.pop(require_admin_key, None)
 
 
-# ---------------------------------------------------------------------------
-# Protocol + history seeding
-# ---------------------------------------------------------------------------
-
-
 def _ts(year: int, month: int = 1, day: int = 1) -> datetime:
     return datetime(year, month, day, tzinfo=timezone.utc)
 
 
 @pytest.fixture()
 def seed_protocol_with_history(db_session):
-    """Proxy (-> impl_a) with impl_a "Pool" active [100,200)+[300,None), impl_b "PoolV2" [200,300), standalone "Vault".
-    Returns a dict of the pieces.
-    """
+    """impl_a "Pool" active [100,200)+[300,None), impl_b "PoolV2" [200,300), standalone "Vault"."""
     from db.models import AuditContractCoverage, AuditReport, Contract, Protocol, UpgradeEvent
 
     name = f"cov-int-{uuid.uuid4().hex[:12]}"
@@ -146,7 +129,6 @@ def seed_protocol_with_history(db_session):
     db_session.add_all([proxy, impl_a, impl_b, standalone])
     db_session.commit()
 
-    # Three events -> impl_a windows [100,200) + [300,None), impl_b [200,300).
     for ts, block, new_impl, old_impl in [
         (_ts(2023, 6, 1), 100, impl_a.address, None),
         (_ts(2024, 3, 1), 200, impl_b.address, impl_a.address),
@@ -198,7 +180,6 @@ def _seed_scoped_audit(
     date: str | None,
     text_sha256: str | None = None,
 ) -> int:
-    """Insert an AuditReport with text_extraction='success' + fixture body in storage."""
     from db.models import AuditReport
     from services.audits.text_extraction import audit_text_key
 
@@ -236,17 +217,10 @@ def _drive_worker(worker, db_session) -> None:
         worker._persist_outcome(ar.id, outcome)
 
 
-# ---------------------------------------------------------------------------
-# 1. Scope worker triggers coverage population
-# ---------------------------------------------------------------------------
-
-
 def test_scope_worker_populates_coverage_for_proxy_and_standalone(
     db_session, storage_bucket, seed_protocol_with_history, worker, llm_stub_dir
 ):
-    """An audit inside impl_a's [300,None) window yields an impl_era row on Pool and a direct row on Vault, populated
-    by the worker's _persist_outcome (no manual upsert).
-    """
+    """Populated by the worker's _persist_outcome, not a manual upsert."""
     from db.models import AuditContractCoverage
 
     proto = seed_protocol_with_history
@@ -269,8 +243,7 @@ def test_scope_worker_populates_coverage_for_proxy_and_standalone(
         .order_by(AuditContractCoverage.contract_id)
         .all()
     )
-    # The default LLM stub returns ['Pool','Vault','Strategy','Registry'].
-    # Only Pool (impl_a) + Vault (standalone) are in the inventory.
+    # The stub names Pool/Vault/Strategy/Registry; only Pool and Vault are in the inventory.
     by_contract = {r.contract_id: r for r in rows}
     assert set(by_contract) == {proto["impl_a"].id, proto["standalone"].id}
 
@@ -290,9 +263,7 @@ def test_scope_worker_populates_coverage_for_proxy_and_standalone(
 def test_audits_straddling_upgrades_map_to_distinct_windows(
     db_session, storage_bucket, seed_protocol_with_history, worker, llm_stub_dir
 ):
-    """Per-audit window selection for impl_a. The LLM stub always says Pool + Vault regardless of date, so the middle
-    audit names Pool too.
-    """
+    """The stub names Pool regardless of date, so the middle audit matches too."""
     from db.models import AuditContractCoverage
 
     proto = seed_protocol_with_history
@@ -343,17 +314,10 @@ def test_audits_straddling_upgrades_map_to_distinct_windows(
     late = rows_by_audit[a3]
 
     assert (early.covered_from_block, early.covered_to_block) == (100, 200)
-    # Middle — 2024-05-01, falls in impl_b's [200,300) window. On
-    # impl_a it's outside every window → confidence 'low', nearest
-    # window is [100,200) (closer) or [300,None) (further).
+    # 2024-05-01 is inside impl_b's window, outside every impl_a window.
     assert middle.match_confidence == "low"
     assert (late.covered_from_block, late.covered_to_block) == (300, None)
     assert late.match_confidence == "high"
-
-
-# ---------------------------------------------------------------------------
-# 2. refresh_coverage admin endpoint
-# ---------------------------------------------------------------------------
 
 
 def test_refresh_coverage_endpoint_backfills(
@@ -364,7 +328,6 @@ def test_refresh_coverage_endpoint_backfills(
     llm_stub_dir,
     api_with_storage,
 ):
-    """Wipe coverage, hit the admin refresh endpoint: rows reappear (backfill path)."""
     from db.models import AuditContractCoverage
 
     proto = seed_protocol_with_history
@@ -397,11 +360,6 @@ def test_refresh_coverage_unknown_company_404(db_session, storage_bucket, api_wi
     assert r.status_code == 404
 
 
-# ---------------------------------------------------------------------------
-# 3. API — GET /api/company/{name}/audit_coverage reads the new table
-# ---------------------------------------------------------------------------
-
-
 def test_audit_coverage_endpoint_uses_coverage_table(
     db_session,
     storage_bucket,
@@ -410,7 +368,6 @@ def test_audit_coverage_endpoint_uses_coverage_table(
     llm_stub_dir,
     api_with_storage,
 ):
-    """Surfaces match_type, match_confidence, covered_from/to_block; an unrelated contract has audit_count=0."""
     from db.models import Contract
 
     proto = seed_protocol_with_history
@@ -423,8 +380,7 @@ def test_audit_coverage_endpoint_uses_coverage_table(
             chain="ethereum",
         )
     )
-    # Inventory-only entry: discovered but never analyzed, no Etherscan
-    # name, no audits. Should NOT appear in the response.
+    # Never analyzed, so it must not appear.
     db_session.add(
         Contract(
             protocol_id=proto["protocol_id"],
@@ -468,13 +424,11 @@ def test_audit_coverage_endpoint_uses_coverage_table(
     assert by_name["NotAudited"]["audit_count"] == 0
     assert by_name["NotAudited"]["last_audit"] is None
 
-    # Inventory-only entry is filtered out, matching company_overview (never analyzed).
     addresses = {row["address"] for row in body["coverage"]}
     assert "0x" + "e" * 40 not in addresses
     assert body["contract_count"] == len(body["coverage"])
 
-    # Proxy inherits its current impl's coverage: the company view asks "is the code this address runs
-    # audited?", driven by Contract.implementation -> impl_a (Pool), not the generic proxy name.
+    # The company view asks whether the code this address runs is audited, via Contract.implementation.
     proxy_row = by_name["PoolProxy"]
     assert proxy_row["audit_count"] == 1
     assert proxy_row["last_audit"]["auditor"] == "Spearbit"
@@ -487,7 +441,6 @@ def test_audit_coverage_endpoint_reuses_verified_dependency_coverage(
     seed_protocol_with_history,
     api_with_storage,
 ):
-    """A contract shared with another protocol inherits only strict verified coverage."""
     from db.models import AuditContractCoverage, AuditReport, Protocol
 
     proto = seed_protocol_with_history
@@ -566,11 +519,6 @@ def test_audit_coverage_endpoint_reuses_verified_dependency_coverage(
     assert audit["inherited_contract_address"] == dep_contract.address
 
 
-# ---------------------------------------------------------------------------
-# 4. API — GET /api/contracts/{id}/audit_timeline
-# ---------------------------------------------------------------------------
-
-
 def test_audit_timeline_for_proxy_with_audited_current_impl(
     db_session,
     storage_bucket,
@@ -579,8 +527,6 @@ def test_audit_timeline_for_proxy_with_audited_current_impl(
     llm_stub_dir,
     api_with_storage,
 ):
-    """Proxy currently points at impl_a; an audit dated inside impl_a's
-    open-ended window covers it → current_status='audited'."""
     proto = seed_protocol_with_history
     _seed_scoped_audit(
         db_session,
@@ -602,8 +548,7 @@ def test_audit_timeline_for_proxy_with_audited_current_impl(
     blocks = [(w["from_block"], w["to_block"]) for w in body["impl_windows"]]
     assert blocks == [(100, 200), (200, 300), (300, None)]
     assert body["current_status"] == "audited"
-    # Coverage must union in the proxy's historical impls, not just name matches on the proxy
-    # (a bare-proxy query once came back empty).
+    # A bare-proxy query once came back empty; coverage must union the historical impls.
     assert len(body["coverage"]) == 1
     entry = body["coverage"][0]
     assert entry["match_type"] == "impl_era"
@@ -619,9 +564,6 @@ def test_audit_timeline_flags_unaudited_since_upgrade(
     llm_stub_dir,
     api_with_storage,
 ):
-    """Audit covers only impl_a's first window ([100,200)); the proxy has since upgraded away and back, so the
-    current-impl check (covered_to_block IS NULL) fails -> unaudited_since_upgrade.
-    """
     proto = seed_protocol_with_history
 
     _seed_scoped_audit(
@@ -635,8 +577,6 @@ def test_audit_timeline_flags_unaudited_since_upgrade(
     )
     _drive_worker(worker, db_session)
 
-    # current_status reflects the current impl: impl_a's coverage has covered_to_block=200 (not NULL),
-    # so the "covered current era?" test fails.
     r = api_with_storage.get(f"/api/contracts/{proto['proxy'].id}/audit_timeline")
     assert r.status_code == 200, r.text
     assert r.json()["current_status"] == "unaudited_since_upgrade"
@@ -650,13 +590,9 @@ def test_audit_timeline_grace_match_is_not_audited(
     llm_stub_dir,
     api_with_storage,
 ):
-    """A medium-confidence grace-zone match (audit 10 days before the impl went live) must not count as
-    'audited'; the timeline reports unaudited_since_upgrade. Mirrors ether.fi LiquidityPool (impl live
-    2026-03-16, nearest audit 2026-03-05).
-    """
+    """Mirrors ether.fi LiquidityPool: impl live 2026-03-16, nearest audit 2026-03-05."""
     proto = seed_protocol_with_history
-    # Current impl (impl_a) went live at block 300, timestamp 2024-09-01.
-    # Audit dated 2024-08-22 → 10 days before → grace → medium.
+    # Audit 10 days before the impl went live: grace, medium.
     _seed_scoped_audit(
         db_session,
         storage_bucket,
@@ -672,7 +608,7 @@ def test_audit_timeline_grace_match_is_not_audited(
     assert r.status_code == 200
     body = r.json()
 
-    # Row stays present and 'medium' so the UI can show it, just not counted as "audited".
+    # The UI shows it, but it doesn't count as audited.
     cov = body["coverage"]
     assert len(cov) == 1
     entry = cov[0]
@@ -686,8 +622,6 @@ def test_audit_timeline_cited_only_proof_is_not_audited(
     seed_protocol_with_history,
     api_with_storage,
 ):
-    """A proven row with proof_kind='cited_only' is too weak to make the
-    proxy's current impl count as audited."""
     from db.models import AuditContractCoverage, AuditReport
 
     proto = seed_protocol_with_history
@@ -738,8 +672,6 @@ def test_audit_timeline_for_non_proxy(
     llm_stub_dir,
     api_with_storage,
 ):
-    """Non-proxy audited + non-proxy unaudited should both have
-    impl_windows=[] and a non_proxy_* status."""
     proto = seed_protocol_with_history
     _seed_scoped_audit(
         db_session,
@@ -779,9 +711,7 @@ def test_audit_timeline_for_impl_contract_queried_directly(
     llm_stub_dir,
     api_with_storage,
 ):
-    """Timeline on an IMPL Contract row (is_proxy=False, in UpgradeEvent history) returns non_proxy_audited +
-    covering audits without walking a proxy lineage (ether.fi verification script drilling into a historical impl).
-    """
+    """No proxy lineage walk (the ether.fi verification script drills into historical impls)."""
     proto = seed_protocol_with_history
     _seed_scoped_audit(
         db_session,
@@ -812,18 +742,9 @@ def test_audit_timeline_404_for_unknown_contract(db_session, api_with_storage):
     assert r.status_code == 404
 
 
-# ---------------------------------------------------------------------------
-# 5. The "upgrade after most recent audit" unaudited_since_upgrade signal,
-#     exercised via the unified-watcher live trigger
-# ---------------------------------------------------------------------------
-
-
 def test_unified_watcher_upgrade_refreshes_coverage_windows(
     db_session, storage_bucket, seed_protocol_with_history, worker, llm_stub_dir
 ):
-    """A new upgrade event via unified_watcher's sync path closes impl_a's current window; the coverage row
-    picks up the new upper bound.
-    """
     from db.models import AuditContractCoverage, Contract, UpgradeEvent
     from services.monitoring.unified_watcher import _sync_relational_tables
 
@@ -844,7 +765,6 @@ def test_unified_watcher_upgrade_refreshes_coverage_windows(
     pool_row = db_session.query(AuditContractCoverage).filter_by(contract_id=proto["impl_a"].id).one()
     assert pool_row.covered_to_block is None
 
-    # _sync_relational_tables needs a MonitoredContract with a linked contract_id; wire a lightweight one.
     from db.models import MonitoredContract
 
     mc = MonitoredContract(
@@ -877,24 +797,14 @@ def test_unified_watcher_upgrade_refreshes_coverage_windows(
     assert refreshed.covered_to_block == 400
 
     db_session.query(MonitoredContract).filter_by(id=mc.id).delete()
-    # Defensive: fixture teardown already sweeps UpgradeEvent for the protocol's contracts.
     db_session.query(UpgradeEvent).filter_by(contract_id=proto["proxy"].id, block_number=400).delete()
     db_session.query(Contract).filter_by(address=("0x" + "c" * 40).lower()).delete()
     db_session.commit()
 
 
-# ---------------------------------------------------------------------------
-# audit_timeline dedupe + findings filter — TestClient against the same rows
-# ---------------------------------------------------------------------------
-
-
 def test_audit_timeline_dedupe_prefers_reviewed_commit_over_impl_era(db_session, seed_protocol):
-    """best_by_audit must prefer a reviewed_commit row over impl_era at equal confidence (cryptographic proof
-    beats temporal heuristic).
-
-    Regression: dedupe ranked only on match_confidence, so ties fell to first-iterated-wins; on EtherFi's
-    LiquidityPool that dropped Certora "Priority Queue" off the current impl in the UI while the top banner
-    said "audited".
+    """Cryptographic proof beats the temporal heuristic; ties used to fall to first-iterated, dropping an audit on
+    EtherFi's LiquidityPool.
     """
     from fastapi.testclient import TestClient
 
@@ -937,8 +847,7 @@ def test_audit_timeline_dedupe_prefers_reviewed_commit_over_impl_era(db_session,
     )
     audit = _add_audit(db_session, protocol_id, scope=["Pool"], date="2024-08-01")
 
-    # Same confidence on both rows; impl_b's impl_era row goes FIRST so the old first-wins ranker pins the
-    # chip to impl_b.
+    # impl_b's row goes first so the old first-wins ranker would pick it.
     db_session.add(
         AuditContractCoverage(
             contract_id=impl_b.id,
@@ -988,9 +897,6 @@ def test_audit_timeline_dedupe_prefers_reviewed_commit_over_impl_era(db_session,
 
 
 def test_audit_timeline_dedupe_prefers_impl_era_over_direct(db_session, seed_protocol):
-    """At equal confidence impl_era beats direct (carries more information); keeps the ranker consistent across match
-    types.
-    """
     from fastapi.testclient import TestClient
 
     import api as api_module
@@ -1080,8 +986,7 @@ def test_findings_filter_excludes_fixed_status(db_session, api_client, seed_prot
     contract = _add_contract(db_session, protocol_id, address=addr, name="Vault")
     audit = _add_audit(db_session, protocol_id, date="2024-06-15", scope=["Vault"])
 
-    # Write a coverage row directly (bypass upsert to keep this test
-    # focused on the findings filter rather than the whole match path).
+    # Bypasses upsert to focus on the findings filter.
     from db.models import AuditContractCoverage
 
     db_session.add(
@@ -1094,8 +999,7 @@ def test_findings_filter_excludes_fixed_status(db_session, api_client, seed_prot
             match_confidence="high",
         )
     )
-    # Set findings on the audit row — must update via SQLAlchemy so the
-    # JSONB serialization path runs.
+    # Update via SQLAlchemy so the JSONB serialization runs.
     audit_row = db_session.query(AuditReport).filter_by(id=audit.id).one()
     audit_row.findings = [
         {"title": "Fixed issue", "severity": "medium", "status": "fixed", "contract_hint": "Vault"},

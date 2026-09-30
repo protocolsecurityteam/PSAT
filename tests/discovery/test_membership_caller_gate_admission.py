@@ -1,13 +1,7 @@
 """A bare caller gate admits nobody (``W3_D2_SOURCES``).
 
-``authority_provenance='caller_gate'`` records a proven fact (address checked against ``msg.sender``) for
-monitoring and scoring, but is NOT a governance derivation: LayerZero's ``if (msg.sender != endpoint) revert``
-lowers to the same leaf as ``msg.sender != _owner``, so admitting off it admits an integration counterparty
-(EndpointV2, and via its owner slot the OneSig multisig) as readily as an authority.
-
-Pinned: the EndpointV2/OneSig shape earns ZERO witnesses on both chains and demotes on re-earn, the caller-gate
-rows survive untouched, and real governance derivations (probed ``owner()``/``authority()``, proxy-admin
-slots, authority-derived principals) keep admitting.
+LayerZero's ``msg.sender != endpoint`` lowers to the same leaf as ``msg.sender != _owner``, so admitting off it
+would admit an integration counterparty (EndpointV2, and via its owner the OneSig multisig).
 """
 
 from __future__ import annotations
@@ -30,7 +24,6 @@ from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
 
-#: The real (address, chain) rows the dev DB carries for the shape.
 ENDPOINT_V2 = "0x1a44076050125825900e736c501f859c50fe728c"
 ONESIG_ETHEREUM = "0xbe010a7e3686fdf65e93344ab664d065a0b02478"
 ONESIG_BASE = "0xa0392d116d71ed3b75086194aba6de3cd1e39b7e"
@@ -129,10 +122,7 @@ def _active_rules(session, contract: Contract) -> set[str]:
 
 @pytest.mark.parametrize("chain", ["ethereum", "base"])
 def test_endpoint_and_onesig_earn_zero_witnesses(db_session, chain):
-    """The measured dev-DB shape, both chains: the protocol's OApp members
-    carry ``external_contract:endpoint`` caller gates naming EndpointV2, and
-    EndpointV2's own ``state_variable:_owner`` names OneSig. Neither may earn a
-    witness — and OneSig must not ride in behind EndpointV2."""
+    """The measured dev-DB shape; OneSig must not ride in behind EndpointV2."""
     protocol = _protocol(db_session)
     onesig_address = ONESIG_ETHEREUM if chain == "ethereum" else ONESIG_BASE
     oapp = _member(db_session, protocol, _addr(0xE01), chain=chain)
@@ -237,7 +227,6 @@ def test_probed_owner_read_still_admits_the_controller(db_session):
 
 
 def test_d2_evidence_refuses_the_caller_gate_source(db_session):
-    """The evidence constructor is the boundary: a D2 witness citing
-    ``controller_values`` is not constructible, so no writer can mint one."""
+    """No writer can mint a D2 witness citing ``controller_values``."""
     with pytest.raises(ValueError, match="d2 source"):
         gate.w3_evidence(direction="d2", source="controller_values", via_address=_addr(0xE40))

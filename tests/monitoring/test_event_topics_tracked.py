@@ -1,6 +1,3 @@
-"""Unit tests for the per-contract tracked-topic extractor (``extract_governance_topics``),
-the generic ABI decoder (``parse_tracked_log``) and the timelock decode. No DB, Anvil or RPC.
-"""
 
 from __future__ import annotations
 
@@ -33,11 +30,6 @@ def _topic_addr(addr: str) -> str:
 
 def _topic0(signature: str) -> str:
     return "0x" + keccak(text=signature).hex()
-
-
-# ---------------------------------------------------------------------------
-# extract_governance_topics
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -85,8 +77,7 @@ def test_extract_governance_topics_solmate(controller_id, name, new_input, expec
 
 
 def test_extract_governance_topics_skips_hand_rolled_oz():
-    """OZ OwnershipTransferred is already in ALL_EVENT_TOPICS, so the extractor must not
-    duplicate it; the hand-rolled decoder carries semantics the generic path doesn't."""
+    """The hand-rolled OZ decoder carries semantics the generic path doesn't."""
     oz_topic0 = _topic0("OwnershipTransferred(address,address)")
     assert oz_topic0 in ALL_EVENT_TOPICS  # sanity
 
@@ -115,9 +106,7 @@ def test_extract_governance_topics_skips_hand_rolled_oz():
 
 
 def test_extract_governance_topics_unknown_controller_id_falls_through():
-    """An unmapped controller_id still yields a tracked topic under the neutral
-    ``state_changed:<id>`` type: this plan proves nothing about gating callers, so no sync
-    handler fires and no control claim is published."""
+    """The plan proves nothing about gating callers, so no control claim is published."""
     plan = {
         "tracked_controllers": [
             {
@@ -144,8 +133,6 @@ def test_extract_governance_topics_unknown_controller_id_falls_through():
 
 
 def test_extract_governance_topics_unknown_controller_id_with_gate_proof():
-    """With the plan's proof that a predicate leaf gates callers on ``guardian``, the
-    controller claim IS earned and the terminal fallback publishes it."""
     plan = {
         "tracked_controllers": [
             {
@@ -179,7 +166,7 @@ def test_extract_governance_topics_handles_null_plan():
 
 
 def test_extract_governance_topics_dedups_across_controllers():
-    """Two controllers referencing the same event emit topic0 once (dispatcher is topic0-keyed)."""
+    """The dispatcher is topic0-keyed."""
     sig = "SomeEvent(address,address)"
     topic = _topic0(sig)
     event_dict = {
@@ -201,11 +188,6 @@ def test_extract_governance_topics_dedups_across_controllers():
     assert len(topics) == 1
 
 
-# ---------------------------------------------------------------------------
-# parse_tracked_log
-# ---------------------------------------------------------------------------
-
-
 _OLD = "0xf39fd6e51aad88f6f4ce6ab8827279cffFb92266"
 _NEW = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 _NEW_ADMIN = "0x3994741a5b29c60D0AB318dE1024F9256fe959dc"
@@ -218,8 +200,7 @@ def _in(name: str, indexed: bool, typ: str = "address") -> dict:
 @pytest.mark.parametrize(
     ("sig", "event_type", "controller_id", "inputs", "indexed_args", "data_args", "expected", "absent"),
     [
-        # Solmate OwnerUpdated: both args indexed addresses. Decoder must surface ABI-name keys AND
-        # semantic aliases (``old_owner``/``new_owner``) so existing sync paths keep working.
+        # ABI-name keys and semantic aliases, so existing sync paths keep working.
         pytest.param(
             "OwnerUpdated(address,address)",
             "ownership_transferred",
@@ -242,7 +223,6 @@ def _in(name: str, indexed: bool, typ: str = "address") -> dict:
             (),
             id="authority-semantic-keys",
         ),
-        # Validates the eth_abi decode path: one non-indexed address in ``data`` (DSAuth LogSetOwner).
         pytest.param(
             "LogSetOwner(address)",
             "controller_changed:state_variable:owner",
@@ -254,8 +234,6 @@ def _in(name: str, indexed: bool, typ: str = "address") -> dict:
             (),
             id="non-indexed-data",
         ),
-        # DSAuth ``LogSetOwner(address indexed owner)``: name doesn't start with ``new``, so the
-        # single-arg fallback treats the value as new owner; no old_owner recorded.
         pytest.param(
             "LogSetOwner(address)",
             "ownership_transferred",
@@ -267,8 +245,6 @@ def _in(name: str, indexed: bool, typ: str = "address") -> dict:
             ("old_owner",),
             id="dsauth-single-indexed-owner",
         ),
-        # Compound ``NewAdmin(address newAdmin)``: name match alone fills new_admin; previous_admin
-        # stays unset.
         pytest.param(
             "NewAdmin(address)",
             "admin_changed",
@@ -280,7 +256,6 @@ def _in(name: str, indexed: bool, typ: str = "address") -> dict:
             ("previous_admin",),
             id="compound-new-admin-non-indexed",
         ),
-        # Names matching neither ``new*`` nor ``previous*`` fall back to positional (old, new).
         pytest.param(
             "GovernorChanged(address,address)",
             "ownership_transferred",
@@ -292,8 +267,6 @@ def _in(name: str, indexed: bool, typ: str = "address") -> dict:
             (),
             id="anonymous-args-positional-fallback",
         ),
-        # Ownable2Step ``OwnershipTransferStarted``: both names match OZ convention, so both slots
-        # fill by name alone.
         pytest.param(
             "OwnershipTransferStarted(address,address)",
             "ownership_transfer_started",
@@ -335,16 +308,10 @@ def test_parse_tracked_log_shapes(sig, event_type, controller_id, inputs, indexe
     assert parsed["tx_hash"] == "0xdeadbeef"
 
 
-# ---------------------------------------------------------------------------
-# Tag-driven classification (effect_tags)
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("controller_id", "name", "signature", "inputs", "effect_tags", "expected_event_type"),
     [
-        # Compound NewAdmin: ``state_variable:admin`` isn't in the legacy controller_id map, but
-        # effect_tags.writes containing ``admin`` classifies it ``admin_changed`` with no per-ABI edit.
+        # ``admin`` in effect_tags.writes classifies it with no per-ABI edit.
         pytest.param(
             "state_variable:admin",
             "NewAdmin",
@@ -354,8 +321,6 @@ def test_parse_tracked_log_shapes(sig, event_type, controller_id, inputs, indexe
             "admin_changed",
             id="tags-drive-admin-changed",
         ),
-        # Curve/Vyper 2-step admin: ``CommitOwnership`` (writes ``future_admin``) routes through
-        # ``admin_changed`` without a controller_id mapping.
         pytest.param(
             "state_variable:future_admin",
             "CommitOwnership",
@@ -365,9 +330,7 @@ def test_parse_tracked_log_shapes(sig, event_type, controller_id, inputs, indexe
             "admin_changed",
             id="curve-commit-ownership",
         ),
-        # OZ Ownable2Step ``acceptOwnership`` writes BOTH ``owner`` and ``pendingOwner``. The
-        # classifier must pick ``ownership_transferred`` (commit phase), not
-        # ``ownership_transfer_started``.
+        # ``acceptOwnership`` writes both slots, and the commit phase wins.
         pytest.param(
             "state_variable:owner",
             "OwnershipTransferred",
@@ -377,7 +340,6 @@ def test_parse_tracked_log_shapes(sig, event_type, controller_id, inputs, indexe
             "ownership_transferred",
             id="ownable2step-commit-phase",
         ),
-        # OZ ``Initialized(uint64)`` is tagged via ``is_initializer`` (slot ``_initialized``).
         pytest.param(
             "state_variable:_initialized",
             "Initialized",
@@ -387,9 +349,7 @@ def test_parse_tracked_log_shapes(sig, event_type, controller_id, inputs, indexe
             "initialized",
             id="initializer",
         ),
-        # When effect_tags match no canonical write target, the classifier falls back to
-        # controller_id and then the neutral form (no gate proof for ``guardian``). Tags still
-        # ride along even when classification fell back.
+        # No canonical write target, so it falls back to controller_id then the neutral form.
         pytest.param(
             "state_variable:guardian",
             "GuardianSet",
@@ -399,9 +359,7 @@ def test_parse_tracked_log_shapes(sig, event_type, controller_id, inputs, indexe
             "state_changed:state_variable:guardian",
             id="fall-through-when-no-match",
         ),
-        # When controller_id disagrees with effect_tags, tags win: they reflect what the emitter
-        # ACTUALLY mutates. controller_id ``owner`` is misleading (would map to
-        # ownership_transferred) but the emitter actually writes admin.
+        # Tags reflect what the emitter actually mutates, so they beat controller_id.
         pytest.param(
             "state_variable:owner",
             "AdminSet",
@@ -441,7 +399,6 @@ def test_extract_governance_topics_tag_classification(
 
 
 def test_parse_tracked_log_carries_effect_tags_through():
-    """The decoder propagates effect_tags from the spec onto the parsed event."""
     sig = "NewAdmin(address)"
     spec = {
         "topic0": _topic0(sig),
@@ -467,8 +424,7 @@ def test_parse_tracked_log_carries_effect_tags_through():
 
 
 def test_parse_tracked_log_returns_none_on_short_topics():
-    """A topic count that doesn't match the spec's indexed inputs (corrupt log, misrouted
-    topic0) makes the decoder decline rather than emit a partial event."""
+    """A partial event from a corrupt or misrouted log is worse than none."""
     sig = "OwnerUpdated(address,address)"
     spec = {
         "topic0": _topic0(sig),
@@ -490,12 +446,7 @@ def test_parse_tracked_log_returns_none_on_short_topics():
     assert parse_tracked_log(log, spec) is None
 
 
-# ---------------------------------------------------------------------------
-# Hand-rolled decoders attach synthesized effect_tags
-# ---------------------------------------------------------------------------
-# These pin the canonical event_type → effect_tags map. Downstream consumers
-# (``_should_watch``, ``_update_state_from_event``, ``_sync_relational_tables``,
-# ``should_trigger_reanalysis``) branch on tags, so a regression silently drops events.
+# Downstream consumers branch on these tags, so a regression silently drops events.
 
 
 def _call_scheduled_log() -> dict:
@@ -513,16 +464,12 @@ def _call_scheduled_log() -> dict:
 
 
 def _diamond_cut_log() -> dict:
-    # Minimal DiamondCut data: one Add action with one facet, zero init.
     facet = "00" * 12 + "01" * 20
-    # ABI: offset to FacetCut[], _init, _calldata offset
     array_off = format(96, "x").zfill(64)
     init_word = "0" * 64
     calldata_off = format(160, "x").zfill(64)
-    # Array starts here: count=1, entry_offset=32
     array_count = format(1, "x").zfill(64)
     entry_off = format(32, "x").zfill(64)
-    # Entry: facet, action=0 (Add), selectors array (empty)
     entry = facet + format(0, "x").zfill(64) + format(96, "x").zfill(64) + format(0, "x").zfill(64)
     calldata_len = "0" * 64
     return {
@@ -537,8 +484,7 @@ def _governance_log(topics: list[str], data: str = "0x", block: str = "0x10", tx
     return {"topics": topics, "data": data, "blockNumber": block, "transactionHash": tx}
 
 
-# ``parse_upgrade_log`` can't import the synthesizer (circular dependency), so ``parse_any_log``
-# attaches tags at the consolidated entry point; the ``parse_any_log`` cases verify they land there.
+# ``parse_upgrade_log`` can't import the synthesizer (circular), so tags attach in ``parse_any_log``.
 @pytest.mark.parametrize(
     ("parser", "log", "event_type", "effect_tags"),
     [
@@ -579,8 +525,7 @@ def _governance_log(topics: list[str], data: str = "0x", block: str = "0x10", tx
             {"writes": ["owners"]},
             id="added-owner",
         ),
-        # Synthetic ``_timelock_op`` marker: activity events don't mutate a named state slot, but
-        # ``_should_watch`` still needs a tag to gate them against ``watch_timelock``.
+        # ``_should_watch`` needs a tag to gate activity events against ``watch_timelock``.
         pytest.param(
             parse_governance_log,
             _call_scheduled_log(),
@@ -588,8 +533,6 @@ def _governance_log(topics: list[str], data: str = "0x", block: str = "0x10", tx
             {"writes": ["_timelock_op"]},
             id="call-scheduled",
         ),
-        # ``delegates: True`` is the canonical marker for delegate-target swaps; it drives the
-        # upgrade path in _sync_relational_tables.
         pytest.param(
             parse_any_log,
             _governance_log([UPGRADED_TOPIC0, _topic_addr(_NEW)]),
@@ -607,8 +550,6 @@ def _governance_log(topics: list[str], data: str = "0x", block: str = "0x10", tx
             {"writes": ["admin"]},
             id="any-log-admin-changed",
         ),
-        # EIP-2535 DiamondCut is a facet swap: tags need both ``delegates: True`` (reanalysis) and
-        # ``facets`` (upgrade path).
         pytest.param(
             parse_any_log,
             _diamond_cut_log(),
@@ -626,8 +567,6 @@ def test_hand_rolled_decoders_attach_synthesized_tags(parser, log, event_type, e
 
 
 def test_parse_any_log_handrolled_tags_isolated_from_module_state():
-    """``_attach_effect_tags`` must deep-copy writes so consumers mutating them don't poison
-    the module-level synthesis map."""
     log = {
         "topics": [
             OWNERSHIP_TRANSFERRED_TOPIC0,
@@ -649,14 +588,7 @@ def test_parse_any_log_handrolled_tags_isolated_from_module_state():
     )
 
 
-# ---------------------------------------------------------------------------
-# Timelock event decode (CallScheduled / CallExecuted)
-# ---------------------------------------------------------------------------
-
-
 class TestTimelockEventDecode:
-    """Pin the decode of target/value/calldata/predecessor/delay from CallScheduled/CallExecuted
-    data, so the parser can't regress to keeping only operation_id + index."""
 
     def test_call_scheduled_decodes_static_fields(self):
         from services.monitoring.event_topics import CALL_SCHEDULED_TOPIC0, parse_governance_log
@@ -716,8 +648,7 @@ class TestTimelockEventDecode:
         assert ev["selector"] == "0xdeadbeef"
 
     def test_short_data_field_does_not_crash(self):
-        """A short data field must not raise: set the indexed fields, skip the rest
-        (RPCs occasionally truncate before the body)."""
+        """RPCs occasionally truncate before the body."""
         from services.monitoring.event_topics import CALL_SCHEDULED_TOPIC0, parse_governance_log
 
         log = {

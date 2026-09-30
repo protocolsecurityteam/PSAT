@@ -1,4 +1,3 @@
-"""Transactional invalidation, shared dependencies, and public/private reuse."""
 
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
@@ -138,7 +137,6 @@ def test_independent_contract_writers_do_not_share_a_protocol_lock(prepared, ope
         independent.commit()  # Must finish while copying is still uncommitted.
         assert source(session, protocol.name) == "prepared-stale"
         copying.rollback()
-    # The company check is a read-only digest, never a producer-written row.
     assert session.get(Revision, f"protocol:{protocol.id}") is None
     ready(session)
     assert worker.refresh_one(factory) == "prepared"
@@ -254,7 +252,6 @@ def test_bulk_updates_coalesce_and_unrelated_protocol_does_not_dirty(prepared, m
     assert session.execute(select(Revision.token).where(Revision.key == key)).scalar_one() == changed
     session.commit()
     assert source(session, protocol.name) == "prepared-stale"
-    # Prepare the unrelated company, then rebuild the one dirty company once.
     ready(session)
     builder = MagicMock(wraps=worker.build_company_overview)
     monkeypatch.setattr(worker, "build_company_overview", builder)

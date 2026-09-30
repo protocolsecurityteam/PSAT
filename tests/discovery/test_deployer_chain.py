@@ -1,7 +1,6 @@
 """Multichain: chain_id threading through deployer expansion.
 
-The Etherscan calls (``getcontractcreation``, ``txlist``) must carry the searched chain, not a hardcoded mainnet
-default. Name resolution still uses ``get_contract_name`` (no chain param yet), so tests set ``resolve_names=False``.
+Name resolution has no chain param yet, hence ``resolve_names=False``.
 """
 
 import pytest
@@ -17,7 +16,6 @@ def _fake_get_factory(seen):
     def fake_get(_module, action, **kwargs):
         seen.append((action, kwargs.get("chain_id")))
         if action == "getcontractcreation":
-            # All seeds share one deployer → it clears the qualification bar.
             return {"result": [{"contractAddress": s, "contractCreator": _DEPLOYER} for s in _SEEDS]}
         if action == "txlist":
             return {"result": [{"to": "", "contractAddress": _NEW_CONTRACT}]}
@@ -48,8 +46,6 @@ def test_expand_from_deployers_threads_chain_id(monkeypatch, kwargs, expected_ch
 
 
 def test_explorer_links_follow_the_expansion_chain(monkeypatch):
-    """Display links point at the searched chain's explorer, not a hardcoded
-    etherscan.io (P3: the deployer-hardcode row in Appendix A)."""
     monkeypatch.setattr(deployer.etherscan, "get", _fake_get_factory([]))
 
     base = deployer.expand_from_deployers(_SEEDS, resolve_names=False, chain_id=8453)

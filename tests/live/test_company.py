@@ -1,4 +1,3 @@
-"""Company reads must exercise the deployed cache and background builder."""
 
 from __future__ import annotations
 
@@ -25,7 +24,7 @@ def test_company_refresh_invalidates_the_prepared_page(analyzed_company, live_cl
     refresh = live_client._session.post(live_client._url(f"/api/company/{DEFAULT_TEST_COMPANY}/refresh"), timeout=15)
     assert refresh.status_code == 202, refresh.text
     after = live_client.company_response(DEFAULT_TEST_COMPANY)
-    # The debounced rebuild may not have run yet; until it does the old build is labelled stale.
+    # The debounced rebuild may not have run yet.
     if after.headers.get("X-PSAT-Response-Source") == "prepared":
         assert after.headers["X-PSAT-Prepared-At"] != before.headers["X-PSAT-Prepared-At"]
     else:
@@ -36,7 +35,7 @@ def test_company_refresh_invalidates_the_prepared_page(analyzed_company, live_cl
 def test_company_overview_basic_shape(analyzed_company, live_client: LiveClient):
     overview = live_client.company_overview(DEFAULT_TEST_COMPANY)
     assert isinstance(overview, dict)
-    # Loose membership check — schema evolves; catches total regression without flapping on additions.
+    # Loose on purpose: catches total regression without flapping on additions.
     expected_any = {"contracts", "contract_count", "owner_groups", "protocol_id", "company"}
     assert expected_any & set(overview.keys()), (
         f"company overview missing every expected key: got {list(overview.keys())}"

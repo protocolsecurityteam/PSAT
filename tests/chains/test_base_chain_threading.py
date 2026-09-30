@@ -19,8 +19,6 @@ from tests.support.balance_stubs import page, pinned_native_unavailable
 
 
 def _row(**attrs: Any) -> Any:
-    """SimpleNamespace stand-in for a Job/Contract row, typed Any so call sites
-    annotated with the ORM types accept it."""
     return SimpleNamespace(**attrs)
 
 
@@ -57,11 +55,6 @@ def test_resolve_chain_context(_erpc_base, chain_id, rpc_url, chain_name, expect
     ctx = _resolve_chain_context(chain_id, rpc_url, chain_name)
     assert ctx.chain_id == chain_id
     assert ctx.rpc_url == expected_url
-
-
-# ---------------------------------------------------------------------------
-# capability_resolver — a chain-8453 job reaches the EvaluationContext + URL
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -127,11 +120,6 @@ def test_resolver_threads_base_chain_into_eval_context(session, _erpc_base, monk
     assert captured["rpc_url"].endswith(_BASE_URL_SUFFIX)
 
 
-# ---------------------------------------------------------------------------
-# workers — chain_id derivation + threading
-# ---------------------------------------------------------------------------
-
-
 def test_resolution_worker_chain_id_for_job_column_and_derived():
     from workers.resolution_worker import _chain_id_for_job
 
@@ -154,7 +142,6 @@ def test_static_worker_parent_chain_name_never_none():
     from workers.static_worker import _parent_chain_name
 
     assert _parent_chain_name(_row(chain_id=_BASE_ID, request={}, address="0x1")) == "base"
-    # Chain-less parent still resolves to a concrete name (mainnet), never None.
     assert _parent_chain_name(_row(request={}, address="0x1")) == "ethereum"
 
 
@@ -180,9 +167,7 @@ def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch, db_session):
     monkeypatch.setattr("services.clients.etherscan.get_token_balances_page", _tokens)
     monkeypatch.setattr("services.clients.etherscan.get_native_price", _price)
     monkeypatch.setattr("workers.base.update_job_detail", lambda *a, **kw: None)
-    # The chain id under test is the one on the Etherscan reads; the pinned
-    # native read is a separate wire on the same path, stubbed to its
-    # unavailable outcome so the assertions stay about Etherscan.
+    # The pinned native read is a separate wire, stubbed unavailable so the assertions stay about Etherscan.
     pinned_native_unavailable(monkeypatch)
 
     worker = ResolutionWorker()
@@ -198,13 +183,8 @@ def test_fetch_balances_passes_chain_id_to_etherscan(monkeypatch, db_session):
 
     assert captured["balance_chain"] == _BASE_ID
     assert captured["token_chain"] == _BASE_ID
-    # Base uses ETH: the collector intentionally shares its mainnet ETH quote.
+    # Base uses ETH, so it shares the mainnet ETH quote.
     assert captured["price_chain"] == 1
-
-
-# ---------------------------------------------------------------------------
-# recursive — materialization cache keyed by the chain's canonical name
-# ---------------------------------------------------------------------------
 
 
 def test_materialization_chain_name_base_and_mainnet():
@@ -234,11 +214,6 @@ def test_materialize_contract_artifacts_threads_chain(monkeypatch):
     assert captured["chain"] == "base"
 
 
-# ---------------------------------------------------------------------------
-# company_overview — a mainnet job never pairs with a same-address L2 contract
-# ---------------------------------------------------------------------------
-
-
 def test_job_matches_contract_chain_cross_chain():
     from services.aggregations.company_overview import _job_matches_contract_chain
 
@@ -248,7 +223,6 @@ def test_job_matches_contract_chain_cross_chain():
     assert _job_matches_contract_chain(base_job, "base") is True
     assert _job_matches_contract_chain(base_job, "ethereum") is False
     assert _job_matches_contract_chain(mainnet_job, "ethereum") is True
-    # NULL contract chain + alias fold to mainnet.
     assert _job_matches_contract_chain(mainnet_job, None) is True
     assert _job_matches_contract_chain(mainnet_job, "mainnet") is True
     assert _job_matches_contract_chain(base_job, None) is False
@@ -270,18 +244,12 @@ def test_probe_rate_bucket_is_chain_scoped(monkeypatch):
 
     addr = "0x" + "ab" * 20
     predicate_capabilities._probe_rate_check("k", addr, 1)
-    # The Base bucket is independent — this must NOT be rate-limited.
     predicate_capabilities._probe_rate_check("k", addr, _BASE_ID)
     with pytest.raises(HTTPException):
         predicate_capabilities._probe_rate_check("k", addr, 1)
 
     assert ("k", addr, 1) in predicate_capabilities._probe_rate_state
     assert ("k", addr, _BASE_ID) in predicate_capabilities._probe_rate_state
-
-
-# ---------------------------------------------------------------------------
-# contract_audit_timeline — bytecode read scoped to the contract's chain
-# ---------------------------------------------------------------------------
 
 
 def test_audit_timeline_bytecode_read_uses_contract_chain(monkeypatch):
@@ -307,10 +275,8 @@ def test_audit_timeline_bytecode_read_uses_contract_chain(monkeypatch):
 
 @pytest.fixture
 def _bind_router_session(session, monkeypatch):
-    """Point ``deps.SessionLocal`` at this file's test-DB session. The router functions open it themselves, which
-    binds to ``DATABASE_URL`` (``psat``) while the ``session`` fixture seeds ``psat_test``; without the rebind the
-    endpoint reads an empty DB and 404s. (In the full suite this passed only via an earlier test's leaked rebind,
-    an order-dependency this fixture removes.)
+    """The routers open ``deps.SessionLocal`` themselves, which binds to the dev DB; this used to pass only via
+    another test's leaked rebind.
     """
     from routers import deps
 
@@ -341,7 +307,7 @@ def test_delete_company_address_chain_qualifies(session, _bind_router_session):
     session.add(Contract(address=address, chain="base", protocol_id=proto.id))
     session.commit()
 
-    # Address-only keying used to 500 on MultipleResultsFound; chain disambiguates.
+    # Address-only keying used to 500 on MultipleResultsFound.
     result = delete_company_address(proto.name, address, chain="base")
     assert result["deleted"] is True
     assert result["chain"] == "base"
@@ -349,11 +315,6 @@ def test_delete_company_address_chain_qualifies(session, _bind_router_session):
     remaining = session.query(Contract).filter(Contract.protocol_id == proto.id).all()
     assert len(remaining) == 1
     assert remaining[0].chain == "ethereum"
-
-
-# ---------------------------------------------------------------------------
-# routers/analyses — address artifact lookup chain-qualifies when chain given
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -379,8 +340,7 @@ def test_analysis_artifact_address_lookup_chain_qualified(session, _bind_router_
         store_artifact(session, job.id, "dependencies", data={"chain": chain_name})
         session.commit()
 
-    # Mainnet job is the MORE recent one, so an unqualified lookup returns it;
-    # a chain=base lookup must still select the Base job.
+    # The mainnet job is newer, so an unqualified lookup returns it.
     _seed("base", _BASE_ID, datetime(2024, 1, 1, tzinfo=timezone.utc))
     _seed("ethereum", 1, datetime(2025, 1, 1, tzinfo=timezone.utc))
 

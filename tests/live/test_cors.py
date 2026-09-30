@@ -1,4 +1,4 @@
-"""CORS enforcement. Raw requests throughout — the wrapper's auth header and raise-for-status both get in the way."""
+"""Raw requests: the wrapper's auth header and raise-for-status get in the way."""
 
 from __future__ import annotations
 

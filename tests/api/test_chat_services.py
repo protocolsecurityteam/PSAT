@@ -39,9 +39,7 @@ from services.chat import tools as chat_tools
 from services.chat.agent import AgentContext, run_agent_stream
 from utils import llm as llm_mod
 
-# db_session teardown clears Protocol-scoped rows but contracts (ondelete="SET NULL") survive, so
-# reusing an address hits uq_contract_address_chain; addresses are generated per test instead.
-# PROTO_NAME / addresses are populated lazily in the fixture; names here exist for type checkers.
+# Contracts survive teardown (SET NULL), so addresses are generated per test to avoid uq_contract_address_chain.
 PROTO_NAME = ""
 SAFE_ADDR = ""
 EOA_ADDR = ""
@@ -52,20 +50,14 @@ PLAIN_ADDR = ""
 
 
 def _addr(prefix: str) -> str:
-    """Random 20-byte address with a recognizable prefix nibble.
-
-    ``ADDR_RE`` in services.chat.agent needs 40 hex chars after ``0x`` (one uuid4 hex is only 32),
-    else highlight tests silently fail to match, so concatenate two uuids.
-    """
+    """``ADDR_RE`` needs 40 hex chars and one uuid4 is only 32."""
     pad = (uuid.uuid4().hex + uuid.uuid4().hex)[: 40 - len(prefix)]
     return "0x" + prefix + pad
 
 
 @pytest.fixture(autouse=True)
 def _stub_etherscan_source_fallback(monkeypatch):
-    """Offline: the contract-source tool falls back to live Etherscan when DB /
-    storage bodies are absent. That fallback already returns {} on failure, so
-    stub it to {} (the tool tests assert on DB-backed data, not the fallback)."""
+    """The live Etherscan fallback already returns {} on failure."""
     monkeypatch.setattr("services.chat.tools._etherscan_sources", lambda address, chain=None: {})
 
 
@@ -85,10 +77,7 @@ def seeded_protocol(db_session: Session):
     db_session.flush()
 
     def _job(addr: str | None = None) -> Job:
-        # protocol_brief / list_protocol_principals / list_protocol_addresses
-        # all walk Job.protocol_id (not Contract.protocol_id), so the link
-        # has to live on the Job too — without it those tools return empty
-        # and highlights never fire.
+        # The protocol tools walk Job.protocol_id, not Contract.protocol_id.
         j = Job(
             status=JobStatus.completed,
             stage=JobStage.done,
@@ -151,8 +140,6 @@ def seeded_protocol(db_session: Session):
         )
     )
 
-    # Control graph: Safe (4-of-7), one EOA, one Timelock — all governing
-    # the proxy. classify_address reads from this table.
     db_session.add(
         ControlGraphNode(
             contract_id=proxy.id,
@@ -179,12 +166,9 @@ def seeded_protocol(db_session: Session):
         )
     )
 
-    # Owner controller — points at the timelock contract, so contract_brief
-    # also resolves a controller through classify_address.
     db_session.add(ControllerValue(contract_id=proxy.id, controller_id="owner", value=TIMELOCK_ADDR))
     db_session.add(ControllerValue(contract_id=proxy.id, controller_id="placeholder", value=None))
 
-    # Upgrade event — drives upgrade_summary + last_upgrade in contract_brief.
     db_session.add(
         UpgradeEvent(
             contract_id=proxy.id,
@@ -195,7 +179,6 @@ def seeded_protocol(db_session: Session):
         )
     )
 
-    # AuditReport + coverage row — drives live_findings, search_audits.
     audit = AuditReport(
         protocol_id=proto.id,
         auditor="TrailOfBytes",
@@ -208,8 +191,7 @@ def seeded_protocol(db_session: Session):
     )
     db_session.add(audit)
     db_session.flush()
-    # Coverage rows must target implementations (DB trigger rejects
-    # is_proxy=TRUE rows). matched_name has a NOT NULL constraint.
+    # A DB trigger rejects coverage rows on proxies.
     db_session.add(
         AuditContractCoverage(
             audit_report_id=audit.id,
@@ -222,21 +204,17 @@ def seeded_protocol(db_session: Session):
         )
     )
 
-    # Effective function with role principal — drives role_holders +
-    # the no-arg summary path that inlines holders.
     ef = EffectiveFunction(
         contract_id=plain.id,
         function_name="pauseContract",
         selector="0xabcd0001",
         authority_public=False,
-        # The shape the producer emits: the grant names the role AND its members. (``origin`` is
-        # the constant ``semantic_capability:finite_set`` on 1132/1132 real rows, never a role name.)
+        # ``origin`` is a resolver constant on every real row, never a role name.
         authority_roles=[{"role": "PROTOCOL_PAUSER", "principals": [{"address": EOA_ADDR}, {"address": SAFE_ADDR}]}],
     )
     db_session.add(ef)
     db_session.flush()
-    # Real ``origin`` / ``principal_type`` values: resolver-source constants. These
-    # rows are authorized CALLERS with no role attribution.
+    # Authorized callers with no role attribution.
     db_session.add(
         FunctionPrincipal(
             function_id=ef.id,
@@ -255,8 +233,7 @@ def seeded_protocol(db_session: Session):
             principal_type="controller",
         )
     )
-    # A second gated function whose grant names a role but NO members: the role
-    # gates it, who holds it was not determined.
+    # A role with no members: who holds it was not determined.
     ef_unknown = EffectiveFunction(
         contract_id=plain.id,
         function_name="sweep",
@@ -274,15 +251,10 @@ def _ctx(selected: str | None = None) -> AgentContext:
 
 
 def _patch_session_local(monkeypatch, db_session: Session) -> None:
-    """``services.chat.agent`` opens its own ``SessionLocal()``, bound to ``DATABASE_URL`` at
-    import (possibly the dev DB while tests write to ``TEST_DATABASE_URL``); rebind to the test
-    engine so its queries see the seeded fixture."""
+    """``services.chat.agent`` binds its own SessionLocal at import, possibly to the dev DB."""
     test_engine = db_session.get_bind()
     TestSession = sessionmaker(bind=test_engine, expire_on_commit=False)
     monkeypatch.setattr(agent_mod, "SessionLocal", TestSession)
-
-
-# ── data.py ────────────────────────────────────────────────────────────────
 
 
 def test_canonical_chain_aliases_ethereum_and_mainnet():
@@ -306,7 +278,6 @@ def test_classify_address_for_safe_eoa_timelock_unknown(db_session, seeded_proto
     assert eoa["has_bytecode"] is False
 
     tl = chat_data.classify_address(db_session, TIMELOCK_ADDR)
-    # Promoted from "contract" → "timelock" via the delay/name heuristic.
     assert tl["kind"] == "timelock"
     assert tl["delay_seconds"] == 259_200
 
@@ -316,10 +287,8 @@ def test_classify_address_for_safe_eoa_timelock_unknown(db_session, seeded_proto
 
 
 def test_resolve_contract_alias_and_chain_filter(db_session, seeded_protocol):
-    # Strict chain match.
     c = chat_data._resolve_contract(db_session, PROXY_ADDR, "ethereum")
     assert c is not None and c.address == PROXY_ADDR
-    # Alias hit (mainnet → ethereum).
     c = chat_data._resolve_contract(db_session, PROXY_ADDR, "mainnet")
     assert c is not None
     assert chat_data._resolve_contract(db_session, "0x" + "0" * 40, None) is None
@@ -330,7 +299,6 @@ def test_contract_brief_and_upgrade_summary(db_session, seeded_protocol):
     brief = chat_data.contract_brief(db_session, PROXY_ADDR)
     assert brief["kind"] == "contract"
     assert brief["is_proxy"] is True
-    # Owner controller was resolved via classify_address.
     assert brief["controllers"]["owner"]["kind"] == "timelock"
     assert brief["last_upgrade"]["new_impl"] == IMPL_ADDR
 
@@ -349,8 +317,7 @@ def test_live_findings_filters_fixed_and_resolves_company(db_session, seeded_pro
     assert "Reentrancy" not in titles  # fixed → excluded
     assert "Missing pause" in titles
 
-    # Coverage rows are pinned to the impl (DB trigger forbids
-    # is_proxy=TRUE), so the address-filtered path matches via the impl.
+    # Coverage rows are pinned to the impl.
     addr_findings = chat_data.live_findings(db_session, address=IMPL_ADDR)
     assert any(f["title"] == "Missing pause" for f in addr_findings["findings"])
 
@@ -371,23 +338,17 @@ def test_protocol_brief_principals_addresses_and_role_holders(db_session, seeded
     assert PROXY_ADDR.lower() in addrs
     assert chat_data.list_protocol_addresses(db_session, "missing") == set()
 
-    # role_holders summary (no role_name) inlines holders so the agent
-    # can answer "who holds this role?" in one call.
     summary = chat_data.role_holders(db_session, company=PROTO_NAME)
     pauser = next(r for r in summary["roles"] if r["role"] == "PROTOCOL_PAUSER")
     assert pauser["holder_count"] == 2
     holder_kinds = {h["kind"] for h in pauser["holders"]}
     assert holder_kinds == {"eoa", "safe"}
 
-    # role_name path returns the full holder list.
     detail = chat_data.role_holders(db_session, company=PROTO_NAME, role_name="PROTOCOL_PAUSER")
     assert detail["role"] == "PROTOCOL_PAUSER"
     assert {h["kind"] for h in detail["holders"]} == {"eoa", "safe"}
 
     assert chat_data.role_holders(db_session, company="nope")["error"]
-
-
-# ── tools.py ───────────────────────────────────────────────────────────────
 
 
 def test_tool_wrappers_round_trip(db_session, seeded_protocol):
@@ -410,8 +371,7 @@ def test_tool_wrappers_round_trip(db_session, seeded_protocol):
     assert upgrades["impl_count"] == 1
     assert "error" in chat_tools._get_upgrade_history(db_session, ctx)
 
-    # Exercised for the raise-free path only; the key-presence assertions these
-    # calls used to carry named no behaviour the wrappers could fail.
+    # Only the raise-free path is exercised here.
     chat_tools._get_audit_findings(db_session, ctx)
     chat_tools._list_principals(db_session, ctx)
 
@@ -464,8 +424,7 @@ def test_truncate_caps_and_run_tool_dispatches(db_session, seeded_protocol):
     out = chat_tools.run_tool("get_protocol_info", db_session, ctx, {})
     assert out["name"] == PROTO_NAME
     assert "error" in chat_tools.run_tool("does_not_exist", db_session, ctx, {})
-    # Tools accept ``**_kw``, so an unknown kwarg is absorbed: the call still
-    # answers the protocol, never an error and never an exception.
+    # Tools accept ``**_kw``, so an unknown kwarg is absorbed.
     unknown_kwarg_out = chat_tools.run_tool(
         "get_protocol_info", db_session, ctx, {"unknown_arg_that_should_fail": True}
     )
@@ -473,11 +432,7 @@ def test_truncate_caps_and_run_tool_dispatches(db_session, seeded_protocol):
     assert unknown_kwarg_out["name"] == PROTO_NAME
 
 
-# ── agent.py + utils.llm.tool_chat ─────────────────────────────────────────
-
-
 def _scripted_iter(events):
-    """Fake openrouter.tool_chat yielding one pre-canned event list per call."""
     state = {"calls": list(events)}
 
     def fake_tool_chat(messages, tools, model=None, **_kw):
@@ -543,8 +498,6 @@ def test_run_agent_stream_tool_call_then_answer(monkeypatch, db_session, seeded_
 
 
 def test_run_agent_stream_unknown_tool_surfaces_error(monkeypatch, db_session, seeded_protocol):
-    """Bad tool call → error result, then synthesis. The loop should
-    still terminate cleanly without raising."""
     _patch_session_local(monkeypatch, db_session)
     monkeypatch.setattr(
         llm_mod.openrouter,
@@ -581,9 +534,6 @@ def test_run_agent_stream_init_failure_emits_error(monkeypatch, db_session, seed
     assert events and events[0]["event"] == "error"
 
 
-# ── utils/llm.py: tool_chat parsing ────────────────────────────────────────
-
-
 class _FakeResponse:
     def __init__(self, lines: list[str], status_code: int = 200):
         self._lines = [line.encode("utf-8") for line in lines]
@@ -597,8 +547,6 @@ class _FakeResponse:
 
 
 def test_tool_chat_parses_tokens_reasoning_and_tool_calls(monkeypatch):
-    """Drive the SSE parser on a realistic OpenRouter trace: reasoning chunk, text tokens, a
-    tool-call delta split across chunks, and a finish_reason."""
     monkeypatch.setenv("OPEN_ROUTER_KEY", "test-key")
     chunks = [
         json.dumps({"choices": [{"delta": {"reasoning": "let me think"}}]}),
@@ -641,8 +589,6 @@ def test_tool_chat_parses_tokens_reasoning_and_tool_calls(monkeypatch):
 
 
 def test_tool_chat_handles_malformed_args_and_unknown_chunks(monkeypatch):
-    """Malformed JSON in `arguments` falls through to ``_raw`` instead of
-    raising; non-JSON SSE lines are silently ignored."""
     monkeypatch.setenv("OPEN_ROUTER_KEY", "k")
     bad_call = {
         "choices": [
@@ -677,25 +623,14 @@ def test_tool_chat_handles_malformed_args_and_unknown_chunks(monkeypatch):
 
 def test_get_api_key_raises_without_env(monkeypatch):
     monkeypatch.delenv("OPEN_ROUTER_KEY", raising=False)
-    # _get_api_key calls load_dotenv from the project's .env which may
-    # populate the var. Patch load_dotenv to a no-op so the test sees a
-    # truly empty env.
+    # load_dotenv could repopulate the var from .env.
     monkeypatch.setattr(llm_mod, "load_dotenv", lambda *_a, **_kw: None)
     with pytest.raises(RuntimeError, match="not set"):
         llm_mod.openrouter._get_api_key()
 
 
-# ---------------------------------------------------------------------------
-# search_source must not report an unreadable corpus as an absent pattern
-# ---------------------------------------------------------------------------
-
-
 def test_search_source_reports_unreadable_bodies_instead_of_zero_matches(db_session, seeded_protocol):
-    """Pre-fix, ``_source_row_content`` swallowed every storage failure into
-    ``""`` and the tool answered ``total_matches: 0`` — indistinguishable from
-    "the pattern does not occur". In the working database that was the answer
-    for all 167 contracts while 2,261/2,261 source bodies were unreachable.
-    """
+    """Every storage failure used to read as ``total_matches: 0``, indistinguishable from a real miss."""
     from sqlalchemy import select
 
     from db.models import SourceFile
@@ -716,8 +651,7 @@ def test_search_source_reports_unreadable_bodies_instead_of_zero_matches(db_sess
 
 
 def test_search_source_zero_matches_stays_clean_when_bodies_are_readable(db_session, seeded_protocol):
-    """NEGATIVE CONTROL for the same change: a genuine miss over readable
-    source must not acquire an error field."""
+    """Negative control: a genuine miss over readable source has no error field."""
     ctx = _ctx()
     res = chat_tools._search_source(db_session, ctx, pattern="zzz_no_such_token")
 
@@ -728,9 +662,6 @@ def test_search_source_zero_matches_stays_clean_when_bodies_are_readable(db_sess
 
 
 def test_get_contract_source_distinguishes_unreadable_from_unavailable(db_session, seeded_protocol, monkeypatch):
-    """Same conflation on the sibling tool: "no verified source available for
-    0x…" stated a fact about the contract when the truth was a storage read
-    failure."""
     from sqlalchemy import select
 
     from db.models import SourceFile
@@ -747,11 +678,7 @@ def test_get_contract_source_distinguishes_unreadable_from_unavailable(db_sessio
 
 
 def test_get_contract_source_marks_a_partial_read_as_incomplete(db_session, seeded_protocol, monkeypatch):
-    """The dead-end branch above was not the whole defect. On a *partial* read —
-    some bodies readable, some not — the unreadable count was discarded and the
-    response was ``{files, requested, source}``, publishing 1 of 2 indexed files
-    to the model as the contract's complete verified source.
-    """
+    """A partial read used to publish 1 of 2 files as the complete verified source."""
     from sqlalchemy import select
 
     from db.models import SourceFile
@@ -778,7 +705,6 @@ def test_get_contract_source_marks_a_partial_read_as_incomplete(db_session, seed
 
 
 def test_get_contract_source_fully_readable_carries_no_shortfall(db_session, seeded_protocol, monkeypatch):
-    """NEGATIVE CONTROL: nothing unreadable, no shortfall keys, no hedge."""
     monkeypatch.setattr(chat_tools, "_etherscan_sources", lambda *a, **kw: {})
 
     res = chat_tools._get_contract_source(db_session, _ctx(), address=PLAIN_ADDR)
@@ -790,12 +716,7 @@ def test_get_contract_source_fully_readable_carries_no_shortfall(db_session, see
 
 
 def test_classify_address_scopes_the_control_graph_by_chain(db_session, seeded_protocol):
-    """``control_graph_nodes`` has no chain column, so the chain predicate has to
-    ride the ``contract_id`` join.
-
-    Three real cross-chain twins already exist in ``contracts``; the aliasing is
-    unrealised only because no analysis job has ever run on a second chain.
-    """
+    """``control_graph_nodes`` has no chain column, so the chain predicate rides the ``contract_id`` join."""
     from sqlalchemy import select
 
     twin = _addr("77")
@@ -810,7 +731,6 @@ def test_classify_address_scopes_the_control_graph_by_chain(db_session, seeded_p
     )
     db_session.add(scroll_subject)
     db_session.flush()
-    # The SAME address typed differently on the two chains — the aliasing shape.
     db_session.add(
         ControlGraphNode(
             contract_id=scroll_subject.id,
@@ -837,19 +757,15 @@ def test_classify_address_scopes_the_control_graph_by_chain(db_session, seeded_p
 
     assert chat_data.classify_address(db_session, twin, "scroll")["kind"] == "eoa"
     assert chat_data.classify_address(db_session, twin, "ethereum")["kind"] == "safe"
-    # POSITIVE CONTROL for the alias fold: a row stored under one spelling must be
-    # reachable by the other, or the predicate turns a hint into a false miss.
+    # The alias fold must make both spellings reach the same row.
     assert chat_data.classify_address(db_session, twin, "mainnet")["kind"] == "safe"
-    # No chain supplied → address-only, deterministic, and never invented as
-    # mainnet: the answer is one of the two, the same one every call.
+    # No chain means address-only and deterministic, never assumed mainnet.
     unscoped = {chat_data.classify_address(db_session, twin)["kind"] for _ in range(5)}
     assert len(unscoped) == 1
 
 
 def test_classify_address_prefers_a_classified_row_deterministically(db_session, seeded_protocol):
-    """An unordered ``LIMIT 1`` is a query-plan coin flip: 2 local addresses
-    disagree between ``contract`` (a non-terminal way-point) and ``timelock`` (a
-    settled key with a delay) across their control-graph rows."""
+    """An unordered ``LIMIT 1`` flips between ``contract`` and ``timelock`` rows."""
     from sqlalchemy import select
 
     addr = _addr("79")
@@ -876,9 +792,7 @@ def test_classify_address_prefers_a_classified_row_deterministically(db_session,
 
 
 def test_last_upgrade_reports_the_newest_not_the_newest_with_a_block(db_session, seeded_protocol):
-    """Under ``block_number DESC NULLS LAST`` a poll-detected upgrade (block
-    NULL by design) sorted LAST and was reported as the OLDEST, so
-    ``last_upgrade`` named a stale block-carrying event."""
+    """``NULLS LAST`` sorted a poll-detected upgrade (NULL block) as the oldest."""
     from datetime import datetime, timezone
 
     from sqlalchemy import select
@@ -899,39 +813,27 @@ def test_last_upgrade_reports_the_newest_not_the_newest_with_a_block(db_session,
 
     brief = chat_data.contract_brief(db_session, PROXY_ADDR, "ethereum")
     assert brief["last_upgrade"]["new_impl"] == newest_impl
-    # An LLM reads this result: "block": null must not be left to interpretation.
     assert brief["last_upgrade"]["detection"] == "poll_detected"
     assert brief["last_upgrade"]["block"] is None
 
 
 def test_role_holders_reads_roles_from_grants_not_from_origin(db_session, seeded_protocol):
-    """``function_principals.origin`` is a resolver-source constant, not a role
-    name.
-
-    Measured before the fix on the real local corpus: ``role_holders`` published
-    exactly ONE "role", named ``semantic_capability:finite_set`` after the
-    resolver, with 136 "holders", and every real role name returned
-    ``{"holders": []}`` — an empty answer that reads as "nobody holds this role".
-    After: 8 real roles, 170 functions with witnessed grants, 315 whose role
-    structure was not determined.
+    """``function_principals.origin`` is a resolver constant, not a role name; it used to be published as the only
+    role.
     """
     summary = chat_data.role_holders(db_session, company=PROTO_NAME)
 
-    # The resolver source must never appear as a role.
     assert all(str(r["role"]) != "semantic_capability:finite_set" for r in summary["roles"])
-    # ...and the addresses it really describes are still published, labelled.
     caller_addrs = {c["address"].lower() for c in summary["authorized_callers"]["callers"]}
     assert {EOA_ADDR.lower(), SAFE_ADDR.lower()} <= caller_addrs
     assert "NOT role holders" in summary["authorized_callers"]["note"]
 
-    # POSITIVE CONTROL: a grant that names its members is witnessed, classified.
     pauser = next(r for r in summary["roles"] if str(r["role"]) == "PROTOCOL_PAUSER")
     assert pauser["holder_count"] == 2
     assert {h["kind"] for h in pauser["holders"]} == {"eoa", "safe"}
     assert pauser["holders_state"] == "witnessed"
 
-    # A grant naming a role with NO members is the third state: the role gates the
-    # function, who holds it was not determined. Not an empty holder set.
+    # The third state: the role gates the function, and who holds it was not determined.
     role7 = next(r for r in summary["roles"] if str(r["role"]) == "7")
     assert role7["holder_count"] == 0
     assert role7["holders_state"] == "not_determined"
@@ -943,17 +845,15 @@ def test_role_holders_reads_roles_from_grants_not_from_origin(db_session, seeded
 
 
 def test_role_holders_named_lookup_distinguishes_absent_from_empty(db_session, seeded_protocol):
-    """An empty holder list is the answer to two different questions and the LLM
-    reading this result cannot be expected to guess which."""
+    """An empty holder list answers two different questions."""
     witnessed = chat_data.role_holders(db_session, company=PROTO_NAME, role_name="PROTOCOL_PAUSER")
     assert witnessed["state"] == "witnessed"
     assert {h["kind"] for h in witnessed["holders"]} == {"eoa", "safe"}
 
-    # Same bucket via the numeric/"role N" spellings an LLM is likely to produce.
     assert chat_data.role_holders(db_session, company=PROTO_NAME, role_name="7")["state"] == "not_determined"
     assert chat_data.role_holders(db_session, company=PROTO_NAME, role_name="role 7")["state"] == "not_determined"
 
-    # No grant names this role anywhere: NOT "the role has no holders".
+    # No grant names this role: not "the role has no holders".
     missing = chat_data.role_holders(db_session, company=PROTO_NAME, role_name="NO_SUCH_ROLE")
     assert missing["state"] == "not_witnessed"
     assert missing["holders"] == []

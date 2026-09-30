@@ -22,17 +22,13 @@ BASE_CHAIN = "base"
 BASE_CHAIN_ID = 8453
 ETHEREUM_CHAIN = "ethereum"
 
-# etherfi's canonical weETH deployment on Base. Stable (address, chain) identity —
-# MonitoredContract rows leak across runs (no admin DELETE; the (address, chain)
-# unique key makes the upsert idempotent), so this must never be randomized.
+# MonitoredContract rows leak across runs, so the (address, chain) identity must stay stable.
 WEETH_BASE_ADDRESS = "0x04C0599Ae5A44757c0af6F9eC3b93da8976c150A"
 
 _BASE_CONFIG = {"watch_upgrades": True, "watch_ownership": True}
 
 
 def _declared_supported_chain_ids() -> set[int] | None:
-    """Runner-side mirror of ``PSAT_SUPPORTED_CHAIN_IDS``; None when unset/blank so the caller can probe the server.
-    Non-integers are ignored, like ``utils/chains.supported_chain_ids``."""
     raw = os.environ.get("PSAT_LIVE_SUPPORTED_CHAIN_IDS")
     if raw is None or not raw.strip():
         return None
@@ -45,8 +41,7 @@ def _declared_supported_chain_ids() -> set[int] | None:
 
 
 def _base_present_in_health_chains(live_client: LiveClient) -> bool:
-    """Positive-only probe for Base in ``/api/health/monitoring`` chains; 503 is a valid body (an unrelated daemon may
-    be stale)."""
+    """503 is a valid body when an unrelated daemon is stale."""
     try:
         r = live_client._session.get(live_client._url("/api/health/monitoring"), timeout=15)
     except Exception:
@@ -59,10 +54,7 @@ def _base_present_in_health_chains(live_client: LiveClient) -> bool:
 
 @pytest.fixture(scope="module", autouse=True)
 def _require_base_enabled(live_client: LiveClient):
-    """Skip the module unless the deployment supports Base.
-
-    Autouse, module-scoped, depends only on ``live_client`` so it fires before the expensive company fixtures.
-    """
+    """Depends only on ``live_client`` so it fires before the expensive company fixtures."""
     declared = _declared_supported_chain_ids()
     if declared is not None:
         if BASE_CHAIN_ID not in declared:
@@ -84,8 +76,6 @@ def base_monitored_contract(
     company_protocol_id: int,
     live_client: LiveClient,
 ) -> dict[str, Any]:
-    """Upsert a Base ``MonitoredContract`` for weETH; the (address, chain) unique key makes re-runs idempotent (no admin
-    DELETE)."""
     payload = {
         "address": WEETH_BASE_ADDRESS.lower(),
         "chain": BASE_CHAIN,
@@ -97,7 +87,6 @@ def base_monitored_contract(
     try:
         return live_client.upsert_protocol_monitoring(company_protocol_id, payload)
     except requests.HTTPError as exc:
-        # Defense in depth: a mainnet-only deployment rejects Base enrollment with 400; skip, never fail.
         resp = exc.response
         if resp is not None and resp.status_code == 400:
             pytest.skip(f"deployment rejected Base enrollment (allowlist): {resp.text[:200]}")
@@ -110,11 +99,7 @@ def test_base_monitored_contract_chain_roundtrips(base_monitored_contract):
     assert base_monitored_contract["chain"] == BASE_CHAIN
     assert base_monitored_contract["address"] == WEETH_BASE_ADDRESS.lower()
     assert base_monitored_contract["is_active"] is True
-    # Subset, not equality: the route stamps ``tracking_plan_not_determined``
-    # into every caller-supplied config so the row cannot read as "the analysis
-    # looked and found nothing to track" (routers/monitored._stamp_caller_supplied).
-    # The caller's own keys still round-trip untouched, which is what this
-    # assertion is for.
+    # The route stamps ``tracking_plan_not_determined`` into caller configs, so compare the caller's keys as a subset.
     stored = base_monitored_contract["monitoring_config"]
     assert {k: stored.get(k) for k in _BASE_CONFIG} == _BASE_CONFIG
     assert stored["tracking_plan_not_determined"] == "config_supplied_by_caller"
@@ -124,15 +109,12 @@ def test_base_monitored_contract_listed_by_chain(
     base_monitored_contract,
     live_client: LiveClient,
 ):
-    # Read-back via the chain-filtered listing guards against a POST that echoes
-    # 'base' without committing it under that chain.
+    # Guards against a POST that echoes 'base' without committing it.
     base_rows = live_client.list_monitored_contracts(chain=BASE_CHAIN)
     persisted = next((r for r in base_rows if r.get("id") == base_monitored_contract["id"]), None)
     assert persisted is not None, "base-enrolled contract missing from chain='base' listing"
     assert persisted["chain"] == BASE_CHAIN
 
-    # The same row must NOT surface under the ethereum-filtered listing — chain is
-    # a real filter dimension, not cosmetic.
     eth_rows = live_client.list_monitored_contracts(chain=ETHEREUM_CHAIN)
     assert base_monitored_contract["id"] not in {r.get("id") for r in eth_rows}
 
@@ -142,8 +124,6 @@ def test_same_address_distinct_across_chains(
     company_protocol_id: int,
     live_client: LiveClient,
 ):
-    """The SAME address on 'ethereum' vs 'base' is two rows (``(address, chain)`` unique key); the ethereum row is a
-    deliberate collision probe."""
     eth_payload = {
         "address": WEETH_BASE_ADDRESS.lower(),
         "chain": ETHEREUM_CHAIN,
@@ -159,7 +139,6 @@ def test_same_address_distinct_across_chains(
     )
     assert eth_row["chain"] == ETHEREUM_CHAIN
     assert base_monitored_contract["chain"] == BASE_CHAIN
-    # Same address string, different chain — the address matches, the identity does not.
     assert eth_row["address"] == base_monitored_contract["address"]
 
 
@@ -184,7 +163,6 @@ def test_fleet_exposes_base_by_chain(
     assert base_entry is not None, f"base absent from fleet watchers.by_chain: {by_chain}"
     assert base_entry.get("monitored_contracts", 0) >= 1
 
-    # Indexer rollup: present and list-shaped, tolerant of an idle (cursor-less) Base.
     indexer = next(
         (d for d in body.get("daemons", []) if isinstance(d.get("work"), dict) and "by_chain" in d["work"]),
         None,

@@ -1,7 +1,3 @@
-"""Protocol-subscription event_filter validation and monitored-contract PATCH / re-enroll routes.
-
-No live services: PostgreSQL for the DB, enrollment call patched.
-"""
 
 from __future__ import annotations
 
@@ -14,11 +10,6 @@ import pytest
 from tests.conftest import requires_postgres
 
 pytestmark = requires_postgres
-
-
-# ---------------------------------------------------------------------------
-# Protocol subscription event_filter validation
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -89,11 +80,6 @@ def test_subscribe_rejects_bad_event_filter(api_client, db_session, name, event_
     assert resp.status_code == 422
 
 
-# ---------------------------------------------------------------------------
-# PATCH /api/monitored-contracts/{id}
-# ---------------------------------------------------------------------------
-
-
 def _create_monitored_contract(session, address="0x" + "a1" * 20, protocol_id=None):
     from db.models import MonitoredContract
 
@@ -125,10 +111,8 @@ def test_patch_monitoring_config(api_client, db_session):
     )
     assert resp.status_code == 200
     body = resp.json()
-    # The caller's keys round-trip; the route additionally stamps
-    # ``tracking_plan_not_determined`` so a caller-authored config cannot read as
-    # a tracking plan the analysis produced (routers/monitored, and
-    # tests/monitoring/test_monitoring_config_caller_provenance.py for that rule itself).
+    # The route stamps ``tracking_plan_not_determined`` so a caller-authored config never reads as an analysis-produced
+    # plan.
     assert {k: body["monitoring_config"].get(k) for k in new_config} == new_config
     assert body["monitoring_config"]["tracking_plan_not_determined"] == "config_supplied_by_caller"
     assert body["is_active"] is True  # unchanged
@@ -155,11 +139,6 @@ def test_patch_404_for_missing_contract(api_client):
         json={"is_active": False},
     )
     assert resp.status_code == 404
-
-
-# ---------------------------------------------------------------------------
-# POST /api/protocols/{id}/re-enroll
-# ---------------------------------------------------------------------------
 
 
 def test_re_enroll_404_for_missing_protocol(api_client):

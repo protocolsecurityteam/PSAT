@@ -1,17 +1,7 @@
-"""Chain-threading regression tests for proxy→implementation resolution
-(``resolve_implementation_contracts`` + its consumers).
+"""Proxy -> implementation resolution must key by the composite entity token, not a bare address.
 
-PR #157 made the ``/functions`` output keys chain-composite, but the internal proxy→impl linkage
-(``impl_job_by_entity``, the secondary-impl suppression set, the overview dedup) still ran on
-chainless bare addresses. With one address on ≥2 chains where one side is an implementation:
-
-  * **Mode 1 (cross-attach)**: an impl behind a proxy on two chains — one chain's impl job wins
-    the bare map, so the other chain's proxy gets the winner's function verdicts.
-  * **Mode 2 (drop-entry)**: a standalone contract on chain B sharing an address with a chain-A
-    proxy's secondary impl is swallowed by the chainless suppression set.
-
-Each test fails against the pre-fix code (verified by forcing iteration order so the wrong chain
-wins the bare pick) and passes once resolution keys by the composite entity token.
+Mode 1 (cross-attach): an impl behind a proxy on two chains gave one chain's verdicts to both proxies.
+Mode 2 (drop-entry): a chain-B standalone sharing an address with a chain-A secondary impl was swallowed.
 """
 
 from __future__ import annotations
@@ -38,20 +28,12 @@ pytestmark = requires_postgres
 
 
 def _newer(job, when=datetime(2030, 1, 1, tzinfo=timezone.utc)):
-    """Force a job to be the newest candidate so the bare-address pick (ORDER BY
-    updated_at DESC) selects it — the deterministic wrong-chain winner."""
+    """Force the deterministic wrong-chain winner of the bare-address pick (ORDER BY updated_at DESC)."""
     job.updated_at = when
     job.created_at = when
 
 
 def test_mode1_cross_attach_functions(db_session):
-    """Mode 1 via ``build_functions_for_protocol``: impl ``0xI`` sits behind a proxy on BOTH
-    ethereum and base (CREATE2 impl twin) with different functions; each proxy's entry must
-    carry ITS OWN chain's verdicts.
-
-    Pre-fix: the base impl job (forced newest) wins the bare ``impl_job_by_addr``, so the
-    ethereum proxy carries base's function and fails the ``ethOnly`` assertion.
-    """
     s = db_session
     p = _add_protocol(s, f"m1fn-{uuid.uuid4().hex[:8]}")
     proxy_eth = _addr("pxeth")
@@ -71,8 +53,7 @@ def test_mode1_cross_attach_functions(db_session):
     )
     eth_impl_c = _add_contract(s, address=impl, job=eth_impl_job, protocol_id=p.id, chain="ethereum")
 
-    # Base proxy → impl 0xI, impl analysed as a proxy-child on base. Forced newest
-    # so the bare-address pick selects it for BOTH proxies.
+    # Forced newest so the bare-address pick selects it for both proxies.
     proxy_base_job = _add_job(
         s, address=proxy_base, protocol_id=p.id, is_proxy=True, request={"address": proxy_base, "chain": "base"}
     )
@@ -106,11 +87,6 @@ def test_mode1_cross_attach_functions(db_session):
 
 
 def test_mode2_drop_entry_functions(db_session):
-    """Mode 2 via ``build_functions_for_protocol``: an ethereum proxy has SECONDARY impl ``0xI``
-    while base has an unrelated standalone at ``0xI``; the payload must contain BOTH entries.
-
-    Pre-fix: ``secondary_impl_addrs`` holds bare ``0xI``, so ``base::0xI`` never appears.
-    """
     s = db_session
     p = _add_protocol(s, f"m2fn-{uuid.uuid4().hex[:8]}")
     proxy_eth = _addr("pxeth")
@@ -130,13 +106,11 @@ def test_mode2_drop_entry_functions(db_session):
     )
     core_c = _add_contract(s, address=core, job=core_job, protocol_id=p.id, chain="ethereum")
 
-    # Ethereum secondary impl — modelled as a standalone job (old shape), so the
-    # aggregation dedupes it into the proxy by (chain, address).
+    # Modelled as a standalone job (the old shape), which the aggregation dedupes into the proxy.
     admin_job = _add_job(s, address=shared, protocol_id=p.id, name="AdminImpl")
     admin_c = _add_contract(s, address=shared, job=admin_job, protocol_id=p.id, chain="ethereum")
 
-    # Base standalone at the same address — unrelated, forced newest so the bare
-    # pick would fold IT into the proxy while dropping its own entry.
+    # Forced newest so a bare pick would fold it into the proxy and drop its own entry.
     base_job = _add_job(
         s, address=shared, protocol_id=p.id, name="BaseStandalone", request={"address": shared, "chain": "base"}
     )
@@ -161,12 +135,6 @@ def test_mode2_drop_entry_functions(db_session):
 
 
 def test_mode1_cross_attach_overview(db_session):
-    """Mode 1 via ``build_company_overview``: the twin-impl shape asserted on the overview
-    entries' ``value_effects`` (read from the resolved impl contract).
-
-    Pre-fix: the ethereum proxy resolves to base's impl and surfaces base's ``mint`` instead of
-    ethereum's ``asset_pull``.
-    """
     s = db_session
     p = _add_protocol(s, f"m1ov-{uuid.uuid4().hex[:8]}")
     proxy_eth = _addr("pxeth")
@@ -216,11 +184,6 @@ def test_mode1_cross_attach_overview(db_session):
 
 
 def test_mode2_drop_entry_overview(db_session):
-    """Mode 2 via ``build_company_overview``: the base standalone sharing an address with an
-    ethereum proxy's secondary impl must still render as its own entry (different chain).
-
-    Pre-fix: the overview dedup's bare ``impl_addresses`` set dropped it.
-    """
     s = db_session
     p = _add_protocol(s, f"m2ov-{uuid.uuid4().hex[:8]}")
     proxy_eth = _addr("pxeth")
@@ -264,23 +227,19 @@ def test_mode2_drop_entry_overview(db_session):
 
 
 def test_nullchain_linkage_preserved(db_session):
-    """Legacy NULL-chain linkage: a NULL-chain impl row must still fold into an
-    ethereum proxy's entry (the coalesce makes NULL ≡ ethereum ≡ mainnet, so
-    both resolve to the same composite token)."""
+    """NULL chain coalesces to ethereum, so both rows resolve to the same composite token."""
     s = db_session
     p = _add_protocol(s, f"nullchain-{uuid.uuid4().hex[:8]}")
     proxy_addr = _addr("px")
     impl = _addr("impl")
 
     proxy_job = _add_job(s, address=proxy_addr, protocol_id=p.id, is_proxy=True)
-    # Proxy contract carries NO chain (legacy row) — coalesces to ethereum.
     _add_contract(
         s, address=proxy_addr, job=proxy_job, protocol_id=p.id, chain=None, is_proxy=True, implementation=impl
     )
     impl_job = _add_job(
         s, address=impl, protocol_id=p.id, name="LegacyImpl", request={"address": impl, "proxy_address": proxy_addr}
     )
-    # Impl contract also NULL-chain (legacy).
     impl_c = _add_contract(s, address=impl, job=impl_job, protocol_id=p.id, chain=None)
     _ef(s, impl_c, "legacyFn", effect_labels=["pause_toggle"])
     s.commit()
@@ -292,8 +251,6 @@ def test_nullchain_linkage_preserved(db_session):
 
 
 def _fp_safe(session, ef, safe_addr):
-    """Attach a Safe FunctionPrincipal (call authority) to an EffectiveFunction so
-    the Safe surfaces as a governing principal (mirrors the real ACL shape)."""
     session.add(
         FunctionPrincipal(
             function_id=ef.id,
@@ -307,13 +264,7 @@ def _fp_safe(session, ef, safe_addr):
 
 
 def test_f1_controller_attribution_no_cross_chain_fold(db_session):
-    """F1: an ethereum proxy with impl ``0xI`` and an UNRELATED base standalone at ``0xI`` (each
-    gated by a different Safe). The base standalone's principal must NOT fold under the
-    ethereum proxy: controller attribution (``impl_to_proxy`` / ``contract_addr_by_cid``) must
-    resolve the impl on the PROXY's own chain.
-
-    Pre-fix (bare ``impl_to_proxy``): the base Safe appeared among the ethereum proxy's controllers.
-    """
+    """Controller attribution must resolve the impl on the proxy's own chain."""
     s = db_session
     p = _add_protocol(s, f"f1-{uuid.uuid4().hex[:8]}")
     proxy_eth = _addr("pxeth")
@@ -357,12 +308,6 @@ def test_f1_controller_attribution_no_cross_chain_fold(db_session):
 
 
 def test_f3_implementation_name_chain_scoped(db_session):
-    """F3: a proxy on each of ethereum + base points at impl ``0xI`` whose contract rows carry
-    DIFFERENT names per chain; each proxy's ``implementation_name`` in /addresses must be its own
-    chain's.
-
-    Pre-fix (bare ``impl_name_by_addr``): last-wins, so one proxy showed the wrong name.
-    """
     s = db_session
     p = _add_protocol(s, f"f3-{uuid.uuid4().hex[:8]}")
     proxy_eth = _addr("pxeth")

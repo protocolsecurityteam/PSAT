@@ -1,11 +1,7 @@
-"""Cross-protocol admission (candidacy for A must not block membership in B).
+"""Candidacy for A must not block membership in B.
 
-The nomination slot is first-wins recall provenance; admission is evidence-keyed: the fixpoint may evaluate a
-candidate for protocol P whenever P's own stored facts admit it, regardless of who claimed the slot. Promotion
-to P aligns ``nominated_protocol_id`` to P (proof supersedes provenance); the first nominator's tag stays in
-``discovery_sources``. Determinism: the nominated slot's protocol is attempted first, then other
-evidence-bearing protocols by ascending id; the first valid admission wins and a contract holds ONE
-``protocol_id``.
+The nomination slot is first-wins provenance; admission is evidence-keyed. The nominated slot's protocol is
+tried first, then others by ascending id, and a contract holds one ``protocol_id``.
 """
 
 from __future__ import annotations
@@ -83,11 +79,6 @@ def _active_witness_protocols(session, contract: Contract) -> set[int]:
     }
 
 
-# ---------------------------------------------------------------------------
-# The fixed shape: A-nominated candidate + B's genuine W2 edge → B member
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "candidate_n,member_n,source_tag,edge_field,deployer_n",
     [(0xC1, 0xC2, "inventory", "implementation", None), (0xC5, 0xC6, "registry_probe", "beacon", 0xD5)],
@@ -96,11 +87,7 @@ def _active_witness_protocols(session, contract: Contract) -> set[int]:
 def test_a_nominated_candidate_admits_to_b_on_b_edge(
     db_session, candidate_n, member_n, source_tag, edge_field, deployer_n
 ):
-    """A candidate slot-claimed by protocol A — inventory- or deployer-keyed —
-    earns B-membership when B's member's stored structural pointer names it
-    (genuine W2 for B). The slot aligns to B on promotion; A's nomination stays
-    visible as provenance; and no A-witness is minted from B's facts (a
-    wrong-protocol derivation is impossible)."""
+    """The slot aligns to B on promotion and A's nomination stays as provenance."""
     protocol_a = _protocol(db_session, "slot-a")
     protocol_b = _protocol(db_session, "evidence-b")
     fields = {"deployer": _addr(deployer_n)} if deployer_n is not None else {}
@@ -126,15 +113,8 @@ def test_a_nominated_candidate_admits_to_b_on_b_edge(
     assert a_rows == []
 
 
-# ---------------------------------------------------------------------------
-# No new overreach
-# ---------------------------------------------------------------------------
-
-
 def test_candidate_own_pointer_to_foreign_member_does_not_cross(db_session):
-    """Deliberate narrowing: a candidate proxy whose OWN impl pointer resolves
-    to B's member (the shared-singleton shape) is NOT vacuumed into B — the
-    W2 proxy / W3-D1 shapes admit only for the nominated protocol."""
+    """Deliberate narrowing: the shared-singleton shape is not vacuumed into B."""
     protocol_a = _protocol(db_session, "own-ptr-a")
     protocol_b = _protocol(db_session, "own-ptr-b")
     b_impl = _member(db_session, protocol_b, _addr(0xF1))
@@ -152,9 +132,7 @@ def test_candidate_own_pointer_to_foreign_member_does_not_cross(db_session):
 
 
 def test_dual_evidence_resolves_deterministically_nominated_slot_first(db_session):
-    """Evidence for BOTH A and B: the nominated slot's protocol is attempted
-    first and wins; the loser's evidence mints no membership (one protocol_id
-    per contract) and the settled state is independent of fact arrival order."""
+    """The settled state is independent of fact arrival order."""
     for arrival in ("a_first", "b_first"):
         protocol_a = _protocol(db_session, f"dual-a-{arrival}")
         protocol_b = _protocol(db_session, f"dual-b-{arrival}")
@@ -175,14 +153,11 @@ def test_dual_evidence_resolves_deterministically_nominated_slot_first(db_sessio
         db_session.commit()
         db_session.refresh(candidate)
 
-        # Nominated-slot-first: A wins in BOTH arrival orders.
         assert candidate.protocol_id == protocol_a.id, arrival
         assert candidate.nominated_protocol_id == protocol_a.id, arrival
 
 
 def test_existing_member_never_flipped_by_foreign_evidence(db_session):
-    """promote()'s existing-membership guard: a proven A-member named by B's
-    member edge stays an A-member."""
     protocol_a = _protocol(db_session, "keep-a")
     protocol_b = _protocol(db_session, "flip-b")
     a_member = _member(db_session, protocol_a, _addr(0xE0))
@@ -198,8 +173,6 @@ def test_existing_member_never_flipped_by_foreign_evidence(db_session):
 
 
 def test_demotion_restore_coherent_after_cross_protocol_promotion(db_session):
-    """After an A-slotted candidate promotes to B, a demotion restores the
-    ALIGNED slot (B), never the stale foreign one."""
     protocol_a = _protocol(db_session, "demote-a")
     protocol_b = _protocol(db_session, "demote-b")
     candidate = _contract(db_session, _addr(0xE4))
@@ -221,10 +194,7 @@ def test_demotion_restore_coherent_after_cross_protocol_promotion(db_session):
 
 
 def test_w5_assertion_for_b_on_a_slotted_candidate_admits_via_fixpoint(db_session):
-    """The W5 admin path on an A-slotted candidate: nominate() records the
-    W5-for-B witness (slot stays A, first-wins) and the fixpoint's
-    evidence-keyed admission binds W1 from the persisted code probe and
-    promotes to B."""
+    """nominate() records W5-for-B while the slot stays A; the fixpoint then promotes to B."""
     protocol_a = _protocol(db_session, "w5-a")
     protocol_b = _protocol(db_session, "w5-b")
     candidate = _contract(db_session, _addr(0xE8))

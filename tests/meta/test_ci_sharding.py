@@ -1,4 +1,3 @@
-"""Exercise the pytest handoff and reject incomplete coverage before combining."""
 
 from __future__ import annotations
 

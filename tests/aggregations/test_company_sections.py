@@ -1,4 +1,3 @@
-"""Section invalidation, multi-consumer claims, and public/operator read parity."""
 
 import gzip
 import json

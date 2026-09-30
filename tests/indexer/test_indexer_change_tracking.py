@@ -1,4 +1,3 @@
-"""Real PostgreSQL contracts for durable indexer scheduling (no external I/O)."""
 
 from datetime import timedelta
 from unittest.mock import Mock
@@ -224,7 +223,6 @@ def test_unchanged_enrollment_reads_no_artifact_and_poison_does_not_block_siblin
     read_mock.reset_mock()
     scheduler.drain_enrollment(session)
     read_mock.assert_not_called()
-    # Repair only the failed source; a new write allows it to run immediately.
     read_mock.side_effect = None
     read_mock.return_value = {}
     mark_dirty(session, "job", str(first.id))
@@ -382,7 +380,6 @@ def test_reorg_removal_below_fold_frontier_requeues_once_after_warming(session):
     session.expire_all()
     assert session.get(Job, row.id).status == JobStatus.queued
     assert work(session, "refresh_job", row.id) is None
-    # A later successful analysis is not forced again by a stuck chain marker.
     row = session.get(Job, row.id)
     row.status = JobStatus.completed
     row.stage = JobStage.done

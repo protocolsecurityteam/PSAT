@@ -1,8 +1,3 @@
-"""Integration tests for ``POST /api/jobs/{id}/retry``.
-
-Hits the FastAPI app with the test DB wired through ``api_client`` so
-admin-key, status checks, and the artifact append are exercised end to end.
-"""
 
 from __future__ import annotations
 
@@ -30,11 +25,6 @@ def _read_stage_errors(session, job_id):
     if art is None or art.data is None:
         return None
     return art.data
-
-
-# ---------------------------------------------------------------------------
-# Happy path: failed_terminal → queued
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -68,14 +58,8 @@ def test_retry_endpoint_resets_failed_terminal_to_queued(api_client, clean_jobs)
     assert "perator-initiated" in last["message"]  # case-insensitive match
 
 
-# ---------------------------------------------------------------------------
-# 409 for the wrong status
-# ---------------------------------------------------------------------------
-
-
-# done: a real outcome must not be clobbered. queued: already eligible, so a retry would only reset
-# retry_count and mask earlier failures. processing: in flight, clobbering could double-execute work.
-# legacy failed: pre-migration rows must be promoted to failed_terminal first, not retried blindly.
+# done: a real outcome must not be clobbered. queued: a retry would only reset retry_count and mask
+# failures. processing: clobbering could double-execute. legacy failed: must be promoted first.
 @requires_postgres
 @pytest.mark.parametrize(
     ("status", "detail_fragment"),
@@ -99,11 +83,6 @@ def test_retry_endpoint_rejects_non_retryable_status(api_client, clean_jobs, sta
         assert detail_fragment in response.json()["detail"]
 
 
-# ---------------------------------------------------------------------------
-# 404 for missing / malformed
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 @pytest.mark.parametrize(
     "job_id",
@@ -117,23 +96,11 @@ def test_retry_endpoint_returns_404(api_client, clean_jobs, job_id):
     assert response.status_code == 404
 
 
-# ---------------------------------------------------------------------------
-# Concurrency: two operators hitting /retry simultaneously
-# ---------------------------------------------------------------------------
-# ``routers/jobs.py:retry_job`` must serialize concurrent admin retries via ``SELECT … FOR UPDATE``.
-# Without the lock, two near-simultaneous POSTs both see ``failed_terminal`` and the second
-# ``store_artifact`` upsert clobbers the first's manual_retry entry, losing audit history. With
-# it, the second caller blocks, then sees ``queued`` and returns 409.
-
-
 @requires_postgres
 def test_retry_endpoint_concurrent_operators_serialize_via_row_lock(clean_jobs, monkeypatch):
-    """Two concurrent /retry calls: exactly one returns 200, the other 409, and the audit log
-    gets exactly one manual_retry entry.
+    """Without FOR UPDATE both see ``failed_terminal`` and the second upsert clobbers the first's audit entry.
 
-    Bypasses the shared-session ``api_client`` fixture, which serializes at the SQLAlchemy layer
-    and never exercises the DB-level lock; each request gets its own session from a sessionmaker
-    bound to the test DB, as in production.
+    ``api_client`` shares one session, so each request gets its own.
     """
     import os
     import threading
@@ -155,12 +122,7 @@ def test_retry_endpoint_concurrent_operators_serialize_via_row_lock(clean_jobs, 
     test_engine = create_engine(os.environ["TEST_DATABASE_URL"])
     real_factory = sessionmaker(bind=test_engine, class_=Session, expire_on_commit=False)
 
-    # Hand each request its own session and coordinate them at the post-lock
-    # observation point so we can assert both calls reached the SELECT … FOR
-    # UPDATE site — proving the test actually exercised contention rather
-    # than running them serially. The barrier waits on the first ``execute``
-    # of the request: thread A's ``execute`` (the locking SELECT) returns
-    # immediately; thread B's ``execute`` blocks at the DB until A commits.
+    # The barrier proves both calls reached the locking SELECT, so contention really happened.
     started = threading.Barrier(2)
 
     class _CoordinatedFactory:
@@ -198,8 +160,6 @@ def test_retry_endpoint_concurrent_operators_serialize_via_row_lock(clean_jobs, 
 
     statuses = sorted(r.status_code for r in responses)
 
-    # FOR UPDATE serializes the two callers: first one flips to queued and
-    # commits, second one wakes up holding the lock, sees queued, returns 409.
     assert statuses == [200, 409], f"expected serialized [200, 409] — got {statuses}"
 
     body_409 = next(r.json() for r in responses if r.status_code == 409)
@@ -212,7 +172,6 @@ def test_retry_endpoint_concurrent_operators_serialize_via_row_lock(clean_jobs, 
         assert art is not None and isinstance(art.data, dict)
         manual_retries = [e for e in art.data["errors"] if e.get("phase") == "manual_retry"]
 
-    # Exactly one writer ever ran the artifact append, so exactly one entry.
     assert len(manual_retries) == 1, (
         f"lock should have ensured exactly one manual_retry entry — got {len(manual_retries)}"
     )

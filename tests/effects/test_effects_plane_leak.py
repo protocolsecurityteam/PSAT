@@ -1,9 +1,5 @@
-"""Code-plane / state-plane separation, asserted against real rows.
-
-``effect_behavior_cache`` is keyed on code alone, so every row is re-published verbatim to EVERY
-other deployment of that bytecode. The downstream value-reach fields (holder ADDRESSES and a USD
-figure) once leaked into a proven ``value_out`` verdict's ``details`` and came back as another
-deployment's witness. Drives the real worker on real Postgres rows; a mock can't show a value crossing deployments.
+"""``effect_behavior_cache`` is keyed on code alone and republished to every twin, so per-deployment reach must never
+enter it. Drives the real worker on real rows, since a mock can't show a value crossing deployments.
 """
 
 from __future__ import annotations
@@ -37,8 +33,7 @@ from utils.execution_record import PROVING_EXECUTION_KEY
 from utils.logging import degraded_errors_var, stage_metrics_var
 from workers.effects_worker import EffectsWorker, _Seams
 
-# Deployment A observes the reach; deployment B shares its bytecode and must
-# inherit the code-plane verdict WITHOUT inheriting A's holders or USD.
+# B shares A's bytecode and inherits the verdict, not A's holders or USD.
 CONTRACT_A = "0x" + "a1" * 20
 CONTRACT_B = "0x" + "b2" * 20
 HOLDER = "0x" + "aa" * 20
@@ -127,8 +122,7 @@ def _run(worker, session, job) -> dict:
 
 
 def _real_value_out_plan(address: str):
-    """A plan running the REAL value-out recipe against a scripted outflow, so the
-    reach fields come from production code rather than a hand-built dict."""
+    """The reach fields come from production code rather than a hand-built dict."""
 
     def run():
         from services.effects import recipes
@@ -201,20 +195,17 @@ def _flat_values(obj: Any):
         yield obj
 
 
-# Integer keys a CACHEABLE ``details`` payload may carry, with the code-plane justification for each.
-# Any other number is a per-execution measurement that belongs on the deployment's own row: the
-# cache republishes ``details`` verbatim, so a count seen on one becomes a claim about all.
+# Any other number is a per-execution measurement; the cache republishes ``details`` verbatim.
 _CODE_PLANE_INT_KEYS = {
-    # Read out of THIS bytecode's own source/guard constants (calldata.read_max_pause_duration).
+    # Read from this bytecode's own guard constants.
     "duration_bound_seconds",
-    # How many random identities the prober used — a constant of the probe, not of the deployment.
+    # A constant of the probe, not the deployment.
     "identities",
 }
 
 
 def _plane_violations(details: dict[str, Any] | None) -> list[Any]:
-    """Anything per-deployment in a CACHEABLE ``details`` payload: an address, a float (every recipe
-    float is a USD/amount figure), or a bare int outside the allowlist."""
+    """Every recipe float is a USD or amount figure."""
     bad: list[Any] = []
 
     def walk(node: Any, key: str | None) -> None:
@@ -240,12 +231,9 @@ def _plane_violations(details: dict[str, Any] | None) -> list[Any]:
 
 
 def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
-    """The cross-class audit, as a standing guard.
-
-    ``details`` is the only recipe output entering the code-keyed ``effect_behavior_cache``, so every
-    value in it is asserted about EVERY deployment of that bytecode. Each Tier-1 recipe runs on an
-    observation FULL of per-deployment data and none of it may reach ``details``; concrete values
-    belong in ``concrete``, which the worker routes to ``effect_verdicts``."""
+    """``details`` is the only recipe output entering the code-keyed cache, so every Tier-1 recipe must keep
+    per-deployment data in ``concrete``.
+    """
     from services.effects import recipes
 
     zero = "0x" + "00" * 20
@@ -317,7 +305,6 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
         randoms=randoms,
     )
 
-    # Freeze/pause on the fork tier — the class with the richest ``details``.
     from tests.support.effects_stubs import GUARDED, PAUSE, StubAnvil
 
     p = anvil.pause_recipe(
@@ -334,7 +321,6 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
 
     for eff in (v, s, u, a, p):
         assert _plane_violations(eff.details) == [], f"{eff.effect_class}: {_plane_violations(eff.details)}"
-    # ...and the per-deployment values are not lost; they are on the state-plane side.
     assert v.concrete["observed_reach_holders"] == [HOLDER.lower()]
     assert u.concrete["impl_before"] == "0x" + "dd" * 20
     assert s.concrete["backing_inflow_transfers"] == 1
@@ -345,7 +331,6 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
 
 @requires_postgres
 def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
-    """No address and no USD figure may appear anywhere in the cached row."""
     session = clean_effects
     pid, fns, cids = _protocol(session, [CONTRACT_A])
     _run_for(session, pid, fns, cids, CONTRACT_A, "leak-a", monkeypatch, [])
@@ -357,8 +342,7 @@ def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
     assert RECIPIENT.lower() not in body.lower()
     assert str(REACH_USD) not in body
     assert not any(k.startswith(("observed_reach", "reach_")) for k in (cached.details or {}))
-    # The PROVING EXECUTION obeys the same rule: an impersonated caller at one block is one
-    # deployment's observation, and a cache hit would name another contract's call as this one's proof.
+    # The proving execution is one deployment's observation too.
     assert PROVING_EXECUTION_KEY not in (cached.details or {})
     assert PRINCIPAL.lower() not in body.lower()
     assert (cached.details or {})["value_moved"] is True
@@ -369,21 +353,16 @@ def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
     assert residue == {
         "observed_reach_value_usd": REACH_USD,
         "observed_reach_holders": [HOLDER.lower()],
-        # The reach-determined discriminator and asset list ride the STATE plane with the figures they qualify.
         "reach_determined": True,
         "observed_reach_assets": [TOKEN.lower()],
-        # The TVL ceiling's outcome travels with its figure; this stub protocol has no snapshot, so "not checked".
         "reach_tvl_check": "skipped_no_tvl",
     }
-    # The figure and the call that proved it share a row: a magnitude without its execution has no account of itself.
     assert execution["caller"] == PRINCIPAL.lower()
     assert execution["target"] == CONTRACT_A.lower()
 
 
 @requires_postgres
 def test_cache_hit_never_inherits_another_deployments_reach(clean_effects, monkeypatch):
-    """The reproduced end-to-end failure: B hits A's cached row and used to be
-    persisted with A's holder and A's USD as its own witness."""
     session = clean_effects
     pid, fns, cids = _protocol(session, [CONTRACT_A, CONTRACT_B])
     runs: list[str] = []
@@ -397,23 +376,19 @@ def test_cache_hit_never_inherits_another_deployments_reach(clean_effects, monke
     assert metrics["cache_hits_kernel"] == 1
     rows = {r.contract_address: r for r in session.query(EffectVerdict).all()}
     b = rows[CONTRACT_B.lower()]
-    # B's verdict IS the cache's (the code plane transfers, as designed) ...
     assert b.verdict == VERDICT_PROVEN
     assert (b.witness or {})["value_moved"] is True
-    # ... but nothing per-deployment from A crossed over.
     assert HOLDER.lower() not in str(b.witness).lower()
     assert str(REACH_USD) not in str(b.witness)
     residue: dict[str, Any] = b.observed_residue or {}
     assert "observed_reach_holders" not in residue
     assert "observed_reach_value_usd" not in residue
-    # A keeps its own.
     assert rows[CONTRACT_A.lower()].observed_residue["observed_reach_holders"] == [HOLDER.lower()]
 
 
 @requires_postgres
 def test_minted_claim_surfaces_reach_only_for_the_observing_deployment(clean_effects, monkeypatch):
-    """The claim is what the frontend publishes, so the separation has to hold all
-    the way through the bridge."""
+    """The claim is what the frontend publishes."""
     session = clean_effects
     pid, fns, cids = _protocol(session, [CONTRACT_A, CONTRACT_B])
     runs: list[str] = []
@@ -434,14 +409,11 @@ def test_minted_claim_surfaces_reach_only_for_the_observing_deployment(clean_eff
 
 @requires_postgres
 def test_reach_survives_a_later_observation_less_rewrite(clean_effects, monkeypatch):
-    """Moving reach off the witness must not make it evaporate on the deployment
-    that DID observe it: the residue column is preserved across an
-    observation-less rewrite of the same verdict, the way the destination is."""
+    """The residue column is preserved across an observation-less rewrite, like the destination."""
     session = clean_effects
     pid, fns, cids = _protocol(session, [CONTRACT_A])
     runs: list[str] = []
     _run_for(session, pid, fns, cids, CONTRACT_A, "leak-keep-1", monkeypatch, runs)
-    # Second job: a plain cache hit carrying no observation of its own.
     _run_for(session, pid, fns, cids, CONTRACT_A, "leak-keep-2", monkeypatch, runs)
     session.expire_all()
 

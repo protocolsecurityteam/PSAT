@@ -43,7 +43,6 @@ def _clean_heartbeats(db_session):
 
 @pytest.fixture()
 def posts(monkeypatch):
-    """Capture Discord posts by stubbing the HTTP wire (requests.post) only."""
     captured: list[dict] = []
 
     def fake_post(url, json=None, timeout=None):
@@ -75,8 +74,7 @@ def _seed_all_fresh(db_session, now: datetime, *, exclude: set[str] | None = Non
 
 
 def _restamp_fresh(db_session, now: datetime, *, exclude: set[str] | None = None) -> None:
-    """Re-stamp healthy processes against a new tick clock so advancing ``now`` doesn't age
-    them into stale (short-cadence daemons have a 120s window)."""
+    """Short-cadence daemons have a 120s window, so healthy ones are re-stamped."""
     exclude = (exclude or set()) | {"ops_alerter"}
     for process in PROCESS_META:
         if process in exclude:
@@ -85,40 +83,25 @@ def _restamp_fresh(db_session, now: datetime, *, exclude: set[str] | None = None
     db_session.commit()
 
 
-# ── process_meta: staleness rule ─────────────────────────────────────────────
-
-
 def test_stale_after_seconds_rule():
-    # 3×interval above the floor.
     assert stale_after_seconds(600) == 1800.0
-    # Floor dominates for short-cadence daemons.
     assert stale_after_seconds(30) == 120.0
     assert stale_after_seconds(40) == 120.0  # 3×40=120 == floor
     assert stale_after_seconds(41) == 123.0  # just over the floor
 
 
 def test_classify_boundaries():
-    # interval 600 → window 1800.
     assert classify("running", 1799.9, 600) == FRESH
     assert classify("running", 1800.0, 600) == STALE
-    # 120s floor for a 30s-cadence daemon.
     assert classify("running", 119.0, 30) == FRESH
     assert classify("running", 120.0, 30) == STALE
-    # Missing heartbeat is stale regardless of interval.
     assert classify(None, None, 600) == STALE
-    # A live beat with an explicit error status surfaces as error, not fresh.
     assert classify(ERROR, 5.0, 600) == ERROR
-    # Staleness dominates an error status once the beat goes silent.
     assert classify(ERROR, 5000.0, 600) == STALE
-
-
-# ── watchdog transitions: dedupe / recovery / cooldown ───────────────────────
 
 
 @requires_postgres
 def test_down_dedupe_recovery_transition_graph(db_session, _clean_heartbeats, posts):
-    """The full watchdog state machine: down fires once, a stale tick dedupes, recovery posts
-    once, a healthy tick doesn't repeat it."""
     now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
     _seed_all_fresh(db_session, now, exclude={HEARTBEAT_PROTOCOL_SCANNER})
     _seed(db_session, HEARTBEAT_PROTOCOL_SCANNER, age_s=100_000, now=now)
@@ -160,20 +143,15 @@ def test_cooldown_re_alerts_after_window(db_session, _clean_heartbeats, posts, m
     run_ops_alert_tick(db_session, now=now)
     assert len(posts) == 1
 
-    # Inside the cooldown → still deduped.
     t2 = now + timedelta(seconds=299)
     _restamp_fresh(db_session, t2, exclude={HEARTBEAT_PROTOCOL_SCANNER})
     run_ops_alert_tick(db_session, now=t2)
     assert len(posts) == 1
 
-    # Past the cooldown, still down → one reminder.
     t3 = now + timedelta(seconds=301)
     _restamp_fresh(db_session, t3, exclude={HEARTBEAT_PROTOCOL_SCANNER})
     run_ops_alert_tick(db_session, now=t3)
     assert len(posts) == 2
-
-
-# ── CAS: two racing web machines ─────────────────────────────────────────────
 
 
 @requires_postgres
@@ -185,7 +163,6 @@ def test_cas_prevents_double_write(db_session, _clean_heartbeats):
 
     prior_beat_at = db_session.query(WorkerHeartbeat).filter_by(process="ops_alerter").one().beat_at
 
-    # Two instances read the same prior beat_at, then both try to advance it.
     other = SASession(db_session.get_bind(), expire_on_commit=False)
     try:
         won_a = _cas_write(db_session, prior_beat_at, {"alerts": {"x": {"kind": "dead"}}})
@@ -199,18 +176,13 @@ def test_cas_prevents_double_write(db_session, _clean_heartbeats):
 
 @requires_postgres
 def test_cas_insert_when_absent(db_session, _clean_heartbeats):
-    # No ops_alerter row yet → INSERT-claim path wins.
     assert _cas_write(db_session, None, {"alerts": {}}) is True
     assert db_session.query(WorkerHeartbeat).filter_by(process="ops_alerter").count() == 1
-
-
-# ── scanner lag ("behind") alert ─────────────────────────────────────────────
 
 
 @requires_postgres
 def test_lag_alert_fires_only_above_threshold_with_own_dedupe(db_session, _clean_heartbeats, posts):
     now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-    # Scanner fresh (not "dead") but reporting a large head-lag.
     _seed_all_fresh(db_session, now, exclude={HEARTBEAT_PROTOCOL_SCANNER})
     _seed(db_session, HEARTBEAT_PROTOCOL_SCANNER, age_s=5, now=now, detail={"max_lag_blocks": 60_000})
     db_session.commit()
@@ -220,7 +192,6 @@ def test_lag_alert_fires_only_above_threshold_with_own_dedupe(db_session, _clean
     assert len(posts) == 1
     assert "behind" in posts[0]["json"]["embeds"][0]["title"].lower()
 
-    # Same lag next tick → deduped on its own key.
     out2 = run_ops_alert_tick(db_session, now=now + timedelta(seconds=60))
     assert out2["posted_down"] == 0
     assert len(posts) == 1
@@ -230,7 +201,6 @@ def test_lag_alert_fires_only_above_threshold_with_own_dedupe(db_session, _clean
 def test_lag_alert_absent_or_below_threshold_is_silent(db_session, _clean_heartbeats, posts):
     now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
     _seed_all_fresh(db_session, now, exclude={HEARTBEAT_PROTOCOL_SCANNER})
-    # Below threshold, and (separately) absent — neither should alert.
     _seed(db_session, HEARTBEAT_PROTOCOL_SCANNER, age_s=5, now=now, detail={"max_lag_blocks": 10})
     db_session.commit()
     out = run_ops_alert_tick(db_session, now=now)
@@ -246,8 +216,6 @@ def test_lag_alert_absent_or_below_threshold_is_silent(db_session, _clean_heartb
 
 @requires_postgres
 def test_no_webhook_still_logs_no_post(db_session, _clean_heartbeats, monkeypatch):
-    """PSAT_OPS_WEBHOOK_URL unset → the transition still processes (logs) but
-    posts nothing to Discord."""
     monkeypatch.delenv("PSAT_OPS_WEBHOOK_URL", raising=False)
     calls: list = []
     monkeypatch.setattr("services.monitoring.notifier.requests.post", lambda *a, **k: calls.append(1))
@@ -264,8 +232,7 @@ def test_no_webhook_still_logs_no_post(db_session, _clean_heartbeats, monkeypatc
 
 @requires_postgres
 def test_discord_transport_failure_does_not_suppress_other_daemons(db_session, _clean_heartbeats, monkeypatch, caplog):
-    """A ConnectionError/Timeout on one daemon's Discord post must not abort the emit loop
-    and silence the others."""
+    """One daemon's post failure must not silence the others."""
     import requests
 
     captured: list[dict] = []
@@ -280,25 +247,20 @@ def test_discord_transport_failure_does_not_suppress_other_daemons(db_session, _
 
     monkeypatch.setattr("services.monitoring.notifier.requests.post", flaky_post)
     monkeypatch.setenv("PSAT_OPS_WEBHOOK_URL", _WEBHOOK)
-    # Pinned rather than incidental: a just-started watchdog, so these beats
-    # read as the cold-start shape and the level below is a stated expectation.
+    # A just-started watchdog, so the level is a stated expectation.
     monkeypatch.setattr("services.monitoring.ops_alerts._uptime_s", lambda: 5.0)
 
     now = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
-    # Two daemons go stale together (a monitor VM crash pattern).
     down = {HEARTBEAT_PROTOCOL_SCANNER, HEARTBEAT_PROTOCOL_POLLER}
     _seed_all_fresh(db_session, now, exclude=down)
     for process in down:
         _seed(db_session, process, age_s=100_000, now=now)
     db_session.commit()
 
-    # WARNING, not ERROR: these beats are older than the watchdog's own uptime,
-    # which is the cold-start shape (see ``_emit_down``). The level is asserted
-    # on its own below; what this test is about is that every daemon got a line.
+    # These beats are older than the watchdog's uptime: the cold-start shape (see ``_emit_down``).
     with caplog.at_level("WARNING", logger="services.monitoring.ops_alerts"):
         out = run_ops_alert_tick(db_session, now=now)
 
-    # Both transitions were emitted despite the first post raising.
     assert out["posted_down"] == 2
     assert calls["n"] == 2  # the second post was attempted, not skipped
     assert len(captured) == 1  # first raised, second succeeded
@@ -307,14 +269,12 @@ def test_discord_transport_failure_does_not_suppress_other_daemons(db_session, _
 
 
 def test_daemon_down_is_error_only_when_it_died_on_our_watch(monkeypatch, caplog):
-    """Cold start is a routine condition; a death while we watch is an incident."""
     import logging as _logging
 
     from services.monitoring import ops_alerts
 
     problem = {"kind": "dead", "daemon": HEARTBEAT_PROTOCOL_SCANNER, "status": "stale", "beat_age_s": 100_000.0}
 
-    # Freshly started process: the staleness predates every second we watched.
     monkeypatch.setattr(ops_alerts, "_uptime_s", lambda: 5.0)
     with caplog.at_level(_logging.WARNING, logger="services.monitoring.ops_alerts"):
         ops_alerts._emit_down(dict(problem), webhook_url=None)
@@ -323,8 +283,6 @@ def test_daemon_down_is_error_only_when_it_died_on_our_watch(monkeypatch, caplog
     assert rec.cold_start is True
 
     caplog.clear()
-    # A watchdog that has been up for hours: the same beat age is now a death
-    # that happened while we were watching, whatever its arithmetic.
     monkeypatch.setattr(ops_alerts, "_uptime_s", lambda: 200_000.0)
     with caplog.at_level(_logging.WARNING, logger="services.monitoring.ops_alerts"):
         ops_alerts._emit_down(dict(problem), webhook_url=None)
@@ -333,17 +291,13 @@ def test_daemon_down_is_error_only_when_it_died_on_our_watch(monkeypatch, caplog
     assert rec.cold_start is False
 
     caplog.clear()
-    # And the arithmetic on its own is not enough: past the cold-start window a
-    # daemon that has NEVER beaten is an incident, not a boot condition.
+    # Past the cold-start window a never-beaten daemon is an incident.
     monkeypatch.setattr(ops_alerts, "_uptime_s", lambda: 10_000.0)
     with caplog.at_level(_logging.WARNING, logger="services.monitoring.ops_alerts"):
         ops_alerts._emit_down({**problem, "beat_age_s": None}, webhook_url=None)
     rec = [r for r in caplog.records if r.msg == "ops: daemon %s is down"][-1]
     assert rec.levelno == _logging.ERROR
     assert rec.cold_start is False
-
-
-# ── /api/health/monitoring ───────────────────────────────────────────────────
 
 
 @requires_postgres
@@ -378,7 +332,6 @@ def test_health_monitoring_503_lists_stale(api_client, db_session, _clean_heartb
 
 @requires_postgres
 def test_health_monitoring_503_when_no_heartbeats(api_client, db_session, _clean_heartbeats):
-    # No rows at all → every process missing → stale → 503.
     resp = api_client.get("/api/health/monitoring")
     assert resp.status_code == 503
     body = resp.json()
@@ -395,7 +348,6 @@ def _addr(n: int) -> str:
 @requires_postgres
 def test_collect_chain_health_flags_one_chain_stale(db_session, _clean_heartbeats):
     now = datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc)
-    # Mainnet cursor scanned just now; Base cursor stalest run long ago.
     db_session.add(
         IndexedEventCursor(
             chain_id=1,
@@ -448,8 +400,7 @@ def test_collect_chain_health_all_fresh(db_session, _clean_heartbeats):
 @requires_postgres
 def test_health_monitoring_flags_stale_chain(api_client, db_session, _clean_heartbeats):
     now = datetime.now(timezone.utc)
-    # Every process fresh → process-level check is clean; a per-chain stall is
-    # the only thing that can degrade health here.
+    # A per-chain stall is the only thing that can degrade health here.
     _seed_all_fresh(db_session, now)
     db_session.add(
         IndexedEventCursor(

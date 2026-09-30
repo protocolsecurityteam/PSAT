@@ -1,4 +1,3 @@
-"""Concurrent /api/analyze submissions — exercises worker pool and DB-pool contention."""
 
 from __future__ import annotations
 
@@ -8,22 +7,17 @@ import pytest
 
 from tests.live.conftest import DEFAULT_SINGLE_TIMEOUT, LiveClient
 
-# Mix of proxy (USDC) + non-proxy. Etherscan caches all five aggressively.
-# UNI (0x1f9840...) intentionally omitted — Etherscan API v2 returns empty
-# SourceCode for it despite the contract being verified in the UI, so it's
-# an unreliable fixture for "everything analyzes cleanly" assertions.
+# UNI is omitted: Etherscan v2 returns empty SourceCode for it despite verification.
 PARALLEL_ADDRESSES = [
     "0xC02aaA39b223FE8D0A0e5c4F27eAD9083C756Cc2",  # WETH
     "0xA0b86991c6218b36c1D19D4a2e9Eb0cE3606eB48",  # USDC (proxy — also exercises impl spawn)
     "0x6B175474E89094C44Da98b954EedeAC495271d0F",  # DAI
     "0x514910771AF9Ca656af840dff83E8264EcF986CA",  # LINK
     "0xc00e94Cb662C3520282E6f5717214004A7f26888",  # COMP (MKR was pre-Solidity-0.5 and
-    # occasionally trips up Slither's CLI on the preview's compiler combo.)
 ]
 
 
 def _submit_and_wait(base_url: str, admin_key: str, address: str) -> dict:
-    # Fresh client per thread: requests.Session is not thread-safe.
     client = LiveClient(base_url, admin_key)
     return client.submit_and_wait(address, timeout=DEFAULT_SINGLE_TIMEOUT)
 
@@ -45,12 +39,7 @@ def test_concurrent_analyses_all_complete(live_base_url: str, live_admin_key: st
 
 
 def test_concurrent_analyses_parallelism(live_base_url: str, live_admin_key: str):
-    """The worker pool runs concurrent submissions in parallel, not serially.
-
-    Wall time ≈ slowest job means parallel; ≈ sum means serialized. 1.5× slack absorbs queueing jitter at the
-    static→resolution handoff (PSAT_STATIC_WORKERS=3, PSAT_RESOLUTION_WORKERS=2 in fly.toml). A sum/wall metric
-    failed on weight variance (LINK/DAI occasionally 100-150s), not pool health.
-    """
+    """Wall time near the slowest job means parallel, near the sum means serial; 1.5x slack absorbs handoff jitter."""
     jobs: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=len(PARALLEL_ADDRESSES)) as pool:
         futures = {
@@ -71,7 +60,7 @@ def test_concurrent_analyses_parallelism(live_base_url: str, live_admin_key: str
     wall = (max(end for _, end in windows.values()) - min(start for start, _ in windows.values())).total_seconds()
     slowest = max(durations.values())
 
-    # Sub-30s aggregate runs are dominated by submission/poll jitter rather than worker scheduling.
+    # Sub-30s runs are dominated by submission/poll jitter.
     if total_serial < 30:
         pytest.skip(f"total work {total_serial:.1f}s too short to evaluate parallelism")
 

@@ -58,19 +58,16 @@ def test_source_tracking():
     assert r["dependencies"][DEP_A]["source"] == ["dynamic"]
     # Provenance lives only in dependency_graph, not on dep entries
     assert "provenance" not in r["dependencies"][DEP_A]
-    # dependency_graph is keyed by from|to
     key = f"{TARGET}|{DEP_A}"
     assert key in r["dependency_graph"]
     assert r["dependency_graph"][key][0]["op"] == "CALL"
     assert "network" not in r
 
-    # Merged: DEP_A in both, DEP_B static-only, DEP_C dynamic-only
     r = build(TARGET, _static([DEP_A, DEP_B]), _dynamic([DEP_A, DEP_C]), None)
     assert r["dependencies"][DEP_A]["source"] == ["dynamic", "static"]
     assert r["dependencies"][DEP_B]["source"] == ["static"]
     assert r["dependencies"][DEP_C]["source"] == ["dynamic"]
 
-    # Duplicates within a source are deduplicated
     r = build(TARGET, _static([DEP_A, DEP_A]), _dynamic([DEP_A]), None)
     assert r["dependencies"][DEP_A]["source"] == ["dynamic", "static"]
 
@@ -110,7 +107,6 @@ def test_classification_merging():
     assert impl["source"] == ["classification"]
     assert "proxies" not in impl  # reverse link removed
 
-    # IMPL is NOT a top-level dependency
     assert IMPL not in r["dependencies"]
 
     # discovered_addresses is not stored — derived from source=["classification"]
@@ -143,7 +139,6 @@ def test_target_classification_fallback():
     r = build(TARGET, _static([DEP_A]), None, cls, target_classification=fallback)
     assert r["target_classification"]["proxy_type"] == "beacon_proxy"
 
-    # Regular fallback is ignored
     regular_fallback = {"address": TARGET, "type": "regular"}
     r = build(TARGET, _static([DEP_A]), None, None, target_classification=regular_fallback)
     assert "target_classification" not in r
@@ -177,7 +172,6 @@ def test_edge_cases():
         "discovered_addresses": [DEP_B],
     }
     r = build(TARGET, _static([DEP_A, DEP_B]), None, cls)
-    # DEP_B is nested under DEP_A (its proxy), not top-level
     assert DEP_B not in r["dependencies"]
     impl = r["dependencies"][DEP_A]["implementation"]
     assert isinstance(impl, dict)
@@ -221,7 +215,6 @@ def test_dependency_graph_keyed():
     assert len(dg[key_a]) == 2
     assert dg[key_a][0]["selector"] == "0xdeadbeef"
     assert dg[key_a][1]["selector"] == "0xcafebabe"
-    # from/to not repeated inside entries
     assert "from" not in dg[key_a][0]
     assert "to" not in dg[key_a][0]
 

@@ -1,7 +1,4 @@
-"""Parity tests for ``_apply_equivalence_http`` (max_workers=4): the parallel path stamps like the sequential one,
-the per-address Etherscan cache collapses repeats under concurrency, and a per-match crash maps to
-``github_fetch_failed`` without aborting siblings. DB-free: plain dataclasses, both HTTP calls stubbed.
-"""
+"""DB-free parity for the parallel ``_apply_equivalence_http`` path, with both HTTP calls stubbed."""
 
 from __future__ import annotations
 
@@ -48,9 +45,7 @@ def _make_inputs(audit_id: int, contract_id: int, address: str) -> _EquivalenceI
 
 
 def _stub_etherscan_and_github(monkeypatch, *, etherscan_calls=None, github_calls=None):
-    """Patch the two HTTP imports inside _apply_equivalence_http; they happen in the function body via
-    ``from services.audits.source_equivalence import ...``, so the monkeypatch must target that module.
-    """
+    """The imports happen inside the function body, so patch the source module."""
     from services.audits import source_equivalence
 
     fake_fetch = source_equivalence.EtherscanFetch(
@@ -121,8 +116,6 @@ def test_apply_equivalence_http_parity_parallel_vs_sequential(monkeypatch):
 
 
 def test_apply_equivalence_http_caches_etherscan_per_address(monkeypatch):
-    """When N matches share a contract_address, only one Etherscan call fires
-    even under fan-out — the per-call cache + lock collapses the rest."""
     monkeypatch.setenv("PSAT_RPC_FANOUT", "8")
     RpcExecutor.reset_for_tests()
 
@@ -135,7 +128,7 @@ def test_apply_equivalence_http_caches_etherscan_per_address(monkeypatch):
 
     stamped = _apply_equivalence_http(matches, inputs)
 
-    # Strict bound: one address -> one Etherscan call; the lock + setdefault discards a first-write race loser.
+    # The lock + setdefault discards a first-write race loser.
     assert len(etherscan_calls) <= 2, (
         f"expected ≤2 Etherscan calls for one shared address, got {len(etherscan_calls)}: {etherscan_calls}"
     )
@@ -143,8 +136,6 @@ def test_apply_equivalence_http_caches_etherscan_per_address(monkeypatch):
 
 
 def test_apply_equivalence_http_per_match_crash_does_not_abort_siblings(monkeypatch):
-    """If verify_audit_covers_impl raises for one match, that match becomes
-    ``github_fetch_failed`` while siblings still get their normal stamp."""
     monkeypatch.setenv("PSAT_RPC_FANOUT", "8")
     RpcExecutor.reset_for_tests()
 

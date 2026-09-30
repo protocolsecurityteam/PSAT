@@ -1,4 +1,3 @@
-"""Smoke tests: unauth GET endpoints + SPA fallback."""
 
 from __future__ import annotations
 
@@ -16,7 +15,7 @@ def test_health_reports_ok(public_live_client: LiveClient):
     body = r.json()
     assert body.get("status") == "ok"
     assert body.get("db") == "ok"
-    # "inline" = legacy Postgres-only; "unavailable" is the failure value.
+    # "inline" is legacy Postgres-only storage.
     assert body.get("storage") in ("ok", "inline")
 
 
@@ -41,7 +40,6 @@ def test_frontend_assets_served(live_base_url: str):
     html = requests.get(live_base_url + "/", timeout=15).text
     m = re.search(r"/assets/([\w.\-]+\.js)", html)
     if not m:
-        # Local-dev may have no built frontend; SPA fallback serves a plaintext message.
         pytest.skip("no JS asset URL found in frontend HTML (likely no built frontend)")
     asset_path = "/assets/" + m.group(1)
     r = requests.get(live_base_url + asset_path, timeout=15)

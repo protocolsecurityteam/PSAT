@@ -1,10 +1,6 @@
-"""Perf: the ``cache_lookup`` N+1 batch.
-
-``EffectsWorker._plan`` used to issue several serial single-row DB round-trips PER candidate.
-The batched form (bulk prefetch + one composite verdict lookup) must return **byte-identical**
-worklist items to the legacy path (``PSAT_EFFECTS_BATCH_PLAN`` off) on the SAME fixture DB state
-and collapse the per-job query count. Offline: real prober + resolver over a seeded proxy
-protocol; ``_plan`` only builds the worklist, so plan ``run`` closures never execute."""
+"""The batched ``_plan`` must return byte-identical worklist items to the legacy per-candidate path on the same DB
+state, with far fewer queries.
+"""
 
 from __future__ import annotations
 
@@ -35,8 +31,7 @@ from services.effects.selection import Candidate
 from tests.cache_helpers import requires_postgres
 from workers.effects_worker import EffectsWorker, _Counters
 
-# Distinct runtime bytecode per deployment => distinct hash; enough candidates that the flat
-# batched query count visibly beats N+1.
+# Enough candidates that the flat batched query count visibly beats N+1.
 N_CANDIDATES = 6
 SELECTOR = "0x3659cfe6"  # upgradeTo(address)
 PRINCIPAL = "0x" + "22" * 20
@@ -59,24 +54,18 @@ def clean(db_session):
 
 
 def _seed_proxy_protocol(session) -> list[Candidate]:
-    """Two upgradeable proxies (each its own contract + effective function +
-    principal + indexed UpgradeEvent + cached bytecode). Returns the candidates
-    the way selection would."""
     proto = Protocol(name=f"batch-{uuid.uuid4().hex[:8]}")
     session.add(proto)
     session.flush()
 
-    # Unique addresses per run: bytecode_cache is a global table not swept by conftest teardown,
-    # so a fixed address would pkey-collide. The kernel hash keys on CODE, so seeding stays deterministic.
+    # bytecode_cache isn't swept by teardown, so fixed addresses would collide.
     tag = uuid.uuid4().hex[:8]
     cands: list[Candidate] = []
     for i in range(N_CANDIDATES):
         code = _code(i)
         addr = "0x" + f"{i:x}{tag}".ljust(40, "0")[:40]
-        # Each proxy names its OWN implementation and that bytecode is cached below: a proxy row
-        # with function rows must never be hashed on its forwarding stub (one stub hash covers every
-        # implementation behind the pattern; 15 behind ``UUPSProxy``). Without the impl bytecode the
-        # candidate is skipped, which is the guard working.
+        # A proxy row must never be hashed on its forwarding stub, which is shared by every implementation behind the
+        # pattern.
         impl_addr = "0x" + f"d{i:x}{tag}".ljust(40, "0")[:40]
         c = Contract(
             protocol_id=proto.id,
@@ -121,8 +110,6 @@ def _seed_proxy_protocol(session) -> list[Candidate]:
 
 
 def _run_plan(session, candidates, *, batched: bool):
-    """Drive ``EffectsWorker._plan`` with the real resolver + prober, counting the
-    SQL statements it issues. Returns (serialized_items, query_count)."""
     worker = EffectsWorker()
     resolver = make_bytecode_hash_resolver(1)
     ctx = ProbeContext(
@@ -172,8 +159,7 @@ def _run_plan(session, candidates, *, batched: bool):
 
 @requires_postgres
 def test_plan_batched_matches_legacy_byte_identical(clean):
-    """Same fixture DB state, both code paths => identical worklist. Candidate 0's code_upgrade
-    identity is pre-seeded so the run exercises a cache HIT and a MISS."""
+    """Candidate 0 is pre-seeded so the run exercises both a cache hit and a miss."""
     session = clean
     cands = _seed_proxy_protocol(session)
 
@@ -198,7 +184,6 @@ def test_plan_batched_matches_legacy_byte_identical(clean):
     assert len(hits) == 1 and len(misses) == N_CANDIDATES - 1
     assert hits[0][4] == kernel_hash
 
-    # (b) query count dropped sharply: legacy grows with N, batched is a small fixed set of bulk queries.
     assert batched_q < legacy_q
     assert batched_q <= 8
     assert legacy_q >= 3 * N_CANDIDATES
@@ -206,7 +191,6 @@ def test_plan_batched_matches_legacy_byte_identical(clean):
 
 @requires_postgres
 def test_prefetch_cleared_after_plan(clean):
-    """The per-session store must not leak past ``cache_lookup``."""
     session = clean
     cands = _seed_proxy_protocol(session)
     _run_plan(session, cands, batched=True)
@@ -228,13 +212,9 @@ def _pause_claim(var: str, member: str | None):
 
 @requires_postgres
 def test_principals_by_selector_is_deterministic_with_two_principals(clean):
-    """A selector with TWO principals is where the batched and unbatched reads
-    could disagree: both keep the first row via ``setdefault``, but only the
-    prefetch path ordered its query. The unbatched read then returned whichever
-    row Postgres handed back first — a different ``from_addr`` in the simulated
-    call depending on which plan path ran. Insertion order below is the reverse
-    of the ordered answer, so the pre-fix single-contract query returns the HIGH
-    address and the prefetch path the LOW one."""
+    """Only the prefetch path ordered its query, so the unbatched read could pick a different ``from_addr``;
+    insertion order is reversed to expose it.
+    """
     session = clean
     proto = Protocol(name=f"pbs2-{uuid.uuid4().hex[:8]}")
     session.add(proto)
@@ -323,20 +303,10 @@ def test_claim_latch_pairs_prefetch_matches_query(clean):
     assert batched == {("paused", None)}
 
 
-# ---------------------------------------------------------------------------
-# A proxy row's forwarding stub is never a behavioral hash
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_a_proxy_rows_stub_bytecode_is_never_hashed(clean):
-    """The invariant this cache rests on, "a proxy row never carries ``effective_functions``", is
-    asserted by nothing. When it breaks, the bytecode at ``candidate.contract_address`` is the
-    forwarding STUB, whose hash is shared by every implementation behind the pattern (measured: 16
-    colliding groups over 323 mainnet rows, largest 15 implementations behind ``UUPSProxy``).
-
-    Two proxies of the SAME type with DIFFERENT implementations must not collide, and a proxy whose
-    implementation code is unavailable must yield no hash rather than the stub's.
+    """The stub hash is shared by every implementation behind a proxy pattern (15 behind ``UUPSProxy`` on mainnet),
+    so a proxy row is never hashed on it.
     """
     session = clean
     resolver = make_bytecode_hash_resolver(1)
@@ -391,8 +361,7 @@ def test_a_proxy_rows_stub_bytecode_is_never_hashed(clean):
         assert got[0] == bytecode_fallback_hash(_code_of(session, impl), cand.selector)
     assert all(bytecode_fallback_hash(stub, SELECTOR) != got[0] for got in resolved if got)
 
-    # A proxy row with no resolvable implementation code: no hash at all (skip,
-    # degraded, never guess) — NEVER the stub.
+    # Skip rather than hash the stub.
     orphan_proxy = "0x" + f"a{tag}".ljust(40, "0")[:40]
     orphan = Contract(protocol_id=proto.id, address=orphan_proxy, chain="ethereum", is_proxy=True)
     session.add(orphan)
@@ -421,7 +390,6 @@ def test_a_proxy_rows_stub_bytecode_is_never_hashed(clean):
     )
     assert resolver(session, orphan_cand) is None
 
-    # CONTROL: a NON-proxy row still hashes its own code, unchanged.
     plain_addr = "0x" + f"c{tag}".ljust(40, "0")[:40]
     plain = Contract(protocol_id=proto.id, address=plain_addr, chain="ethereum", is_proxy=False)
     session.add(plain)

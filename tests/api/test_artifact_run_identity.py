@@ -1,4 +1,3 @@
-"""Fixture artifact reads stay on the completed job while its name is reused."""
 
 from datetime import datetime, timedelta, timezone
 
@@ -44,15 +43,12 @@ def test_live_fixture_reads_keep_job_identity_as_same_name_run_progresses(api_cl
     monkeypatch.setattr(client, "_session", api_client)
     fixture_job = {"job_id": str(fixture.id), "name": fixture.name}
     for name in names:
-        # Exercise the actual live-test assertion against the real local route.
-        # Its former name lookup selects the unfinished job and fails here.
+        # The old name lookup selected the unfinished job and failed here.
         check_fixture_artifact(fixture_job, client, name)
         assert client.artifact(str(fixture.id), name) == {"run": "fixture", "artifact": name}
         assert api_client.get(f"/api/analyses/{fixture.name}/artifact/{name}.json").status_code == 404
         assert client.artifact(str(newer.id), name) is None
 
-    # A heartbeat makes the alias more recent, then completion supplies a
-    # different artifact. Neither changes the completed fixture's identity.
     newer.updated_at = now + timedelta(seconds=10)
     db_session.commit()
     check_fixture_artifact(fixture_job, client, "control_snapshot")

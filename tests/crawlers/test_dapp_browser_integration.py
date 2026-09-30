@@ -1,4 +1,4 @@
-"""Browser integration test for the DApp crawler against a local fake DApp; skipped without Playwright + Chromium."""
+"""Skipped without Playwright + Chromium."""
 
 from __future__ import annotations
 

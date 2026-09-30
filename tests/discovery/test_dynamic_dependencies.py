@@ -2,10 +2,6 @@ import pytest
 
 from services.discovery import dynamic_dependencies as ddc
 
-# ---------------------------------------------------------------------------
-# Transaction selection
-# ---------------------------------------------------------------------------
-
 
 def test_pick_representative_transactions_prefers_selector_coverage():
     target = "0x1111111111111111111111111111111111111111"
@@ -60,7 +56,6 @@ def test_extract_edges_captures_all_op_types():
     def addr(n: int) -> str:
         return "0x" + hex(n)[2:].zfill(40)
 
-    # debug callTracer: nested CALL/DELEGATECALL/CREATE/CALLCODE
     debug_trace = {
         "type": "CALL",
         "from": addr(1),
@@ -79,7 +74,6 @@ def test_extract_edges_captures_all_op_types():
         "CALLCODE",
     }
 
-    # parity style: all six types including STATICCALL and CREATE2
     parity_entries = [
         {
             "type": "call",
@@ -139,7 +133,6 @@ def test_trace_transaction_falls_back_to_parity_style(monkeypatch):
     ]
 
 
-# Shared mock: all traced addresses are contracts
 def _mock_code_checks(monkeypatch):
     monkeypatch.setattr(ddc, "get_code", lambda _rpc, _addr: "0x6000")
     monkeypatch.setattr(ddc, "has_deployed_code", lambda code: code not in ("0x", "0x0"))
@@ -197,8 +190,7 @@ def test_find_dynamic_dependencies_aggregates_graph(monkeypatch):
 
     out = ddc.find_dynamic_dependencies(target, tx_limit=2)
     assert out["address"] == target
-    # Only direct calls from target are included; the indirect
-    # 0x2222→0x3333 DELEGATECALL is filtered out.
+    # The indirect DELEGATECALL is filtered out.
     assert out["dependencies"] == [
         "0x2222222222222222222222222222222222222222",
     ]
@@ -360,11 +352,6 @@ def test_find_dynamic_dependencies_with_explicit_tx_hashes(monkeypatch):
     assert out["transactions_analyzed"][0]["tx_hash"] == "0xtxhash"
 
 
-# ---------------------------------------------------------------------------
-# resolve_trace_rpc
-# ---------------------------------------------------------------------------
-
-
 def test_resolve_trace_rpc_raises_without_rpc(monkeypatch):
     monkeypatch.setattr(ddc, "load_dotenv", lambda _path: None)
     monkeypatch.delenv("ERPC_BASE_URL", raising=False)
@@ -385,11 +372,6 @@ def test_resolve_trace_rpc(monkeypatch, arg, expected):
     assert ddc.resolve_trace_rpc(arg) == expected
 
 
-# ---------------------------------------------------------------------------
-# _build_graph
-# ---------------------------------------------------------------------------
-
-
 def test_build_graph_deduplicates_and_sorts_none_blocks():
     a = "0x" + "aa" * 20
     b = "0x" + "bb" * 20
@@ -408,11 +390,6 @@ def test_build_graph_deduplicates_and_sorts_none_blocks():
     assert prov[1]["block_number"] == 100
 
 
-# ---------------------------------------------------------------------------
-# fetch_contract_transactions dual fetch
-# ---------------------------------------------------------------------------
-
-
 def test_fetch_contract_transactions_merges_normal_and_internal(monkeypatch):
     calls = []
 
@@ -429,20 +406,10 @@ def test_fetch_contract_transactions_merges_normal_and_internal(monkeypatch):
     assert txs[0]["hash"] == "0xaa"
 
 
-# ---------------------------------------------------------------------------
-# _fetch_tx_metadata_from_rpc error path
-# ---------------------------------------------------------------------------
-
-
 def test_fetch_tx_metadata_invalid_response(monkeypatch):
     monkeypatch.setattr(ddc, "rpc_call", lambda *a, **kw: "0x")
     with pytest.raises(RuntimeError, match="Could not fetch"):
         ddc._fetch_tx_metadata_from_rpc("https://rpc.example", "0xbad")
-
-
-# ---------------------------------------------------------------------------
-# find_dynamic_dependencies validation
-# ---------------------------------------------------------------------------
 
 
 def test_find_dynamic_dependencies_rejects_invalid_tx_limit(monkeypatch):
@@ -452,14 +419,8 @@ def test_find_dynamic_dependencies_rejects_invalid_tx_limit(monkeypatch):
         ddc.find_dynamic_dependencies("0x" + "11" * 20, tx_limit=0)
 
 
-# ---------------------------------------------------------------------------
-# Regression: proxy_address routes tx fetch to proxy, rewrites edges to impl
-# ---------------------------------------------------------------------------
-
-
 def test_proxy_address_fetches_txs_from_proxy_and_rewrites_edges(monkeypatch):
-    """Regression: with proxy_address, txs are fetched from the proxy (where real traffic goes), edges are rewritten
-    proxy->dep to impl->dep, and both proxy and impl are excluded from dependencies."""
+    """Real traffic goes to the proxy; edges are rewritten to the impl."""
     impl = "0x1111111111111111111111111111111111111111"
     proxy = "0x2222222222222222222222222222222222222222"
     dep = "0x3333333333333333333333333333333333333333"
@@ -500,19 +461,12 @@ def test_proxy_address_fetches_txs_from_proxy_and_rewrites_edges(monkeypatch):
     assert proxy not in out["dependencies"]
     assert dep in out["dependencies"]
 
-    # Graph edges originate from the proxy (where transactions occur)
     for edge in out["dependency_graph"]:
         assert edge["from"] == proxy, f"Edge source should be proxy {proxy}, got {edge['from']}"
 
 
-# ---------------------------------------------------------------------------
-# Regression: fetch_contract_transactions oldest-first fallback
-# ---------------------------------------------------------------------------
-
-
 def test_fetch_contract_transactions_oldest_first_when_all_eth_transfers(monkeypatch):
-    """Regression: when all recent (desc) txs are plain ETH transfers, a second oldest-first fetch finds function
-    calls buried under high-volume value transfers."""
+    """Recent txs can all be ETH transfers, hiding the function calls."""
     target = "0x1111111111111111111111111111111111111111"
     etherscan_calls = []
 
@@ -521,7 +475,6 @@ def test_fetch_contract_transactions_oldest_first_when_all_eth_transfers(monkeyp
         if action == "txlistinternal":
             raise RuntimeError("No transactions found")
         if action == "txlist" and kwargs.get("sort") == "desc":
-            # Recent txs are all plain ETH transfers (input='0x')
             return {
                 "result": [
                     {"hash": "0xeth1", "to": target, "isError": "0", "blockNumber": "100", "input": "0x"},
@@ -529,7 +482,6 @@ def test_fetch_contract_transactions_oldest_first_when_all_eth_transfers(monkeyp
                 ]
             }
         if action == "txlist" and kwargs.get("sort") == "asc":
-            # Oldest txs have real function selectors
             return {
                 "result": [
                     {"hash": "0xold1", "to": target, "isError": "0", "blockNumber": "1", "input": "0xdeadbeef00"},
@@ -552,7 +504,6 @@ def test_fetch_contract_transactions_oldest_first_when_all_eth_transfers(monkeyp
     assert "0xold2" in hashes, "Oldest tx with function call should be included"
     assert "0xeth1" in hashes
     assert "0xeth2" in hashes
-    # Total should be 4 (2 desc + 2 asc, no duplicates)
     assert len(txs) == 4
 
 
@@ -613,7 +564,6 @@ def _trace_parity_helper(monkeypatch, fanout: str):
     )
 
     def fake_trace(_rpc, tx_hash):
-        # Tx index 2 fails; the rest yield a CALL edge to a distinct dep.
         idx = tx_hashes.index(tx_hash)
         if idx == 2:
             raise RuntimeError(f"trace failed for tx{idx}")
@@ -631,13 +581,8 @@ def test_find_dynamic_dependencies_parity_parallel_vs_sequential(monkeypatch):
     seq = _trace_parity_helper(monkeypatch, "1")
     par = _trace_parity_helper(monkeypatch, "10")
 
-    # Dependencies are sorted in find_dynamic_dependencies output, so an
-    # exact equality check is the right assertion here.
     assert seq["dependencies"] == par["dependencies"]
-    # trace_errors is appended in input order in both modes; check exact equality.
     assert seq["trace_errors"] == par["trace_errors"]
-    # dependency_graph is built via _build_graph which sorts keys, so equality
-    # is meaningful.
     assert seq["dependency_graph"] == par["dependency_graph"]
     assert seq["transactions_analyzed"] == par["transactions_analyzed"]
 
@@ -663,7 +608,6 @@ def test_fetch_contract_transactions_chain_id(monkeypatch, kwargs, expected_chai
 
     monkeypatch.setattr(ddc, "etherscan_get", fake_etherscan_get)
     ddc.fetch_contract_transactions("0x1", **kwargs)
-    # txlist + txlistinternal, both stamped with the chain id.
     assert seen_chain_ids == [expected_chain_id, expected_chain_id]
 
 

@@ -1,9 +1,3 @@
-"""End-to-end tests for ``GET /api/contract/{address}/capabilities``.
-
-Semantic capability read path. Read-only and not
-admin-gated (idempotent, no side effects), so tests skip the
-``require_admin_key`` override.
-"""
 
 from __future__ import annotations
 
@@ -90,8 +84,6 @@ def test_capabilities_returns_per_function_dict(api_client, db_session):
 
 @requires_postgres
 def test_capabilities_finds_checksummed_address_job(api_client, db_session):
-    """A root job stored with a mixed-case address is still found by the
-    lowercased route param — the job pick matches case-insensitively."""
     lower = "0x" + uuid.uuid4().hex[:8] + "ab" * 16
     mixed = lower[:2] + lower[2:].upper()
     _seed_completed_job_with_artifact(db_session, address=mixed, predicate_trees=_equality_leaf_artifact())
@@ -119,7 +111,6 @@ def test_capabilities_returns_404_when_predicate_tree_artifact_is_missing(api_cl
 
 @requires_postgres
 def test_capabilities_empty_dict_for_unguarded_only_contract(api_client, db_session):
-    """No guarded functions -> 200 with capabilities={} (analyzed, every function implicitly public)."""
     address = "0x" + uuid.uuid4().hex[:8] + "c3" * 16
     _seed_completed_job_with_artifact(
         db_session,
@@ -134,7 +125,6 @@ def test_capabilities_empty_dict_for_unguarded_only_contract(api_client, db_sess
 
 @requires_postgres
 def test_capabilities_block_query_param(api_client, db_session):
-    """``block=N`` supports point-in-time queries; the response echoes it for 'as of block N' UIs."""
     address = "0x" + uuid.uuid4().hex[:8] + "d4" * 16
     _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=_equality_leaf_artifact())
     resp = api_client.get(f"/api/contract/{address}/capabilities", params={"block": 18_000_000})
@@ -177,15 +167,12 @@ def test_capabilities_explicit_chain_isolates_twin(api_client, db_session, monke
     eth_caps = resp_eth.json()["capabilities"]
     assert "eth_fn()" in eth_caps and "poly_fn()" not in eth_caps, eth_caps
 
-    # A chain with NO completed job 404s rather than cross-loading a twin's trees.
     resp_base = api_client.get(f"/api/contract/{address}/capabilities", params={"chain_id": 8453})
     assert resp_base.status_code == 404, resp_base.text
 
 
 @requires_postgres
 def test_capabilities_response_includes_data_freshness(api_client, db_session, monkeypatch):
-    """The response carries a ``data_freshness`` block for the indexer cursor (UI: 'current as of
-    block X' / stale warning)."""
     from db.models import IndexedEventCursor
     from routers import predicate_capabilities
 
@@ -242,7 +229,6 @@ def test_capabilities_response_freshness_null_when_no_cursor(api_client, db_sess
     [
         # Repeat hits within the TTL short-circuit the resolver.
         pytest.param(60.0, 1, id="cached-within-ttl"),
-        # PSAT_CAPABILITIES_CACHE_TTL_S=0 disables caching: every request runs the resolver.
         pytest.param(0.0, 2, id="ttl-disabled-when-zero"),
     ],
 )
@@ -276,7 +262,6 @@ def test_capabilities_response_caching(api_client, db_session, monkeypatch, ttl_
 
 @requires_postgres
 def test_capabilities_cache_keyed_on_block_and_chain(api_client, db_session, monkeypatch):
-    """Different ``block`` / ``chain_id`` parameters cache independently."""
     from services.resolution import capability_resolver as resolver_mod
 
     address = "0x" + uuid.uuid4().hex[:8] + "cc" * 16
@@ -312,11 +297,9 @@ def test_capabilities_cache_keyed_on_block_and_chain(api_client, db_session, mon
 
 @requires_postgres
 def test_capabilities_route_is_not_admin_gated(api_client, db_session):
-    """No X-PSAT-Admin-Key required: the route is read-only/idempotent, and adding
-    require_admin_key would lock external consumers out."""
+    """Adding require_admin_key would lock external consumers out."""
     import api as api_module
 
-    # No override: the real require_admin_key must not gate this route.
     from routers.deps import require_admin_key
 
     api_module.app.dependency_overrides.pop(require_admin_key, None)

@@ -1,7 +1,5 @@
-"""Smoke test walking one fixture PDF through discovery sync, text extraction, scope extraction (stub returns
-Pool/Vault/Strategy/Registry) and coverage population. Per-phase behaviour lives in the focused files; this
-catches regressions in the *handoffs* (a status column no longer advanced, a storage key changing shape,
-scope/coverage worker mismatch). Needs Postgres + object storage (skips without docker).
+"""One fixture PDF through discovery sync, text extraction, scope extraction and coverage; catches regressions in the
+handoffs between phases.
 """
 
 from __future__ import annotations
@@ -30,26 +28,14 @@ STUB_DIR = FIXTURE_DIR / "llm_responses"
 AUDIT_FIXTURE = FIXTURE_DIR / "audits" / "spearbit_table.txt"
 
 
-# ---------------------------------------------------------------------------
-# LLM stub — scope-worker fixture stub expects a dir, not an individual file
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def llm_stub_dir(monkeypatch, tmp_path):
-    """Committed ``_default.json`` stub returns Pool/Vault/Strategy/Registry, all present in the Spearbit fixture
-    body so the scope validator drops nothing as hallucinated.
-    """
+    """The stub's names all appear in the Spearbit fixture, so the validator drops nothing."""
     committed = STUB_DIR / "_default.json"
     assert committed.exists()
     (tmp_path / "_default.json").write_text(committed.read_text())
     monkeypatch.setenv("PSAT_LLM_STUB_DIR", str(tmp_path))
     return tmp_path
-
-
-# ---------------------------------------------------------------------------
-# Worker bindings — SessionLocal swapped to the test DB engine
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -86,11 +72,6 @@ def _drive_batch(worker, db_session) -> None:
     for ar in worker._claim_batch(db_session):
         _, outcome = worker._process_row(ar)
         worker._persist_outcome(ar.id, outcome)
-
-
-# ---------------------------------------------------------------------------
-# Seed: protocol + one Pool Contract, to be matched by scope extraction
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -142,7 +123,6 @@ def test_full_audit_pipeline_from_discovery_row_to_coverage(
     protocol_id = seeded_protocol["protocol_id"]
     contract = seeded_protocol["contract"]
 
-    # --- Phase 1: discovery syncs a report into audit_reports ---
     url = "https://example.com/e2e-spearbit.pdf"
     reports = [
         {
@@ -162,8 +142,7 @@ def test_full_audit_pipeline_from_discovery_row_to_coverage(
     assert audit_row.text_extraction_status is None
     assert audit_row.scope_extraction_status is None
 
-    # --- Phase 2: text extraction worker ---
-    # Stub ``download_pdf`` with a real PDF body carrying the Spearbit scope text; pypdf, MinIO and DB run for real.
+    # pypdf, MinIO and the DB run for real; only the download is stubbed.
     pdf_body = minimal_pdf_with_text(AUDIT_FIXTURE.read_text())
     monkeypatch.setattr(
         "services.audits.text_extraction.download_pdf",
@@ -185,7 +164,6 @@ def test_full_audit_pipeline_from_discovery_row_to_coverage(
     assert "Pool" in stored_text
     assert "Vault" in stored_text
 
-    # --- Phase 3: scope extraction worker ---
     _drive_batch(scope_worker, db_session)
 
     db_session.expire_all()
@@ -196,13 +174,9 @@ def test_full_audit_pipeline_from_discovery_row_to_coverage(
     assert audit_row.scope_storage_key == f"audits/scope/{audit_id}.json"
     assert audit_row.scope_contracts is not None
     assert "Pool" in audit_row.scope_contracts
-    # The Spearbit fixture mentions ``abc123def456`` as the reviewed commit.
     assert audit_row.reviewed_commits and "abc123def456" in audit_row.reviewed_commits
 
-    # --- Phase 4: coverage written by the scope worker's inline refresh ---
-    # The scope worker calls ``upsert_coverage_for_audit`` in the same
-    # persist transaction; by the time we see scope_status=success, the
-    # audit_contract_coverage row is already durable.
+    # The scope worker writes coverage in the same persist transaction.
     coverage_rows = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit_id).all()
     assert len(coverage_rows) >= 1, "no coverage written after scope extraction"
     pool_row = next((r for r in coverage_rows if r.contract_id == contract.id), None)

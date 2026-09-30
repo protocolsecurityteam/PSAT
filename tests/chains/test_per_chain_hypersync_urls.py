@@ -20,8 +20,7 @@ from services.resolution.hypersync_bound import hypersync_url_for_chain
 
 MAINNET_URL = "https://eth.hypersync.xyz"
 BASE_URL = "https://base.hypersync.xyz"
-# Registry chain still marked indexer-disabled (hypersync_url=None): arbitrum, since Base gained a proven
-# HyperSync URL in Phase 2.
+# Arbitrum is still indexer-disabled; Base gained HyperSync in Phase 2.
 UNAVAILABLE_CHAIN_ID = 42161  # arbitrum
 
 EVENT_ADDRESS = "0x00000000000000000000000000000000c0ffee19"
@@ -40,7 +39,6 @@ class _FakeClient:
 
 @pytest.fixture
 def _capture_build_url(monkeypatch):
-    """Stub the shared client builder; record the URL every consumer passes it."""
     captured: dict[str, Any] = {}
 
     def _fake_build(_module: Any, *, url: str, bearer_token: str | None) -> _FakeClient:
@@ -52,24 +50,13 @@ def _capture_build_url(monkeypatch):
     return captured
 
 
-# --------------------------------------------------------------------------- #
-# registry anchor                                                             #
-# --------------------------------------------------------------------------- #
-
-
 def test_registry_drives_per_chain_hypersync_availability():
     assert hypersync_url_for_chain(1) == MAINNET_URL
     # Base has a HyperSync URL in the registry and is enabled here.
     assert hypersync_url_for_chain(8453) == BASE_URL
-    # A chain without proven coverage → indexer/repo disabled there.
     assert hypersync_url_for_chain(UNAVAILABLE_CHAIN_ID) is None
     # Unknown chain id degrades to unavailable, not a raise (unknown-chain validation is separate).
     assert hypersync_url_for_chain(999999) is None
-
-
-# --------------------------------------------------------------------------- #
-# external_check_materializer candidate scan                                  #
-# --------------------------------------------------------------------------- #
 
 
 def _stub_floor_defer(monkeypatch):
@@ -110,11 +97,6 @@ def test_external_check_unavailable_chain_skips_scan(monkeypatch, _capture_build
     assert "url" not in _capture_build_url  # no coverage → client never built
 
 
-# --------------------------------------------------------------------------- #
-# predicate_evaluator view-key membership scan                                #
-# --------------------------------------------------------------------------- #
-
-
 def _observed(outer: Any):
     from services.resolution.predicate_evaluator import _observed_event_key_words_from_hypersync
 
@@ -148,7 +130,6 @@ def test_observed_keys_unavailable_chain_skips_scan(monkeypatch, _capture_build_
 
 
 def test_observed_keys_meta_url_overrides_registry(monkeypatch, _capture_build_url):
-    """The meta override still wins (byte-identical precedence), even on an otherwise-unavailable chain."""
     import services.resolution.creation_block_floor as floor_mod
 
     monkeypatch.delenv("PSAT_HYPERSYNC_URL", raising=False)
@@ -161,6 +142,3 @@ def test_observed_keys_meta_url_overrides_registry(monkeypatch, _capture_build_u
     assert _capture_build_url["url"] == BASE_URL
 
 
-# --------------------------------------------------------------------------- #
-# mapping_enumerator default                                                   #
-# --------------------------------------------------------------------------- #

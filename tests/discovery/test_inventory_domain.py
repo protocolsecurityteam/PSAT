@@ -1,8 +1,3 @@
-"""Unit tests for services.discovery.inventory_domain.
-
-Covers regex constants, RateLimiter, pure utility helpers, and mocked
-external-service functions (Tavily search, LLM domain/page selection).
-"""
 
 from __future__ import annotations
 
@@ -39,10 +34,6 @@ from services.discovery.inventory_domain import (
     _tavily_search,
 )
 
-# ---------------------------------------------------------------------------
-# Regex constants
-# ---------------------------------------------------------------------------
-
 
 class TestAddressRE:
     @pytest.mark.parametrize(
@@ -63,7 +54,6 @@ class TestURLRE:
     def test_stops_at_angle_bracket(self):
         match = URL_RE.search('<a href="https://example.com/page">')
         assert match is not None
-        # Should stop before the closing quote or angle bracket
         assert ">" not in match.group()
 
 
@@ -71,11 +61,6 @@ class TestDomainRE:
     @pytest.mark.parametrize("value", ["docs.example.com", "my-app.example.com"], ids=["subdomain", "hyphenated"])
     def test_matches(self, value):
         assert DOMAIN_RE.match(value) is not None
-
-
-# ---------------------------------------------------------------------------
-# RateLimiter
-# ---------------------------------------------------------------------------
 
 
 class TestRateLimiter:
@@ -97,11 +82,6 @@ class TestRateLimiter:
         assert elapsed < 0.02  # should not need to wait
 
 
-# ---------------------------------------------------------------------------
-# Utility functions
-# ---------------------------------------------------------------------------
-
-
 class TestDebugLog:
     def test_enabled_prints_to_stderr(self, capsys):
         _debug_log(True, "hello debug")
@@ -118,7 +98,6 @@ class TestGetDomain:
             pytest.param("https://www.example.com", "example.com", id="strips_www"),
             pytest.param("https://docs.example.com", "docs.example.com", id="preserves_subdomain"),
             pytest.param("https://Example.COM/Page", "example.com", id="lowercases"),
-            # urlparse is lenient, but completely broken strings may return empty netloc
             pytest.param("", "", id="invalid_url_returns_empty"),
             pytest.param("https://example.com:8080/path", "example.com:8080", id="port_included_in_netloc"),
         ],
@@ -127,7 +106,6 @@ class TestGetDomain:
         assert _get_domain(url) == expected
 
     def test_valueerror_returns_empty(self, monkeypatch):
-        """Trigger the defensive ValueError branch in _get_domain."""
         from urllib import parse as _urlparse_mod
 
         _ = _urlparse_mod.urlparse  # keep reference before patching
@@ -227,19 +205,17 @@ class TestInferChain:
         ],
     )
     def test_text_fallback(self, text, expected):
-        # One case per distinct literal in _infer_chain's keyword ladder, including
-        # the ``optimistic``/``matic`` alias arms.
+        # One case per literal in the keyword ladder.
         assert _infer_chain("https://example.com", text) == expected
 
     def test_optimistic_etherscan_url_resolves_to_optimism(self):
-        # Regression: etherscan.io must not suffix-shadow its own subdomain entry.
+        # etherscan.io must not suffix-shadow its own subdomain entry.
         assert _infer_chain("https://optimistic.etherscan.io/address/0x1234", "") == "optimism"
 
     def test_unknown_when_no_clues(self):
         assert _infer_chain("https://example.com", "some random text") == "unknown"
 
     def test_url_takes_priority_over_text(self):
-        # URL says ethereum, text says arbitrum — URL should win
         assert _infer_chain("https://etherscan.io/address/0x1234", "arbitrum stuff") == "ethereum"
 
 
@@ -256,11 +232,6 @@ class TestResolveChain:
     )
     def test_resolve_chain(self, inferred, requested, expected):
         assert _resolve_chain(inferred, requested) == expected
-
-
-# ---------------------------------------------------------------------------
-# _maybe_domain
-# ---------------------------------------------------------------------------
 
 
 class TestMaybeDomain:
@@ -283,14 +254,8 @@ class TestMaybeDomain:
         assert _maybe_domain(value) == expected
 
 
-# ---------------------------------------------------------------------------
-# _fetch_page
-# ---------------------------------------------------------------------------
-
-
 class TestFetchPage:
-    # ``_fetch_page`` fetches through the SSRF guard (``utils.egress.safe_get``),
-    # so these stub that rather than the raw ``requests`` call.
+    # ``_fetch_page`` goes through ``utils.egress.safe_get``.
     @pytest.mark.parametrize(
         ("stub", "expected"),
         [
@@ -338,11 +303,6 @@ class TestFetchPage:
         _fetch_page("https://example.com", debug=True)
         captured = capsys.readouterr()
         assert "HTTP 500" in captured.err
-
-
-# ---------------------------------------------------------------------------
-# _tavily_search
-# ---------------------------------------------------------------------------
 
 
 class TestTavilySearch:
@@ -402,11 +362,6 @@ class TestTavilySearch:
         assert queries_used[0] == 4
         _tavily_search("q2", 5, queries_used, 10, [])
         assert queries_used[0] == 5
-
-
-# ---------------------------------------------------------------------------
-# _llm_select_domain
-# ---------------------------------------------------------------------------
 
 
 class TestLlmSelectDomain:
@@ -501,11 +456,6 @@ class TestLlmSelectDomain:
         assert extras == expected_extras
 
 
-# ---------------------------------------------------------------------------
-# _domain_candidates_from_results
-# ---------------------------------------------------------------------------
-
-
 class TestDomainCandidatesFromResults:
     def test_filters_explorers_and_low_trust(self):
         results = [
@@ -530,11 +480,6 @@ class TestDomainCandidatesFromResults:
     def test_skips_empty_urls(self):
         results = [{"url": "", "title": "No URL"}, {"url": "  ", "title": "Blank"}]
         assert _domain_candidates_from_results(results) == []
-
-
-# ---------------------------------------------------------------------------
-# _collect_in_domain_pages
-# ---------------------------------------------------------------------------
 
 
 class TestCollectInDomainPages:
@@ -567,11 +512,6 @@ class TestCollectInDomainPages:
     )
     def test_collects_exactly_one_page(self, results, domain):
         assert len(_collect_in_domain_pages(results, domain)) == 1
-
-
-# ---------------------------------------------------------------------------
-# _llm_select_pages
-# ---------------------------------------------------------------------------
 
 
 class TestLlmSelectPages:
@@ -637,11 +577,6 @@ class TestLlmSelectPages:
         assert result == ["https://example.com/a"]
 
 
-# ---------------------------------------------------------------------------
-# _dedupe_results_by_url
-# ---------------------------------------------------------------------------
-
-
 class TestDedupeResultsByUrl:
     @pytest.mark.parametrize(
         ("results", "expected"),
@@ -686,11 +621,6 @@ class TestDedupeResultsByUrl:
         deduped = _dedupe_results_by_url(results)
         assert len(deduped) == 1
         assert deduped[0]["score"] == 0.9
-
-
-# ---------------------------------------------------------------------------
-# _discover_contract_inventory_pages (integration with mocks)
-# ---------------------------------------------------------------------------
 
 
 class TestDiscoverContractInventoryPages:
@@ -768,13 +698,7 @@ class TestDiscoverContractInventoryPages:
         assert recommended == []
 
 
-# ---------------------------------------------------------------------------
-# Step 4: extract_inventory_entries_from_pages parallel fetch
-# ---------------------------------------------------------------------------
-
-
 class TestExtractInventoryEntriesFromPagesParallel:
-    """Page fetches run concurrently; entries are still emitted in URL input order."""
 
     def test_fetches_all_urls_and_preserves_order(self, monkeypatch):
         from services.discovery import inventory_extract
@@ -798,7 +722,6 @@ class TestExtractInventoryEntriesFromPagesParallel:
         out = inventory_extract.extract_inventory_entries_from_pages(urls, requested_chain=None)
 
         assert sorted(fetched) == sorted(urls)
-        # extract is called in input URL order even though fetches finished out of order.
         assert seen_text_order == urls
         assert [entry["url"] for entry in out] == urls
 

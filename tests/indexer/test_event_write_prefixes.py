@@ -1,4 +1,3 @@
-"""Write budgets apply across topics and never split one block."""
 
 from dataclasses import replace
 

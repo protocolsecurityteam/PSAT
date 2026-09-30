@@ -1,5 +1,3 @@
-"""Offline integration tests for the contract inventory pipeline: scoring, dedup, chain-resolution and HTML
-extraction end-to-end. No network calls."""
 
 from typing import Any
 
@@ -21,22 +19,16 @@ from services.discovery.inventory_extract import (
 
 @pytest.fixture(autouse=True)
 def _stub_inventory_search(monkeypatch):
-    """Offline: the orchestrator runs a broad Tavily search + LLM domain pick before
-    page extraction. Stub both (no Tavily/OpenRouter); tests that exercise specific
-    search/LLM results override these in-body."""
+    """The orchestrator runs a broad Tavily search and an LLM domain pick; tests needing specific results override
+    in-body.
+    """
     monkeypatch.setattr("services.discovery.inventory._tavily_search", lambda *a, **k: [])
     monkeypatch.setattr("services.discovery.inventory._llm_select_domain", lambda *a, **k: (None, []))
 
 
 @pytest.fixture
 def _all_inventory_chains_enabled(monkeypatch):
-    """The resolver only probes allowlisted chains; multichain tests need them all."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", ",".join(str(i) for i in CHAIN_IDS.values()))
-
-
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
 
 
 def _entry(
@@ -56,11 +48,6 @@ def _entry(
         "explorer_url": explorer_url,
         "chain_from_hint": False,
     }
-
-
-# ---------------------------------------------------------------------------
-# _build_contracts — realistic multi-entry scenarios
-# ---------------------------------------------------------------------------
 
 
 class TestBuildContracts:
@@ -131,11 +118,6 @@ class TestBuildContracts:
         assert "Beta" in contracts[0].get("aliases", [])
 
 
-# ---------------------------------------------------------------------------
-# extract_inventory_entries_from_page_text — realistic HTML
-# ---------------------------------------------------------------------------
-
-
 class TestExtractFromPageText:
     def test_table_with_chain_headings_and_explorer_links(self):
         html = """
@@ -179,11 +161,6 @@ class TestExtractFromPageText:
         assert not any(e["address"] == "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" for e in entries)
 
 
-# ---------------------------------------------------------------------------
-# search_protocol_inventory — orchestrator with mocked externals
-# ---------------------------------------------------------------------------
-
-
 class TestSearchProtocolInventoryOffline:
     def test_validation_errors(self):
         with pytest.raises(ValueError, match="must not be empty"):
@@ -205,9 +182,7 @@ class TestSearchProtocolInventoryOffline:
             _entry(address="0x" + "a" * 40, name="Vault", chain="ethereum"),
             _entry(address="0x" + "b" * 40, name="Router", chain="arbitrum", kind="official_inventory_link"),
         ]
-        # Even with a domain-shaped input, the orchestrator now runs the broad
-        # Tavily search + LLM domain selection to surface companion docs/github
-        # hosts. Stub them so this test stays offline and deterministic.
+        # The orchestrator runs the broad search even for a domain-shaped input.
         monkeypatch.setattr(
             "services.discovery.inventory._tavily_search",
             lambda *_a, **_kw: [],
@@ -295,11 +270,6 @@ class TestSearchProtocolInventoryOffline:
         assert deployer_only["name"] == "NewContract"
 
 
-# ---------------------------------------------------------------------------
-# _build_contracts — deployer merge scenarios
-# ---------------------------------------------------------------------------
-
-
 class TestBuildContractsDeployerMerge:
     def test_deployer_unknown_chain_remapped_by_tavily(self):
         addr = "0x" + "a" * 40
@@ -353,11 +323,6 @@ class TestBuildContractsDeployerMerge:
         assert len(contracts) == 1
         assert contracts[0]["name"] == "DeployerFound"
         assert contracts[0]["source"] == ["deployer_expansion"]
-
-
-# ---------------------------------------------------------------------------
-# expand_from_deployers — mocked Etherscan calls
-# ---------------------------------------------------------------------------
 
 
 class TestExpandFromDeployers:
@@ -466,11 +431,6 @@ class TestExpandFromDeployers:
 
         entries = expand_from_deployers([seed])
         assert entries == []
-
-
-# ---------------------------------------------------------------------------
-# _group_multi_deployments — multi-chain grouping
-# ---------------------------------------------------------------------------
 
 
 class TestGroupMultiDeployments:
@@ -586,11 +546,6 @@ class TestGroupMultiDeployments:
             assert "rank_score" in dep
 
 
-# ---------------------------------------------------------------------------
-# resolve_unknown_chains — mocked RPC probing
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.usefixtures("_all_inventory_chains_enabled")
 class TestResolveUnknownChains:
     def test_resolves_unknown_to_correct_chain(self, monkeypatch):
@@ -621,7 +576,6 @@ class TestResolveUnknownChains:
 
     def test_no_unknowns_is_noop(self, monkeypatch):
         contracts = [{"name": "A", "address": "0x" + "a" * 40, "chains": ["ethereum"]}]
-        # _probe_chains would fail if called — proves no probing happens.
         monkeypatch.setattr(
             "services.discovery.chain_resolver._probe_chains",
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("should not be called")),
@@ -712,10 +666,7 @@ class TestEvidenceBasedChainMembership:
         assert set(probed) == {"1"}
 
     def test_uncorroborated_hit_is_candidate_only(self, monkeypatch):
-        """(b) No declared evidence: a probe hit is a candidate, not membership.
-
-        ``chains`` stays ``["unknown"]``, keeping it out of ``contracts`` on arbitrum and off the job queue.
-        """
+        """No declared evidence, so a probe hit stays a candidate and off the job queue."""
 
         def fake_batch_get_code(rpc_url, addresses):
             hit = rpc_url.endswith("/evm/42161")
@@ -746,15 +697,13 @@ class TestEvidenceBasedChainMembership:
         assert "chain_candidates" not in contract
 
     def test_none_declared_chains_keeps_legacy_all_chain_probe(self, monkeypatch):
-        """Backward compat: ``declared_chains=None`` keeps the legacy all-chain probe used by standalone callers."""
         probed = self._record_probed_chain_ids(monkeypatch)
         contracts = [{"name": "U", "address": "0x" + "b" * 40, "chains": ["unknown"]}]
         resolve_unknown_chains(contracts, declared_chains=None)
         assert len(set(probed)) > 1
 
     def test_search_inventory_narrows_probe_to_declared(self, monkeypatch):
-        """Orchestrator: a declared set narrows the probe (Bridge has code on arbitrum but only ethereum is declared,
-        so arbitrum is never probed)."""
+        """Bridge has code on arbitrum but only ethereum is declared."""
         addr_known = "0x" + "a" * 40
         addr_unknown = "0x" + "b" * 40
         fake_entries = [
@@ -780,8 +729,6 @@ class TestEvidenceBasedChainMembership:
         assert "arbitrum" not in by_name["Bridge"].get("chains", [])
 
     def test_search_inventory_records_candidate_in_artifact(self, monkeypatch):
-        """End-to-end: with no declared evidence, an off-chain hit rides the
-        inventory (discovery artifact) as a candidate, not as a membership."""
         addr_unknown = "0x" + "b" * 40
         fake_entries = [_entry(address=addr_unknown, name="Bridge", chain="unknown")]
         monkeypatch.setattr(
@@ -806,11 +753,6 @@ class TestEvidenceBasedChainMembership:
         bridge = {c["name"]: c for c in result["contracts"]}["Bridge"]
         assert bridge["chains"] == ["unknown"]
         assert bridge["chain_candidates"] == ["arbitrum"]
-
-
-# ---------------------------------------------------------------------------
-# enrich_with_activity — mocked Etherscan activity lookups
-# ---------------------------------------------------------------------------
 
 
 class TestEnrichWithActivity:
@@ -875,25 +817,15 @@ class TestEnrichWithActivity:
 
         result = enrich_with_activity(contracts)
         assert called_with_chain_id == []
-        # Ranked at the floor: activity score 0 (not the mainnet-fetched score,
-        # not the 0.5 neutral used for a supported chain with no data).
+        # Not 0.5, the neutral used for a supported chain with no data.
         assert result[0]["activity"]["score"] == 0.0
         assert result[0]["activity"]["last_active"] is None
-
-
-# ---------------------------------------------------------------------------
-# Full orchestrator — chain resolution + activity through search_protocol_inventory
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.usefixtures("_all_inventory_chains_enabled")
 class TestOrchestratorIntegration:
     def test_pipeline_with_chain_resolution(self, monkeypatch):
-        """End-to-end: entries → build → chain resolve → group → output.
-
-        Activity ranking is no longer in this orchestrator (the selection stage owns it), so contracts carry no
-        ``activity`` / ``rank_score``.
-        """
+        """The selection stage owns activity ranking."""
         addr_known = "0x" + "a" * 40
         addr_unknown = "0x" + "b" * 40
         fake_entries = [
@@ -935,7 +867,6 @@ class TestOrchestratorIntegration:
         assert "arbitrum" in by_name["Bridge"]["chains"]
         assert "unknown" not in by_name["Bridge"]["chains"]
 
-        # Activity ranking is no longer part of the orchestrator.
         for c in contracts:
             assert "activity" not in c
             assert "rank_score" not in c

@@ -1,8 +1,4 @@
-"""Unit tests for the ``AuditRowWorker`` base-class behaviours the subclass integration suites skip:
-``_handle_signal``, ``_log_outcome`` formatting, ``_recover_stale_rows`` with nothing stuck, and ``run_loop``
-(idle sleep, periodic stale recovery, row processing, unexpected ``_process_row`` exceptions).
-No real Postgres or services; ``SessionLocal`` is patched with a dummy exposing only ``close()``.
-"""
+"""``SessionLocal`` is patched with a dummy exposing only ``close()``."""
 
 from __future__ import annotations
 
@@ -17,10 +13,6 @@ import pytest
 from workers import audit_row_worker as arw_module
 from workers.audit_row_worker import AuditRowWorker
 
-# ---------------------------------------------------------------------------
-# Minimal concrete subclass driving only what the tests need.
-# ---------------------------------------------------------------------------
-
 
 class _Outcome:
     def __init__(self, *, status: str = "success", error: str | None = None) -> None:
@@ -34,9 +26,7 @@ class _FakeRow:
 
 
 class _TestWorker(AuditRowWorker):
-    """Concrete subclass that records every method call. ``run_loop`` tests drive it via ``_next_batch``: each
-    call returns the next queued batch, then sets ``_running = False`` so the loop exits after N iterations.
-    """
+    """Each ``_next_batch`` call returns the next queued batch, then stops the loop."""
 
     worker_name = "TestWorker"
     batch_size = 2
@@ -68,7 +58,6 @@ class _TestWorker(AuditRowWorker):
         self._claim_calls += 1
         if self._batches:
             return self._batches.pop(0)
-        # Out of batches — let the caller decide when to stop. Default: no work.
         return []
 
     def _recover_stale_rows(self, session) -> None:
@@ -84,8 +73,6 @@ class _TestWorker(AuditRowWorker):
 
 @pytest.fixture(autouse=True)
 def _patch_session_local(monkeypatch):
-    """``run_loop`` instantiates ``SessionLocal()`` every poll. Replace it
-    with a context-managerless dummy that only needs ``close()``."""
 
     class _DummySession:
         def close(self) -> None:
@@ -95,16 +82,8 @@ def _patch_session_local(monkeypatch):
     yield
 
 
-# ---------------------------------------------------------------------------
-# _handle_signal — flips _running to False and logs once.
-# ---------------------------------------------------------------------------
-
-
 def test_handle_signal_flips_running_false(caplog):
-    # ``utils.logging.configure_logging`` runs in ``AuditRowWorker.__init__``
-    # and on its first call wipes the root logger's pre-existing handlers
-    # — including pytest's ``LogCaptureHandler``. Pre-mark the root as
-    # configured so the call short-circuits and caplog stays attached.
+    # configure_logging would wipe pytest's LogCaptureHandler; pre-marking the root keeps caplog attached.
     import logging as _stdlib_logging
 
     from utils import logging as _psat_logging
@@ -115,14 +94,8 @@ def test_handle_signal_flips_running_false(caplog):
     with caplog.at_level(logging.INFO, logger=worker.log.name):
         worker._handle_signal(_signal.SIGTERM, None)
     assert worker._running is False
-    # Make sure we logged the signal — ops relies on this line to know why
-    # a worker died.
+    # Ops relies on this line to know why a worker died.
     assert any("received signal" in r.message for r in caplog.records)
-
-
-# ---------------------------------------------------------------------------
-# _log_outcome — default formatting (with / without error).
-# ---------------------------------------------------------------------------
 
 
 class TestLogOutcomeDefault:
@@ -133,8 +106,7 @@ class TestLogOutcomeDefault:
             pytest.param(
                 7, _Outcome(status="failed", error="boom"), "Audit 7 → failed (boom)", True, id="failed-error-in-parens"
             ),
-            # A subclass handing back something without ``status`` must not crash; log ``?``
-            # so the operator can still see the row moved.
+            # A subclass returning something without ``status`` must not crash.
             pytest.param(9, object(), "Audit 9 → ?", False, id="non-outcome-question-mark"),
         ],
     )
@@ -145,9 +117,6 @@ class TestLogOutcomeDefault:
         messages = [r.getMessage() for r in caplog.records]
         assert any(expected in m for m in messages)
         assert any("(" in m and ")" in m for m in messages) is has_parens
-
-
-# _recover_stale_rows — no-stale-rows path (rollback, not commit); MagicMock session reports an empty result.
 
 
 class _RecoveryWorker(AuditRowWorker):
@@ -172,9 +141,7 @@ class _RecoveryWorker(AuditRowWorker):
 
 class TestRecoverStaleRows:
     def test_no_stale_rows_rolls_back(self):
-        """When the RETURNING-less UPDATE finds nothing, the session must
-        roll back the implicit transaction so we don't sit on an idle
-        txn between polls — Postgres will eventually kill it as stuck."""
+        """Otherwise the idle transaction sits between polls until Postgres kills it."""
         worker = _RecoveryWorker()
         session = MagicMock()
         session.execute.return_value = iter([])  # zero rows returned
@@ -183,8 +150,6 @@ class TestRecoverStaleRows:
         session.commit.assert_not_called()
 
     def test_stale_rows_commits_and_logs(self, caplog):
-        """Rows returned → log a warning and commit the reset. We only
-        need a shape that behaves like SQLAlchemy's result iterator."""
         worker = _RecoveryWorker()
         session = MagicMock()
         row1 = MagicMock()
@@ -199,16 +164,8 @@ class TestRecoverStaleRows:
         assert any("reset 2 stale row" in r.getMessage() for r in caplog.records)
 
 
-# ---------------------------------------------------------------------------
-# run_loop — the glue that the integration tests never call directly
-# ---------------------------------------------------------------------------
-
-
 class TestRunLoop:
     def test_processes_claimed_batch_and_exits_on_signal(self, caplog):
-        """Smoke test for the whole loop: claim, process in the pool, persist, log, then flip ``_running = False`` to
-        exit.
-        """
         rows = [_FakeRow(100), _FakeRow(101)]
 
         class _ExitAfterOneBatchWorker(_TestWorker):
@@ -224,13 +181,11 @@ class TestRunLoop:
         assert sorted(pid for pid, _ in worker.persisted) == [100, 101]
         assert worker._claim_calls >= 1
         assert worker._recover_calls >= 1
-        # The startup + claim info lines make up the operator's breadcrumb.
         messages = [r.getMessage() for r in caplog.records]
         assert any("starting" in m for m in messages)
         assert any("claimed 2 audit" in m for m in messages)
 
     def test_no_work_sleeps_and_polls_again(self, monkeypatch):
-        """Empty claim -> idle sleep (the caught-up hot path); exit after one so the loop doesn't run forever."""
         sleeps: list[float] = []
 
         def fake_sleep(secs: float) -> None:
@@ -247,17 +202,12 @@ class TestRunLoop:
         worker = _ExitAfterIdleWorker()
         worker.run_loop()
 
-        # Either the sleep ran (we patched it to no-op) or the loop exited
-        # before hitting the sleep line. The contract matters: no rows
-        # were processed.
         assert worker.processed == []
         assert worker.persisted == []
         assert sleeps == [0.0]
 
     def test_unexpected_process_row_exception_is_swallowed(self, caplog):
-        """``_process_row`` is contracted to never raise. The one here does
-        anyway — the loop must log the exception and keep draining rather
-        than leaving the row in 'processing' until stale recovery."""
+        """The loop must keep draining instead of leaving the row in 'processing' until stale recovery."""
         rows = [_FakeRow(200), _FakeRow(201)]
 
         class _RaisingWorker(_TestWorker):
@@ -279,9 +229,7 @@ class TestRunLoop:
         assert any("Unexpected error" in r.getMessage() for r in caplog.records)
 
     def test_stale_recovery_runs_on_poll_cadence(self):
-        """With ``stale_recovery_every_n_polls=1``, every poll invokes the
-        recovery pass. The counter is the only way to detect a stuck worker
-        from another process — it must not be skipped on idle polls."""
+        """Stale recovery is the only way to detect a stuck worker from another process."""
 
         class _ExitAfterTwoPolls(_TestWorker):
             stale_recovery_every_n_polls = 1
@@ -300,9 +248,7 @@ class TestRunLoop:
 
 
 def test_recovery_cutoff_is_configured_seconds_in_past():
-    """The ``cutoff`` passed to ``_stale_recovery_query`` must be exactly
-    ``stale_processing_seconds`` before ``now``. Without this guarantee,
-    a subclass could unintentionally reset rows that are still in flight."""
+    """Otherwise a subclass could reset rows still in flight."""
     captured: dict[str, datetime] = {}
 
     class _CaptureCutoffWorker(_RecoveryWorker):
@@ -321,18 +267,9 @@ def test_recovery_cutoff_is_configured_seconds_in_past():
     assert before <= captured["cutoff"] <= after
 
 
-# max_concurrent tunable on AuditTextExtractionWorker / AuditScopeExtractionWorker.
-
-
 @pytest.fixture()
 def _restore_audit_worker_modules():
-    """Reload the two worker modules back to their unset-env defaults.
-
-    ``importlib.reload`` rebinds ``max_concurrent`` on the CLASS OBJECT, and the
-    class object outlives the test: without this, every later test in the
-    process — in any file — sees the 3/5 this test dialled in. The reload is the
-    point of the test, so the leak is contained here rather than avoided.
-    """
+    """``importlib.reload`` rebinds ``max_concurrent`` on the class, which outlives the test."""
     yield
     import importlib
     import os
@@ -340,9 +277,7 @@ def _restore_audit_worker_modules():
     import workers.audit_scope_extraction as scope_mod
     import workers.audit_text_extraction as text_mod
 
-    # Clear the overrides here rather than relying on monkeypatch's undo
-    # running first — finalizer order between two same-scope fixtures is not
-    # something this restore should depend on.
+    # Finalizer order between same-scope fixtures is not guaranteed.
     os.environ.pop("PSAT_AUDIT_TEXT_CONCURRENCY", None)
     os.environ.pop("PSAT_AUDIT_SCOPE_CONCURRENCY", None)
     importlib.reload(text_mod)
@@ -350,8 +285,6 @@ def _restore_audit_worker_modules():
 
 
 def test_audit_concurrency_overridable_via_env(_restore_audit_worker_modules, monkeypatch):
-    """The ``PSAT_AUDIT_*_CONCURRENCY`` env vars override the in-code defaults
-    so an operator can dial down a saturated pool without code changes."""
     monkeypatch.setenv("PSAT_AUDIT_TEXT_CONCURRENCY", "3")
     monkeypatch.setenv("PSAT_AUDIT_SCOPE_CONCURRENCY", "5")
     import importlib

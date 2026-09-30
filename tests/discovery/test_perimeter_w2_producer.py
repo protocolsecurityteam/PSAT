@@ -132,7 +132,6 @@ def test_w2_protocol_mismatch_and_chain_mismatch_admit_nothing(db_session):
         )
         is None
     )
-    # A CREATE2 twin's pointer on another chain is not evidence on this one.
     member_other_chain = _contract(
         db_session, ADDR(0x412), chain="base", protocol_id=p1.id, implementation=candidate.address
     )
@@ -185,7 +184,6 @@ def test_witness_pass_nominates_and_promotes_w1_holders_only(db_session, monkeyp
     )
     without_w1 = _contract(db_session, ADDR(0x432), is_proxy=True, implementation=parent.address)
     db_session.flush()
-    # Probes already ran on both; a probe finding NO code cannot mint W1.
     for row in (with_w1, without_w1):
         db_session.add(
             ContractProbeAttempt(contract_id=row.id, chain_id=1, block_number=40, results={"status": "probed"})

@@ -1,4 +1,3 @@
-"""Shared fixtures for the live test suite. See CLAUDE.md for the full writeup."""
 
 from __future__ import annotations
 
@@ -12,19 +11,10 @@ import requests
 
 WETH_ADDRESS = "0xC02aaA39b223FE8D0A0e5c4F27eAD9083C756Cc2"
 
-# These bound job *completion* (worker-side pipeline wall time), not the HTTP
-# calls that poll for it. The CI live runner is a shared-cpu-8x Fly machine:
-# under CPU steal the workers get starved and a job that resolves in ~3 min of
-# real CPU stretches well past the old 10-min ceiling, timing out a healthy
-# pipeline. The raised defaults (single 30 min, company 60 min) absorb that
-# steal; override per-environment via PSAT_LIVE_SINGLE_TIMEOUT /
-# PSAT_LIVE_COMPANY_TIMEOUT. Do NOT bump the per-request `timeout=` on the
-# session calls to match — those guard against a hung HTTP socket, a different
-# failure mode from worker starvation.
+# These bound worker-side job completion, not the polling HTTP calls. Starved CI workers stretch ~3 min jobs well past
+# 10 min; override via PSAT_LIVE_SINGLE_TIMEOUT / PSAT_LIVE_COMPANY_TIMEOUT.
 DEFAULT_SINGLE_TIMEOUT = int(os.environ.get("PSAT_LIVE_SINGLE_TIMEOUT", "1800"))
-# Company runs on a cold preview (shared-cpu-2x, 2GB RAM) spend ~2 min
-# in selection alone because ranking calls Etherscan per candidate and
-# inventories grow past 400 rows after the first run.
+# Cold-preview company runs spend minutes in selection alone.
 DEFAULT_COMPANY_TIMEOUT = int(os.environ.get("PSAT_LIVE_COMPANY_TIMEOUT", "3600"))
 DEFAULT_POLL_INTERVAL = 5
 
@@ -39,7 +29,6 @@ def _parse_dt(s: str) -> datetime:
 
 
 class LiveClient:
-    """Thin wrapper over a deployed PSAT API."""
 
     def __init__(self, base_url: str, admin_key: str) -> None:
         self.base_url = base_url.rstrip("/")
@@ -49,10 +38,7 @@ class LiveClient:
         # Preparation has its own bounded retry loop, without adapter retries.
         self._company_session = requests.Session()
         self._company_session.headers.update(self._session.headers)
-        # Retry idempotent reads on transient 5xx. Previews occasionally return
-        # a one-shot 500 when a worker commits and the read lands mid-refresh
-        # (e.g. ``/api/analyses`` right after a fixture finishes). 3 retries
-        # with exponential backoff erase the flake without masking real 5xx.
+        # Previews occasionally 500 once when a read lands mid-refresh.
         from requests.adapters import HTTPAdapter
         from urllib3.util.retry import Retry
 
@@ -73,7 +59,7 @@ class LiveClient:
         return f"{self.base_url}{path}"
 
     def health(self, timeout: float = 5) -> requests.Response:
-        # Bare requests (no auth) so a bad admin key doesn't mask reachability.
+        # No auth, so a bad admin key doesn't mask reachability.
         return requests.get(self._url("/api/health"), timeout=timeout)
 
     def is_healthy(self) -> bool:
@@ -92,7 +78,6 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
-    # -- analyze -------------------------------------------------------------
 
     def analyze(self, address: str) -> dict[str, Any]:
         r = self._session.post(self._url("/api/analyze"), json={"address": address}, timeout=15)
@@ -117,7 +102,6 @@ class LiveClient:
         return r.json()
 
     def cancel_queued_company_jobs(self, company: str) -> dict[str, Any]:
-        """Delete every ``queued`` job tagged to *company*; teardown for analyze-remaining."""
         r = self._session.delete(
             self._url(f"/api/company/{company}/queued-jobs"),
             timeout=30,
@@ -126,7 +110,7 @@ class LiveClient:
         return r.json()
 
     def refresh_company_coverage(self, company: str, verify_source_equivalence: bool = False) -> dict[str, Any]:
-        # Skip the per-file Etherscan equivalence pass — rate-limited, irrelevant to row count.
+        # The Etherscan equivalence pass is rate-limited and irrelevant to row count.
         r = self._session.post(
             self._url(f"/api/company/{company}/refresh_coverage"),
             params={"verify_source_equivalence": str(verify_source_equivalence).lower()},
@@ -136,10 +120,8 @@ class LiveClient:
         return r.json()
 
     def reextract_audit_scope(self, audit_id: int) -> requests.Response:
-        # Raw Response so callers can inspect 409 (text extraction not complete).
         return self._session.post(self._url(f"/api/audits/{audit_id}/reextract_scope"), timeout=15)
 
-    # -- reads ---------------------------------------------------------------
 
     def job(self, job_id: str) -> dict[str, Any]:
         r = self._session.get(self._url(f"/api/jobs/{job_id}"), timeout=15)
@@ -155,7 +137,6 @@ class LiveClient:
         return [j for j in self.jobs() if (j.get("request") or {}).get("parent_job_id") == parent_job_id]
 
     def artifact(self, job_id: str, artifact_name: str) -> dict | str | None:
-        """Fetch this fixture job's artifact, independent of newer same-name runs."""
         r = self._session.get(
             self._url(f"/api/analyses/{job_id}/artifact/{artifact_name}.json"),
             timeout=15,
@@ -175,7 +156,6 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
-    # -- company -------------------------------------------------------------
 
     def company_response(self, company: str, section: str = "", *, wait_seconds: float = 60) -> requests.Response:
         suffix = f"/{section}" if section else ""
@@ -205,9 +185,7 @@ class LiveClient:
         return r.json()
 
     def company_score(self, company: str) -> requests.Response:
-        # Raw Response: 404 is a legitimate answer (no fold has run yet on a
-        # fresh preview) and the caller decides whether that is a skip or a
-        # failure. Raising here would make the two indistinguishable.
+        # 404 is legitimate on a fresh preview; the caller decides skip vs failure.
         return self._session.get(self._url(f"/api/company/{company}/score"), timeout=30)
 
     def fleet(self) -> dict[str, Any]:
@@ -215,7 +193,6 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
-    # -- address labels ------------------------------------------------------
 
     def list_address_labels(self) -> dict[str, Any]:
         r = self._session.get(self._url("/api/address_labels"), timeout=15)
@@ -232,7 +209,6 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
-    # -- monitoring ----------------------------------------------------------
 
     def list_monitored_events(self, limit: int = 50) -> list[dict[str, Any]]:
         r = self._session.get(self._url("/api/monitored-events"), params={"limit": limit}, timeout=15)
@@ -245,13 +221,11 @@ class LiveClient:
         return r.json()
 
     def audit_text(self, audit_id: int) -> requests.Response:
-        # Raw Response so tests can distinguish 200 / 409 (in progress) / 503 (storage down).
         return self._session.get(self._url(f"/api/audits/{audit_id}/text"), timeout=30)
 
     def audit_pdf(self, audit_id: int) -> requests.Response:
         return self._session.get(self._url(f"/api/audits/{audit_id}/pdf"), timeout=60)
 
-    # -- audits --------------------------------------------------------------
 
     def add_audit(self, company: str, payload: dict[str, Any]) -> dict[str, Any]:
         r = self._session.post(
@@ -268,7 +242,6 @@ class LiveClient:
         return r.json()
 
     def audit_scope(self, audit_id: int) -> requests.Response:
-        # Raw Response so callers can inspect 409 ("not ready yet").
         return self._session.get(self._url(f"/api/audits/{audit_id}/scope"), timeout=15)
 
     def delete_audit(self, audit_id: int) -> dict[str, Any]:
@@ -292,13 +265,7 @@ class LiveClient:
         timeout: float = DEFAULT_COMPANY_TIMEOUT,
         interval: float = DEFAULT_POLL_INTERVAL * 2,
     ) -> dict[str, Any]:
-        """Poll the audit row until scope extraction reaches success/failed.
-
-        Also bails out early if text extraction failed: the scope worker only
-        claims rows where ``text_extraction_status == 'success'``
-        (workers/audit_scope_extraction.py), so a transient PDF-download
-        failure would otherwise stall the poll for the full timeout.
-        """
+        """Bail early on a failed text extraction; the scope worker only claims text successes."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             row = self.get_audit(audit_id)
@@ -309,7 +276,6 @@ class LiveClient:
             time.sleep(interval)
         raise TimeoutError(f"Audit {audit_id} did not finish scope extraction within {timeout}s")
 
-    # -- monitored contracts (PATCH) ----------------------------------------
 
     def list_monitored_contracts(
         self,
@@ -334,7 +300,6 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
-    # -- protocol monitoring -------------------------------------------------
 
     def protocol_monitoring(self, protocol_id: int) -> list[dict[str, Any]]:
         r = self._session.get(self._url(f"/api/protocols/{protocol_id}/monitoring"), timeout=15)
@@ -366,7 +331,6 @@ class LiveClient:
         return r.json()
 
     def re_enroll_protocol(self, protocol_id: int, chain: str = "ethereum") -> dict[str, Any]:
-        # Hits live RPC + classifier; generous timeout for cold previews.
         r = self._session.post(
             self._url(f"/api/protocols/{protocol_id}/re-enroll"),
             params={"chain": chain},
@@ -389,7 +353,6 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
-    # -- polling -------------------------------------------------------------
 
     def poll_job_until_done(
         self,
@@ -397,14 +360,7 @@ class LiveClient:
         timeout: float = DEFAULT_SINGLE_TIMEOUT,
         interval: float = DEFAULT_POLL_INTERVAL,
     ) -> dict[str, Any]:
-        """Poll ``/api/jobs/{id}`` until status is terminal or timeout fires.
-
-        ``failed_terminal`` is a distinct ``JobStatus`` enum value introduced
-        for deterministic-from-the-start failures (and retry-exhausted
-        transient failures); it is just as terminal as ``completed`` /
-        ``failed``. Treating it as non-terminal keeps the loop alive
-        forever and times out on rows that already settled.
-        """
+        """``failed_terminal`` is as terminal as ``completed``."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             status = self.job(job_id)
@@ -419,7 +375,6 @@ class LiveClient:
         timeout: float = DEFAULT_COMPANY_TIMEOUT,
         interval: float = DEFAULT_POLL_INTERVAL * 2,
     ) -> list[dict[str, Any]]:
-        """Poll ``/api/jobs`` until every child of *parent_job_id* is terminal."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             children = self.children_of(parent_job_id)
@@ -428,7 +383,6 @@ class LiveClient:
             time.sleep(interval)
         return self.children_of(parent_job_id)
 
-    # -- utilities -----------------------------------------------------------
 
     @staticmethod
     def job_duration_seconds(job: dict[str, Any]) -> float:
@@ -436,7 +390,6 @@ class LiveClient:
 
     @staticmethod
     def job_window(job: dict[str, Any]) -> tuple[datetime, datetime]:
-        """Return the (created_at, updated_at) datetimes for a job."""
         return _parse_dt(job["created_at"]), _parse_dt(job["updated_at"])
 
     def submit_and_wait(
@@ -458,24 +411,9 @@ class LiveClient:
         )
 
 
-# ---------------------------------------------------------------------------
-# Pytest hooks / fixtures
-# ---------------------------------------------------------------------------
-
-
-# Tests that are provably read-only, environment-agnostic, and anonymous. These
-# get @pytest.mark.smoke so production CI can exercise the public Cloudflare path
-# without a human Access session or admin key.
-#
-# Audited 2026-04-24:
-# - selected test_health.py checks: GET /api/health, /, and /assets
-# - test_monitoring_reads.py: public GET monitoring/event lists, shape-only
-# - selected test_auth_and_errors.py check: anonymous POST denied before any write
-#
-# Deliberately excluded from smoke (still run on PR previews via `live` marker):
-# - test_cors.py: asserts ACAO == preview's own origin; prod uses a custom origin
-# - test_pipeline_health.py: flags wedged jobs, which is pre-existing state, not
-#   a deploy regression — would cause false rollbacks
+# Provably read-only, anonymous tests, tagged smoke so production CI can run them without an admin key.
+# test_cors.py and test_pipeline_health.py are excluded: prod has a custom origin, and wedged jobs are pre-existing
+# state that would cause false rollbacks.
 SMOKE_SAFE_TESTS = {
     ("test_health.py", "test_health_reports_ok"),
     ("test_health.py", "test_spa_fallback_serves_frontend"),
@@ -487,8 +425,6 @@ SMOKE_SAFE_TESTS = {
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-tag every test under ``tests/live/`` with @pytest.mark.live;
-    tag the read-only subset with @pytest.mark.smoke as well."""
     live_mark = pytest.mark.live
     smoke_mark = pytest.mark.smoke
     for item in items:
@@ -525,7 +461,6 @@ def public_live_client(live_base_url: str) -> LiveClient:
 
 @pytest.fixture(scope="session", autouse=True)
 def _require_live_api(live_base_url: str):
-    """Health-gate the entire live suite once per session."""
     client = LiveClient(live_base_url, "")
     if not client.is_healthy():
         pytest.skip(f"API not reachable at {client.base_url}")
@@ -533,7 +468,6 @@ def _require_live_api(live_base_url: str):
 
 @pytest.fixture(scope="session")
 def analyzed_weth(live_client: LiveClient) -> dict[str, Any]:
-    """Submit WETH once per session; dependent tests reuse the result."""
     job = live_client.submit_and_wait(WETH_ADDRESS)
     if job["status"] != "completed":
         pytest.fail(f"WETH analysis did not complete on {live_client.base_url}: {job.get('error')}")
@@ -542,32 +476,21 @@ def analyzed_weth(live_client: LiveClient) -> dict[str, Any]:
 
 @pytest.fixture(scope="session")
 def cached_weth(analyzed_weth, live_client: LiveClient) -> dict[str, Any]:
-    """Second WETH submission — exercised by test_cache.py to verify the static cache.
-
-    Session-scoped and ordered before ``analyzed_company`` so the cache-hit run
-    doesn't queue behind etherfi child analyses on contended previews. A real
-    incident saw this submission sit 12min in worker queues behind concurrent
-    company children before completing; with this ordering it finishes in seconds.
-    """
+    """Ordered before ``analyzed_company`` so it doesn't queue behind etherfi children."""
     job = live_client.submit_and_wait(WETH_ADDRESS)
     if job["status"] != "completed":
         pytest.fail(f"Cached WETH run did not complete on {live_client.base_url}: {job.get('error')}")
     return job
 
 
-# Shared with test_cache.py so its inventory is warm. Queue two candidates so
-# one terminal source/discovery failure does not make every company test fail.
+# Two candidates, so one terminal failure doesn't fail every company test.
 DEFAULT_TEST_COMPANY = "etherfi"
 DEFAULT_TEST_COMPANY_LIMIT = 2
 
 
 @pytest.fixture(scope="session")
 def analyzed_company(cached_weth, live_client: LiveClient) -> dict[str, Any]:
-    """Ensure a Protocol row exists for ``DEFAULT_TEST_COMPANY`` (else POSTs 404).
-
-    Depends on ``cached_weth`` so the WETH cache-hit submission completes
-    before company children start saturating per-stage workers.
-    """
+    """Depends on ``cached_weth`` so the cache-hit run finishes before company children saturate the workers."""
     parent = live_client.submit_company_and_wait(DEFAULT_TEST_COMPANY, limit=DEFAULT_TEST_COMPANY_LIMIT)
     if parent["status"] != "completed":
         pytest.fail(
@@ -591,7 +514,6 @@ def analyzed_company(cached_weth, live_client: LiveClient) -> dict[str, Any]:
 
 @pytest.fixture(scope="session")
 def company_protocol_id(analyzed_company, live_client: LiveClient) -> int:
-    """Resolve Protocol.id for the test company via GET — doubles as an upsert sanity check."""
     overview = live_client.company_overview(DEFAULT_TEST_COMPANY)
     pid = overview.get("protocol_id")
     if not isinstance(pid, int):

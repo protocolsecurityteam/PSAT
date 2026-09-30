@@ -1,4 +1,3 @@
-"""Unit tests for services.clients.exa HTTP client."""
 
 from __future__ import annotations
 
@@ -24,11 +23,6 @@ class _FakeResp:
         return self._payload
 
 
-# ---------------------------------------------------------------------------
-# error helpers
-# ---------------------------------------------------------------------------
-
-
 def test_normalize_error_full():
     err = exa.normalize_error("boom", status_code=429, retryable=True, detail="rate limited")
     assert err["provider"] == "exa"
@@ -49,11 +43,6 @@ def test_error_from_exception_generic():
     assert out["retryable"] is False
 
 
-# ---------------------------------------------------------------------------
-# api key
-# ---------------------------------------------------------------------------
-
-
 def test_get_api_key_missing(monkeypatch):
     monkeypatch.delenv("EXA_API_KEY", raising=False)
     monkeypatch.setattr(exa, "load_dotenv", lambda *a, **kw: None)
@@ -66,11 +55,6 @@ def test_get_api_key_present(monkeypatch):
     monkeypatch.setenv("EXA_API_KEY", "  abc  ")
     monkeypatch.setattr(exa, "load_dotenv", lambda *a, **kw: None)
     assert exa._get_api_key() == "abc"
-
-
-# ---------------------------------------------------------------------------
-# search
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -185,13 +169,8 @@ def test_search_truncates_content_to_1000(monkeypatch):
     assert len(out[0]["content"]) == 1000
 
 
-# ---------------------------------------------------------------------------
-# deep_research
-# ---------------------------------------------------------------------------
-
-
 def test_deep_research_happy_path(monkeypatch):
-    # time.sleep is imported inside the function — stub it via the module.
+    # time.sleep is imported inside the function.
     import time as _time
 
     monkeypatch.setattr(_time, "sleep", lambda _s: None)
@@ -266,7 +245,6 @@ def test_deep_research_task_errors(monkeypatch, create_resp, poll_resp, fragment
 def test_deep_research_timeout(monkeypatch):
     import time as _time
 
-    # Fake monotonic that jumps past the deadline on the second tick.
     ticks = iter([0.0, 0.0, 100.0, 100.0])
     monkeypatch.setattr(_time, "monotonic", lambda: next(ticks))
     monkeypatch.setattr(_time, "sleep", lambda _s: None)
@@ -280,11 +258,6 @@ def test_deep_research_timeout(monkeypatch):
     with pytest.raises(exa.ExaError) as ei:
         exa.deep_research("inst", timeout_seconds=10)
     assert "timed out" in ei.value.error["error"]
-
-
-# ---------------------------------------------------------------------------
-# cache layer (PSAT_EXA_CACHE)
-# ---------------------------------------------------------------------------
 
 
 class TestCacheKey:
@@ -308,7 +281,6 @@ class TestCacheKey:
             pytest.param({"query": "x"}, {"query": "y"}, id="query"),
             pytest.param({"numResults": 5}, {"numResults": 10}, id="num_results"),
             pytest.param({"type": "neural"}, {"type": "keyword"}, id="type"),
-            # search and deep_research with otherwise-equal payloads must not collide.
             pytest.param({"endpoint": "search"}, {"endpoint": "deep_research"}, id="endpoint"),
         ],
     )
@@ -316,7 +288,6 @@ class TestCacheKey:
         assert self._key_for(**a) != self._key_for(**b)
 
     def test_stable_across_dict_ordering(self):
-        # sort_keys=True in _cache_key guards against insertion-order drift.
         k1 = _cache_key({"a": 1, "b": 2, "api_key": "x"})
         k2 = _cache_key({"b": 2, "a": 1, "api_key": "y"})
         assert k1 == k2
@@ -400,8 +371,7 @@ class TestSearchCacheBehavior:
             result = exa.search("q", max_results=3)
 
         assert result == []
-        # An empty response would poison the cache for 30 days; the write
-        # path bails before that happens.
+        # An empty response would poison the cache for 30 days.
         storage_client.put.assert_not_called()
 
     def test_expired_envelope_refetches(self, monkeypatch):
@@ -470,7 +440,6 @@ class TestSearchCacheBehavior:
 
         with patch("db.storage.get_storage_client", return_value=storage_client if has_client else None):
             monkeypatch.setattr(exa.requests, "post", post_mock)
-            # Bucket flake on read or write must not surface to the caller.
             result = exa.search("q", max_results=3)
 
         assert result[0]["url"] == "https://x"

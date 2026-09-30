@@ -1,11 +1,6 @@
-"""Issue #119 regression suite — durable event-fold cursor coverage.
-
-Fails on the unfixed source, where the fold minted ``enumerable``/``exact`` gated only on
-``backfill_complete``, never comparing the cursor to the evaluated height. A cursor that does not
-cover it (unpinned or past the cursor) demotes to ``partial``/``cursor_behind_block``, never a silent
-``exact``; the head pin must NOT strip an already-indexed denylist member (round-2 fail-open).
-
-Real ``psat_test`` Postgres + production ``PostgresEventLogRepo`` / ``EventIndexedAdapter``; only rows are seeded.
+"""Issue #119: the fold minted ``exact`` on ``backfill_complete`` alone; a cursor that doesn't cover the evaluated
+height now demotes to ``cursor_behind_block``, and the head pin must not strip an already-indexed denylist member.
+Real Postgres and production repos.
 """
 
 from __future__ import annotations
@@ -32,7 +27,6 @@ from services.resolution.repos.event_logs_pg import (
 from tests.conftest import requires_postgres
 
 
-# Pure-function units (no DB) for the two coverage helpers.
 def test_cursor_covers_block_truth_table():
     assert _cursor_covers_block(1000, 990) is True
     assert _cursor_covers_block(1000, 1000) is True
@@ -42,7 +36,6 @@ def test_cursor_covers_block_truth_table():
 
 
 def test_row_ceiling_uses_frontier_not_pin():
-    # The frontier (cursor) caps the row scan; the lower finality pin never does.
     assert _row_ceiling(1028, 976) == 1028  # pin 976 < frontier -> include up to frontier
     assert _row_ceiling(1028, 2000) == 1028  # pin above frontier -> still the frontier
     assert _row_ceiling(None, 976) == 976  # cold path: fall back to the requested block
@@ -53,7 +46,6 @@ pytestmark = requires_postgres
 
 CHAIN_ID = 119_4242
 EVENT_ADDRESS = "0x00000000000000000000000000000000c0ffee19"
-# keccak256("RoleGranted(bytes32,address,address)")-shaped 32-byte topic stand-in.
 TOPIC_ADD = "0x2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d"
 
 ADMIN_A = "0x000000000000000000000000000000000000aaaa"  # granted @ 900
@@ -130,7 +122,7 @@ def _allowlist_descriptor() -> dict[str, Any]:
 
 
 def test_fold_event_writes_demotes_unpinned_head_to_lower_bound(db_session):
-    # Pre-fix this minted enumerable/exact; a cursor that lags head cannot cover an unpinned block=None.
+    # A cursor lagging head can't cover an unpinned block=None.
     _seed_cursor(db_session, last_indexed_block=1000)
     db_session.add(_grant_row(TOPIC_ADD, ADMIN_A, 900))
     db_session.add(_grant_row(TOPIC_ADD, ADMIN_B, 950))
@@ -140,7 +132,6 @@ def test_fold_event_writes_demotes_unpinned_head_to_lower_bound(db_session):
     result = _writes(repo, block=None)
     assert result.confidence == "partial"
     assert result.partial_reason == "cursor_behind_block"
-    # Members are still surfaced (lower_bound = "at least these"), never dropped.
     assert {m[-4:] for m in result.members} == {"aaaa", "bbbb"}
 
 
@@ -223,8 +214,7 @@ def test_adapter_covering_pin_stays_exact(db_session):
 
 
 def test_recently_blocked_indexed_address_stays_in_blacklist_under_head_pin(db_session):
-    # A denylist leaf negates the indexed set into a cofinite blacklist. DENIED (blocked @1010) sits inside
-    # (pin=976, cursor]; truncating the row scan at the pin dropped it and read PUBLIC (fail-open).
+    # Truncating the row scan at the pin dropped a member blocked inside (pin, cursor] and read public.
     head = 1040
     pin = head - RESOLVER_FINALITY_MARGIN  # 976
     cursor = 1028
@@ -237,12 +227,10 @@ def test_recently_blocked_indexed_address_stays_in_blacklist_under_head_pin(db_s
     ctx = EvaluationContext(chain_id=CHAIN_ID, contract_address=EVENT_ADDRESS, block=pin, event_log_repo=repo)
 
     blocked_set = EventIndexedAdapter().enumerate(_allowlist_descriptor(), ctx)
-    # The blocked set is exact (cursor covers the pin) AND retains the indexed member.
     assert blocked_set.kind == "finite_set"
     assert blocked_set.membership_quality == "exact"
     assert DENIED.lower() in (blocked_set.members or [])
 
-    # negate() is exactly what predicate_evaluator applies to a falsy leaf.
     allowed = negate(blocked_set)
     assert allowed.kind == "cofinite_blacklist"
     assert DENIED.lower() in (allowed.blacklist or [])  # still excluded → gated, not public

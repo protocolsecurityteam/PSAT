@@ -25,7 +25,6 @@ def _stub_inventory_flow(monkeypatch, captured):
         "extract_inventory_entries_from_pages",
         lambda *a, **k: [{"address": "0x" + "a" * 40, "chain": "unknown"}],
     )
-    # Post-deployer processing that could otherwise touch the network.
     monkeypatch.setattr(inventory, "resolve_unknown_chains", lambda contracts, *a, **k: contracts)
 
     def fake_expand(seed_addresses, *, debug=False, chain_id=1):

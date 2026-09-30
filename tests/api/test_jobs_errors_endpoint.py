@@ -1,4 +1,3 @@
-"""Integration tests for ``GET /api/jobs/{job_id}/errors``."""
 
 from __future__ import annotations
 

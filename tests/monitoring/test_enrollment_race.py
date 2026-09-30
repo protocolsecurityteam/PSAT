@@ -1,9 +1,5 @@
-"""Regression tests for the whole-protocol enrollment race (PR #139 live errors).
-
-Concurrent enrolls raced on ``uq_monitored_contract_address_chain`` and left the session
-pending-rollback, marking a completed policy job ``failed_terminal``. Fixed by
-``ON CONFLICT DO NOTHING`` plus a rollback in the auto-enroll handler. Needs real Postgres:
-SQLite can't reproduce the unique-index race or session poisoning.
+"""Concurrent enrolls raced on ``uq_monitored_contract_address_chain`` and poisoned the session, failing a completed
+policy job (PR #139). Needs real Postgres for the unique-index race.
 """
 
 from __future__ import annotations
@@ -26,8 +22,6 @@ DUP_POISON_ADDR = "0x" + "ab" * 20
 
 @pytest.fixture()
 def race_session():
-    """Real Postgres session matching the production ``SessionLocal`` shape
-    (``expire_on_commit=False``); cleans up only this test's rows."""
     engine = create_engine(DATABASE_URL)
     session = Session(engine, expire_on_commit=False)
     try:
@@ -47,14 +41,11 @@ def race_session():
 
 
 def _is_monitored_contract_select(statement: object) -> bool:
-    """True for the per-contract existence-check SELECT (the TOCTOU read)."""
     return isinstance(statement, Select) and "monitored_contracts" in str(statement).lower()
 
 
 def _commit_conflicting_monitored_contract(protocol_id: int, address: str) -> None:
-    """Insert + commit a clashing ``(address, ethereum)`` row from a SEPARATE
-    connection — the concurrent winner the enrolling session can't see until
-    after its own existence check has already returned empty."""
+    """The concurrent winner the enrolling session can't see after its existence check."""
     engine = create_engine(DATABASE_URL)
     other = Session(engine, expire_on_commit=False)
     try:
@@ -80,11 +71,7 @@ def _commit_conflicting_monitored_contract(protocol_id: int, address: str) -> No
 
 
 def _poisoning_enroll(session, protocol_id, *args, **kwargs):
-    """Stand-in for ``maybe_enroll_protocol`` that reproduces the benign race's
-    effect: a duplicate ``(address, chain)`` flush raises ``IntegrityError`` and
-    leaves the session pending-rollback, exactly as the concurrent
-    uq_monitored_contract_address_chain loser did. Two adds so the flush — not
-    the second add — is what raises."""
+    """Two adds, so the flush, not the second add, raises."""
     for _ in range(2):
         session.add(
             MonitoredContract(id=uuid.uuid4(), address=DUP_POISON_ADDR, chain="ethereum", contract_type="regular")
@@ -93,8 +80,7 @@ def _poisoning_enroll(session, protocol_id, *args, **kwargs):
 
 
 def _seed_policy_job(session):
-    """A committed processing policy job with a protocol but no Contract row, so
-    ``process`` skips every DB-write branch and reaches the auto-enroll block."""
+    """No Contract row, so ``process`` reaches the auto-enroll block."""
     proto = Protocol(name=PROTO_NAME)
     session.add(proto)
     session.flush()
@@ -113,8 +99,6 @@ def _seed_policy_job(session):
 
 
 def _stub_policy_internals(monkeypatch, job_address):
-    """Stub the heavy / RPC policy internals so ``process`` runs offline, and
-    wire ``maybe_enroll_protocol`` to the session-poisoning stand-in."""
     from workers.policy_worker import PolicyWorker
 
     artifacts = {
@@ -142,8 +126,6 @@ def _stub_policy_internals(monkeypatch, job_address):
 
 
 def test_concurrent_enroll_insert_is_race_safe(race_session):
-    """A concurrent enroll landing between the existence check and the insert must be a
-    no-op, not a session-poisoning ``UniqueViolation`` (pre-fix: ``IntegrityError`` escaped)."""
     from services.monitoring.enrollment import maybe_enroll_protocol
 
     proto = Protocol(name=PROTO_NAME)
@@ -156,9 +138,7 @@ def test_concurrent_enroll_insert_is_race_safe(race_session):
     race_session.add(Job(address=addr, protocol_id=proto.id, status=JobStatus.completed, stage=JobStage.done))
     race_session.commit()
 
-    # Inject the concurrent winner right after enroll's existence-check SELECT
-    # returns (its snapshot already taken → still sees nothing → takes the
-    # insert path), so the insert collides with a committed row.
+    # Inject right after the existence check, so the insert collides.
     injected = {"done": False}
     orig_execute = race_session.execute
 
@@ -172,7 +152,6 @@ def test_concurrent_enroll_insert_is_race_safe(race_session):
     race_session.execute = execute_then_inject
     try:
         with patch("services.monitoring.enrollment.rpc_request", return_value="0x100"):
-            # No PendingRollbackError / IntegrityError may escape.
             fired = maybe_enroll_protocol(race_session, proto.id, "http://rpc", "ethereum")
     finally:
         del race_session.execute  # restore the bound method
@@ -182,14 +161,11 @@ def test_concurrent_enroll_insert_is_race_safe(race_session):
 
     rows = race_session.execute(select(MonitoredContract).where(MonitoredContract.address == addr)).scalars().all()
     assert len(rows) == 1, f"expected exactly one row for {addr}, got {len(rows)}"
-    # Session survived the benign race and is still usable.
     assert race_session.execute(select(func.count()).select_from(MonitoredContract)).scalar() >= 1
 
 
 def test_benign_enroll_race_does_not_poison_policy_job(race_session, monkeypatch):
-    """A failed auto-enroll must be rolled back inside ``PolicyWorker.process``; pre-fix the
-    poisoned session made the success path raise ``PendingRollbackError``. The live SELECT
-    below is the assertion that fails without the rollback."""
+    """The live SELECT fails without the rollback."""
     from workers.policy_worker import PolicyWorker
 
     job = _seed_policy_job(race_session)
@@ -197,7 +173,6 @@ def test_benign_enroll_race_does_not_poison_policy_job(race_session, monkeypatch
 
     PolicyWorker().process(race_session, job)  # must not raise
 
-    # Usable only if the handler rolled back; otherwise raises PendingRollbackError.
     assert race_session.execute(select(func.count()).select_from(Job)).scalar() >= 1
     leaked = race_session.execute(
         select(func.count()).select_from(MonitoredContract).where(MonitoredContract.address == DUP_POISON_ADDR)

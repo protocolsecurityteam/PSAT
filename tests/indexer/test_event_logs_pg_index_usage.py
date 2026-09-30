@@ -1,9 +1,4 @@
-"""The durable event-log queries must be index-sargable.
-
-Columns are stored lowercase and ``ix_indexed_event_logs_lookup`` covers the raw columns, so wrapping one in
-``lower(...)`` would force a sequential scan. Asserts (a) compiled SQL never wraps an indexed column in ``lower()``
-and (b) on real seeded data the planner picks the lookup index. Production repo + real Postgres; only rows seeded.
-"""
+"""Columns are stored lowercase, so wrapping one in ``lower()`` would force a sequential scan."""
 
 from __future__ import annotations
 
@@ -16,9 +11,7 @@ from tests.conftest import requires_postgres
 
 pytestmark = requires_postgres
 
-# A selective (address, topic0) the planner should serve from the lookup index,
-# plus a high-cardinality decoy address that fills the table so a sequential scan
-# is the expensive alternative.
+# The decoy fills the table so a sequential scan is the expensive alternative.
 TARGET_ADDR = "0xaba6ba1e95e0926a6a6b917fe4e2f19ceae4ff2e"
 TARGET_TOPIC0 = "0xa52ea92e6e955aa8ac66420b86350f7139959adfcc7e6a14eee1bd116d09860e"
 DECOY_ADDR = "0x1a44076050125825900e736c501f859c50fe728c"
@@ -46,13 +39,10 @@ def _compiled(query) -> str:
 
 def _seed_index_demo(session) -> None:
     rows = [_log(TARGET_ADDR, TARGET_TOPIC0, block=100 + i, log_index=i) for i in range(40)]
-    # ~4k decoy rows under a different address so the target predicate is highly
-    # selective and an index scan strictly beats a sequential scan.
     rows += [_log(DECOY_ADDR, DECOY_TOPIC0, block=1000 + i, log_index=i) for i in range(4000)]
     for row in rows:
         session.add(row)
     session.flush()
-    # Refresh planner stats for this session's view of the freshly seeded table.
     session.execute(text("ANALYZE indexed_event_logs"))
 
 
@@ -81,8 +71,6 @@ def test_selective_fold_query_uses_lookup_index(db_session):
 
 
 def test_role_drift_query_uses_case_insensitive_lookup_index(db_session):
-    # Role reconciliation retains case-insensitive historical semantics. Its
-    # dedicated index must cover the negative lookup without a full scan.
     _seed_index_demo(db_session)
     plan = "\n".join(
         r[0]
@@ -100,9 +88,6 @@ def test_role_drift_query_uses_case_insensitive_lookup_index(db_session):
 
 
 def test_repo_returns_rows_with_raw_column_comparison(db_session):
-    # End-to-end: the repo's raw-column query still returns the right rows, and a
-    # mixed-case literal handed in by a caller is lowercased before the comparison
-    # (the stored data is lowercase, so the match holds).
     _seed_index_demo(db_session)
     db_session.add(
         IndexedEventCursor(
@@ -120,8 +105,6 @@ def test_repo_returns_rows_with_raw_column_comparison(db_session):
 
     lowered = repo.iter_event_rows(chain_id=1, event_address=TARGET_ADDR, topic0s=[TARGET_TOPIC0])
     assert len(lowered) == 40
-    # A caller passing a checksum/upper variant resolves to the same 40 rows: the
-    # repo lowercases the literal, matching the lowercase-stored column.
     mixed = repo.iter_event_rows(chain_id=1, event_address=TARGET_ADDR.upper(), topic0s=[TARGET_TOPIC0.upper()])
     assert len(mixed) == 40
     block, complete = repo._cursor_state(1, TARGET_ADDR.upper(), TARGET_TOPIC0.upper())

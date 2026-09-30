@@ -82,7 +82,6 @@ def test_late_collection_resumes_once_without_gating_original_probes(clean_effec
     assert row.state == "complete"
     assert prober.runs == [fn.id, fn.id]
     assert session.query(EffectVerdict).filter_by(function_id=fn.id).count() == 1
-    # Neither price changes nor arbitrary new holdings reopen completed analysis.
     fetch = accepted_empty(session, fn.contract_id)
     fetch.asset_set_status = "returned_assets"
     session.add(

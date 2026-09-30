@@ -1,8 +1,4 @@
-"""Tests for DefiLlamaWorker.process() paths and edge cases.
-
-Child-job creation and ``analyze_limit`` moved to ``SelectionWorker``; this file keeps the worker's direct duties:
-run the scan, persist artifacts, populate ``contracts``, complete the job.
-"""
+"""Child-job creation moved to ``SelectionWorker``; this file keeps the scan, artifacts and ``contracts``."""
 
 from __future__ import annotations
 
@@ -69,8 +65,6 @@ def _patch_worker_deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     monkeypatch.setattr("workers.defillama_worker.store_artifact", fake_store)
     monkeypatch.setattr("workers.defillama_worker.complete_job", fake_complete)
     monkeypatch.setattr("workers.defillama_worker.get_or_create_protocol", fake_get_or_create_protocol)
-    # Worker now resolves the name to a canonical DefiLlama slug before
-    # upserting the Protocol row; stub the network call away.
     monkeypatch.setattr(
         "workers.defillama_worker.resolve_protocol",
         lambda name: {"slug": None, "url": None, "name": None, "chains": [], "all_slugs": [], "all_names": []},
@@ -213,7 +207,6 @@ class TestScanResultArtifactContent:
         assert summary["mode"] == "defillama_scan"
         assert summary["protocol"] == PROTOCOL
         assert summary["discovered_count"] == 2
-        # Ranking/child jobs moved to SelectionWorker; the summary no longer reports analyzed_count or child_jobs.
         assert "analyzed_count" not in summary
         assert "child_jobs" not in summary
 
@@ -286,8 +279,6 @@ class TestProtocolCreation:
 
 
 class TestListingAddressNomination:
-    """The listing's own ``address`` field is nominated alongside the adapter
-    scan's hits, under the same ``defillama`` tag and the same W6 seed path."""
 
     def _run(self, monkeypatch: pytest.MonkeyPatch, *, listing: list[dict], scanned: list[str]) -> list[dict]:
         worker = DefiLlamaWorker()

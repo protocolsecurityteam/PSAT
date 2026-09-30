@@ -1,10 +1,4 @@
-"""Admin gating of ops/internal reads + two enumeration/leak guards.
-
-Drives the real FastAPI app via TestClient and stubs only the wire
-(``routers.deps.SessionLocal`` and the aggregation builders). The conftest
-``_bypass_admin_key`` autouse fixture stubs the auth dependency for every test,
-so the 401 cases here pop that override and set a known key first.
-"""
+"""The conftest ``_bypass_admin_key`` fixture stubs auth for every test, so 401 cases pop it and set a known key."""
 
 from __future__ import annotations
 
@@ -19,7 +13,6 @@ ADMIN_KEY = "real-admin-key"
 
 
 def _client_without_bypass(monkeypatch) -> TestClient:
-    """Real app with the conftest admin-key bypass removed and a known key set."""
     import api
     from routers.deps import require_admin_key
 
@@ -39,8 +32,6 @@ def _fake_job(job_id: str) -> MagicMock:
 
 
 def _session_cm(fake_job: MagicMock) -> MagicMock:
-    """A SessionLocal() context manager whose session answers every read shape
-    these endpoints use (get → a job; execute → empty scalars / zero counts)."""
     exec_result = MagicMock()
     exec_result.scalars.return_value.all.return_value = []
     exec_result.scalar.return_value = 0
@@ -83,8 +74,6 @@ def test_ops_reads_require_admin_key(monkeypatch) -> None:
 
 
 def test_artifact_allowlist_gates_internal_names(monkeypatch) -> None:
-    """Internal artifact names are admin-gated before any lookup; the four
-    consumer-safe names stay reachable without a key."""
     client = _client_without_bypass(monkeypatch)
     cm = _session_cm(_fake_job(str(uuid.uuid4())))
 
@@ -92,18 +81,16 @@ def test_artifact_allowlist_gates_internal_names(monkeypatch) -> None:
         patch("routers.deps.SessionLocal", return_value=cm),
         patch("routers.deps.get_artifact", return_value=None),
     ):
-        # Not on the allowlist → 401 with no key, before any DB/storage I/O.
         gated = client.get("/api/analyses/demo_run/artifact/stage_errors")
         assert gated.status_code == 401
 
-        # An admin reaches it (404 here only because the stub has no body).
+        # 404 only because the stub has no body.
         admin = client.get(
             "/api/analyses/demo_run/artifact/stage_errors",
             headers={"X-PSAT-Admin-Key": ADMIN_KEY},
         )
         assert admin.status_code != 401
 
-        # Consumer-safe names (incl. the .json the graph fetches with no key).
         for name in ("upgrade_history", "dependencies", "dependency_graph_viz.json", "policy_state.json"):
             resp = client.get(f"/api/analyses/demo_run/artifact/{name}")
             assert resp.status_code != 401, f"{name} must be reachable without a key (got {resp.status_code})"
@@ -164,8 +151,7 @@ def test_health_pool_only_for_admin(monkeypatch) -> None:
     import api
     import db.models as dbm
 
-    # The pool's connection counters (size/checkedin/...) read by /api/health
-    # never call the creator, so a no-op creator is enough for this stub.
+    # The pool counters /api/health reads never call the creator.
     monkeypatch.setattr(dbm, "engine", SimpleNamespace(pool=QueuePool(lambda: None)))  # pyright: ignore[reportArgumentType]
     monkeypatch.setattr("routers.deps.ADMIN_KEY", ADMIN_KEY)
 

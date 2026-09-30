@@ -1,9 +1,6 @@
-"""Static guardrail for the WARNING-degraded-with-record_degraded contract (``utils/logging.py``).
+"""A swallowing ``except`` that logs WARNING must also ``record_degraded`` so the outcome reaches ``stage_errors``.
 
-Any ``logger.warning`` / ``logger.exception`` in an ``except`` handler that swallows (no trailing ``raise``) must also
-call ``record_degraded(...)`` in that handler so the partial outcome reaches the ``stage_errors`` artifact.
-Approximate by design: resolves one level of module-local helper indirection, no deeper call-chains or control flow.
-The per-file allow-list below carries a one-line reason per exception.
+Approximate by design; the allow-list carries a reason per exception.
 """
 
 from __future__ import annotations
@@ -11,10 +8,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-# Pipeline workers (BaseWorker subclasses that drive the jobs queue).
-# Audit-row workers + monitoring loops are intentionally excluded — they
-# don't bind ``degraded_errors_var`` so ``record_degraded`` is a no-op
-# there and the contract doesn't apply.
+# Audit-row workers and monitoring loops bind no accumulator, so the contract doesn't apply.
 PIPELINE_WORKERS: tuple[str, ...] = (
     "workers/discovery.py",
     "workers/static_worker.py",
@@ -49,10 +43,8 @@ PIPELINE_SERVICE_GLOBS: tuple[str, ...] = (
     "services/monitoring/balance_reads.py",
 )
 
-# {file: {line_of_logger_call: reason}}
-# Sites where WARNING in a swallowed except is intentionally NOT paired with record_degraded; when in doubt, prefer
-# adding record_degraded. Keys are LINE-PINNED: any edit above a listed call shifts them, so re-pin in the same
-# commit. ``test_allow_list_entries_still_present`` fails when an entry stops matching a real violation.
+# {file: {line: reason}}. Line-pinned, so re-pin in the same commit as any edit above; stale entries fail
+# ``test_allow_list_entries_still_present``.
 ALLOW_LIST: dict[str, dict[int, str]] = {
     "services/resolution/indexer_scheduler.py": {
         100: "Indexer daemon has no job accumulator; failed enrollment remains in its durable retry queue.",
@@ -60,37 +52,22 @@ ALLOW_LIST: dict[str, dict[int, str]] = {
         180: "Indexer daemon has no job accumulator; failed reconciliation remains in its durable retry queue.",
     },
     "workers/discovery.py": {
-        # Boot-time chain-enable sweep in main(): no job is claimed yet, so no
-        # accumulator is bound and record_degraded would be a no-op.
         1142: "Boot-time sweep failure; runs before any job context exists.",
     },
     "workers/policy_worker.py": {
-        # Reanalysis-completion notifier: the reanalysis itself completed
-        # before the notifier ran, so its failure is a side-effect that
-        # doesn't change the job's stage output. record_degraded would
-        # mislead callers of /api/jobs/{id}/errors into thinking the
-        # reanalysis was degraded.
+        # The reanalysis completed before the notifier; recording would mark it degraded.
         929: "Notifier side-effect; reanalysis already completed before this fired.",
     },
     "workers/effects_worker.py": {
-        # Fork-close cleanup: the anvil subprocess close failing is a resource
-        # side-effect (port/memory), not a degradation of the stage's verdict
-        # output. record_degraded would mislead /monitor into flagging a healthy
-        # job's effects stage as degraded.
+        # A resource side-effect, not a degraded verdict.
         480: "Fork-close cleanup side-effect; does not degrade the stage's verdict output.",
     },
     "services/effects/anvil.py": {
-        # Same fork-close-cleanup exemption class as the effects_worker entry
-        # above: SubprocessAnvil.close() escalating SIGTERM → SIGKILL is a
-        # resource outcome (port/pid), not a change to the stage's verdicts.
         714: "Fork-close cleanup side-effect; SIGKILL escalation does not degrade the verdicts.",
         723: "Fork-close cleanup side-effect; an unreaped pid does not degrade the verdicts.",
     },
     "services/resolution/repos/event_logs_rpc.py": {
-        # Env-var parse, evaluated per call on every job of every worker in the
-        # process. A malformed cap is a deployment misconfiguration, not a
-        # per-job partial outcome, and recording it would stamp every job's
-        # stage_errors with the same process-level fact.
+        # A process-level misconfiguration would stamp every job's stage_errors.
         42: "Process-level env parse; a bad cap is a misconfiguration, not a per-job degradation.",
     },
 }
@@ -121,7 +98,6 @@ def _is_logger_warning_or_exception(node: ast.Call) -> bool:
 
 
 def _recording_helper_names(tree: ast.AST) -> set[str]:
-    """Functions in this module that themselves call ``record_degraded``; a local wrapper still honours the contract."""
     names: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -211,7 +187,6 @@ def test_warning_in_swallowed_except_pairs_with_record_degraded() -> None:
 
 
 def test_allow_list_entries_still_present() -> None:
-    """A moved or vanished allow-listed line would rot the entry silently; fail so the exemption is re-evaluated."""
     repo_root = Path(__file__).resolve().parents[2]
     enforced = set(_enforced_paths(repo_root))
     outside = sorted(rel for rel in ALLOW_LIST if rel not in enforced)

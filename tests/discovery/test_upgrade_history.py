@@ -31,12 +31,10 @@ def _make_log(
 
 
 def _write_deps(_tmp_path, target, deps_dict):
-    """Build a unified-dependencies dict (kept as ``_write_deps`` so call sites stay readable)."""
     return {"address": target, "dependencies": deps_dict}
 
 
 def _write_deps_target_proxy(_tmp_path, target, proxy_type, implementation, deps_dict=None):
-    """Unified-dependencies dict with the TARGET classified as a proxy (only the target is processed)."""
     return {
         "address": target,
         "target_classification": {
@@ -52,11 +50,6 @@ def _mock_no_enrichment(monkeypatch):
     from services.clients import etherscan
 
     monkeypatch.setattr(etherscan, "get_contract_info", lambda addr, **_kw: (None, {}))
-
-
-# ---------------------------------------------------------------------------
-# parse_upgrade_log — boundary between raw Etherscan data and domain model
-# ---------------------------------------------------------------------------
 
 
 class TestParseUpgradeLog:
@@ -108,7 +101,6 @@ class TestParseUpgradeLog:
         assert uh.parse_upgrade_log(_make_log(ADDR(1), "0xdeadbeef" * 8)) is None
 
     def test_partial_data(self):
-        """Upgraded without topic1 and admin_changed with short data still parse."""
         upgraded_no_impl = uh.parse_upgrade_log(_make_log(ADDR(1), uh.UPGRADED_TOPIC0))
         assert upgraded_no_impl is not None
         assert upgraded_no_impl["event_type"] == "upgraded"
@@ -128,7 +120,6 @@ class TestParseUpgradeLog:
         assert uh._hex_to_int(42) == 42
 
     def test_bare_hex_log_index(self):
-        """Etherscan sometimes returns '0x' for logIndex — must not crash."""
         log = _make_log(
             ADDR(1),
             uh.UPGRADED_TOPIC0,
@@ -194,13 +185,8 @@ class TestParseUpgradeLog:
         assert "implementation" not in event
 
 
-# ---------------------------------------------------------------------------
-# build_upgrade_history — full pipeline integration tests
-# ---------------------------------------------------------------------------
-
-
 class TestBuildUpgradeHistory:
-    """Mocks only at the boundary: _fetch_logs_etherscan and get_contract_info."""
+    """Mocks only at the boundary."""
 
     def test_no_proxies_returns_empty_schema(self, tmp_path):
         deps_path = _write_deps(
@@ -271,8 +257,7 @@ class TestBuildUpgradeHistory:
             assert "block_number" in event
 
     def test_dependency_proxies_are_ignored(self, monkeypatch, tmp_path):
-        """Proxies under ``dependencies`` are NOT processed: upgrade history only
-        runs for the target; each dependency builds its own history in its job."""
+        """Each dependency builds its own history in its own job."""
         target = ADDR(0)  # regular (non-proxy) target
         proxy_a, proxy_b = ADDR(1), ADDR(2)
         deps_path = _write_deps(
@@ -284,7 +269,6 @@ class TestBuildUpgradeHistory:
             },
         )
 
-        # Any fetch call would be unexpected.
         def fail_fetch(address, topic0, from_block=0, chain_id=1):
             pytest.fail(f"_fetch_logs_etherscan should not be called (addr={address})")
 
@@ -328,13 +312,9 @@ class TestBuildUpgradeHistory:
         assert admin_event.get("new_admin") == ADDR(51)
 
     def test_implementation_as_dict_in_target_classification(self, monkeypatch, tmp_path):
-        """A dict-shaped implementation in target_classification yields the
-        address; a dependency entry with the same impl name provides the
-        known-name shortcut so Etherscan is never called."""
+        """The dependency entry's impl name lets Etherscan be skipped."""
         target = ADDR(1)
         impl = ADDR(10)
-        # Known name comes from the dependencies side so _enrich_implementations
-        # reuses it.
         deps_path = _write_deps_target_proxy(
             tmp_path,
             target,
@@ -390,8 +370,7 @@ class TestBuildUpgradeHistory:
         assert impls[1].get("contract_name") == "ImplV2"  # reused from deps
 
     def test_enrichment_deduplicates_calls(self, monkeypatch, tmp_path):
-        """get_contract_info is called at most once per unique unknown address,
-        even when an impl repeats (rolled back then re-upgraded)."""
+        """Even when an impl repeats after a rollback."""
         target = ADDR(1)
         shared_impl = ADDR(10)
         deps_path = _write_deps_target_proxy(tmp_path, target, "eip1967", shared_impl)
@@ -482,11 +461,6 @@ class TestBuildUpgradeHistory:
         assert h["implementations"][0].get("address") == impl
 
 
-# ---------------------------------------------------------------------------
-# fetch_upgrade_events parity: parallel + sequential produce identical events.
-# ---------------------------------------------------------------------------
-
-
 def _fetch_events_parity_helper(monkeypatch, fanout: str, tmp_path):
     monkeypatch.setenv("PSAT_RPC_FANOUT", fanout)
     target = ADDR(0xA)
@@ -528,9 +502,7 @@ def test_fetch_upgrade_events_parity_parallel_vs_sequential(monkeypatch, tmp_pat
     seq_events, seq_calls = _fetch_events_parity_helper(monkeypatch, "1", tmp_path)
     par_events, par_calls = _fetch_events_parity_helper(monkeypatch, "8", tmp_path)
     assert seq_events == par_events
-    # The (addr, topic) task list is enumerated identically in both modes;
-    # only the dispatch order across threads differs, which is invisible to
-    # the deterministic post-sort.
+    # Only dispatch order differs, and the post-sort hides it.
     assert sorted(seq_calls) == sorted(par_calls)
 
 
@@ -555,10 +527,8 @@ def test_build_upgrade_history_threads_chain_id_to_getlogs(monkeypatch, kwargs, 
         seen_chain_ids.append(kw.get("chain_id"))
         return {"result": []}
 
-    # _fetch_logs_etherscan does `from services.clients.etherscan import get` at call time,
-    # so patching the module attribute intercepts the real wire call.
+    # _fetch_logs_etherscan imports ``get`` at call time.
     monkeypatch.setattr(etherscan_mod, "get", fake_get)
-    # Stub the name-enrichment wrapper so the test never leaves the machine.
     monkeypatch.setattr(etherscan_mod, "get_contract_info", lambda addr, **_kw: (None, {}))
 
     target = ADDR(0xABC)

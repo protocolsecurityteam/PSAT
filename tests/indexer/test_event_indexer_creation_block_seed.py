@@ -1,8 +1,5 @@
-"""Regression: event-log cursors are seeded from the event address's *creation block*, not block 0.
-
-A fresh RolesAuthority cursor used to start at block 0 and rescan ~20M empty pre-deployment blocks.
-Pins that backfill starts AT the seed, ``enroll_from_completed_jobs`` seeds Solmate role cursors at
-``creation_block - 1`` (Etherscan ``getcontractcreation``), and the companion pins the old seed-0 behavior.
+"""Cursors are seeded from the address's creation block, not 0, which used to rescan ~20M empty pre-deployment
+blocks.
 """
 
 from __future__ import annotations
@@ -27,8 +24,7 @@ from workers.event_log_indexer import (
 
 @pytest.fixture(autouse=True)
 def _no_creation_witness(monkeypatch):
-    """Enrollment grades its seed with three chain reads; this module asserts the seed, not the grade,
-    so the wire is stubbed to the unreachable-RPC outcome ``(None, not_determined)``."""
+    """This module asserts the seed, not the grade."""
     import workers.event_log_indexer as eli
 
     def _no_wire(*_a, **_kw):
@@ -47,7 +43,6 @@ _TOPIC = "0x" + "ab" * 32
 
 
 class _SeedAwareFetcher:
-    """Records every ``from_block`` and refuses to scan below the deploy block; emits one event at it."""
 
     def __init__(self, deploy: int) -> None:
         self.deploy = deploy
@@ -74,7 +69,6 @@ class _SeedAwareFetcher:
 
 
 class _RecordingFetcher:
-    """Records ``from_block`` only, so the companion test can observe the block-0 seed's wasteful low scan."""
 
     def __init__(self) -> None:
         self.from_blocks: list[int] = []
@@ -150,12 +144,9 @@ def test_backfill_starts_at_seed_and_never_scans_pre_deploy(session):
         max_windows_per_cursor=500,
     )
 
-    # The very first window begins AT the deploy block; nothing below is fetched
-    # (the fetcher would have raised). Old behavior (seed 0) would start at 1.
     assert fetcher.from_blocks, "indexer never called the fetcher"
     assert min(fetcher.from_blocks) == _DEPLOY
 
-    # Backfill reached head and flipped the completeness flag the resolvers gate on.
     last_block, complete = _cursor_state(session, _AUTHORITY)
     assert last_block == _TARGET
     assert complete is True
@@ -200,9 +191,7 @@ def test_enroll_from_completed_jobs_seeds_solmate_cursor_at_creation_block(sessi
     inserted = enroll_from_completed_jobs(session)
     assert inserted >= len(_SOLMATE_ROLE_TOPICS)
 
-    # All three RolesAuthority role cursors are seeded one below the authority's
-    # deploy block (so the first scan window starts AT deploy), and not yet
-    # marked complete (the backfill hasn't run).
+    # One below deploy so the first window starts at it.
     for topic0 in _SOLMATE_ROLE_TOPICS:
         from db.models import IndexedEventCursor
 
@@ -219,15 +208,12 @@ def test_enroll_from_completed_jobs_seeds_solmate_cursor_at_creation_block(sessi
 
 @requires_postgres
 def test_enroll_from_completed_jobs_skips_zero_authority(session, monkeypatch):
-    # A Solmate canCall descriptor whose authority is renounced (0x0) must enroll
-    # NO cursor: 0x0 has no creation block, so it would seed at genesis and backfill
-    # the whole chain for an address that can never emit role events.
+    # 0x0 has no creation block, so it would seed at genesis for an address that never emits.
     import workers.event_log_indexer as eli
     from db.models import Contract, ControllerValue, IndexedEventCursor, Job, JobStage, JobStatus, Protocol
     from db.queue import store_artifact
 
-    # If the guard works, _seed_block is never reached for 0x0; stub anyway so a
-    # regression that *does* reach it can't quietly "succeed" with a real block.
+    # Stub anyway so a regression reaching it can't quietly succeed.
     monkeypatch.setattr(eli, "get_contract_creation_block", lambda *a, **k: 18_500_000)
 
     protected = "0x" + "11" * 20
@@ -293,7 +279,6 @@ _CREATOR = "0x" + "ab" * 20
             18_500_000,
             id="falls_back_to_txhash",
         ),
-        # A transient lookup failure yields None, never a genesis 0.
         pytest.param(_CREATOR, _etherscan_down, {}, None, id="none_on_failure"),
         pytest.param(
             _CREATOR,
@@ -303,7 +288,6 @@ _CREATOR = "0x" + "ab" * 20
             id="accepts_int_blocknumber",
         ),
         pytest.param("not-an-address", _etherscan_down, {}, None, id="rejects_non_address"),
-        # Neither blockNumber nor a usable txHash -> None (caller defers enrollment).
         pytest.param(
             _CREATOR,
             lambda module, action, **params: {"status": "1", "result": [{"contractCreator": "0x" + "cd" * 20}]},
@@ -330,9 +314,7 @@ def test_seed_block_defers_on_lookup_error(monkeypatch):
         raise RuntimeError("etherscan down")
 
     monkeypatch.setattr(eli, "get_contract_creation_block", _raise)
-    # A transient lookup failure must DEFER (None), never seed at genesis (0) — the
-    # caller then skips enrollment and retries next pass rather than backfilling
-    # ~20M empty pre-deploy blocks.
+    # The caller skips enrollment and retries rather than backfilling from genesis.
     assert _seed_block(_AUTHORITY, {}, chain_id=1) is None
 
 
@@ -347,8 +329,6 @@ def test_is_enrollable_event_address_rejects_zero_and_none():
 
 @requires_postgres
 def test_index_step_marks_backfill_complete_when_already_at_head(session):
-    # A cursor already at/past the confirmed head takes the early-return path:
-    # it must flip backfill_complete and never call the fetcher (no window).
     enroll_event_cursor(session, chain_id=1, event_address=_AUTHORITY, topic0=_TOPIC, start_block=_HEAD)
     session.commit()
 
@@ -370,8 +350,7 @@ def test_index_step_marks_backfill_complete_when_already_at_head(session):
 
 @requires_postgres
 def test_pg_repo_not_backfill_complete_is_not_trusted(session):
-    # Seeded at the deploy block but not yet backfilled must NOT be trusted: no_index_cursor (fail closed),
-    # not a partial history folded as exact.
+    # A partial history must not fold as exact.
     from db.models import IndexedEventCursor, IndexedEventLog
     from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
 
@@ -425,12 +404,11 @@ def test_pg_repo_not_backfill_complete_is_not_trusted(session):
     )
     assert writes.partial_reason == "no_index_cursor"
 
-    # Once the backfill completes, the same durable read is trusted and resolves.
     cursor = session.execute(select(IndexedEventCursor)).scalar_one()
     cursor.backfill_complete = True
     session.commit()
     assert repo.min_indexed_block(chain_id=1, event_address=addr, topic0s=[topic]) == 19_000_000
-    # Evaluate at a height the backfilled cursor covers (#119); block=None would demote to lower_bound.
+    # Evaluate at a covered height (#119); block=None would demote.
     hist2 = repo.fold_event_history(
         chain_id=1,
         event_address=addr,

@@ -1,12 +1,5 @@
-"""A canonical governance event_type is minted only when the event's OWN
-signature corroborates the family — a multi-write emitter's donated slot
-set is not evidence of what the event announces.
-
-Fixtures are verbatim shapes from persisted tracking plans: RoleRegistry's
-``Initialized(uint8)`` whose ``initialize()`` emitter also seeds ``_owner``
-(published ``ownership_transferred`` before the corroboration gate), and
-EtherfiL1SyncPoolETH's ``EEthSet(address)`` whose initializer writes the
-initializer slots (published ``initialized`` before the gate).
+"""A canonical event_type needs the event's own signature to corroborate it; a multi-write emitter's donated slots
+are not evidence. Fixtures are persisted RoleRegistry and EtherfiL1SyncPoolETH shapes.
 """
 
 from __future__ import annotations
@@ -53,10 +46,9 @@ def _plan(address: str, *controllers: dict) -> dict:
 
 
 def _role_registry_owner_controller() -> dict:
-    """RoleRegistry's ``_owner`` controller as persisted: ``initialize()``
-    writes ``_owner``/``_pendingOwner`` AND the OZ initializer slots, and
-    emits ``Initialized(uint8)`` — so the initializer event carries the
-    owner slots in its donated write set."""
+    """``initialize()`` writes the owner slots and emits ``Initialized(uint8)``, so that event carries them in its
+    donated set.
+    """
     writes = ["_initialized", "_initializing", "_owner", "_pendingOwner"]
     return {
         "controller_id": "state_variable:_owner",
@@ -82,9 +74,6 @@ def _role_registry_owner_controller() -> dict:
 
 
 def _sync_pool_eeth_controller() -> dict:
-    """EtherfiL1SyncPoolETH's ``_eEth`` controller: the setters emit
-    ``EEthSet``-family events from an initializer context, so their
-    donated write set includes the initializer slot constants."""
     writes = ["L1BaseSyncPoolStorageLocation", "OwnableStorageLocation", "_eEth", "_liquifier"]
     return {
         "controller_id": "external_contract:_eEth",
@@ -115,14 +104,7 @@ def _sync_pool_eeth_controller() -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# The realized defect: donated slot sets no longer mint canonical types
-# ---------------------------------------------------------------------------
-
-
 def test_initializer_event_is_not_an_ownership_transfer():
-    """``Initialized(uint8)`` from an owner-seeding initializer announces
-    initialization — the corroborated family — not an ownership transfer."""
     topics = extract_governance_topics(_plan(ROLE_REGISTRY, _role_registry_owner_controller()))
 
     assert len(topics) == 1
@@ -130,18 +112,13 @@ def test_initializer_event_is_not_an_ownership_transfer():
 
 
 def test_setter_event_from_initializer_context_is_not_initialized():
-    """``EEthSet(address)`` / ``TokenOutSet(address)`` corroborate no
-    canonical family — they fall to the neutral stem, not ``initialized``."""
     topics = extract_governance_topics(_plan(SYNC_POOL, _sync_pool_eeth_controller()))
 
     assert {t["event_type"] for t in topics} == {"state_changed:external_contract:_eEth"}
 
 
 def test_uncorroborated_event_fills_no_semantic_keys():
-    """Before the gate, the false ``ownership_transferred`` type made
-    ``_assign_semantic_keys`` alias unrelated args into ``new_owner``.
-    The corroborated type has no semantic-key mapping, so the parsed
-    event carries none."""
+    """The old false type aliased unrelated args into ``new_owner``."""
     spec = extract_governance_topics(_plan(ROLE_REGISTRY, _role_registry_owner_controller()))[0]
     log = {
         "address": ROLE_REGISTRY,
@@ -160,14 +137,8 @@ def test_uncorroborated_event_fills_no_semantic_keys():
     assert parsed["version"] == 1
 
 
-# ---------------------------------------------------------------------------
-# Positive controls: corroborated canonical families keep their types
-# ---------------------------------------------------------------------------
-
-
 def test_corroborated_families_keep_their_canonical_types():
     cases = [
-        # (signature, inputs, writes, expected)
         (
             "AuthorityUpdated(address,address)",
             [
@@ -207,7 +178,6 @@ def test_corroborated_families_keep_their_canonical_types():
             ["threshold"],
             "threshold_changed",
         ),
-        # Curve/Vyper 2-step admin transfer under ownership vocabulary.
         (
             "CommitOwnership(address)",
             [{"name": "admin", "type": "address", "indexed": False}],
@@ -239,20 +209,11 @@ def test_corroborated_families_keep_their_canonical_types():
         assert topics[0]["event_type"] == expected, signature
 
 
-# ---------------------------------------------------------------------------
-# The corroboration predicate's own three states
-# ---------------------------------------------------------------------------
-
-
 def test_corroboration_arg_shape_is_required():
-    # Name matches but no address arg: the family's payload cannot exist.
     assert not _event_corroborates("ownership_transferred", "OwnerFeeSet(uint256)")
-    # Name matches and the payload type is present.
     assert _event_corroborates("ownership_transferred", "OwnerFeeSet(address)")
-    # threshold family carries a uint payload.
     assert _event_corroborates("threshold_changed", "ThresholdSet(uint256)")
     assert not _event_corroborates("threshold_changed", "ThresholdSet(address)")
-    # initialized needs no payload at all.
     assert _event_corroborates("initialized", "Initialized()")
 
 
@@ -263,9 +224,6 @@ def test_absent_signature_is_not_determined_and_cannot_corroborate():
 
 
 def test_initializer_flag_fallback_is_also_gated():
-    """The ``is_initializer`` tag fallback mints ``initialized`` only for
-    an initializer-named event; the ``delegates`` fallback mints
-    ``upgraded`` only for an upgrade-named one."""
     assert (
         _resolve_event_type("state_variable:x", {"is_initializer": True, "writes": ["x"]}, signature="FeeSet(address)")
         == "state_changed:state_variable:x"
@@ -284,11 +242,6 @@ def test_initializer_flag_fallback_is_also_gated():
         _resolve_event_type("state_variable:x", {"delegates": True, "writes": ["x"]}, signature="Upgraded(address)")
         == "upgraded"
     )
-
-
-# ---------------------------------------------------------------------------
-# Published surface: the served tracked_topics spec carries the earned type
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres

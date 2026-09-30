@@ -1,8 +1,4 @@
-"""Pure-logic tests for audit-pipeline internals the integration suite no longer exercises: the
-``_collapse_same_audit_mirrors`` heuristic fallback (used only when LLM validate+cluster fails), chunking
-and extraction helpers, follow-up query cleanup, classifier threshold, and process_audit_report error
-paths. No DB, HTTP or object storage; ``llm.chat`` and storage/download functions are monkeypatched.
-"""
+"""Pure-logic tests for internals the integration suite no longer exercises; no DB, HTTP or object storage."""
 
 from __future__ import annotations
 
@@ -52,10 +48,7 @@ def _returning(value):
     return lambda *_a, **_kw: value
 
 
-# ---------------------------------------------------------------------------
-# _collapse_same_audit_mirrors — heuristic fallback when LLM is unavailable.
-# Three passes, each designed not to merge genuinely distinct audits.
-# ---------------------------------------------------------------------------
+# The heuristic fallback when the LLM is unavailable; each pass must not merge distinct audits.
 
 
 def _report(**overrides) -> dict:
@@ -72,8 +65,7 @@ def _report(**overrides) -> dict:
 
 class TestCollapseSameAuditMirrors:
     def test_drops_unknown_on_unique_host_when_same_date_named_exists(self):
-        """Pass 1: Unknown-auditor entry on a host that no named same-date
-        entry uses looks like a cross-host mirror — drop it."""
+        """Pass 1: an Unknown-auditor entry on a host no named same-date entry uses looks like a mirror."""
         reports = [
             _report(url="https://real.com/x.pdf", auditor="Halborn"),
             _report(url="https://mirror.xyz/x.pdf", auditor="Unknown"),
@@ -82,8 +74,7 @@ class TestCollapseSameAuditMirrors:
         assert [r["auditor"] for r in out] == ["Halborn"]
 
     def test_keeps_same_host_unknown_sibling(self):
-        """Pass 1: an Unknown on the same host as a named entry is a sibling
-        file whose auditor the LLM missed — don't drop it."""
+        """Pass 1: an Unknown on the same host is a sibling file whose auditor the LLM missed."""
         reports = [
             _report(url="https://github.com/x/y/a.pdf", auditor="Halborn"),
             _report(url="https://github.com/x/y/b.pdf", auditor="Unknown"),
@@ -111,8 +102,7 @@ class TestCollapseSameAuditMirrors:
         assert out[0]["pdf_url"]  # richer entry retained
 
     def test_same_auditor_same_day_different_products_survive(self):
-        """Pass 3: Certora's same-day v2.49 vs Instant-Withdrawal audits have
-        distinct title tokens → don't collapse."""
+        """Pass 3: distinct title tokens keep same-day audits apart."""
         a = _report(
             auditor="Certora",
             date="2024-05-01",
@@ -150,21 +140,14 @@ class TestCollapseSameAuditMirrors:
         assert out[0]["pdf_url"]
 
     def test_no_titles_bypasses_pass3(self):
-        """Pass 3 skips entries with no meaningful title tokens — collapsing
-        them would be too risky."""
+        """Pass 3: collapsing entries with no title tokens would be too risky."""
         reports = [
             _report(auditor="X", date="2024-01-01", title="", url="https://a/1.pdf"),
             _report(auditor="X", date="2024-01-01", title="", url="https://b/2.pdf"),
         ]
-        # Cross-host pass 2 still catches these: both have named auditor +
-        # same date + different hosts → collapse to one.
+        # Pass 2 still collapses them: named auditor, same date, different hosts.
         out = _collapse_same_audit_mirrors(reports)
         assert len(out) == 1
-
-
-# ---------------------------------------------------------------------------
-# _chunked_text — page-splitter for long gitbook/SPA bodies
-# ---------------------------------------------------------------------------
 
 
 class TestChunkedText:
@@ -190,14 +173,8 @@ class TestChunkedText:
         chunks = _chunked_text(text)
         assert len(chunks) == 3  # _MAX_CHUNKS
         assert all(len(c) <= 15_000 for c in chunks)
-        # Consecutive chunks overlap by ``overlap`` chars so contracts
-        # straddling the boundary aren't lost.
+        # Overlap keeps contracts that straddle a chunk boundary.
         assert chunks[0][-100:] == chunks[1][:100]
-
-
-# ---------------------------------------------------------------------------
-# _extract_one_chunk — LLM call + JSON parsing for one slice
-# ---------------------------------------------------------------------------
 
 
 class TestExtractOneChunk:
@@ -219,11 +196,6 @@ class TestExtractOneChunk:
         assert _extract_one_chunk("https://x.com", "text", "Acme") is None
 
 
-# ---------------------------------------------------------------------------
-# extract_report_details — multi-chunk dedup + relative-URL resolution
-# ---------------------------------------------------------------------------
-
-
 class TestExtractReportDetails:
     def test_none_when_every_chunk_fails(self, monkeypatch):
         def raising(*_a, **_kw):
@@ -233,9 +205,7 @@ class TestExtractReportDetails:
         assert extract_report_details("https://x.com", "text", "Acme") is None
 
     def test_resolves_relative_pdf_url(self, monkeypatch):
-        """PDFs discovered via a ``<a href="/path">`` link come back as
-        absolute paths from the LLM; the orchestrator must ``urljoin`` them
-        against the source page."""
+        """The LLM returns root-relative paths, which must be joined against the source page."""
         import json
 
         monkeypatch.setattr(
@@ -274,15 +244,9 @@ class TestExtractReportDetails:
         assert [r["auditor"] for r in out["reports"]] == ["OZ"]
 
 
-# ---------------------------------------------------------------------------
-# generate_followup_query — quote-handling + length cap + failure modes
-# ---------------------------------------------------------------------------
-
-
 class TestGenerateFollowupQuery:
     def test_empty_initial_returns_canned_fallback(self):
-        """Nothing from Tavily → use a deterministic fallback query that
-        doesn't burn an LLM call."""
+        """The fallback query doesn't burn an LLM call."""
         q = generate_followup_query([], "Morpho")
         assert q is not None
         assert "Morpho" in q
@@ -290,8 +254,7 @@ class TestGenerateFollowupQuery:
     @pytest.mark.parametrize(
         ("chat", "expected"),
         [
-            # LLM strips to empty -> None so the caller skips the second Tavily
-            # query (falsy means no follow-up).
+            # None means no follow-up Tavily query.
             pytest.param(_returning(""), None, id="empty-llm-response"),
             pytest.param(_returning('"aave audits 2024"'), "aave audits 2024", id="strips-surrounding-quotes"),
             pytest.param(_returning("x" * 300), None, id="overlong-response-rejected"),
@@ -303,8 +266,6 @@ class TestGenerateFollowupQuery:
         assert generate_followup_query([{"title": "t", "url": "u"}], "Aave") == expected
 
     def test_mismatched_quotes_are_scrubbed(self, monkeypatch):
-        """The LLM sometimes produces ``'foo"`` or ``"foo'`` — scrub to avoid
-        passing a syntactically-invalid search query downstream."""
         monkeypatch.setattr(
             "services.discovery.audit_reports_llm.llm.chat",
             lambda *_a, **_kw: '"aave audit',
@@ -312,11 +273,6 @@ class TestGenerateFollowupQuery:
         q = generate_followup_query([{"title": "t", "url": "u"}], "Aave")
         assert q is not None
         assert '"' not in q
-
-
-# ---------------------------------------------------------------------------
-# classify_search_results — confidence threshold + LLM error paths
-# ---------------------------------------------------------------------------
 
 
 class TestClassifySearchResults:
@@ -334,12 +290,6 @@ class TestClassifySearchResults:
         monkeypatch.setattr("services.discovery.audit_reports_llm.llm.chat", chat)
         out = classify_search_results([{"url": "https://x.com", "title": "t", "content": "c"}], "Acme")
         assert out == []
-
-
-# ---------------------------------------------------------------------------
-# text_extraction.process_audit_report — error-path coverage that the
-# integration suite's happy path doesn't exercise.
-# ---------------------------------------------------------------------------
 
 
 class TestProcessAuditReportErrorPaths:
@@ -364,7 +314,6 @@ class TestProcessAuditReportErrorPaths:
                 id="oversized-pdf",
             ),
             pytest.param("https://x/a.pdf", _returning(b"not a pdf"), None, "failed", ("parse",), id="parse-error"),
-            # Image-only PDFs return near-empty text; worker marks skipped so OCR can be handled later.
             pytest.param(
                 "https://x/a.pdf",
                 _returning(minimal_pdf_with_text("tiny")),
@@ -373,8 +322,7 @@ class TestProcessAuditReportErrorPaths:
                 ("image-only",),
                 id="short-text",
             ),
-            # Download+parse succeed but object storage rejects the write: must surface as
-            # ``failed`` so the worker can retry.
+            # ``failed`` lets the worker retry.
             pytest.param(
                 "https://x/a.pdf",
                 _returning(_LONG_PDF),
@@ -411,15 +359,8 @@ class TestProcessAuditReportErrorPaths:
         assert out.text_sha256 == "a" * 64
 
 
-# ---------------------------------------------------------------------------
-# _fetch_html_page — SSRF egress guard routing + preserved download protections.
-#
-# The candidate URLs come from attacker-seedable Exa/Tavily results, and the
-# fetched HTML feeds LLM extraction whose output is stored on ``AuditReport``
-# and served publicly. So the outbound request must go through the shared
-# egress guard (``utils.egress.safe_get``), and the pre-existing download-cap /
-# binary-rejection protections must survive that reroute.
-# ---------------------------------------------------------------------------
+# Candidate URLs come from attacker-seedable search results and the output is served publicly, so fetches go through
+# ``utils.egress.safe_get`` and keep the download cap.
 
 
 class _FakeResp:
@@ -454,12 +395,7 @@ class TestFetchHtmlPage:
         assert _fetch_html_page("https://example.com/report") == expected
 
     def test_internal_target_refused_without_raising(self, monkeypatch):
-        """A URL whose host would resolve to an internal address is refused by
-        the guard and treated as a plain fetch failure (None, no exception).
-
-        This also proves the request is routed through ``safe_get``: the raw
-        ``requests.get`` is booby-trapped, so reverting to it would fetch the
-        internal URL and blow up here instead of returning None."""
+        """Raw ``requests.get`` is booby-trapped, so this also proves the request goes through ``safe_get``."""
         from utils.egress import UnsafeUrlError
 
         def refuse(*_a, **_kw):
@@ -492,7 +428,6 @@ class TestFetchHtmlPage:
 
         out = _fetch_html_page("https://example.com/huge")
         assert out is not None
-        # Reads whole chunks until downloaded >= cap, then stops: exactly the
-        # first ceil(cap / chunk) chunks, nowhere near the 6.4 MB offered.
+        # Reading stops at the first chunk crossing the cap.
         assert len(out) == _MAX_DOWNLOAD_BYTES
         assert len(out) < sum(len(c) for c in oversized)

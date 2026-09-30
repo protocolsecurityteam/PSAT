@@ -19,7 +19,6 @@ AUDIT_TITLE = "PSAT live integration test audit"
 
 @pytest.fixture(scope="module")
 def created_audit(analyzed_company, live_client: LiveClient, request) -> dict[str, Any]:
-    """Register an audit against the test company; module-scoped to amortize extraction wait."""
     payload = {
         "url": AUDIT_URL,
         "auditor": AUDITOR_TAG,
@@ -28,7 +27,7 @@ def created_audit(analyzed_company, live_client: LiveClient, request) -> dict[st
     try:
         audit = live_client.add_audit(DEFAULT_TEST_COMPANY, payload)
     except requests.HTTPError as exc:
-        # 409 → leftover from a failed prior run; delete + retry so the suite is re-runnable.
+        # A leftover from a failed run; delete and retry.
         if exc.response is not None and exc.response.status_code == 409:
             existing = live_client._session.get(
                 live_client._url(f"/api/company/{DEFAULT_TEST_COMPANY}/audits"),
@@ -88,7 +87,6 @@ def test_audit_appears_in_pipeline(created_audit, live_client: LiveClient):
 
 @pytest.fixture(scope="module")
 def scoped_audit(created_audit, live_client: LiveClient) -> dict[str, Any]:
-    """Block until scope extraction terminates; skip if it never succeeds."""
     try:
         row = live_client.poll_audit_until_scope(
             created_audit["id"],
@@ -117,7 +115,7 @@ def test_audit_coverage_non_empty(scoped_audit, live_client: LiveClient):
     coverage = live_client.company_audit_coverage(DEFAULT_TEST_COMPANY)
     assert coverage["company"] == DEFAULT_TEST_COMPANY
     assert coverage.get("audit_count", 0) >= 1
-    # Don't assert scope↔address overlap — that's scope-drift flaky.
+    # Scope-to-address overlap is flaky.
     assert isinstance(coverage.get("coverage"), list)
 
 
@@ -137,7 +135,7 @@ def test_audit_pdf_proxied(created_audit, live_client: LiveClient):
 
 
 def test_reextract_scope_resets_status(scoped_audit, live_client: LiveClient):
-    # Race: the scope worker may re-claim before our GET, so accept None or "processing".
+    # The scope worker may re-claim before our GET.
     audit_id = scoped_audit["id"]
     resp = live_client.reextract_audit_scope(audit_id)
     assert resp.status_code == 200, f"reextract returned {resp.status_code}: {resp.text[:200]}"
@@ -156,7 +154,6 @@ def test_reextract_scope_unknown_audit_404(live_client: LiveClient):
 
 
 def test_contract_audit_timeline_on_weth(analyzed_weth, live_client: LiveClient):
-    # WETH has no audits — verifies the "never_audited" path doesn't error on empty joins.
     detail = live_client.analysis_detail(analyzed_weth["job_id"])
     contract_id = detail.get("contract_id")
     assert isinstance(contract_id, int), "need contract_id from analysis_detail to exercise timeline"

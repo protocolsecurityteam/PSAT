@@ -1,9 +1,5 @@
-"""Regression: the event-log indexer must backfill in bounded block windows.
-
-Production incident (PR #104 follow-up): a fresh cursor's ~25M-block gap was scanned and bulk-inserted
-in one shot; on a high-volume authority (LayerZero endpoint) the insert dropped the Neon connection, the
-cursor never left block 0, and ``SolmateRolesAuthorityAdapter`` failed closed permanently. A fetcher that
-*rejects* oversized spans stands in for that; the companion test pins the old single-shot behaviour.
+"""A fresh cursor's ~25M-block gap scanned in one shot dropped the Neon connection on LayerZero's endpoint, pinning
+the cursor at 0 forever (PR #104 follow-up).
 """
 
 from __future__ import annotations
@@ -19,8 +15,6 @@ from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
 from workers.event_log_indexer import enroll_event_cursor, scan_enrolled_events
 
-# A single eth_getLogs / bulk insert blows up past this many blocks in one shot.
-# The indexer must never hand the fetcher a wider window than this.
 _MAX_SAFE_SPAN = 10_000
 _HEAD = 1_000_000
 _CONFIRMATIONS = 12
@@ -31,7 +25,6 @@ _TOPIC = "0x" + "ab" * 32  # stand-in RoleCapabilityUpdated topic
 
 
 class _RangeCappedFetcher:
-    """Emits one log per ``_DENSITY`` blocks but raises on an oversized span, like mainnet RPCs / a giant INSERT."""
 
     def __init__(self) -> None:
         self.requested_spans: list[int] = []
@@ -66,8 +59,7 @@ class _FixedHead:
 
 
 class _DeterministicBlockHash:
-    # Observed hash == stored hash (block number as bytes), so the reorg guard
-    # never spuriously rewinds during a backfill.
+    # Stored hash matches observed, so the reorg guard never rewinds.
     def block_hash(self, block_number: int) -> bytes:
         return block_number.to_bytes(32, "big")
 
@@ -137,15 +129,12 @@ def test_backfills_full_history_in_bounded_windows(session):
         insert_batch_size=1000,
     )
 
-    # Fix engaged: every window the fetcher saw was within the safe cap. The old
-    # single-shot fetch would have requested the full ~1M-block gap here.
     assert fetcher.requested_spans, "indexer never called the fetcher"
     assert max(fetcher.requested_spans) <= _MAX_SAFE_SPAN, (
         f"indexer requested a {max(fetcher.requested_spans)}-block window > {_MAX_SAFE_SPAN}; "
         "the unbounded full-range fetch is what crashed the DB connection"
     )
 
-    # And it actually backfilled the whole history: cursor at head, every event in.
     expected_logs = _TARGET // _DENSITY  # 9_999
     assert _cursor_block(session, _AUTHORITY) == _TARGET
     assert _log_count(session, _AUTHORITY) == expected_logs
@@ -167,9 +156,7 @@ class _OrderRecordingFetcher:
 
 
 def _set_last_run_at(session, address: str, when: datetime) -> None:
-    # Explicit timestamp via Core update: an explicit value in the SET clause
-    # suppresses the column's onupdate=func.now(), and a literal avoids the
-    # transaction-constant now() collapsing distinct rows to the same instant.
+    # An explicit SET value suppresses onupdate, and a literal avoids a transaction-constant now().
     from db.models import IndexedEventCursor
 
     session.execute(
@@ -181,7 +168,6 @@ def _set_last_run_at(session, address: str, when: datetime) -> None:
 
 @requires_postgres
 def test_scan_visits_least_recently_run_cursor_first(session):
-    """Fair rotation: least-recently-run first, so a just-scanned high-volume cursor can't starve a fresh one."""
     older = "0x" + "a1" * 20  # last scanned long ago → must be visited first
     newer = "0x" + "b2" * 20  # scanned recently → goes to the back
     enroll_event_cursor(session, chain_id=1, event_address=older, topic0=_TOPIC)
@@ -208,15 +194,11 @@ def test_scan_visits_least_recently_run_cursor_first(session):
 
 @requires_postgres
 def test_caught_up_cursor_stamps_last_run_at(session):
-    """A warm cursor returns caught_up without fetching or flipping backfill_complete, so onupdate never
-    fires; the scan must re-stamp last_run_at explicitly or the stale stamp defeats the rotation."""
+    """A warm cursor updates nothing, so onupdate never fires; last_run_at must be re-stamped or rotation stalls."""
     from db.models import IndexedEventCursor
 
     addr = "0x" + "c3" * 20
     enroll_event_cursor(session, chain_id=1, event_address=addr, topic0=_TOPIC, start_block=_TARGET)
-    # Already backfilled and stamped in the past: only an explicit re-stamp on the
-    # no-fetch caught_up visit can advance it (backfill_complete True→True is a
-    # no-op update).
     session.execute(
         update(IndexedEventCursor)
         .where(func.lower(IndexedEventCursor.event_address) == addr)
@@ -248,9 +230,7 @@ def test_caught_up_cursor_stamps_last_run_at(session):
 
 @requires_postgres
 def test_scan_respects_per_pass_window_budget(session):
-    """The per-pass window budget bounds total windows across cursors so a cold-start pass returns promptly
-    (heartbeat can refresh mid-backfill); un-serviced cursors keep older last_run_at and go first next pass.
-    Without the budget this pass would scan all three cursors (6 windows)."""
+    """Bounds a cold-start pass so the heartbeat can refresh; un-serviced cursors go first next pass."""
     a = "0x" + "a1" * 20  # oldest → serviced first
     b = "0x" + "b2" * 20
     c = "0x" + "c3" * 20  # newest → deferred past the budget this pass
@@ -265,7 +245,6 @@ def test_scan_respects_per_pass_window_budget(session):
     fetchers, heads, hashes = _maps(fetcher)
 
     def run_pass():
-        # budget 4 = two cursors × 2 windows
         return scan_enrolled_events(
             session,
             fetchers=fetchers,
@@ -277,7 +256,6 @@ def test_scan_respects_per_pass_window_budget(session):
             max_windows_per_pass=4,
         )
 
-    # Pass 1: a, b advance two windows each; c is deferred past the budget.
     summary1 = run_pass()
     assert summary1.windows_scanned == 4  # capped at the budget, not 6 (all three)
     assert summary1.budget_exhausted is True  # stopped on the budget → backfill loop re-runs sooner
@@ -285,8 +263,7 @@ def test_scan_respects_per_pass_window_budget(session):
     assert _cursor_block(session, b) == 2 * _MAX_SAFE_SPAN
     assert _cursor_block(session, c) == 0  # never reached this pass
 
-    # Pass 2: a, b were just stamped, so c is now least-recently-run → serviced
-    # first. The rotation picks up the deferred cursor with no persisted offset.
+    # The rotation picks up the deferred cursor with no persisted offset.
     summary2 = run_pass()
     assert summary2.windows_scanned == 4
     assert summary2.budget_exhausted is True
@@ -295,8 +272,7 @@ def test_scan_respects_per_pass_window_budget(session):
 
 @requires_postgres
 def test_cursor_progress_counts_from_table(session):
-    """``_cursor_progress`` reads live (caught_up, total) from the table for the heartbeat;
-    zero-address rows (never emit logs) are excluded, matching the enroll-time guard."""
+    """Zero-address rows never emit logs, so they're excluded."""
     from db.models import IndexedEventCursor
     from workers.event_log_indexer import _cursor_progress
 
@@ -308,7 +284,6 @@ def test_cursor_progress_counts_from_table(session):
         .where(func.lower(IndexedEventCursor.event_address) == "0x" + "11" * 20)
         .values(backfill_complete=True)
     )
-    # A zero-address cursor must not inflate the total.
     enroll_event_cursor(session, chain_id=1, event_address="0x" + "00" * 20, topic0=_TOPIC)
     session.commit()
 
@@ -317,10 +292,7 @@ def test_cursor_progress_counts_from_table(session):
 
 @requires_postgres
 def test_budgeted_backfill_is_identical_to_unbudgeted(session):
-    """Parity: many small budgeted passes must yield the EXACT same index as one unbudgeted pass.
-
-    Budgets change only WHEN windows run, never WHICH blocks are scanned; a skipped window, duplicate,
-    premature completion or starved cursor diverges here."""
+    """Budgets change when windows run, never which blocks are scanned."""
     from db.models import IndexedEventCursor, IndexedEventLog
 
     authorities = ["0x" + h * 20 for h in ("a1", "b2", "c3")]
@@ -366,17 +338,14 @@ def test_budgeted_backfill_is_identical_to_unbudgeted(session):
         ).all()
         return logs, cursors
 
-    # One unbudgeted pass: caps far exceed the work, so it drains in a single pass.
     unbudgeted_logs, unbudgeted_cursors = drain_to_completion(10_000, 10_000)
 
-    # Reset, then re-run with tiny caps that force ~100 budgeted passes + rotation.
     session.execute(delete(IndexedEventLog))
     session.execute(delete(IndexedEventCursor))
     session.commit()
     budgeted_logs, budgeted_cursors = drain_to_completion(max_windows_per_cursor=2, max_windows_per_pass=4)
 
-    # Absolute correctness (catches a bug wrong *identically* in both runs): one
-    # log every _DENSITY blocks over (0, _TARGET], per authority.
+    # Catches a bug that is wrong identically in both runs.
     assert len(unbudgeted_logs) == len(authorities) * (_TARGET // _DENSITY)
     assert budgeted_logs == unbudgeted_logs  # byte-identical index: no skipped/duplicated event
     assert budgeted_cursors == unbudgeted_cursors
@@ -491,8 +460,7 @@ def test_shutdown_stops_after_current_page_and_preserves_committed_progress(sess
     saved_logs = _log_count(session, _AUTHORITY)
     assert saved_logs > 0
 
-    # A new process can resume from the committed cursor, without losing or
-    # duplicating the window that was in flight when shutdown was requested.
+    # A new process resumes from the committed cursor without losing or duplicating the in-flight window.
     normal, heads, hashes = _maps(_RangeCappedFetcher())
     scan_enrolled_events(
         session,

@@ -1,7 +1,5 @@
-"""Pure-logic and contract-boundary tests for the audit-PDF text extractor: ``extract_text_from_pdf`` through real
-``pypdf``, ``download_pdf`` HTTP boundaries the integration test skips (it stubs ``download_pdf`` wholesale), and
-``audit_text_key`` format. The worker loop is covered by ``test_audit_text_extraction_integration.py``; don't
-re-mock worker/storage/LLM paths here.
+"""The worker loop is covered by ``test_audit_text_extraction_integration.py``, which stubs ``download_pdf``
+wholesale.
 """
 
 from __future__ import annotations
@@ -23,10 +21,6 @@ from services.audits.text_extraction import (
 )
 from tests.support.pdf import minimal_pdf_with_text
 
-# ---------------------------------------------------------------------------
-# extract_text_from_pdf — real pypdf roundtrip, no mocks
-# ---------------------------------------------------------------------------
-
 
 class TestExtractTextFromPdf:
     def test_roundtrips_simple_ascii(self):
@@ -42,8 +36,8 @@ class TestExtractTextFromPdf:
             extract_text_from_pdf(body)
 
     def test_link_annotation_uris_are_included_in_extracted_text(self):
-        """Certora PDFs embed commit SHAs as hyperlinks and pypdf's ``extract_text()`` drops the URI, leaving
-        ``reviewed_commits`` empty, which kills source-equivalence and strands the audit in grace-zone matching.
+        """Certora embeds commit SHAs as hyperlinks that ``extract_text()`` drops, leaving ``reviewed_commits``
+        empty.
         """
         import io
 
@@ -65,12 +59,9 @@ class TestExtractTextFromPdf:
 
         text = extract_text_from_pdf(buf.getvalue())
 
-        # Assert on the SHA, not the URL, so the impl isn't pinned to a formatting choice.
         assert sha in text, f"commit SHA from link annotation lost in extraction. Extracted text: {text!r}"
 
     def test_link_annotations_across_multiple_pages(self):
-        """URIs on page 2 must show up alongside (or after) page 2's body
-        text, not get collapsed into page 1."""
         import io
 
         from pypdf import PdfWriter
@@ -106,9 +97,7 @@ class TestExtractTextFromPdf:
         assert "--- page 2 ---" in text
 
     def test_non_link_annotations_do_not_leak_garbage(self):
-        """Only ``/Subtype == /Link`` with ``/A/URI`` counts; highlights, form fields and comments must not pollute the
-        text.
-        """
+        """Only ``/Link`` annotations with ``/A/URI`` count."""
         import io
 
         from pypdf import PdfWriter
@@ -132,9 +121,7 @@ class TestExtractTextFromPdf:
         assert "annotator's private note" not in text
 
     def test_end_to_end_link_sha_reaches_reviewed_commits_extractor(self):
-        """Locks extract_text_from_pdf -> extract_reviewed_commits end to end for the Certora-V3.Prelude-1 case
-        (hyperlinked "commit" with no inline SHA).
-        """
+        """The Certora-V3.Prelude-1 case: a hyperlinked "commit" with no inline SHA."""
         import io
 
         from pypdf import PdfWriter
@@ -162,8 +149,7 @@ class TestExtractTextFromPdf:
         )
 
 
-# download_pdf HTTP boundaries (error, wrong content-type, oversize). The integration suite stubs download_pdf
-# wholesale, so these break unnoticed in prod when a publisher changes CDN behaviour.
+# The integration suite stubs download_pdf wholesale, so these break unnoticed when a publisher changes CDN behaviour.
 
 
 def _mock_response(
@@ -196,8 +182,7 @@ class TestDownloadPdfBoundaries:
             download_pdf("https://example.com/missing.pdf", session=session)
 
     def test_rejects_html_content_type(self):
-        """Etherscan / publisher soft-redirects (login walls, 200 HTML) are
-        the main cause of misclassified bodies — guard against them."""
+        """Soft-redirects (login walls, 200 HTML) are the main cause of misclassified bodies."""
         session = MagicMock()
         session.get.return_value = _mock_response(content_type="text/html")
         with pytest.raises(PdfDownloadError, match="content-type"):
@@ -217,8 +202,7 @@ class TestDownloadPdfBoundaries:
             download_pdf("https://example.com/huge.pdf", session=session)
 
     def test_streamed_body_over_cap_raises(self):
-        """Content-Length header is optional — the size cap must still trip
-        when the stream itself exceeds the limit."""
+        """Content-Length is optional."""
         session = MagicMock()
         resp = _mock_response()
         resp.iter_content.return_value = iter([b"x" * (60 * 1024 * 1024)])
@@ -233,9 +217,7 @@ class TestDownloadPdfBoundaries:
             download_pdf("https://example.com/a.pdf", session=session)
 
 
-# download_audit_body retry-with-backoff. Prod saw bursts of ConnectionResetError(104) from Code4rena / Sherlock
-# that permanently failed audit rows. requests wraps it as requests.exceptions.ConnectionError, so tests mock
-# the wrapped form.
+# Prod saw bursts of ConnectionResetError(104) from Code4rena / Sherlock; requests wraps it as ConnectionError.
 
 
 class TestDownloadAuditBodyRetry:
@@ -249,9 +231,8 @@ class TestDownloadAuditBodyRetry:
                 ),
                 id="connection_error",
             ),
-            # Slow CDNs surface as ReadTimeout, not ConnectionError; same transient retry treatment.
             pytest.param(requests.exceptions.ReadTimeout("read timed out"), id="read_timeout"),
-            # 503 is the HTTP-level analogue of a connection reset; it used to be bucketed with 4xx as fatal.
+            # 503 used to be bucketed with 4xx as fatal.
             pytest.param(_mock_response(status_code=503), id="transient_5xx"),
         ],
     )
@@ -283,7 +264,7 @@ class TestDownloadAuditBodyRetry:
         ("response_kwargs", "url", "match"),
         [
             pytest.param({"status_code": 404}, "https://example.com/missing.pdf", "HTTP 404", id="fatal_4xx"),
-            # text/html signals a wrong URL was captured at discovery; refetching keeps returning HTML.
+            # HTML means a wrong URL was captured at discovery; refetching keeps returning it.
             pytest.param(
                 {"content_type": "text/html"}, "https://example.com/login.pdf", "content-type", id="fatal_content_type"
             ),
@@ -303,11 +284,6 @@ class TestDownloadAuditBodyRetry:
 def test_audit_text_key_is_deterministic():
     assert audit_text_key(1) == "audits/text/1.txt"
     assert audit_text_key(999999) == "audits/text/999999.txt"
-
-
-# ---------------------------------------------------------------------------
-# download_audit_body — accepts text/* content-types when kind="text"
-# ---------------------------------------------------------------------------
 
 
 class TestDownloadAuditBodyTextMode:
@@ -330,8 +306,7 @@ class TestDownloadAuditBodyTextMode:
         assert body == payload
 
     def test_rejects_html_in_text_mode(self):
-        """Even in text mode we reject HTML — a GitHub /blob/ URL serves HTML
-        which is the code-view page, not the raw markdown."""
+        """A GitHub /blob/ URL serves the HTML code view."""
         session = MagicMock()
         session.get.return_value = _mock_response(content_type="text/html")
         with pytest.raises(PdfDownloadError, match="content-type"):
@@ -342,8 +317,6 @@ class TestDownloadAuditBodyTextMode:
             )
 
     def test_pdf_mode_still_rejects_text_markdown(self):
-        """PDF mode must not silently accept markdown — the caller's URL
-        said .pdf, so getting text/markdown signals a wrong file."""
         session = MagicMock()
         session.get.return_value = _mock_response(content_type="text/markdown")
         with pytest.raises(PdfDownloadError, match="content-type"):
@@ -352,11 +325,6 @@ class TestDownloadAuditBodyTextMode:
                 session=session,
                 kind="pdf",
             )
-
-
-# ---------------------------------------------------------------------------
-# process_audit_report — markdown / plain-text routing
-# ---------------------------------------------------------------------------
 
 
 _MD_BODY = "# Hats Finance Audit\n\n" + ("\n## Scope\n\nPool.sol, Vault.sol, Strategy.sol. " * 30)

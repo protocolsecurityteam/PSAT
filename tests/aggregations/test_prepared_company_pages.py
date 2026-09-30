@@ -1,4 +1,3 @@
-"""Prepared response correctness against an isolated local PostgreSQL database."""
 
 import gzip
 import json
@@ -236,7 +235,6 @@ def test_reanalysis_pointer_preserves_preparation_eligibility(prepared, status, 
         make_due(session)
     contract = session.execute(select(Contract).where(Contract.protocol_id == protocol.id)).scalar_one()
     previous_job_id = contract.job_id
-    # Jobs may store checksummed addresses, unlike the canonical contract key.
     session.execute(update(Job).where(Job.id == previous_job_id).values(address=contract.address.upper()))
     replacement = _add_job(session, address=contract.address, protocol_id=protocol.id, status=status)
     contract.job_id = replacement.id

@@ -33,21 +33,14 @@ def proto_id(db_session):
     return p.id
 
 
-# ---------------------------------------------------------------------------
-# (a) defillama-then-dapp_crawl of the same mainnet address → ONE merged row
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_defillama_then_dapp_crawl_same_mainnet_address_yields_one_row(db_session, proto_id):
-    """Chainless defillama then dapp_crawl persists of one mainnet address collapse to one row, sources unioned."""
     from db.models import Contract
     from db.queue import bulk_upsert_discovered_contracts
 
     addr = _addr()
 
-    # Writer 1 (defillama): the scan couldn't attribute a chain → inherits the
-    # job's mainnet chain instead of persisting NULL.
+    # The scan couldn't attribute a chain, so it inherits the job's.
     bulk_upsert_discovered_contracts(
         db_session,
         protocol_id=proto_id,
@@ -56,7 +49,6 @@ def test_defillama_then_dapp_crawl_same_mainnet_address_yields_one_row(db_sessio
     )
     db_session.commit()
 
-    # Writer 2 (dapp_crawl, ~1 min later): same address, same mainnet job.
     bulk_upsert_discovered_contracts(
         db_session,
         protocol_id=proto_id,
@@ -77,7 +69,6 @@ def test_defillama_then_dapp_crawl_same_mainnet_address_yields_one_row(db_sessio
 
 @requires_postgres
 def test_dapp_crawl_dedups_against_legacy_null_defillama_stub(db_session, proto_id):
-    """A legacy ``chain=NULL`` defillama stub is deduped via the coalesced key by a later mainnet dapp_crawl write."""
     from db.models import Contract
     from db.queue import bulk_upsert_discovered_contracts
 
@@ -99,11 +90,6 @@ def test_dapp_crawl_dedups_against_legacy_null_defillama_stub(db_session, proto_
     assert row.chain is None  # decided: no backfill; NULL≡mainnet convention kept.
     assert set(row.discovery_sources or []) == {"defillama", "dapp_crawl"}
     assert row.protocol_id == proto_id
-
-
-# ---------------------------------------------------------------------------
-# (b) same address on two evidence chains still yields two rows
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -133,8 +119,7 @@ def test_same_address_two_evidence_chains_yields_two_rows(db_session, proto_id):
 
 @requires_postgres
 def test_base_entry_does_not_dedup_against_legacy_null_row(db_session, proto_id):
-    """A non-mainnet write must NOT collapse onto a legacy NULL (mainnet) stub:
-    coalescing maps NULL→'ethereum', and 'base' ≠ 'ethereum', so they stay two rows."""
+    """NULL coalesces to 'ethereum', which is not 'base'."""
     from db.models import Contract
     from db.queue import bulk_upsert_discovered_contracts
 
@@ -154,15 +139,9 @@ def test_base_entry_does_not_dedup_against_legacy_null_row(db_session, proto_id)
     assert {r.chain for r in rows} == {None, "base"}
 
 
-# ---------------------------------------------------------------------------
-# (c) an 'unknown'-chains entry stays its own resolve-later bucket
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_unknown_chain_entry_is_preserved_and_isolated(db_session, proto_id):
-    """``'unknown'`` is a real "resolve later" bucket (chain_resolver probes it): never coerced to the job
-    chain, and its coalesced key keeps it from deduping against a mainnet stub at the same address."""
+    """'unknown' is a real resolve-later bucket that chain_resolver probes."""
     from db.models import Contract
     from db.queue import bulk_upsert_discovered_contracts
 
@@ -187,14 +166,8 @@ def test_unknown_chain_entry_is_preserved_and_isolated(db_session, proto_id):
     assert {r.chain for r in rows} == {"ethereum", "unknown"}
 
 
-# ---------------------------------------------------------------------------
-# Worker-level: the defillama scan (spawned with no chain) never writes NULL
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_defillama_worker_chainless_job_writes_ethereum_not_null(db_session, monkeypatch):
-    """The writer that produced the NULL stubs: a chainless defillama scan persists ``chain='ethereum'``, not NULL."""
     from db.models import Contract, JobStage
     from db.queue import create_job
     from workers.base import JobHandledDirectly

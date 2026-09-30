@@ -1,8 +1,3 @@
-"""Integration tests for ``GET /api/audits/pipeline`` against real PostgreSQL (``requires_postgres``).
-
-Each test seeds ``audit_reports`` rows in the states the endpoint slices on (NULL / processing /
-success / failed); no workers or object storage involved.
-"""
 
 from __future__ import annotations
 
@@ -14,11 +9,6 @@ import pytest
 from tests.conftest import requires_postgres
 
 pytestmark = [requires_postgres]
-
-
-# ---------------------------------------------------------------------------
-# Seed helpers
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -97,11 +87,6 @@ def _insert_audit(
     return ar.id
 
 
-# ---------------------------------------------------------------------------
-# 1. Empty pipeline
-# ---------------------------------------------------------------------------
-
-
 def test_pipeline_empty_when_no_audits(api_client):
     r = api_client.get("/api/audits/pipeline")
     assert r.status_code == 200
@@ -109,11 +94,6 @@ def test_pipeline_empty_when_no_audits(api_client):
     assert set(body.keys()) == {"text_extraction", "scope_extraction", "generated_at"}
     for worker in ("text_extraction", "scope_extraction"):
         assert body[worker] == {"processing": [], "pending": [], "failed": []}
-
-
-# ---------------------------------------------------------------------------
-# 2. Bucket routing — rows land in the right column
-# ---------------------------------------------------------------------------
 
 
 def test_pipeline_places_rows_in_correct_buckets(db_session, api_client, seed_protocol):
@@ -167,19 +147,11 @@ def test_pipeline_places_rows_in_correct_buckets(db_session, api_client, seed_pr
     assert failed["error"] == "HTTP 404"
 
 
-# ---------------------------------------------------------------------------
-# 3. Scope pending is gated on text success
-# ---------------------------------------------------------------------------
-
-
 def test_scope_pending_excludes_unclaimable_rows(db_session, api_client, seed_protocol):
-    """A scope row is only ``pending`` when text has already succeeded —
-    otherwise the worker can't do anything with it and showing it in the
-    monitor would misrepresent the work the scope worker actually has."""
+    """Scope work is only claimable once text has succeeded."""
     pid, _ = seed_protocol
     now = datetime.now(timezone.utc)
 
-    # Text failed → scope unreachable; must NOT show up in scope pending.
     text_failed_id = _insert_audit(
         db_session,
         pid,
@@ -203,14 +175,8 @@ def test_scope_pending_excludes_unclaimable_rows(db_session, api_client, seed_pr
     assert [a["audit_id"] for a in scope["pending"]] == [claimable_id]
 
 
-# ---------------------------------------------------------------------------
-# 4. Failed lookback window — stale failures drop out
-# ---------------------------------------------------------------------------
-
-
 def test_pipeline_excludes_failures_older_than_lookback(db_session, api_client, seed_protocol):
-    """Only failures within the last 24h appear — older ones fade so the
-    panel doesn't grow unbounded across weeks of accumulated misses."""
+    """Old failures fade so the panel doesn't grow unbounded."""
     pid, _ = seed_protocol
     now = datetime.now(timezone.utc)
 
@@ -232,11 +198,6 @@ def test_pipeline_excludes_failures_older_than_lookback(db_session, api_client, 
     r = api_client.get("/api/audits/pipeline")
     failed_ids = {a["audit_id"] for a in r.json()["text_extraction"]["failed"]}
     assert failed_ids == {recent_id}
-
-
-# ---------------------------------------------------------------------------
-# 5. Scope-stage state machine — pending → processing → failed / success
-# ---------------------------------------------------------------------------
 
 
 def test_scope_bucket_routing(db_session, api_client, seed_protocol):
@@ -284,8 +245,7 @@ def test_scope_bucket_routing(db_session, api_client, seed_protocol):
     assert {a["audit_id"] for a in scope["processing"]} == {processing}
     assert {a["audit_id"] for a in scope["failed"]} == {failed}
 
-    # Processing row's worker_id is the SCOPE worker, not text — the
-    # frontend shows "who's working on this right now".
+    # The frontend shows who is working on this right now.
     proc = next(a for a in scope["processing"] if a["audit_id"] == processing)
     assert proc["worker_id"] == "scope-worker-b"
     assert proc["error"] is None
@@ -294,14 +254,8 @@ def test_scope_bucket_routing(db_session, api_client, seed_protocol):
     assert fail["error"] == "LLM timeout"
 
 
-# ---------------------------------------------------------------------------
-# 6. Bucket cap — the endpoint never returns more than _PIPELINE_BUCKET_LIMIT
-#    entries, protecting the monitor page from pathological backlogs
-# ---------------------------------------------------------------------------
-
-
 def test_pipeline_caps_buckets_at_limit(db_session, api_client, seed_protocol):
-    """Seeding more rows than the cap still yields a bounded response (one stuck worker can't brick the monitor)."""
+    """One stuck worker can't brick the monitor."""
     from services.aggregations import audits_pipeline as pipeline_module
 
     cap = pipeline_module._PIPELINE_BUCKET_LIMIT
@@ -315,18 +269,11 @@ def test_pipeline_caps_buckets_at_limit(db_session, api_client, seed_protocol):
     assert len(pending) == cap
 
 
-# ---------------------------------------------------------------------------
-# 8. Pending ordering — oldest discovered first so FIFO matches worker claim
-# ---------------------------------------------------------------------------
-
-
 def test_text_pending_ordered_oldest_first(db_session, api_client, seed_protocol):
-    """Pending follows worker claim order (``discovered_at`` ascending); otherwise the top entry
-    could be the newest audit, misleading anyone watching a stuck queue."""
+    """Pending follows worker claim order, so the top entry is the one a stuck queue is blocked on."""
     pid, _ = seed_protocol
     now = datetime.now(timezone.utc)
 
-    # Insert newest first so we're sure ordering isn't just insertion order.
     newer = _insert_audit(db_session, pid, text_status=None, discovered_at=now - timedelta(hours=1))
     older = _insert_audit(db_session, pid, text_status=None, discovered_at=now - timedelta(hours=5))
     middle = _insert_audit(db_session, pid, text_status=None, discovered_at=now - timedelta(hours=3))

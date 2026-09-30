@@ -32,7 +32,6 @@ from tests.conftest import requires_postgres
 
 @pytest.fixture()
 def cm_db(db_session, monkeypatch):
-    """Route the module's own sessions at the test DB, storage off (inline JSONB)."""
     import os
 
     test_url = os.environ.get("TEST_DATABASE_URL")
@@ -158,7 +157,6 @@ def test_rebuild_plan_is_capped_and_excludes_in_flight_builds(cm_db, monkeypatch
     assert backlog["budget_per_day"] == 2
     assert len(candidates) == 2
     assert all(c.reason != REASON_IN_PROGRESS for c in candidates)
-    # Stable order, so a repeated dry run proposes the same work.
     assert [c.address for c in candidates] == [c.address for c in plan_rebuilds(cm_db)[0]]
 
 
@@ -177,7 +175,6 @@ def test_budget_counts_what_it_already_spent(cm_db, monkeypatch):
             created_at=now - timedelta(hours=2),
         )
     )
-    # Older than the window, and an unrelated job — neither is this budget.
     cm_db.add(
         Job(
             id=uuid.uuid4(),
@@ -209,9 +206,7 @@ def test_budget_counts_what_it_already_spent(cm_db, monkeypatch):
 
 @requires_postgres
 def test_a_second_pass_moves_down_the_list_instead_of_re_proposing_the_head(cm_db, monkeypatch):
-    """The 24h counter bounds how MANY jobs are issued, not WHICH. Without an
-    identity exclusion every pass re-proposes the head, and a contract that
-    keeps failing to rebuild starves the tail forever."""
+    """Without an identity exclusion every pass re-proposes the head and a failing contract starves the tail."""
     addrs = ["0x" + f"{n:02x}" * 20 for n in range(40, 45)]
     for addr in addrs:
         _monitored(cm_db, addr)
@@ -235,17 +230,14 @@ def test_an_in_flight_rebuild_is_not_re_queued_even_when_it_is_old(cm_db, monkey
     monkeypatch.setenv("PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY", "5")
     candidates, backlog = plan_rebuilds(cm_db)
     assert candidates == []
-    # Outside the 24h window, so it is not budget already spent — but it is
-    # still an attempt outstanding, and those are different facts.
+    # Outside the budget window but still outstanding.
     assert backlog["queued_last_24h"] == 0
     assert backlog["attempted_not_yet_resolved"] == 1
 
 
 @requires_postgres
 def test_a_rebuild_on_one_chain_does_not_suppress_the_same_address_on_another(cm_db, monkeypatch):
-    """The same address on two chains is two deployments with two
-    materializations; keying the exclusion on the address alone would leave the
-    twin permanently unattempted."""
+    """Keying on the address alone would leave the twin unattempted."""
     addr = "0x" + "80" * 20
     _monitored(cm_db, addr, chain="ethereum")
     _monitored(cm_db, addr, chain="base")
@@ -259,8 +251,6 @@ def test_a_rebuild_on_one_chain_does_not_suppress_the_same_address_on_another(cm
 
 @requires_postgres
 def test_a_resolved_attempt_is_not_outstanding_work(cm_db, monkeypatch):
-    """The count answers "how much issued work has not landed yet"; an attempt
-    whose contract now has its row has landed."""
     resolved, outstanding = "0x" + "90" * 20, "0x" + "91" * 20
     _monitored(cm_db, resolved)
     _monitored(cm_db, outstanding)
@@ -275,8 +265,7 @@ def test_a_resolved_attempt_is_not_outstanding_work(cm_db, monkeypatch):
 
 @requires_postgres
 def test_a_stale_builder_claim_is_rebuildable_not_in_flight(cm_db, monkeypatch):
-    """A crashed worker's leftover claim would otherwise read as "a builder is
-    running" forever and exempt the contract from every rebuild pass."""
+    """Otherwise a crashed worker's claim exempts the contract forever."""
     fresh, stale = "0x" + "60" * 20, "0x" + "61" * 20
     _monitored(cm_db, fresh)
     _monitored(cm_db, stale)
@@ -302,9 +291,7 @@ def test_a_stale_builder_claim_is_rebuildable_not_in_flight(cm_db, monkeypatch):
 
 @requires_postgres
 def test_queued_rebuilds_force_past_the_static_cache(cm_db, monkeypatch):
-    """Discovery's same-address static cache is not version-gated, so a rebuild
-    issued after a schema bump would copy the superseded era's artifacts, skip
-    analysis, and clear the backlog without re-analyzing anything."""
+    """Discovery's static cache isn't version-gated, so a rebuild would copy superseded artifacts."""
     from scripts.reconcile_materializations import queue_rebuilds
 
     addr = "0x" + "70" * 20

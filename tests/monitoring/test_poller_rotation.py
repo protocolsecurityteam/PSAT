@@ -1,11 +1,7 @@
-"""Integration tests for the poller rotation + chunked-commit driver.
+"""The real ``poll_for_state_changes`` with only the RPC wire stubbed.
 
-Exercises the real ``poll_for_state_changes`` against the test DB, stubbing only the RPC
-wire (``rpc_batch_request_classified``). Per-entry ``last_poll_status`` is ``ok`` / ``error``
-(per-call revert) / ``no_value``; errored chunks stamp and rotate normally (always-reverting
-entries exist in persisted plans and would pin the rotation), while a transport-failed
-chunk publishes nothing and stays unstamped (retry-first for outages). Any non-observed
-entry marks the pass ``partial``; an observed value never does.
+Errored chunks stamp and rotate normally, since always-reverting entries would pin the rotation; a
+transport-failed chunk publishes nothing and stays retry-first. Any non-observed entry marks the pass partial.
 """
 
 from __future__ import annotations
@@ -27,8 +23,7 @@ from db.models import (
 )
 from services.monitoring.unified_watcher import poll_for_state_changes
 
-# A timestamp every seeded ``last_polled_at`` is strictly below and every
-# server-stamped one is strictly above — clock-skew-proof "was stamped" check.
+# Clock-skew-proof "was stamped" check.
 RECENT = datetime(2025, 1, 1, tzinfo=timezone.utc)
 
 
@@ -37,7 +32,6 @@ def ADDR(n: int) -> str:
 
 
 def _word(addr: str) -> str:
-    """Right-pad a 20-byte address into a 32-byte ABI word."""
     return "0x" + "0" * 24 + addr[2:]
 
 
@@ -79,12 +73,7 @@ def _make_mock(
     error_on: set[int] | None = None,
     transport_on: set[int] | None = None,
 ):
-    """Build a ``rpc_batch_request_classified`` stub that records batches and returns
-    per-``to``-address ``(value, "ok")`` slots from *returns*.
-
-    *error_on* / *transport_on* are 1-based invocation indexes whose whole batch comes back
-    as ``(None, "error")`` (per-call JSON-RPC errors) or ``(None, "transport")`` (node never
-    answered; the real helper never raises)."""
+    """``transport`` means the node never answered; the real helper never raises."""
     batches: list[list] = []
     state = {"n": 0}
 
@@ -108,11 +97,6 @@ def _addrs_in_batch(batch: list) -> list[str]:
     return [(params[0]["to"] if method == "eth_call" else params[0]).lower() for method, params in batch]
 
 
-# ---------------------------------------------------------------------------
-# Rotation order + slice cap
-# ---------------------------------------------------------------------------
-
-
 def test_rotation_orders_nulls_first_then_ascending_and_caps_slice(db_session, monkeypatch):
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
     plan = [_entry("trackedAddr", "0xaa000001")]
@@ -128,26 +112,17 @@ def test_rotation_orders_nulls_first_then_ascending_and_caps_slice(db_session, m
 
     assert events == []
     db_session.expire_all()
-    # NULLS FIRST (c) then oldest (a); cap=2 stops there.
     assert db_session.get(MonitoredContract, c.id).last_polled_at > RECENT
     assert db_session.get(MonitoredContract, a.id).last_polled_at > RECENT
-    # b and d were beyond the slice — untouched.
     assert db_session.get(MonitoredContract, b.id).last_polled_at == datetime(2021, 1, 1, tzinfo=timezone.utc)
     assert db_session.get(MonitoredContract, d.id).last_polled_at == datetime(2022, 1, 1, tzinfo=timezone.utc)
-
-
-# ---------------------------------------------------------------------------
-# Chunk packing
-# ---------------------------------------------------------------------------
 
 
 def test_chunking_keeps_one_contracts_entries_together(db_session, monkeypatch):
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "10")
     monkeypatch.setattr("services.monitoring.unified_watcher.MAX_BATCH_SIZE", 3)
 
-    # A: 2 calls, B: 1 call, C: 2 calls. With a 3-call budget the packer fills
-    # [A(2)+B(1)] exactly, then starts a fresh chunk for C rather than splitting
-    # C's 2 calls across the boundary.
+    # C's calls start a fresh chunk rather than split across the boundary.
     a = _seed(
         db_session,
         1,
@@ -170,15 +145,9 @@ def test_chunking_keeps_one_contracts_entries_together(db_session, monkeypatch):
     assert _addrs_in_batch(batches[0]) == [ADDR(1), ADDR(1), ADDR(2)]  # A+B packed
     assert _addrs_in_batch(batches[1]) == [ADDR(3), ADDR(3)]  # C whole, not split
 
-    # No contract's address spans two batches.
     for mc in (a, b, c):
         hosting = [i for i, batch in enumerate(batches) if mc.address in _addrs_in_batch(batch)]
         assert len(hosting) == 1
-
-
-# ---------------------------------------------------------------------------
-# Per-entry status + partial reporting
-# ---------------------------------------------------------------------------
 
 
 def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, monkeypatch):
@@ -208,8 +177,7 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
     )
 
     returns = {ADDR(1): _word(ADDR(190)), ADDR(3): _word(ADDR(192))}
-    # Order is a, b, c (by last_polled_at); MAX_BATCH_SIZE=1 -> one chunk each.
-    # Chunk 2 (b): every call gets a per-call JSON-RPC error (revert), an observed outcome.
+    # One chunk per contract; chunk 2 gets per-call reverts, an observed outcome.
     mock, _ = _make_mock(returns, error_on={2})
     captured: list[tuple] = []
 
@@ -224,7 +192,7 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
 
     assert len(events) == 2  # a and c detected; b's call errored
 
-    # A fresh connection sees each chunk's rows: the commit was per chunk, not pass-wide.
+    # A fresh connection sees each chunk: the commit was per chunk.
     engine = create_engine(os.environ["TEST_DATABASE_URL"])
     with SASession(engine) as fresh:
         ra = fresh.get(MonitoredContract, a.id)
@@ -234,7 +202,7 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
         assert ra.last_polled_at is not None and ra.last_polled_at > RECENT  # chunk 1 stamped + persisted
         assert ra.last_known_state and ra.last_known_state["trackedAddr"] == ADDR(190)
         assert ra.last_poll_status == {"trackedAddr": "ok"}
-        # The errored chunk is stamped too, else always-reverting entries would pin the front.
+        # Otherwise always-reverting entries would pin the front.
         assert rb.last_polled_at is not None and rb.last_polled_at > RECENT
         assert rb.last_known_state and rb.last_known_state["trackedAddr"] == ADDR(91)  # value plane untouched
         assert rb.last_poll_status == {"trackedAddr": "error"}
@@ -261,8 +229,6 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
 
 
 def test_errored_chunk_contracts_rotate_normally_not_retry_first(db_session, monkeypatch):
-    """A chunk answered with per-call errors stamps its contracts (status ``error``) instead
-    of holding them at the front, where always-reverting entries would crowd out the rest."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
     monkeypatch.setattr("services.monitoring.unified_watcher.MAX_BATCH_SIZE", 1)
 
@@ -273,8 +239,6 @@ def test_errored_chunk_contracts_rotate_normally_not_retry_first(db_session, mon
         db_session, 2, plan=[_entry("trackedAddr", "0xbb01")], last_polled_at=datetime(2021, 1, 1, tzinfo=timezone.utc)
     )
 
-    # Pass 1: a stamped; b's chunk (invocation 2) reverts per-call ->
-    # b is stamped as well, with the error published per entry.
     mock1, _ = _make_mock({}, error_on={2})
     with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock1):
         poll_for_state_changes(db_session, "http://rpc")
@@ -285,7 +249,6 @@ def test_errored_chunk_contracts_rotate_normally_not_retry_first(db_session, mon
     assert rb.last_polled_at > RECENT
     assert rb.last_poll_status == {"trackedAddr": "error"}
 
-    # Pass 2: b's status heals to ok once the call answers a value again.
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
     mock2, _ = _make_mock({ADDR(1): _word(ADDR(190)), ADDR(2): _word(ADDR(191))})
     with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock2):
@@ -296,9 +259,7 @@ def test_errored_chunk_contracts_rotate_normally_not_retry_first(db_session, mon
 
 
 def test_transport_failed_chunk_publishes_nothing_and_is_retry_first(db_session, monkeypatch):
-    """A batch the node never answered observed nothing: contracts keep their prior
-    ``last_poll_status`` and ``last_polled_at`` (sort first next pass) and the pass reports
-    partial with ``chunks_transport_failed``; an outage never publishes an ``error``."""
+    """An outage keeps prior status and sorts first next pass, and never publishes ``error``."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
     monkeypatch.setattr("services.monitoring.unified_watcher.MAX_BATCH_SIZE", 1)
 
@@ -333,7 +294,6 @@ def test_transport_failed_chunk_publishes_nothing_and_is_retry_first(db_session,
     assert detail["chunks_transport_failed"] == 1
     assert detail["entry_errors"] == 0  # transport is NOT an entry error
 
-    # Once the node answers again, b polls and publishes normally.
     mock2, _ = _make_mock({ADDR(1): _word(ADDR(190)), ADDR(2): _word(ADDR(191))})
     with patch("services.monitoring.unified_watcher.rpc_batch_request_classified", side_effect=mock2):
         poll_for_state_changes(db_session, "http://rpc")
@@ -344,8 +304,6 @@ def test_transport_failed_chunk_publishes_nothing_and_is_retry_first(db_session,
 
 
 def test_transport_outage_with_real_helper_publishes_nothing(db_session, monkeypatch):
-    """Same invariant with the REAL ``rpc_batch_request_classified`` and only the HTTP wire
-    broken: an outage writes no per-entry status and doesn't stamp."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     seeded = datetime(2020, 1, 1, tzinfo=timezone.utc)
     mc = _seed(db_session, 1, plan=[_entry("trackedAddr", "0xaa01")], last_polled_at=seeded)
@@ -367,8 +325,7 @@ def test_transport_outage_with_real_helper_publishes_nothing(db_session, monkeyp
 
 
 def test_answered_empty_return_publishes_no_value_not_ok(db_session, monkeypatch):
-    """A ``0x`` answer (codeless address / stale fabricated getter) publishes ``no_value``:
-    not ``ok`` (nothing yielded), not ``error`` (nothing reverted); the pass is partial."""
+    """Answered empty: not ``ok``, not ``error``."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     mc = _seed(db_session, 1, plan=[_entry("_initialized", "0xdeadbeef")], last_polled_at=RECENT)
 
@@ -399,10 +356,10 @@ def test_answered_empty_return_publishes_no_value_not_ok(db_session, monkeypatch
 
 
 def test_answered_zero_word_is_ok_and_pass_is_not_partial(db_session, monkeypatch):
-    """A 32-byte zero word on an address getter (``owner()`` on a renounced contract) is an
-    OBSERVED value: ``ok``, and a pass of such reads is healthy (not ``partial``/``degraded``).
-    A negative must come from failing to observe, not the decoder's zero convention; the zero
-    itself stays out of ``last_known_state``."""
+    """A zero word is an observed value; a negative must come from failing to observe.
+
+    The zero stays out of ``last_known_state``.
+    """
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     plan = [_entry("owner", "0x8da5cb5b"), _entry("guardian", "0xaa02")]
     mc = _seed(db_session, 1, plan=plan, last_polled_at=RECENT)
@@ -413,7 +370,6 @@ def test_answered_zero_word_is_ok_and_pass_is_not_partial(db_session, monkeypatc
         captured.append((process, status, detail))
 
     def _mock(url, calls):
-        # Plan order: owner (zero word), guardian (nonzero control).
         assert len(calls) == 2
         return [("0x" + "0" * 64, "ok"), (_word(ADDR(190)), "ok")]
 
@@ -437,8 +393,7 @@ def test_answered_zero_word_is_ok_and_pass_is_not_partial(db_session, monkeypatc
 
 
 def test_entry_not_dispatched_is_absent_from_status_map(db_session, monkeypatch):
-    """Published shapes: decoded ``ok``, reverting ``error``, answered-empty ``no_value``; an
-    undispatchable (unrecognized kind) entry stays absent, never conflated with these."""
+    """An undispatchable entry stays absent rather than conflated with a published status."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     plan = [
         _entry("good", "0xaa01"),
@@ -449,7 +404,6 @@ def test_entry_not_dispatched_is_absent_from_status_map(db_session, monkeypatch)
     mc = _seed(db_session, 1, plan=plan, last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
 
     def _mock(url, calls):
-        # Plan order: good, dead, hollow (the future_kind entry produced no call).
         assert len(calls) == 3
         return [(_word(ADDR(190)), "ok"), (None, "error"), ("0x", "ok")]
 
@@ -464,7 +418,6 @@ def test_entry_not_dispatched_is_absent_from_status_map(db_session, monkeypatch)
 
 
 def test_last_poll_status_is_served_on_monitored_contracts(db_session, api_client, monkeypatch):
-    """GET /api/monitored-contracts serves per-entry status beside the value plane."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     plan = [_entry("good", "0xaa01"), _entry("dead", "0xaa02"), _entry("hollow", "0xaa03")]
     mc = _seed(db_session, 1, plan=plan, last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc))
@@ -480,11 +433,6 @@ def test_last_poll_status_is_served_on_monitored_contracts(db_session, api_clien
     row = next(r for r in resp.json() if r["id"] == str(mc.id))
     assert row["last_poll_status"] == {"good": "ok", "dead": "error", "hollow": "no_value"}
     assert row["last_known_state"] == {"good": ADDR(190)}
-
-
-# ---------------------------------------------------------------------------
-# Preserved computation: change, first-observation, suppression, write-through
-# ---------------------------------------------------------------------------
 
 
 def test_value_change_emits_event_updates_state_and_stamps(db_session, monkeypatch):
@@ -558,7 +506,6 @@ def test_suppression_when_scanner_already_detected(db_session, monkeypatch):
     assert events == []  # suppressed by the recent scanner event
     db_session.expire_all()
     reloaded = db_session.get(MonitoredContract, mc.id)
-    # State still advanced (recorded before the suppression check) and stamped.
     assert reloaded.last_known_state["guardian"] == ADDR(180)
     assert reloaded.last_polled_at > RECENT
     poll_events = (
@@ -620,5 +567,5 @@ def test_contract_without_poll_entries_still_rotates(db_session, monkeypatch):
     assert events == []
     assert batches == []  # no RPC issued for an empty plan
     db_session.expire_all()
-    # Stamped anyway so it doesn't perpetually occupy the NULLS-FIRST slot.
+    # Otherwise it perpetually occupies the NULLS-FIRST slot.
     assert db_session.get(MonitoredContract, mc.id).last_polled_at > RECENT

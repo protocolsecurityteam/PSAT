@@ -1,4 +1,3 @@
-"""Analyses list + detail endpoints — shape checks for frontend-critical fields."""
 
 from __future__ import annotations
 
@@ -32,7 +31,6 @@ def test_analysis_detail_roundtrip(analyzed_weth, live_client: LiveClient):
 
 
 def test_analysis_detail_inlines_contract_analysis(analyzed_weth, live_client: LiveClient):
-    # contract_analysis is unconditionally inlined (api.py:770-779).
     detail = live_client.analysis_detail(analyzed_weth["job_id"])
     assert isinstance(detail.get("contract_analysis"), dict)
     via_artifact = live_client.artifact(analyzed_weth["job_id"], "contract_analysis")

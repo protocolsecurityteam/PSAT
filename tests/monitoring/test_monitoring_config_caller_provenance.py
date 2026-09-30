@@ -1,13 +1,8 @@
 """A caller-authored ``monitoring_config`` may not read as an analysis result.
 
-``enrollment._build_monitoring_config`` stamps a tracking-plan discriminant (``tracked_topics``
-present, or ``tracking_plan_not_determined``), but ``POST /api/protocols/{id}/monitoring`` and
-``PATCH /api/monitored-contracts/{id}`` stored the caller's dict verbatim, so caller-enrolled
-rows (all 3 ``surface_alert`` rows on the PR-161 preview) looked like analyzer output.
-
-Also pinned: the analyzer-owned keys the live monitor ACTS on are rejected from callers.
-``tracked_topics`` feeds ``_scan_topics_union``; ``polling_plan`` becomes eth_call /
-eth_getStorageAt and a ``state_changed_poll`` event with no provenance of its own.
+The routes stored caller dicts verbatim, so caller-enrolled rows looked like analyzer output. Analyzer-owned keys
+the monitor acts on are also rejected: ``tracked_topics`` feeds the scan filter and ``polling_plan`` becomes
+eth_call / eth_getStorageAt.
 """
 
 from __future__ import annotations
@@ -51,8 +46,6 @@ def admin_headers(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_wire(monkeypatch):
-    """``_current_head_block`` seeds the cursor over RPC; the offline suite is
-    hermetic, so stub the one call these routes make."""
     from routers import monitored
 
     monkeypatch.setattr(monitored, "rpc_request", lambda *a, **k: hex(21_000_000))
@@ -74,8 +67,6 @@ def _post(api_client, protocol_id: int, admin_headers: dict[str, str], config: d
 
 
 def test_caller_enrolled_row_is_stamped_not_silently_proven_absent(api_client, db_session, protocol_id, admin_headers):
-    """The positive case: a plain flags-only config (what the live fixtures and Surface alert
-    UI send) comes back carrying the provenance token."""
     resp = _post(api_client, protocol_id, admin_headers, {"watch_upgrades": True, "watch_ownership": True})
     assert resp.status_code == 200, resp.text
 
@@ -93,16 +84,14 @@ def test_caller_enrolled_row_is_stamped_not_silently_proven_absent(api_client, d
 
 
 def test_null_monitoring_config_is_stamped_too(api_client, protocol_id, admin_headers):
-    """``monitoring_config`` is optional; an omitted one must not store ``None`` (reads as
-    proven-absent like ``{}``)."""
+    """``None`` would read as proven-absent like ``{}``."""
     resp = _post(api_client, protocol_id, admin_headers, None)
     assert resp.status_code == 200, resp.text
     assert resp.json()["monitoring_config"] == {"tracking_plan_not_determined": CALLER_SUPPLIED_TRACKING_PLAN}
 
 
 def test_a_forged_reason_token_cannot_survive_the_route(api_client, protocol_id, admin_headers):
-    """A caller naming an analyzer reason gets the route's own token instead: overwrite, not
-    reject, so reading a stamped row and writing it back still works."""
+    """Overwrite rather than reject, so a stamped row can be written back."""
     resp = _post(
         api_client,
         protocol_id,
@@ -113,12 +102,8 @@ def test_a_forged_reason_token_cannot_survive_the_route(api_client, protocol_id,
     assert resp.json()["monitoring_config"]["tracking_plan_not_determined"] == CALLER_SUPPLIED_TRACKING_PLAN
 
 
-# Rejected with 422, not silently dropped: a drop would tell the caller the value is being acted on.
-# CRITICAL invariants:
-# - ``tracked_topics`` feeds the live scan filter.
-# - ``polling_plan`` is the more consequential key: the poller ACTS on it.
-# - ``scan_gaps`` is the scanner's own record of uncovered ranges, preserved across config rebuilds,
-#   so a forged entry would outlive every enrollment as a coverage hole nobody observed.
+# Rejected, not dropped: a drop would tell the caller the value is acted on. ``scan_gaps`` survives config rebuilds, so
+# a forged entry would outlive every enrollment.
 @pytest.mark.parametrize(
     ("key", "payload"),
     [
@@ -140,9 +125,7 @@ def test_caller_supplied_analyzer_owned_keys_are_rejected(api_client, protocol_i
 def test_rejected_polling_plan_never_reaches_the_wire_or_the_event_stream(
     api_client, db_session, protocol_id, admin_headers
 ):
-    """After a 422 no row holds a plan the poller WOULD act on (``_rpc_call_for_entry`` issues
-    an ``eth_getStorageAt`` on a caller-chosen slot; ``_apply_poll_result`` mints a
-    provenance-free ``state_changed_poll`` event)."""
+    """The poller would read a caller-chosen slot and mint a provenance-free event."""
     from services.monitoring.unified_watcher import _rpc_call_for_entry
 
     assert _rpc_call_for_entry(ADDR, _PLAN_ENTRY) == ("eth_getStorageAt", [ADDR, SLOT, "latest"])
@@ -157,8 +140,7 @@ def test_rejected_polling_plan_never_reaches_the_wire_or_the_event_stream(
 
 
 def test_the_watch_flags_stay_caller_settable(api_client, protocol_id, admin_headers):
-    """Negative control on the reject-list's reach: ``watch_*`` booleans only gate
-    notification (``_should_watch``), so they are caller preference and must survive."""
+    """``watch_*`` booleans only gate notification."""
     resp = _post(
         api_client,
         protocol_id,
@@ -174,7 +156,6 @@ def test_the_watch_flags_stay_caller_settable(api_client, protocol_id, admin_hea
 
 
 def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers):
-    """PATCH replaces the config wholesale, so it is the same door."""
     created = _post(api_client, protocol_id, admin_headers, {"watch_upgrades": True})
     assert created.status_code == 200, created.text
     contract_id = created.json()["id"]
@@ -203,8 +184,6 @@ def test_patch_applies_the_same_two_rules(api_client, protocol_id, admin_headers
 
 
 def test_rejected_topics_never_reach_the_live_scan_filter(api_client, db_session, protocol_id, admin_headers):
-    """The consequence the rejection exists for, asserted end to end against the
-    query the scanner actually runs (``_scan_topics_union``)."""
     from services.monitoring.unified_watcher import _scan_topics_union
 
     assert _post(api_client, protocol_id, admin_headers, {"tracked_topics": [{"topic0": TOPIC0}]}).status_code == 422

@@ -70,8 +70,7 @@ def test_new_row_is_nominated_candidate_not_member(db_session, proto_id, write, 
 
 class TestBulkUpsertNominates:
     def test_high_confidence_tags_no_longer_stamp(self, db_session, proto_id):
-        # The retired HIGH tier: each tag used to write protocol_id at the
-        # persistence boundary; all are nominations now.
+        # Each of these tags used to write protocol_id.
         for i, tag in enumerate(["deployer_expansion", "defillama", "ai_inventory", "exa_deep_research", "inventory"]):
             addr = ADDR(0x1B00 + i)
             bulk_upsert_discovered_contracts(
@@ -85,7 +84,6 @@ class TestBulkUpsertNominates:
             assert row.nominated_protocol_id == proto_id, tag
 
     def test_existing_orphan_gains_nomination(self, db_session, proto_id):
-        # Orphan amnesia fix: the re-write records WHICH protocol nominated.
         addr = ADDR(0x1C01)
         db_session.add(Contract(address=addr, chain="ethereum", discovery_sources=["dapp_crawl"]))
         db_session.commit()
@@ -130,7 +128,6 @@ class TestBulkUpsertNominates:
         db_session.commit()
         row = _row(db_session, addr)
         assert row.nominated_protocol_id == proto_id
-        # The late nominator's tag stays as provenance.
         assert set(row.discovery_sources or []) >= {"defillama", "exa_deep_research"}
 
     def test_member_row_is_never_reclaimed(self, db_session, proto_id):
@@ -148,8 +145,7 @@ class TestBulkUpsertNominates:
         db_session.commit()
         row = _row(db_session, addr)
         assert row.protocol_id == proto_id
-        # The member's empty nomination slot belongs to its own protocol
-        # (demotion provenance), never a foreign nominator.
+        # Demotion provenance: never a foreign nominator.
         assert row.nominated_protocol_id == proto_id
 
 

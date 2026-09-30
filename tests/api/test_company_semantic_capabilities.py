@@ -1,8 +1,4 @@
-"""End-to-end tests for ``GET /api/company/{name}/semantic_capabilities`` (read-only, not admin-gated).
-
-Returns the per-contract capability map, distinguishing "no predicate-tree artifact" (``null``)
-from "semantically analyzed with no guarded functions" (``{}``).
-"""
+"""``null`` means no predicate-tree artifact; ``{}`` means analyzed with no guarded functions."""
 
 from __future__ import annotations
 
@@ -19,8 +15,6 @@ from tests.conftest import requires_postgres  # noqa: E402
 
 
 def _seed_protocol_with_jobs(db_session, *, name: str, addresses_with_artifacts):
-    """``addresses_with_artifacts`` is a list of
-    ``(address, predicate_trees_or_None)``."""
     from db.models import Job, JobStage, JobStatus, Protocol
     from db.queue import store_artifact
 
@@ -114,12 +108,7 @@ def _guard_tree(fn: str) -> dict:
 
 @requires_postgres
 def test_company_semantic_capabilities_twin_keeps_both_chains(api_client, db_session):
-    """A CREATE2 twin analyzed on two chains keeps BOTH chains' capability sets,
-    each under its own ``<chain>::<address>`` entity key (multichain invariant
-    13). Resolving per bare address (last-writer-wins on updated_at) used to drop
-    the older chain's set entirely and collapse the two into one ``contracts``
-    entry.
-    """
+    """Invariant 13: resolving per bare address used to drop the older chain's set."""
     from db.models import Job, JobStage, JobStatus, Protocol
     from db.queue import store_artifact
 
@@ -155,10 +144,8 @@ def test_company_semantic_capabilities_twin_keeps_both_chains(api_client, db_ses
     assert "eth_fn()" in by_entity[eth_key] and "base_fn()" not in by_entity[eth_key], by_entity[eth_key]
     assert "base_fn()" in by_entity[base_key] and "eth_fn()" not in by_entity[base_key], by_entity[base_key]
 
-    # The bare ``contracts`` map keeps one deterministic entry per address
-    # (newest completed job wins across chains).
+    # The bare map keeps the newest completed job per address.
     assert body["contracts"][addr.lower()] is not None
-    # missing_semantic_count is counted per entity; both twins resolved.
     assert body["missing_semantic_count"] == 0
 
 
@@ -171,8 +158,7 @@ def test_company_semantic_capabilities_unknown_company_404(api_client, db_sessio
 
 @requires_postgres
 def test_company_semantic_capabilities_empty_when_no_completed_jobs(api_client, db_session):
-    """A company with no completed analyses returns an empty
-    contracts map — distinct from the 404 unknown-company case."""
+    """Distinct from the unknown-company 404."""
     from db.models import Protocol
 
     name = f"empty_company_{uuid.uuid4().hex[:6]}"
@@ -202,8 +188,7 @@ def test_company_semantic_capabilities_resolver_failure_treated_as_missing(api_c
         raise RuntimeError("simulated resolver failure")
 
     monkeypatch.setattr("services.resolution.capability_resolver.resolve_contract_capabilities", _boom)
-    # The api module imported the function lazily inside the
-    # handler, so monkeypatching the module-level export is enough.
+    # The handler imports the function lazily, so patching the module export is enough.
     import services.resolution.capability_resolver as cr_mod
 
     monkeypatch.setattr(cr_mod, "resolve_contract_capabilities", _boom)
@@ -217,9 +202,7 @@ def test_company_semantic_capabilities_resolver_failure_treated_as_missing(api_c
 
 @requires_postgres
 def test_company_semantic_capabilities_route_not_admin_gated(api_client, db_session):
-    """Mirror of the /api/contract/{addr}/capabilities pin: this
-    endpoint is read-only and external consumers need it without
-    credentials."""
+    """External consumers need this without credentials."""
     import api as api_module
     from routers.deps import require_admin_key
 

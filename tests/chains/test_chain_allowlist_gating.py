@@ -20,16 +20,10 @@ from workers.base import JobHandledDirectly
 pytestmark = [requires_postgres]
 
 
-# ---------------------------------------------------------------------------
-# chain_enabled unit coverage
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("allowlist", "expected"),
     [
-        # Unset allowlist = mainnet-only, so only chain 1 (and the NULL≡mainnet coalescing of
-        # None/empty) is enabled.
+        # Unset means mainnet-only, including the NULL-means-mainnet coalescing.
         pytest.param(
             None,
             {
@@ -49,8 +43,7 @@ pytestmark = [requires_postgres]
             {"base": True, 8453: True, "8453": True, "optimism": False, 10: False},
             id="widened_allowlist",
         ),
-        # A non-empty but unresolvable name returns False rather than coalescing to mainnet: an unknown
-        # chain can never be 'enabled'.
+        # An unknown chain can never be enabled.
         pytest.param("1", {"not-a-real-chain": False}, id="unknown_chain_never_enabled"),
     ],
 )
@@ -62,11 +55,6 @@ def test_chain_enabled(monkeypatch, allowlist, expected):
     else:
         monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", allowlist)
     assert {chain: chain_enabled(chain) for chain in expected} == expected
-
-
-# ---------------------------------------------------------------------------
-# Selection worker — analysis-child spawns
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
@@ -160,8 +148,6 @@ def _run_selection(db_session, pid, company):
 
 @requires_postgres
 def test_selection_gates_off_allowlist_chain_but_spawns_enabled(db_session, monkeypatch, _seed):
-    """With base enabled but optimism not, an inventory that mixes both spawns a
-    base child and skips the optimism one — its Contract evidence is retained."""
     from db.models import Contract
 
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
@@ -185,9 +171,7 @@ def test_selection_gates_off_allowlist_chain_but_spawns_enabled(db_session, monk
 
 @requires_postgres
 def test_selection_widened_allowlist_picks_up_retained_evidence(db_session, monkeypatch, _seed):
-    """The same optimism Contract that was skipped spawns once optimism is added
-    to the allowlist — proving the retained evidence is sufficient for a future
-    scan to pick it up."""
+    """The retained evidence is enough for a later scan to pick it up."""
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453,10")
     pid, company, addr = _seed
 
@@ -198,16 +182,8 @@ def test_selection_widened_allowlist_picks_up_retained_evidence(db_session, monk
     assert op_addr in spawned
 
 
-# ---------------------------------------------------------------------------
-# Auto-enrollment — monitored_contracts / watched_proxies rows
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_enrollment_gates_off_allowlist_chain_within_one_protocol(db_session, monkeypatch):
-    """A single protocol whose contracts span base (enabled) and optimism (not)
-    enrolls only the base contract — no MonitoredContract row is created for the
-    optimism deployment."""
     from db.models import Contract, Job, JobStage, JobStatus, MonitoredContract, Protocol
     from services.monitoring.enrollment import enroll_protocol_contracts
 

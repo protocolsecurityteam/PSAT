@@ -1,7 +1,5 @@
-"""The deployed monitor and web process groups are running, not merely deployed.
-
-Read-only endpoint shapes pass even when every background loop is crash-looping,
-so these assert on the heartbeats the loops themselves write.
+"""Read-only endpoint shapes pass even when every background loop is crash-looping, so these assert on the loops' own
+heartbeats.
 """
 
 from __future__ import annotations
@@ -11,8 +9,7 @@ from typing import Any, Callable
 
 from tests.live.conftest import LiveClient
 
-# Monitor-group loops plus the web-side watchdog. Worker-group drainers are
-# excluded: under the enforced lifecycle they legitimately sleep between jobs.
+# Worker-group drainers legitimately sleep between jobs under the enforced lifecycle.
 ALWAYS_ON = (
     "event_log_indexer",
     "protocol_scanner",
@@ -74,8 +71,7 @@ def _lifecycle_problems(daemons: dict[str, dict[str, Any]]) -> list[str]:
         found.append(f"mode {detail.get('mode')!r}")
     if detail.get("paused") is not False:
         found.append(f"paused {detail.get('paused')!r}")
-    # "unobserved" means the controller could not read Fly machine state, so it
-    # could never start a sleeping worker.
+    # The controller couldn't read Fly machine state, so it could never start a sleeping worker.
     if detail.get("machine_state") in (None, "unobserved"):
         found.append(f"machine_state {detail.get('machine_state')!r}")
     return found

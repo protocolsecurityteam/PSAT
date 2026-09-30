@@ -1,7 +1,4 @@
-"""Unit tests for the end-of-pipeline ``CoverageWorker``: readiness-gated claim, stuck-job escape hatch, and the
-source-equivalence refresh path. Network helpers in ``source_equivalence`` are stubbed at module scope (test-hygiene
-rule: never rely on env-var-controlled divergence), so real coverage code runs with no GitHub/Etherscan traffic.
-"""
+"""Source-equivalence network helpers are stubbed at module scope, so no GitHub/Etherscan traffic."""
 
 from __future__ import annotations
 
@@ -22,9 +19,7 @@ pytestmark = [
 
 @pytest.fixture(autouse=True)
 def _stub_source_equivalence_network(monkeypatch):
-    """Replace GitHub + Etherscan helpers with no-ops returning None, so no match is proven and the temporal
-    matcher's answer stands; positive-proof tests override locally.
-    """
+    """No match is proven, so the temporal matcher's answer stands."""
     from services.audits import source_equivalence
 
     monkeypatch.setattr(source_equivalence, "fetch_github_source_hash", lambda *a, **k: None)
@@ -33,9 +28,7 @@ def _stub_source_equivalence_network(monkeypatch):
 
 @pytest.fixture()
 def worker():
-    """CoverageWorker with signals patched so pytest's handlers aren't touched. Tests call ``_claim_next_job``,
-    ``_claim_stuck_job`` and ``process`` directly; the inherited ``run_loop`` is never exercised.
-    """
+    """``run_loop`` is never exercised; tests call the claim and process methods directly."""
     from unittest.mock import patch
 
     from workers.coverage_worker import CoverageWorker
@@ -63,8 +56,7 @@ def seed_protocol(db_session):
             db_session.query(UpgradeEvent).filter(UpgradeEvent.contract_id.in_(contract_ids)).delete(
                 synchronize_session=False
             )
-        # Jobs have ON DELETE SET NULL on protocol_id; clean them up by
-        # (protocol_id + jobs whose contract we just deleted).
+        # Jobs are SET NULL on protocol deletion.
         job_ids = {c.job_id for c in db_session.query(Contract).filter_by(protocol_id=protocol_id).all() if c.job_id}
         db_session.query(Contract).filter_by(protocol_id=protocol_id).delete()
         db_session.query(AuditReport).filter_by(protocol_id=protocol_id).delete()
@@ -111,8 +103,7 @@ def _add_job(
     session.add(j)
     session.commit()
     if updated_at is not None:
-        # Force the updated_at column — server_default/onupdate would
-        # otherwise stamp NOW(), which defeats the stuck-job test.
+        # onupdate would stamp NOW() and defeat the stuck-job test.
         from sqlalchemy import update as sa_update
 
         from db.models import Job as _Job
@@ -148,11 +139,6 @@ def _add_audit(
     session.add(ar)
     session.commit()
     return ar
-
-
-# ---------------------------------------------------------------------------
-# 1. Happy path — claim + process + write coverage rows
-# ---------------------------------------------------------------------------
 
 
 def test_coverage_worker_claims_and_writes_when_ready(db_session, seed_protocol, worker):
@@ -200,10 +186,7 @@ def test_coverage_worker_claims_and_writes_when_ready(db_session, seed_protocol,
 
 
 def test_coverage_worker_writes_pending_when_audit_is_verifiable(db_session, seed_protocol, worker, monkeypatch):
-    """A scope-completed audit with reviewed_commits + source_repo yields ``equivalence_status='pending'`` and the
-    coverage worker makes NO GitHub/Etherscan calls; that's the point of the deferred-verify split (#82). It also
-    avoids the 4-way Etherscan burst that used to cascade-block other workers behind the shared backoff.
-    """
+    """The deferred-verify split (#82) keeps the coverage worker off the network."""
     from db.models import AuditContractCoverage, JobStage, JobStatus
     from services.audits import source_equivalence
 
@@ -232,8 +215,6 @@ def test_coverage_worker_writes_pending_when_audit_is_verifiable(db_session, see
     audit.source_repo = "some/repo"
     db_session.commit()
 
-    # Make any HTTP attempt loud — the coverage worker mustn't reach
-    # network on the deferred-verify path.
     calls = {"github": 0, "etherscan": 0}
 
     def boom_etherscan(_addr, **_kw):
@@ -264,15 +245,7 @@ def test_coverage_worker_writes_pending_when_audit_is_verifiable(db_session, see
     assert calls == {"github": 0, "etherscan": 0}
 
 
-# ---------------------------------------------------------------------------
-# 2. Readiness blocking — an unsettled audit prevents claim
-# ---------------------------------------------------------------------------
-
-
 def test_coverage_worker_waits_for_text_extraction(db_session, seed_protocol, worker):
-    """A processing text extraction keeps readiness false (claim returns None); once text + scope succeed, the next
-    claim picks the job up.
-    """
     from db.models import AuditReport, JobStage, JobStatus
 
     protocol_id, _ = seed_protocol
@@ -314,9 +287,7 @@ def test_coverage_worker_waits_for_text_extraction(db_session, seed_protocol, wo
 
 
 def test_coverage_worker_unblocks_on_text_extraction_failure(db_session, seed_protocol, worker):
-    """A failed text extraction leaves scope_extraction_status NULL forever; readiness must treat that as settled,
-    else one bad PDF wedges every coverage job in the protocol until the stuck-job timeout.
-    """
+    """Otherwise one bad PDF wedges every coverage job until the stuck-job timeout."""
     from db.models import JobStage, JobStatus
 
     protocol_id, _ = seed_protocol
@@ -345,19 +316,10 @@ def test_coverage_worker_unblocks_on_text_extraction_failure(db_session, seed_pr
     assert claimed.id == job.id
 
 
-# ---------------------------------------------------------------------------
-# 3. Stuck-audit timeout — bypass readiness after cutoff
-# ---------------------------------------------------------------------------
-
-
 def test_coverage_worker_claims_stuck_job_past_timeout(db_session, seed_protocol, worker, monkeypatch):
-    """Job queued at stage=coverage past the timeout with an audit still mid-flight: the stuck path bypasses
-    readiness so the job doesn't hang forever.
-    """
     import workers.coverage_worker as worker_mod
     from db.models import JobStage, JobStatus
 
-    # Collapse the timeout so we don't have to actually backdate by an hour.
     monkeypatch.setattr(worker_mod, "_STUCK_COVERAGE_TIMEOUT", 60)
 
     protocol_id, _ = seed_protocol
@@ -391,15 +353,8 @@ def test_coverage_worker_claims_stuck_job_past_timeout(db_session, seed_protocol
     assert claimed.status == JobStatus.processing
 
 
-# ---------------------------------------------------------------------------
-# 4. Edge — job.protocol_id is NULL (direct address submission)
-# ---------------------------------------------------------------------------
-
-
 def test_coverage_worker_claims_job_with_null_protocol(db_session, worker):
-    """A direct-address job (protocol_id NULL) has no audits to wait on: the NOT EXISTS subquery is vacuously true,
-    so claim fires immediately and process() is a no-op refresh.
-    """
+    """No audits to wait on, so the NOT EXISTS is vacuously true."""
     from db.models import AuditContractCoverage, Contract, JobStage, JobStatus
 
     job = _add_job(
@@ -408,9 +363,7 @@ def test_coverage_worker_claims_job_with_null_protocol(db_session, worker):
         stage=JobStage.coverage,
         status=JobStatus.queued,
     )
-    # Contract linked to the job but with protocol_id NULL — no scope
-    # name can match (match_audits_for_contract short-circuits), so the
-    # upsert is a zero-row no-op.
+    # No scope name can match, so the upsert is a no-op.
     contract = Contract(
         protocol_id=None,
         address="0x" + "c" * 40,
@@ -442,9 +395,6 @@ def test_coverage_worker_claims_job_with_null_protocol(db_session, worker):
 
 
 def test_coverage_worker_handles_job_without_contract(db_session, seed_protocol, worker):
-    """No Contract row for the job (e.g. a cached-path reassignment edge case): process() logs and returns without
-    crashing so run_loop can advance to done.
-    """
     from db.models import JobStage, JobStatus
 
     protocol_id, _ = seed_protocol

@@ -1,4 +1,3 @@
-"""Tests for services.discovery.protocol_resolver."""
 
 from __future__ import annotations
 
@@ -17,9 +16,6 @@ from services.discovery.protocol_resolver import (
     resolve_protocol,
 )
 
-# ---------------------------------------------------------------------------
-# Sample protocol dicts reused across tests
-# ---------------------------------------------------------------------------
 
 AAVE = {
     "slug": "aave-v3",
@@ -68,25 +64,13 @@ LIDO = {
 PROTOCOLS = [LIDO, AAVE, ETHERFI, AAVE_V2]
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture(autouse=True)
 def _reset_cache(monkeypatch):
-    """Reset the module-level protocol cache before every test."""
     monkeypatch.setattr("services.discovery.protocol_resolver._protocols_cache", None)
 
 
 def _set_cache(monkeypatch, protocols):
-    """Seed the module cache so ``resolve_protocol`` never reaches the wire."""
     monkeypatch.setattr("services.discovery.protocol_resolver._protocols_cache", list(protocols))
-
-
-# ---------------------------------------------------------------------------
-# _normalize
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -95,18 +79,12 @@ def _set_cache(monkeypatch, protocols):
         pytest.param("Ether.fi", "etherfi", id="lowercase_and_strip_punctuation"),
         pytest.param("Aave V3", "aavev3", id="spaces_removed"),
         pytest.param("my-proto_col", "myprotocol", id="dashes_and_underscores_removed"),
-        # Non-ASCII characters are removed by the [^a-z0-9] regex
         pytest.param("café", "caf", id="unicode_non_ascii_stripped"),
         pytest.param("", "", id="empty_string"),
     ],
 )
 def test_normalize(raw, expected):
     assert _normalize(raw) == expected
-
-
-# ---------------------------------------------------------------------------
-# _make_result
-# ---------------------------------------------------------------------------
 
 
 class TestMakeResult:
@@ -132,11 +110,6 @@ class TestMakeResult:
         assert result["all_slugs"] == []
 
 
-# ---------------------------------------------------------------------------
-# _find_siblings
-# ---------------------------------------------------------------------------
-
-
 class TestFindSiblings:
     def test_with_parent_protocol(self):
         siblings = _find_siblings(AAVE, PROTOCOLS)
@@ -152,11 +125,6 @@ class TestFindSiblings:
         assert siblings == [ETHERFI]
 
 
-# ---------------------------------------------------------------------------
-# _match_protocol
-# ---------------------------------------------------------------------------
-
-
 SUPERSWAP = {"slug": "xyz-unrelated", "name": "SuperSwap", "tvl": 1}
 BIG_PROTOCOL = {"slug": "abcdefghijklmn", "name": "Big Protocol", "tvl": 1}
 COMPOUND = {"slug": "compound-v2", "name": "Compound V2", "tvl": 1}
@@ -166,25 +134,18 @@ class TestMatchProtocol:
     @pytest.mark.parametrize(
         ("query", "protos", "expected"),
         [
-            # Tier 1: exact slug
             pytest.param("aave-v3", PROTOCOLS, AAVE, id="exact_slug"),
             pytest.param("AAVE-V3", PROTOCOLS, AAVE, id="exact_slug_case_insensitive"),
-            # Tier 2: exact name
             pytest.param("Aave V3", PROTOCOLS, AAVE, id="exact_name"),
             pytest.param("aave v3", PROTOCOLS, AAVE, id="exact_name_case_insensitive"),
-            # Tier 3: normalized match
             pytest.param("etherfistake", PROTOCOLS, ETHERFI, id="normalized_dot"),
             pytest.param("ether.fi stake", PROTOCOLS, ETHERFI, id="normalized_ignores_punctuation"),
-            # Tier 4: substring match (50% length requirement); 7/12 = 0.583 >= 0.5
+            # Substring tier: 7/12 = 0.583 clears the 50% length requirement.
             pytest.param("etherfi", PROTOCOLS, ETHERFI, id="substring_sufficient_length"),
-            # Slug does not contain the substring, but the name does: 6/9 = 0.667 >= 0.5
             pytest.param("supers", [SUPERSWAP], SUPERSWAP, id="substring_via_name"),
-            # Substring under 50% of the target length: 3/14 and 3/11 (name "bigprotocol") are both < 0.5
             pytest.param("abc", [BIG_PROTOCOL], None, id="substring_too_short_no_match"),
-            # Tier 5: fuzzy similarity; "compoundv2x" vs "compoundv2": ratio 20/21 ~ 0.952
             pytest.param("compound-v2x", [COMPOUND], COMPOUND, id="fuzzy_above_threshold"),
             pytest.param("nonexistent-protocol-xyz", PROTOCOLS, None, id="no_match"),
-            # Empty / blank input
             pytest.param("", PROTOCOLS, None, id="empty_input"),
             pytest.param("   ", PROTOCOLS, None, id="blank_input"),
             pytest.param("...", PROTOCOLS, None, id="punctuation_only"),
@@ -192,11 +153,6 @@ class TestMatchProtocol:
     )
     def test_match(self, query, protos, expected):
         assert _match_protocol(query, protos) is expected
-
-
-# ---------------------------------------------------------------------------
-# resolve_protocol  (mocks _fetch_protocols via requests.get)
-# ---------------------------------------------------------------------------
 
 
 class TestResolveProtocol:
@@ -241,11 +197,6 @@ class TestResolveProtocol:
         result = resolve_protocol("Aave")
         assert result["slug"] is None
         assert result["all_slugs"] == []
-
-
-# ---------------------------------------------------------------------------
-# _fetch_protocols caching
-# ---------------------------------------------------------------------------
 
 
 class TestFetchProtocols:
@@ -299,8 +250,7 @@ class TestFetchProtocols:
 
 
 class TestListingAddress:
-    """The listing's own ``address`` field — the governance token DefiLlama
-    publishes on the protocol entry, which the adapter-source scan never sees."""
+    """The governance token DefiLlama publishes on the listing, which the adapter scan never sees."""
 
     def test_bare_address_is_ethereum(self):
         assert parse_listing_address("0xFE0C30065B384F05761f15d0CC899D4F9F9Cc0eB") == (
@@ -359,7 +309,5 @@ class TestListingAddress:
         assert listing_nominations(resolved) == [{"address": "0x" + "c" * 40, "chain": "arbitrum"}]
 
     def test_unrecognized_prefix_is_preserved_never_coerced(self):
-        """A chain nobody named must not become ethereum — the row stays a
-        candidate whose chain never resolves."""
         resolved = {"listing_addresses": [{"address": "0x" + "d" * 40, "chain": "someL3", "slug": "x"}]}
         assert listing_nominations(resolved) == [{"address": "0x" + "d" * 40, "chain": "somel3"}]

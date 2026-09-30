@@ -29,8 +29,7 @@ from workers.protocol_monitor import Supervisor, _build_default_supervisor, main
 
 
 class RecordingEvent(threading.Event):
-    """A stop event that records every ``wait(timeout)`` and auto-stops, so ``_supervise``
-    terminates after N backoff waits while capturing the schedule without sleeping."""
+    """Captures the backoff schedule without sleeping."""
 
     def __init__(self, stop_after_waits: int):
         super().__init__()
@@ -44,18 +43,11 @@ class RecordingEvent(threading.Event):
         return super().wait(0)
 
 
-# ---------------------------------------------------------------------------
-# Backoff schedule
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "stop_after,max_backoff_s,healthy_stretch_s,expected_waits",
     [
-        # Each death backs off exponentially from base (5 → 10 → 20), then pins at the 20s cap;
-        # 1e9 means never "healthy", so the backoff never resets.
+        # 1e9 means never healthy, so the backoff never resets.
         pytest.param(6, 20.0, 1e9, [5.0, 10.0, 20.0, 20.0, 20.0, 20.0], id="growing_capped"),
-        # A run that clears the healthy threshold resets the backoff to base (0.0: every run is healthy).
         pytest.param(4, 300.0, 0.0, [5.0, 5.0, 5.0, 5.0], id="reset_after_healthy_stretch"),
     ],
 )
@@ -77,13 +69,7 @@ def test_raising_loop_restart_backoff(stop_after, max_backoff_s, healthy_stretch
     assert ev.waits == expected_waits
 
 
-# ---------------------------------------------------------------------------
-# Error heartbeat on every death
-# ---------------------------------------------------------------------------
-
-
 def test_error_heartbeat_recorded_with_exc_type_on_each_death(monkeypatch):
-    """Each escape records a status='error' heartbeat carrying the exc_type."""
     calls: list[tuple[str, str, dict | None]] = []
 
     def spy(process, *, status="running", detail=None):
@@ -105,13 +91,7 @@ def test_error_heartbeat_recorded_with_exc_type_on_each_death(monkeypatch):
     assert all(detail == {"exc_type": "ValueError"} for _, _, detail in calls)
 
 
-# ---------------------------------------------------------------------------
-# Failure isolation (HR3)
-# ---------------------------------------------------------------------------
-
-
 def test_sibling_runs_uninterrupted_while_one_loop_crash_loops():
-    """A repeatedly-crashing loop never stalls its healthy sibling."""
     stop = threading.Event()
     deaths = [0]
     healthy_ticks = [0]
@@ -145,11 +125,6 @@ def test_sibling_runs_uninterrupted_while_one_loop_crash_loops():
     assert all(not t.is_alive() for t in sup._threads)
 
 
-# ---------------------------------------------------------------------------
-# Bounded shutdown join
-# ---------------------------------------------------------------------------
-
-
 def test_stop_event_joins_all_threads_within_bound():
     stop = threading.Event()
     started = [False, False, False]
@@ -180,11 +155,6 @@ def test_stop_event_joins_all_threads_within_bound():
     assert all(not t.is_alive() for t in sup._threads)
 
 
-# ---------------------------------------------------------------------------
-# Real-loop stop-event plumbing (integration; wire stubbed)
-# ---------------------------------------------------------------------------
-
-
 def _stub_scan_wire(monkeypatch, head: int = 100):
     import services.monitoring.unified_watcher as uw
     import services.resolution.repos.event_logs_rpc as elr
@@ -201,13 +171,12 @@ def _stub_scan_wire(monkeypatch, head: int = 100):
 
 @pytest.mark.parametrize("loop_name", ["run_scan_loop", "run_poll_loop"])
 def test_real_loop_honors_stop_event_mid_interval(db_session, monkeypatch, loop_name):
-    """A stop mid-interval returns promptly instead of sleeping the interval."""
     import services.monitoring.unified_watcher as uw
 
     loop = getattr(uw, loop_name)
     _stub_scan_wire(monkeypatch)
     stop = threading.Event()
-    # 3600s interval: sleeping it out instead of waiting on the stop event would time out the join.
+    # Sleeping out the interval would time out the join.
     t = threading.Thread(target=loop, args=("http://stub", 3600.0), kwargs={"stop_event": stop}, daemon=True)
     t.start()
     time.sleep(0.2)  # let it finish one empty-DB pass and enter the inter-pass wait
@@ -219,15 +188,9 @@ def test_real_loop_honors_stop_event_mid_interval(db_session, monkeypatch, loop_
     assert time.monotonic() - t0 < 5.0
 
 
-# ---------------------------------------------------------------------------
-# Default-mode thread set + flag dispatch
-# ---------------------------------------------------------------------------
-
-
 def test_default_mode_spawns_exactly_six_named_threads():
     sup = _build_default_supervisor("http://stub", 3600.0)
-    # Pre-set stop so each supervised thread returns before invoking the real
-    # loop (no RPC, no DB work) — we only assert the thread set here.
+    # Each thread returns before its loop, so only the thread set is asserted.
     sup.stop_event.set()
     sup.start()
     try:
@@ -248,7 +211,6 @@ def test_default_mode_spawns_exactly_six_named_threads():
 
 
 def _monitor_launch_flags(script: str) -> list[str]:
-    """Every ``workers.protocol_monitor`` launch in a start script, by mode."""
     flags = []
     for line in script.splitlines():
         stripped = line.strip()
@@ -261,15 +223,12 @@ def _monitor_launch_flags(script: str) -> list[str]:
 
 
 def test_start_local_launches_each_monitor_loop_exactly_once():
-    """Flag modes run a loop ALONE; co-launching one beside default mode doubles it (the
-    Aug-10 local run ran default + ``--poll`` + ``--tvl``; the TVL loop has no daemon lease,
-    so both instances ran the full scan)."""
+    """Co-launching a flag mode beside default doubles the loop (the TVL loop has no lease)."""
     root = pathlib.Path(__file__).resolve().parents[2]
     launched = _monitor_launch_flags((root / "deploy/start_local.sh").read_text())
 
     assert launched == ["default"], f"start_local.sh must launch default mode alone, got {launched}"
 
-    # The reconciler needs its own process, owned by deploy/start_workers.sh (run by start_local.sh).
     workers_launched = _monitor_launch_flags((root / "deploy/start_workers.sh").read_text())
     assert workers_launched == ["--reconcile"], workers_launched
 
@@ -277,26 +236,21 @@ def test_start_local_launches_each_monitor_loop_exactly_once():
 @pytest.mark.parametrize(
     "argv, patch_targets, expected",
     [
-        # --tvl → run_tvl_loop(interval)  [local import from services.monitoring.tvl]
         (
             ["--tvl", "--interval", "7"],
             {"tvl": ("services.monitoring.tvl", "run_tvl_loop")},
             {"tvl": ((7.0,), {})},
         ),
-        # --reconcile → run_enrollment_reconciler_loop(rpc_url, chain, interval=interval)
         (
             ["--reconcile", "--rpc-url", "http://x", "--interval", "9"],
             {"rec": ("services.monitoring.reconciler", "run_enrollment_reconciler_loop")},
             {"rec": (("http://x", "ethereum"), {"interval": 9.0})},
         ),
-        # --poll (unified) → run_poll_loop(rpc_url, interval, startup_offset_s=0)
-        # (standalone poller has no co-scheduled scanner to de-phase from).
         (
             ["--poll", "--rpc-url", "http://p", "--interval", "3"],
             {"poll": ("services.monitoring.unified_watcher", "run_poll_loop")},
             {"poll": (("http://p", 3.0), {"startup_offset_s": 0.0})},
         ),
-        # default (no mode flag) → _run_supervised_default(rpc_url, interval)
         (
             ["--rpc-url", "http://d"],
             {"default": ("workers.protocol_monitor", "_run_supervised_default")},
@@ -305,8 +259,6 @@ def test_start_local_launches_each_monitor_loop_exactly_once():
     ],
 )
 def test_main_flag_dispatch(monkeypatch, argv, patch_targets, expected):
-    """Each CLI mode flag routes ``main()`` to exactly its loop entry point; loops are patched
-    where ``main`` imports them."""
     seen: dict[str, tuple] = {}
 
     for label, (mod_path, attr) in patch_targets.items():
@@ -347,7 +299,6 @@ def test_run_forever_returns_after_stop():
 
 
 def test_clean_return_is_restarted():
-    """A loop that returns without a stop request is treated as a restart."""
     ev = RecordingEvent(stop_after_waits=3)
     sup = Supervisor([], stop_event=ev, base_backoff_s=5.0, healthy_stretch_s=1e9)
     runs = [0]
@@ -357,7 +308,6 @@ def test_clean_return_is_restarted():
 
     sup._supervise(HEARTBEAT_PROTOCOL_SCANNER, returns_immediately)
 
-    # Restarted after each clean return until the stop event fired.
     assert runs[0] == 3
 
 

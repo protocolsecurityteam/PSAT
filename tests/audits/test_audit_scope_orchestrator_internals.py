@@ -1,7 +1,3 @@
-"""Error-path tests for ``process_audit_scope``: every ``status="failed"`` branch the integration happy path
-misses (storage unavailable/raising, UnicodeDecodeError, chunk-scan LLM failure/recovery). Storage client
-and LLM call are stubbed; no MinIO or OpenRouter.
-"""
 
 from __future__ import annotations
 
@@ -20,8 +16,7 @@ from services.audits.scope_extraction._errors import LLMUnavailableError
 
 @pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch):
-    """Keep stray env vars out of these tests. ``process_audit_scope``
-    doesn't read any itself but it imports modules that do."""
+    """``process_audit_scope`` imports modules that read env vars."""
     for var in ("PSAT_LLM_STUB_DIR", "PSAT_SCOPE_LLM_MODEL"):
         monkeypatch.delenv(var, raising=False)
     yield
@@ -46,9 +41,6 @@ def _page_text(body: str) -> str:
 
 class TestStorageFailurePaths:
     def test_missing_storage_client_returns_failed(self, monkeypatch):
-        """``get_storage_client`` returns None (ARTIFACT_STORAGE_* unset): bail with a clear error, not a NoneType
-        crash.
-        """
         _patch_storage(monkeypatch, None)
         outcome = process_audit_scope(
             audit_report_id=1,
@@ -61,8 +53,7 @@ class TestStorageFailurePaths:
         assert "storage not configured" in (outcome.error or "")
 
     def test_storage_unavailable_on_get_returns_failed(self, monkeypatch):
-        """A MinIO/Tigris outage during fetch is transient — surface as
-        failed so the worker's stale-recovery retry brings it back later."""
+        """Transient, so stale-recovery retries it later."""
         _patch_storage(monkeypatch, _make_client(StorageUnavailable("connection refused")))
         outcome = process_audit_scope(
             audit_report_id=2,
@@ -75,9 +66,7 @@ class TestStorageFailurePaths:
         assert "storage get failed" in (outcome.error or "")
 
     def test_unexpected_storage_error_returns_failed(self, monkeypatch):
-        """Any non-StorageUnavailable exception from ``client.get`` still
-        results in ``failed`` with the exception repr captured — prevents
-        a weird boto3 edge case from looping forever."""
+        """A weird boto3 edge case must not loop forever."""
         _patch_storage(monkeypatch, _make_client(RuntimeError("broken pipe")))
         outcome = process_audit_scope(
             audit_report_id=3,
@@ -90,8 +79,7 @@ class TestStorageFailurePaths:
         assert "storage" in (outcome.error or "")
 
     def test_unicode_decode_error_returns_failed(self, monkeypatch):
-        """Binary bodies accidentally written to the text bucket must fail
-        loudly, not corrupt ``scope_contracts`` with garbage."""
+        """Binary bodies in the text bucket must not corrupt ``scope_contracts``."""
         _patch_storage(monkeypatch, _make_client(b"\xff\xfe\x00\x00not-utf-8"))
         outcome = process_audit_scope(
             audit_report_id=4,
@@ -106,8 +94,6 @@ class TestStorageFailurePaths:
 
 class TestChunkScanPath:
     def test_chunk_scan_llm_unavailable_yields_skipped(self, monkeypatch):
-        """No header -> chunk-scan -> LLM unavailable: skipped with a descriptive error, no crash (last-resort path)."""
-        # No scope header, so locate_scope_section is empty and routes through chunk-scan.
         body = " ".join(["filler"] * 300)
         _patch_storage(monkeypatch, _make_client(_page_text(body).encode("utf-8")))
 
@@ -130,9 +116,7 @@ class TestChunkScanPath:
         assert "no scope section" in (outcome.error or "")
 
     def test_chunk_scan_recovers_when_primary_returns_nothing(self, monkeypatch):
-        """Primary path finds no scope → chunk-scan returns names → artifact
-        is stored and the ``method`` field flips to ``llm_chunk_scan`` so
-        the operator can tell where the names came from."""
+        """``method`` tells the operator where the names came from."""
         body = " ".join(["LiquidityPool Vault"] * 40) + " contract LiquidityPool {}"
         _patch_storage(monkeypatch, _make_client(_page_text(body).encode("utf-8")))
 
@@ -174,8 +158,7 @@ class TestChunkScanPath:
         )
         assert outcome.status == "success"
         assert outcome.method == "llm_chunk_scan"
-        # ``LiquidityPool`` must appear — the validator filters out names
-        # that aren't in the raw text, and our body includes it.
+        # The validator drops names absent from the raw text.
         assert "LiquidityPool" in outcome.contracts
         assert outcome.storage_key == "audits/scope/6.json"
         assert stored["aid"] == 6
@@ -185,8 +168,7 @@ class TestChunkScanPath:
 
 class TestClassifiedCommitFiltering:
     def test_process_audit_scope_drops_classified_shas_missing_from_raw_text(self, monkeypatch):
-        """Keep only classified commits whose 7-char prefix actually appears
-        in the PDF text; this is the hallucination guard for commit labels."""
+        """The hallucination guard for commit labels."""
         body = _page_text("Scope\nPool.sol reviewed at commit abc1234 for this assessment.")
         _patch_storage(monkeypatch, _make_client(body.encode("utf-8")))
 
@@ -249,8 +231,7 @@ class TestClassifiedCommitFiltering:
 
 class TestArtifactPayloadShape:
     def test_build_artifact_payload_caps_scope_section_text(self):
-        """Pathological PDFs can have 100k+ chars of scope prose. The 20k
-        cap keeps the artifact readable in a debugger."""
+        """Keeps the artifact readable in a debugger."""
         from services.audits.scope_extraction._artifact import build_artifact_payload
 
         long_text = "x" * 50_000
@@ -269,16 +250,13 @@ class TestArtifactPayloadShape:
 
 class TestStoreArtifactFallbacks:
     def test_returns_none_when_storage_client_unavailable(self, monkeypatch):
-        """Storage off → the artifact is just lost (debug-only data). The
-        row-state update still proceeds; this branch must not raise."""
+        """The artifact is debug-only; the row-state update still proceeds."""
         from services.audits.scope_extraction import _artifact
 
         monkeypatch.setattr(_artifact, "get_storage_client", lambda: None)
         assert _artifact._store_artifact(42, {"contracts": []}) is None
 
     def test_returns_none_when_put_raises_storage_unavailable(self, monkeypatch):
-        """Transient MinIO failure during artifact write → skip the key
-        rather than fail the whole scope extraction."""
         from services.audits.scope_extraction import _artifact
 
         client = MagicMock()

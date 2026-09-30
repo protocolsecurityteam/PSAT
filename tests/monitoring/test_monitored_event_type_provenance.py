@@ -1,9 +1,6 @@
-"""The published ``monitored_events.event_type`` may claim a controller changed only when the
-tracking plan PROVES the write target gates callers.
+"""A controller-change event_type needs the tracking plan to prove the write target gates callers.
 
-Fixtures are verbatim tracked-controller entries from persisted plans: a governance token's
-``_balances`` slot (no ``authority_provenance``; must publish the neutral type) and
-FiatTokenV2_2's ``pauser`` (``caller_gate``; must keep the controller claim).
+Fixtures: a governance token's ``_balances`` slot and FiatTokenV2_2's ``pauser``.
 """
 
 from __future__ import annotations
@@ -34,9 +31,6 @@ FIAT_TOKEN_ADDRESS = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
 
 
 def _erc20_balances_controller(*, authority_provenance: str | None = None) -> dict:
-    """``state_variable:_balances`` as persisted for the enrolled governance token: ordinary
-    ERC-20/Votes signatures on a mapping slot with no gate proof (3 of the 5 bound
-    signatures; Enter/Exit dropped as same-shape noise)."""
     tracked = {
         "controller_id": "state_variable:_balances",
         "label": "_balances",
@@ -105,7 +99,6 @@ def _erc20_balances_controller(*, authority_provenance: str | None = None) -> di
 
 
 def _fiat_token_pauser_controller() -> dict:
-    """FiatTokenV2_2's ``pauser``: the plan proves a predicate leaf gates callers on it."""
     return {
         "controller_id": "state_variable:pauser",
         "label": "pauser",
@@ -184,25 +177,16 @@ def _pauser_changed_log(*, block: int = 25634400) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Producer — the three provenance states
-# ---------------------------------------------------------------------------
-
-
 def test_erc20_traffic_on_enrolled_token_is_not_a_controller_claim():
-    """Every signature bound to the unproven ``_balances`` slot publishes the neutral type."""
     topics = extract_governance_topics(_plan(_erc20_balances_controller()))
 
     assert len(topics) == 3
     assert {t["event_type"] for t in topics} == {"state_changed:state_variable:_balances"}
     assert not any("controller_changed" in t["event_type"] for t in topics)
-    # The neutral type drops the control claim, not the identity of what was written.
     assert {t["controller_id"] for t in topics} == {"state_variable:_balances"}
 
 
 def test_proven_caller_gate_target_keeps_the_controller_claim():
-    """POSITIVE ARM: the plan proves ``pauser`` gates callers, so an event
-    that writes it still publishes ``controller_changed``."""
     topics = extract_governance_topics(_plan(_fiat_token_pauser_controller()))
 
     assert len(topics) == 1
@@ -210,17 +194,13 @@ def test_proven_caller_gate_target_keeps_the_controller_claim():
 
 
 def test_call_target_provenance_does_not_earn_the_controller_claim():
-    """DISCRIMINATING CONTROL: ``call_target`` is a PRESENT provenance
-    value that is not the gate proof — "called, and no gate was proven".
-    It must resolve exactly like an absent one."""
+    """``call_target`` is present but is not the gate proof."""
     topics = extract_governance_topics(_plan(_erc20_balances_controller(authority_provenance="call_target")))
 
     assert {t["event_type"] for t in topics} == {"state_changed:state_variable:_balances"}
 
 
 def test_absent_and_call_target_agree_but_caller_gate_differs():
-    """The three states of ``authority_provenance`` off the resolver: only a proven gate mints
-    the controller claim."""
     assert _resolve_event_type("state_variable:x") == "state_changed:state_variable:x"
     assert _resolve_event_type("state_variable:x", authority_provenance=None) == "state_changed:state_variable:x"
     assert (
@@ -233,9 +213,6 @@ def test_absent_and_call_target_agree_but_caller_gate_differs():
 
 
 def test_provenance_never_overrides_a_canonical_classification():
-    """Steps 1 and 2 of the resolver still win over the terminal fallback
-    when the event's own signature corroborates the canonical family,
-    with or without the gate proof."""
     assert (
         _resolve_event_type(
             "state_variable:whatever",
@@ -256,9 +233,6 @@ def test_provenance_never_overrides_a_canonical_classification():
 
 
 def test_uncorroborated_canonical_claim_falls_to_the_earned_stem():
-    """A canonical family type needs the event's OWN signature to corroborate it; otherwise
-    donation and the legacy map fall to the terminal stem (which honours provenance)."""
-    # Donated writes, uncorroborated name -> neutral.
     assert (
         _resolve_event_type(
             "state_variable:whatever",
@@ -268,8 +242,6 @@ def test_uncorroborated_canonical_claim_falls_to_the_earned_stem():
         )
         == "state_changed:state_variable:whatever"
     )
-    # Legacy controller_id map, uncorroborated name -> the stem earned by
-    # provenance (proven gate -> controller_changed, not the canonical type).
     assert (
         _resolve_event_type(
             "state_variable:owner",
@@ -278,7 +250,6 @@ def test_uncorroborated_canonical_claim_falls_to_the_earned_stem():
         )
         == "controller_changed:state_variable:owner"
     )
-    # Not-determined signature (absent) cannot corroborate anything.
     assert (
         _resolve_event_type(
             "state_variable:whatever",
@@ -290,8 +261,6 @@ def test_uncorroborated_canonical_claim_falls_to_the_earned_stem():
 
 
 def test_unclassified_spec_decodes_to_the_neutral_type():
-    """A spec carrying no event_type at all was never classified — the
-    decoder's own default must not invent the controller claim either."""
     spec = {
         "topic0": TRANSFER_TOPIC0,
         "signature": "Transfer(address,address,uint256)",
@@ -306,15 +275,8 @@ def test_unclassified_spec_decodes_to_the_neutral_type():
     assert parsed["event_type"] == "state_changed"
 
 
-# ---------------------------------------------------------------------------
-# Published surfaces — GET /api/protocols/{id}/events and /api/monitored-events
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def served_rows(db_session):
-    """Two MonitoredEvents from the real producer path over the fixture plans, inserted as the
-    watcher inserts them."""
     from db.models import MonitoredContract, MonitoredEvent, Protocol
 
     protocol = Protocol(name=f"prov-fixture-{uuid.uuid4().hex[:8]}")
@@ -383,7 +345,6 @@ def test_protocol_events_endpoint_serves_the_neutral_type(api_client, served_row
 
     assert "state_changed:state_variable:_balances" in by_type
     assert "controller_changed:state_variable:_balances" not in by_type
-    # The earned claim is still served for the proven-gate write target.
     assert "controller_changed:state_variable:pauser" in by_type
 
 
@@ -394,8 +355,7 @@ def test_monitored_events_endpoint_serves_the_neutral_type(api_client, served_ro
     body = resp.json()
     assert [e["event_type"] for e in body] == ["state_changed:state_variable:_balances"]
 
-    # The event_type filter is a published query axis — the neutral type
-    # has to be addressable by it.
+    # The neutral type must be addressable by the filter.
     filtered = api_client.get(
         "/api/monitored-events",
         params={"event_type": "state_changed:state_variable:_balances"},

@@ -91,8 +91,7 @@ def test_member_carries_state_and_admitting_witnesses(db_session, protocol):
     row = _row(payload, member.address)
     assert row["membership_state"] == "member"
     assert row["membership_reason"] is None
-    # W1 is the precondition, not an admitting reason — only admitting rules
-    # appear in the display witnesses.
+    # W1 is a precondition, not an admitting reason, so it is not a display witness.
     assert row["membership_witnesses"] == [
         {"rule": "w2_structural", "via_address": via, "edge_kind": "implementation", "heuristic": False}
     ]
@@ -291,6 +290,5 @@ def test_membership_enrichment_is_batched(db_session, protocol):
         event.remove(db_session.bind, "before_cursor_execute", before_cursor_execute)
 
     assert len(payload) == 8
-    # contracts + completed-jobs + code facts + witnesses + probe attempts —
-    # one query per evidence table, never per row.
+    # One query per evidence table, never per row.
     assert len(queries) <= 6, f"expected ≤ 6 SELECTs for 8 rows, got {len(queries)}:\n" + "\n".join(queries)

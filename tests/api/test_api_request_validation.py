@@ -1,8 +1,3 @@
-"""Ingest-side input validation on the request models in ``schemas/api_requests``.
-
-These assert the reject/accept boundary for hex addresses and outbound URLs so
-a hostile payload cannot reach a downstream link, fetch, or scan filter.
-"""
 
 from __future__ import annotations
 
@@ -50,14 +45,12 @@ def test_add_audit_request_rejects_dangerous_scheme(bad_url):
         pytest.param(AnalyzeRequest, {"address": "0x" + "zz" * 20}, id="address-non-hex"),
         # fullmatch anchoring: a trailing newline must not sneak past the hex check.
         pytest.param(AnalyzeRequest, {"address": "0x" + "ab" * 20 + "\n"}, id="address-trailing-newline"),
-        # CRITICAL: a javascript: scheme must never reach the crawler or rendered links.
         pytest.param(AnalyzeRequest, {"dapp_urls": ["javascript:alert(1)"]}, id="dapp-urls-non-http"),
         pytest.param(
             AddAuditRequest,
             {"url": "https://ok.test", "pdf_url": "javascript:alert(1)", "auditor": "a", "title": "t"},
             id="audit-dangerous-pdf-url",
         ),
-        # CRITICAL: SSRF guard on the webhook URL; only https discord.com is allowed.
         pytest.param(
             ProtocolSubscribeRequest,
             {"discord_webhook_url": "https://evil.example/webhook"},
@@ -80,8 +73,7 @@ def test_request_models_reject_invalid_input(model, kwargs):
     [
         "https://discord.com@evil.com/api/webhooks/1/abc",  # userinfo, real host is evil.com
         "https://discord.com.evil.com/api/webhooks/1/abc",  # subdomain-suffix, host ends in evil.com
-        # Backslash authority: urlparse reads discord.com, urllib3 (the client's
-        # parser) dials the pre-backslash host. The gate reads the dialed host.
+        # urlparse reads discord.com but urllib3 dials the pre-backslash host; the gate reads the dialed host.
         "https://x\\@discord.com/api/webhooks/1/abc",
     ],
 )

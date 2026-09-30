@@ -1,10 +1,4 @@
-"""Implementation-invariant sweep for the effects stage.
-
-One explicit test per invariant, each CLOSING the invariant with an assertion or
-recorded evidence — the same one-test-per-rule pattern the multichain suite uses
-(``tests/test_multichain_*``). Each section header below states the rule its test
-pins. Offline/hermetic; the DB-touching cases carry ``@requires_postgres``.
-"""
+"""One test per effects-stage invariant; each section header states the rule its test pins."""
 
 from __future__ import annotations
 
@@ -37,7 +31,6 @@ from services.effects.selection import AuthorityGraph, select_candidates
 from tests.cache_helpers import requires_postgres
 from tests.support.effects_ir import _fn, _ir, _node, _var
 
-# Shared structural doubles + scripted stubs from the harness tests.
 from tests.support.effects_stubs import CTX, RecordingStore, ScriptedSimulate, ok, transfer_log, uint_ret
 from workers.base import _resolve_job_concurrency
 from workers.effects_worker import EffectsWorker
@@ -61,18 +54,11 @@ def clean_effects(db_session):
     db_session.commit()
 
 
-# ---------------------------------------------------------------------------
-# No name drives an effect; every verdict traces to a witness.
-# ---------------------------------------------------------------------------
-
-
 def test_inv1_no_name_drives_effect():
-    # Two structurally-identical functions with DIFFERENT names hash equal —
-    # the identity is structural, never the name.
+    # The identity is structural, never the name.
     a = _fn("A.wildlyDifferentName()", nodes=[_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable"))])])
     b = _fn("B.f()", nodes=[_node("EXPRESSION", [_ir("Assignment", lvalue=_var("StateVariable"))])])
     assert resolved_function_hash(a) == resolved_function_hash(b)
-    # And a positive verdict carries a replayable transcript (an observed witness).
     from services.effects.simulate import SimResult
 
     res = SimResult(
@@ -90,21 +76,14 @@ def test_inv1_no_name_drives_effect():
     assert eff.transcript is not None and eff.is_proven
 
 
-# ---------------------------------------------------------------------------
-# Cache scope matches verdict scope; concrete values are never keys.
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_inv3_cache_scope_matches_verdict_scope(clean_effects):
     session = clean_effects
-    # Kernel row: empty surface sentinel; a kernel lookup ignores surface.
     upsert_cached_verdict(
         session, behavior_hash="h", effect_class="supply", scope="kernel", verdict="proven", tier="tier1"
     )
     krow = find_cached_verdict(session, behavior_hash="h", effect_class="supply", scope="kernel")
     assert krow is not None and krow.contract_surface_hash == KERNEL_SURFACE_SENTINEL
-    # Projection: same hash on two surfaces → two rows (surface IS part of key).
     upsert_cached_verdict(
         session,
         behavior_hash="h",
@@ -120,14 +99,8 @@ def test_inv3_cache_scope_matches_verdict_scope(clean_effects):
         )
         is None
     )
-    # Concrete values are not columns of the cache identity (no address column).
     cols = {c.name for c in EffectBehaviorCache.__table__.columns}
     assert "concrete_destination" not in cols and "contract_address" not in cols
-
-
-# ---------------------------------------------------------------------------
-# Value ORDERS, never gates; a resource cap logs what it drops.
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -151,20 +124,13 @@ def test_inv4_value_never_gates_cap_logs_drops(clean_effects, caplog):
         )
     session.commit()
 
-    # No value gate: all three blank+gated+facts functions survive (value 0).
     assert len(select_candidates(session, proto.id)) == 3
-    # The ONLY cutoff — a resource cap — logs exactly what it dropped.
     import logging as _logging
 
     with caplog.at_level(_logging.WARNING):
         kept = select_candidates(session, proto.id, resource_cap=1)
     assert len(kept) == 1
     assert "resource cap hit" in caplog.text and "dropped 2 candidate" in caplog.text
-
-
-# ---------------------------------------------------------------------------
-# Transitive reach, not direct balance, drives ordering.
-# ---------------------------------------------------------------------------
 
 
 def test_inv5_transitive_reach_beats_direct_balance():
@@ -174,17 +140,9 @@ def test_inv5_transitive_reach_beats_direct_balance():
     graph._add_control(safe, vault)  # the $33k Safe controls the $3.2B vault
     graph.balance[safe] = Decimal("33000.00")
     graph.balance[vault] = Decimal("3200000000.00")
-    # Reach from the Safe includes the full downstream vault value (upper bound).
-    # Exact, not approx: `Decimal == pytest.approx(float)` cannot fail — it
-    # returns True on agreement and raises TypeError otherwise.
+    # Exact on purpose: ``Decimal == pytest.approx(float)`` can't fail, it raises TypeError instead.
     assert graph.reachable_value({safe}) == Decimal("3200033000.00")
-    # Its transitive reach dwarfs its direct balance — the ordering signal.
     assert graph.reachable_value({safe}) > graph.balance[safe]
-
-
-# ---------------------------------------------------------------------------
-# Read-only and keyless: no mainnet writes.
-# ---------------------------------------------------------------------------
 
 
 def test_inv7_readonly_keyless():
@@ -202,17 +160,10 @@ def test_inv7_readonly_keyless():
         sentinel_address=SENTINEL,
         sentinel_calldata="0x00000000",
     )
-    # Every issued call carries zero ETH value (read-only probing, no transfer).
     for calls, _tag, _ov in sim.blocks:
         for c in calls:
             assert c.value == 0
-    # The real fork transport defaults to NON-forking (no mainnet-write path).
     assert inspect.signature(anvil.SubprocessAnvil.__init__).parameters["fork_url"].default is None
-
-
-# ---------------------------------------------------------------------------
-# Duration/bound facts are read from source constants, never hardcoded.
-# ---------------------------------------------------------------------------
 
 
 def test_inv10_duration_bound_from_source_constant():
@@ -244,7 +195,6 @@ def test_inv10_duration_bound_from_source_constant():
         def call(self, tx):
             from services.clients.rpc import EthCallResult
 
-            # Every entry point succeeds pre-pause; the paused one reverts after.
             paused = getattr(self, "_paused", False)
             return EthCallResult(not paused, "0x", None if not paused else "0xdead", None)
 
@@ -271,35 +221,20 @@ def test_inv10_duration_bound_from_source_constant():
         max_pause_duration=src_read_duration,
         duration_bound_source="guard_constant",
     )
-    # The bound in the witness is exactly the source-read value — not a constant.
     assert eff.details["duration_bound_seconds"] == src_read_duration
-    # ...and it names the evidence that produced it, so a consumer can tell a read
-    # bound from an unread one.
+    # The source key tells a read bound from an unread one.
     assert eff.details["duration_bound_source"] == "guard_constant"
-    # No hardcoded duration literal lives in the recipe.
     assert "MAX_PAUSE_DURATION =" not in inspect.getsource(anvil)
 
 
-# ---------------------------------------------------------------------------
-# Fail-forward stage, transition-gated flag.
-# ---------------------------------------------------------------------------
-
-
 def test_inv15_fail_forward_and_flag_gates_transition(monkeypatch):
-    # The effects stage advances to coverage on failure (never failed_terminal).
     assert EffectsWorker.next_stage == JobStage.coverage
     src = inspect.getsource(EffectsWorker._finalize_terminal_failure)
     assert "advance_job" in src and "failed_terminal" not in src.split('"""')[-1]
-    # Flag gates the transition itself.
     monkeypatch.delenv("PSAT_EFFECTS_STAGE", raising=False)
     assert effects_stage_enabled() is False
     monkeypatch.setenv("PSAT_EFFECTS_STAGE", "1")
     assert effects_stage_enabled() is True
-
-
-# ---------------------------------------------------------------------------
-# Single-flight fork: PSAT_EFFECTS_JOB_CONCURRENCY defaults to 1.
-# ---------------------------------------------------------------------------
 
 
 def test_inv16_single_flight_fork_default(monkeypatch):
@@ -308,9 +243,7 @@ def test_inv16_single_flight_fork_default(monkeypatch):
     assert _resolve_job_concurrency("effects") == 1
 
 
-# The self-audit helper closes the cache-scope rule's "first shared-hash pair
-# self-audited" clause with a pure comparison (the worker path is covered in
-# test_effects_worker_integration).
+# The worker path is covered in test_effects_worker_integration.
 def test_inv3_self_audit_helper_catches_collision():
     assert kernel_verdicts_agree("proven", {"supply_delta_sign": "mint"}, "proven", {"supply_delta_sign": "mint"})
     assert not kernel_verdicts_agree("proven", {"supply_delta_sign": "mint"}, "proven", {"supply_delta_sign": "burn"})

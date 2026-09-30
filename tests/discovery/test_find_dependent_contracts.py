@@ -2,14 +2,8 @@ import pytest
 
 from services.discovery import static_dependencies as fdc
 
-# offline: BFS pre-fills bytecode via a batched eth_getCode (services.clients.rpc.get_code_batch,
-# imported at call time); stub it empty so it falls back to the per-address get_code mocks
+# The BFS batch-prefetches bytecode; stubbed empty it falls back to the per-address mocks.
 pytestmark = pytest.mark.usefixtures("_stub_rpc_bytecode")
-
-
-# ---------------------------------------------------------------------------
-# Core helpers: normalize_address, extract_push20_addresses
-# ---------------------------------------------------------------------------
 
 
 def test_normalize_address_and_extract_push20():
@@ -34,8 +28,7 @@ def test_normalize_address_and_extract_push20():
     assert "0x" + zero_addr not in result
     assert "0x" + addr in result
 
-    # extract_push20_addresses: skips PUSH data correctly
-    # PUSH32 (0x7f) has 32 bytes of data — a PUSH20 opcode inside that data should be ignored
+    # A PUSH20 opcode inside PUSH32 data must be ignored.
     push32_data = "73" + addr + "00" * 11  # 0x73 inside PUSH32 data (32 bytes total)
     bytecode = "0x7f" + push32_data
     result = fdc.extract_push20_addresses(bytecode)
@@ -47,11 +40,6 @@ def test_normalize_address_and_extract_push20():
     assert result == {"0x" + addr, "0x" + addr2}
 
     assert fdc.extract_push20_addresses("0x600") == set()
-
-
-# ---------------------------------------------------------------------------
-# RPC resolution
-# ---------------------------------------------------------------------------
 
 
 def test_find_dependencies_raises_without_rpc(monkeypatch):
@@ -97,11 +85,6 @@ def test_find_dependencies_uses_erpc_when_no_explicit(monkeypatch):
     out = fdc.find_dependencies("0x1111111111111111111111111111111111111111")
     assert captured["rpc"] == "https://erpc-proxy.example/main/evm/1"
     assert "rpc" not in out
-
-
-# ---------------------------------------------------------------------------
-# Mocked BFS traversal
-# ---------------------------------------------------------------------------
 
 
 def test_discover_dependencies_bfs_mocked(monkeypatch):

@@ -1,11 +1,5 @@
-"""A rotated controller must not keep the OLD address's classification.
-
-``_update_controller_value_rows`` wrote only ``cv.value``, leaving ``resolved_type``, ``details``, ``block_number``
-and ``observed_via`` describing the replaced address. The consumer republishes that payload under the NEW address
-(``company_overview._record_principal_lookup``, ``_principal_lookup_type`` via ``_has_timelock_delay``), so a
-Timelock -> EOA rotation published a fresh EOA as ``resolved_type="timelock"`` with the old ``delay``: a
-safety-inflating false credit in a scoring input, worse than a false adverse. Safe -> Safe (wrong owners/threshold)
-is the milder half. Armed population at writing: 13 rows (8 ``safe`` + 5 ``timelock``); lower bound one protocol.
+"""A rotated controller used to keep the old address's classification, so a Timelock -> EOA rotation published the
+EOA as a timelock with the old delay: a safety-inflating false credit.
 """
 
 from __future__ import annotations
@@ -104,9 +98,6 @@ def _monitored(session, contract) -> MonitoredContract:
     return mc
 
 
-# --- the worse half: a timelock's delay must not follow the rotation ------
-
-
 def test_event_rotation_from_timelock_to_eoa_drops_the_stale_delay(db_session, subject):
     _seed_controller(
         db_session,
@@ -134,17 +125,14 @@ def test_event_rotation_from_timelock_to_eoa_drops_the_stale_delay(db_session, s
 
     row = _reload(db_session, subject.id, "state_variable:owner")
     assert row.value == NEW_EOA
-    # The classification described the OLD address. Nothing here can
-    # re-classify, so NULL — not determined — is the only honest answer.
+    # Nothing here can re-classify, so NULL.
     assert row.resolved_type is None
     assert row.details is None
-    # SQL NULL, not the jsonb scalar ``null`` (a written ``null`` is a recorded absence, i.e. evidence; db/jsonb.py);
-    # psycopg2 decodes both to None, so only SQL can tell them apart.
+    # psycopg2 decodes SQL NULL and jsonb ``null`` alike; only SQL tells them apart (db/jsonb.py).
     state = db_session.execute(
         select(jsonb_state(ControllerValue.details)).where(ControllerValue.id == row.id)
     ).scalar_one()
     assert state == JSONB_UNSET
-    # The read that produced the new value is identified and dated.
     assert row.observed_via == CONTROLLER_OBSERVED_VIA_EVENT_LOG
     assert row.block_number == 25_619_159
 
@@ -174,12 +162,8 @@ def test_poll_rotation_records_no_block_rather_than_the_stale_one(db_session, su
     assert row.resolved_type is None
     assert row.details is None
     assert row.observed_via == CONTROLLER_OBSERVED_VIA_STORAGE_POLL
-    # A poll reads a slot, not a log. Keeping 18,000,000 would date the new
-    # value to a block at which it was not there.
+    # A poll reads a slot, not a log; the old block would misdate the value.
     assert row.block_number is None
-
-
-# --- the milder half: a Safe's owner set must not follow the rotation -----
 
 
 def test_event_rotation_between_safes_drops_the_stale_owner_set(db_session, subject):
@@ -210,12 +194,8 @@ def test_event_rotation_between_safes_drops_the_stale_owner_set(db_session, subj
     row = _reload(db_session, subject.id, "state_variable:owner")
     assert row.value == NEW_SAFE
     assert row.resolved_type is None
-    # ``details["address"]`` used to stay the OLD Safe, and the consumer's
-    # ``setdefault("address", addr)`` cannot correct a key that is present.
+    # The consumer's ``setdefault("address", ...)`` can't correct a present key.
     assert row.details is None
-
-
-# --- negative control: an unchanged value must not be disturbed -----------
 
 
 def test_a_write_that_does_not_move_the_value_leaves_the_row_alone(db_session, subject):
@@ -244,7 +224,6 @@ def test_a_write_that_does_not_move_the_value_leaves_the_row_alone(db_session, s
     db_session.expire_all()
 
     row = _reload(db_session, subject.id, "state_variable:owner")
-    # Still describing the same address, so the classification is still valid.
     assert row.resolved_type == "timelock"
     assert row.details == {"address": OLD_TIMELOCK, "delay": 259200}
     assert row.block_number == 18_000_000

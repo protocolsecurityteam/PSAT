@@ -501,8 +501,7 @@ def test_snapshot_rejects_unresolved_mutable_image(monkeypatch, tmp_path):
 
 
 def add_fly_standbys(fly):
-    # Fly's --standby-for flag serializes as config.standbys, not standby_for.
-    # Match the live topology: a stopped standby for each non-service group.
+    # Fly serializes --standby-for as config.standbys.
     for primary in list(fly.rows):
         if primary["config"]["metadata"]["fly_process_group"] in {"workers", "monitor"}:
             standby = fly.copy(primary)
