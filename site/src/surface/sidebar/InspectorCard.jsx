@@ -3,6 +3,7 @@ import { GotoArrow } from "../GotoArrow.jsx";
 import { LANE_META, TYPE_META } from "../meta.js";
 import { claimWitnessFacts } from "../../vocab/witnessFacts.js";
 import { sharedDeployerNote, signerOverlapNote, terminalControllerNote } from "../../vocab/principalNotes.js";
+import { clickable } from "../../shared/clickable.js";
 
 // A contract principal is a way-point, never a settled key (SCORING plan §4);
 // renders nothing for a settled key.
@@ -123,15 +124,7 @@ function PrincipalRefCard({ principal, indirect = false, onPreview, onNavigate }
   return (
     <div
       className={`ps-principal-card ps-principal-clickable${indirect ? " ps-principal-indirect" : ""}`}
-      role="button"
-      tabIndex={0}
-      onClick={() => onPreview && onPreview(principal.address)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onPreview && onPreview(principal.address);
-        }
-      }}
+      {...clickable(() => onPreview && onPreview(principal.address))}
     >
       <div className="ps-principal-top">
         <span className="ps-principal-type" style={{ "--principal-accent": type.accent }}>{type.label}</span>

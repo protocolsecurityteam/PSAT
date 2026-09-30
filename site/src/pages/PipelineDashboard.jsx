@@ -8,6 +8,7 @@ import { FleetStrip } from "./fleet/FleetStrip.jsx";
 import { DaemonDetail } from "./fleet/DaemonDetail.jsx";
 import { computeFleetRates } from "./fleet/fleetHealth.js";
 import { CORE_STAGES, STAGE_COLORS, STATUS_COLORS, coreIndexForStage, formatStageLabel } from "./jobStages.js";
+import { clickable } from "../shared/clickable.js";
 
 // Only queued/processing are exempt from the window; failed jobs age out like
 // completed ones. "all" has no bound.
@@ -75,15 +76,6 @@ function monitorJobLabel(job) {
   return job.request?.proxy_address ? `${base} (impl)` : base;
 }
 
-function onActivate(fn) {
-  return (ev) => {
-    if (ev.key === "Enter" || ev.key === " ") {
-      ev.preventDefault();
-      fn();
-    }
-  };
-}
-
 function StageProgress({ job }) {
   const status = job.status;
   const done = status === "completed" || job.stage === "done";
@@ -140,10 +132,7 @@ function ActiveRow({ job, now, selected, onSelect }) {
   return (
     <div
       className={`run-row${isSel ? " sel" : ""}`}
-      onClick={() => onSelect(job.job_id)}
-      onKeyDown={onActivate(() => onSelect(job.job_id))}
-      role="button"
-      tabIndex={0}
+      {...clickable(() => onSelect(job.job_id))}
     >
       <span className={`rdot${pulse ? " pulse-dot" : ""}`} style={{ background: dotColor }} />
       <span className="rname">
@@ -168,10 +157,7 @@ function HistoryRow({ job, now, selected, onSelect }) {
   return (
     <div
       className={`run-row${isFailed ? " fail" : ""}${isSel ? " sel" : ""}`}
-      onClick={() => onSelect(job.job_id)}
-      onKeyDown={onActivate(() => onSelect(job.job_id))}
-      role="button"
-      tabIndex={0}
+      {...clickable(() => onSelect(job.job_id))}
     >
       <span className="rdot" style={{ background: dotColor }} />
       <span className="rname">

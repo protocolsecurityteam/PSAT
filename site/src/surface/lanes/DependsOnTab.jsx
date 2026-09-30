@@ -5,6 +5,7 @@ import { blockExplorerAddressUrl, blockExplorerName } from "../blockExplorer.js"
 import { fnChipClass, shortAddr } from "../format.js";
 import { GotoArrow } from "../GotoArrow.jsx";
 import { buildDependencyView, fetchDependencyGraphViz } from "../layout/dependencies.js";
+import { clickable } from "../../shared/clickable.js";
 
 // The selected contract's outbound calls: external integrations (the trust
 // surface shown nowhere else) as cards, internal calls one row per sibling.
@@ -92,15 +93,7 @@ function InternalRow({ row, onPreview, onNavigate }) {
       <div className="ps-depends-head">
         <span
           className="ps-depends-preview"
-          role="button"
-          tabIndex={0}
-          onClick={preview}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              preview();
-            }
-          }}
+          {...clickable(preview)}
         >
           <span className="ps-depends-name">{row.name}</span>
           <span className="ps-depends-addr">{shortAddr(row.onCanvasAddress)}</span>

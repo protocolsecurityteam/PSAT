@@ -6,6 +6,7 @@ import { AuditReadModal } from "../modals/AuditReadModal.jsx";
 import { GotoArrow } from "../GotoArrow.jsx";
 import { entityKey } from "../entityKey.js";
 import { principalLabel, shortAddr } from "../format.js";
+import { clickable } from "../../shared/clickable.js";
 
 // Picked-audit state is one radio: null, an audit_id, or ALL_PROVEN.
 const ALL_PROVEN = "all";
@@ -146,15 +147,7 @@ function ProtocolAuditsView({
               <div
                 key={c.address}
                 className="ps-audits-covrow"
-                role="button"
-                tabIndex={0}
-                onClick={() => onPreview?.(c.address)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onPreview?.(c.address);
-                  }
-                }}
+                {...clickable(() => onPreview?.(c.address))}
               >
                 <span className="ps-audits-covrow-name">{c.name}</span>
                 <span className="ps-audits-covrow-addr">{shortAddr(c.address)}</span>

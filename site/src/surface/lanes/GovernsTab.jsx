@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { fnChipClass, formatUsd, shortAddr } from "../format.js";
 import { GotoArrow } from "../GotoArrow.jsx";
+import { clickable } from "../../shared/clickable.js";
 
 // Shared row: head previews, arrow commits. The "N fns" button appears only on
 // Can Call rows (path rows are reachability-only).
@@ -15,15 +16,7 @@ function GovernsRow({ row, onPreview, onNavigate }) {
     <div className="ps-governs-row">
       <div
         className="ps-governs-head"
-        role="button"
-        tabIndex={0}
-        onClick={() => onPreview && onPreview(row.address)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onPreview && onPreview(row.address);
-          }
-        }}
+        {...clickable(() => onPreview && onPreview(row.address))}
       >
         <span className="ps-governs-name">
           {label}

@@ -1,3 +1,5 @@
+import { clickable } from "../shared/clickable.js";
+
 // The one clickable-entity pathway on the score page, so every entity click has
 // one keyboard contract.
 
@@ -11,19 +13,7 @@ function actionable(onSelect, target) {
 // parent lays out.
 export function entityProps({ onSelect, target, title, ariaLabel }) {
   if (!actionable(onSelect, target)) return null;
-  const activate = () => onSelect(target);
-  return {
-    role: "button",
-    tabIndex: 0,
-    title,
-    "aria-label": ariaLabel,
-    onClick: activate,
-    onKeyDown: (e) => {
-      if (e.key !== "Enter" && e.key !== " ") return;
-      e.preventDefault();
-      activate();
-    },
-  };
+  return { ...clickable(() => onSelect(target)), title, "aria-label": ariaLabel };
 }
 
 // Without a handler the children stay plain text.

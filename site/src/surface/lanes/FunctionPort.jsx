@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 
 import { GuardGlyph } from "../../ui/GuardGlyph.jsx";
 import { GotoArrow } from "../GotoArrow.jsx";
+import { clickable } from "../../shared/clickable.js";
 
 // Body previews, arrow commits.
 function CallerButton({ principal, onPreview, onNavigate, marked = false }) {
@@ -11,19 +12,8 @@ function CallerButton({ principal, onPreview, onNavigate, marked = false }) {
   return (
     <div
       className={`ps-caller-btn${marked ? " ps-caller-score-highlight" : ""}`}
-      role="button"
-      tabIndex={0}
       title={`Preview ${d.name}${d.sub ? ` ${d.sub}` : ""}`}
-      onClick={(e) => {
-        e.stopPropagation();
-        preview();
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          preview();
-        }
-      }}
+      {...clickable(preview, { stopPropagation: true })}
     >
       <span className="ps-caller-ic" style={{ color: accent }}>
         <GuardGlyph kind={d.kind} accent={accent} title={d.name} />
