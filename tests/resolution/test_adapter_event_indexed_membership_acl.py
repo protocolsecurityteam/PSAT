@@ -75,7 +75,7 @@ def _patched_value_fold(monkeypatch, logs: list[Any]) -> None:
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
-    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: 0)
+    monkeypatch.setattr(floor_mod, "resolve_scan_floor_with_basis", lambda *_a, **_k: (0, "creation_block_lookup"))
 
     orig = mapping_enumerator.enumerate_mapping_values
 

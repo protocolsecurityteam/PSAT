@@ -421,9 +421,9 @@ class EventIndexedAdapter:
         if isinstance(ctx.block, int):
             kwargs["to_block"] = ctx.block
         # Floor at the deploy block; with no floor, defer rather than scan from genesis.
-        from ..creation_block_floor import resolve_scan_floor
+        from ..creation_block_floor import resolve_scan_floor_with_basis
 
-        floor = resolve_scan_floor(contract_address, ctx.chain_id, session=ctx.session)
+        floor, floor_basis = resolve_scan_floor_with_basis(contract_address, ctx.chain_id, session=ctx.session)
         if floor is None:
             return self._deferred_value_check(descriptor, ctx, event_address)
         kwargs["from_block"] = floor
@@ -445,6 +445,15 @@ class EventIndexedAdapter:
             quality="exact" if is_complete else "lower_bound",
             confidence="enumerable" if is_complete else "partial",
             last_indexed_block=scan["last_block_scanned"] or None,
+            trace=[
+                {
+                    "step": "live_value_fold",
+                    "event_address": contract_address.lower(),
+                    "scan_from_block": floor,
+                    "scan_to_block": ctx.block if isinstance(ctx.block, int) else (scan["last_block_scanned"] or None),
+                    "floor_basis": floor_basis,
+                }
+            ],
         )
 
 

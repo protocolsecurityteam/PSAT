@@ -409,7 +409,7 @@ def _resolve_param_keyed_authority_mapping(op: dict[str, Any], ctx: EvaluationCo
     if not isinstance(contract, str) or not contract.startswith("0x") or len(contract) != 42:
         return _unresolved("param_keyed_mapping_no_address")
 
-    values = _enumerate_param_keyed_mapping_values(contract, list(writer_specs), outer)
+    values, scan_window = _enumerate_param_keyed_mapping_values(contract, list(writer_specs), outer)
     if not values:
         # An honest query interface, never a fabricated empty set.
         return _unresolved("param_keyed_mapping_unresolved")
@@ -417,12 +417,22 @@ def _resolve_param_keyed_authority_mapping(op: dict[str, Any], ctx: EvaluationCo
         values,
         quality="lower_bound",
         confidence="partial",
-        trace=[{"step": "param_keyed_mapping_enumeration", "mapping": mapping_name, "contract": contract.lower()}],
+        trace=[
+            {
+                "step": "param_keyed_mapping_enumeration",
+                "mapping": mapping_name,
+                "contract": contract.lower(),
+                **scan_window,
+            }
+        ],
     )
 
 
-def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict[str, Any]], outer: Any) -> list[str]:
-    """Fold the non-zero address values of a parameter-keyed mapping from its ``set`` events.
+def _enumerate_param_keyed_mapping_values(
+    contract: str, writer_specs: list[dict[str, Any]], outer: Any
+) -> tuple[list[str], dict[str, Any]]:
+    """Fold the non-zero address values of a parameter-keyed mapping from its ``set`` events, with the scan window as
+    trace fields.
 
     Empty when there's no event source, the scan errors, or nothing folds. The HyperSync client comes from
     ``outer.meta`` so tests can seed it.
@@ -434,23 +444,23 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
     client = meta.get("hypersync_client")
     module = meta.get("hypersync_module")
     if not token and client is None:
-        return []
+        return [], {}
     block = getattr(outer, "block", None)
     chain_id = getattr(outer, "chain_id", None)
     if not isinstance(chain_id, int):
         # No chain means nothing to scan (inv. 6).
-        return []
+        return [], {}
     _bump_resolve_counter(outer, "mapping_value_scans")
-    from services.resolution.creation_block_floor import resolve_scan_floor
+    from services.resolution.creation_block_floor import resolve_scan_floor_with_basis
 
     # No floor: defer rather than scan from genesis.
-    floor = resolve_scan_floor(
+    floor, floor_basis = resolve_scan_floor_with_basis(
         contract,
         chain_id,
         session=getattr(outer, "session", None),
     )
     if floor is None:
-        return []
+        return [], {}
     kwargs: dict[str, Any] = {"from_block": floor}
     if isinstance(block, int):
         kwargs["to_block"] = block
@@ -475,9 +485,9 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
             **kwargs,
         )
     except Exception:
-        return []
+        return [], {}
     if scan["status"] == "error":
-        return []
+        return [], {}
     values: list[str] = []
     seen: set[str] = set()
     for entry in scan["entries"]:
@@ -489,7 +499,12 @@ def _enumerate_param_keyed_mapping_values(contract: str, writer_specs: list[dict
             continue
         seen.add(addr)
         values.append(addr)
-    return sorted(values)
+    scan_window = {
+        "scan_from_block": floor,
+        "scan_to_block": block if isinstance(block, int) else (scan.get("last_block_scanned") or None),
+        "floor_basis": floor_basis,
+    }
+    return sorted(values), scan_window
 
 
 def _view_call_caller_selects_key(op: Mapping[str, Any]) -> bool:

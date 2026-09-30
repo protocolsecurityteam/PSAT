@@ -149,7 +149,7 @@ def _stub_creation_block_floor(monkeypatch):
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
-    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: 0)
+    monkeypatch.setattr(floor_mod, "resolve_scan_floor_with_basis", lambda *_a, **_k: (0, "creation_block_lookup"))
 
 
 @pytest.fixture
@@ -701,7 +701,9 @@ def test_live_fallback_floors_from_block_at_creation_block(monkeypatch):
 
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
     floor_mod.clear_scan_floor_cache()
-    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: 18_000_000 - 1)
+    monkeypatch.setattr(
+        floor_mod, "resolve_scan_floor_with_basis", lambda *_a, **_k: (18_000_000 - 1, "creation_block_lookup")
+    )
 
     captured: dict = {}
 
@@ -722,9 +724,18 @@ def test_live_fallback_floors_from_block_at_creation_block(monkeypatch):
         event_log_repo=cast(Any, _NoValueFoldRepo()),
         meta={"hypersync_token": "tok-123"},
     )
-    EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
+    cap = EventIndexedAdapter().enumerate(_eigenpod_descriptor(), ctx)
 
     assert captured["kwargs"].get("from_block") == 18_000_000 - 1
+    assert cap.trace == [
+        {
+            "step": "live_value_fold",
+            "event_address": STATE_HOLDER,
+            "scan_from_block": 18_000_000 - 1,
+            "scan_to_block": RESOLUTION_BLOCK,
+            "floor_basis": "creation_block_lookup",
+        }
+    ]
 
 
 def test_live_fallback_defers_on_unknown_floor(monkeypatch):
@@ -735,7 +746,7 @@ def test_live_fallback_defers_on_unknown_floor(monkeypatch):
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
     floor_mod.clear_scan_floor_cache()
     # Override the autouse floor stub: an unresolvable floor returns the DEFER sentinel (None).
-    monkeypatch.setattr(floor_mod, "resolve_scan_floor", lambda *_a, **_k: None)
+    monkeypatch.setattr(floor_mod, "resolve_scan_floor_with_basis", lambda *_a, **_k: (None, None))
 
     invoked: dict = {"called": False}
 
