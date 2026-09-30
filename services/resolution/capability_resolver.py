@@ -13,6 +13,7 @@ Returns ``None`` when there's no completed analysis or predicate-tree artifact; 
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from dataclasses import asdict, dataclass, is_dataclass, replace
@@ -25,7 +26,7 @@ from db.deployment import deployment_scope, normalize_deployment
 from db.models import Contract, ControllerValue, Job, JobStatus
 from db.queue import get_artifact
 from services.clients.rpc import ChainContext, chain_context, eth_call_batch, rpc_request
-from utils.chains import require_chain
+from utils.chains import UnknownChainError, chain_by_id, require_chain
 from utils.logging import record_degraded, record_stage_metric
 
 from .adapters import AdapterRegistry, CallFrame, EvaluationContext
@@ -50,14 +51,29 @@ from .repos.bytecode_rpc import BytecodeSelectorRepo
 
 logger = logging.getLogger(__name__)
 
-# Blocks the resolver steps back from head when pinning the per-pass evaluation height (#119).
+# Minimum blocks the resolver steps back from head when pinning the per-pass evaluation height (#119).
 #
-# Deliberately deeper than the indexer's confirmation depth (``PSAT_EVENT_INDEXER_FINALITY_DEPTH``, 12): a healthy
-# cursor sits at ``indexer_head - depth`` as of its last poll, so pinning at ``resolver_head - depth`` would race and
-# demote everything. With a margin larger than depth plus one poll interval of blocks, a healthy cursor always covers
-# the pin and a stalled one falls behind it. ``exact`` stays truthful. 64 suits ~2-12s block chains; raise it for
-# sub-second chains. A larger value only delays stall detection.
+# A healthy cursor sits at ``indexer_head - confirmation_depth`` as of its last poll, so pinning at
+# ``resolver_head - depth`` would race and demote everything. ``resolver_pin_margin`` deepens this floor per chain to
+# the chain's depth plus two indexer poll intervals of blocks, so a keeping-up cursor covers the pin and a stalled one
+# falls behind it. A larger value only delays stall detection.
 RESOLVER_FINALITY_MARGIN = int(os.getenv("PSAT_RESOLVER_FINALITY_MARGIN", "64"))
+# The event indexer's poll interval (same env and default as the indexer loop).
+INDEXER_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_INTERVAL_S", "60"))
+
+
+def resolver_pin_margin(chain_id: int | None) -> int:
+    """``max(RESOLVER_FINALITY_MARGIN, confirmation_depth + 2·⌈INDEXER_INTERVAL_S / block_time_s⌉)`` for the chain; the
+    floor alone when the chain is unknown.
+    """
+    if not isinstance(chain_id, int):
+        return RESOLVER_FINALITY_MARGIN
+    try:
+        info = chain_by_id(chain_id)
+    except UnknownChainError:
+        return RESOLVER_FINALITY_MARGIN
+    poll_blocks = math.ceil(INDEXER_INTERVAL_S / info.block_time_s)
+    return max(RESOLVER_FINALITY_MARGIN, info.confirmation_depth + 2 * poll_blocks)
 
 
 def _capability_function_slow_ms() -> int:
@@ -315,9 +331,9 @@ def resolve_contract_capabilities(
     # Per-pass memo of live nullary getter reads, shared across functions; discarded with this frame, never persisted.
     live_read_memo: dict[Any, Any] = {}
     slow_threshold_ms = _capability_function_slow_ms()
-    # Pin one finalized height for the whole pass (#119), stepped back ``RESOLVER_FINALITY_MARGIN`` so healthy cursors
-    # stay ``exact`` and stalled ones demote. ``None`` leaves it unpinned, which demotes (safe). The differential probe
-    # keeps its own height.
+    # Pin one finalized height for the whole pass (#119), stepped back ``resolver_pin_margin`` so healthy cursors stay
+    # ``exact`` and stalled ones demote. ``None`` leaves it unpinned, which demotes (safe). The differential probe keeps
+    # its own height.
     resolution_block: int | None = _resolve_resolution_block(rpc_url, block, chain_id=chain_id)
     probe_block: int | None = (
         _resolve_probe_block(rpc_url, block, chain_id=chain_id) if differential_probe_enabled() else None
@@ -462,8 +478,7 @@ def _resolve_probe_block(rpc_url: str | None, block: int | None, *, chain_id: in
 
 def _resolve_resolution_block(rpc_url: str | None, block: int | None, *, chain_id: int | None = None) -> int | None:
     """Pin the per-pass evaluation height for event-indexed coverage (#119): the caller's ``block``, else head minus
-    ``RESOLVER_FINALITY_MARGIN`` (see its comment). ``None`` leaves it unpinned, so coverage demotes to
-    ``lower_bound``.
+    ``resolver_pin_margin(chain_id)``. ``None`` leaves it unpinned, so no event fold can claim coverage.
     """
     if isinstance(block, int) and block > 0:
         return block
@@ -473,7 +488,7 @@ def _resolve_resolution_block(rpc_url: str | None, block: int | None, *, chain_i
         head = int(rpc_request(rpc_url, "eth_blockNumber", [], retries=1, chain_id=chain_id), 16)
     except Exception:
         return None
-    return max(1, head - RESOLVER_FINALITY_MARGIN)
+    return max(1, head - resolver_pin_margin(chain_id))
 
 
 def _should_differential_probe(cap: CapabilityExpr) -> bool:

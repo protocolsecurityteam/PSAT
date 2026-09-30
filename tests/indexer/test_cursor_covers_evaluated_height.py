@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from db.models import IndexedEventCursor, IndexedEventLog
+from db.models import FIRST_INDEXED_BASIS_CREATION, IndexedEventCursor, IndexedEventLog
 from services.resolution import capability_resolver
 from services.resolution.adapters import EvaluationContext
 from services.resolution.adapters.event_indexed import EventIndexedAdapter
@@ -22,6 +22,7 @@ from services.resolution.capabilities import negate
 from services.resolution.capability_resolver import (
     RESOLVER_FINALITY_MARGIN,
     _resolve_resolution_block,
+    resolver_pin_margin,
 )
 from services.resolution.repos.event_logs_pg import (
     PostgresEventLogRepo,
@@ -64,9 +65,9 @@ def _pad(addr: str) -> str:
     return "0x" + addr[2:].rjust(64, "0")
 
 
-def _grant_row(topic0: str, acct: str, block: int, log_index: int = 0) -> IndexedEventLog:
+def _grant_row(topic0: str, acct: str, block: int, log_index: int = 0, chain_id: int = CHAIN_ID) -> IndexedEventLog:
     return IndexedEventLog(
-        chain_id=CHAIN_ID,
+        chain_id=chain_id,
         event_address=EVENT_ADDRESS.lower(),
         topic0=topic0,
         tx_hash=(block * 1000 + log_index).to_bytes(32, "big"),
@@ -79,14 +80,18 @@ def _grant_row(topic0: str, acct: str, block: int, log_index: int = 0) -> Indexe
     )
 
 
-def _seed_cursor(session, *, last_indexed_block: int, topic0: str = TOPIC_ADD, complete: bool = True) -> None:
+def _seed_cursor(
+    session, *, last_indexed_block: int, topic0: str = TOPIC_ADD, complete: bool = True, chain_id: int = CHAIN_ID
+) -> None:
     session.add(
         IndexedEventCursor(
-            chain_id=CHAIN_ID,
+            chain_id=chain_id,
             event_address=EVENT_ADDRESS.lower(),
             topic0=topic0,
             last_indexed_block=last_indexed_block,
             backfill_complete=complete,
+            first_indexed_block=0,
+            first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION,
         )
     )
 
@@ -95,9 +100,9 @@ _KEY_SOURCES = [{"source": "msg_sender"}]
 _TOPICS_TO_KEYS = {1: 0}
 
 
-def _writes(repo: PostgresEventLogRepo, block: int | None, topic0: str = TOPIC_ADD):
+def _writes(repo: PostgresEventLogRepo, block: int | None, topic0: str = TOPIC_ADD, chain_id: int = CHAIN_ID):
     return repo.fold_event_writes(
-        chain_id=CHAIN_ID,
+        chain_id=chain_id,
         event_address=EVENT_ADDRESS,
         topic0=topic0,
         topics_to_keys=_TOPICS_TO_KEYS,
@@ -295,3 +300,48 @@ def test_pin_keeps_keeping_up_cursor_exact_and_demotes_stalled(db_session, monke
     else:
         assert result.confidence == "partial"
         assert result.partial_reason == "cursor_behind_block"
+
+
+def test_resolver_pin_margin_is_per_chain():
+    # mainnet: max(64, 12 + 2·⌈60/12⌉) = 64; Base: max(64, 75 + 2·⌈60/2⌉) = 135.
+    assert resolver_pin_margin(1) == 64
+    assert resolver_pin_margin(8453) == 135
+    assert resolver_pin_margin(None) == RESOLVER_FINALITY_MARGIN
+    assert resolver_pin_margin(999_999_999) == RESOLVER_FINALITY_MARGIN
+
+
+def test_resolve_resolution_block_pins_base_below_its_confirmation_depth(monkeypatch):
+    monkeypatch.setattr(capability_resolver, "rpc_request", lambda *a, **k: hex(5_000_000))
+    assert _resolve_resolution_block("http://rpc.example", None, chain_id=1) == 5_000_000 - 64
+    assert _resolve_resolution_block("http://rpc.example", None, chain_id=8453) == 5_000_000 - 135
+
+
+@pytest.mark.parametrize(
+    "chain_id, depth, cursor_offset, stays_exact",
+    [
+        (1, 12, 12, True),  # keeping-up mainnet cursor at head - depth
+        (1, 12, 64, True),  # mainnet cursor exactly at the pin
+        (1, 12, 65, False),  # mainnet stalled one block below the pin
+        (8453, 75, 75, True),  # keeping-up Base cursor at head - 75: behind the old head-64 pin, covers the new one
+        (8453, 75, 135, True),  # Base cursor exactly at the pin
+        (8453, 75, 136, False),  # Base stalled one block below the pin
+    ],
+)
+def test_pin_keeps_keeping_up_cursor_exact_per_chain(
+    db_session, monkeypatch, chain_id, depth, cursor_offset, stays_exact
+):
+    from utils.chains import chain_by_id
+
+    assert chain_by_id(chain_id).confirmation_depth == depth
+    head = 5_000_000
+    monkeypatch.setattr(capability_resolver, "rpc_request", lambda *a, **k: hex(head))
+    pin = _resolve_resolution_block("http://rpc.example", None, chain_id=chain_id)
+
+    _seed_cursor(db_session, last_indexed_block=head - cursor_offset, chain_id=chain_id)
+    db_session.add(_grant_row(TOPIC_ADD, ADMIN_A, 1, chain_id=chain_id))
+    db_session.flush()
+    result = _writes(PostgresEventLogRepo(db_session), block=pin, chain_id=chain_id)
+    if stays_exact:
+        assert (result.confidence, result.partial_reason) == ("enumerable", None)
+    else:
+        assert (result.confidence, result.partial_reason) == ("partial", "cursor_behind_block")
