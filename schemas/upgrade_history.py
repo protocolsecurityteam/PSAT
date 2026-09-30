@@ -1,11 +1,6 @@
-"""Typed schemas for upgrade history artifacts.
+"""Upgrade-history artifact shapes, mirroring ``services.discovery.upgrade_history``.
 
-Shapes mirror what ``services.discovery.upgrade_history`` actually writes:
-``parse_upgrade_log`` builds ``UpgradeEventRecord`` (four base keys always,
-per-event-type keys only when the log data decodes), and
-``build_upgrade_history`` returns ``UpgradeHistoryOutput``. ``UpgradeEventRecord``
-is named to stay distinct from the ORM model ``db.models.UpgradeEvent``, which
-the producer module also imports.
+Named ``UpgradeEventRecord`` to stay distinct from the ORM ``UpgradeEvent``.
 """
 
 from __future__ import annotations

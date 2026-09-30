@@ -1,5 +1,3 @@
-"""Typed output schemas for PSAT."""
-
 from .contract_analysis import ContractAnalysis
 from .control_tracking import ControlTrackingPlan
 from .effective_permissions import EffectivePermissions
