@@ -1,18 +1,7 @@
-"""``is_pausable`` reads the Plane-1 pause claims, and the EigenLayer bitmap
-family is excluded by construction.
-
-The structural ``PauseAnalyzer`` only sees a top-level scalar latch, so it missed two
-families that hold most of the corpus (``is_pausable`` was false on 33 of 46
-contracts with a ``pause*`` entry point): a **struct member** latch (Veda
-``accountantState.isPaused``; ``_is_pause_typed`` rejects the STRUCT) and an
-**ERC-7201 namespaced slot** (EtherFi ``Pausable``, OZ-v5 ``PausableUpgradeable``;
-not in ``state_variables``, no writer indexed). The claims matcher already resolves
-both via member-path facts, so the summary reads it.
-
-**The bitmap exclusion is structural, not a name list.** EigenLayer's
-``pause(uint256 newPausedStatus)`` assigns a *parameter*, so toggle polarity is never
-a definite constant bool and the matcher fails closed (0 of 8 local bitmap contracts
-mint a ``pause.*`` claim; their 24 ``effective_functions`` rows are inert).
+"""``is_pausable`` reads the Plane-1 pause claims. The structural ``PauseAnalyzer`` only sees top-level scalar
+latches, missing struct-member latches (Veda ``accountantState.isPaused``) and ERC-7201 namespaced slots
+(false on 33 of 46 contracts with a ``pause*`` entry). EigenLayer's bitmap ``pause(uint256)`` assigns a
+parameter, so the matcher fails closed on it structurally, not by name list.
 """
 
 from __future__ import annotations
@@ -71,9 +60,7 @@ STRUCT_MEMBER_LATCH = """
     }
 """
 
-# EigenLayer `Pausable`, reduced to the shape that matters and kept in an
-# abstract base with a `private` flag, which is how the real one is written:
-# a uint256 bitmap assigned from a PARAMETER, plus the `pauseAll()` alias.
+# The real one is an abstract base with a private flag, assigned from a parameter.
 BITMAP_LATCH = """
     pragma solidity ^0.8.19;
     abstract contract Pausable {
@@ -117,22 +104,17 @@ NO_LATCH = """
 
 
 def test_struct_member_latch_is_pausable(tmp_path):
-    """POSITIVE CONTROL. ``accountantState.isPaused`` in the corpus; 7
-    contracts move on this shape alone."""
+    """7 corpus contracts move on this shape alone."""
     result, effects = _analyse(tmp_path, STRUCT_MEMBER_LATCH)
     assert result["is_pausable"] is True
     assert "state.isPaused" in result["pause_variables"], result["pause_variables"]
     assert "pause()" in result["pause_functions"]
     assert "unpause()" in result["unpause_functions"]
-    # The widening's own input, so a later matcher change that silently stops
-    # minting the claim fails here rather than quietly reverting the column.
     assert _pause_claims(effects) == ({"pause()"}, {"unpause()"}, {"state.isPaused"})
 
 
 def test_bitmap_pause_family_is_not_widened_into(tmp_path):
-    """NEGATIVE CONTROL and the leg's hard ordering constraint: the bitmap family must
-    not publish a pause capability before A7 can bound the duration. The exclusion is
-    a property of the evidence (no definite constant-bool toggle), not a name list."""
+    """The bitmap family must not publish a pause capability before A7 can bound the duration."""
     result, effects = _analyse(tmp_path, BITMAP_LATCH)
     assert _pause_claims(effects) == (set(), set(), set()), "the widening's input must be empty here"
     assert result["is_pausable"] is False, result
@@ -141,13 +123,9 @@ def test_bitmap_pause_family_is_not_widened_into(tmp_path):
 
 
 def test_struct_member_latch_is_not_determined_when_only_the_claims_stage_raised(tmp_path):
-    """R1 on the POSITIVE control, in the degradation a populated ``functions`` map
-    cannot distinguish.
-
-    ``core`` runs ``build_effects`` and the claims block under separate
-    ``try``/``except``. When only claims raises, the effects map is complete and
-    claim-free, and this contract, which HAS a latch, is invisible to every other
-    detector. ``False`` there is a proven absence of a latch that exists."""
+    """``core`` runs effects and claims under separate try/except; when only claims raises, ``False`` would be a
+    proven absence of a latch that exists.
+    """
     path = tmp_path / "C.sol"
     path.write_text(textwrap.dedent(STRUCT_MEMBER_LATCH).strip() + "\n")
     contract = next(c for c in Slither(str(path)).contracts if c.name == "C")
@@ -161,7 +139,6 @@ def test_struct_member_latch_is_not_determined_when_only_the_claims_stage_raised
 
 
 def test_pauser_registry_shape_stays_clean(tmp_path):
-    """NEGATIVE CONTROL. Naming a pauser is not being pausable."""
     result = _pausability(tmp_path, NO_LATCH)
     assert result["is_pausable"] is False
     assert result["pause_variables"] == []
@@ -187,26 +164,15 @@ CLASSIC_PAUSABLE = """
 @pytest.mark.parametrize(
     "label, source",
     [
-        # The leg's own POSITIVE control: only the claims matcher can see it.
         pytest.param("struct_member", STRUCT_MEMBER_LATCH, id="struct_member"),
-        # The *structural* family, which the claims matcher is not the only
-        # route to — it goes blind here anyway, because the pass that produces
-        # ``PauseInfo`` lives inside the same degraded stage.
+        # ``PauseInfo`` comes from inside the same degraded stage, so the structural route goes blind too.
         pytest.param("classic", CLASSIC_PAUSABLE, id="classic"),
     ],
 )
 def test_is_pausable_is_not_determined_when_the_trees_stage_raised(tmp_path, monkeypatch, label, source):
-    """R1 end-to-end on the THIRD independently degradable plane, through the real
-    ``core`` path.
-
-    ``core.py:206-221`` catches the predicate-trees stage alone, substitutes an
-    error stub and an empty ``PauseInfo``, and carries on; ``build_claims`` still
-    runs and the claims-key discriminator answers True. ``apply_reentrancy_pause_pass``
-    lives inside that same stage (``predicate_artifacts.py:383``), so the structural
-    detector is blind too and ``false`` was published on 100% of pausable contracts.
-
-    The healthy arm runs first and must say ``True``, so a fixture that stopped
-    being pausable cannot make this vacuous."""
+    """``core.py`` catches the trees stage and substitutes an empty ``PauseInfo`` while claims still run; ``false``
+    was published on every pausable contract. The healthy arm runs first so the fixture can't go vacuous.
+    """
     from services.static.contract_analysis_pipeline import core
     from tests.support.foundry_project import write_foundry_project
 
@@ -223,7 +189,6 @@ def test_is_pausable_is_not_determined_when_the_trees_stage_raised(tmp_path, mon
     degraded_project = write_foundry_project(tmp_path / "degraded", "C", body)
     degraded, trees_artifact, effects_artifact = core.collect_contract_analysis_with_artifacts(degraded_project)
 
-    # The trap, asserted rather than assumed: the claims plane looks healthy.
     assert isinstance(trees_artifact, dict) and isinstance(effects_artifact, dict)
     assert "error" in trees_artifact, "guard: the trees stage must actually have degraded"
     assert any("claims" in record for record in (effects_artifact.get("functions") or {}).values()), (

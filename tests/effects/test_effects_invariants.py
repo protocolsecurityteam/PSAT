@@ -30,7 +30,6 @@ from services.effects.hashing import resolved_function_hash
 from services.effects.selection import AuthorityGraph, select_candidates
 from tests.cache_helpers import requires_postgres
 from tests.support.effects_ir import _fn, _ir, _node, _var
-
 from tests.support.effects_stubs import CTX, RecordingStore, ScriptedSimulate, ok, transfer_log, uint_ret
 from workers.base import _resolve_job_concurrency
 from workers.effects_worker import EffectsWorker

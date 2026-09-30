@@ -178,7 +178,6 @@ def test_struct_getter_snapshot_value_is_storable(clean_db, monkeypatch):
 
 
 class _SessionPoisoningWorker(BaseWorker):
-
     stage = JobStage.resolution
     next_stage = JobStage.policy
     poll_interval = 0.0

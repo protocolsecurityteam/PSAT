@@ -150,7 +150,6 @@ def test_payability_and_native_payout_reach_the_plan():
 
 
 class _Chain:
-
     def __init__(self, *, revert_data: str | None = "0x") -> None:
         self.blocks: list[tuple[list, str, dict | None]] = []
         self.revert_data = revert_data
@@ -249,7 +248,6 @@ def test_every_failed_attempt_records_its_revert():
 
 
 class _UnderfundedChain:
-
     def __init__(self) -> None:
         self.blocks: list[tuple[list, str, dict | None]] = []
 

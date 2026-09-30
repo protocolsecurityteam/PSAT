@@ -279,7 +279,6 @@ class TestProtocolCreation:
 
 
 class TestListingAddressNomination:
-
     def _run(self, monkeypatch: pytest.MonkeyPatch, *, listing: list[dict], scanned: list[str]) -> list[dict]:
         worker = DefiLlamaWorker()
         session = MagicMock()

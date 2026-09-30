@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import time
@@ -449,5 +448,3 @@ class TestResolveBranchCommit:
         for i in range(20):
             _github._resolve_branch_commit("owner", f"repo{i}", "main")
         assert len(_github._BRANCH_SHA_CACHE) <= _github._BRANCH_SHA_CACHE_MAX
-
-

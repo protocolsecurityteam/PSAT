@@ -112,7 +112,6 @@ def role_plane_session(db_session):
 
 
 class TestRoleHolderPlaneFiringCondition:
-
     def _spy(self, monkeypatch) -> list[dict[str, Any]]:
         calls: list[dict[str, Any]] = []
 
@@ -246,7 +245,6 @@ class TestRoleHolderPlaneFiringCondition:
 
 
 class TestRoleHolderPlaneColdCursor:
-
     def test_cold_cursor_publishes_null_holders_not_an_empty_set(self, role_plane_session, monkeypatch):
         session = role_plane_session
         session.add_all(
@@ -549,7 +547,6 @@ class TestRestakingStepFailClosed:
 
 
 class TestRestakingFailureDomain:
-
     def test_a_cycle_exception_never_leaves_the_loop(self, monkeypatch):
         beats: list[tuple[str, str]] = []
         monkeypatch.setattr(

@@ -1,8 +1,4 @@
-"""Unit tests for ``workers/retry_policy.py`` (no DB).
-
-The classifier decides on type alone (not message); backoff respects base + jitter +
-cap; env overrides are read each call so monkeypatch isn't cached behind a singleton.
-"""
+"""The classifier decides on type alone; env overrides are read each call so monkeypatch isn't cached."""
 
 from __future__ import annotations
 
@@ -22,19 +18,11 @@ from workers.retry_policy import (
     retry_base_s,
 )
 
-# ---------------------------------------------------------------------------
-# classify() — type tuples
-# ---------------------------------------------------------------------------
-
-
 _TRANSIENT_STATUSES = [408, 425, 429, 500, 502, 503, 504, 522, 524]
 _TERMINAL_STATUSES = [400, 401, 403, 404, 405, 410, 422]
 
 
 def _http_error(status: int | None) -> requests.exceptions.HTTPError:
-    # ``classify`` uses ``getattr(response, "status_code", None)`` so a
-    # SimpleNamespace stand-in is enough — avoids constructing a real
-    # ``Response`` object just to set one attribute.
     response = SimpleNamespace(status_code=status) if status is not None else None
     return requests.exceptions.HTTPError(f"{status}", response=response)  # pyright: ignore[reportArgumentType]
 
@@ -44,8 +32,7 @@ def _psycopg2_operational() -> Exception:
     return psycopg2.OperationalError("connection closed")
 
 
-# Network errors must retry; bug-class exceptions must not (CRITICAL: a terminal error that
-# retries loops forever). Exceptions are built lazily so importorskip only skips its own case.
+# A terminal error that retries loops forever. Exceptions are built lazily so importorskip only skips its own case.
 @pytest.mark.parametrize(
     "make_exc, expected",
     [
@@ -68,17 +55,11 @@ def _psycopg2_operational() -> Exception:
         pytest.param(lambda: RuntimeError("generic"), "terminal", id="runtime-error"),
         *[pytest.param(lambda s=s: _http_error(s), "transient", id=f"http-{s}") for s in _TRANSIENT_STATUSES],
         *[pytest.param(lambda s=s: _http_error(s), "terminal", id=f"http-{s}") for s in _TERMINAL_STATUSES],
-        # HTTPError raised without a response is a deterministic shape problem.
         pytest.param(lambda: _http_error(None), "terminal", id="http-no-response"),
     ],
 )
 def test_classify(make_exc, expected):
     assert classify(make_exc()) == expected
-
-
-# ---------------------------------------------------------------------------
-# compute_next_attempt() — backoff math
-# ---------------------------------------------------------------------------
 
 
 _NOW = datetime(2026, 5, 2, 12, 0, 0, tzinfo=timezone.utc)
@@ -107,17 +88,10 @@ def test_compute_next_attempt_doubles_each_retry(monkeypatch, retry_count, expec
 
 def test_compute_next_attempt_caps_at_30min(monkeypatch):
     monkeypatch.setenv("PSAT_JOB_RETRY_BASE_S", "30")
-    # retry_count=10 → 30 * 1024 = 30720s, well past the 30min cap of 1800s.
     cap = 30 * 60
     for _ in range(20):
         delay = _delay_seconds(compute_next_attempt(10, now=_NOW))
-        # Jitter only shrinks the cap (post-cap multiply ≤ 1.25 then re-cap).
         assert delay <= cap
-
-
-# ---------------------------------------------------------------------------
-# Env-tunable knobs honour overrides
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(

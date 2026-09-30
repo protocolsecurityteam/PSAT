@@ -1,5 +1,4 @@
-"""The self-service payout join: ``_facts.amount_record_constraint`` (W1),
-``_facts.self_service_payout`` (W1 ∧ W2), and the ``_flow_entry`` attachment.
+"""The W1 ∧ W2 self-service join.
 
 * **Unit** - hand-built :class:`ClaimContext`, stating every refusal reason and cross-plane
   reconciliation case against exact input, including ones no corpus contract reaches.
@@ -36,11 +35,6 @@ _SIBLING = "self_service_sibling_function_residual_not_proven"
 _BASE_DISCLOSURES = [_UPGRADE, _SIBLING]
 
 _SIG = "pay(uint256)"
-
-
-# ---------------------------------------------------------------------------
-# Unit harness — hand-built predicate trees + flows
-# ---------------------------------------------------------------------------
 
 
 def _leaf(*, authority_role: str = "caller_authority", operands: list[dict], kind: str = "equality") -> dict:
@@ -82,12 +76,9 @@ _CALLER = {"source": "msg_sender"}
 
 
 def _ownership_tree(base: str, key_index: int | None, *, mandatory: bool = True) -> dict:
-    """A mandatory (or, when ``mandatory=False``, OR-guarded) caller-authority
-    leaf comparing ``base[key]``'s ownership member against ``msg.sender``."""
     leaf = _leaf(operands=[_element_op(base, ["bidder"], key_index), _CALLER])
     if mandatory:
         return _and(leaf)
-    # Under an OR the leaf is reachable via an escape, so it is not mandatory.
     return _or(leaf, _leaf(authority_role="business", operands=[{"source": "constant"}]))
 
 
@@ -121,9 +112,6 @@ def _ctx(tree: Any, flow: dict) -> ClaimContext:
     return ClaimContext(None, effects, {"trees": {_SIG: tree}})
 
 
-# --- W1: amount_record_constraint ------------------------------------------
-
-
 def test_keyed_by_caller_is_constrained_without_a_guard():
     flow = _flow(
         amount_record_variable="C.balances",
@@ -135,7 +123,6 @@ def test_keyed_by_caller_is_constrained_without_a_guard():
 
 
 def test_keyed_by_caller_survives_a_second_caller_chosen_level():
-    """``withdrawRequests[msg.sender][asset]``: the outer key is the caller's, so the whole subtree is theirs."""
     flow = _flow(
         amount_record_variable="C.withdrawRequests",
         amount_record_key_kinds=["msg_sender", "param"],
@@ -157,8 +144,7 @@ def test_owner_guarded_record_joins_guard_and_amount_on_the_same_cell():
 
 
 def test_owner_guarded_record_compares_canonical_names_across_inheritance():
-    """Both walks name the base off ``canonical_name``, so an inherited ``Base.pool`` joins to
-    itself (the likeliest silent-zero): asserted to JOIN, not vanish."""
+    """An inherited ``Base.pool`` must join to itself, the likeliest silent zero."""
     flow = _flow(
         amount_record_variable="Base.pool",
         amount_record_member_path=["amount"],
@@ -194,16 +180,13 @@ def test_non_mandatory_guard_refuses_guard_not_mandatory():
 
 
 def test_param_kind_without_index_refuses_never_kind_alone():
-    """The amount side folds ``key_kinds`` and ``key_param_indexes`` separately; the join requires
-    the index PRESENT and equal, never ``kind == param`` alone."""
     flow = _flow(amount_record_variable="C.bids", amount_record_key_kinds=["param"])  # no key_param_indexes
     verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
     assert verdict == {"state": "not_determined", "reason": "key_index_disagreement"}
 
 
 def test_lossy_key_asymmetry_refuses_on_the_amount_sides_indeterminate():
-    """The guard side lacks the amount side's lossy-narrowing check (``bids[uint128(id)]`` could
-    stamp slot 0 while the amount key is indeterminate); the join refuses on that asymmetry."""
+    """``bids[uint128(id)]`` could stamp slot 0 while the amount key is indeterminate."""
     flow = _flow(
         amount_record_variable="C.bids",
         amount_record_key_kinds=["indeterminate"],
@@ -220,8 +203,6 @@ def test_two_declarations_refuses_multiple_record_declarations():
 
 
 def test_no_record_named_refuses_amount_root_not_classifiable():
-    """The redeem shape: ``bounded_by_storage`` but the amount root was a memory
-    array the walk could not classify, so it named no cell."""
     flow = _flow()  # no amount_record_* keys at all
     verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
     assert verdict == {"state": "not_determined", "reason": "amount_root_not_classifiable"}
@@ -236,17 +217,12 @@ def test_missing_tree_refuses_rather_than_reading_absence_as_no_guard():
 
 
 def test_guard_without_msg_sender_operand_does_not_satisfy_w1():
-    """Paired falsifier for conjunct 3: without the msg_sender operand an element read compared to a
-    constant proves nothing."""
     leaf = _leaf(operands=[_element_op("C.bids", ["bidder"], 0), {"source": "constant"}])
     flow = _flow(
         amount_record_variable="C.bids", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[0]
     )
     verdict = _facts.amount_record_constraint(_ctx(_and(leaf), flow), _SIG, flow)
     assert verdict == {"state": "not_determined", "reason": "guard_not_mandatory"}
-
-
-# --- W1 ∧ W2: self_service_payout (W2 via ordering; no live contract) -------
 
 
 def test_proven_keyed_by_caller_with_ordering():
@@ -318,8 +294,6 @@ def test_ordering_refusal_wins_when_w1_holds():
 
 
 def test_no_ordering_and_no_guard_refuses_function_not_analyzed():
-    """Both W2 satisfiers silent (no ``record_ordering`` on the flow, no live
-    contract for the guard arm) — the guard's explicit refusal is published."""
     flow = _flow(
         amount_record_variable="C.balances",
         amount_record_key_kinds=["msg_sender"],
@@ -327,9 +301,6 @@ def test_no_ordering_and_no_guard_refuses_function_not_analyzed():
     )
     verdict = _facts.self_service_payout(_ctx(None, flow), _SIG, flow)
     assert verdict == {"state": "not_determined", "reason": "function_not_analyzed"}
-
-
-# --- _flow_entry gate + SS-R3 ride-along -----------------------------------
 
 
 def test_flow_entry_attaches_only_on_a_storage_amount():
@@ -352,8 +323,6 @@ def test_flow_entry_attaches_only_on_a_storage_amount():
 
 
 def test_flow_entry_omits_the_keys_on_a_param_amount_and_rides_ss_r3():
-    """A param amount is a different question: the self-service keys stay ABSENT
-    (fail-closed), and SS-R3's ``amount_constraint`` rides instead."""
     flow = {
         "direction": "out",
         "kind": "callee_erc20_selector",
@@ -367,10 +336,6 @@ def test_flow_entry_omits_the_keys_on_a_param_amount_and_rides_ss_r3():
     assert "amount_record_constraint" not in entry
     assert entry["amount_constraint"]["state"] in {"unconstrained_proven", "constrained", "not_determined"}
 
-
-# ---------------------------------------------------------------------------
-# Producer integration — the two walks actually meet on a real contract
-# ---------------------------------------------------------------------------
 
 _CORPUS_SRC = """
 // SPDX-License-Identifier: MIT
@@ -485,8 +450,7 @@ def test_producer_withdraw_proves_keyed_by_caller_on_ordering(_corpus):
 
 
 def test_producer_verified_guard_and_ordering_are_both_earned(_corpus):
-    """P3 - a guarded clear-after-pay row proves via the verified guard; the ordering-only
-    sibling proves via ordering. ``withdraw`` needing no guard shows the ordering arm survives its removal."""
+    """``withdraw`` needing no guard shows the ordering arm stands alone."""
     guarded = _self_service(_corpus, "withdrawGuarded()")
     assert guarded["state"] == "proven_self_service"
     assert guarded["w2_basis"] == "verified_guard"
@@ -501,8 +465,6 @@ def test_producer_dao_shape_refuses(_corpus):
 
 
 def test_producer_contract_scoped_guard_licenses_no_unguarded_function(_corpus):
-    """A12 - a real guard exists but ``badWithdraw`` does not apply it and its ordering refuses,
-    so the row is NOT cleared (``guard_modifier_not_applied``)."""
     verdict = _self_service(_corpus, "badWithdraw()")
     assert verdict["state"] == "not_determined"
     guard = verified_guard_verdicts(_corpus)["badWithdraw()"]
@@ -511,8 +473,6 @@ def test_producer_contract_scoped_guard_licenses_no_unguarded_function(_corpus):
 
 
 def test_producer_admin_sweep_param_leaves_the_key_absent(_corpus):
-    """A5 - a param-amount sweep names no record, so the gate never fires and the key stays
-    absent (fail-closed); the discrimination pair with ``cancelBid``."""
     entries = _flow_out_entries(_corpus, "rescueTokens(address,uint256)")
     assert entries
     assert all("self_service_payout" not in e for e in entries)
@@ -523,10 +483,6 @@ def test_producer_whole_balance_sweep_leaves_the_key_absent(_corpus):
     assert entries
     assert all("self_service_payout" not in e for e in entries)
 
-
-# ---------------------------------------------------------------------------
-# The burn variant — its provable sub-case and its fail-closed refusal
-# ---------------------------------------------------------------------------
 
 _BURN_SRC = """
 // SPDX-License-Identifier: MIT
@@ -564,8 +520,7 @@ def _burn(tmp_path_factory):
 
 
 def test_burn_same_value_proves_as_keyed_by_caller(_burn):
-    """P4 (as shipped producers realize it): a burn paid from the caller's own cell is
-    keyed_by_caller; ``burn_of_caller_shares`` needs a decrement/SSA fact no producer publishes."""
+    """``burn_of_caller_shares`` needs a decrement fact no producer publishes."""
     verdict = _self_service(_burn, "redeemSame()")
     assert verdict["state"] == "proven_self_service"
     assert verdict["w1_basis"] == "keyed_by_caller"

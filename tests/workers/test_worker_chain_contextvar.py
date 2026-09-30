@@ -45,11 +45,6 @@ def _make_job(**overrides):
     return SimpleNamespace(**defaults)
 
 
-# ---------------------------------------------------------------------------
-# _job_chain_log_value — pure label resolution
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("chain_id", "req", "expected"),
     [
@@ -62,11 +57,6 @@ def _make_job(**overrides):
 def test_job_chain_log_value(chain_id, req, expected):
     job = _make_job(chain_id=chain_id)
     assert _job_chain_log_value(job, req) == expected
-
-
-# ---------------------------------------------------------------------------
-# _execute_job — the bind actually happens at the worker entry point
-# ---------------------------------------------------------------------------
 
 
 @patch("workers.base.signal.signal")
@@ -82,5 +72,4 @@ def test_execute_job_binds_chain_from_request(_mock_advance, _mock_signal):
 
     w._execute_job(MagicMock(), cast(Any, job))
     assert captured["chain"] == "base"
-    # Contextvar is reset on exit — no leak into the next job.
     assert chain_var.get() is None

@@ -40,7 +40,6 @@ from tests.support.anvil import (
     anvil_env,  # noqa: F401
 )
 
-
 _has_anvil = shutil.which("anvil") is not None
 _has_cast = shutil.which("cast") is not None
 _has_forge = shutil.which("forge") is not None
@@ -262,7 +261,6 @@ def _setup_monitored(
 
 
 class TestUpgradeUpdatesContractTable:
-
     def test_upgrade_updates_contract_implementation(self, anvil_env, pg_session):
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
@@ -358,7 +356,6 @@ class TestUpgradeUpdatesContractTable:
 
 
 class TestAdminChangedPropagation:
-
     def test_admin_changed_updates_contract_admin(self, anvil_env, pg_session):
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
@@ -408,7 +405,6 @@ class TestAdminChangedPropagation:
 
 
 class TestOwnershipUpdatesControllerValue:
-
     def test_ownership_transfer_updates_controller_value(self, anvil_env, pg_session):
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
@@ -453,7 +449,6 @@ class TestOwnershipUpdatesControllerValue:
 
 
 class TestUpgradePollingUpdatesRelational:
-
     def test_poll_upgrade_updates_contract_implementation(self, anvil_env, pg_session):
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import poll_for_state_changes
@@ -498,7 +493,6 @@ class TestUpgradePollingUpdatesRelational:
 
 
 class TestPollOwnershipUpdatesControllerValue:
-
     def test_poll_ownership_updates_controller_value(self, anvil_env, pg_session):
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import poll_for_state_changes

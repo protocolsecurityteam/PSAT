@@ -193,7 +193,6 @@ class TestResolutionRpcUrlUsesJobChainColumn:
 
 
 class TestWorkerRpcHelpersUseJobChainColumn:
-
     def test_policy_rpc_chainless_request_resolves_via_column(self, monkeypatch):
         from types import SimpleNamespace
         from typing import Any, cast

@@ -352,7 +352,6 @@ class TestFailedFetchIsAbsentNotZero:
 
 @requires_postgres
 class TestHoldingsRequireAPositiveWitness:
-
     def test_zero_and_unparseable_rows_are_not_holdings(self, db_session):
         proto = _protocol(db_session, "3s-guard")
         c = _contract(db_session, proto.id, _addr("61"))

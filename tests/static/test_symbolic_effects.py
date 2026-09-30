@@ -1,7 +1,4 @@
-"""Symbolic effect detection: Pass 1 classifies each state variable by its ROLE (not its name),
-Pass 2 labels each semantic function by the roles it writes. Every test uses randomized names
-to prove zero name dependence, grouped by the security question answered.
-"""
+"""State variables are classified by role, not name; every test uses randomized names."""
 
 import random
 import string
@@ -24,9 +21,7 @@ def _rand(n: int = 8) -> str:
 
 
 def _analyze(source: str, name: str = "Target"):
-    """Run the production static label sequence (``build_effects`` -> Plane-1 claims ->
-    ``project_effect_labels``); per-function claim ids are stashed on the returned summary for
-    tests asserting a claim with no legacy label projection."""
+    """Claim ids are stashed on the summary for tests asserting a claim with no legacy label."""
     with tempfile.TemporaryDirectory(prefix="psat_test_sym_") as tmp:
         p = Path(tmp) / f"{name}.sol"
         p.write_text(source)
@@ -34,7 +29,6 @@ def _analyze(source: str, name: str = "Target"):
         subject = _select_subject_contract(slither, name)
         if subject is None:
             raise RuntimeError(f"Contract {name} not found")
-        # _build_semantic_control_summary reads predicate_trees + effects.
         predicate_trees = build_predicate_artifacts(subject)
         effects = build_effects(subject)
         claims_artifact = build_claims(subject, effects, predicate_trees)
@@ -62,12 +56,7 @@ def _claims(ac, fn_name: str) -> set[str]:
     return set()
 
 
-# =========================================================================
-# Q1: CAN VALUE LEAVE THE CONTRACT?
-#
-# Storage role: "balance store" — mapping(address => uint256) that decreases,
-# or ETH sent via any mechanism.
-# =========================================================================
+# Q1: can value leave the contract?
 
 
 def test_q1_eth_leaves_via_call_value():
@@ -162,12 +151,7 @@ contract Target {{
     assert "asset_send" in _labels(ac, fn)
 
 
-# =========================================================================
-# Q2: CAN DEPOSITS/WITHDRAWALS BE BLOCKED?
-#
-# Storage role: "guard variable" — a bool that a modifier reads, and that
-# modifier gates other functions. Writing this bool = pause_toggle.
-# =========================================================================
+# Q2: can deposits/withdrawals be blocked? A bool a gating modifier reads.
 
 
 def test_q2_random_bool_gates_functions():
@@ -195,7 +179,6 @@ contract Target {{
 
 
 def test_q2_inverted_bool_guard():
-    """Guard checks require(active) instead of require(!paused) — same pattern, inverted."""
     var = f"_{_rand()}"
     mod = _rand()
     disable_fn = _rand()
@@ -216,16 +199,10 @@ contract Target {{
     assert "pause_toggle" in _labels(ac, disable_fn)
 
 
-# =========================================================================
-# Q3: CAN NEW VALUE BE CREATED? (minting)
-#
-# Detected via: internal _mint/mint calls, cross-contract .mint() calls,
-# or known selectors.
-# =========================================================================
+# Q3: can new value be created?
 
 
 def test_q3_internal_mint_helper_name_does_not_drive_label():
-    """Internal helper names alone are not semantic mint evidence."""
     fn = _rand()
     source = f"""
 // SPDX-License-Identifier: MIT
@@ -279,17 +256,11 @@ contract Target {{
     assert "mint" in _labels(ac, fn)
 
 
-# =========================================================================
-# Q4: CAN THE CODE CHANGE? (implementation update)
-#
-# The bespoke impl-slot dataflow detectors are RETIRED (0 fires on prod). ``upgrade.implementation``
-# is standard-gated (UUPS/1967/proxy-shell selectors), so a bespoke impl-slot setter gets no
-# claim; the delegatecall stays a Plane-0 fact on the fallback (``delegatecall_execution``).
-# =========================================================================
+# Q4: can the code change? The bespoke impl-slot detectors are retired (0 fires on prod); ``upgrade.implementation`` is
+# standard-gated.
 
 
 def test_q4_random_impl_slot_delegatecall():
-    """Bespoke impl-slot var + fallback delegatecall: no standard upgrade selector, so no ``implementation_update``."""
     var = f"_{_rand()}"
     fn = _rand()
     source = f"""
@@ -308,12 +279,10 @@ contract Target {{
 """
     ac = _analyze(source)
     assert "implementation_update" not in _labels(ac, fn)
-    # The delegatecall is a fact carried on the fallback, not the setter.
     assert "delegatecall_execution" in _labels(ac, "fallback")
 
 
 def test_q4_assembly_sstore_sload_delegatecall():
-    """Pure-assembly sstore/sload delegatecall: the retired detector no longer mints ``implementation_update``."""
     fn = _rand()
     source = f"""
 // SPDX-License-Identifier: MIT
@@ -342,18 +311,10 @@ contract Target {{
     assert "delegatecall_execution" in _labels(ac, "fallback")
 
 
-# =========================================================================
-# Q5: CAN WHO'S IN CHARGE CHANGE? (ownership vs caller-authority rotation)
-#
-# ``ownership.transfer`` is standards-gated (canonical selectors + ``owner()`` sibling / two-step)
-# so it stays ghost-immune. A bespoke caller-authority scalar rotated by a random function is
-# ``authorized_caller.rotate``: same admin weight, but not the "Transfers contract ownership"
-# sentence (no legacy ownership_transfer projection).
-# =========================================================================
+# Q5: can who's in charge change? A bespoke rotation is ``authorized_caller.rotate``, not ownership.
 
 
 def test_q5_random_owner_var():
-    """Bespoke scalar rotated by a random function, no ownership standard: ``authorized_caller.rotate``."""
     var = f"_{_rand()}"
     mod = _rand()
     fn = _rand()
@@ -373,8 +334,6 @@ contract Target {{
 
 
 def test_q5_two_step_ownership():
-    """Two-step nominate + accept over bespoke scalars: accept rotates the admin scalar
-    (``authorized_caller.rotate``, no ownership_transfer)."""
     admin_var = f"_{_rand()}"
     pending_var = f"_{_rand()}"
     nominate_fn = _rand()
@@ -400,15 +359,7 @@ contract Target {{
     assert "ownership_transfer" not in _labels(ac, accept_fn)
 
 
-# =========================================================================
-# Q6: CAN THE RULES CHANGE? (authority/hook update)
-#
-# Storage role: "authority reference" — address that is CALLED (not just
-# compared) within a modifier body. Writing this = authority_update.
-#
-# Storage role: "hook reference" — address called during transfer-like
-# function execution. Writing this = hook_update.
-# =========================================================================
+# Q6: can the rules change? An address called in a modifier is an authority; one called during transfers is a hook.
 
 
 def test_q6_random_hook_var():
@@ -435,11 +386,6 @@ contract Target {{
     assert "hook_update" in _labels(ac, set_fn)
 
 
-# =========================================================================
-# COMPOUND SCENARIOS — multiple effects in one function
-# =========================================================================
-
-
 def test_compound_drain_and_selfdestruct():
     fn = _rand()
     source = f"""
@@ -463,8 +409,6 @@ contract Target {{
 
 
 def test_compound_pause_and_ownership():
-    """One function pauses AND rotates the scalar: ``pause.set`` -> ``pause_toggle``, and the
-    bespoke rotation is ``authorized_caller.rotate`` with no ``ownership_transfer`` label."""
     bool_var = f"_{_rand()}"
     admin_var = f"_{_rand()}"
     mod_auth = _rand()
@@ -494,13 +438,7 @@ contract Target {{
     assert "ownership_transfer" not in labels
 
 
-# =========================================================================
-# Q6 RECURSIVE: Authority/hook hidden behind internal helpers
-# =========================================================================
-
-
 def test_q6_recursive_authority():
-    """Helper-hidden auth check + setter: same retirement as the direct case, so no ``authority_update``."""
     auth_var = f"_{_rand()}"
     mod = _rand()
     set_fn = _rand()

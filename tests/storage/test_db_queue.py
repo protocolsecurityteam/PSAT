@@ -17,7 +17,6 @@ DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "")
 
 @pytest.fixture()
 def session():
-    """PostgreSQL session scoped to one test, cleans Job rows on teardown."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
 
@@ -39,10 +38,7 @@ def session():
 
 
 def _backdate_job(s, job_id, seconds_ago: int) -> None:
-    """Force ``updated_at`` *and* ``lease_expires_at`` into the past.
-
-    ``updated_at`` auto-stamps NOW() on every write and ``claim_job`` sets ``lease_expires_at`` to
-    NOW()+ttl, either of which would defeat a stuck-job assertion."""
+    """Both auto-advance on write and would defeat a stuck-job assertion."""
     from sqlalchemy import update as sa_update
 
     from db.models import Job
@@ -107,11 +103,6 @@ class TestGetOrCreateProtocol:
         session.flush.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# reclaim_stuck_jobs — cross-stage worker-crash recovery
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_reclaim_stuck_jobs_resets_long_running_processing_to_queued(session):
     from db.models import JobStage, JobStatus
@@ -137,7 +128,7 @@ def test_reclaim_stuck_jobs_resets_long_running_processing_to_queued(session):
 
 @requires_postgres
 def test_reclaim_stuck_jobs_leaves_recent_processing_alone(session):
-    """A freshly-claimed job within the threshold must NOT be swept (that would steal work from a live worker)."""
+    """Sweeping it would steal work from a live worker."""
     from db.models import JobStage, JobStatus
     from db.queue import claim_job, create_job, reclaim_stuck_jobs
 
@@ -156,7 +147,6 @@ def test_reclaim_stuck_jobs_leaves_recent_processing_alone(session):
 
 @requires_postgres
 def test_reclaim_stuck_jobs_ignores_terminal_states(session):
-    """Completed and failed jobs are never touched, however old their updated_at."""
     from db.models import JobStage, JobStatus
     from db.queue import claim_job, complete_job, create_job, fail_job, reclaim_stuck_jobs
 
@@ -178,16 +168,9 @@ def test_reclaim_stuck_jobs_ignores_terminal_states(session):
     assert session.get(type(failed), failed.id).status == JobStatus.failed
 
 
-# ---------------------------------------------------------------------------
-# Lease-based claim: duplicate-claim race POC
-#
-# claim_job filters only on status='queued', and reclaim_stuck_jobs fires when updated_at is stale.
-# The heartbeat keeping updated_at fresh runs inside parallel_map's per-task callback
-# (services/concurrency.py:82-86, 122-126), so a nested forge build longer than
-# PSAT_JOB_STALE_TIMEOUT (900s in prod) silently expires the lease and a sibling claims the same
-# job. These tests pin the fix: (1) the original holder's writes detect the lost lease and refuse
-# to commit; (2) claim takes the lease atomically with the status flip.
-# ---------------------------------------------------------------------------
+# The heartbeat runs inside parallel_map's per-task callback, so a nested forge build longer than PSAT_JOB_STALE_TIMEOUT
+# (900s) expires the lease and a sibling claims the job. The original holder's writes must refuse to commit, and claim
+# takes the lease atomically.
 
 
 def _complete(session, job_id, lease):
@@ -208,13 +191,10 @@ def _advance(session, job_id, lease):
     "op",
     [
         pytest.param(_complete, id="complete"),
-        # CRITICAL: a reclaimed job must not be silently advanced by the original holder either.
         pytest.param(_advance, id="advance"),
     ],
 )
 def test_reclaimed_job_cannot_be_silently_written_by_original_holder(session, op):
-    """Worker A claims, lags past stale_timeout, is reclaimed; B claims; A's completion/advance must be rejected
-    (lease lost)."""
     from db.models import JobStage
     from db.queue import LeaseLost, claim_job, create_job, reclaim_stuck_jobs
 
@@ -239,11 +219,7 @@ def test_reclaimed_job_cannot_be_silently_written_by_original_holder(session, op
 
 @requires_postgres
 def test_heartbeat_extends_lease_and_blocks_reclaim(session, monkeypatch):
-    """A worker heartbeating inside a long task must not be reclaimed: the sweep keys on
-    lease_expires_at, which the heartbeat extends regardless of updated_at.
-
-    ``_heartbeat`` opens a fresh ``SessionLocal()`` (see ``test_heartbeat_fresh_session.py``),
-    bound to the dev ``DATABASE_URL``, so it is routed to ``TEST_DATABASE_URL`` here."""
+    """``_heartbeat`` opens a fresh ``SessionLocal()`` bound to ``DATABASE_URL``, so it's routed to the test DB here."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session as _Session
     from sqlalchemy.orm import sessionmaker
@@ -271,7 +247,6 @@ def test_heartbeat_extends_lease_and_blocks_reclaim(session, monkeypatch):
     probe = _Probe()
     probe._heartbeat(session, claimed)
 
-    # Refresh test session to see the heartbeat's commit (different connection).
     session.expire_all()
 
     rescued = reclaim_stuck_jobs(session, stale_timeout_seconds=1)
@@ -288,7 +263,6 @@ def test_heartbeat_extends_lease_and_blocks_reclaim(session, monkeypatch):
 
 @requires_postgres
 def test_concurrent_claims_cannot_both_acquire_lease(session):
-    """A live lease must block any sibling claim, even when an unrelated write stamps updated_at."""
     from db.models import JobStage
     from db.queue import claim_job, create_job, reclaim_stuck_jobs
 

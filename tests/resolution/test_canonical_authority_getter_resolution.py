@@ -197,7 +197,6 @@ def _contract(sl, name: str):
 
 
 class TestGovernableFixture:
-
     def test_transfer_governance_resolves_governor_via_canonical_getter(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sl = _compile_fixture("Governable.sol", (0, 8, 25))
         contract = _contract(sl, "Governable")
@@ -220,7 +219,6 @@ class TestGovernableFixture:
 
 
 class TestTopUpSoladyFixture:
-
     # Since A2 the burned owner concludes only an empty ``lower_bound``, never "provably nobody".
     @pytest.mark.parametrize(
         ("owner", "members", "quality", "empty_reason"),

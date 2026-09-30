@@ -1,13 +1,7 @@
-"""Behavior-family claim matchers over the frozen fixture corpus.
+"""Behavior-family matchers over the real stack on the frozen corpus, a positive and a negative per family.
 
-Drives the real stack (Slither compile -> predicate artifacts -> effects -> claims ->
-matchers) and asserts the pause / flow / supply / callee_pointer / user-plane claims
-each contract must (and must not) carry. Each family keeps a positive and a negative;
-where a real positive left the corpus (gov.delegate / flow.in) it is pinned through
-``build_claims`` on the documented facts shape instead.
-
-The corpus pins solc 0.8.27 (what the offline CI job installs); each contract compiles
-once and the gate never reaches the network to resolve a version.
+gov.delegate / flow.in positives left the corpus and are pinned through ``build_claims`` instead. The corpus pins solc
+0.8.27 so the gate never hits the network.
 """
 
 from __future__ import annotations
@@ -21,7 +15,6 @@ pytest.importorskip("slither")
 
 from tests.support.label_corpus import SolcNotInstalled, claims_for_address
 
-# address -> name of every corpus contract these tests touch.
 TOKEN = "0x0000000000000000000000000000000000000010"
 VAULT_HOOK = "0x0000000000000000000000000000000000000040"
 LZ_OAPP = "0x0000000000000000000000000000000000000050"
@@ -47,55 +40,38 @@ def _one(claims: Sequence[dict[str, Any]], claim_id: str) -> dict[str, Any]:
     return matches[0]
 
 
-# ---------------------------------------------------------------------------
-# pause.set / pause.unset
-# ---------------------------------------------------------------------------
-
-
 def test_pause_standard_require_toggle():
     fns = _load(TOKEN)
     assert _one(fns["pause()"], "pause.set")["tier"] == "standard_exact"
     assert _one(fns["unpause()"], "pause.unset")["tier"] == "standard_exact"
-    # A require-based flag never mislabels its own toggle as the opposite polarity.
     assert "pause.unset" not in _ids(fns["pause()"])
     assert "pause.set" not in _ids(fns["unpause()"])
-    # Counterexample: a non-toggle setter on the same contract carries no pause claim.
     assert not _ids(fns["mint(address,uint256)"]) & {"pause.set", "pause.unset"}
 
 
 def test_pause_namespaced_erc7201_latch():
-    """The flag lives in an ERC-7201 struct reached through assembly, so Plane 0
-    records a ``bytes32`` slot pseudo-variable, never a ``bool``. A bool-only
-    filter left every OZ-v5 / etherfi pauser unlabelled."""
+    """Plane 0 records the ERC-7201 flag as a ``bytes32`` slot, so a bool-only filter missed every OZ-v5 / etherfi
+    pauser.
+    """
     fns = _load(NAMESPACED_PAUSABLE)
     assert _one(fns["pause()"], "pause.set")
     assert _one(fns["unpause()"], "pause.unset")
-    # Polarity survives the local storage pointer: the assignment names `$`, not
-    # the slot, so without the guard-read member alias both directions would fire.
+    # The assignment names the local pointer, so without the guard-read member alias both directions would fire.
     assert "pause.unset" not in _ids(fns["pause()"])
     assert "pause.set" not in _ids(fns["unpause()"])
-    # The guarded victim and the view are not pausers.
     assert not _ids(fns["transfer(address,uint256)"]) & {"pause.set", "pause.unset"}
     assert not _ids(fns["paused()"]) & {"pause.set", "pause.unset"}
-    # Counterexample: an unguarded sibling writing ordinary storage stays clean.
     assert not _ids(fns["approveSelf(uint256)"]) & {"pause.set", "pause.unset"}
 
 
 def test_namespaced_authority_write_is_not_a_pause():
-    """A namespaced slot holds the WHOLE struct, so "writes a slot some gate
-    reads" is satisfied by an owner change against the owner gate. Only a
-    definite constant-bool toggle of a guard-read member is a pause; the OZ-v5
-    Ownable contract must stay pause-free."""
+    """A namespaced slot holds the whole struct, so an owner change "writes a slot some gate reads"; only a
+    constant-bool toggle of a guard-read member is a pause.
+    """
     fns = _load(OZ_V5_NAMESPACED_OWNABLE)
     for signature in ("transferOwnership(address)", "renounceOwnership()"):
         assert not _ids(fns[signature]) & {"pause.set", "pause.unset"}, signature
-        # ...while its real claim is untouched.
         assert _ids(fns[signature]) & {"ownership.transfer", "ownership.renounce"}
-
-
-# ---------------------------------------------------------------------------
-# flow.out / flow.in + supply.mint / supply.burn
-# ---------------------------------------------------------------------------
 
 
 def test_flow_out_and_supply_burn_native_withdraw():
@@ -109,9 +85,6 @@ def test_flow_out_and_supply_burn_native_withdraw():
 
 
 def test_flow_in_pull_from_third_party():
-    """A callee ERC-20 ``transferFrom`` whose ``from`` is not this contract pulls
-    value *in* — driven through the real ``build_claims`` on the documented facts
-    shape (input data, not a faked collaborator)."""
     from services.static.claims import build_claims
 
     effects = {
@@ -159,22 +132,14 @@ def test_supply_sign_idiom_vault_enter_exit():
     exit_ = "exit(address,uint256)"
     assert _one(fns[enter], "supply.mint")["tier"] == "idiom_structural"
     assert _one(fns[exit_], "supply.burn")["tier"] == "idiom_structural"
-    # Direction is not crossed: enter never burns, exit never mints.
     assert "supply.burn" not in _ids(fns[enter])
     assert "supply.mint" not in _ids(fns[exit_])
 
 
 def test_flow_counterexample_pure_token_transfer_is_not_a_flow():
-    """An ERC-20's own ``transfer`` moves its ledger, not value out of the
-    contract — no flow claim, only the user-plane claim."""
     fns = _load(WRAPPED_NATIVE)
     assert not _ids(fns["transfer(address,uint256)"]) & {"flow.out", "flow.in"}
     assert not _ids(fns["approve(address,uint256)"]) & {"flow.out", "flow.in", "supply.mint", "supply.burn"}
-
-
-# ---------------------------------------------------------------------------
-# callee_pointer.rotate
-# ---------------------------------------------------------------------------
 
 
 def test_callee_pointer_rotate_vault_hook():
@@ -188,22 +153,14 @@ def test_callee_pointer_rotate_vault_hook():
 @pytest.mark.parametrize(
     ("address", "signature"),
     [
-        # ``approve`` writes a mapping, not a callable scalar pointer a sibling invokes.
         pytest.param(VAULT_HOOK, "approve(address,uint256)", id="counterexample-erc20-approve"),
-        # ``setLockBox`` writes an OZ-v5 namespaced pseudo-slot member (hygiene
-        # ``storage_location_pseudo``), not a hygiene-normal scalar pointer, so no claim even
-        # though ``lockBox`` is address-typed.
+        # An OZ-v5 namespaced pseudo-slot member, not a hygiene-normal scalar pointer.
         pytest.param(LZ_OAPP, "setLockBox(address)", id="near-miss-ozv5-pseudo-slot-setter"),
     ],
 )
 def test_callee_pointer_negatives(address, signature):
     fns = _load(address)
     assert "callee_pointer.rotate" not in _ids(fns[signature])
-
-
-# ---------------------------------------------------------------------------
-# user-plane: erc20 / weth / gov.delegate / lz_oapp
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -222,10 +179,7 @@ def test_wrapped_native_user_plane_claims(signature, expected_claim):
 
 
 def test_gov_delegate_positive_writes_delegates_and_checkpoints():
-    """Comp-style delegation — writing both the ``delegates`` map and the
-    ``checkpoints`` voting-power ledger is the voting-power move. The gate is
-    facts-only, so it is pinned through the real ``build_claims`` on the
-    documented state-write shape."""
+    """The gate is facts-only, so it's pinned through ``build_claims``."""
     ids = _claim_ids_over(
         {
             "delegate(address)": _fn_record(

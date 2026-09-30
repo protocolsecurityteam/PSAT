@@ -43,7 +43,6 @@ _TOPIC = "0x" + "ab" * 32
 
 
 class _SeedAwareFetcher:
-
     def __init__(self, deploy: int) -> None:
         self.deploy = deploy
         self.from_blocks: list[int] = []
@@ -69,7 +68,6 @@ class _SeedAwareFetcher:
 
 
 class _RecordingFetcher:
-
     def __init__(self) -> None:
         self.from_blocks: list[int] = []
 

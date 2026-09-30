@@ -16,7 +16,6 @@ from eth_utils.crypto import keccak
 from services.clients.rpc import EthCallResult, encode_address_word
 from services.resolution import differential_probe as dp
 
-
 TRUE = "0x" + "0" * 63 + "1"
 
 
@@ -46,7 +45,6 @@ UNAUTHORIZED = custom_err("Unauthorized()")
 
 
 class StubWire:
-
     def __init__(self, responder):
         self.responder = responder
         self.batches: list[tuple[str, list[dict]]] = []

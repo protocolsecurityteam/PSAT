@@ -582,7 +582,6 @@ def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
             "type_kind": "primitive",
         }
 
-
     scalars = [
         ("_minDelay", _primitive("getMinDelay", "uint256"), 864_000),
         ("threshold", _primitive("threshold", "uint256"), 3),

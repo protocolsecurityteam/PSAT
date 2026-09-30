@@ -35,8 +35,7 @@ def test_upgrade_preserves_legacy_verdicts_and_does_not_backfill_recovery(db_ses
     migration = runpy.run_path(
         str(Path(__file__).resolve().parents[2] / "alembic/versions/d8e51f0a2b64_current_balance_collection.py")
     )
-    # PostgreSQL DDL is transactional: exercise the real upgrade on legacy rows,
-    # with the surrounding test transaction rolling back even if the test fails.
+    # Postgres DDL is transactional, so the test transaction still rolls back.
     migration["upgrade"].__globals__["op"] = Operations(MigrationContext.configure(db_session.connection()))
     migration["downgrade"]()
     migration["upgrade"]()

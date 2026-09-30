@@ -22,7 +22,6 @@ from services.policy.effective_permissions import (
 )
 from services.policy.effective_permissions_writer import write_effective_function_rows
 
-
 # Positive control (job ee44f242): a role-gated token mover with no state writes.
 _SWEEP_DUST: dict[str, Any] = {
     "function": "sweepDust(address,address)",

@@ -32,7 +32,6 @@ def paced(prepared, monkeypatch):
 
 
 def advance(session, seconds):
-    """Move every build start and change time into the past instead of sleeping."""
     shift = timedelta(seconds=seconds)
     session.execute(
         update(Page).values(
@@ -126,7 +125,6 @@ def test_late_commit_with_early_change_time_stays_dirty_until_rebuilt(paced, mon
                 "WHERE transaction_id = txid_current()"
             )
         )
-        # A code change forces a rebuild whose snapshot cannot see the open write.
         monkeypatch.setenv("PSAT_COMPANY_BUILD_REVISION", "during-late-write")
         assert worker.refresh_one(factory) == "prepared"
         assert source(session, protocol.name) == "prepared"
@@ -135,7 +133,6 @@ def test_late_commit_with_early_change_time_stays_dirty_until_rebuilt(paced, mon
     assert response is not None
     assert response.headers["x-psat-response-source"] == "prepared-stale"
     assert response.headers["x-psat-stale-reason"] == "data"
-    # The early change time makes it quiet at once; the minimum interval still applies.
     assert worker.refresh_one(factory) == "idle"
     advance(session, 300)
     assert worker.refresh_one(factory) == "prepared"

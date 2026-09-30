@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from services.scoring.schema import PrincipalRef, Tri, entity_key

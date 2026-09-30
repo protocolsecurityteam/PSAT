@@ -1,5 +1,3 @@
-"""Unit tests for the StageError / StageErrors Pydantic schema."""
-
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -30,7 +28,6 @@ def test_stage_error_message_is_truncated_at_4kb():
     long_message = "x" * (5 * 1024)
     err = _example(message=long_message)
     assert len(err.message.encode("utf-8")) <= 4 * 1024
-    # Truncation is from the head of the limit, so the value still starts with x's.
     assert err.message.startswith("x")
 
 
@@ -45,9 +42,7 @@ def test_stage_error_unserializable_context_is_replaced_with_truncated_sentinel(
         def __repr__(self) -> str:
             raise RuntimeError("nope")
 
-    # ``json.dumps(value, default=str)`` calls ``str(obj)``, which reaches the
-    # raising ``__repr__``; the exception escapes json.dumps and the validator
-    # answers the sentinel. Deterministic — the value, not a disjunction.
+    # ``default=str`` reaches the raising ``__repr__``, so the validator answers the sentinel.
     err = _example(context={"x": NotSerializable()})
     assert err.context == {"_truncated": True}
 

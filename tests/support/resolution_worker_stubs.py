@@ -1,9 +1,3 @@
-"""Job factory and dependency stubs for ``ResolutionWorker.process`` tests.
-
-Shared by ``tests/resolution/test_resolution_worker.py`` and ``tests/resolution/test_flow_asset_plane.py``
-so the two exercise the worker against one stub surface.
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -65,7 +59,6 @@ def _resolved_graph(nodes: list[dict] | None = None, edges: list[dict] | None = 
 
 
 def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, Any]:
-    """Patch all external dependencies for ResolutionWorker and return tracking dicts."""
     tracking_plan = overrides.get("tracking_plan", _minimal_tracking_plan())
     contract_analysis = overrides.get("contract_analysis", _minimal_contract_analysis())
     snapshot = overrides.get("snapshot", _minimal_snapshot())
@@ -110,8 +103,7 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
         assert balance_calls, "initial balances must precede graph/effects input construction"
         return resolved_graph, {}
 
-    # Pipeline orchestration tests isolate collection; dedicated DB tests cover
-    # its separate commits. Keep an order witness for the graph stage below.
+    # Collection has its own DB tests; keep an order witness for the graph stage.
     monkeypatch.setattr(
         "workers.resolution_worker.ResolutionWorker._fetch_balances",
         lambda *args, **kwargs: balance_calls.append(args),
@@ -119,9 +111,7 @@ def _patch_all(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> dict[str, A
     monkeypatch.setattr("workers.resolution_worker.get_artifact", fake_get_artifact)
     monkeypatch.setattr("workers.resolution_worker.store_artifact", fake_store_artifact)
     monkeypatch.setattr("workers.resolution_worker.create_job", fake_create_job)
-    # The perimeter walk moved to services/discovery/perimeter; the resolution
-    # worker still imports create_job for its dependency-provider spawn, so both
-    # bindings are stubbed and the assertions below are unchanged.
+    # create_job is also imported for the dependency-provider spawn, so both bindings are stubbed.
     monkeypatch.setattr("services.discovery.perimeter.create_job", fake_create_job)
     monkeypatch.setattr("workers.resolution_worker.build_control_snapshot", fake_build_control_snapshot)
     monkeypatch.setattr("workers.resolution_worker.resolve_control_graph", fake_resolve_control_graph)

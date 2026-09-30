@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import pytest
@@ -589,7 +588,6 @@ def test_parse_any_log_handrolled_tags_isolated_from_module_state():
 
 
 class TestTimelockEventDecode:
-
     def test_call_scheduled_decodes_static_fields(self):
         from services.monitoring.event_topics import CALL_SCHEDULED_TOPIC0, parse_governance_log
 

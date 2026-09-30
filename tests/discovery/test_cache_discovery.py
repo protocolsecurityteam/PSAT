@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -293,5 +292,3 @@ def test_is_known_proxy(db_session, name, proxy_fields, lookups, expected):
 
     for lookup in lookups:
         assert is_known_proxy(db_session, lookup) is expected
-
-

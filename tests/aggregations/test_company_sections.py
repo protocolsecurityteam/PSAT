@@ -1,4 +1,3 @@
-
 import gzip
 import json
 from concurrent.futures import ThreadPoolExecutor

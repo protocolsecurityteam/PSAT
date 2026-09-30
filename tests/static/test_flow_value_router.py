@@ -1,17 +1,6 @@
-"""Cross-contract value routing (``value_router`` flows + claim).
-
-A *router* (``TellerWithMultiAssetSupport.deposit`` / ``bulkWithdraw``) neither holds
-nor sends value: it CALLS an in-unit contract (``BoringVault.enter`` / ``exit``)
-whose body moves it. The effect walk crosses the ``HighLevelCall`` boundary, rebases
-destination/self classification onto the callee, and tags the move
-``direction: "value_router"``, distinct from the entry's own ``in``/``out``.
-
-Proven on a self-contained Router->Vault->SafeTransferLib fixture: a routed pull
-resolves to ``self``; a routed send binds ``target_param_index`` to the ROUTER's
-caller parameter; a SAME-contract library transfer stays ``out`` (the crossing mints
-the router flow); the vault as its OWN entry keeps plain ``in``/``out``.
-
-Precedent: ``test_flow_interproc.py`` (same compile-with-Slither harness).
+"""A router (``TellerWithMultiAssetSupport.deposit`` / ``bulkWithdraw``) calls an in-unit contract whose body moves
+value; the walk crosses the ``HighLevelCall``, rebases onto the callee, and tags the move ``value_router``. Same
+harness as ``test_flow_interproc.py``.
 """
 
 from __future__ import annotations
@@ -29,8 +18,6 @@ from services.static.contract_analysis_pipeline.effects import build_effects  # 
 
 pytestmark = pytest.mark.compile
 
-# Router -> Vault -> token-first library transfer (SafeTransferLib idiom): the vault
-# as a direct entry has plain in/out; routing alone promotes them to value_router.
 _SRC = """
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -167,18 +154,13 @@ def _router_flows(info) -> list[dict[str, Any]]:
     return [f for f in info["value_flows"] if f["direction"] == "value_router"]
 
 
-# --- routed destination resolution -----------------------------------------
-
-
 def test_deposit_routes_value_into_the_vault(_unit):
     fns = _effects(_unit, "Router")
     info = fns["deposit(uint256)"]
     routed = _router_flows(info)
     assert len(routed) == 1, routed
     flow = routed[0]
-    # The money goes INTO the vault (address(this) of the callee), not the caller.
     assert flow["target_kind"]["kind"] == "self"
-    # A destination that is the callee's self is not the entry's own arg slot.
     assert "target_param_index" not in flow
     assert flow["amount_kind"]["kind"] == "param"
     assert flow["amount_param_index"] == 0
@@ -190,14 +172,10 @@ def test_withdraw_binds_router_destination_to_the_caller_param(_unit):
     routed = _router_flows(info)
     assert len(routed) == 1, routed
     flow = routed[0]
-    # The vault sends its own asset to a destination the ROUTER's caller named:
-    # withdraw's `to`, positional index 1 — recovered across the boundary.
+    # ``to`` is recovered across the boundary at index 1.
     assert flow["from_is_self"] is True
     assert flow["target_kind"]["kind"] == "param"
     assert flow["target_param_index"] == 1
-
-
-# --- the crossing, not the transfer, is what mints a router flow ------------
 
 
 def test_same_contract_library_transfer_is_not_routed(_unit):
@@ -217,9 +195,6 @@ def test_vault_as_direct_entry_keeps_plain_in_out(_unit):
     assert any(f["direction"] == "out" for f in exit_["value_flows"])
 
 
-# --- a pull is inbound only when the funds provably land HERE ---------------
-
-
 @pytest.mark.parametrize(
     "signature",
     [
@@ -229,10 +204,7 @@ def test_vault_as_direct_entry_keeps_plain_in_out(_unit):
     ],
 )
 def test_a_pull_between_two_third_parties_is_not_an_inflow(_unit, signature):
-    """``in`` asserts the funds arrived here, and only a destination resolved to
-    this contract proves that. Reading the ``from`` argument alone published
-    "pulls value into the contract" about a bridge fee the caller paid straight
-    to an endpoint — value that never touched the analyzed contract."""
+    """Reading ``from`` alone published an inflow for a fee paid straight to an endpoint."""
     info = _effects(_unit, "Bridger")[signature]
     assert [f["direction"] for f in info["value_flows"]] == ["value_router"]
     assert "asset_pull" not in info["effect_labels"]
@@ -240,9 +212,7 @@ def test_a_pull_between_two_third_parties_is_not_an_inflow(_unit, signature):
 
 @pytest.mark.parametrize("signature", ["deposit(uint256)", "depositVia(uint256)"])
 def test_a_pull_whose_sink_is_this_contract_stays_inbound(_unit, signature):
-    """The control, direct and through a helper's bound parameter: a real deposit
-    keeps ``in`` and its legacy label. Demoting these would have traded one false
-    claim for a silence on every wrapper in the corpus."""
+    """Demoting these would silence every wrapper in the corpus."""
     info = _effects(_unit, "Bridger")[signature]
     flows = info["value_flows"]
     assert [f["direction"] for f in flows] == ["in"]
@@ -256,11 +226,7 @@ def test_a_third_party_pull_mints_the_routed_claim_not_flow_in(_unit):
     ids = {c["claim_id"] for c in claims["payFee(uint256)"]}
     assert "value_router" in ids
     assert "flow.in" not in ids
-    # The real deposit is unaffected: it still claims an inflow.
     assert "flow.in" in {c["claim_id"] for c in claims["deposit(uint256)"]}
-
-
-# --- claim plane ------------------------------------------------------------
 
 
 def test_value_router_claim_is_minted_for_routers(_unit):
@@ -273,7 +239,6 @@ def test_value_router_claim_is_minted_for_routers(_unit):
 
     assert _has_router_claim("deposit(uint256)")
     assert _has_router_claim("withdraw(uint256,address)")
-    # A same-contract transfer is not a routing claim.
     assert not _has_router_claim("directSend(uint256,address)")
 
     router_claim = next(c for c in claims["withdraw(uint256,address)"] if c["claim_id"] == "value_router")
@@ -283,10 +248,7 @@ def test_value_router_claim_is_minted_for_routers(_unit):
 
 
 def test_the_published_router_claim_carries_the_crossed_ops_identity(_unit):
-    """On real compiler output, end to end: the op recorded at the crossing
-    reaches the PERSISTED claim witness, not only the in-process transparency
-    join. Byte-exact against the producer's own record, so a projection that
-    rewrote or truncated it would fail here."""
+    """Byte-exact against the producer's record, so a projection that rewrote it fails."""
     contract = _contract(_unit, "Router")
     art = build_effects(contract)
     claims = build_claims(contract, art, {})["functions"]
@@ -296,47 +258,30 @@ def test_the_published_router_claim_carries_the_crossed_ops_identity(_unit):
         claim = next(c for c in claims[signature] if c["claim_id"] == "value_router")
         assert claim["witness"]["flows"][0]["router_ops"] == produced
 
-    # The unrouted sibling has no op to publish and publishes none.
     direct = next(c for c in claims["directSend(uint256,address)"] if c["claim_id"] == "flow.out")
     assert all("router_ops" not in f for f in direct["witness"]["flows"])
 
 
-# --- the routed move's own op is recorded, and only it is transparent -------
-
-
 def test_a_crossing_records_the_router_op_identity(_unit):
-    """A routed flow's ``selector`` names the CALLEE's inner transfer; the op
-    this entry actually makes — the call that crossed the boundary — is
-    recorded in ``router_ops``, keyed by the callee's own canonical selector
-    and bare name. This is the only identity the mandatory-gate walk may treat
-    as the effect's own revert surface."""
+    """The flow's ``selector`` is the callee's inner transfer; ``router_ops`` records the crossing call, the only op
+    the gate walk may treat as the effect's own.
+    """
     from services.static.contract_analysis_pipeline.effects import _selector_for
 
     fns = _effects(_unit, "Router")
     flow = _router_flows(fns["withdraw(uint256,address)"])[0]
-    # The canonical form lowers the interface-typed parameter (IERC20 →
-    # address), so this IS the EVM selector of the crossed call — the same
-    # identity an external-call sink records, which is what a leaf joins on.
+    # The interface-typed param lowers to address, so this is the EVM selector a sink records.
     exit_selector = _selector_for("exit(address,address,uint256,address,uint256)")
     assert flow["router_ops"] == [{"selector": exit_selector, "callee": "exit"}]
 
 
 def test_a_boundary_less_routed_pull_records_its_own_op(_unit):
-    """``payFee``'s third-party pull is routed with no crossing: the op that
-    carries the move IS the pull, and its identity is recorded so the walk can
-    keep treating exactly that revert surface as the effect's own."""
     flow = _router_flows(_effects(_unit, "Bridger")["payFee(uint256)"])[0]
     assert flow["router_ops"] == [{"selector": "0x23b872dd", "callee": "transferFrom"}]
 
 
 def test_a_destination_guard_on_a_routed_function_blocks_the_negative_proof(tmp_path):
-    """Round-5 R1 on real compiler output, value-flow side: a mandatory NONVIEW
-    guard call vetting the caller-supplied destination (``guard.checkDestination(to)``)
-    before the routed ``vault.exit(to, …)`` must leave ``target_constraint``
-    OPEN, while the guard-free control alone earns the negative proof. Before
-    per-op transparency, BOTH published ``unconstrained_proven`` — the guarded
-    function was byte-identical to the open one, a proof of absence minted from
-    a leaf the walk chose not to evaluate."""
+    """Round-5 R1: before per-op transparency, the guarded function published a proof byte-identical to the open one."""
     from pathlib import Path
 
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
@@ -356,18 +301,14 @@ def test_a_destination_guard_on_a_routed_function_blocks_the_negative_proof(tmp_
 
     guarded = _routed_witness_flow("redeemGuarded(address,IERC20,uint256)")
     open_control = _routed_witness_flow("redeemOpen(address,IERC20,uint256)")
-    # Same claim, same destination binding — only the constraint verdict may differ.
     for flow in (guarded, open_control):
         assert (flow["target_kind"]["kind"], flow["target_param_index"]) == ("param", 0)
     assert guarded["target_constraint"] == {"state": "not_determined"}
     assert open_control["target_constraint"] == {"state": "unconstrained_proven"}
 
 
-# --- the sink -> flow join (fix 7) ------------------------------------------
-# ``sink_receivers``/``sink_ids`` used to join sinks to flows by BARE MOVE-SELECTOR,
-# but a routed claim's flow selector is the CALLEE's inner transfer, so a
-# same-selector DIRECT sink in the entry attached its receiver to the routed claim
-# while ``router_ops`` named a different carrying op.
+# ``sink_receivers``/``sink_ids`` used to join by bare move-selector, attaching a same-selector direct sink to the
+# routed claim.
 
 
 def _witness(contract_name: str, signature: str, claim_id: str, _unit) -> dict:
@@ -382,40 +323,29 @@ _DECOY_DIRECT_SINK = f"{_DECOY_SIG}:sink1:external_call:feeToken.transfer"
 
 
 def test_routed_claim_does_not_adopt_a_same_selector_direct_sink(_unit):
-    """FALSIFIER: ``withdrawWithFee`` routes through ``vault.exit`` (inner move
-    ``transfer(address,uint256)``) AND calls ``feeToken.transfer`` directly in
-    the same body — the same selector, a different receiver.
-
-    Joining by that bare selector gave the routed claim the FEE TOKEN as its
-    receiver, which is a positive fact about where routed value goes minted
-    from a call that carries none of it.
+    """The fee token's transfer shares the inner move's selector; joining by it gave the routed claim the wrong
+    receiver.
     """
     witness = _witness("DecoyRouter", _DECOY_SIG, "value_router", _unit)
     assert witness["flows"][0]["router_ops"] == [{"selector": "0x18457e61", "callee": "exit"}]
 
     assert _DECOY_DIRECT_SINK not in witness["sink_ids"]
     assert _DECOY_DIRECT_SINK not in witness.get("sink_receivers", {})
-    # The carrier ``router_ops`` names is the one that IS attached.
     assert witness["sink_ids"] == [_DECOY_ROUTER_SINK]
     assert witness["sink_receivers"][_DECOY_ROUTER_SINK]["variable"] == "vault"
 
 
 def test_direct_out_claim_in_the_same_body_is_unchanged(_unit):
-    """RECALL: the direct ``out`` flow beside it keeps its own sink and receiver.
-    The routed regime is the only one whose join changed."""
     witness = _witness("DecoyRouter", _DECOY_SIG, "flow.out", _unit)
     assert witness["sink_ids"] == [_DECOY_DIRECT_SINK]
     assert witness["sink_receivers"][_DECOY_DIRECT_SINK]["variable"] == "feeToken"
 
 
 def test_a_routed_flow_with_no_router_ops_withholds_its_sinks():
-    """A routed flow that names no carrying op joins to nothing: the key goes
-    ABSENT rather than being filled from the bare selector. (Artifacts produced
-    before ``router_ops`` existed are exactly this case.)"""
+    """Pre-``router_ops`` artifacts are exactly this case."""
     from services.static.claims.matchers import flows as flows_matcher
 
     routed = {"direction": "value_router", "selector": "0xa9059cbb"}
     direct_sink = {"kind": "external_call", "selector": "0xa9059cbb", "target": "feeToken.transfer"}
     assert flows_matcher._carries(direct_sink, [routed]) is False
-    # And it is not rescued by the low-level-value arm either.
     assert flows_matcher._carries({"kind": "external_call", "selector": None, "target": "x.call"}, [routed]) is False

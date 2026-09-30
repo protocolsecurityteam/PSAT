@@ -1,10 +1,5 @@
-"""Discovery must not emit non-authority state vars as resolvable controllers.
-
-Two admission predicates in ``build_controller_tracking`` (the single producer of controller
-targets): a bare non-address aggregate with no ``member_path`` has no single storable address
-(only an address member projection is a controller), and a compile-time ``constant`` consulted
-only by business logic (never under a caller/delegated authority leaf) is a sentinel, not an
-authority. Each case compiles real Solidity and drives the production builders end to end.
+"""A bare aggregate has no single storable address, and a ``constant`` consulted only by business logic is a
+sentinel; neither is a controller.
 """
 
 from __future__ import annotations
@@ -46,11 +41,6 @@ def _build(tmp_path: Path, source: str, contract_name: str):
     return build_controller_tracking(contract, tmp_path, predicate_trees, effects, semantic_control)
 
 
-# ---------------------------------------------------------------------------
-# Authority-role collector — the signal predicate 2 threads.
-# ---------------------------------------------------------------------------
-
-
 def test_authority_role_collector_groups_by_operand():
     trees = {
         "trees": {
@@ -83,15 +73,7 @@ def test_authority_role_collector_handles_malformed_input():
     assert _collect_state_var_authority_roles({"trees": "not-a-dict"}) == {}
 
 
-# ---------------------------------------------------------------------------
-# Predicate 1 — bare aggregate without member_path is dropped; the projected
-# address member survives.
-# ---------------------------------------------------------------------------
-
-
 def test_bare_struct_dropped_member_projection_kept(tmp_path):
-    """AccountantWithRateProviders shape: the whole ``accountantState`` struct is
-    not a controller, but ``accountantState.payoutAddress`` is."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -115,8 +97,6 @@ def test_bare_struct_dropped_member_projection_kept(tmp_path):
 
 
 def test_bare_struct_without_address_member_fully_dropped(tmp_path):
-    """LRTSquaredCore ``rateLimit`` shape: a struct used in a business comparison
-    with no projected address member yields no controller at all."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -138,15 +118,7 @@ def test_bare_struct_without_address_member_fully_dropped(tmp_path):
     assert not any(cid.startswith("state_variable:rateLimit") for cid in by_id), list(by_id.keys())
 
 
-# ---------------------------------------------------------------------------
-# Predicate 2 — business-only compile-time constant sentinel is dropped; a
-# constant the caller is gated on, and immutable business contracts, survive.
-# ---------------------------------------------------------------------------
-
-
 def test_business_only_constant_sentinel_dropped(tmp_path):
-    """EigenPodManager shape: ``beaconChainETHStrategy`` is a constant compared
-    against a function PARAMETER (business logic) — not an authority."""
     source = """
     pragma solidity ^0.8.19;
     interface IStrategy {}
@@ -165,8 +137,6 @@ def test_business_only_constant_sentinel_dropped(tmp_path):
 
 
 def test_business_only_constant_address_sentinel_dropped(tmp_path):
-    """A getter-less ``internal constant`` sentinel (DEFAULT_BURN_ADDRESS / NATIVE / DEFAULT_LIB
-    shape) consulted only in business logic is dropped, like the contract-typed sentinel."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -183,8 +153,6 @@ def test_business_only_constant_address_sentinel_dropped(tmp_path):
 
 
 def test_constant_address_caller_authority_survives(tmp_path):
-    """UnwrapTokenV1ETH shape: a constant address the caller is required to equal
-    (``require(msg.sender == WBETH_TOKEN_ADDRESS)``) is a real authority."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -201,9 +169,7 @@ def test_constant_address_caller_authority_survives(tmp_path):
 
 
 def test_immutable_business_contract_survives(tmp_path):
-    """The 8 immutable business-only contracts (EIGEN, eigenStrategy, …) are
-    ``is_constant == False`` and must survive even when referenced only in
-    business leaves."""
+    """``is_constant`` is False for them."""
     source = """
     pragma solidity ^0.8.19;
     interface IToken {}

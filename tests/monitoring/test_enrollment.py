@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -1364,7 +1363,6 @@ class TestEnrollmentIntegration:
 
 @requires_postgres
 class TestControlGraphTypeReconciliation:
-
     @staticmethod
     def _proto_contract(session, addr, name="EtherFiTimelock"):
         from db.models import Contract, Protocol

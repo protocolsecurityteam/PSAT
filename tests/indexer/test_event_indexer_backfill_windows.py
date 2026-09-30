@@ -25,7 +25,6 @@ _TOPIC = "0x" + "ab" * 32  # stand-in RoleCapabilityUpdated topic
 
 
 class _RangeCappedFetcher:
-
     def __init__(self) -> None:
         self.requested_spans: list[int] = []
 

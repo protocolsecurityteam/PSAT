@@ -56,7 +56,6 @@ def _rows(fixture: dict) -> list[SimpleNamespace]:
 
 
 class FixtureRepo:
-
     def __init__(self, rows: list[SimpleNamespace], indexed_block: int | None = 21_000_000):
         self.rows = rows
         self.indexed_block = indexed_block
@@ -164,7 +163,6 @@ _AUTHORITY = "0x" + "a1" * 20
 
 
 class _FakeBytecode:
-
     def __init__(self, *, selectors):
         self._selectors = {s.lower() for s in selectors}
 

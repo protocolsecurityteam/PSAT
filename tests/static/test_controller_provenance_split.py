@@ -1,15 +1,6 @@
-""" "Gates the caller" and "gets called" must stay distinguishable.
-
-``build_controller_tracking`` used to union the two and type both ``external_contract``,
-so a callee (``eETH``, ``lido``, ``liquidityPool``) was published as a controller. The
-union still decides ``kind``; each target now also carries the provenance that put it
-there, which the resolution stage reads.
-
-Positive control: an authority registry the caller is checked against
-(``authority_provenance == "caller_gate"``). Negative control: a token only called
-(``"call_target"``). Third state: neither — key absent, never guessed. Fourth state: no
-predicate trees at all (builder raised, ``core.py`` continued) — NEITHER answer is
-evidence, so the key is absent for every slot and no control edge is demoted.
+"""``build_controller_tracking`` once typed callees (``eETH``, ``lido``) as controllers. Each target now carries its
+provenance: ``caller_gate``, ``call_target``, absent when neither, and absent for every slot when there are no
+predicate trees (builder raised, ``core.py`` continued).
 """
 
 from __future__ import annotations
@@ -97,30 +88,21 @@ def _targets(tmp_path: Path, predicate_trees_override: Any = _UNSET):
 def test_gate_and_callee_are_distinguishable(tmp_path):
     by_source = _targets(tmp_path)
 
-    # Both are still ``external_contract`` kind — that question ("does this slot
-    # hold another contract's address") was never the defective one.
     assert by_source["roleRegistry"]["kind"] == "external_contract"
     assert by_source["eETH"]["kind"] == "external_contract"
 
-    # POSITIVE control: the registry the caller is checked against.
     assert by_source["roleRegistry"].get("authority_provenance") == "caller_gate"
-    # NEGATIVE control: the token that is only ever called.
     assert by_source["eETH"].get("authority_provenance") == "call_target"
 
 
 def test_neither_gate_nor_callee_stays_not_determined(tmp_path):
     by_source = _targets(tmp_path)
-    # ``feeRecipient`` is a leaf operand under a business-logic role: neither
-    # gated on nor called. The key must be ABSENT — inventing "call_target"
-    # here would claim a call the effects stage never witnessed, and
-    # "caller_gate" would claim an access check that does not exist.
+    # Neither gated on nor called, so either answer would be invented.
     assert "feeRecipient" in by_source
     assert "authority_provenance" not in by_source["feeRecipient"]
 
 
-# ``core.py`` catches any exception out of the predicate builder and continues
-# with this exact object, then passes it straight to ``build_controller_tracking``.
-# The other two are the degenerate shapes of the same state.
+# ``core.py`` passes this exact object when the predicate builder raises.
 _TREELESS_ARTIFACTS = {
     "degraded_from_exception": {"schema_version": "semantic", "error": "boom"},
     "trees_key_empty": {"schema_version": "semantic", "trees": {}},
@@ -130,21 +112,11 @@ _TREELESS_ARTIFACTS = {
 
 @pytest.mark.parametrize("shape", sorted(_TREELESS_ARTIFACTS))
 def test_treeless_artifact_claims_no_provenance_for_anything(tmp_path, shape):
-    """Without trees, ``caller_gate`` is unanswerable — so ``call_target`` must not be
-    emitted either.
-
-    If the effects arm still answered, every name would fall through to ``call_target``
-    and the POSITIVE control would be published as a proven callee: a proven-absent gate
-    synthesized from a failure to determine. Downstream that demotes the control edge to
-    ``external_call_target``, drops the address from the authority closure and strips its
-    ``controller_*`` labels — the contract published as having no external authority
-    controller because the analysis crashed.
+    """Answering ``call_target`` would demote the control edge and strip the registry's controller labels because the
+    analysis crashed.
     """
     by_source = _targets(tmp_path, _TREELESS_ARTIFACTS[shape])
 
-    # The registry is still a target and still ``external_contract`` kind — the
-    # effects artifact is intact, and "does this slot hold another contract's
-    # address" is answerable without trees.
     assert by_source["roleRegistry"]["kind"] == "external_contract"
     assert by_source["eETH"]["kind"] == "external_contract"
 
@@ -156,8 +128,6 @@ def test_treeless_artifact_claims_no_provenance_for_anything(tmp_path, shape):
 
 @pytest.mark.parametrize("shape", sorted(_TREELESS_ARTIFACTS))
 def test_treeless_artifact_keeps_the_control_edge_through_the_plan(tmp_path, shape):
-    """End of the chain: no ``call_target`` reaches the resolution stage, so
-    ``resolve_control_graph`` keeps ``relation="controller_value"``."""
     by_source = _targets(tmp_path, _TREELESS_ARTIFACTS[shape])
     analysis = {
         "subject": {"address": "0x" + "11" * 20, "name": "Vault"},
@@ -182,27 +152,18 @@ def test_provenance_survives_the_tracking_plan(tmp_path):
 
 
 def test_marked_uncertain_guard_unanswers_the_names_that_function_reads(tmp_path):
-    """``guard_extraction_uncertain`` names a function whose caller-authority
-    comparison the builder saw and could not lower. Every name that function
-    reads is then unanswered — including one that already has a tree, because
-    the marker says the tree does not carry the whole gate."""
+    """The marker says the tree doesn't carry the whole gate."""
     contract, predicate_trees, effects, semantic_control = _build(tmp_path)
     marked = dict(predicate_trees)
     marked["guard_extraction_uncertain"] = ["issue(address,uint256)"]
     targets = build_controller_tracking(contract, tmp_path, marked, effects, semantic_control)
     by_source = {t["source"]: t for t in targets}
 
-    # ``eETH`` is read by ``issue`` — no longer a proven callee.
     assert "authority_provenance" not in by_source["eETH"]
-    # ``roleRegistry`` is still PROVEN to gate the caller by a lowered leaf in
-    # ``setFeeRecipient``. Evidence in hand is not erased by a blind spot.
     assert by_source["roleRegistry"].get("authority_provenance") == "caller_gate"
 
 
-# The confirmed corpus shape: EtherFi PriorityWithdrawalQueue gates
-# ``receive()`` on ``msg.sender == address(liquidityPool)``. The predicate
-# builder never lowered ``receive()``, so that gate is invisible to
-# ``caller_gate_vars`` and ``liquidityPool`` fell through to ``call_target``.
+# EtherFi PriorityWithdrawalQueue gates ``receive()`` on ``liquidityPool``; the builder used to skip ``receive()``.
 UNLOWERED_GATE_SOURCE = """
     pragma solidity ^0.8.20;
 
@@ -273,10 +234,7 @@ def _unlowered_targets(tmp_path: Path):
 
 
 def test_a_lowered_receive_gate_publishes_caller_gate(tmp_path):
-    """The G3 class-R merge pin: ``receive()`` now IS lowered, so its
-    ``msg.sender != liquidityPool`` gate reaches ``caller_gate_vars`` and the
-    address earns the stronger, correct answer instead of the withholding
-    path. This test replaces one that asserted the pre-class-R absence."""
+    """G3 class-R: replaces a test that asserted the pre-class-R absence."""
     predicate_trees, by_source = _unlowered_targets(tmp_path)
 
     trees = predicate_trees["trees"]
@@ -288,13 +246,8 @@ def test_a_lowered_receive_gate_publishes_caller_gate(tmp_path):
 
 
 def test_gate_in_an_unlowered_function_is_not_published_as_a_callee(tmp_path):
-    """A gate the builder FAILED to lower must not mint ``call_target``.
-
-    Post class R the builder lowers every plain caller gate we could write, so the
-    blind-spot branch's realised population is *lowering failures* with no nameable
-    source shape. The failure is constructed directly: the tree for ``receive()`` is
-    removed from the artifact, the shape a raised or degraded tree stage persists.
-    Reachable by construction; realised rows are a lower bound.
+    """The builder now lowers every plain gate we could write, so a lowering failure is constructed by removing the
+    tree. Realised rows are a lower bound.
     """
     predicate_trees, _ = _unlowered_targets(tmp_path)
     degraded = dict(predicate_trees)
@@ -314,28 +267,18 @@ def test_gate_in_an_unlowered_function_is_not_published_as_a_callee(tmp_path):
 
 
 def test_the_correction_does_not_swallow_the_other_two_answers(tmp_path):
-    """NEGATIVE controls, both directions.
-
-    Without these the fix is indistinguishable from deleting the split: a proven
-    gate must stay ``caller_gate``, and a callee reached only from a function
-    that never observes the caller must stay ``call_target``.
-    """
+    """Without these the fix is indistinguishable from deleting the split."""
     _predicate_trees, by_source = _unlowered_targets(tmp_path)
 
     assert by_source["roleRegistry"].get("authority_provenance") == "caller_gate"
-    # ``eethAddress`` has no tree either, but it cannot contain a caller gate:
-    # it never reads msg.sender/tx.origin. Its callee's question WAS answered.
+    # It never reads msg.sender/tx.origin, so it can't hold a caller gate.
     assert by_source["eETH"].get("authority_provenance") == "call_target"
 
 
 def test_unenumerable_entry_points_answer_not_determined(tmp_path):
-    """If the entry-point surface itself cannot be read, no name can claim
-    ``call_target`` — the failure to enumerate is not evidence of no gate."""
     contract, predicate_trees, effects, semantic_control = _build(tmp_path)
 
     class _Opaque:
-        """Slither contract whose entry points cannot be listed."""
-
         functions_entry_points = None
 
         def __getattr__(self, item):
@@ -347,8 +290,6 @@ def test_unenumerable_entry_points_answer_not_determined(tmp_path):
 
 
 def test_plan_built_from_a_pre_provenance_artifact_claims_nothing(tmp_path):
-    """A stored analysis written before the field exists must stay
-    not-determined all the way through — no default, no guess."""
     by_source = _targets(tmp_path)
     legacy = []
     for target in by_source.values():
@@ -365,21 +306,10 @@ def test_plan_built_from_a_pre_provenance_artifact_claims_nothing(tmp_path):
 
 @pytest.mark.parametrize("failing_accessor", ["all_state_variables_read", "all_solidity_variables_read"])
 def test_accessor_failure_answers_not_determined_instead_of_narrowing(tmp_path, failing_accessor):
-    """When a recursive Slither accessor RAISES, the blind-spot answer must go
-    not-determined — never fall back to the non-recursive attribute.
+    """The non-recursive attribute is narrower, so falling back turns "couldn't read callees" into a proven absence.
 
-    That attribute is strictly narrower (this function's own body, without callees).
-    Substituting it turns "could not read the callees" into "the callees read nothing", so
-    a gate reached through an internal call becomes invisible and ``call_target`` — a
-    claim of PROVEN ABSENCE of a caller gate — is minted from a failure to determine.
-
-    Both accessors are exercised because they are consulted at different points:
-    ``all_solidity_variables_read`` decides whether a treeless function observes the
-    caller at all, ``all_state_variables_read`` then collects its names.
-
-    Runs on the degraded-``receive()`` shape rather than the Vault fixture, whose entry
-    points are all lowered and never reach the accessor — a fixture where the raise
-    cannot fire proves nothing. Reachable by construction only (0 realised rows).
+    Runs on the degraded ``receive()`` shape because the Vault fixture never reaches the accessor. Reachable by
+    construction only.
     """
     predicate_trees, _ = _unlowered_targets(tmp_path)
     degraded = dict(predicate_trees)
@@ -391,16 +321,12 @@ def test_accessor_failure_answers_not_determined_instead_of_narrowing(tmp_path, 
     effects = build_effects(contract)
     semantic_control = _build_semantic_control_summary(contract, tmp_path, degraded, effects)
 
-    # POSITIVE CONTROLS on the very same inputs, so this is a change of answer
-    # under failure and not a fix that erased the split.
     clean = {t["source"]: t for t in build_controller_tracking(contract, tmp_path, degraded, effects, semantic_control)}
     assert clean["eETH"].get("authority_provenance") == "call_target"
     assert clean["roleRegistry"].get("authority_provenance") == "caller_gate"
     assert "authority_provenance" not in clean["liquidityPool"]
 
     class _FailingFn:
-        """Slither function whose recursive read accessor raises."""
-
         def __init__(self, fn: Any) -> None:
             self._fn = fn
 
@@ -423,12 +349,8 @@ def test_accessor_failure_answers_not_determined_instead_of_narrowing(tmp_path, 
         t["source"]: t for t in build_controller_tracking(_Degraded(), tmp_path, degraded, effects, semantic_control)
     }
 
-    # The name that previously earned the proven-absence answer now earns none.
     assert "authority_provenance" not in by_source["eETH"], (
         "a failed accessor read narrowed the gate set and minted call_target anyway"
     )
-    # A gate already PROVEN present by a lowered leaf is evidence in hand; a
-    # failure elsewhere does not subtract from it.
     assert by_source["roleRegistry"].get("authority_provenance") == "caller_gate"
-    # And the already-withheld name stays withheld.
     assert "authority_provenance" not in by_source["liquidityPool"]

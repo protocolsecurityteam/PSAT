@@ -63,14 +63,8 @@ def _fn_leaves(contract, full_name: str) -> list[dict]:
     return _leaves(build_predicate_tree(fn))
 
 
-# Classifier: the refuted FALSE families flip to business / no descriptor
-
-
 def test_permit_and_transfer_from_are_not_delegated_authority(tmp_path):
-    """WithdrawalQueueERC721 shape: ``STETH.permit(msg.sender, address(this),
-    …)`` authorizes the QUEUE to spend the CALLER's tokens; it restricts no
-    caller. The leaf must not carry delegated_authority or an
-    authority_contract descriptor (which minted STETH/wstETH as controllers)."""
+    """The permit authorizes the queue to spend the caller's tokens; it restricts no caller."""
     sl = _compile(
         tmp_path,
         """
@@ -103,8 +97,6 @@ def test_permit_and_transfer_from_are_not_delegated_authority(tmp_path):
 
 
 def test_burn_shares_is_not_delegated_authority(tmp_path):
-    """LiquidityPool shape: ``eETH.burnShares(msg.sender, share)`` is a
-    solvency/burn call (msg.sender is the burn subject)."""
     sl = _compile(
         tmp_path,
         """
@@ -128,9 +120,7 @@ def test_burn_shares_is_not_delegated_authority(tmp_path):
 
 
 def test_result_checked_effectful_transfer_is_not_delegated_authority(tmp_path):
-    """Eigen shape: ``require(bEIGEN.transferFrom(msg.sender, …))`` — the
-    result IS checked (gate_kind require) but the callee is effectful and
-    msg.sender is the funds subject. Covers the require+nonview arm."""
+    """Covers the require+nonview arm."""
     sl = _compile(
         tmp_path,
         """
@@ -153,13 +143,8 @@ def test_result_checked_effectful_transfer_is_not_delegated_authority(tmp_path):
         assert not leaf.get("set_descriptor")
 
 
-# Classifier: the load-bearing TRUE families keep delegated_authority
-
-
 def test_void_view_role_registry_call_stays_delegated_authority(tmp_path):
-    """RoleRegistry.only*(msg.sender) — a void VIEW call whose entire revert
-    surface is the gate. The largest true family on PR-161 (100 view
-    external_call_revert descriptors) must keep its authority claim."""
+    """The largest true family on PR-161 (100 descriptors)."""
     sl = _compile(
         tmp_path,
         """
@@ -186,9 +171,7 @@ def test_void_view_role_registry_call_stays_delegated_authority(tmp_path):
 
 
 def test_result_checked_can_call_oracle_stays_delegated_authority(tmp_path):
-    """``require(authority.canCall(msg.sender, …))`` — result-checked VIEW
-    ACL oracle (the Solmate RolesAuthority family, 43 descriptors on
-    PR-161)."""
+    """The Solmate RolesAuthority family (43 descriptors on PR-161)."""
     sl = _compile(
         tmp_path,
         """
@@ -214,9 +197,6 @@ def test_result_checked_can_call_oracle_stays_delegated_authority(tmp_path):
 
 
 def test_merkle_witness_void_call_keeps_delegated_authority(tmp_path):
-    """The one nonview carve-out the resolution plane proves: a void call
-    consuming a caller-supplied ``bytes32[]`` hash-path witness is a merkle
-    membership verification against a contract-committed root."""
     sl = _compile(
         tmp_path,
         """
@@ -238,10 +218,6 @@ def test_merkle_witness_void_call_keeps_delegated_authority(tmp_path):
 
 
 def test_const_compare_oracle_view_vs_nonview(tmp_path):
-    """The ``call() == constant`` route (``_try_external_auth_oracle``): a
-    VIEW status oracle is an authorization predicate; an EFFECTFUL call whose
-    result is compared is value movement. Both leaves must now carry the
-    mutability so downstream applies the same judgment."""
     sl = _compile(
         tmp_path,
         """
@@ -275,9 +251,6 @@ def test_const_compare_oracle_view_vs_nonview(tmp_path):
     assert all(lf.get("authority_role") == "business" for lf in ungated)
 
 
-# Tracking harvest: no caller_gate from a non-gate-shaped leaf
-
-
 def _teller_artifact_and_contract(tmp_path):
     from services.static.contract_analysis_pipeline.predicate_artifacts import (
         build_predicate_artifacts,
@@ -308,11 +281,7 @@ def _teller_artifact_and_contract(tmp_path):
 
 
 def test_tracking_plan_does_not_mint_caller_gate_for_vault_enter(tmp_path):
-    """End-to-end through ``build_controller_tracking``: the Teller shape
-    (PR-161: 8 Teller deployments published vault + WETH as caller_gate
-    controllers) yields NO caller_gate target for ``vault``, while the
-    direct-equality ``owner`` gate keeps its caller_gate provenance (the
-    positive control on the same contract)."""
+    """PR-161 published vault + WETH as caller_gate on 8 Teller deployments."""
     artifact, contract = _teller_artifact_and_contract(tmp_path)
     targets = build_controller_tracking(contract, tmp_path, artifact, None)
     by_id = {t["controller_id"]: t for t in targets}
@@ -326,10 +295,7 @@ def test_tracking_plan_does_not_mint_caller_gate_for_vault_enter(tmp_path):
 
 
 def test_harvest_rejects_persisted_nonview_descriptor_tree():
-    """Belt-and-braces arm: a tree in which a delegated_authority +
-    authority_contract descriptor sits on a NONVIEW external_bool leaf (the
-    pre-fix persisted shape) must not contribute to either harvest — the
-    classifier fix alone would leave replayed artifacts poisoned."""
+    """The classifier fix alone would leave replayed artifacts poisoned."""
 
     def leaf_tree(leaf):
         return {"trees": {"f()": {"op": "LEAF", "leaf": leaf}}}
@@ -361,29 +327,21 @@ def test_harvest_rejects_persisted_nonview_descriptor_tree():
     }
     assert _collect_authority_state_vars(leaf_tree(view_leaf)) == {"roleRegistry"}
 
-    # R2 second arm: a descriptor on a NON-authority-role leaf must not mint a caller-gate var.
     business_leaf = dict(view_leaf)
     business_leaf["authority_role"] = "business"
     assert _collect_authority_state_vars(leaf_tree(business_leaf)) == set()
 
 
 def test_gate_shape_helper_three_states():
-    """The discriminator's input→output table, including the two chronic
-    failure routes: a not-determined mutability must not reach the proven
-    gate state, and the merkle carve-out (the adverse branch) must fire."""
-    # Proven gate shapes.
     assert external_bool_leaf_is_gate_shape("view", "external_call_revert", "onlyGuardian(address)")
     assert external_bool_leaf_is_gate_shape("pure", "require", None)
     assert external_bool_leaf_is_gate_shape("nonview_library", "require", "remove(address)")
-    # Value movement — not gates.
     assert not external_bool_leaf_is_gate_shape(
         "nonview", "external_call_revert", "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)"
     )
     assert not external_bool_leaf_is_gate_shape("nonview", "require", "transferFrom(address,address,uint256)")
-    # Not determined — must not publish the proven state.
     assert not external_bool_leaf_is_gate_shape(None, "require", "mystery(address)")
     assert not external_bool_leaf_is_gate_shape(None, None, None)
-    # Merkle bytes32[] witness carve-out (void call only).
     assert external_bool_leaf_is_gate_shape("nonview", "external_call_revert", "verify(bytes32[],address,uint256)")
     assert external_bool_leaf_is_gate_shape(None, "try_catch_revert", "verify(bytes32[],address)")
     assert not external_bool_leaf_is_gate_shape("nonview", "require", "verify(bytes32[],address,uint256)")

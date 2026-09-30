@@ -1,21 +1,7 @@
-"""The ``no_time_reference`` proof, gated against the PRODUCTION builder.
-
-``duration_bound_source = "no_time_reference"`` is PROVEN indefinite, "the MOST
-severe freeze" (``effects/config.py``, ``effects/claims_bridge.py``), and gates the
-frontend copies in ``claimsVocab.js``. It is a proof BY ABSENCE, so every
-precondition must hold against real compiler output, not a hand-built leaf.
-
-Two earlier attempts used hand-built leaves only and both missed a compiler shape:
-the first read one leaf, so a lowered ``||`` splitting latch from clock read as
-proven-indefinite; the second walked the whole tree for a ``block_context`` clock but
-kept OPACITY leaf-local with opaque set ``{computed, top}``, so
-``require(!frozen || _clock() > unpauseAt)`` (``_clock()`` an internal view returning
-``block.timestamp``, like Uniswap V3's ``_blockTimestamp()``) still published the
-proven state for a freeze that expires.
-
-Cases compile Solidity and run ``build_predicate_artifacts``, which also stamps the
-``operand_absorption`` root marker the proof requires. Hand-built-leaf assertions
-live in ``test_effects_calldata.py``.
+"""``no_time_reference`` is a proof by absence of the most severe freeze, so it's tested against real compiler
+output. Two earlier hand-built-leaf attempts missed shapes: a lowered ``||`` splitting latch from clock, and a
+clock behind an internal view (``_clock()``, like Uniswap V3's ``_blockTimestamp()``). Hand-built leaf
+assertions live in ``test_effects_calldata.py``.
 """
 
 from __future__ import annotations
@@ -259,36 +245,25 @@ def _clock_operands(facts: cd.ContractFacts) -> int:
     [("HelperClock", "view_call"), ("OracleClock", "external_call")],
 )
 def test_a_clock_behind_a_callee_denies_the_proven_indefinite_state(compiled, contract_name, opaque_source):
-    """``require(!frozen || <callee>() > unpauseAt)`` must not read as PROVEN indefinite:
-    time alone lifts the freeze, so the honest answers are a resolved window or
-    ``not_determined``.
+    """Time alone lifts this freeze.
 
-    Both preconditions of the whole-tree walk are shown INERT first (that is why it
-    was a false proof, not a near miss): no ``block_context`` operand exists in the
-    tree, and the clock hides behind an operand that only NAMES a callee the
-    absorption recorder never enters."""
+    Both whole-tree preconditions are shown inert first, which is why it was a false proof.
+    """
     facts = compiled[contract_name]
     assert facts.trees, contract_name
     assert _clock_operands(facts) == 0, "rule 1 cannot see this clock — that is the premise"
     assert opaque_source in _operand_sources(facts)
-    # The marker is present, so rule 2's completeness precondition cannot be what produces the answer.
     assert all(cd._absorption_recorded(tree) for tree in facts.trees.values())
 
     assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "not_determined")
-    # The stored expiry is not a latch this reader can bound either: the window is a
-    # timestamp in storage, not an offset in the code (etherfi's real shape).
+    # The window is a timestamp in storage, not an offset in code (etherfi's real shape).
     assert cd.read_max_pause_duration(facts, {"unpauseAt"}) == (None, "not_determined")
 
 
 def test_the_proven_indefinite_state_is_still_reachable_from_compiled_source(compiled):
-    """POSITIVE CONTROL for the demotion above: a discrimination, not a blanket refusal.
-
-    ``require(!frozen)`` has one leaf, one operand, no callee and no clock, so the
-    proof stands and the "indefinite latch" copy stays reachable.
-
-    R2: the firing proof for the ``no_time_reference`` branch. It has zero realised
-    rows locally because no persisted tree carries the ``operand_absorption`` marker
-    yet (static stage not re-run since A7): a lower bound, not a dead branch."""
+    """R2: zero realised rows locally because no persisted tree carries ``operand_absorption`` yet; a lower bound,
+    not a dead branch.
+    """
     facts = compiled["PlainLatch"]
     assert _operand_sources(facts) == {"state_variable"}
     assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "no_time_reference")
@@ -297,15 +272,9 @@ def test_the_proven_indefinite_state_is_still_reachable_from_compiled_source(com
 @pytest.mark.parametrize(
     ("contract_name", "latch"),
     [
-        # ``require(!frozen || block.number > unpauseAtBlock)`` must not read as PROVEN indefinite:
-        # the chain reaching the block lifts the freeze with no transaction.
-        # ``block_context_kind == "number"`` is a clock spelling the demotion must count (its
-        # ``block.timestamp`` twin lands here via the same rule).
+        # A block-number clock lifts the freeze with no transaction.
         pytest.param("NumberTwin", "frozen", id="block-number-clock-denies-proven-indefinite"),
-        # The units trap: ``require(block.number - pausedUntilBlock < 216000)`` carries latch + clock +
-        # constant, but the constant is a block count while ``duration_bound_seconds`` is a severity
-        # reducer in seconds; publishing 216000 would understate a ~30-day gate as 2.5 days. The
-        # block clock only demotes the proven state.
+        # 216000 is a block count; publishing it as seconds would understate a ~30-day gate as 2.5 days.
         pytest.param("BlockWindow", "pausedUntilBlock", id="block-count-window-never-published-as-seconds"),
     ],
 )
@@ -319,15 +288,9 @@ def test_a_block_clock_demotes_to_not_determined(compiled, contract_name, latch)
 @pytest.mark.parametrize(
     "contract_name",
     [
-        # ``guard_constant`` returns before both checks, so widening them cannot cost a resolved
-        # window: ``require(block.timestamp - pausedUntil < 2592000)`` puts clock, latch and offset
-        # in one leaf's ``operands | absorbed_operands``, which no lossy list or unentered callee
-        # can fake; this keeps the conservative rules from eating the only positive answer.
+        # Keeps the conservative rules from eating the only positive answer.
         pytest.param("AbsorbedWindow", id="window-the-recorder-did-read"),
-        # POSITIVE CONTROLS for the side/operator awareness of the harvest: narrowed to a shape,
-        # not one spelling. ``2592000 > block.timestamp - pausedUntil`` (constant on the LEFT under
-        # ``gt``) and ``pausedUntil - block.timestamp < 2592000`` (reversed subtraction) bound the
-        # gap by the same magnitude and must keep resolving.
+        # The harvest is narrowed to a shape, not one spelling.
         pytest.param("WindowLeft", id="gap-ceiling-constant-on-left"),
         pytest.param("RemainingWindow", id="gap-ceiling-reversed-subtraction"),
     ],
@@ -339,35 +302,21 @@ def test_resolving_windows_still_resolve(compiled, contract_name):
 @pytest.mark.parametrize(
     ("contract_name", "fabricated"),
     [
-        # The two shapes that motivated narrowing the harvest.
         ("LeadTime", 3600),
         ("Cooldown", 300),
-        # The same operand union as the resolving window, operator flipped.
         ("ElapsedCooldown", 600),
-        # Sign unrecorded: a margin before an absolute expiry.
         ("MinusWindow", 300),
-        # The mainstream window shape, refused for the SAME missing fact (see below).
         ("LatchPlusWindow", 2592000),
     ],
 )
 def test_a_constant_the_comparison_shape_does_not_make_a_window_is_not_published(compiled, contract_name, fabricated):
-    """On compiled source, each guard puts a latch, a seconds clock and a plausible
-    constant in one leaf's ``operands ∪ absorbed_operands``, and the side/operator-blind
-    harvest published the constant as ``duration_bound_seconds``: a lead time, cooldown
-    offset, minimum-elapsed or safety margin read as the freeze window, in the
-    severity-REDUCING direction.
+    """The side/operator-blind harvest published lead times and cooldowns as the freeze window, reducing severity.
 
-    ``fabricated`` is what each shape used to publish. The honest answer for all five
-    is ``not_determined``: the freeze is timed but the window is not in this comparison.
-
-    ``LatchPlusWindow`` is the recall cost, pinned deliberately: its constant IS the
-    window, but the evidence is byte-identical to ``MinusWindow``'s because
-    ``predicates._stamp_absorbed_operands`` records neither the additive sign nor the
-    side. Stamping the sign in the static plane recovers it; this pin makes that
-    change visible."""
+    ``LatchPlusWindow`` is the pinned recall cost: ``_stamp_absorbed_operands`` records neither sign nor side, so it's
+    indistinguishable from ``MinusWindow``.
+    """
     facts = compiled[contract_name]
     assert facts.trees, contract_name
-    # The constant really is in the leaf's union, so the refusal is a shape judgment, not a missing operand.
     constants = {
         str(op.get("constant_value"))
         for tree in facts.trees.values()

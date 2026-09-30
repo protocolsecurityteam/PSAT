@@ -1,16 +1,6 @@
-"""Regression test: parametric guards land in semantic_functions but resolve to no
-concrete principals, the EtherFiTimelock symptom (todo.txt #7).
-
-grantRole/revokeRole/renounceRole show as 'Unresolved' in the UI although the contract
-is plainly role-controlled: the functions are admitted to ``semantic_functions`` but
-never bound to principals, so ``effective_permissions`` has empty ``direct_owner`` /
-``authority_roles`` / ``controllers``. Pins three claims: (1) OZ-style and
-renamed-helper variants both admit (the admission gate is not the broken layer);
-(2) the Unguarded control does NOT admit; (3) both guarded variants emit an
-``EffectiveFunctionPermission`` with EMPTY principals, the gap to close.
-
-The xfail in (3) flips to passing when the policy stage can express 'guarded by
-getRoleAdmin(role_arg) holders' as a typed parametric principal (todo.txt #7).
+"""The EtherFiTimelock symptom (todo.txt #7): role functions are admitted to ``semantic_functions`` but bind no
+principals, so the UI shows 'Unresolved'. The xfail flips when the policy stage can express
+'getRoleAdmin(role_arg) holders' as a typed parametric principal.
 """
 
 from __future__ import annotations
@@ -23,7 +13,6 @@ import pytest
 
 from services.static import collect_contract_analysis
 
-# Three minimal projects, one subject contract each.
 OZ_SOURCE = """
 pragma solidity ^0.8.19;
 
@@ -105,15 +94,11 @@ def _semantic_signatures(analysis: Any) -> set[str]:
     return {fn["function"] for fn in (ac.get("semantic_functions") or [])}
 
 
-# (1) Admission stage — passes for both naming conventions.
-
-
 @pytest.mark.parametrize(
     ("contract_name", "source", "signature"),
     [
         pytest.param("OZStyle", OZ_SOURCE, "grantRole(bytes32,address)", id="oz_style_grant_role"),
-        # The gate is name-neutral: the helper rename doesn't change the IR shape and ``caller_reach_analysis``
-        # recurses into it to find the ``caller_in_mapping`` revert-gate.
+        # ``caller_reach_analysis`` recurses into the renamed helper.
         pytest.param("Renamed", RENAMED_SOURCE, "dispenseRole(bytes32,address)", id="renamed_helpers_dispense_role"),
     ],
 )
@@ -124,9 +109,7 @@ def test_guarded_role_function_admits(tmp_path: Path, contract_name, source, sig
 
 
 def test_unguarded_grant_role_does_not_admit(tmp_path: Path):
-    """An unguarded ``grantRole`` writes mapping state, so it IS admitted under the
-    structural rule; the "no caller_authority leaf" control is asserted on the
-    predicate tree instead."""
+    """Admitted under the structural rule, so the control is asserted on the predicate tree instead."""
     project = _write_project(tmp_path, "Unguarded", UNGUARDED_SOURCE)
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
@@ -145,12 +128,8 @@ def test_unguarded_grant_role_does_not_admit(tmp_path: Path):
     assert not _has_auth_leaf(tree), "unguarded grantRole surfaced a caller/delegated authority leaf"
 
 
-# (2) Resolution stage — empty principals for parametric guards (the user-facing "Unresolved" gap).
-
-
 def _function_entry(analysis: Any, signature: str) -> dict | None:
-    """Pull the semantic function entry. The empty principal state is observable
-    there before the policy join, which this test deliberately skips."""
+    """The empty principal state is visible here before the policy join."""
     ac = analysis.get("semantic_control") or {}
     for fn in ac.get("semantic_functions") or []:
         if fn["function"] == signature:
@@ -175,25 +154,12 @@ def _function_entry(analysis: Any, signature: str) -> dict | None:
     strict=True,
 )
 def test_renamed_dispense_role_emits_resolvable_principal_signal(tmp_path: Path):
-    """Beyond mere admission, the semantic function entry must carry
-    enough typed signal that the policy stage downstream can compute a
-    non-empty principal set (or explicitly mark it as 'parametric,
-    holders TBD' instead of just 'Unresolved').
-
-    Two acceptable shapes for passing:
-      a. A non-empty resolved member set from semantic event evidence.
-      b. A new typed field, e.g. ``guard_shape`` / ``parametric_guard``,
-         identifying this as a getRoleAdmin(role_arg) gate so the UI
-         can say 'role admin' instead of 'unresolved'.
-    """
+    """Pass needs either a non-empty member set from events or a typed parametric-guard field the UI can route on."""
     project = _write_project(tmp_path, "Renamed", RENAMED_SOURCE)
     analysis = collect_contract_analysis(project)
     entry = _function_entry(analysis, "dispenseRole(bytes32,address)")
     assert entry is not None, "admission already verified above; this should never trip"
 
-    # Today: controller_refs ≈ ['_members', 'role'], guards mention
-    # the mapping, but nothing in the entry types out as a parametric
-    # role-admin guard the policy stage can route on.
     has_typed_parametric_guard = (
         "guard_shape" in entry  # not yet a field — flips when added
         or "parametric_guard" in entry

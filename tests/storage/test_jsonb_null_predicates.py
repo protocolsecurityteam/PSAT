@@ -1,15 +1,6 @@
-"""The jsonb-null audit, as an enforced invariant rather than a one-off sweep.
-
-1. :func:`test_no_sql_null_test_over_a_jsonb_column` re-runs the audit each commit. A SQL null
-   test over a JSONB column is true for the jsonb scalar ``null`` as well as a real payload, so a
-   "does this row carry evidence?" filter written that way is inflated (five offenders before
-   this module: ``deferred_reconciler``, ``company_overview``, ``coverage``).
-2. :func:`test_jsonb_state_separates_three_states_and_has_payload_selects_one` pins, against real Postgres,
-   that the three states exist, ``db.jsonb`` separates them, and the replaced predicate does not.
-
-Known scan limits: it resolves a column by *attribute name*, so ``col = Model.conditions`` then
-``col.is_not(None)`` is invisible to it (the DB test uses that form on purpose to hold the naive
-predicate); ``alembic/versions/`` is out of scope (applied history).
+"""A SQL null test over JSONB is also true for the jsonb scalar ``null``, inflating "has evidence" filters (five
+offenders before this). The scan resolves columns by attribute name, so ``col = Model.x; col.is_not(None)`` is
+invisible to it; ``alembic/versions/`` is out of scope.
 """
 
 from __future__ import annotations
@@ -27,31 +18,24 @@ from db.models import Base, ContractMaterialization
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 
-# The audited scope, plus ``tests`` — a fixture that asserts an
-# inflated count is as wrong as production code that produces one.
+# A fixture asserting an inflated count is as wrong as code producing one.
 SCANNED_DIRS = ("services", "routers", "workers", "db", "scripts", "tests")
 
-# SQLAlchemy spells the ORM-side null test three ways; all compile identically.
 NULL_TEST_METHODS = frozenset({"is_", "isnot", "is_not"})
 
 
 def _jsonb_column_names() -> frozenset[str]:
-    """Every JSONB column name from the mapper metadata, so a new column is covered the day it is added."""
     names = {c.name for t in Base.metadata.tables.values() for c in t.columns if isinstance(c.type, JSON)}
     assert "conditions" in names and "witness" in names, "metadata scan found no known JSONB columns"
     return frozenset(names)
 
 
 def _sql_null_test_pattern(columns: frozenset[str]) -> re.Pattern[str]:
-    """Raw-SQL form: an optionally table-qualified column followed by a null test."""
     return re.compile(r"\b(?:\w+\.)?(" + "|".join(sorted(columns)) + r")\s+is\s+(?:not\s+)?null\b", re.IGNORECASE)
 
 
 def _typeof_guarded(sql: str, column: str) -> bool:
-    """Does this statement already discriminate the jsonb scalar null itself?
-
-    ``x is null or jsonb_typeof(x) = 'null'`` is the correct long form of
-    :func:`db.jsonb.jsonb_has_payload`'s negation; flagging it would train readers to ignore the check."""
+    """Flagging the correct long form would train readers to ignore the check."""
     return re.search(r"jsonb_typeof\(\s*(?:\w+\.)?" + column + r"\b", sql, re.IGNORECASE) is not None
 
 
@@ -97,10 +81,7 @@ def test_no_sql_null_test_over_a_jsonb_column() -> None:
 
 
 def test_scan_detects_a_planted_offender(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The scan is not vacuous — it fires on both forms it claims to catch."""
-    # Assembled, not written out whole: a literal offending statement in this
-    # file would be a real finding for the scan above, and silencing that with
-    # a self-exemption would blind the scan to the rest of the file.
+    # Assembled so this file doesn't contain a literal finding.
     bad_sql = "conditions " + "is not " + "null"
     planted = tmp_path / "services" / "planted.py"
     planted.parent.mkdir(parents=True)
@@ -119,19 +100,14 @@ def test_scan_detects_a_planted_offender(tmp_path: pathlib.Path, monkeypatch: py
 
 @pytest.fixture()
 def _materializations(db_session: Session):
-    """Three rows, one per state of a JSONB column, then clean up.
-
-    ``contract_materializations`` holds all three states in production (75 written-null, 6 unset,
-    1 payload) and has no foreign keys."""
+    """Production has all three states here (75 written-null, 6 unset, 1 payload) and no foreign keys."""
     from sqlalchemy import null
 
     rows = [
         ContractMaterialization(
             chain="w0-5-payload", bytecode_keccak="0x" + "1" * 64, address="0x" + "1" * 40, analysis={"trees": 1}
         ),
-        # A Python ``None`` into a JSONB column: SQLAlchemy's default
-        # ``none_as_null=False`` stores the jsonb scalar null, not SQL NULL.
-        # This is how 5770/5770 ``artifacts.data`` rows got their value.
+        # ``none_as_null=False`` stores the jsonb scalar null; that's how 5770/5770 ``artifacts.data`` rows got theirs.
         ContractMaterialization(
             chain="w0-5-written-null", bytecode_keccak="0x" + "2" * 64, address="0x" + "2" * 40, analysis=None
         ),

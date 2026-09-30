@@ -241,7 +241,6 @@ def _make_monitored_contract(
 
 
 class TestShouldTriggerReanalysis:
-
     @pytest.mark.parametrize("event_type", sorted(_TRIGGERING_EVENT_TYPES))
     def test_triggering_event_types(self, event_type):
         assert should_trigger_reanalysis(event_type) is True
@@ -293,7 +292,6 @@ class TestShouldTriggerReanalysis:
 
 
 class TestMaybeQueueReanalysis:
-
     def test_upgrade_queues_job(self, db_session):
         mc = _make_monitored_contract(db_session, "0x" + "aa" * 20, "proxy")
         job = maybe_queue_reanalysis(db_session, mc, "upgraded")
@@ -457,7 +455,6 @@ class TestMaybeQueueReanalysis:
 
 @requires_anvil
 class TestReanalysisAnvilIntegration:
-
     def test_proxy_upgrade_triggers_reanalysis_job(self, anvil_env, db_session):
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
@@ -703,7 +700,6 @@ contract ImplV3 { uint256 public version = 3; }
 
 @requires_anvil
 class TestEventEmbedAnnotation:
-
     def test_event_data_contains_reanalysis_job_id(self, anvil_env, db_session):
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
@@ -790,7 +786,6 @@ def test_embed_without_reanalysis_has_no_field(db_session):
 
 
 class TestSnapshotAndDiff:
-
     def test_snapshot_captures_contract_state(self, db_session):
         from services.monitoring.reanalysis import _build_snapshot
 
@@ -956,7 +951,6 @@ class TestSnapshotAndDiff:
 
 
 class TestCompletionWebhook:
-
     @pytest.fixture()
     def _protocol_with_sub(self, db_session):
         from db.models import ProtocolSubscription

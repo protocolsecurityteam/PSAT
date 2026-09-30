@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import uuid
@@ -299,7 +298,6 @@ def test_capabilities_cache_keyed_on_block_and_chain(api_client, db_session, mon
 def test_capabilities_route_is_not_admin_gated(api_client, db_session):
     """Adding require_admin_key would lock external consumers out."""
     import api as api_module
-
     from routers.deps import require_admin_key
 
     api_module.app.dependency_overrides.pop(require_admin_key, None)

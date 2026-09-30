@@ -1,14 +1,5 @@
-"""Replay harness for the recorded 2026-08-01 monitoring scan window.
-
-The fixture (``tests/fixtures/monitoring/replay_scan_window.json.gz``) is a
-read-only snapshot of the audited dev-DB state: the enrolled configs of the
-three contracts that emitted, every log the scanner's ``topics_union`` +
-address filter would have fetched in the window, and the identity of all 446
-``monitored_events`` rows that pass produced.
-
-The harness feeds those logs back through ``_process_window`` so any change to
-the taxonomy is measured as a differential against a recorded run rather than
-against a hand-written expectation.
+"""Replays the recorded 2026-08-01 scan window (``tests/fixtures/monitoring/replay_scan_window.json.gz``) through
+``_process_window`` so taxonomy changes are measured against a recorded run of 446 persisted rows.
 """
 
 from __future__ import annotations
@@ -30,16 +21,12 @@ FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "monitoring" /
 
 
 def load_replay_fixture() -> dict[str, Any]:
-    # Gzipped: the recording is a complete audited window (446 raw logs) that
-    # only ever changes by wholesale regeneration, so line-diffability buys
-    # nothing and the hex-heavy JSON compresses ~6x.
+    # Only ever regenerated wholesale, so line-diffability buys nothing and it compresses ~6x.
     with gzip.open(FIXTURE_PATH, "rt") as fh:
         return json.load(fh)
 
 
 class ReplayEnv:
-    """The seeded contracts + decoded logs for one replay."""
-
     def __init__(self, session: Session, fixture: dict[str, Any]) -> None:
         self.session = session
         self.fixture = fixture
@@ -93,8 +80,7 @@ class ReplayEnv:
             addresses=addresses,
             cursor=self.fixture["window"]["from_block"] - 1,
         )
-        # Decode through the production fetcher path so ``raw`` is the same
-        # dict shape ``_process_window``'s tracked-spec branch reads.
+        # Same dict shape ``_process_window``'s tracked-spec branch reads.
         self.logs = [decoded for log in self.fixture["logs"] if (decoded := _decode_log(log)) is not None]
         return self
 
@@ -112,11 +98,7 @@ class ReplayEnv:
         return events
 
     def persisted_identities(self) -> set[tuple[str, str, str, int]]:
-        """``(address, event_type, tx_hash, log_index)`` for every persisted row.
-
-        This is the differential unit: the same identity the partial unique
-        index uses, plus the emitter so a row is attributable.
-        """
+        """The partial unique index's identity plus the emitter."""
         rows = self.session.execute(
             select(
                 MonitoredContract.address,
@@ -128,13 +110,9 @@ class ReplayEnv:
         return {(a.lower(), et, tx, li) for a, et, tx, li in rows}
 
     def persisted_salience(self) -> list[tuple[str, str | None, tuple[str, ...]]]:
-        """``(event_type, data.salience, data.salience_basis)`` per persisted row.
+        """A persisted row without an auditable level means the spine stopped covering this path.
 
-        The salience census's liveness unit: a replayed publication that
-        reaches the DB without an auditable level is a spine that stopped
-        covering the path the recording actually exercises. A missing or
-        non-list basis normalizes to the empty tuple so a caller asserting
-        "non-empty" cannot be satisfied by a malformed one.
+        A malformed basis normalizes to empty so "non-empty" can't pass on it.
         """
         rows = self.session.execute(select(MonitoredEvent.event_type, MonitoredEvent.data)).all()
         out: list[tuple[str, str | None, tuple[str, ...]]] = []

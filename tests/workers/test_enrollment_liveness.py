@@ -92,7 +92,6 @@ def test_actual_takeover_fences_all_stale_commits_and_heartbeat(enrollment, monk
     def build(session, *_args, **_kwargs):
         with factory() as other:
             other.execute(text("UPDATE monitoring_enrollment_queue SET lease_expires_at=now()-interval '1 second'"))
-            # This real claimant locks/replaces the expired token atomically.
             successor.extend(reconciler.claim_due_enrollments(other, lease_ttl_s=10, limit=1))
         assert len(successor) == 1
         time.sleep(0.75)  # At least two old-owner keepalive attempts.

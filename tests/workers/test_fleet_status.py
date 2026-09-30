@@ -1,11 +1,3 @@
-"""Tests for the fleet / process-status backend.
-
-Covers ``db.queue.record_heartbeat`` (upsert + best-effort),
-``services.aggregations.build_fleet_status`` (liveness + work breakdown),
-the ``/api/fleet`` endpoint, and the daemon-loop heartbeat wiring for the
-reconciler and event-log indexer.
-"""
-
 from __future__ import annotations
 
 import time
@@ -58,15 +50,11 @@ def _addr(n: int) -> str:
 
 @pytest.fixture()
 def _clean_heartbeats(db_session):
-    """worker_heartbeats isn't in the conftest teardown sweep."""
     db_session.query(WorkerHeartbeat).delete()
     db_session.commit()
     yield
     db_session.query(WorkerHeartbeat).delete()
     db_session.commit()
-
-
-# ── record_heartbeat ────────────────────────────────────────────────────────
 
 
 @requires_postgres
@@ -92,7 +80,6 @@ def test_record_heartbeat_insert_then_upsert(db_session, monkeypatch, _clean_hea
 
 
 def test_record_heartbeat_is_best_effort(monkeypatch):
-    """A DB failure must be swallowed — a heartbeat write can't crash a loop."""
     import db.queue.heartbeats as queue_mod
 
     def _boom():
@@ -100,9 +87,6 @@ def test_record_heartbeat_is_best_effort(monkeypatch):
 
     monkeypatch.setattr(queue_mod, "SessionLocal", _boom)
     record_heartbeat("anything", status="running")  # must not raise
-
-
-# ── build_fleet_status ───────────────────────────────────────────────────────
 
 
 @requires_postgres
@@ -149,7 +133,7 @@ def test_build_fleet_status_distinguishes_alive_from_stale(db_session, _clean_he
     assert cov["beat_age_s"] == 5.0
     assert cov["last_beat_at"] is not None
 
-    # 1h old, well past the indexer's 3×90s staleness window.
+    # The indexer's staleness window is 3×90s.
     assert idx["alive"] is False and idx["stale"] is True
 
 
@@ -173,10 +157,8 @@ def test_build_fleet_status_reports_work_and_watchers(db_session, _clean_heartbe
 
 @requires_postgres
 def test_build_fleet_status_surfaces_cursor_backfill_lag(db_session, _clean_heartbeats):
-    # One cursor at head + one cursor still at block 0 (the creation-block seed
-    # fell back to 0 on a lookup miss, so it backfills the whole chain).
-    # max_indexed_block alone reads "healthy" because the leader is at head —
-    # min/spread/lagging expose it.
+    # The creation-block seed fell back to 0 on a lookup miss; ``max_indexed_block`` alone reads healthy because the
+    # leader is at head.
     db_session.add(
         IndexedEventCursor(chain_id=1, event_address=_addr(10), topic0="0x" + "aa" * 32, last_indexed_block=19_000_000)
     )
@@ -201,8 +183,6 @@ def test_build_fleet_status_surfaces_cursor_backfill_lag(db_session, _clean_hear
 
 @requires_postgres
 def test_build_fleet_status_cursor_lag_is_chain_scoped(db_session, _clean_heartbeats):
-    """Lag is measured against each chain's own leader: base's higher block numbers are
-    not a backfill signal for mainnet cursors."""
     for i in (20, 21):
         db_session.add(
             IndexedEventCursor(
@@ -221,16 +201,12 @@ def test_build_fleet_status_cursor_lag_is_chain_scoped(db_session, _clean_heartb
     out = build_fleet_status(db_session)
     work = next(d for d in out["daemons"] if d["process"] == HEARTBEAT_EVENT_INDEXER)["work"]
     assert work["lagging_cursors"] == 0
-    # Spread is a within-chain figure; the cross-chain height gap is not spread.
     assert work["block_spread"] == 0
-    # Same for the scan-block spread over monitored contracts.
     assert out["watchers"]["scan_block_spread"] == 0
 
 
 @requires_postgres
 def test_build_fleet_status_surfaces_backlog_and_oldest_pending_age(db_session, _clean_heartbeats):
-    # The Option B triad: backlog (drainable depth) + oldest_pending_age_s
-    # (how long the oldest waiter has sat) come from cheap aggregate SQL.
     now = datetime(2026, 5, 28, 12, 0, 0, tzinfo=timezone.utc)
 
     p = Protocol(name=f"fleet-triad-{_addr(99)[-8:]}")
@@ -242,17 +218,14 @@ def test_build_fleet_status_surfaces_backlog_and_oldest_pending_age(db_session, 
         db_session.add(ar)
         return ar
 
-    # Two rows awaiting text extraction; the oldest discovered 600s ago.
     _audit(n=1, text_extraction_status=None, discovered_at=now - timedelta(seconds=600))
     _audit(n=2, text_extraction_status=None, discovered_at=now - timedelta(seconds=120))
-    # One row past text, awaiting scope, text extracted 300s ago.
     _audit(
         n=3,
         text_extraction_status="success",
         scope_extraction_status=None,
         text_extracted_at=now - timedelta(seconds=300),
     )
-    # One fully-extracted row — counts toward neither backlog.
     _audit(
         n=4,
         text_extraction_status="success",
@@ -261,7 +234,6 @@ def test_build_fleet_status_surfaces_backlog_and_oldest_pending_age(db_session, 
     )
     db_session.commit()
 
-    # A non-proxy contract + one pending coverage row (the coverage backlog).
     c = Contract(protocol_id=p.id, address=_addr(5), chain="ethereum", contract_name="Pool")
     db_session.add(c)
     db_session.commit()
@@ -298,8 +270,7 @@ def test_build_fleet_status_surfaces_backlog_and_oldest_pending_age(db_session, 
 
 @requires_postgres
 def test_build_fleet_status_per_chain_indexer_and_monitoring(db_session, _clean_heartbeats):
-    # Two chains present: mainnet (1) and Base (8453). Per-chain rollups must
-    # separate them so a stalled Base indexer is visible without spelunking.
+    # Per-chain rollups make a stalled Base indexer visible.
     import uuid as _uuid
     from datetime import timedelta as _td
 
@@ -317,8 +288,7 @@ def test_build_fleet_status_per_chain_indexer_and_monitoring(db_session, _clean_
     )
     db_session.add(MonitoredContract(address=_addr(4), chain="ethereum", last_scanned_block=100))
     db_session.add(MonitoredContract(address=_addr(5), chain="base", last_scanned_block=50))
-    # A live scanner lease for Base — the per-chain lease naming is what gives
-    # monitoring visibility without a heartbeat schema change.
+    # Per-chain lease naming gives visibility without a heartbeat schema change.
     db_session.add(DaemonLease(name="protocol_scanner:base", holder=_uuid.uuid4(), expires_at=now + _td(seconds=60)))
     db_session.commit()
 
@@ -338,7 +308,6 @@ def test_build_fleet_status_per_chain_indexer_and_monitoring(db_session, _clean_
     assert set(mon_by_chain) >= {"ethereum", "base"}
     assert mon_by_chain["ethereum"]["monitored_contracts"] == 1
     assert mon_by_chain["base"]["monitored_contracts"] == 1
-    # Base holds a live scanner lease; mainnet does not.
     assert mon_by_chain["base"]["scanner_lease_held"] is True
     assert mon_by_chain["ethereum"]["scanner_lease_held"] is False
 
@@ -368,17 +337,13 @@ def test_fleet_endpoint_returns_all_groups(api_client, db_session, _clean_heartb
     assert {d["process"] for d in data["daemons"]} == _KNOWN_PROCESSES
 
 
-# ── daemon-loop heartbeat wiring (no DB) ─────────────────────────────────────
-
-
 def test_reconciler_loop_records_heartbeat(monkeypatch):
     from services.monitoring import reconciler
 
     stop = Event()
     beats: list[tuple[str, dict]] = []
 
-    # The loop now drives the dirty-queue drain (+ K-sweep enqueue) rather than a
-    # walk-all reconcile; the drain stub ends the loop after one tick.
+    # The drain stub ends the loop after one tick.
     monkeypatch.setattr(reconciler, "sweep_enqueue_stale", lambda session, *a, **k: [])
 
     def fake_drain(_rpc, _chain, **kw):
@@ -400,12 +365,8 @@ def test_reconciler_loop_records_heartbeat(monkeypatch):
 
 
 def test_reconcile_and_heartbeat_run_while_scan_blocks(monkeypatch):
-    """Regression pin for the reconciler-starvation bug.
-
-    The old serial loop let a scan blocked on a cold backfill (LayerZero endpoint
-    cursor, hours) starve the reconcile and fleet heartbeat. Backfill now runs on its
-    own thread; with scan blocked indefinitely, reconcile + heartbeat must still
-    fire every ``interval`` (the old loop times out on ``reconcile_called``).
+    """A scan blocked on a cold backfill (LayerZero endpoint cursor, hours) used to starve reconcile and the
+    heartbeat; backfill now has its own thread.
     """
     from workers import event_log_indexer as idx
 
@@ -447,7 +408,6 @@ def test_reconcile_and_heartbeat_run_while_scan_blocks(monkeypatch):
     t.start()
     try:
         assert scan_entered.wait(timeout=5), "backfill thread never entered scan"
-        # Scan is now blocked. These two are the whole point of the fix.
         assert reconcile_called.wait(timeout=5), "reconcile was starved while scan was blocked (regression)"
         beat_deadline = time.monotonic() + 5
         while time.monotonic() < beat_deadline:

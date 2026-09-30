@@ -1,8 +1,4 @@
-"""Tests for static worker cache hit/miss and proxy cache (mock-based).
-
-Where a proxy is still a proxy after the mocked ``_resolve_proxy``, the worker skips
-Slither and raises ``JobHandledDirectly``.
-"""
+"""A proxy that's still a proxy after the mocked ``_resolve_proxy`` skips Slither and raises ``JobHandledDirectly``."""
 
 from __future__ import annotations
 
@@ -23,10 +19,6 @@ from tests.cache_helpers import (
 )
 
 pytestmark = requires_postgres
-
-# ---------------------------------------------------------------------------
-# Static worker cache hit
-# ---------------------------------------------------------------------------
 
 
 def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
@@ -59,17 +51,11 @@ def test_static_worker_cache_hit_skips_analysis(db_session, monkeypatch):
 
     worker.process(db_session, job)
 
-    # Dependency phase and proxy resolution should run; Slither/analysis/tracking should NOT
     assert "resolve_proxy" in phases_run
     assert "dependency" in phases_run
     assert "slither" not in phases_run
     assert "analysis" not in phases_run
     assert "tracking_plan" not in phases_run
-
-
-# ---------------------------------------------------------------------------
-# Static worker cache miss
-# ---------------------------------------------------------------------------
 
 
 def test_static_worker_cache_miss_runs_analysis(db_session, monkeypatch):
@@ -101,16 +87,10 @@ def test_static_worker_cache_miss_runs_analysis(db_session, monkeypatch):
 
     worker.process(db_session, job)
 
-    # All phases should run (slither CLI subprocess removed in commit 438a11c).
     assert "resolve_proxy" in phases_run
     assert "dependency" in phases_run
     assert "analysis" in phases_run
     assert "tracking_plan" in phases_run
-
-
-# ---------------------------------------------------------------------------
-# Proxy cache optimization -- _check_proxy_cache tests (mock-based)
-# ---------------------------------------------------------------------------
 
 
 def test_proxy_cache_non_proxy_source(db_session, monkeypatch):
@@ -167,8 +147,7 @@ def test_proxy_cache_proxy_unchanged(db_session, monkeypatch):
     worker = StaticWorker()
     phases_run = _patch_static_worker_phases(monkeypatch, worker)
 
-    # Proxy contracts raise JobHandledDirectly because the proxy wrapper is
-    # completed directly and a child job handles the implementation analysis.
+    # The wrapper completes directly and a child job analyzes the implementation.
     from workers.base import JobHandledDirectly
 
     with pytest.raises(JobHandledDirectly):
@@ -296,11 +275,6 @@ def test_proxy_cache_diamond_proxy_falls_back(db_session, monkeypatch):
     assert "resolve_proxy" in phases_run
 
 
-# ---------------------------------------------------------------------------
-# _check_proxy_cache / _apply_proxy_cache unit tests
-# ---------------------------------------------------------------------------
-
-
 def test_apply_proxy_cache_non_proxy(db_session):
     from db.models import Contract
     from db.queue import create_job
@@ -369,11 +343,6 @@ def test_apply_proxy_cache_proxy(db_session):
     assert target.implementation == IMPL_ADDR
 
 
-# ---------------------------------------------------------------------------
-# _check_proxy_cache edge case tests
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("source_contracts", "request_keys"),
     [
@@ -396,7 +365,7 @@ def test_check_proxy_cache_returns_none_on_missing_input(db_session, monkeypatch
     from db.queue import create_job
     from workers.static_worker import _check_proxy_cache
 
-    # Clear the RPC env (eRPC route) so the no-rpc case has no fallback to resolve.
+    # Otherwise the no-rpc case falls back to the eRPC route.
     monkeypatch.delenv("ETH_RPC", raising=False)
     monkeypatch.delenv("ERPC_BASE_URL", raising=False)
 
@@ -415,11 +384,6 @@ def test_check_proxy_cache_returns_none_on_missing_input(db_session, monkeypatch
     db_session.flush()
 
     assert _check_proxy_cache(db_session, job, contract) is None
-
-
-# ---------------------------------------------------------------------------
-# End-to-end: discovery cache hit -> static worker cache hit
-# ---------------------------------------------------------------------------
 
 
 def test_e2e_discovery_then_static_with_cache(db_session, monkeypatch):

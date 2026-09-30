@@ -1,9 +1,5 @@
-"""Row builders for the company-overview / analysis-detail aggregation tests.
-
-Protocol → Job → Contract is the spine every one of those payloads is read off,
-and three test modules used to carry their own copy of it. One definition here;
-the addresses are UUID-derived so two modules seeding "the same" contract never
-collide on ``uq_contract_address_chain``.
+"""Protocol → Job → Contract rows for the aggregation tests, with UUID-derived addresses so modules never collide on
+``uq_contract_address_chain``.
 """
 
 from __future__ import annotations
@@ -15,12 +11,7 @@ from db.models import Contract, Job, JobStage, JobStatus, Protocol
 
 
 def _addr(seed: str) -> str:
-    """Deterministic-but-test-unique 0x address keyed by ``seed``.
-
-    The conftest db_session fixture cleans up Protocol but not Contract or
-    Job rows (they have ON DELETE SET NULL). Hardcoding addresses across
-    tests collides on uq_contract_address_chain — UUID-derive instead.
-    """
+    """db_session cleans Protocol but not Contract or Job (ON DELETE SET NULL)."""
     return "0x" + (uuid.uuid4().hex + seed.encode().hex())[:40]
 
 

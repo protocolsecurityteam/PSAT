@@ -1,12 +1,3 @@
-"""``build_controller_tracking`` semantic behavior.
-
-The predicate-tree + effects-driven builder covers the old controller-tracking shapes:
-inherited Ownable ``_owner`` is emitted as ``state_variable:_owner`` from leaves,
-external authority registries are promoted to ``external_contract``, and registry
-state variables are promoted without inventing role identifiers from standard ABI/event
-names.
-"""
-
 from __future__ import annotations
 
 import textwrap
@@ -71,8 +62,6 @@ def test_inherited_owner_caught_from_predicate_tree(tmp_path):
     assert "state_variable:_owner" in by_id, list(by_id.keys())
     target = by_id["state_variable:_owner"]
     assert target["kind"] == "state_variable"
-    # Private state-var with same-name getter ``owner()`` → read_spec
-    # points at the GETTER, not the var.
     read_spec = target.get("read_spec")
     assert isinstance(read_spec, dict)
     assert read_spec["target"] == "owner"
@@ -125,8 +114,6 @@ def test_struct_state_var_read_spec_preserves_field_components(tmp_path):
     targets = build_controller_tracking(contract, tmp_path, predicate_trees, effects, semantic_control)
     by_id = {t["controller_id"]: t for t in targets}
 
-    # The bare struct has no single storable address value, so it is not a
-    # controller; only the projected address member is.
     assert "state_variable:accountantState" not in by_id, list(by_id.keys())
     assert "state_variable:accountantState.payoutAddress" in by_id, list(by_id.keys())
     leaf = predicate_trees["trees"]["sweep()"]["leaf"]
@@ -141,7 +128,6 @@ def test_struct_state_var_read_spec_preserves_field_components(tmp_path):
     assert projected_spec.get("type") == "address"
     assert projected_spec.get("type_kind") == "address"
     assert projected_spec.get("member_path") == ["payoutAddress"]
-    # The projected member spec preserves the full struct field component list.
     assert projected_spec.get("components") == [
         {
             "name": "payoutAddress",
@@ -229,16 +215,8 @@ def test_writer_emits_event_promotes_tracking_mode(tmp_path):
     assert any(e["name"] == "OwnershipTransferred" for e in target["associated_events"])
 
 
-# ---------------------------------------------------------------------------
-# read_spec getter honesty — a getter_call claim requires an actual getter
-# ---------------------------------------------------------------------------
-
-
 def test_private_var_without_getter_gets_unknown_strategy_and_no_poll_entry(tmp_path):
-    """A private state var with no public getter cannot be read by any
-    function call. Its read_spec must not claim ``getter_call`` (which
-    would mint ``keccak('_admin()')`` — a selector of a function that
-    does not exist), and it must produce no polling-plan entry."""
+    """``getter_call`` would mint ``keccak('_admin()')`` for a function that doesn't exist."""
     from services.monitoring.polling_plan import build_polling_plan
 
     source = """
@@ -264,7 +242,6 @@ def test_private_var_without_getter_gets_unknown_strategy_and_no_poll_entry(tmp_
     assert isinstance(read_spec, dict)
     assert read_spec["strategy"] == "unknown"
     assert read_spec.get("state_variable_name") == "_admin"
-    # Type info survives so type-shape guards downstream keep their inputs.
     assert read_spec.get("type_kind") == "address"
 
     plan = build_polling_plan(
@@ -277,8 +254,6 @@ def test_private_var_without_getter_gets_unknown_strategy_and_no_poll_entry(tmp_
 
 
 def test_private_var_with_getter_stays_pollable_through_the_getter(tmp_path):
-    """POSITIVE ARM: a private var whose same-contract view getter was discovered keeps
-    ``getter_call``, pointed at the getter, never the var."""
     from services.monitoring.polling_plan import build_polling_plan, selector_for
 
     source = """
@@ -319,9 +294,7 @@ def test_private_var_with_getter_stays_pollable_through_the_getter(tmp_path):
 
 
 def test_public_underscore_var_keeps_its_auto_getter(tmp_path):
-    """DISCRIMINATING CONTROL: the underscore prefix is not the
-    discriminator — a PUBLIC ``_roleRegistry`` has a compiled auto-getter
-    named after itself and stays pollable through it."""
+    """The underscore prefix isn't the discriminator."""
     from services.monitoring.polling_plan import build_polling_plan, selector_for
 
     source = """

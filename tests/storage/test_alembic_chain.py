@@ -1,10 +1,4 @@
-"""Guards against accidental migration branching.
-
-When two PRs each add a revision with the same ``down_revision``, Alembic
-silently produces a branched history. ``alembic upgrade head`` then errors
-with "Multiple head revisions are present" — but only at deploy time. This
-test catches it in CI instead.
-"""
+"""Two PRs adding revisions with the same ``down_revision`` branch the history silently, which only errors at deploy."""
 
 from __future__ import annotations
 
@@ -35,12 +29,9 @@ def test_single_head_revision():
 
 @requires_postgres
 def test_no_autogenerate_drift_between_models_and_migrations():
-    """The migrations and ``db.models`` describe the same schema.
-
-    Also the gate the mapped-view filter in ``alembic/env.py`` depends on: Alembic can't tell the
-    ``ContractBalanceLatest`` VIEW from a table, so without ``include_object`` it would report a
-    missing TABLE here and a later autogenerate would emit a shadowing ``CREATE TABLE``. Also
-    catches a model column missing from a migration (``UndefinedColumn`` in production)."""
+    """Also gates ``alembic/env.py``'s mapped-view filter: without it the ``ContractBalanceLatest`` VIEW reads as a
+    missing table and autogenerate would emit a shadowing ``CREATE TABLE``.
+    """
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
     from sqlalchemy import create_engine

@@ -1,11 +1,6 @@
-"""Regression tests for split-proxy *secondary implementation* handling (1A).
-
-The real ether.fi LRTSquared shape: a UUPSProxy whose EIP-1967 impl (``LRTSquaredCore``) has a
-``fallback`` that ``sload``s an unstructured slot and delegatecalls a second logic contract
-(``LRTSquaredAdmin``). Before the fix that admin impl was analysed against its own empty storage
-and rendered as an ownerless orphan. One test drives the ACTUAL verified source (repo-owned
-fixture) through the production pipeline; the rest use synthetic fixtures for edge shapes, plus
-resolver / queue / cache-hit tests that read the pointer against the PROXY (stubbed RPC).
+"""ether.fi LRTSquared: ``LRTSquaredCore``'s fallback ``sload``s an unstructured slot and delegatecalls
+``LRTSquaredAdmin``, which used to render as an ownerless orphan. One test runs the real verified source; the rest
+cover edge shapes and read the pointer against the proxy.
 """
 
 from __future__ import annotations
@@ -23,10 +18,6 @@ from services.discovery.secondary_impl import (
 )
 from tests.conftest import requires_postgres
 
-# ---------------------------------------------------------------------------
-# Detection (real Slither)
-# ---------------------------------------------------------------------------
-
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
@@ -37,14 +28,11 @@ def _compile(tmp_path, src: str, name: str):
     return next(c for c in Slither(str(f)).contracts if c.name == name)
 
 
-# Real on-chain contract data: ether.fi LRTSquaredCore (0x1cb489ef…) verified
-# source, fetched from Etherscan and saved as a repo-owned fixture (immune to
-# upstream rot, no network at test time).
+# Repo-owned so it's immune to upstream rot and needs no network.
 _LRT_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "lrtsquared_core.json"
 
 
 def _analyze_real_contract(tmp_path, fixture: dict):
-    """Scaffold the saved verified source and run the PRODUCTION static pipeline over it."""
     import json as _json
 
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
@@ -92,9 +80,7 @@ def real_lrtsquared(tmp_path_factory):
 
 
 def test_pipeline_detects_real_lrtsquared_secondary_impl(real_lrtsquared):
-    """The ACTUAL LRTSquaredCore source must surface its secondary-impl pointer
-    (``adminImplPosition``) at the real slot. The first implementation missed it: the admin
-    address comes from an unstructured constant slot via assembly ``sload``, not an ``address`` var."""
+    """The admin address comes from an assembly ``sload`` of a constant slot, not an ``address`` var."""
     fixture, analysis = real_lrtsquared
     pointers = analysis.get("secondary_impl_pointers") or []
     by_name = {p["name"]: p for p in pointers}
@@ -150,8 +136,6 @@ def inline_var_contract(tmp_path_factory):
 
 
 def test_detect_named_address_var_pointer(inline_var_contract):
-    """A fallback delegatecalling a plain ``address`` state var is found at its layout slot; a
-    ``governor`` read by a modifier (never delegatecalled) is NOT mistaken for a pointer."""
     from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
 
     pointers = detect_secondary_impl_pointers(inline_var_contract)
@@ -183,8 +167,6 @@ contract Core {
 
 
 def test_detect_indirected_fallback(tmp_path):
-    """``fallback() -> _delegate(adminImpl)`` is detected via the transitive IR walk (OZ-style
-    indirection the first implementation missed)."""
     from services.static.contract_analysis_pipeline.secondary_impl import detect_secondary_impl_pointers
 
     c = _compile(
@@ -213,8 +195,7 @@ contract Plain { address public owner; function f() external {} }
             "Plain",
             id="plain-contract",
         ),
-        # #3: a plain ``.call()`` on a variable merely NAMED ``delegatecallTarget`` must NOT be
-        # flagged; detection keys on the IR operation, not a substring.
+        # Detection keys on the IR op, not a substring.
         pytest.param(
             """// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -235,26 +216,15 @@ def test_detect_empty_for_non_delegating_contract(tmp_path, source, contract_nam
     assert detect_secondary_impl_pointers(c) == []
 
 
-# ---------------------------------------------------------------------------
-# Storage-word decode (pure)
-# ---------------------------------------------------------------------------
-
-
 def test_address_from_storage_word_offsets():
     admin = "0x" + "ab" * 20
     assert _address_from_storage_word("0x" + "00" * 12 + admin[2:], 0) == admin
     assert _address_from_storage_word("0x" + "00" * 32, 0) is None
-    # packed at byte offset 8: 4 high bytes | 20-byte address | 8 low bytes.
     packed = "22" * 4 + admin[2:] + "11" * 8
     assert len(packed) == 64
     assert _address_from_storage_word("0x" + packed, 8) == admin
     assert _address_from_storage_word(None, 0) is None
     assert _address_from_storage_word("0x", 0) is None
-
-
-# ---------------------------------------------------------------------------
-# Pointer-value resolution (stubbed RPC) — reads against the PROXY
-# ---------------------------------------------------------------------------
 
 
 def test_resolve_secondary_impl_addresses_reads_proxy_storage(monkeypatch):
@@ -296,8 +266,6 @@ def test_resolve_secondary_impl_addresses_reads_proxy_storage(monkeypatch):
 
 
 def test_resolve_handles_256bit_constant_slot(monkeypatch):
-    """Unstructured (EIP-1967-style) pointers carry the full 256-bit constant as
-    the slot; it must be passed to eth_getStorageAt as a hex quantity."""
     proxy = "0x" + "11" * 20
     admin = "0x" + "ab" * 20
     big_slot = int.from_bytes(b"\xbc" * 32, "big")
@@ -315,11 +283,6 @@ def test_resolve_handles_256bit_constant_slot(monkeypatch):
         "http://stub", proxy, [{"name": "adminImplPosition", "slot": big_slot, "offset": 0}]
     )
     assert addrs == [admin]
-
-
-# ---------------------------------------------------------------------------
-# Recording + child-job spawn (real Postgres)
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -393,7 +356,7 @@ def test_queue_secondary_impl_jobs_records_and_spawns(db_session):
     remaining = db_session.query(Job).filter(Job.address == admin).count()
     assert remaining == 1
 
-    # cleanup (db_session fixture doesn't sweep Job/Contract rows we orphan)
+    # The db_session fixture doesn't sweep orphaned Job/Contract rows.
     db_session.query(Job).filter(Job.address.in_([core, admin])).delete(synchronize_session=False)
     db_session.query(Contract).filter(Contract.address == proxy).delete(synchronize_session=False)
     db_session.commit()
@@ -401,9 +364,7 @@ def test_queue_secondary_impl_jobs_records_and_spawns(db_session):
 
 @requires_postgres
 def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch):
-    """#1: an impl re-seen in proxy context whose static artifacts are CACHED (non-force
-    incremental run) must still resolve + queue its secondary impls; the cache-hit branch used
-    to skip this, leaving the admin impl an orphan. Drives the real ``StaticWorker.process``."""
+    """The cache-hit branch used to skip this."""
     from db.models import Contract, Job, JobStage, JobStatus
     from db.queue import store_artifact
     from workers.static_worker import StaticWorker
@@ -437,7 +398,6 @@ def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch
         Contract(address=core, chain="ethereum", is_proxy=False, contract_name="LRTSquaredCore", job_id=impl_job.id)
     )
     db_session.commit()
-    # The cached contract_analysis carries the detected pointer (copy_static_cache copies it).
     store_artifact(
         db_session,
         impl_job.id,
@@ -460,7 +420,6 @@ def test_static_cache_hit_still_resolves_secondary_impls(db_session, monkeypatch
     monkeypatch.setattr("services.clients.rpc.rpc_request", fake_rpc)
 
     worker = StaticWorker()
-    # Stub the heavy, unrelated phases so the test exercises the cache branch only.
     monkeypatch.setattr(worker, "update_detail", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_scaffold_project", lambda *a, **kw: None)
     monkeypatch.setattr(worker, "_run_dependency_phase", lambda *a, **kw: None)

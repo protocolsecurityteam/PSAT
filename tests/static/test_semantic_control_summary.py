@@ -1,9 +1,5 @@
-"""``_build_semantic_control_summary`` semantic signal.
-
-Pins the structural inclusion rule: a function is in ``semantic_functions`` iff its predicate
-tree has a ``caller_authority``/``delegated_authority`` leaf, OR its effects record carries a
-sensitive sink (state_write, external_call, delegatecall, contract_creation, selfdestruct).
-Tree-keys-as-included used to over-include pause / reentrancy / time / business trees.
+"""A function is in ``semantic_functions`` iff it has a caller/delegated authority leaf or a sensitive sink;
+tree-keys-as-included over-included side-condition trees.
 """
 
 from __future__ import annotations
@@ -74,7 +70,6 @@ def test_sensitive_sink_admits_unguarded_function(tmp_path):
 
 
 def test_pause_only_tree_does_not_admit_function(tmp_path):
-    """Pause-only with no sensitive sink is a side-condition, not caller authorization."""
     source = """
     pragma solidity ^0.8.19;
     contract C {
@@ -98,9 +93,7 @@ def test_pause_only_tree_does_not_admit_function(tmp_path):
     """
     ac = _detect(tmp_path, source)
     semantic_signatures = {pf["function"] for pf in ac["semantic_functions"]}
-    # ``pause()`` has caller_authority + state_write.
     assert "pause()" in semantic_signatures
-    # ``readOnly()`` has only a pause leaf and no sensitive sink.
     assert "readOnly()" not in semantic_signatures
 
 

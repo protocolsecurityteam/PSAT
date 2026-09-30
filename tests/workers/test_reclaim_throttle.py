@@ -1,9 +1,6 @@
-"""Regression tests for the stuck-job sweep throttle in ``workers.base.BaseWorker._claim_job``.
+"""Unthrottled, 10 workers polling every 2s issued ~5 cross-stage sweeps per second.
 
-Unthrottled, 10 workers polling every 2s issued ~5 cross-stage ``UPDATE … FOR UPDATE
-SKIP LOCKED`` sweeps per second, mostly returning zero rows. Each worker is now bounded
-to one sweep per ``RECLAIM_INTERVAL_S`` (30s vs the 900s stale_timeout), while
-``claim_job`` must never be starved by the throttle.
+Each worker now sweeps at most once per ``RECLAIM_INTERVAL_S``, and ``claim_job`` must never be starved.
 """
 
 from __future__ import annotations
@@ -26,10 +23,8 @@ class _FakeWorker(BaseWorker):
 @pytest.mark.parametrize(
     ("ticks", "expected_sweeps"),
     [
-        # The ``-inf`` sentinel makes the first poll sweep; otherwise a fresh fleet waits RECLAIM_INTERVAL_S.
         pytest.param([1000.0], 1, id="first_claim_sweeps"),
         pytest.param([1000.0, 1001.0], 1, id="repeat_claim_within_window_does_not_sweep"),
-        # The cadence guarantee the fleet relies on.
         pytest.param([1000.0, 1000.0 + base.RECLAIM_INTERVAL_S + 0.1], 2, id="claim_after_window_expires_sweeps_again"),
     ],
 )
@@ -48,7 +43,7 @@ def test_reclaim_sweep_throttle_timeline(ticks, expected_sweeps):
 
 
 def test_each_worker_throttle_is_independent():
-    """Per-worker, not global: otherwise an unlucky boot order could starve one stage's recovery."""
+    """A global throttle could starve one stage's recovery by boot order."""
     w1 = _FakeWorker()
     w2 = _FakeWorker()
     session = MagicMock()

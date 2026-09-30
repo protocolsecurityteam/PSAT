@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from services.scoring import fold as FOLD

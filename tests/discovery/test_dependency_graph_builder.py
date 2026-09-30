@@ -1,4 +1,3 @@
-
 import pytest
 
 from services.discovery.dependency_graph_builder import build_dependency_visualization

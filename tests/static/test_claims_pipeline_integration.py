@@ -1,9 +1,5 @@
-"""End-to-end integration for the Plane-1 claims plumbing.
-
-Drives the real stack (static pipeline claims phase in ``core.py``, effective-
-permissions dual-write, row writer, API serializers) on a compiled factory fixture
-and asserts a ``contract_deployment`` claim survives onto ``EffectiveFunction.claims``
-and out through the payloads. Only solc + Postgres are external.
+"""A ``contract_deployment`` claim survives the real stack onto ``EffectiveFunction.claims`` and out through the API
+payloads.
 """
 
 from __future__ import annotations
@@ -42,24 +38,17 @@ def test_claims_flow_from_static_pipeline_to_effective_function_row(tmp_path, db
     source = (FIXTURES_DIR / "composed" / "upgrade_factory_uups.sol").read_text()
     project_dir = write_foundry_project(tmp_path, "UpgradeFactory", source)
 
-    # (1) The static pipeline's claims phase minted a claim onto the effects
-    #     facts carrier (the real core.py invocation, not a stub).
     analysis, predicate_trees, effects = collect_contract_analysis_with_artifacts(project_dir)
     assert effects is not None
     create_effect = effects["functions"]["createChild()"]
     assert _has_deploy_claim(create_effect.get("claims")), create_effect.get("claims")
-    # A non-deploying function carries an (empty) claims list — the field is
-    # always present, never a KeyError downstream.
     assert all("claims" in rec for rec in effects["functions"].values())
 
-    # (2) Dual-write: build_effective_permissions carries claims per function
-    #     alongside the untouched legacy effect_labels.
     payload = build_effective_permissions(analysis, effects=effects, predicate_trees=predicate_trees)
     create_record = next(r for r in payload["functions"] if r["function"] == "createChild()")
     assert _has_deploy_claim(create_record.get("claims"))
     assert "contract_deployment" in create_record["effect_labels"]  # legacy label unchanged
 
-    # (3) The writer round-trips claims onto the real EffectiveFunction column.
     contract = Contract(
         address=analysis["subject"]["address"],
         chain="ethereum",
@@ -83,7 +72,6 @@ def test_claims_flow_from_static_pipeline_to_effective_function_row(tmp_path, db
     )
     assert _has_deploy_claim(row.claims)
 
-    # (4) API pass-throughs expose the field on both serializers.
     detail_entry = next(e for e in _serialize_effective_functions([row]) if e["function"].startswith("createChild"))
     assert _has_deploy_claim(detail_entry["claims"])
 

@@ -12,7 +12,6 @@ from tests.support.live_helpers import _resolve_impl_job
 
 
 class _StubClient:
-
     def __init__(
         self,
         *,

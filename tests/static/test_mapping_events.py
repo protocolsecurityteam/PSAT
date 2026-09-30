@@ -114,10 +114,9 @@ def test_makerdao_rely_adds_to_wards():
 
 
 def test_event_call_name_as_constant_does_not_crash():
-    """Slither types ``EventCall.name`` as ``str | Constant``; a Constant name
-    (observed on Morpho) must not crash ``discover_mapping_writer_events`` —
-    it's coerced to str and the spec is still produced. Regression for
-    ``AttributeError: 'Constant' object has no attribute 'split'``."""
+    """Slither types ``EventCall.name`` as ``str | Constant``; a Constant (seen on Morpho) raised ``AttributeError:
+    'Constant' object has no attribute 'split'``.
+    """
 
     class _ConstantName:  # like Slither's Constant: str(...) yields the event sig
         def __init__(self, s: str) -> None:
@@ -136,7 +135,6 @@ def test_event_call_name_as_constant_does_not_crash():
                 [
                     _index(wards, guy, index_lv),
                     _assignment(index_lv, _constant(1)),
-                    # deliberately non-str: Slither types EventCall.name as ``str | Constant``
                     _event_call(_ConstantName("Rely(address)"), [guy]),  # pyright: ignore[reportArgumentType]
                 ]
             )
@@ -286,9 +284,7 @@ def test_constructor_skipped():
 
 
 def test_non_literal_value_emits_set_direction():
-    """Pre-D: a non-literal RHS dropped the writer event. PR D emits
-    ``direction="set"`` so indexer/replay can decode the value at index time and
-    feed it through ``ValuePredicate``."""
+    """Emitting ``direction="set"`` lets the indexer decode the value at index time."""
     wards = _mapping("wards")
     guy = _local("guy")
     some = _local("someValue", "uint256")

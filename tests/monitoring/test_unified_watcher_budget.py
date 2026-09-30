@@ -525,7 +525,6 @@ def test_catch_up_event_after_enrollment_is_notified(db_session, monkeypatch):
 
 @requires_postgres
 class TestCohortScanBlock:
-
     @staticmethod
     def _install(monkeypatch, head, calls):
         def mock_rpc(url, method, params, *, chain_id=None):

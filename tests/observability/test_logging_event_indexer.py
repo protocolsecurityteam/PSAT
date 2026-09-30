@@ -35,7 +35,6 @@ class _FakeResult:
 
 
 class _FakeSession:
-
     def __init__(self, rows):
         self._rows = rows
         self.rollbacks = 0

@@ -10,7 +10,6 @@ from services.static.contract_analysis_pipeline import predicate_artifacts
 
 
 class _StubFn:
-
     def __init__(self, name: str, *, slow: bool = False) -> None:
         self.full_name = name
         self.name = name.split("(")[0]

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import time
@@ -699,7 +698,6 @@ class TestDiscoverContractInventoryPages:
 
 
 class TestExtractInventoryEntriesFromPagesParallel:
-
     def test_fetches_all_urls_and_preserves_order(self, monkeypatch):
         from services.discovery import inventory_extract
 

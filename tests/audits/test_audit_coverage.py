@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import uuid
@@ -1588,7 +1587,6 @@ def test_match_audits_for_contract_address_anchor_honors_chain(db_session, seed_
 
 
 class TestComputeProofKind:
-
     def _call(self, matched: list[str], classified: list[dict] | None):
         from services.audits.coverage import _compute_proof_kind
 

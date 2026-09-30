@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from services.scoring.schema import FunctionSignal, PrincipalRef, Tri, not_determined_signal_defaults

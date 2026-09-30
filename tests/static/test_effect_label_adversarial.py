@@ -1,13 +1,7 @@
-"""Adversarial effect label tests — simulating a malicious developer.
+"""Randomized names force detection from what the code does.
 
-Names are randomized so detection can't rely on naming conventions.
-These test whether the detection works based on *what the code does*
-(AST structure, data flow, IR) rather than *what things are called*.
-
-Randomization strengthens a *positive* assertion and weakens a *negative*
-one: for an assertion-of-absence, conventional naming is the adversarial
-input. So the file ends with conventional-name controls — the pairs are what
-make the earned negatives falsifiable in both directions.
+That strengthens positive assertions but weakens negative ones, so conventional-name controls at the end make the earned
+negatives falsifiable.
 """
 
 import random
@@ -40,7 +34,6 @@ def _scaffold_and_analyze(solidity_source: str, contract_name: str = "Target") -
         subject = _select_subject_contract(slither, contract_name)
         if subject is None:
             raise RuntimeError(f"Contract {contract_name} not found")
-        # Full production label sequence: facts -> Plane-1 claims -> projection.
         predicate_trees = build_predicate_artifacts(subject)
         effects = build_effects(subject)
         claims_artifact = build_claims(subject, effects, predicate_trees)
@@ -55,9 +48,6 @@ def _get_function_labels(analysis: dict, function_name: str) -> set[str]:
         if pf.get("function", "").split("(")[0] == function_name:
             return set(pf.get("effect_labels", []))
     return set()
-
-
-# 1. Randomized impl slot name + delegatecall fallback
 
 
 def test_random_impl_slot_with_delegatecall():
@@ -79,15 +69,13 @@ contract Target {{
 """
     analysis = _scaffold_and_analyze(source)
     labels = _get_function_labels(analysis, setter_name)
-    # The bespoke same-contract impl-slot detector is retired; ``upgrade.*`` is
-    # standard-gated. The delegatecall stays a fact on the fallback.
+    # The same-contract impl-slot detector is retired; ``upgrade.*`` is standard-gated.
     assert "implementation_update" not in labels, (
         f"Random impl slot '{slot_name}', setter '{setter_name}': expected NO implementation_update, got {labels}"
     )
     assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
 
 
-# 2. Randomized pause variable name (a bool gating a modifier, flipped by a function)
 def test_random_pause_variable():
     var_name = f"_{_rand()}"
     pause_fn = _rand()
@@ -112,9 +100,6 @@ contract Target {{
     assert "pause_toggle" in labels, (
         f"Random pause var '{var_name}', fn '{pause_fn}': expected pause_toggle, got {labels}"
     )
-
-
-# 3. Raw storage slot write via assembly (no named variable; fallback sloads + delegatecalls)
 
 
 def test_raw_assembly_storage_slot_impl():
@@ -149,9 +134,6 @@ contract Target {{
     assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
 
 
-# 4. ETH drain via selfdestruct (not a .call{value:})
-
-
 def test_selfdestruct_value_drain():
     fn_name = _rand()
     source = f"""
@@ -171,9 +153,6 @@ contract Target {{
     assert "selfdestruct_capability" in labels, (
         f"selfdestruct fn '{fn_name}': expected selfdestruct_capability, got {labels}"
     )
-
-
-# 5. Randomized caller name for cross-contract mint (label comes from the callee selector)
 
 
 def test_random_named_cross_contract_mint():
@@ -229,9 +208,6 @@ contract Target {{
     assert labels == {"external_contract_call"}
 
 
-# 7. Value transfer hidden behind a randomly-named internal helper
-
-
 def test_value_transfer_via_random_internal_helper():
     fn_name = _rand()
     helper_name = f"_{_rand()}"
@@ -258,9 +234,6 @@ contract Target {{
     )
 
 
-# 8. ERC20 transfer via abi.encodeWithSelector (low-level obfuscation)
-
-
 def test_erc20_transfer_via_encode_selector():
     fn_name = _rand()
     source = f"""
@@ -281,22 +254,11 @@ contract Target {{
     assert "asset_send" in labels, f"ERC20 via encodeWithSelector fn '{fn_name}': expected asset_send, got {labels}"
 
 
-# 9. Ownership transfer with randomized variable name
-
-
-# Conventional-name controls:
-# the paired control for each randomized test above, so a label is proven to come
-# from what the code does in both directions.
+# Conventional-name controls for each randomized test above.
 
 
 def test_nonstandard_impl_slot_name():
-    """Conventional-name control for ``test_random_impl_slot_with_delegatecall``.
-
-    The load-bearing assertion is an earned negative, so ordinary names
-    (``_logic`` / ``setLogic``) are the adversarial input here: a
-    reintroduced name-keyed impl-slot heuristic would pass the randomized
-    test and fail this one.
-    """
+    """A reintroduced name-keyed impl-slot heuristic would pass the randomized test and fail this one."""
     source = textwrap.dedent("""\
         // SPDX-License-Identifier: MIT
         pragma solidity ^0.8.20;
@@ -333,9 +295,6 @@ def test_nonstandard_impl_slot_name():
     assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
 
 
-# WEAKNESS 2: non-standard naming for pause variables
-
-
 def test_raw_eth_transfer():
     source = textwrap.dedent("""\
         // SPDX-License-Identifier: MIT
@@ -360,9 +319,6 @@ def test_raw_eth_transfer():
     analysis = _scaffold_and_analyze(source)
     labels = _get_function_labels(analysis, "sweep")
     assert "asset_send" in labels, f"Expected asset_send for sweep (raw ETH transfer), got: {labels}"
-
-
-# WEAKNESS 4: ERC20 transfer() instead of safeTransfer()
 
 
 def test_raw_erc20_transfer():
@@ -393,9 +349,6 @@ def test_raw_erc20_transfer():
     analysis = _scaffold_and_analyze(source)
     labels = _get_function_labels(analysis, "withdrawTokens")
     assert "asset_send" in labels, f"Expected asset_send for withdrawTokens (ERC20.transfer), got: {labels}"
-
-
-# WEAKNESS 5: indirect mint through another contract
 
 
 def test_standard_ownable_transfer():

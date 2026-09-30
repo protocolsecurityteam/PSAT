@@ -390,7 +390,6 @@ def test_structural_absent_repo_without_fold_event_values_falls_through_to_live(
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
 
     class _NoValueFoldRepo:
-
         def fold_event_history(self, **_kwargs):
             raise AssertionError("value path must not reach the add/remove fold")
 
@@ -625,8 +624,7 @@ def test_live_fallback_forwards_token_and_block_when_durable_absent(db_session, 
     monkeypatch.setattr(mapping_enumerator, "enumerate_mapping_values", fake_values)
     mapping_enumerator._VALUE_CACHE.clear()
 
-    class _NoValueFoldRepo:
-        ...
+    class _NoValueFoldRepo: ...
 
     sentinel_client = object()
     sentinel_module = object()

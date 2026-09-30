@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import Any, cast
@@ -64,7 +63,6 @@ def test_detect_standards(code, expected):
 
 
 class _FakeSession:
-
     def __init__(self, impl_by_addr: dict[str, str]):
         self._impl = {k.lower(): v for k, v in impl_by_addr.items()}
 

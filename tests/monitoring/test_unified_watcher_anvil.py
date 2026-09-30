@@ -36,7 +36,6 @@ from tests.support.anvil import (
     purge_materializations,
 )
 
-
 _has_anvil = shutil.which("anvil") is not None
 _has_cast = shutil.which("cast") is not None
 _has_forge = shutil.which("forge") is not None

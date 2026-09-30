@@ -65,8 +65,6 @@ def _tracked_controller(analysis: ContractAnalysis, label: str) -> ControllerTra
 
 
 def test_collect_contract_analysis_with_artifacts_returns_semantic_artifacts(tmp_path):
-    """The worker-facing entrypoint returns the semantic ``predicate_trees`` and
-    ``effects`` artifacts alongside the analysis dict, off a single Slither parse."""
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     project_dir = _write_project(
@@ -95,15 +93,10 @@ def test_collect_contract_analysis_uses_semantic_factory_without_upgrade_timeloc
 
     analysis = collect_contract_analysis(project_dir)
 
-    # Upgradeability is recovered from the UUPS *standard* (``proxiableUUID`` +
-    # ``upgradeTo`` selector), not by guessing on the ``upgradeTo`` name — the
-    # ``upgrade.implementation`` claim projects to ``implementation_update``,
-    # which ``_detect_upgradeability`` consumes. The empty ``upgradeTo`` body
-    # writes no slot, so no implementation slot is inferred.
+    # Recovered from the UUPS standard via ``implementation_update``, not the ``upgradeTo`` name.
     assert analysis["summary"]["is_upgradeable"] is True
     assert analysis["upgradeability"]["pattern"] == "custom"
-    # Timelock still is NOT name-guessed: bespoke ``schedule``/``execute`` carry
-    # no OZ-timelock standard gate (no getMinDelay / hashOperation), so no claim.
+    # Bespoke ``schedule``/``execute`` carry no OZ-timelock standard gate.
     assert analysis["timelock"]["has_timelock"] is False
     assert analysis["timelock"]["pattern"] == "none"
     assert analysis["contract_classification"]["is_factory"] is True
@@ -112,8 +105,6 @@ def test_collect_contract_analysis_uses_semantic_factory_without_upgrade_timeloc
     assert "createChild()" in factory_functions
     assert analysis["upgradeability"]["implementation_slots"] == []
     create_child = _semantic_function(analysis, "createChild()")
-    # sink_ids come from the semantic effects artifact and end with
-    # ``:<kind>:<target>``; the inner segment is the per-function sink index.
     assert any(sink_id.endswith(":contract_creation:Child") for sink_id in create_child["sink_ids"])
     assert "owner" in create_child["controller_refs"]
 
@@ -262,19 +253,13 @@ def test_modifier_helper_auth_structure_recovered(tmp_path):
 
     manage = _semantic_function(analysis, "manage(PingTarget,uint256)")
     assert manage["effect_labels"] == ["external_contract_call"]
-    # ``target.ping`` is the body sink and sole driver of the label; the modifier's
-    # ``auth.canCall`` is a guard-origin sink, excluded from effect_targets so it can't
-    # dilute the effect (it stays in ``sinks`` as ``origin=guard``).
+    # The guard-origin ``auth.canCall`` is excluded from effect_targets but stays in ``sinks``.
     assert "target.ping" in manage["effect_targets"]
     assert not any("canCall" in target for target in manage["effect_targets"])
     assert manage["action_summary"] == "Calls an external contract from the contract context."
 
     set_hook = _semantic_function(analysis, "setHook(address)")
-    # No sibling entry point invokes ``hook`` at runtime, so ``callee_pointer.rotate``
-    # does not fire — the retired unclassified-pointer fallback used to mislabel
-    # this bare setter ``hook_update``. It now collapses to silence + fact text
-    # (the ``hook`` state write is still the only body sink; the guard-origin
-    # ``auth.canCall`` from ``requiresAuth`` is not a target).
+    # No sibling invokes ``hook``, so the rotate doesn't fire; the retired fallback mislabelled this ``hook_update``.
     assert set_hook["effect_labels"] == []
     assert set_hook["effect_targets"] == ["hook"]
     assert set_hook["action_summary"] == "Writes or calls into: hook."
@@ -466,7 +451,6 @@ def test_modifier_helper_preserves_opaque_role_identifier(tmp_path):
     analysis = collect_contract_analysis(project_dir)
     semantic = _semantic_function(analysis, "pause()")
 
-    # ``guards`` is no longer populated by the semantic summary.
     assert "BREAK_GLASS" in semantic["controller_refs"]
 
     tracked = _tracked_controller(analysis, "BREAK_GLASS")
@@ -474,7 +458,6 @@ def test_modifier_helper_preserves_opaque_role_identifier(tmp_path):
     assert tracked["kind"] == "role_identifier"
 
 
-# CRITICAL: an opaque external guard call must count as a controller ref, not vanish.
 @pytest.mark.parametrize(
     ("project_name", "source", "function", "controller_ref"),
     [
@@ -612,17 +595,10 @@ def test_opaque_external_helper_is_controller_ref(tmp_path, project_name, source
     assert "external_contract_call" in semantic["effect_labels"]
 
 
-# ---------------------------------------------------------------------------
-# Classification: which of these fields can honestly be not-determined.
-# ---------------------------------------------------------------------------
-
-
 def test_is_factory_is_not_determined_without_the_effects_artifact(tmp_path):
-    """``is_factory`` is the ONLY classification field that is not IR-derived:
-    it reads the effects artifact's ``contract_creation`` sinks. ``core``
-    substitutes ``{"schema_version", "error"}`` when ``build_effects`` raises,
-    and ``false`` would then assert that a contract deploys nothing on the
-    strength of never having looked."""
+    """The only non-IR field; ``core`` substitutes an error sentinel when ``build_effects`` raises, and ``false``
+    would claim it deploys nothing without looking.
+    """
     from slither import Slither
 
     from services.static.contract_analysis_pipeline.summaries import (
@@ -636,7 +612,6 @@ def test_is_factory_is_not_determined_without_the_effects_artifact(tmp_path):
     degraded = _detect_contract_classification(contract, tmp_path, {"schema_version": "semantic", "error": "boom"})
     assert degraded["is_factory"] is None
     assert degraded["factory_functions"] is None
-    # The IR-derived half is unaffected -- the sentinel narrows one field.
     assert degraded["standards"] == []
     assert degraded["is_nft"] is False
 
@@ -646,10 +621,9 @@ def test_is_factory_is_not_determined_without_the_effects_artifact(tmp_path):
 
 
 def test_standards_absence_is_measured_not_missing(tmp_path):
-    """A proposal to null ``standards`` because ``{}`` on 61/92 rows meant "no detector
-    ran" was rejected by measurement: ``standards`` comes from ``contract.ercs()`` plus a
-    signature+event match off the IR, and is non-empty on 31 of 88 local contracts, every
-    real token among them. Nulling it would suppress a true negative."""
+    """Nulling ``standards`` was rejected: it's IR-derived and non-empty on 31 of 88 local contracts, every real
+    token among them.
+    """
     from slither import Slither
 
     from services.static.contract_analysis_pipeline.summaries import (
@@ -675,7 +649,6 @@ def test_standards_absence_is_measured_not_missing(tmp_path):
     """
     project = write_foundry_project(tmp_path, "C", erc20)
     contract = next(c for c in Slither(str(project)).contracts if c.name == "C")
-    # No effects artifact at all: standards must still resolve.
     classification = _detect_contract_classification(contract, tmp_path, None)
     assert "ERC20" in classification["standards"]
     assert classification["is_factory"] is None

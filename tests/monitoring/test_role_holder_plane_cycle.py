@@ -451,7 +451,6 @@ class TestCycleObservability:
 
 
 class TestResolutionStageObservability:
-
     def _metrics(self, monkeypatch) -> dict[str, Any]:
         recorded: dict[str, Any] = {}
         monkeypatch.setattr(

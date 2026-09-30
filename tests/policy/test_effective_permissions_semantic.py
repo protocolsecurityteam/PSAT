@@ -47,7 +47,6 @@ from services.resolution.capabilities import (
 )
 from services.resolution.capability_resolver import capability_to_dict
 
-
 _TestBase = declarative_base()
 
 

@@ -97,7 +97,6 @@ class TestRevertedEthCallPolling:
 
 
 class TestOwnerControllerMatching:
-
     def test_only_exact_owner_controllers_updated(self, db_session: SASession):
         from services.monitoring.unified_watcher import _sync_relational_tables
 
@@ -217,7 +216,6 @@ class TestOwnerControllerMatching:
 
 
 class TestCustomNamedSlotEndToEnd:
-
     def _setup_custom_slot_fixture(self, session: SASession):
         proto = Protocol(name="CustomSlotProtocol")
         session.add(proto)

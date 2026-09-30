@@ -140,5 +140,3 @@ def test_observed_keys_meta_url_overrides_registry(monkeypatch, _capture_build_u
 
     _observed(SimpleNamespace(meta={"hypersync_url": BASE_URL}, chain_id=UNAVAILABLE_CHAIN_ID, block=None))
     assert _capture_build_url["url"] == BASE_URL
-
-

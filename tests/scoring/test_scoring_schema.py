@@ -1,17 +1,6 @@
-"""The scorer's two planes, and the three-state encoding they are built around.
-
-Every test here pins one of the ways a ``not_determined`` could quietly become a
-published fact:
-
-  * a state discriminator acquiring a default, so an INSERT that determined
-    nothing still records a state;
-  * an undetermined severity carrying a number a reader could pick up anyway;
-  * an empty principal list published as a proven caller set;
-  * a proven-absent value and an unread value collapsing into one state;
-  * an unread destination presenting as an unconstrained one — the escalation
-    that made the prototype's delegatecall false positive an F;
-  * the ``_latest`` view answering with a stale computed row instead of the
-    newest verdict.
+"""Each test pins a way a ``not_determined`` could become a published fact: a defaulted discriminator, a number on an
+undetermined severity, an empty list read as a proven caller set, proven-absent collapsing into unread, an unread
+destination read as unconstrained, or ``_latest`` serving a stale computed row.
 """
 
 from __future__ import annotations
@@ -78,13 +67,9 @@ from utils.scoring_status import (
     WITNESS_TIER_NOT_DETERMINED,
 )
 
-# --------------------------------------------------------------------------
-# The typed contract (no DB)
-# --------------------------------------------------------------------------
-
 
 def test_entity_key_is_chain_scoped():
-    """The same address on two chains is two entities (#158 twin aliasing)."""
+    """#158 twin aliasing."""
     assert entity_key("ethereum", "0xAbC") != entity_key("optimism", "0xAbC")
     assert entity_key("ethereum", "0xAbC") == "ethereum::0xabc"
 
@@ -111,7 +96,6 @@ def test_proven_cannot_be_spelled_not_determined():
 
 
 def test_reading_a_payload_requires_naming_the_state():
-    """No silent ``None`` flows into arithmetic from an undetermined fact."""
     undetermined = Tri[float].not_determined()
     with pytest.raises(ValueError):
         undetermined.require(SEVERITY_STATE_PROVEN)
@@ -138,8 +122,6 @@ def _signal(**overrides: Any) -> FunctionSignal:
 
 
 def test_every_three_state_field_must_be_named():
-    """No dataclass default may supply a state, so a distiller that never decided one
-    cannot construct the row at all."""
     with pytest.raises(TypeError):
         FunctionSignal(  # pyright: ignore[reportCallIssue]
             job_id=uuid.uuid4(),
@@ -153,11 +135,7 @@ def test_every_three_state_field_must_be_named():
 
 
 def test_contract_id_is_required_because_it_is_identity():
-    """R2-B2: split-proxy siblings are only told apart by contract_id.
-
-    On the in-memory CLI path there is no DB to reject a None, so a default
-    would let two siblings collapse into one another in the oracle.
-    """
+    """R2-B2: the in-memory CLI path has no DB to reject a None, so a default would collapse split-proxy siblings."""
     fields = {
         "job_id": uuid.uuid4(),
         "protocol_id": 1,
@@ -179,7 +157,6 @@ def test_fully_undetermined_signal_is_constructible_and_not_scored():
     assert sig.authority_openness == OPENNESS_NOT_DETERMINED
     assert sig.principal_state == PRINCIPAL_STATE_NOT_DETERMINED
     assert sig.value_state == VALUE_STATE_NOT_DETERMINED
-    # The fail-closed gate: an undetermined severity never enters the grade.
     assert sig.enters_grade is False
 
 
@@ -196,7 +173,6 @@ def test_proven_severity_enters_grade_and_must_name_its_basis():
 
 
 def test_proven_zero_severity_is_not_undetermined():
-    """``pause.set`` builds up from a proven 0.0 — a fact, not an absence."""
     zero = _signal(
         claim_id="pause.set",
         severity=Tri.proven(SEVERITY_STATE_PROVEN, 0.0),
@@ -221,7 +197,6 @@ def test_value_states_are_three_and_bounds_require_a_proven_reach():
     )
     assert reached.value_bound == VALUE_BOUND_FLOOR
 
-    # Proven-absent reach is a real, distinct state and carries no entities.
     absent = _signal(value_state=VALUE_STATE_PROVEN_NO_REACH, value_basis="proven_no_reach")
     assert absent.value_entity_keys == ()
 
@@ -232,11 +207,7 @@ def test_value_states_are_three_and_bounds_require_a_proven_reach():
 
 
 def test_destination_not_applicable_differs_from_not_determined():
-    """``pause.set`` has no destination; an unread delegatecall has one.
-
-    Collapsing them makes the banned escalation representable: an unproven
-    destination graded as unconstrained is the −30λ, F→C false positive.
-    """
+    """Collapsing them makes the -30λ F→C delegatecall false positive representable."""
     inapplicable = _signal(claim_id="pause.set", destination=Tri.proven(DESTINATION_STATE_NOT_APPLICABLE, "none"))
     unread = _signal(claim_id="delegatecall.execute")
     assert inapplicable.destination.state != unread.destination.state
@@ -282,19 +253,8 @@ def test_score_document_grade_and_confidence_are_determined_together():
         )
 
 
-# --------------------------------------------------------------------------
-# Persistence round-trip
-# --------------------------------------------------------------------------
-
-
 class _Fixture:
-    """Two jobs and two contracts sharing one deployment_address.
-
-    The shared address is the split-proxy shape that is live on this corpus: a
-    proxy whose secondary implementations are distinct ``contracts`` rows at one
-    runtime address. It is the fixture default rather than a special case
-    because the identity key has to survive it.
-    """
+    """The live split-proxy shape: secondary implementations as distinct ``contracts`` rows at one runtime address."""
 
     def __init__(self, protocol, job, later_job, contract, sibling):
         self.protocol = protocol
@@ -365,7 +325,6 @@ def _row(fx, **overrides: Any) -> FunctionScoreSignal:
 
 
 def _signal_for(fx, **overrides: Any) -> FunctionSignal:
-    """The typed counterpart of :func:`_row`, bound to the fixture's identity."""
     bound: dict[str, Any] = dict(
         protocol_id=fx.protocol.id,
         contract_id=fx.contract.id,
@@ -420,17 +379,13 @@ def test_signal_three_states_round_trip(db_session, scoring_protocol):
         SEVERITY_STATE_PROVEN,
         SEVERITY_STATE_NOT_DETERMINED,
     ]
-    # A proven 0.0 survives as a number, not as a NULL indistinguishable from
-    # the undetermined row above it.
     assert rows[0].severity_proven is None
     assert float(rows[1].severity_proven) == 0.0
-    # All three value states are distinct on the way back out.
     assert len({r.value_state for r in rows}) == 3
     assert rows[1].principal_refs[0]["function_principal_id"] == 3
 
 
-# Each case is a row a DB CHECK must refuse. CRITICAL ones guard a published-state biconditional: a row that
-# reads as determined without its witness (or the reverse) would corrupt the fold.
+# CRITICAL cases guard a published-state biconditional.
 _REJECTED_SIGNAL_ROWS = [
     pytest.param(
         dict(severity_state=SEVERITY_STATE_NOT_DETERMINED, severity_proven=1.0), id="undetermined_severity_number"
@@ -443,7 +398,6 @@ _REJECTED_SIGNAL_ROWS = [
     pytest.param(
         dict(principal_state=PRINCIPAL_STATE_ENUMERATED, principal_refs=[]), id="empty_enumerated_principal_set"
     ),
-    # A partial set under ``not_determined`` is a set a reader could total.
     pytest.param(
         dict(value_state=VALUE_STATE_NOT_DETERMINED, value_entity_keys=["ethereum::0x1"]),
         id="undetermined_value_smuggles_entity_keys",
@@ -460,12 +414,10 @@ _REJECTED_SIGNAL_ROWS = [
         ),
         id="destination_bearing_claim_not_applicable",
     ),
-    # N2: the reverse arm of the destination biconditional.
     pytest.param(
         dict(destination_state=DESTINATION_STATE_UNCONSTRAINED_PROVEN, destination_shape=None),
         id="proven_destination_without_shape",
     ),
-    # N2: the reverse arm of the principal pairing.
     pytest.param(
         dict(
             principal_state=PRINCIPAL_STATE_NOT_DETERMINED,
@@ -473,9 +425,7 @@ _REJECTED_SIGNAL_ROWS = [
         ),
         id="non_enumerated_principal_carries_refs",
     ),
-    # S3: a JSONB object is invisible to a length test but not to a reader.
     pytest.param(dict(principal_refs={"function_principal_id": 1}), id="principal_refs_as_object"),
-    # N2: the reverse arm of the value pairing — an earned negative is empty.
     pytest.param(
         dict(
             value_state=VALUE_STATE_PROVEN_NO_REACH,
@@ -484,7 +434,6 @@ _REJECTED_SIGNAL_ROWS = [
         ),
         id="proven_no_reach_carries_entity_keys",
     ),
-    # S7: a NULL element is an entity the fold cannot key.
     pytest.param(
         dict(
             value_state=VALUE_STATE_PROVEN_REACH,
@@ -519,11 +468,7 @@ def test_unconstrained_proven_destination_may_carry_a_shape(db_session, scoring_
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_state_columns_have_no_default(db_session, scoring_protocol):
-    """A raw INSERT omitting a discriminator raises instead of defaulting.
-
-    With a server default, a writer that never determined the fact would silently
-    record ``not_determined`` — an unread witness becoming a published one.
-    """
+    """A server default would record ``not_determined`` for a writer that never decided."""
     discriminators = [
         "severity_state",
         "witness_tier",
@@ -544,7 +489,6 @@ def test_state_columns_have_no_default(db_session, scoring_protocol):
     ).fetchall()
     assert defaulted == [], f"discriminators must not be defaultable: {defaulted}"
 
-    # And NOT NULL, so omission is an error rather than a NULL third state.
     nullable = db_session.execute(
         text(
             "SELECT column_name FROM information_schema.columns "
@@ -571,11 +515,7 @@ def test_score_state_columns_have_no_default(db_session, scoring_protocol):
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_reanalysis_replaces_prior_jobs_signals_for_the_same_contract(db_session, scoring_protocol):
-    """The real currency case: a SECOND job distilling the same contract.
-
-    Re-analysis mints a new job, so a job-scoped delete would leave the first
-    job's rows behind and the fold would count the contract twice.
-    """
+    """Re-analysis mints a new job, so a job-scoped delete would double-count the contract."""
     fx = scoring_protocol
     db_session.add_all([_row(fx, selector=f"0x0000000{n}") for n in (1, 2)])
     db_session.commit()
@@ -596,7 +536,6 @@ def test_reanalysis_replaces_prior_jobs_signals_for_the_same_contract(db_session
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_replace_does_not_touch_a_sibling_contract(db_session, scoring_protocol):
-    """Contract-scoped means contract-scoped, even at a shared deployment address."""
     fx = scoring_protocol
     db_session.add_all([_row(fx), _row(fx, contract_id=fx.sibling.id)])
     db_session.commit()
@@ -610,11 +549,7 @@ def test_replace_does_not_touch_a_sibling_contract(db_session, scoring_protocol)
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_split_proxy_siblings_share_a_deployment_address_without_colliding(db_session, scoring_protocol):
-    """Two contracts, one deployment_address, same selector and claim.
-
-    Without ``contract_id`` in the identity this is a unique-constraint violation
-    and one contract's signals can never be written.
-    """
+    """Without ``contract_id`` in the identity this is a unique-constraint violation."""
     fx = scoring_protocol
     db_session.add_all([_row(fx), _row(fx, contract_id=fx.sibling.id)])
     db_session.commit()
@@ -636,7 +571,6 @@ def test_identity_still_rejects_a_true_duplicate(db_session, scoring_protocol):
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_deleting_a_contract_stops_it_charging_exposure(db_session, scoring_protocol):
-    """A contract dropped from the perimeter must not outlive its own analysis."""
     fx = scoring_protocol
     db_session.add(_row(fx))
     db_session.commit()
@@ -649,7 +583,6 @@ def test_deleting_a_contract_stops_it_charging_exposure(db_session, scoring_prot
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_losing_the_job_keeps_the_signal(db_session, scoring_protocol):
-    """``job_id`` is provenance: pruning it must not withdraw a current signal."""
     fx = scoring_protocol
     db_session.add(_row(fx))
     db_session.commit()
@@ -754,11 +687,7 @@ def test_latest_view_returns_the_newest_row_per_protocol(db_session, scoring_pro
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_latest_view_prefers_the_newest_verdict_over_the_newest_grade(db_session, scoring_protocol):
-    """A ``not_determined`` fold wins if it is newest.
-
-    Serving the last COMPUTED row instead would republish a stale grade as
-    current — an absence reading as a fact at the read surface.
-    """
+    """Serving the last computed row would republish a stale grade as current."""
     fx = scoring_protocol
     now = datetime.now(timezone.utc)
     db_session.add_all(
@@ -800,17 +729,8 @@ def test_latest_view_breaks_same_instant_ties_deterministically(db_session, scor
     assert rows[0].id == newest_id
 
 
-# --------------------------------------------------------------------------
-# Reviewer-required coverage: normalization, seam, gate reader, guards
-# --------------------------------------------------------------------------
-
-
 def test_chain_aliases_collapse_to_one_entity_key():
-    """MAX-per-entity only dedups if the alias forms mint ONE key.
-
-    Without the fold, ``"mainnet"``/``"Ethereum"``/``None`` would be three keys
-    for one vault and the value axis would charge it three times.
-    """
+    """Otherwise the value axis charges one vault three times."""
     keys = {entity_key(c, "0xVAULT") for c in (None, "", "  ", "mainnet", "Ethereum", "ETHEREUM", "ethereum")}
     assert keys == {"ethereum::0xvault"}
     assert coalesce_chain("MAINNET") == "ethereum"
@@ -824,7 +744,6 @@ def test_entity_key_is_byte_identical_to_the_codebase_canon():
 
 def test_is_entity_key_rejects_unscoped_and_malformed_tokens():
     assert is_entity_key("ethereum::0xabc")
-    # A bare address aliases every chain's copy of it into one entity.
     assert not is_entity_key("0xabc")
     assert not is_entity_key("ethereum::0xABC")
     assert not is_entity_key("::0xabc")
@@ -842,7 +761,6 @@ def test_signal_rejects_unscoped_value_entity_keys():
 
 
 def test_proven_state_must_carry_its_witness_value():
-    """S2: the pairing is biconditional in the Python layer too."""
     with pytest.raises(ValueError, match="must carry its witness"):
         Tri(state=SEVERITY_STATE_PROVEN, value=None)
     with pytest.raises(ValueError, match="must carry its witness"):
@@ -850,7 +768,6 @@ def test_proven_state_must_carry_its_witness_value():
 
 
 def test_gate_input_raises_on_a_gate_that_was_never_distilled():
-    """A ``dict.get`` here would return None and read as 'no constraint'."""
     sig = _signal(gate_inputs={"pause_effective": Tri.not_determined().to_json()})
     assert sig.gate_input("pause_effective").state == NOT_DETERMINED
     with pytest.raises(KeyError, match="duration_bound_seconds"):
@@ -863,7 +780,6 @@ def test_gate_inputs_must_be_tri_envelopes():
 
 
 def test_destination_bearing_claim_cannot_be_not_applicable():
-    """Item 6: an unread delegatecall destination must not launder as 'none'."""
     for claim in DESTINATION_BEARING_CLAIMS:
         with pytest.raises(ValueError, match="launder"):
             _signal(
@@ -879,11 +795,7 @@ def test_destination_bearing_claim_cannot_be_not_applicable():
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protocol):
-    """S5: every field's three states survive the trip through Postgres.
-
-    Both directions are exercised: a state written to the wrong column leaves every
-    value legal, so no CHECK downstream would notice.
-    """
+    """A state in the wrong column leaves every value legal, so no CHECK would notice."""
     fx = scoring_protocol
     originals = [
         _signal_for(fx, selector="0x00000001"),
@@ -940,8 +852,7 @@ def test_signal_row_seam_round_trips_all_three_states(db_session, scoring_protoc
     assert restored[0].severity.value is None
 
 
-# N-a: a mismatched chain is part of the entity key and mis-keys every value; a non-lowercased address breaks
-# the identity join.
+# N-a: chain is part of the entity key; a non-lowercased address breaks the identity join.
 @pytest.mark.usefixtures("scoring_protocol")
 @pytest.mark.parametrize(
     ("match", "overrides"),
@@ -967,7 +878,6 @@ def test_replace_rejects_a_mismatched_signal(db_session, scoring_protocol, match
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_latest_view_correlates_per_protocol(db_session, scoring_protocol):
-    """N3: one protocol's newest row never becomes another's."""
     fx = scoring_protocol
     other = Protocol(name=f"scoretest-other-{uuid.uuid4().hex[:8]}")
     db_session.add(other)
@@ -1001,18 +911,9 @@ def test_latest_view_correlates_per_protocol(db_session, scoring_protocol):
         db_session.commit()
 
 
-# --------------------------------------------------------------------------
-# Round-2: all-or-nothing replace, cross-field agreement, grouping guard
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.usefixtures("scoring_protocol")
 def test_a_rejected_signal_leaves_the_original_set_fully_intact(db_session, scoring_protocol):
-    """R2-B1: validation runs before the delete, so a bad list changes nothing.
-
-    The distillation call site is fail-forward and commits anyway; had the delete
-    run, that commit would persist a partially replaced contract.
-    """
+    """R2-B1: the fail-forward caller commits anyway, so validation must run before the delete."""
     fx = scoring_protocol
     db_session.add_all([_row(fx, selector=f"0x0000000{n}") for n in (1, 2)])
     db_session.commit()
@@ -1027,7 +928,6 @@ def test_a_rejected_signal_leaves_the_original_set_fully_intact(db_session, scor
             ],
             job_id=fx.later_job.id,
         )
-    # The fail-forward caller commits regardless.
     db_session.commit()
 
     survivors = db_session.query(FunctionScoreSignal).filter_by(contract_id=fx.contract.id).all()
@@ -1036,7 +936,6 @@ def test_a_rejected_signal_leaves_the_original_set_fully_intact(db_session, scor
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_replace_rejects_a_signal_claiming_another_protocol(db_session, scoring_protocol):
-    """N-a: a mismatched protocol_id would be read by the WRONG protocol's fold."""
     fx = scoring_protocol
     other = Protocol(name=f"scoretest-wrong-{uuid.uuid4().hex[:8]}")
     db_session.add(other)
@@ -1057,7 +956,6 @@ def test_replace_rejects_a_signal_claiming_another_protocol(db_session, scoring_
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_replace_accepts_chain_aliases_of_the_contracts_chain(db_session, scoring_protocol):
-    """The agreement test coalesces, so "mainnet" is not a false mismatch."""
     fx = scoring_protocol
     replace_contract_signals(
         db_session,
@@ -1079,10 +977,7 @@ def test_replace_refuses_an_unknown_contract(db_session, scoring_protocol):
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_second_replace_of_one_contract_in_a_transaction_raises(db_session, scoring_protocol):
-    """Item-4: grouping by (contract_id, deployment_address) must not truncate.
-
-    The second call's delete would drop the first call's rows — silent recall loss.
-    """
+    """The second delete would silently drop the first call's rows."""
     fx = scoring_protocol
     replace_contract_signals(
         db_session,
@@ -1102,7 +997,6 @@ def test_second_replace_of_one_contract_in_a_transaction_raises(db_session, scor
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_the_grouping_guard_resets_between_transactions(db_session, scoring_protocol):
-    """The invariant is per-pass: the next distillation may replace again."""
     fx = scoring_protocol
     replace_contract_signals(
         db_session,
@@ -1126,7 +1020,6 @@ def test_the_grouping_guard_resets_between_transactions(db_session, scoring_prot
 
 @pytest.mark.usefixtures("scoring_protocol")
 def test_siblings_may_each_be_replaced_in_one_transaction(db_session, scoring_protocol):
-    """The guard is per contract, not per pass — siblings are distinct contracts."""
     fx = scoring_protocol
     replace_contract_signals(db_session, contract_id=fx.contract.id, signals=[_signal_for(fx)], job_id=fx.job.id)
     replace_contract_signals(
@@ -1140,7 +1033,6 @@ def test_siblings_may_each_be_replaced_in_one_transaction(db_session, scoring_pr
 
 
 def test_destination_bearing_claims_exist_in_the_claims_registry():
-    """N-b: a renamed or new destination-driven claim must not lose the guard."""
     from services.static.claims.matchers import discover
     from services.static.claims.registry import registry
 

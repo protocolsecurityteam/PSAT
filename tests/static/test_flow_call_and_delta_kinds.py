@@ -36,8 +36,6 @@ def _out_flow(info) -> Any:
     return flows[0]
 
 
-# ``token_owner``: the destination is the CURRENT owner of a caller-named token.
-
 TOKEN_OWNER_SRC = """
 pragma solidity ^0.8.20;
 
@@ -118,10 +116,7 @@ contract Queue {
 
 
 def test_token_owner_destination_is_not_a_caller_supplied_param(tmp_path):
-    """The load-bearing one. ``ownerOf(id)`` unions {view_call, state_variable,
-    parameter} — the parameter being the mapping KEY. Picking ``param`` out of
-    that union is the canonical forbidden failure and reports a token-owner
-    payout as a caller-chosen destination."""
+    """``ownerOf(id)`` unions {view_call, state_variable, parameter}, the parameter being the key."""
     contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
     effects = build_effects(contract)
     target = _out_flow(effects["functions"]["claim(uint256)"])["target_kind"]
@@ -137,8 +132,7 @@ def test_token_owner_external_erc721_lookup(tmp_path):
 
 
 def test_token_owner_nested_matches_inline_entry(tmp_path):
-    """Entry-vs-nested parity: the helper hop must not make the classification
-    MORE specific than the identical operand shape written at the entry."""
+    """The helper hop must not make the classification more specific than the entry."""
     contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
     fns = build_effects(contract)["functions"]
     assert _out_flow(fns["claim(uint256)"])["target_kind"] == _out_flow(fns["claimInline(uint256)"])["target_kind"]
@@ -151,9 +145,7 @@ def test_token_owner_batch_matches_single(tmp_path):
 
 
 def test_token_owner_taint_is_not_a_token_owner_destination(tmp_path):
-    """``ownerOf(id) ^ salt`` is caller-influenced arithmetic, not the owner. The
-    classification is a POSITIVE def-chain test precisely so a merely-tainted
-    value cannot borrow the kind."""
+    """A positive def-chain test, so a merely tainted value can't borrow the kind."""
     contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
     effects = build_effects(contract)
     target = _out_flow(effects["functions"]["claimMangled(uint256,uint160)"])["target_kind"]
@@ -161,10 +153,7 @@ def test_token_owner_taint_is_not_a_token_owner_destination(tmp_path):
 
 
 def test_unrecognized_getter_result_is_not_a_caller_supplied_param(tmp_path):
-    """The general case of the same trap: ANY call return value unions the call
-    tag with the callee's body sources, so a mapping read keyed by a forwarded
-    parameter looks like ``param``. Only the ERC-721 selector earns a name; every
-    other callee must fall to indeterminate rather than to the key's kind."""
+    """Only the ERC-721 selector earns a name; every other callee falls to indeterminate."""
     contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
     effects = build_effects(contract)
     target = _out_flow(effects["functions"]["claimUnknownGetter(uint256)"])["target_kind"]
@@ -180,8 +169,7 @@ def test_token_owner_union_with_storage_stays_indeterminate(tmp_path):
 
 
 def test_token_owner_reaches_the_claims_witness(tmp_path):
-    """The kind must survive the fact -> matcher -> claim projection, since the
-    frontend renders it from the witness."""
+    """The frontend renders it from the witness."""
     contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
     effects = build_effects(contract)
     claims = build_claims(contract, effects, {})["functions"]
@@ -190,8 +178,6 @@ def test_token_owner_reaches_the_claims_witness(tmp_path):
     kinds = [f.get("target_kind") for f in out[0]["witness"]["flows"]]
     assert {"kind": "token_owner", "tier": "static_trace"} in kinds, kinds
 
-
-# Struct-member destinations: caller-supplied struct vs. stored request row.
 
 STRUCT_DEST_SRC = """
 pragma solidity ^0.8.20;
@@ -228,25 +214,19 @@ contract Requests {
 
 
 def test_calldata_struct_array_element_destination_is_param(tmp_path):
-    """The array-of-struct element shape. The single-struct twin lives in
-    ``test_flow_interproc.py::test_calldata_struct_member_destination_is_param``,
-    which also pins the tier and entry-vs-nested parity."""
+    """The single-struct twin is in ``test_flow_interproc.py``."""
     contract = _compile(tmp_path, STRUCT_DEST_SRC, "Requests")
     fns = build_effects(contract)["functions"]
     assert _out_flow(fns["batchClaim(Requests.Request[])"])["target_kind"]["kind"] == "param"
 
 
 def test_stored_request_row_destination_is_not_param(tmp_path):
-    """A stored row's payee was fixed by an earlier transaction. Classifying it
-    ``param`` because the caller picked the KEY would read as caller-chosen
-    extraction."""
+    """The stored payee was fixed by an earlier tx; the caller only picked the key."""
     contract = _compile(tmp_path, STRUCT_DEST_SRC, "Requests")
     target = _out_flow(build_effects(contract)["functions"]["claimStored(uint256)"])["target_kind"]
     assert target["kind"] != "param", target
     assert target["kind"] in ("storage_no_setter", "storage_setter", "indeterminate"), target
 
-
-# ``balance_delta`` amounts.
 
 BALANCE_DELTA_SRC = """
 pragma solidity ^0.8.20;
@@ -312,8 +292,7 @@ def test_balance_delta_across_external_call(tmp_path):
 
 
 def test_balance_minus_storage_is_a_delta_not_storage_bounded(tmp_path):
-    """``balance - locked`` tracks the BALANCE; crediting the storage value with
-    bounding it understates how much can leave."""
+    """Crediting the storage value understates how much can leave."""
     contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
     amount = _out_flow(build_effects(contract)["functions"]["sweepStranded()"])["amount_kind"]
     assert amount["kind"] != "bounded_by_storage", amount
@@ -321,10 +300,7 @@ def test_balance_minus_storage_is_a_delta_not_storage_bounded(tmp_path):
 
 
 def test_non_subtractive_balance_arithmetic_is_not_a_delta(tmp_path):
-    """``balance / 2`` is balance-derived but not a delta. It also must not report
-    the DIVISOR's kind: the constant is the only non-``computed`` source, so
-    before the balance-derivation guard it won alone and the amount read as
-    ``fixed_constant``."""
+    """Before the balance-derivation guard the constant divisor won alone and read as ``fixed_constant``."""
     contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
     amount = _out_flow(build_effects(contract)["functions"]["half(address)"])["amount_kind"]
     assert amount["kind"] not in ("balance_delta", "fixed_constant"), amount
@@ -342,7 +318,6 @@ def test_balance_delta_reaches_the_claims_witness(tmp_path):
 
 
 def test_param_index_reaches_the_claims_witness(tmp_path):
-    # A caller-supplied destination resolves to calldata slot 0, projected into flow.out.
     contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
     effects = build_effects(contract)
     claims = build_claims(contract, effects, {})["functions"]
@@ -352,8 +327,7 @@ def test_param_index_reaches_the_claims_witness(tmp_path):
     assert 0 in indexes, out[0]["witness"]["flows"]
 
 
-# Helper RETURN values: the way back out of a helper. Getter-read destinations and
-# computed amounts used to publish "we traced nothing".
+# Getter-read destinations and computed amounts used to publish "we traced nothing".
 
 HELPER_RETURN_SRC = """
 pragma solidity ^0.8.20;
@@ -404,9 +378,7 @@ def _returns(tmp_path_factory):
 
 
 def test_a_getter_helper_return_resolves_to_the_variables_mutability(_returns):
-    """``_send(_governor(), amount)``. The destination is an admin-settable state
-    variable — the redirectable-vs-fixed distinction a scorer reads — and saying
-    ``indeterminate`` claimed the contract had not told us."""
+    """An admin-settable variable is the redirectable-vs-fixed distinction a scorer reads."""
     assert _out_flow(_returns["payGovernor(uint256)"])["target_kind"]["kind"] == "storage_setter"
 
 
@@ -419,8 +391,6 @@ def test_a_helper_returning_a_helper_resolves_through_both_hops(_returns):
 
 
 def test_a_helper_returning_its_argument_resolves_to_the_caller_value(_returns):
-    """Not a leak — a finding. The helper hands back what the caller passed, so
-    the destination really is caller-named, and that is the theft-shaped case."""
     assert _out_flow(_returns["payEcho(address,uint256)"])["target_kind"]["kind"] == "param"
 
 
@@ -429,8 +399,6 @@ def test_a_calculating_helper_return_resolves_the_amount(_returns):
 
 
 def test_a_helper_whose_returns_disagree_stays_indeterminate(_returns):
-    """``if (flag) return governor; return treasury;`` — the answer genuinely
-    depends on state, and picking either member asserts what the code does not."""
     assert _out_flow(_returns["payEither(uint256)"])["target_kind"]["kind"] == "indeterminate"
 
 
@@ -444,8 +412,7 @@ def test_a_keyed_lookup_return_is_never_published_as_fixed(_returns):
     assert target["kind"] == "indeterminate", target
 
 
-# `caller_supplied`: a merge is only caller-chosen if EVERY branch is, and a nested
-# formal only if the caller bound it to something that is.
+# A merge is caller-chosen only if every branch is, and a nested formal only if the caller bound it to one.
 
 MERGE_SRC = """
 pragma solidity ^0.8.20;
@@ -487,23 +454,16 @@ def _merge(tmp_path_factory):
 
 
 def test_a_merge_of_entry_param_and_msg_value_is_caller_supplied(_merge):
-    """Both branches are the caller's number, so the disjunction says something
-    an amount kind can assert — and it is stronger than ``indeterminate``."""
     assert _out_flow(_merge["payEntry(uint256)"])["amount_kind"]["kind"] == "caller_supplied"
 
 
 def test_a_merge_reached_through_a_forwarded_state_variable_is_not(_merge):
-    """The formal in ``_helper`` is a parameter of that UNIT, but the caller bound
-    it to storage. Reading it as self-evidently caller-supplied asserts that the
-    caller picks the magnitude on a branch where the magnitude is a state
-    variable they cannot influence — an over-claim in the direction that matters,
-    since a consumer reads ``caller_supplied`` as attacker-chosen."""
+    """The caller bound the formal to storage; a consumer reads ``caller_supplied`` as attacker-chosen."""
     flow = _out_flow(_merge["payForwardedStorage()"])
     assert flow["amount_kind"]["kind"] == "indeterminate", flow
 
 
-# The token-first recognizer's limits. It reads `to`/`amount` off the CALL SITE
-# without proving the callee forwards them, so where it may fire is its soundness.
+# The recognizer reads ``to``/``amount`` off the call site without proving the callee forwards them.
 
 RECOGNIZER_SRC = """
 pragma solidity ^0.8.20;
@@ -576,10 +536,7 @@ def test_an_internal_helper_that_redirects_is_not_read_off_the_call_site(_recogn
 
 
 def test_descending_into_a_recognized_helper_keeps_its_other_moves(_recognizer):
-    """The recognizer matching one move in a helper must not delete the rest of
-    that helper's body. The ETH branch here is a real payout, and losing it also
-    flipped `has_native_payout`, silently disabling the prober's
-    contract-balance seeding for a function that provably sends ETH."""
+    """Losing the ETH branch also flipped ``has_native_payout`` and disabled the prober's balance seeding."""
     flows = _recognizer["claim(IERC20,address,uint256)"]["value_flows"]
     kinds = {f["kind"] for f in flows}
     assert "low_level_value_call" in kinds, flows
@@ -587,9 +544,7 @@ def test_descending_into_a_recognized_helper_keeps_its_other_moves(_recognizer):
 
 
 def test_mentioning_a_selector_is_not_issuing_it(_recognizer):
-    """A deny-list checks the selector and moves nothing. Treating the constant's
-    presence as evidence published a fabricated `flow.out` with resolved
-    destination and amount slots."""
+    """A deny-list checks the selector and moves nothing."""
     assert not (_recognizer["enqueue(bytes4,address,uint256)"]["value_flows"]), _recognizer[
         "enqueue(bytes4,address,uint256)"
     ]["value_flows"]
@@ -621,12 +576,7 @@ def _zero_id(tmp_path_factory):
 
 
 def test_a_zero_trailing_arg_on_the_ambiguous_pull_selector_still_moves(_zero_id):
-    """Both standards define ``transferFrom(address,address,uint256)``, so a
-    literal 0 is a zero QUANTITY under ERC-20 and token id 0 — an ordinary NFT —
-    under ERC-721. Suppressing the site deleted a real transfer, and shrank the
-    member set a ``several`` fold asserts is the complete list of alternatives.
-    The move stands; the amount stays unresolved, because naming it
-    ``fixed_constant`` would assert the reading the selector cannot support."""
+    """0 is a zero quantity under ERC-20 but token id 0 under ERC-721. The move stands; the amount stays unresolved."""
     flows = _zero_id["sendPlain(address)"]["value_flows"]
     assert len(flows) == 1, flows
     assert flows[0]["selector"] == "0x23b872dd"
@@ -639,16 +589,11 @@ def test_a_zero_token_id_on_the_erc721_only_selector_keeps_its_identity_kind(_ze
 
 
 def test_a_zero_amount_on_an_unambiguous_erc20_send_still_moves_nothing(_zero_id):
-    """The exemption is scoped to the ambiguity. ``transfer(to, 0)`` is ERC-20's
-    alone and provably moves nothing, so it must still be dropped."""
     assert not _zero_id["sendNothing(address)"]["value_flows"]
 
 
-# A zero-value ``.call{value:}`` must not read as an ETH payout. Plane 0 mints
-# ``asset_send`` from any reachable ``.call{value: v}`` without looking at ``v``;
-# OZ's ``Address`` helper (bottom of every ``SafeERC20`` call) is such a site and
-# its zero literal lives one frame up. Four etherfi entry points published "sends
-# assets out of the contract" from nothing but this.
+# Plane 0 mints ``asset_send`` from any ``.call{value: v}``; OZ ``Address`` under SafeERC20 passes a zero literal from
+# one frame up. Four etherfi entries published "sends assets out" from this alone.
 
 ZERO_VALUE_CALL_SRC = """
 pragma solidity ^0.8.20;
@@ -713,7 +658,5 @@ def test_a_real_value_call_still_reads_as_a_payout(_zero_value):
 
 
 def test_a_function_that_approves_AND_pays_keeps_the_payout_label(_zero_value):
-    """The retraction is scoped to the absence of any real outflow: one zero-value
-    site alongside a genuine payment must not take the payment's label with it."""
     info = _zero_value["approveAndPay(IERC20,address,uint256)"]
     assert "asset_send" in info["effect_labels"]

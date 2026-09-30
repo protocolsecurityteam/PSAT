@@ -1,11 +1,5 @@
-"""Distillation and the protocol fold, against a fixture corpus.
-
-Every test here pins a way an unread witness could become a published number.
-The adversarial half is the point: a ``not_determined`` destination, constraint,
-value, weakness or principal state must produce NO finding and NO escalation,
-because the defect this scorer exists to avoid is a third state read as a
-positive fact — the prototype's −30λ delegatecall row, whose database row said
-only "I could not resolve the operand".
+"""Every test pins a way an unread witness could become a published number: a ``not_determined`` input must produce
+no finding and no escalation. The prototype's -30λ delegatecall row said only "I could not resolve the operand".
 """
 
 from __future__ import annotations
@@ -222,18 +216,8 @@ _PROVEN_EMPTY_MODULES = {
 }
 
 
-# --------------------------------------------------------------------------
-# Adversarial: an unread witness must never become a graded fact
-# --------------------------------------------------------------------------
-
-
 def test_unread_delegatecall_destination_scores_nothing(corpus):
-    """The banned defect class, as a permanent regression test.
-
-    The row publishes the honest third state (``indeterminate`` /
-    ``unresolved_operand``); a scorer that graded it ``unconstrained`` took an
-    unmodified OpenZeppelin ``multicall`` to an F.
-    """
+    """Grading ``unresolved_operand`` as ``unconstrained`` took an unmodified OZ ``multicall`` to an F."""
     contract = corpus.contract("0x" + "a" * 40)
     function = corpus.function(
         contract,
@@ -279,11 +263,6 @@ def test_unread_exec_destination_scores_nothing(corpus):
     assert not signal.enters_grade
 
 
-# --------------------------------------------------------------------------
-# The fork's caller_arbitrary answer, consumed only on the SAME parameter
-# --------------------------------------------------------------------------
-
-
 def _exec_param_claim(param: str) -> dict[str, Any]:
     return {
         "claim_id": "exec.arbitrary",
@@ -320,9 +299,7 @@ def _caller_arbitrary_verdict(function: EffectiveFunction, *, sentinel_param: st
 
 
 def test_fork_caller_arbitrary_is_consumed_on_the_destination_parameter(corpus):
-    """The 15 already-proven verdicts the exec arm never read: a sentinel landing
-    in the SAME parameter this sink calls through proves the caller picks the
-    destination."""
+    """The 15 proven verdicts the exec arm never read."""
     contract = corpus.contract("0x" + "1a" * 20)
     function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
     corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param="target"))
@@ -336,10 +313,7 @@ def test_fork_caller_arbitrary_is_consumed_on_the_destination_parameter(corpus):
 
 
 def test_fork_caller_arbitrary_about_another_parameter_licenses_nothing(corpus):
-    """The ordinary shape on this corpus: an arbitrary-call executor takes the
-    sentinel in its PAYLOAD slot while the call target keeps the base probe's
-    value, so the verdict proves the payload recipient is caller-chosen and says
-    nothing about the destination parameter."""
+    """The common shape: the sentinel lands in the payload slot, proving nothing about the destination parameter."""
     contract = corpus.contract("0x" + "1b" * 20)
     function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
     corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param="data"))
@@ -353,8 +327,6 @@ def test_fork_caller_arbitrary_about_another_parameter_licenses_nothing(corpus):
 
 
 def test_fork_verdict_that_names_no_parameter_licenses_nothing(corpus):
-    """A verdict whose subject is unnamed is a proof about an unidentified
-    parameter, with no join to make."""
     contract = corpus.contract("0x" + "1c" * 20)
     function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
     corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param=None))
@@ -382,8 +354,6 @@ def test_fork_verdicts_disagreeing_on_the_parameter_yield_nothing():
 
     assert D._fork_caller_arbitrary_param([verdict("target")]) == "target"
     assert D._fork_caller_arbitrary_param([verdict("target"), verdict("data")]) is None
-    # Neither an unproven verdict nor a shape proved by something other than the
-    # landed sentinel is a caller_arbitrary proof.
     unknown = SimpleNamespace(
         verdict="unknown",
         witness={
@@ -399,11 +369,6 @@ def test_fork_verdicts_disagreeing_on_the_parameter_yield_nothing():
     assert D._fork_caller_arbitrary_param([unknown, static]) is None
 
 
-# --------------------------------------------------------------------------
-# The caller-relative static destinations (msg_sender / token_owner)
-# --------------------------------------------------------------------------
-
-
 def _caller_relative_flow(kind: str) -> dict[str, Any]:
     return _flow_out(
         None,
@@ -413,8 +378,6 @@ def _caller_relative_flow(kind: str) -> dict[str, Any]:
 
 
 def test_msg_sender_destination_with_an_open_gate_is_unconstrained(corpus):
-    """With a proven-open caller gate the caller names the destination by
-    choosing which address calls, so it takes the unconstrained convention."""
     contract = corpus.contract("0x" + "2a" * 20)
     corpus.function(contract, name="redeem", claims=[_caller_relative_flow("msg_sender")], openness="open")
 
@@ -425,12 +388,8 @@ def test_msg_sender_destination_with_an_open_gate_is_unconstrained(corpus):
 
 
 def test_an_open_msg_sender_payee_publishes_the_destination_and_withholds_the_price(corpus):
-    """The two questions are answered separately and the row must publish both.
-
-    The payee IS the caller, proven. What the payout is bounded BY (the caller's
-    own position or the contract's whole balance) has no witness, so the price is
-    withheld. Publishing either half alone is the defect: a withheld destination
-    would un-earn a proof, a priced row would charge a bound nobody read.
+    """The payee is proven to be the caller, but what bounds the payout has no witness; publishing either half alone
+    is the defect.
     """
     contract = corpus.contract("0x" + "3a" * 20)
     corpus.function(contract, name="unwrap", claims=[_caller_relative_flow("msg_sender")], openness="open")
@@ -440,19 +399,15 @@ def test_an_open_msg_sender_payee_publishes_the_destination_and_withholds_the_pr
     assert signal.severity.state == SEVERITY_STATE_NOT_DETERMINED
     assert "flow_severity_withheld_pending_amount_witness" in signal.witness_notes
     assert not signal.enters_grade
-    # The refusal is on the price alone: the destination keeps naming its proof.
     assert str(signal.gate_input("destination_basis").value).endswith("+open_caller+severity_pending_amount_witness")
-    # The unread-destination token is a different fact and must not ride along.
     assert "destination_not_determined_row_withheld" not in signal.witness_notes
 
 
 def test_an_open_gate_licenses_no_escalation_where_the_caller_cannot_name_the_payee(corpus):
-    """``token_owner`` is not ``msg_sender``. The caller picks the token id; the
-    token's transfer history picks the address, so an open gate is the canonical
-    SAFE shape ("anyone may settle, funds go to the rightful owner"), not
-    evidence the destination is the attacker's. The escalation is withheld;
-    whether the open-caller ruling reaches this kind is the owner's call, and
-    until then the row publishes no positive destination."""
+    """The token's history picks the payee, so an open gate is the safe "anyone may settle" shape.
+
+    Whether the open-caller ruling reaches this kind is the owner's call.
+    """
     contract = corpus.contract("0x" + "2b" * 20)
     corpus.function(contract, name="claimWithdraw", claims=[_caller_relative_flow("token_owner")], openness="open")
 
@@ -472,10 +427,6 @@ def test_an_open_gate_licenses_no_escalation_where_the_caller_cannot_name_the_pa
     ids=["msg_sender", "token_owner"],
 )
 def test_caller_relative_destination_behind_a_gate_is_the_constrained_convention(corpus, kind, note):
-    """Both kinds take the existing constrained-destination severity, each naming
-    the constraint that holds it: for ``msg_sender`` the caller gate; for
-    ``token_owner`` the gate bounds who may trigger and token ownership fixes the
-    payee."""
     contract = corpus.contract("0x" + ("2c" if kind == "msg_sender" else "2d") * 20)
     corpus.function(contract, name="rescueTokens", claims=[_caller_relative_flow(kind)], openness="restricted")
 
@@ -485,7 +436,6 @@ def test_caller_relative_destination_behind_a_gate_is_the_constrained_convention
     assert signal.severity.value == DEST_SEVERITY_CONSTRAINED_OTHER
     assert note in signal.witness_notes
     if kind == "token_owner":
-        # The claim the caller gate cannot support: it bounds who triggers, never who is paid.
         assert "constraint_only_as_strong_as_the_caller_gate" not in signal.witness_notes
 
 
@@ -503,8 +453,6 @@ def test_caller_relative_destination_with_an_unread_gate_stays_undetermined(corp
 
 
 def test_caller_relative_conjunction_takes_the_worst_member(corpus):
-    """A flow set mixing a fixed payee with a caller-relative one reduces to the
-    caller-relative one: the meet, not whichever was read last."""
     contract = corpus.contract("0x" + "2f" * 20)
     corpus.function(
         contract,
@@ -550,11 +498,6 @@ def test_an_indeterminate_member_still_blocks_a_caller_relative_conjunction(corp
     assert not signal.enters_grade
 
 
-# --------------------------------------------------------------------------
-# The msg_value witness (W3): what the caller just attached, and who gets it
-# --------------------------------------------------------------------------
-
-
 def _msg_value_flow(target: str, **over: Any) -> dict[str, Any]:
     flow: dict[str, Any] = {
         "kind": "low_level_value_call",
@@ -571,10 +514,7 @@ def _msg_value_claims(*flows: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def test_msg_value_returned_to_the_caller_carries_no_severity_of_its_own(corpus):
-    """W3a, the exact conjunction: every out-flow pays this contract's own
-    balance, in the amount the caller attached to THIS call, to the caller. The
-    payout moves no position the caller did not just fund, so it is priced at a
-    named zero, and the earned destination fact is republished untouched."""
+    """W3a: the payout moves no position the caller didn't just fund, so it's priced at a named zero."""
     contract = corpus.contract("0x" + "4a" * 20)
     corpus.function(
         contract, name="unwrapL2Eth", claims=_msg_value_claims(_msg_value_flow("msg_sender")), openness="restricted"
@@ -588,18 +528,12 @@ def test_msg_value_returned_to_the_caller_carries_no_severity_of_its_own(corpus)
     assert signal.severity_basis == (MSG_VALUE_ARM_SELF_RETURN,)
     assert MSG_VALUE_ARM_SELF_RETURN in signal.witness_notes
     assert MSG_VALUE_ARM_PASSTHROUGH not in signal.witness_notes
-    # The zero says what it did not look at, and the warning table renders it.
     assert MSG_VALUE_REPETITION_RESIDUAL in signal.witness_notes
     assert MSG_VALUE_REPETITION_RESIDUAL in _NOTE_WARNINGS
 
 
 def test_msg_value_self_return_answers_the_withhold_it_is_pending_on(corpus):
-    """The compose ordering, on the branch that created the pending state. An open
-    caller-relative destination is PROVEN and its price withheld *pending an
-    amount witness*; this is that witness, so it is read first (a row carrying
-    both the refusal and its answer would publish a question it has the answer
-    to). The destination fact stays what the lattice proved: the AMOUNT carries
-    the bound."""
+    """This is the amount witness the withhold is pending on, so it's read first."""
     contract = corpus.contract("0x" + "4d" * 20)
     corpus.function(contract, name="refund", claims=_msg_value_claims(_msg_value_flow("msg_sender")), openness="open")
 
@@ -614,10 +548,7 @@ def test_msg_value_self_return_answers_the_withhold_it_is_pending_on(corpus):
 
 
 def test_the_self_return_arm_cannot_price_a_destination_nobody_read(corpus):
-    """The gate on the reordering is the destination being PROVEN, not priced.
-    With the caller gate unread the row keeps the unread-destination withhold;
-    the amount fact is still published (it is true) but prices nothing, and the
-    repetition residual, which belongs to the priced verdict, is not published."""
+    """The gate is the destination being proven; with the caller gate unread, the withhold stays."""
     contract = corpus.contract("0x" + "4e" * 20)
     corpus.function(
         contract,
@@ -637,11 +568,7 @@ def test_the_self_return_arm_cannot_price_a_destination_nobody_read(corpus):
 
 
 def test_msg_value_passed_through_to_a_fixed_payee_is_uncharged_product(corpus):
-    """W3b, ruled in by the owner. The caller's own ETH reaching a payee no caller
-    can name is bounded by what the caller just attached, so (beside the
-    self-return arm, ahead of the withhold) it is uncharged product surface at a
-    named zero. Its basis names the pass-through arm, the token the fold reads to
-    exclude the row; the earned destination fact is unchanged."""
+    """W3b, owner-ruled: the caller's own ETH to an unnameable payee is uncharged product surface at a named zero."""
     contract = corpus.contract("0x" + "4b" * 20)
     corpus.function(contract, name="receive", claims=_msg_value_claims(_msg_value_flow("immutable")), openness="open")
 
@@ -656,15 +583,12 @@ def test_msg_value_passed_through_to_a_fixed_payee_is_uncharged_product(corpus):
     assert MSG_VALUE_ARM_PASSTHROUGH in UNCHARGED_PRODUCT_BASES
     assert MSG_VALUE_ARM_PASSTHROUGH in signal.witness_notes
     assert MSG_VALUE_ARM_SELF_RETURN not in signal.witness_notes
-    # The immutable destination's UUPS disclosure is preserved for the earned
-    # negative the fold leaves behind (the excluded row publishes no finding).
+    # Preserved for the earned negative the fold leaves behind.
     assert "fixed_destination_conditional_on_upgrade_authority" in signal.witness_notes
 
 
 _MSG_VALUE_REFUSALS = [
-    # The fold declined to answer. ``amount_kinds`` is emitted exactly where the
-    # contributing sites disagreed, and a ``several`` carrying a ``msg_value``
-    # member says nothing about the member beside it.
+    # ``amount_kinds`` is emitted exactly where sites disagreed.
     (
         "several_fold",
         "5a",
@@ -681,8 +605,7 @@ _MSG_VALUE_REFUSALS = [
         "amount_fold_disagreed",
         DEST_SEVERITY_CONSTRAINED_OTHER,
     ),
-    # The scalar and the breakdown disagree with each other. The scalar alone
-    # would read as proven; the breakdown is the producer saying it is not.
+    # The breakdown is the producer saying the scalar isn't proven.
     (
         "breakdown_beside_a_msg_value_scalar",
         "5b",
@@ -698,8 +621,7 @@ _MSG_VALUE_REFUSALS = [
         "amount_fold_disagreed",
         DEST_SEVERITY_CONSTRAINED_OTHER,
     ),
-    # A TRACED msg.value is that the tracer arrived at the opcode, not that the
-    # amount IS the value attached to this call.
+    # A traced msg.value means the tracer reached the opcode, not that the amount is this call's value.
     (
         "traced_amount",
         "5c",
@@ -707,7 +629,6 @@ _MSG_VALUE_REFUSALS = [
         "amount_not_dispositive_ast",
         DEST_SEVERITY_CONSTRAINED_OTHER,
     ),
-    # The universal: one sibling flow paying something else refuses the function.
     (
         "sibling_flow_is_not_msg_value",
         "5d",
@@ -718,7 +639,6 @@ _MSG_VALUE_REFUSALS = [
         "amount_not_msg_value",
         DEST_SEVERITY_CONSTRAINED_OTHER,
     ),
-    # An absent ``from_is_self`` is not "this contract is the source".
     (
         "source_not_self",
         "5e",
@@ -747,8 +667,6 @@ _MSG_VALUE_REFUSALS = [
         "target_fold_disagreed",
         DEST_SEVERITY_CONSTRAINED_OTHER,
     ),
-    # A payee neither arm names. The lattice's own answer stands; this witness
-    # adds nothing to it.
     (
         "third_payee_kind",
         "6a",
@@ -756,10 +674,7 @@ _MSG_VALUE_REFUSALS = [
         "target_not_a_witnessed_arm",
         None,
     ),
-    # The bound is per ENTRY, and two entries paying the caller move twice what
-    # the caller attached — the surplus out of a balance somebody else funded.
-    # This shape is what the conjunction must refuse rather than read as one
-    # payment; it is also why the two arms can never be mixed on a proven set.
+    # The bound is per entry: two entries paying the caller move twice what was attached.
     (
         "multiple_paying_entries",
         "6b",
@@ -793,9 +708,6 @@ _MSG_VALUE_REFUSALS = [
     ids=[case[0] for case in _MSG_VALUE_REFUSALS],
 )
 def test_msg_value_return_refuses(corpus, slug, claims, reason, severity):
-    """Every conjunct, removed one at a time: the witness publishes its named
-    refusal and NOTHING positive, and the row scores what the destination lattice
-    scored it without the witness."""
     from services.scoring import distill as D
 
     assert D._msg_value_return(claims) == D._MsgValueReturn(arm=None, refusal=reason)
@@ -818,10 +730,7 @@ def test_msg_value_return_refuses(corpus, slug, claims, reason, severity):
 
 
 def test_a_payout_that_never_mentions_msg_value_is_asked_nothing(corpus):
-    """The third state, and why it is silence rather than a refusal: where the
-    payout amount is a parameter the question does not arise, and a reason there
-    would put this witness's vocabulary on every flow in the corpus while proving
-    nothing about any."""
+    """Where the amount is a parameter the question doesn't arise; a reason there would spread over every flow."""
     contract = corpus.contract("0x" + "4c" * 20)
     corpus.function(
         contract,
@@ -841,19 +750,12 @@ def test_a_payout_that_never_mentions_msg_value_is_asked_nothing(corpus):
 
 
 def test_a_blocked_flow_set_proves_no_msg_value_arm():
-    """A claim with no ``flows`` key blocks the read; a universal over an unread
-    set must not come out vacuously true."""
     from services.scoring import distill as D
 
     blocked = [{"claim_id": "flow.out", "tier": "idiom_structural", "witness": {"kind": "value_flow"}}]
     policy = [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"kind": "value_flow", "flows": []}}]
     assert D._msg_value_return(blocked) == D._MsgValueReturn(arm=None, refusal=None)
     assert D._msg_value_return(policy) == D._MsgValueReturn(arm=None, refusal=None)
-
-
-# --------------------------------------------------------------------------
-# The self-service witness (W1 ∧ W2): the consumer arm
-# --------------------------------------------------------------------------
 
 
 def _proven_ssp(**over: Any) -> dict[str, Any]:
@@ -888,10 +790,7 @@ def _ss_claims(*flows: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def test_self_service_bound_conjuncts():
-    """G2, the universal directly. A COMPLETE fixture proves; dropping any one
-    conjunct (W1 (C1), W2 (C2), the caller-relative payee (C3), a readable
-    sibling flow (C4)) yields a NAMED refusal and nothing positive, so the arm
-    never clears a payout whose bound was not fully witnessed."""
+    """G2: drop any of W1, W2, caller-relative payee or readable sibling flow and a named refusal replaces the proof."""
     from services.scoring import distill as D
 
     proven = D._self_service_bound(_ss_claims(_ss_flow()))
@@ -900,36 +799,27 @@ def test_self_service_bound_conjuncts():
     assert SELF_SERVICE_DISCLOSE_UPGRADE in proven.disclosures
     assert SELF_SERVICE_DISCLOSE_SIBLING in proven.disclosures
 
-    # C1 — W1 refused (the amount is not proven read from the caller's own cell).
     c1 = D._self_service_bound(_ss_claims(_ss_flow(ssp={"state": "not_determined", "reason": "guard_not_mandatory"})))
     assert c1 == D._SelfServiceBound(proven=False, refusal="guard_not_mandatory")
-    # C2 — W2 refused (the record is not cleared before the external call).
     c2 = D._self_service_bound(_ss_claims(_ss_flow(ssp={"state": "not_determined", "reason": "no_clearing_write"})))
     assert c2 == D._SelfServiceBound(proven=False, refusal="no_clearing_write")
-    # C3 — the payee is NOT the caller (a fixed payee out of the caller's balance).
     c3 = D._self_service_bound(_ss_claims(_ss_flow(target="immutable")))
     assert c3 == D._SelfServiceBound(proven=False, refusal="payee_not_caller_relative")
-    # C3 — the contract is not the proven source.
     c3b = D._self_service_bound(_ss_claims(_ss_flow(from_is_self=False)))
     assert c3b == D._SelfServiceBound(proven=False, refusal="flow_source_not_self")
-    # C4 — one sibling out-flow carries no witness at all: the universal refuses.
     c4 = D._self_service_bound(_ss_claims(_ss_flow(), _ss_flow(ssp=None)))
     assert c4 == D._SelfServiceBound(proven=False, refusal="unread_out_flow")
 
-    # NOT-ASKED: no out-flow raises the question, so no note and no refusal.
     not_asked = D._self_service_bound(_ss_claims(_msg_value_flow("msg_sender")))
     assert not_asked == D._SELF_SERVICE_NOT_ASKED
-    # A blocked (unreadable) set is NOT-ASKED, never a vacuous proof.
     blocked = [{"claim_id": "flow.out", "tier": "policy_derived", "witness": {"kind": "value_flow", "flows": []}}]
     assert D._self_service_bound(blocked) == D._SELF_SERVICE_NOT_ASKED
 
 
 def test_self_service_proven_reclassifies_an_open_payout_to_uncharged_product(corpus):
-    """The compose ordering the SPEC demands: an open ``msg_sender`` payout has
-    its destination PROVEN and price withheld pending an amount witness, and
-    W1 ∧ W2 IS that witness, so it is read BEFORE the withhold and the row
-    reclassifies to a named zero. Row kept; the two G7 disclosures ride the notes
-    so the fold's earned negative can carry them."""
+    """W1 ∧ W2 is the amount witness, read before the withhold; the G7 disclosures ride the notes for the earned
+    negative.
+    """
     contract = corpus.contract("0x" + "51" * 20)
     corpus.function(contract, name="cancelBid", claims=_ss_claims(_ss_flow()), openness="open")
 
@@ -943,14 +833,11 @@ def test_self_service_proven_reclassifies_an_open_payout_to_uncharged_product(co
     assert SELF_SERVICE_UNCHARGED_NOTE in signal.witness_notes
     assert SELF_SERVICE_DISCLOSE_UPGRADE in signal.witness_notes
     assert SELF_SERVICE_DISCLOSE_SIBLING in signal.witness_notes
-    # The interim withhold is NOT published beside the proof that answered it.
     assert "flow_severity_withheld_pending_amount_witness" not in signal.witness_notes
 
 
 def test_self_service_refused_open_payout_stays_at_the_interim_withhold(corpus):
-    """A refused conjunction returns the row to the U-IW withhold (not_determined,
-    withheld from the grade), never to a cheaper number. The refusal reason rides
-    the row."""
+    """Back to the U-IW withhold, never a cheaper number."""
     contract = corpus.contract("0x" + "52" * 20)
     corpus.function(
         contract,
@@ -970,17 +857,13 @@ def test_self_service_refused_open_payout_stays_at_the_interim_withhold(corpus):
 
 
 def test_self_service_uncharged_row_is_excluded_and_leaves_an_earned_negative(corpus):
-    """G1 + G7 together. A proven-bounded row keeps its confidence credit but
-    creates NO finding; its disclosures, which would vanish with the finding, ride
-    an earned negative instead."""
+    """G1 + G7: no finding, but the disclosures ride an earned negative."""
     contract = corpus.contract("0x" + "53" * 20)
     corpus.function(contract, name="cancelBid", claims=_ss_claims(_ss_flow()), openness="open")
 
     document = corpus.score()
-    # G1: the proven-bounded row carries no finding.
     assert [f for f in document.findings if f["capability"] == "flow.out"] == []
     assert document.provenance["population"]["rows_uncharged_product"] == 1
-    # entered the grade (credit kept), then excluded — not deleted.
     assert document.provenance["population"]["signals_entering_grade"] == 1
 
     payload = document.document()
@@ -989,7 +872,6 @@ def test_self_service_uncharged_row_is_excluded_and_leaves_an_earned_negative(co
     (neg,) = negatives
     assert neg["function"] == "cancelBid"
     assert neg["basis"] == [SELF_SERVICE_BASIS]
-    # G7: the UUPS disclosure and the same-function residual survive the exclusion.
     assert neg["conditional_on"] == SELF_SERVICE_DISCLOSE_UPGRADE
     assert neg["residual"] == SELF_SERVICE_DISCLOSE_SIBLING
     # ... and surface as warnings too (the warning channel).
@@ -1000,10 +882,10 @@ def test_self_service_uncharged_row_is_excluded_and_leaves_an_earned_negative(co
 
 
 def test_uncharged_product_basis_value_disagreement_warns_and_does_not_exclude():
-    """G8. A severity_basis naming an uncharged-product token beside a severity
-    that is not proven 0.0 is a bug: it warns and is NOT excluded, so the
-    disagreement never buys a silent exclusion. The corpus count of that warning
-    is 0 (checked by the differential harness)."""
+    """G8: the disagreement never buys a silent exclusion.
+
+    Its corpus count is 0 (checked by the differential harness).
+    """
     import types
     from typing import cast
 
@@ -1030,8 +912,7 @@ def test_uncharged_product_basis_value_disagreement_warns_and_does_not_exclude()
     assert _uncharged_product(sig(0.35), warnings) is False
     assert [w["kind"] for w in warnings] == ["uncharged_product_basis_value_disagreement"]
 
-    # And the token is REQUIRED: a proven 0.0 with no uncharged token (pause.set's
-    # build-up-from-zero) is a real charge that starts at zero, never excluded.
+    # pause.set builds up from zero; that's a real charge.
     plain_zero = cast(
         Any, types.SimpleNamespace(severity_basis=("capability_class_base",), severity=Tri.proven(PROVEN, 0.0))
     )
@@ -1077,8 +958,7 @@ def test_not_applicable_is_a_different_fact_from_not_determined(corpus):
     upgrade = corpus.only(contract, "upgrade.implementation")
     delegatecall = corpus.only(contract, "delegatecall.execute")
 
-    # A latch is genuinely destination-free; an upgrade names a new
-    # implementation and this scorer has no destination model for it.
+    # An upgrade names a new implementation and this scorer has no destination model for it.
     assert pause.destination.state == DESTINATION_STATE_NOT_APPLICABLE
     assert upgrade.destination.state == DESTINATION_STATE_NOT_DETERMINED
     assert delegatecall.destination.state == DESTINATION_STATE_NOT_DETERMINED
@@ -1250,7 +1130,6 @@ def test_freeze_value_membership_is_gated_on_the_latch_proof(corpus):
     signals = {s.function_name: s for s in corpus.signals(contract)}
     assert signals["pauseUnproven"].value_state == VALUE_STATE_NOT_DETERMINED
     assert signals["pauseProven"].value_state == VALUE_STATE_PROVEN_REACH
-    # Severity is proven on both: the capability's existence is the component.
     assert signals["pauseUnproven"].severity.state == SEVERITY_STATE_PROVEN
 
 
@@ -1284,11 +1163,6 @@ def test_null_openness_is_never_read_as_restricted(corpus):
     document = corpus.score()
     assert document.findings == []
     assert "unresolved_reachability" in {w["kind"] for w in document.warnings}
-
-
-# --------------------------------------------------------------------------
-# The fold: units, value and determinism
-# --------------------------------------------------------------------------
 
 
 def test_two_functions_reaching_one_vault_charge_it_once(corpus):
@@ -1369,8 +1243,7 @@ def test_unpriced_value_is_a_confidence_hit_not_a_zero(corpus):
 def test_safe_protection_withholds_the_kn_credit(corpus):
     protected = corpus.contract("0x" + "ae" * 20)
     exposed = corpus.contract("0x" + "af" * 20)
-    # Disjoint owner sets, so the two Safes stay two units: identical owners
-    # would make them one power and the max-weakness fold would hide the point.
+    # Identical owners would make them one power and hide the point.
     for contract, owners, protection in (
         (protected, OWNERS, _PROVEN_EMPTY_MODULES),
         (exposed, OTHER_OWNERS, {**_PROVEN_EMPTY_MODULES, "protection_is_upper_bound": True}),
@@ -1429,7 +1302,6 @@ def test_role_holder_floor_raises_breadth_and_never_lowers_it(corpus, db_session
     try:
         document = corpus.score()
         finding = document.findings[0]
-        # 5/6 alone earns the supermajority weakness; two proven holders raise it.
         assert WEAKNESS_SAFE_SUPERMAJORITY < ROLE_BREADTH_MULTI_HOLDER_WEAKNESS
         assert finding["weakness"] == ROLE_BREADTH_MULTI_HOLDER_WEAKNESS
     finally:
@@ -1584,9 +1456,7 @@ def test_both_feeding_modes_produce_the_same_document(corpus, db_session):
     persisted_signals = current_signals_for_protocol(db_session, corpus.protocol.id)
     persisted = compute_protocol_score(db_session, corpus.protocol.id)
 
-    # The SEQUENCES, not just the documents: comparing only the folded output
-    # lets an ordering bug hide behind a fold that happens to be commutative on
-    # this fixture.
+    # A commutative fold could hide an ordering bug.
     assert [_identity(s) for s in in_memory_signals] == [_identity(s) for s in persisted_signals]
     assert in_memory_signals == persisted_signals
     assert persisted.document() == in_memory.document()
@@ -1596,13 +1466,8 @@ def test_both_feeding_modes_produce_the_same_document(corpus, db_session):
 
 
 def test_r2_a_foreign_protocols_backlink_licenses_no_reach(corpus, db_session):
-    """A reach licence from another protocol's graph is not this protocol's fact.
-
-    The payloads are the producer's own shape: the node is written AT THE GATING
-    CONTRACT'S ADDRESS, on the GATED contract's graph, with
-    ``gated_contract_address`` naming the gated contract. An earlier version wrote
-    ``gated_contract_address = manager.address`` (a payload no producer emits), so
-    the join it protected was inert on every real row.
+    """Payloads use the producer's real shape; an earlier fixture wrote ``gated_contract_address = manager.address``,
+    so the join was inert on every real row.
     """
     from db.models import ControlGraphNode, Protocol
 
@@ -1639,9 +1504,7 @@ def test_r2_a_foreign_protocols_backlink_licenses_no_reach(corpus, db_session):
         assert signal.reach_gate_state == REACH_GATE_NOT_DETERMINED
         assert all(entity_key("ethereum", foreign.address) != key for key in signal.value_entity_keys)
 
-        # Positive control: the same backlink inside THIS protocol does license
-        # the pairing, so the negative above is a scope decision and not a
-        # recogniser that never fires.
+        # So the negative above is a scope decision, not a recogniser that never fires.
         vault = corpus.contract("0x" + "e3" * 20)
         db_session.add(
             ControlGraphNode(
@@ -1666,11 +1529,6 @@ def test_r2_a_foreign_protocols_backlink_licenses_no_reach(corpus, db_session):
         db_session.query(Contract).filter_by(id=foreign.id).delete()
         db_session.query(Protocol).filter_by(id=other.id).delete()
         db_session.commit()
-
-
-# --------------------------------------------------------------------------
-# The value plane and the audit posture, as the document publishes them
-# --------------------------------------------------------------------------
 
 
 def _balance(session, contract: Contract, *, usd: str, token: str) -> None:
@@ -1728,10 +1586,7 @@ def test_the_tracked_total_is_published_and_folds_the_impl_onto_its_proxy(corpus
     _balance(db_session, impl, usd="400.00", token=token)
 
     plane = load_value_plane(db_session, corpus.protocol.id)
-    # One entity, one asset. Neither row records the account it observed, so they
-    # are one account read twice — the later write is the current reading, and
-    # never the 1400.00 the two rows would sum to. The impl's key answers with
-    # the proxy's sheet, which is the alias fold this test exists for.
+    # No row records its account, so they're one account read twice; the later write wins, never the 1400.00 sum.
     assert plane.provenance["tracked_total_usd"] == 400.0
     assert plane.total(entity_key("ethereum", impl.address)) == 400.0
     assert plane.total(entity_key("ethereum", proxy.address)) == 400.0
@@ -1768,12 +1623,9 @@ def test_audit_posture_weighs_contracts_and_value_not_coverage_rows(corpus, db_s
     assert posture["reports_on_file"] == 2
     assert posture["rows"] == 2
     assert posture["contracts_total"] == 3
-    # Two audits of one contract are two rows and ONE covered contract.
     assert posture["contracts_covered"] == 1
     assert posture["contracts_proven"] == 1
-    # The proxy holds the balance and the audit reviewed the implementation, so
-    # the money behind that audit is the proxy's — counted once, and the
-    # unaudited contract's $25 is not in it.
+    # The audit reviewed the implementation but the proxy holds the balance.
     assert posture["value_covered_usd"] == 1000.0
     assert posture["value_proven_usd"] == 1000.0
     assert posture["non_coverage_classified"] == {"deployed_source_provably_differs": 1}
@@ -1795,7 +1647,6 @@ def test_audit_posture_value_is_null_when_no_covered_entity_is_priced(corpus, db
     posture = load_audit_posture(db_session, corpus.protocol.id, load_value_plane(db_session, corpus.protocol.id))
     assert posture["contracts_covered"] == 1
     assert posture["contracts_proven"] == 1
-    # An unpriced audited contract contributes nothing and is never read as $0.
     assert posture["value_covered_usd"] is None
     assert posture["value_proven_usd"] is None
 
@@ -1826,8 +1677,6 @@ def test_a_proven_equivalence_without_its_commit_is_not_a_proof(corpus, db_sessi
     posture = load_audit_posture(db_session, corpus.protocol.id, load_value_plane(db_session, corpus.protocol.id))
     assert posture["contracts_covered"] == 2
     assert posture["value_covered_usd"] == 1200.0
-    # The commit-less row is covered but never proven, in the count and in the
-    # money behind it.
     assert posture["proven_equivalence"] == 1
     assert posture["contracts_proven"] == 1
     assert posture["value_proven_usd"] == 500.0
@@ -1842,8 +1691,6 @@ def test_audit_discovery_that_ran_and_found_nothing_publishes_zero(corpus, db_se
 
     posture = load_audit_posture(db_session, corpus.protocol.id, load_value_plane(db_session, corpus.protocol.id))
     assert posture["reports_on_file"] == 0
-    # Nothing on file is nothing that could have matched, so the coverage zeros
-    # are earned too.
     assert posture["contracts_covered"] == 0
     assert posture["contracts_proven"] == 0
 
@@ -1855,13 +1702,7 @@ def test_an_unwitnessed_audit_discovery_publishes_no_counts(corpus, db_session):
     assert posture["reports_on_file"] is None
     assert posture["contracts_covered"] is None
     assert posture["contracts_proven"] is None
-    # The denominator is a discovery fact and stands on its own.
     assert posture["contracts_total"] == 1
-
-
-# --------------------------------------------------------------------------
-# Value-plane hygiene and closure admission, against real rows
-# --------------------------------------------------------------------------
 
 
 def _balance_row(
@@ -1874,9 +1715,7 @@ def _balance_row(
     block: int | None = None,
     raw: str = "1",
 ) -> None:
-    """A balance row. ``block`` is only storable on a native row:
-    ``ck_contract_balances_token_block_null`` enforces that an ERC-20 quantity is
-    never height-pinned, so most observations can only be ordered by write order."""
+    """``ck_contract_balances_token_block_null`` keeps ERC-20 rows unpinned, so most are ordered by write order."""
     from db.models import ContractBalance
 
     session.add(
@@ -1894,12 +1733,7 @@ def _balance_row(
 
 
 def test_the_same_account_read_at_two_heights_publishes_the_later_read(corpus, db_session):
-    """R5: MAX across heights republishes a balance that had already moved.
-
-    The proxy's live row and its implementation's frozen row observe ONE address;
-    the alias fold buckets them and only the height says which is current.
-    Native, because the schema refuses a height on an ERC-20 row.
-    """
+    """R5: the proxy's live row and its impl's frozen row observe one address; only height says which is current."""
     proxy = corpus.contract("0x" + "f1" * 20, implementation="0x" + "f2" * 20)
     impl = corpus.contract("0x" + "f2" * 20)
     _balance_row(db_session, impl, usd="26404230.63", token=None, observed=proxy.address, block=25_658_048)
@@ -1922,24 +1756,15 @@ def test_a_sheet_of_rounding_dust_publishes_no_total_and_names_why(corpus, db_se
     key = entity_key("ethereum", contract.address)
     assert plane.sheet_state(key) == SHEET_BELOW_RESOLUTION
     assert plane.total(key) is None
-    # The perimeter is unpriced, so the tracked total is not_determined — never a
-    # zero denominator standing in for "the protocol holds nothing".
+    # Never a zero denominator standing in for "holds nothing".
     assert plane.provenance["tracked_total_usd"] is None
-    # Every state, including the four no entity is in.
     assert plane.provenance["sheet_states"][SHEET_BELOW_RESOLUTION] == 1
     assert sum(plane.provenance["sheet_states"].values()) == 1
     assert plane.provenance["sheet_states"][SHEET_PROVEN_EMPTY] == 0
 
 
 def test_the_sheet_state_census_counts_the_entities_nobody_has_read(corpus, db_session):
-    """V2: ``no_rows`` was a STRUCTURAL zero, not a measurement.
-
-    The census walked the observation maps, whose keys by construction have
-    something observed, so the "nothing observed" state could never increment and
-    ``sheet_states.no_rows: 0`` falsely told a consumer "every entity carries a
-    balance sheet". Here two of three contracts were never read; the census says
-    two.
-    """
+    """V2: the census walked observation maps, so ``no_rows`` could never increment."""
     read = corpus.contract("0x" + "e1" * 20)
     corpus.contract("0x" + "e2" * 20)
     corpus.contract("0x" + "e3" * 20)
@@ -1948,17 +1773,11 @@ def test_the_sheet_state_census_counts_the_entities_nobody_has_read(corpus, db_s
     states = load_value_plane(db_session, corpus.protocol.id).provenance["sheet_states"]
     assert states[SHEET_NO_ROWS] == 2
     assert states["priced"] == 1
-    # The population is the whole base population, not the read part of it.
     assert sum(states.values()) == 3
 
 
 def test_an_unread_proxy_and_its_implementation_are_one_unread_sheet(corpus, db_session):
-    """The base population is NOT canonical when the census runs.
-
-    ``contract_entities`` folds onto proxies only after this block, so a census
-    over it raw would count an implementation apart from its proxy and report two
-    unread sheets where there is one.
-    """
+    """``contract_entities`` folds onto proxies only after this block."""
     proxy = "0x" + "e4" * 20
     impl = "0x" + "e5" * 20
     corpus.contract(proxy, implementation=impl)
@@ -1970,11 +1789,7 @@ def test_an_unread_proxy_and_its_implementation_are_one_unread_sheet(corpus, db_
 
 
 def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(corpus, db_session):
-    """R10: a burn sentinel is not a principal, and not an anchor either.
-
-    Admitting it makes every renounced authority one principal's closure, the
-    largest fan-out in the graph, seeded by no witness.
-    """
+    """R10: admitting it makes every renounced authority one principal's closure."""
     from db.models import ControlGraphEdge
 
     zero = "0x" + "0" * 40
@@ -2005,7 +1820,6 @@ def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(cor
     }
     assert entity_key("ethereum", zero) not in closure.principals()
     assert closure.controlled_by(entity_key("ethereum", zero)) == ()
-    # The one real edge survives: the rule removes reach, it does not empty the graph.
     assert closure.controlled_by(entity_key("ethereum", real)) == (entity_key("ethereum", anchor.address),)
 
 
@@ -2032,11 +1846,7 @@ def test_an_edge_with_an_unkeyable_endpoint_is_refused_by_name_not_dropped(corpu
 
 
 def test_a_controller_value_pointing_at_the_zero_address_is_an_earned_negative(corpus, db_session):
-    """R18: renounced authority is a resolved constraint, not a missing edge.
-
-    Counted apart from the refusal it coincides with: "we declined to walk this"
-    and "nobody holds this authority" are different facts.
-    """
+    """R18: counted apart from the refusal it coincides with."""
     from db.models import ControlGraphEdge
 
     zero = "0x" + "0" * 40
@@ -2057,9 +1867,7 @@ def test_a_controller_value_pointing_at_the_zero_address_is_an_earned_negative(c
         "edges": 1,
         "authority_slots": 1,
         "anchors": 1,
-        # A renounced ``owner`` and a never-set ``accessController`` are both
-        # proven-absent authority and both land here; which slot it was is the
-        # difference between a renunciation and a pointer nobody wired.
+        # Which slot distinguishes a renunciation from a pointer nobody wired.
         "authority_slots_by_label": {"owner": 1},
     }
     renounced = closure.renounced[0]
@@ -2069,11 +1877,8 @@ def test_a_controller_value_pointing_at_the_zero_address_is_an_earned_negative(c
 
 
 def test_every_excluded_relation_is_enumerated_with_its_count_and_reason(corpus, db_session):
-    """R13: the bound is discovery-fixed, not built from what the walk consumed.
-
-    Relations the scorer never mentions, or that carry no rows today, are
-    silently unwalked under an enumeration keyed on the consumed set; both must
-    be published with counts.
+    """R13: the bound is discovery-fixed, so unmentioned or currently empty relations are still published with
+    counts.
     """
     from db.models import CONTROL_EDGE_RELATIONS, ControlGraphEdge
 
@@ -2099,16 +1904,13 @@ def test_every_excluded_relation_is_enumerated_with_its_count_and_reason(corpus,
 
     published = unconsumed_reach_relations(db_session, corpus.protocol.id)
     relations = published["relations"]
-    # Walked, so absent from the exclusion register.
     assert "controller_value" not in relations
     for relation in ("safe_owner", "external_call_target", "controller_value_unattributed", "capability_principal"):
         assert relations[relation]["edges"] == 1
         assert relations[relation]["classified"] is True
-    # Present in the writer's allowlist, no rows here — a named zero, not an absence.
     for relation in set(CONTROL_EDGE_RELATIONS) - set(CONTROL_RELATIONS):
         assert relation in relations
     assert relations["timelock_owner"]["edges"] == 0
-    # A relation nobody classified is published rather than dropped.
     assert relations["some_relation_nobody_classified"] == {
         "edges": 1,
         "reason": UNCONSUMED_REASON_UNCLASSIFIED,
@@ -2118,13 +1920,7 @@ def test_every_excluded_relation_is_enumerated_with_its_count_and_reason(corpus,
 
 
 def test_role_holder_floors_are_scoped_to_the_protocol_being_scored(corpus, db_session):
-    """R20: another protocol's analysis may not move this protocol's floors.
-
-    The table has no protocol column, so an unscoped read makes the population a
-    function of what else was analysed (same protocol scored twice, different
-    floors). Only a registry this protocol's own resolution names is in scope,
-    which is the set the fold can join.
-    """
+    """R20: the table has no protocol column, so an unscoped read makes floors depend on what else was analysed."""
     contract = corpus.contract("0x" + "fb" * 20)
     registry = "0x" + "f9" * 20
     foreign_registry = "0x" + "fa" * 20

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -226,7 +225,6 @@ class TestSearch:
 
 
 class TestCacheKey:
-
     def _key_for(self, **overrides):
         base = {
             "api_key": "secret",
@@ -262,7 +260,6 @@ class TestCacheKey:
 
 
 class TestCacheBehavior:
-
     @patch("services.clients.tavily.load_dotenv")
     def test_disabled_skips_storage(self, _mock_dotenv, monkeypatch):
         monkeypatch.setenv("TAVILY_API_KEY", "test-key")

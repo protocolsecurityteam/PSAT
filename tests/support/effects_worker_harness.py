@@ -1,10 +1,3 @@
-"""Effects-worker orchestration harness: the stubbed seams, the injectable prober
-and the row builders the worker integration tests drive.
-
-Extracted verbatim from ``test_effects_worker_integration``; ``test_effects_stage``
-imported all of it cross-module, including the ``clean_effects`` fixture.
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -35,11 +28,6 @@ CONTRACT_C = "0x" + "c3" * 20
 PRINCIPAL = "0x" + "22" * 20
 
 
-# ---------------------------------------------------------------------------
-# fixtures / helpers
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def clean_effects(db_session):
     db_session.query(EffectVerdict).delete()
@@ -53,9 +41,7 @@ def clean_effects(db_session):
 
 
 def _protocol_with_functions(session, addresses: list[str]) -> tuple[int, dict[str, int]]:
-    """Create a protocol + one contract & effective-function per address. Returns
-    ``(protocol_id, {address: function_id})`` so candidates can reference real
-    ``effective_functions.id`` rows (the ``effect_verdicts`` FK)."""
+    """Candidates need real ``effective_functions.id`` rows for the ``effect_verdicts`` FK."""
     proto = Protocol(name=f"effects-it-{uuid.uuid4().hex[:8]}")
     session.add(proto)
     session.flush()
@@ -79,8 +65,7 @@ def _protocol_with_functions(session, addresses: list[str]) -> tuple[int, dict[s
 
 
 def _make_job(session, protocol_id: int, name: str, address: str = CONTRACT_A):
-    """A job stamped with ``protocol_id`` so the worker's selection guard passes
-    (a contract job with no protocol has nothing to simulate)."""
+    """A contract job with no protocol has nothing to simulate."""
     job = create_job(session, {"address": address, "name": name})
     job.protocol_id = protocol_id
     session.commit()
@@ -101,7 +86,6 @@ def _candidate(address: str, function_id: int, contract_id: int = 0) -> Candidat
 
 
 def _transcript_store(session, job):
-    """A REAL transcript store (artifact-backed) so ``transcript_ptr`` resolves."""
     seq = {"n": 0}
 
     def store(tr: dict[str, Any]) -> str:
@@ -114,8 +98,6 @@ def _transcript_store(session, job):
 
 
 def _run(worker, session, job) -> tuple[list, dict]:
-    """Run ``process`` under bound warning-channel + metrics accumulators (as
-    ``BaseWorker._execute_job`` would), returning (stage_errors, metrics)."""
     errors: list = []
     metrics: dict = {}
     etok = degraded_errors_var.set(errors)
@@ -129,9 +111,7 @@ def _run(worker, session, job) -> tuple[list, dict]:
 
 
 class _Prober:
-    """Injectable prober: one plan per candidate whose ``run`` returns a canned
-    ObservedEffect from ``factory(candidate)``. Records which candidates ran so
-    'no re-sim' is checkable."""
+    """Records which candidates ran so 'no re-sim' is checkable."""
 
     def __init__(self, factory, *, effect_class=EFFECT_CLASS_SUPPLY, scope=SCOPE_KERNEL, gate_ref="role:MINTER"):
         self.factory = factory

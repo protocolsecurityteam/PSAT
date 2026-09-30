@@ -1,10 +1,4 @@
-"""Cross-contract policy-derived claim tests (unit layer).
-
-Drives the real ``services.static.cross_contract`` functions over ``effects``-shaped fact
-dicts (no Slither/DB). The legacy propagate-every-effect-label rule is gone: these assert
-typed ``policy_derived`` claims only, and that a control-plane label never rides across a
-call boundary.
-"""
+"""Only typed ``policy_derived`` claims cross a call boundary; control-plane labels never do."""
 
 from __future__ import annotations
 
@@ -49,11 +43,6 @@ def _caller(fn_sig: str, sinks: list[dict]) -> dict:
     return {"functions": {fn_sig: {"selector": _selector(fn_sig), "sinks": sinks, "claims": []}}}
 
 
-# ---------------------------------------------------------------------------
-# build_callee_claim_map — only propagatable claims survive
-# ---------------------------------------------------------------------------
-
-
 def test_callee_map_keeps_flow_drops_control_and_weak_tiers():
     effects = {
         "functions": {
@@ -67,8 +56,7 @@ def test_callee_map_keeps_flow_drops_control_and_weak_tiers():
     }
     callee_map = build_callee_claim_map({TOKEN: effects})
     assert TOKEN in callee_map
-    # flow.out (flow family, standard) kept; roles.grant (control plane) and
-    # supply.burn (only idiom tier) dropped.
+    # The control-plane and idiom-tier claims are dropped.
     assert set(callee_map[TOKEN]) == {TRANSFER_SELECTOR}
     assert callee_map[TOKEN][TRANSFER_SELECTOR][0]["claim_id"] == "flow.out"
 
@@ -76,11 +64,6 @@ def test_callee_map_keeps_flow_drops_control_and_weak_tiers():
 def test_callee_map_empty_for_missing_claims():
     assert build_callee_claim_map({TOKEN: {"functions": {}}}) == {}
     assert build_callee_claim_map(None) == {}
-
-
-# ---------------------------------------------------------------------------
-# Derivation 1: value-flow propagation
-# ---------------------------------------------------------------------------
 
 
 def test_value_flow_propagation_emits_policy_derived():
@@ -106,7 +89,6 @@ _RESOLVED = {"state_variable:token": {"value": TOKEN}}
     ("origin", "controller_values", "analyzed_callees"),
     [
         pytest.param("guard", _RESOLVED, {TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])}, id="guard_origin"),
-        # No controller_values: "token" cannot resolve to an address.
         pytest.param("body", {}, {TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])}, id="controller_unresolved"),
         pytest.param("body", _RESOLVED, {}, id="callee_not_analyzed"),
     ],
@@ -125,11 +107,6 @@ def test_external_contract_controller_id_format_resolves():
     assert out["pull(address)"][0]["claim_id"] == "flow.in"
 
 
-# ---------------------------------------------------------------------------
-# Derivation 3: beacon upgrade (the one control-plane claim that DOES ride)
-# ---------------------------------------------------------------------------
-
-
 def test_beacon_upgrade_propagates_upgrade_implementation():
     callee_map = build_callee_claim_map({BEACON: _callee(UPGRADE_TO, [_std("upgrade.implementation")])})
     target = _caller("upgradeEtherFiNode(address)", [_external_sink("beacon.upgradeTo", UPGRADE_TO)])
@@ -138,11 +115,6 @@ def test_beacon_upgrade_propagates_upgrade_implementation():
     claim = out["upgradeEtherFiNode(address)"][0]
     assert claim["claim_id"] == "upgrade.implementation"
     assert claim["tier"] == "policy_derived"
-
-
-# ---------------------------------------------------------------------------
-# Derivation 2: transfer_policy.configure
-# ---------------------------------------------------------------------------
 
 
 def _vault_with_hook_pointer(pointer: str = "hook") -> dict:
@@ -223,7 +195,6 @@ def test_transfer_policy_configure_on_bool_mapping_setter():
 @pytest.mark.parametrize(
     ("var", "declared_type", "links"),
     [
-        # A scalar address write (e.g. setOwner) is not a transfer allow/deny list.
         pytest.param("owner", "address", [{"sibling_address": VAULT, "pointer_var": "hook"}], id="not_bool_mapping"),
         pytest.param("allowlist", "mapping(address => bool)", [], id="no_sibling_hook_link"),
     ],
@@ -236,11 +207,6 @@ def test_transfer_policy_negatives(var, declared_type, links):
         sibling_transfer_hooks=links,
     )
     assert out == {}
-
-
-# ---------------------------------------------------------------------------
-# Derivation 4: proxy-verified upgrade provenance
-# ---------------------------------------------------------------------------
 
 
 def _classifications(address: str, **info) -> dict:
@@ -256,7 +222,6 @@ def test_proxy_provenance_from_slot_confirmed_proxy():
 
 
 def test_proxy_provenance_none_for_non_slot_proxy_or_non_proxy():
-    # eip1167 is a bytecode proxy, not a slot-confirmed one.
     assert (
         proxy_provenance_from_classifications(
             TELLER, _classifications(TELLER, type="proxy", proxy_type="eip1167", implementation=IMPL)
@@ -303,16 +268,10 @@ def test_provenance_does_not_override_static_standard_exact():
     assert merged[0]["tier"] == "standard_exact"
 
 
-# ---------------------------------------------------------------------------
-# The join meets through the canonical ``abi_selector`` when the callee's
-# declared signature is not the ABI form (interface/enum/struct params).
-# ---------------------------------------------------------------------------
+# The join meets through ``abi_selector`` when the callee's declared signature isn't the ABI form.
 
-# keccak("sweepTo(IERC20,address,uint256)")[:4] — the DECLARED form the callee
-# record keys today; NOT a dispatchable selector.
+# The declared form the callee record keys on; not dispatchable.
 DECLARED_SWEEP_TO = _selector("sweepTo(IERC20,address,uint256)")
-# keccak("sweepTo(address,address,uint256)")[:4] — the canonical ABI form the
-# caller's sink records.
 CANONICAL_SWEEP_TO = _selector("sweepTo(address,address,uint256)")
 
 
@@ -324,10 +283,10 @@ def _interface_param_callee(claims: list[dict], *, stamped: bool) -> dict:
 
 
 def test_interface_param_callee_joins_via_the_canonical_key():
-    """The realised pair: AssetRecovery's record says 0x38541c00, the
-    caller's sink says 0x0aeef8c8; with the canonical stamp the join meets and
-    the caller inherits flow.out at policy_derived — its OWN rank, not the
-    callee's standard_exact (the tier lattice scores it as the weakest tier)."""
+    """AssetRecovery's record says 0x38541c00 and the caller's sink 0x0aeef8c8.
+
+    The caller inherits at its own policy_derived rank, not the callee's.
+    """
     callee_map = build_callee_claim_map({TOKEN: _interface_param_callee([_std("flow.out")], stamped=True)})
     assert CANONICAL_SWEEP_TO in callee_map[TOKEN]
     target = _caller("recoverVia(address,address,uint256)", [_external_sink("recovery.sweepTo", CANONICAL_SWEEP_TO)])
@@ -339,7 +298,6 @@ def test_interface_param_callee_joins_via_the_canonical_key():
 
 
 def test_unstamped_interface_param_callee_still_misses_honestly():
-    """A pre-stamp artifact has no canonical key; absence is not-determined, so the join must not guess a lowering."""
     callee_map = build_callee_claim_map({TOKEN: _interface_param_callee([_std("flow.out")], stamped=False)})
     assert CANONICAL_SWEEP_TO not in callee_map[TOKEN]
     target = _caller("recoverVia(address,address,uint256)", [_external_sink("recovery.sweepTo", CANONICAL_SWEEP_TO)])
@@ -347,9 +305,7 @@ def test_unstamped_interface_param_callee_still_misses_honestly():
 
 
 def test_non_propagatable_claims_never_join_even_via_the_canonical_key():
-    """Negative control: the canonical key widens the JOIN, not the
-    propagation rule. A weak-tier claim and a control-plane claim on the same
-    stamped callee still derive nothing."""
+    """The canonical key widens the join, not the propagation rule."""
     weak = {"claim_id": "exec.arbitrary", "tier": "idiom_structural", "witness": {}}
     control = _std("authority.replace")
     callee_map = build_callee_claim_map({TOKEN: _interface_param_callee([weak, control], stamped=True)})

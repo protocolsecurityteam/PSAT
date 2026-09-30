@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from utils.logging import bind_trace_context, degraded_errors_var, record_degraded

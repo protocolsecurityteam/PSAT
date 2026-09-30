@@ -1,10 +1,6 @@
-"""A/B golden gate for effect labels over the frozen fixture corpus.
+"""Golden gate over the frozen corpus (solc 0.8.27).
 
-Drives the real static pipeline over every corpus contract and compares the
-flattened ``(contract, address, function, selector, effect_labels, claims)`` tuples
-against the checked-in golden. The corpus pins solc ``0.8.27`` (the offline CI
-version), so a producer change that silently relabels a function fails here unless
-the PR carries the regenerated golden (``tests/regenerate_label_golden.py``).
+A silent relabel fails unless the PR regenerates via ``tests/regenerate_label_golden.py``.
 """
 
 from __future__ import annotations
@@ -17,15 +13,12 @@ from tests.support import label_corpus as harness
 
 
 def test_manifest_and_golden_cover_the_same_contracts():
-    """The manifest is the single source of truth; the golden must mirror it
-    exactly (no orphaned or missing corpus entries)."""
     manifest_addrs = {e["address"] for e in harness.corpus_entries()}
     golden_addrs = {c["address"] for c in harness.load_golden()["contracts"]}
     assert manifest_addrs == golden_addrs
 
 
 def test_label_corpus_golden(tmp_path):
-    """Recompute the entire corpus and diff against the checked-in golden."""
     try:
         actual = harness.build_golden(harness.corpus_entries(), workdir=tmp_path)
     except harness.SolcNotInstalled as exc:  # pragma: no cover - env-dependent skip

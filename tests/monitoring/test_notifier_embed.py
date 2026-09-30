@@ -16,7 +16,6 @@ from services.monitoring.notifier import _format_governance_embed as _format_emb
 
 
 class _FakeSession:
-
     def get(self, _model, _id):
         return None
 

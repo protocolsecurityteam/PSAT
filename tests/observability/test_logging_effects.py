@@ -282,7 +282,6 @@ def test_dropped_manifest_is_capped_with_the_full_count(caplog):
 
 
 class _FlushOnlySession:
-
     def flush(self) -> None:
         pass
 

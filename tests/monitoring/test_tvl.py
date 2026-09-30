@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -92,7 +91,6 @@ def _cleanup(db_session):
 
 
 class TestFetchDefillamaTvl:
-
     @patch("services.monitoring.tvl.requests.get")
     @patch("services.discovery.protocol_resolver.resolve_protocol")
     def test_happy_path(self, mock_resolve, mock_get):
@@ -534,7 +532,6 @@ class TestRefreshAllProtocols:
 
 @requires_postgres
 class TestSnapshotDedup:
-
     def test_back_to_back_snapshots_deduped(self, db_session, monkeypatch, _cleanup):
         protocol = Protocol(name="DedupProto")
         db_session.add(protocol)
@@ -678,7 +675,6 @@ class TestNativeAssetPricingDispatch:
 
 @requires_postgres
 class TestEthPriceDegradationDB:
-
     def test_price_failure_logs_contract_count(self, db_session, monkeypatch, _cleanup, caplog):
         import logging
 

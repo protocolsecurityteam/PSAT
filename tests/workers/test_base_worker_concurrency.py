@@ -1,10 +1,4 @@
-"""Tests for in-process job concurrency in workers.base.BaseWorker.
-
-K=1 keeps the legacy single-job loop byte-identical (see test_base_worker.py).
-K>1 dispatches each claimed job into a per-worker ThreadPoolExecutor: env
-precedence, real parallelism, per-job sessions (no ORM identity-map mixing),
-SIGTERM drain, slot cap, and error isolation.
-"""
+"""K=1 keeps the legacy loop byte-identical; K>1 dispatches into a ThreadPoolExecutor with per-job sessions."""
 
 from __future__ import annotations
 
@@ -21,14 +15,8 @@ import pytest
 from db.models import JobStage, JobStatus
 from workers.base import BaseWorker, JobHandledDirectly, _resolve_job_concurrency
 
-# ---------------------------------------------------------------------------
-# Concrete subclass for testing
-# ---------------------------------------------------------------------------
-
 
 class _ConcurrentWorker(BaseWorker):
-    """Discovery-stage worker stub; per-test K is set via env (monkeypatch)."""
-
     stage = JobStage.discovery
     next_stage = JobStage.static
     poll_interval = 0
@@ -54,11 +42,6 @@ def _make_job(**overrides):
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
-
-
-# ---------------------------------------------------------------------------
-# Env-var resolution
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -107,11 +90,6 @@ def test_init_no_pool_when_concurrency_is_one(mock_signal, monkeypatch):
     assert w._job_pool is None
 
 
-# ---------------------------------------------------------------------------
-# K>1 dispatcher: actual parallelism
-# ---------------------------------------------------------------------------
-
-
 @patch("workers.base.signal.signal")
 @patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job")
@@ -119,7 +97,6 @@ def test_init_no_pool_when_concurrency_is_one(mock_signal, monkeypatch):
 def test_concurrent_dispatcher_runs_jobs_in_parallel(
     mock_advance, mock_claim, mock_session_cls, mock_signal, monkeypatch
 ):
-    """A serial loop deadlocks on the 4-party barrier; the parallel dispatcher releases it."""
     monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "4")
     mock_session_cls.return_value = MagicMock()
 
@@ -144,13 +121,10 @@ def test_concurrent_dispatcher_runs_jobs_in_parallel(
     def _process(session, job):
         with process_lock:
             process_calls.append(job.id)
-        # All 4 jobs must reach this barrier within the timeout, otherwise
-        # the test fails — proves they're running concurrently.
         barrier.wait()
 
     w = _ConcurrentWorker()
 
-    # Need session.get to return the job (the dispatcher re-fetches via id).
     def _fake_get(_model, jid):
         return _make_job(id=jid)
 
@@ -240,11 +214,6 @@ def test_concurrent_dispatcher_uses_distinct_session_per_job(
             w._job_pool.shutdown(wait=False)
 
 
-# ---------------------------------------------------------------------------
-# Slot accounting
-# ---------------------------------------------------------------------------
-
-
 @patch("workers.base.signal.signal")
 @patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job")
@@ -301,11 +270,6 @@ def test_dispatcher_never_exceeds_concurrency_cap(mock_advance, mock_claim, mock
     finally:
         if w._job_pool:
             w._job_pool.shutdown(wait=False)
-
-
-# ---------------------------------------------------------------------------
-# SIGTERM drain
-# ---------------------------------------------------------------------------
 
 
 @patch("workers.base.signal.signal")
@@ -365,7 +329,6 @@ def test_sigterm_drains_inflight_jobs(mock_advance, mock_claim, mock_session_cls
 @patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job")
 def test_sigterm_waits_for_jobs_even_past_stale_timeout(mock_claim, mock_session_cls, mock_signal, monkeypatch):
-    """An idle drain must never abandon work just because a stale timeout passed."""
     monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "1")
     monkeypatch.setattr("workers.base.STALE_JOB_TIMEOUT", 0)
 
@@ -388,8 +351,7 @@ def test_sigterm_waits_for_jobs_even_past_stale_timeout(mock_claim, mock_session
 
     mock_claim.side_effect = _claim_side_effect
 
-    # Keep process() blocked until the assertions finish. This proves the
-    # worker abandons an in-flight future without relying on scheduler timing.
+    # Proves the worker abandons an in-flight future without relying on scheduler timing.
     release = threading.Event()
 
     def _slow_process(session, job):
@@ -414,16 +376,10 @@ def test_sigterm_waits_for_jobs_even_past_stale_timeout(mock_claim, mock_session
         assert finished.is_set()
         assert not runner.is_alive()
     finally:
-        # Drain the abandoned worker thread before yielding to the next test.
         release.set()
         runner.join(timeout=5.0)
         if w._job_pool:
             w._job_pool.shutdown(wait=True)
-
-
-# ---------------------------------------------------------------------------
-# Error isolation
-# ---------------------------------------------------------------------------
 
 
 @patch("workers.base.signal.signal")
@@ -477,19 +433,12 @@ def test_concurrent_job_exception_doesnt_kill_dispatcher(
 
     try:
         w.run_loop()
-        # All 3 jobs were dispatched (the failing first one didn't poison the loop).
         assert call_count["n"] == 3
-        # 2 successful → 2 advances; 1 failed → 1 fail_job call.
         assert mock_advance.call_count == 2
         assert mock_fail.call_count == 1
     finally:
         if w._job_pool:
             w._job_pool.shutdown(wait=False)
-
-
-# ---------------------------------------------------------------------------
-# JobHandledDirectly under K>1
-# ---------------------------------------------------------------------------
 
 
 @patch("workers.base.signal.signal")
@@ -540,11 +489,6 @@ def test_concurrent_job_handled_directly_skips_advance(
             w._job_pool.shutdown(wait=False)
 
 
-# ---------------------------------------------------------------------------
-# K>1 with next_stage=done
-# ---------------------------------------------------------------------------
-
-
 @patch("workers.base.signal.signal")
 @patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job")
@@ -588,11 +532,6 @@ def test_concurrent_done_stage_calls_complete_job(
     finally:
         if w._job_pool:
             w._job_pool.shutdown(wait=False)
-
-
-# ---------------------------------------------------------------------------
-# Vanished job (race: claim succeeds, row deleted before dispatch)
-# ---------------------------------------------------------------------------
 
 
 @patch("workers.base.signal.signal")

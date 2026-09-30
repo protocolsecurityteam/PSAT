@@ -605,7 +605,6 @@ def test_section8_rule8_scored_denominator_is_static_not_observed():
 
 
 class VerifyStub(StubAnvil):
-
     def __init__(self, *, echo: str = "0x", raise_on_call: bool = False) -> None:
         super().__init__(guarded=set(), pause_calldata="0x", duration=None)
         self.echo = echo

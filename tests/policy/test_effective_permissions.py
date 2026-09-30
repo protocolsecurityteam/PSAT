@@ -704,9 +704,9 @@ def test_guard_extraction_uncertain_marker_flips_only_marked_to_unsupported():
 def test_artifact_carries_openness_for_a_resolver_capability():
     """Resolver-capability branch: openness travels on the record, not only into the DB column.
 
-      finite_set(1 member), enumerable  -> 'restricted'
-      conditional_universal             -> 'open'
-      unsupported(assembly_only)        -> 'not_determined'
+    finite_set(1 member), enumerable  -> 'restricted'
+    conditional_universal             -> 'open'
+    unsupported(assembly_only)        -> 'not_determined'
     """
     restricted = _finite_cap("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     universal = {
@@ -750,8 +750,8 @@ def test_artifact_carries_openness_for_a_resolver_capability():
 def test_artifact_carries_openness_for_a_policy_minted_capability():
     """Policy-minted branch: openness is the projection of the policy-minted ``capability_expr``.
 
-      fall-through public (sink-bearing, tree-less) -> 'open'
-      guard_extraction_uncertain reroute            -> 'not_determined'
+    fall-through public (sink-bearing, tree-less) -> 'open'
+    guard_extraction_uncertain reroute            -> 'not_determined'
     """
     payload = build_effective_permissions(
         _public_default_target(),

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -18,7 +17,6 @@ from tests.support.policy_builders import (
     _minimal_snapshot,
 )
 from workers.policy_worker import PolicyWorker
-
 
 _AUTH_BUNDLE = _authority_bundle()
 
@@ -75,7 +73,6 @@ def test_resolve_authority_status(
 
 
 class TestProcessSemanticInputs:
-
     def test_missing_predicate_trees_and_effects_records_degraded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = PolicyWorker()
         session = MagicMock()
@@ -138,7 +135,6 @@ class TestProcessSemanticInputs:
 
 
 class TestGraphRefreshAfterEffectivePermissions:
-
     def test_refresh_runs_after_effective_permissions(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = PolicyWorker()
         session = MagicMock()
@@ -191,7 +187,6 @@ class TestGraphRefreshAfterEffectivePermissions:
 
 
 class TestCrossContractEnrichmentArtifactSync:
-
     def test_enrichment_rewrites_effective_permissions_artifact(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = PolicyWorker()
         session = MagicMock()
@@ -274,7 +269,6 @@ class TestCrossContractEnrichmentArtifactSync:
 
 
 class TestProcessFanoutParity:
-
     @staticmethod
     def _run(monkeypatch: pytest.MonkeyPatch, fanout: str) -> tuple[Any, dict[str, Any]]:
         from services.concurrency import RpcExecutor

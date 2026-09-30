@@ -1,23 +1,8 @@
-"""The amount-record producer (W1): which storage cell a payout is read out of.
-
-``amount_kind: bounded_by_storage`` discarded the variable, struct member and key
-that selected the cell; this unit recovers them as an additive fact
-(``amount_record_variable`` canonical so two contracts declaring ``bids`` are not
-one, the member path, and origin + entry slot per key level). It names a cell and
-resolves nothing: whether the caller OWNS it is a join on the guard side.
-
-Fixtures pin the discipline, each against a sibling differing in one construct:
-
-* a record is published only when every contributing site named the SAME
-  declaration — otherwise the honest plural and no scalar;
-* one site with no record suppresses the whole fact;
-* a merged key/base, a memory/call-result root or depth past the v1 bounds all
-  REFUSE, and a refusal is an absent key — never an empty path (a real value:
-  ``simple[id]``);
-* a key the caller only DERIVED (cast-narrowed, arithmetic on two arguments) names
-  no slot and is not ``param``: the guard side reads slots through this helper, and
-  two cells agreeing on a slot is how a guard gets read as gating a record it never
-  gated.
+"""The amount-record producer (W1) recovers which storage cell a payout is read from: canonical declaration,
+member path, and origin + entry slot per key level. It resolves nothing about ownership. A record is published
+only when every site named the same declaration; a refusal is an absent key, never an empty path. A key the
+caller only derived names no slot, since two cells agreeing on a slot is how a guard gets read as gating a
+record it never gated.
 """
 
 from __future__ import annotations
@@ -281,8 +266,7 @@ def _flow(unit, contract_name: str, signature: str) -> Any:
 
 
 def _ctx_for(unit, contract_name: str, unit_name: str, **kwargs):
-    """A classification context for one unit, built exactly as the flow walk
-    builds it — the second argument of every producer function under test."""
+    """Built exactly as the flow walk builds it."""
     contract = _contract(unit, contract_name)
     code_unit = next(f for f in contract.functions if f.name == unit_name)
     state_vars = {getattr(v, "name", "") or "": v for v in _all_state_variables(contract)}
@@ -299,13 +283,7 @@ def _ir_lvalue(code_unit, predicate) -> Any:
     raise AssertionError("fixture no longer contains the IR shape under test")
 
 
-# --- what the record names --------------------------------------------------
-
-
 def test_a_parameter_keyed_struct_member_names_its_declaration_member_and_slot(_unit):
-    """``bids[_bidId].amount``: the canonical declaration, the member, and the
-    ENTRY slot the key came from — the three facts a guard leaf must be shown to
-    agree with before anything is proven about ownership."""
     flow = _flow(_unit, "Records", "cancelBid(uint256)")
     assert flow["amount_kind"]["kind"] == "bounded_by_storage"
     assert flow["amount_record_variable"] == "Records.bids"
@@ -315,20 +293,16 @@ def test_a_parameter_keyed_struct_member_names_its_declaration_member_and_slot(_
 
 
 def test_a_caller_keyed_cell_records_msg_sender_at_the_level_that_selected_it(_unit):
-    """``withdrawRequests[msg.sender][asset].shares``: the key origins are per
-    LEVEL and in source order, so a consumer can tell the caller-keyed level
-    from the caller-named one instead of reading a single collapsed answer."""
+    """Key origins are per level, in source order."""
     flow = _flow(_unit, "Records", "completeWithdraw(address)")
     assert flow["amount_record_variable"] == "Records.withdrawRequests"
     assert flow["amount_record_member_path"] == ["shares"]
     assert flow["amount_record_key_kinds"] == ["msg_sender", "param"]
-    # msg.sender occupies no ABI slot; the second level does.
     assert flow["amount_record_key_param_indexes"] == [None, 0]
 
 
 def test_a_scalar_mapping_publishes_an_empty_member_path(_unit):
-    """``simple[id]`` selects a whole cell, so the member path is ``[]`` — a
-    published value. Its sibling ``payPot`` shows what an ABSENT path means."""
+    """``payPot`` shows what an absent path means."""
     flow = _flow(_unit, "Records", "paySimple(uint256)")
     assert flow["amount_record_variable"] == "Records.simple"
     assert flow["amount_record_member_path"] == []
@@ -338,32 +312,19 @@ def test_a_scalar_mapping_publishes_an_empty_member_path(_unit):
 @pytest.mark.parametrize(
     "signature,kind",
     [
-        # The sibling of ``paySimple``: ``totalPot`` is read out of storage too, so
-        # the kind is identical — and there is no cell, no key, and nothing to join.
+        # Same kind, but no cell and nothing to join.
         pytest.param("payPot()", "bounded_by_storage", id="whole_variable"),
-        # ``bids[flag ? a : b].amount``: the base decides the KIND, which is why
-        # the amount is still storage-bounded — but the key IS the cell's identity and
-        # a merge selects one of two. The record is withheld, not guessed.
+        # The base decides the kind, but the key is the cell's identity and a merge selects one of two.
         pytest.param("cancelBidMerged(uint256,uint256,bool)", "bounded_by_storage", id="merged_key"),
-        # ``deep[id].mid.inner.amount`` — three members. The kind is unchanged; the
-        # record is not published, because the path a join would compare against a
-        # guard leaf is deeper than anything this pass is specified to name.
+        # Three members is deeper than this pass names.
         pytest.param("payDeep(uint256)", "bounded_by_storage", id="member_nesting_past_v1"),
-        # The ``redeem`` shape: ``previewRedeem(shares)[0]`` is an element of a
-        # memory array returned by a call. The element root is not one this pass
-        # classifies from, so there is no record — the reason token for that absence
-        # belongs to the join, and inventing a record here would pre-empt it.
+        # A memory-array element root; the reason token for the absence belongs to the join.
         pytest.param("redeem(uint256)", "indeterminate", id="memory_element_root"),
-        # ``cfg.fee`` selects no cell: there is no key to compare against a guard's
-        # and no ownership question this producer can pose. Published records are
-        # keyed records, so this one is absent rather than half-formed.
+        # Published records are keyed records.
         pytest.param("payCfg()", "bounded_by_storage", id="keyless_struct_read"),
-        # ``three[a][b][c]`` — past the v1 bound, refused whole rather than
-        # published truncated to the two levels a consumer is specified to read.
+        # Refused whole rather than truncated.
         pytest.param("payThree(uint256,uint256,uint256)", "bounded_by_storage", id="three_key_levels"),
-        # A site DID name a record here — and the fold is ``several``, so the flow's
-        # quantity is not, as a whole, read out of that cell. The record gate is the
-        # folded kind, never the site that would have supported one.
+        # The record gate is the folded kind, never one site.
         pytest.param("payRecordAndParam(uint256,uint256)", "several", id="not_storage_bounded"),
     ],
 )
@@ -374,13 +335,8 @@ def test_no_amount_record_published(_unit, signature, kind):
         assert key not in flow
 
 
-# --- the binding thread (the burn shape) ------------------------------------
-
-
 def test_the_key_resolves_through_the_call_site_binding(_unit):
-    """``_burnAndPay(msg.sender)``: inside the callee the key is the formal
-    ``account``, and only the binding the flow walk threads says whose cell that
-    is. Without it the caller's own balance reads as an unknown address's."""
+    """Without the threaded binding the caller's own balance reads as an unknown address's."""
     flow = _flow(_unit, "Records", "unwrapAll()")
     assert flow["amount_record_variable"] == "Records._balances"
     assert flow["amount_record_member_path"] == []
@@ -389,9 +345,6 @@ def test_the_key_resolves_through_the_call_site_binding(_unit):
 
 
 def test_the_same_key_without_a_binding_names_no_caller(_unit):
-    """The falsifier for the line above: the identical IR, walked with no
-    binding for ``account``, resolves to ``indeterminate``. A formal parameter's
-    name never stands in for the argument."""
     code_unit, ctx = _ctx_for(_unit, "Records", "_burnAndPay", is_entry=False, param_bindings=None)
     element = _ir_lvalue(code_unit, lambda ir: type(ir).__name__ == "Index")
     site = _element_record_site(element, ctx)
@@ -399,13 +352,8 @@ def test_the_same_key_without_a_binding_names_no_caller(_unit):
     assert site["key_origins"] == (("indeterminate",),)
 
 
-# --- refusals, each against the sibling it differs from ---------------------
-
-
 def test_a_merged_base_refuses_the_record(_unit):
-    """A storage pointer reassigned in a branch. The published flow refuses on
-    the kind as well, so the site is asserted directly: the walk reports the
-    root as a MERGE and the record site declines to read a base off it."""
+    """The published flow also refuses on kind, so the site is asserted directly."""
     flow = _flow(_unit, "Records", "cancelBidPhiBase(uint256,uint256,bool)")
     assert flow["amount_kind"]["kind"] == "indeterminate"
     for key in _RECORD_KEYS:
@@ -419,38 +367,24 @@ def test_a_merged_base_refuses_the_record(_unit):
 
 
 def test_two_declarations_publish_the_plural_and_no_scalar(_unit):
-    """A17. Both vaults declare ``bids``, both pay on one flow key, and both
-    sites fold to the same KIND — so agreement on the kind is not agreement on
-    the cell. The canonical members are published and the scalar is not, because
-    one of them is not the answer."""
+    """A17: agreement on kind is not agreement on the cell."""
     flow = _flow(_unit, "TwoDeclarations", "payBoth(uint256)")
     assert flow["amount_kind"]["kind"] == "bounded_by_storage"
     assert flow["amount_record_variables"] == ["VaultA.bids", "VaultB.bids"]
     assert "amount_record_variable" not in flow
-    # The path and the keys belong to a record that was not identified.
     assert "amount_record_member_path" not in flow
     assert "amount_record_key_kinds" not in flow
     assert "amount_record_key_param_indexes" not in flow
 
 
 def test_each_vault_alone_names_its_own_declaration(_unit):
-    """The non-vacuity sibling of A17: analysed as its own entry, VaultA's flow
-    does publish the scalar — so the plural above is the two-declaration fold and
-    not a shape the producer simply never resolves."""
     flow = _flow(_unit, "VaultA", "payA(uint256)")
     assert flow["amount_record_variable"] == "VaultA.bids"
     assert "amount_record_variables" not in flow
 
 
-# --- the key is the cell's identity, so a narrowed key names no slot ---------
-
-
 def test_a_narrowed_key_withholds_the_slot_it_would_otherwise_name(_unit):
-    """``bids[uint256(uint128(id))].amount``: the cast keeps resolving to slot 0
-    — the argument IS what it was built from — while selecting a DIFFERENT cell
-    for any ``id >= 2**128``. The record still names the declaration and the
-    member; the slot and the ``param`` kind are withheld, because the argument
-    was not, in whole, the key."""
+    """The cast selects a different cell for ``id >= 2**128``, so slot and ``param`` are withheld."""
     flow = _flow(_unit, "Records", "payTruncatedKey(uint256)")
     assert flow["amount_record_variable"] == "Records.bids"
     assert flow["amount_record_member_path"] == ["amount"]
@@ -459,10 +393,7 @@ def test_a_narrowed_key_withholds_the_slot_it_would_otherwise_name(_unit):
 
 
 def test_a_narrowed_and_a_whole_key_do_not_agree_on_a_slot(_unit):
-    """The two-site form, and the reason the rule above is not cosmetic: one
-    site reads ``bids[id]`` and the other ``bids[uint128(id)]``. Two cells. Had
-    both published slot 0 they would AGREE — and a guard proven to gate one
-    would be read as gating the other."""
+    """Had both published slot 0, a guard proven to gate one would be read as gating the other."""
     flow = _flow(_unit, "Records", "paySpuriousAgreement(uint256)")
     assert flow["amount_record_variable"] == "Records.bids"
     assert flow["amount_record_member_path"] == ["amount"]
@@ -471,8 +402,6 @@ def test_a_narrowed_and_a_whole_key_do_not_agree_on_a_slot(_unit):
 
 
 def test_a_widened_key_keeps_its_slot(_unit):
-    """The positive sibling: ``simple[uint256(id)]`` on a ``uint128`` argument
-    widens, so every argument value keeps its own cell and the slot stands."""
     flow = _flow(_unit, "Records", "payWidenedKey(uint128)")
     assert flow["amount_record_variable"] == "Records.simple"
     assert flow["amount_record_key_kinds"] == ["param"]
@@ -480,8 +409,6 @@ def test_a_widened_key_keeps_its_slot(_unit):
 
 
 def test_an_address_width_key_conversion_keeps_its_slot(_unit):
-    """``_balances[address(raw)]`` on a ``uint160`` argument: same 160 bits,
-    same cell per argument. A conversion is not by itself a loss."""
     flow = _flow(_unit, "Records", "payAddressKey(uint160)")
     assert flow["amount_record_variable"] == "Records._balances"
     assert flow["amount_record_key_kinds"] == ["param"]
@@ -489,42 +416,26 @@ def test_an_address_width_key_conversion_keeps_its_slot(_unit):
 
 
 def test_a_caller_derived_key_is_not_a_caller_named_one(_unit):
-    """``bids[a + b]``: both operands are the caller's, and neither IS the key.
-    ``param`` would say the caller named this cell, so the kind reads
-    indeterminate — the same answer the missing slot gives."""
+    """``param`` would claim the caller named this cell."""
     flow = _flow(_unit, "Records", "payArithmeticKey(uint256,uint256)")
     assert flow["amount_record_variable"] == "Records.bids"
     assert flow["amount_record_key_kinds"] == ["indeterminate"]
     assert flow["amount_record_key_param_indexes"] == [None]
 
 
-# --- shape and depth --------------------------------------------------------
-
-
 def test_a_two_member_path_keeps_its_source_order(_unit):
-    """``pair[id].inner.amount``: the path is read back out in source order, not
-    in the reverse order the walk visits it. A join comparing paths against a
-    guard's would agree on the wrong record if either side were reversed."""
+    """A reversed path would agree on the wrong record."""
     flow = _flow(_unit, "Records", "payPair(uint256)")
     assert flow["amount_record_variable"] == "Records.pair"
     assert flow["amount_record_member_path"] == ["inner", "amount"]
 
 
 def test_two_key_levels_keep_their_order(_unit):
-    """``two[a][b]`` and ``two[b][a]`` are different cells, and the only thing
-    that says so is the ORDER of the slots. The levels are published first index
-    level first, so the two do not read alike."""
     assert _flow(_unit, "Records", "payTwo(uint256,uint256)")["amount_record_key_param_indexes"] == [0, 1]
     assert _flow(_unit, "Records", "payTwoSwapped(uint256,uint256)")["amount_record_key_param_indexes"] == [1, 0]
 
 
-# --- what one flow's sites must agree on ------------------------------------
-
-
 def test_sites_agreeing_on_the_declaration_but_not_the_member_withhold_the_path(_unit):
-    """``bids[id].amount`` and ``bids[id].fee`` on one flow key: the same cell,
-    two quantities. The declaration and the key are the flow's answer; the
-    member is not, and the first site's is not promoted to it."""
     flow = _flow(_unit, "Records", "paySplit(uint256,address)")
     assert flow["amount_record_variable"] == "Records.bids"
     assert flow["amount_record_key_kinds"] == ["param"]
@@ -533,9 +444,6 @@ def test_sites_agreeing_on_the_declaration_but_not_the_member_withhold_the_path(
 
 
 def test_sites_agreeing_on_the_member_but_not_the_slot_withhold_the_slot(_unit):
-    """``bids[a].amount`` and ``bids[b].amount``: same declaration, same member,
-    two cells. The kinds still ride — both levels ARE entry arguments — while
-    the slot, the thing they disagree on, does not."""
     flow = _flow(_unit, "Records", "payTwoBids(uint256,uint256)")
     assert flow["amount_record_variable"] == "Records.bids"
     assert flow["amount_record_member_path"] == ["amount"]
@@ -544,16 +452,11 @@ def test_sites_agreeing_on_the_member_but_not_the_slot_withhold_the_slot(_unit):
 
 
 def test_one_site_without_a_record_suppresses_the_whole_fact(_unit):
-    """``bids[id].amount`` and ``totalPot`` on one flow key both fold to
-    storage-bounded. A record assembled from the site that happened to have one
-    would name a cell half this flow's value never came out of."""
+    """A record from one site would name a cell half the flow's value never came from."""
     flow = _flow(_unit, "Records", "payRecordAndPot(uint256)")
     assert flow["amount_kind"]["kind"] == "bounded_by_storage"
     for key in _RECORD_KEYS:
         assert key not in flow
-
-
-# --- the sweeps the witness must never reach --------------------------------
 
 
 @pytest.mark.parametrize(
@@ -561,9 +464,7 @@ def test_one_site_without_a_record_suppresses_the_whole_fact(_unit):
     ["rescueTokens(IERC20,uint256)", "withdrawMax(uint256)", "rescueAll()"],
 )
 def test_an_admin_sweep_names_no_record(_unit, signature):
-    """A5/A6/A7 at the producer: a caller-supplied amount, a ``type(uint256).max``
-    branch, and a whole-balance read. None is read out of a cell, so none carries
-    a record — the witness's contribution to a sweep is that its key is absent."""
+    """A5/A6/A7 at the producer."""
     flow = _flow(_unit, "Records", signature)
     for key in _RECORD_KEYS:
         assert key not in flow

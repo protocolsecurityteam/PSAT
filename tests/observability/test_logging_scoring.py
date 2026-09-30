@@ -198,7 +198,6 @@ class _FakeResult:
 
 
 class _FakeSession:
-
     def execute(self, *args, **kwargs):
         return _FakeResult()
 

@@ -473,7 +473,6 @@ class TestPodFactsRequireAProvenPod:
 
 
 class TestPinnedHead:
-
     def _stub(self, monkeypatch, header):
         calls = {"n": 0}
 

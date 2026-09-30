@@ -101,7 +101,6 @@ def test_policy_next_stage_flag_on_is_effects(monkeypatch):
 
 
 class _FailingEffectsWorker(EffectsWorker):
-
     poll_interval = 0.0
 
     def __init__(self, exc: BaseException) -> None:

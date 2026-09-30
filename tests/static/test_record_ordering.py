@@ -1,9 +1,7 @@
-"""W2 — the ordering prover (``record_ordering.py``).
+"""W2 ordering prover.
 
-The unit that can over-claim: every refusal path has its own fixture, and every
-``not_determined`` has a positive sibling differing in ONE construct, proving the walk
-reached the code. Assertions are on the WHOLE verdict dict, since ``{"state":
-"not_determined", ...}`` and a proof are both truthy.
+Every refusal has a fixture and every ``not_determined`` a positive sibling differing in one construct. Assertions
+compare whole verdicts because a refusal and a proof are both truthy.
 """
 
 from __future__ import annotations
@@ -495,7 +493,6 @@ def _function(unit, name: str):
     return next(fn for fn in contract.functions if fn.name == name)
 
 
-#: ``bids[<param slot>].amount`` — a struct member of a param-keyed element.
 def _bid_amount(param_slot: int = 0) -> ro.RecordRef:
     return {
         "base_canonical": "Ordering.bids",
@@ -505,7 +502,6 @@ def _bid_amount(param_slot: int = 0) -> ro.RecordRef:
     }
 
 
-#: ``_balances[msg.sender]`` — a caller-keyed scalar cell.
 def _caller_balance() -> ro.RecordRef:
     return {
         "base_canonical": "Ordering._balances",
@@ -516,8 +512,6 @@ def _caller_balance() -> ro.RecordRef:
 
 
 def _verdict(unit, effects, name: str, record: ro.RecordRef) -> dict[str, Any]:
-    """The verdict, with ``assembly_state_access`` taken from the real
-    ``EffectInfo`` so the wiring the pipeline uses is the wiring under test."""
     function = _function(unit, name)
     info = next(i for i in effects.values() if i["function"].startswith(f"{name}("))
     verdict = dict(ro.prove_record_ordering(function, record, assembly_state_access=info["assembly_state_access"]))
@@ -586,8 +580,7 @@ def test_a2_sibling_decrement_before_call_is_proven(_unit, _effects):
 
 
 def test_a3_hook_token_clear_after_refuses(_unit, _effects):
-    # The safeTransfer is a LibraryCall wrapping a real token call: "not a
-    # low-level call" is not an escape hatch.
+    # A LibraryCall wrapping a token call is not an escape hatch.
     _assert_refused(
         _verdict(_unit, _effects, "hookTokenClearAfter", _bid_amount()),
         ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
@@ -610,7 +603,6 @@ def test_a4_conditional_clear_refuses(_unit, _effects):
 
 
 def test_a11_assembly_state_access_refuses(_unit, _effects):
-    # The clearing write DOES dominate here; the assembly write is what refuses.
     _assert_refused(
         _verdict(_unit, _effects, "assemblyClear", _bid_amount()),
         ro.ASSEMBLY_STATE_ACCESS,
@@ -640,8 +632,7 @@ def test_modifier_clearing_before_the_placeholder_is_proven(_unit, _effects):
 
 
 def test_modifier_clearing_after_the_placeholder_refuses(_unit, _effects):
-    # The DAO shape one indirection deep: the write node is son-less, but the
-    # body — and its payout — already ran at the placeholder.
+    # The DAO shape one indirection deep: the body and its payout ran at the placeholder.
     _assert_refused(
         _verdict(_unit, _effects, "payWithClearLast", _bid_amount()),
         ro.CROSS_UNIT_ORDERING_UNPROVEN,
@@ -649,8 +640,6 @@ def test_modifier_clearing_after_the_placeholder_refuses(_unit, _effects):
 
 
 def test_internal_function_pointer_refuses(_unit, _effects):
-    # The pointer's body is chosen at runtime; the clear that follows it proves
-    # nothing about what it already called.
     _assert_refused(
         _verdict(_unit, _effects, "pointerCallAfterClear", _bid_amount()),
         ro.CALL_ENUMERATION_INCOMPLETE,
@@ -658,8 +647,7 @@ def test_internal_function_pointer_refuses(_unit, _effects):
 
 
 def test_helper_invoked_twice_keeps_both_positions(_unit, _effects):
-    # The first `_pay` runs before the clear. Keying the walk on the callee's
-    # name instead of on its call site would lose that position entirely.
+    # Keying on the callee's name would lose the call-site position.
     _assert_refused(
         _verdict(_unit, _effects, "payTwiceClearBetween", _bid_amount()),
         ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
@@ -691,8 +679,7 @@ def test_selfdestruct_after_the_clear_is_proven(_unit, _effects):
 
 
 def test_non_control_solidity_call_is_not_an_external_call(_unit, _effects):
-    # ecrecover precedes the clear; it transfers no control, so it must not
-    # refuse — otherwise the enumerator's breadth would be indiscriminate.
+    # ecrecover transfers no control.
     _assert_proven(
         _verdict(_unit, _effects, "ecrecoverThenClear", _bid_amount()),
         ro.SHAPE_ZERO_ASSIGNMENT,
@@ -701,17 +688,11 @@ def test_non_control_solidity_call_is_not_an_external_call(_unit, _effects):
 
 
 def test_call_before_write_within_one_node_refuses(_unit, _effects):
-    # Dominance is trivially satisfied inside a node; only the IR index tells
-    # these two apart.
+    # Within a node only the IR index orders them.
     _assert_refused(
         _verdict(_unit, _effects, "callThenWriteSameNode", _bid_amount()),
         ro.CLEARING_WRITE_DOES_NOT_DOMINATE_CALLS,
     )
-
-
-# ---------------------------------------------------------------------------
-# Transfer / Send — the ops the sink classifier does not produce at all.
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("function", ["transferBeforeClear", "sendBeforeClear"])
@@ -728,11 +709,6 @@ def test_native_transfer_after_clear_is_proven(_unit, _effects):
         ro.SHAPE_ZERO_ASSIGNMENT,
         "Ordering.bids",
     )
-
-
-# ---------------------------------------------------------------------------
-# Shapes that are not clearing writes.
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -752,14 +728,11 @@ def test_delete_of_the_containing_element_is_a_clearing_write(_unit, _effects):
 
 
 def test_subtraction_whose_minuend_is_not_the_record_refuses(_unit, _effects):
-    # `amount = cap - used` subtracts, and may RAISE the record. A debit takes
-    # the record's own prior value as its minuend.
+    # ``cap - used`` may raise the record; a debit's minuend is the record's own prior value.
     _assert_refused(_verdict(_unit, _effects, "raiseThenPay", _bid_amount()), ro.NO_CLEARING_WRITE)
 
 
 def test_wrong_key_slot_finds_no_clearing_write(_unit, _effects):
-    # ``goodClearThenPay`` clears ``bids[<slot 0>]``; a record keyed on a
-    # different slot is a different cell and must not borrow the proof.
     _assert_refused(_verdict(_unit, _effects, "goodClearThenPay", _bid_amount(1)), ro.NO_CLEARING_WRITE)
 
 
@@ -774,9 +747,7 @@ def test_indeterminate_key_refuses_the_record(_unit, _effects):
 
 
 def test_absent_member_path_is_not_an_empty_member_path(_unit, _effects):
-    # The producer's ABSENT list means its sites disagreed. Reading it as `[]`
-    # would widen the record from `bids[id].amount` to the whole element, which
-    # is what lets a sibling member's write clear it.
+    # Absent means the producer's sites disagreed; ``[]`` would widen the record to the whole element.
     record: ro.RecordRef = {
         "base_canonical": "Ordering.bids",
         "key_kinds": ["param"],
@@ -788,11 +759,6 @@ def test_absent_member_path_is_not_an_empty_member_path(_unit, _effects):
 def test_absent_key_kinds_refuses(_unit, _effects):
     record: ro.RecordRef = {"base_canonical": "Ordering.bids", "member_path": ["amount"]}
     _assert_refused(_verdict(_unit, _effects, "goodClearThenPay", record), ro.RECORD_NOT_RESOLVABLE)
-
-
-# ---------------------------------------------------------------------------
-# F2-CLEARING: the flag-flip subclass and its one-line reversibility.
-# ---------------------------------------------------------------------------
 
 
 def test_cancel_bid_flag_flip_is_proven(_unit, _effects):
@@ -810,16 +776,13 @@ def test_flag_flip_without_the_mandatory_predicate_refuses(_unit, _effects):
 @pytest.mark.parametrize(
     "name",
     [
-        # The flip must FALSIFY the predicate; mentioning the member is not the
-        # same claim. Each of these leaves a second entry a way through.
+        # Mentioning the member isn't falsifying the predicate.
         "flipWrongPolarity",
         "flipParamPredicate",
         "flipOrAdmin",
         "flipCompareStorage",
         "flipPredicateOtherElement",
         "flipToTrue",
-        # A custom-error `if (...) revert` guard is a predicate this pass does
-        # not read — refused, not refuted.
         "flipCustomErrorRevert",
     ],
 )
@@ -853,11 +816,6 @@ def test_flag_flip_toggle_does_not_touch_the_strict_shapes(_unit, _effects, monk
     )
 
 
-# ---------------------------------------------------------------------------
-# Loops — per-iteration ordering, published with its residual.
-# ---------------------------------------------------------------------------
-
-
 def test_loop_body_ordering_is_proven_with_the_cross_iteration_disclosure(_unit, _effects):
     _assert_proven(
         _verdict(_unit, _effects, "cancelBidBatch", _bid_amount()),
@@ -873,26 +831,18 @@ def test_non_loop_proof_carries_no_disclosure_key(_unit, _effects):
 
 
 def test_post_loop_pair_carries_no_cross_iteration_disclosure(_unit, _effects):
-    # Both sites are dominated by the loop header and neither is inside the
-    # loop. Reading enclosure off dominance alone would attach a per-iteration
-    # residual to a straight-line pair.
+    # Enclosure from dominance alone would attach a per-iteration residual to a straight-line pair.
     verdict = _verdict(_unit, _effects, "loopThenClearThenPay", _bid_amount())
     _assert_proven(verdict, ro.SHAPE_ZERO_ASSIGNMENT, "Ordering.bids")
     assert "disclosures" not in verdict
 
 
 def test_different_loop_nesting_refuses(_unit, _effects):
-    # The write dominates the call; what it does not do is dominate it ONCE PER
-    # PAYMENT, which is the claim a loop would need.
+    # The write dominates the call but not once per payment.
     _assert_refused(
         _verdict(_unit, _effects, "clearThenLoopPay", _bid_amount()),
         ro.LOOP_NESTING_MISMATCH,
     )
-
-
-# ---------------------------------------------------------------------------
-# One-hop composition.
-# ---------------------------------------------------------------------------
 
 
 def test_one_hop_burn_then_pay_is_proven(_unit, _effects):
@@ -933,8 +883,6 @@ def test_two_hop_composition_refuses(_unit, _effects):
 
 
 def test_conditional_write_inside_the_callee_refuses(_unit, _effects):
-    # Conjunct (i) of the composition: the write must be unconditional in the
-    # callee, not merely present in it.
     _assert_refused(
         _verdict(_unit, _effects, "conditionalBurnThenPay", _caller_balance()),
         ro.CROSS_UNIT_ORDERING_UNPROVEN,
@@ -963,16 +911,12 @@ def test_attachment_is_guarded_on_the_record_being_named(_unit):
     ro.attach_record_ordering(flows, function, assembly_state_access=False)
     assert "record_ordering" not in flows[0]
     _assert_proven(flows[1]["record_ordering"], ro.SHAPE_ZERO_ASSIGNMENT, "Ordering.bids")
-    # An inbound or merely-routed move does not make this entry the payer, so
-    # the ordering question is not the one being asked.
+    # An inbound or routed move doesn't make this entry the payer.
     assert "record_ordering" not in flows[2]
     assert "record_ordering" not in flows[3]
 
 
 def test_function_with_no_external_call_is_vacuously_proven(_unit, _effects):
-    # Stated so the vacuity is visible rather than incidental: with no control
-    # transfer there is nothing for the write to race, and the consumer never
-    # reaches this verdict without a value flow to hang it on.
     _assert_proven(
         _verdict(_unit, _effects, "clearOnly", _bid_amount()),
         ro.SHAPE_ZERO_ASSIGNMENT,
@@ -996,16 +940,12 @@ def test_unreadable_callee_body_refuses(_unit):
 
 
 def test_pipeline_orders_against_the_record_the_amount_producer_names(_effects):
-    # With the amount producer naming records on these fixtures, the pipeline
-    # attaches an ordering verdict to exactly the out-flows that carry a record
-    # and to no others, and each verdict is the one the isolated prover earns.
     keyed = {
         fn: flow["record_ordering"]
         for fn, info in _effects.items()
         for flow in info["value_flows"]
         if "record_ordering" in flow
     }
-    # An ordering key rides only where an amount record was named.
     for fn, info in _effects.items():
         for flow in info["value_flows"]:
             if "record_ordering" in flow:

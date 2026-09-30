@@ -455,5 +455,3 @@ class TestProxyMembershipOnClassification:
         row = db_session.query(Contract).filter_by(address=proxy_addr).one()
         assert row.protocol_id is None
         assert row.nominated_protocol_id == seed_protocol
-
-

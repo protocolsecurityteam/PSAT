@@ -1,10 +1,5 @@
-"""Guard: the ``db/models/`` package registers every mapper on ``Base.metadata``.
-
-``alembic/env.py`` imports ``Base`` from the package for autogenerate; a
-submodule dropped from ``db/models/__init__.py`` silently removes its tables
-from ``Base.metadata`` and a later autogenerate emits ``DROP TABLE``s. The
-count and the sorted-name snapshot are hard-coded from the pre-split module so
-a lost submodule import fails loudly here instead.
+"""A submodule dropped from ``db/models/__init__.py`` removes its tables from ``Base.metadata``, and autogenerate
+would emit ``DROP TABLE``s.
 """
 
 from __future__ import annotations

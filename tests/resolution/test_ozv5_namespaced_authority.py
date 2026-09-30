@@ -204,7 +204,6 @@ def test_oz_v5_accessor_without_rpc_stays_placeholder(monkeypatch: pytest.Monkey
 
 
 class _StubContract:
-
     functions: list = []
     state_variables_ordered: list = []
     events: list = []
@@ -302,7 +301,6 @@ def test_layer1_no_dead_slot_controller_emitted(_slither, contract_name, roles) 
 
 
 class TestLayer1OwnableForm:
-
     def test_owner_controller_carries_ownership_event_and_writers(self, _slither) -> None:
         targets, _trees = _build_targets(_slither, "OzV5Ownable", [{"role": "OwnableStorageLocation"}])
         owner = next(t for t in targets if t["controller_id"] == "state_variable:owner")
@@ -314,7 +312,6 @@ class TestLayer1OwnableForm:
 
 
 class TestLayer1AccessControlForm:
-
     ROLES = _ACCESS_CONTROL_ROLES
 
     def test_gate_operand_is_namespaced_accessor_view_call(self, _slither) -> None:
@@ -326,7 +323,6 @@ class TestLayer1AccessControlForm:
 
 
 class TestLayer2AccessControlResolution:
-
     def test_set_peer_resolves_to_owner(self, _slither, monkeypatch: pytest.MonkeyPatch) -> None:
         contract = _contract(_slither, "OzV5AccessControlDefaultAdmin")
         tree = build_predicate_artifacts(contract)["trees"]["setPeer(address)"]

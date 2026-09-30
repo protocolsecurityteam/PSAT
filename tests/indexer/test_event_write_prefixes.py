@@ -1,4 +1,3 @@
-
 from dataclasses import replace
 
 from tests.storage.test_job_submission_indexer_contention import make_log

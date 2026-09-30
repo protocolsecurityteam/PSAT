@@ -1,9 +1,4 @@
-"""Wire-level stubs for the effects harness, the fork recipes and the seeder.
-
-Extracted verbatim from ``test_effects_harness`` (the ``Simulate`` stubs),
-``test_effects_anvil`` (``StubAnvil``) and ``test_effects_input_seeding``
-(``FakeChain``), which between them were imported by 13 other test modules.
-"""
+"""Wire-level stubs for the effects harness, fork recipes and seeder."""
 
 from __future__ import annotations
 
@@ -31,12 +26,7 @@ CTX = SimContext(chain_id=1, block=1000, hardfork="prague")
 _REVERT_A = "0x08c379a0" + "00" * 4
 
 
-# --- the Simulate wire ------------------------------------------------------
-
-
 class ScriptedSimulate:
-    """Returns pre-programmed ``SimResult``s in order; records every block."""
-
     def __init__(self, *results: SimResult) -> None:
         self._results = list(results)
         self.blocks: list[tuple[Sequence[SimCall], str, dict | None]] = []
@@ -50,8 +40,6 @@ class ScriptedSimulate:
 
 
 class RecordingStore:
-    """Injected transcript store: records each dict, hands back a fake key."""
-
     def __init__(self) -> None:
         self.stored: list[dict] = []
 
@@ -84,17 +72,15 @@ def uint_ret(n: int) -> str:
     return "0x" + n.to_bytes(32, "big").hex()
 
 
-# --- the fork transport -----------------------------------------------------
-
 GUARDED = "0xc2985578"  # foo()
 UNGATED = "0xffffffff"
 PAUSE = "0x8456cb59"
 
 
 class StubAnvil:
-    """Models a pausable contract on a fork: ``guarded`` entry points revert while
-    paused-and-unexpired; ``send(pause_calldata)`` flips the latch; ``increase_time``
-    past the duration auto-expires it. snapshot/revert restore the latch state."""
+    """``guarded`` entries revert while paused-and-unexpired; ``increase_time`` past the duration auto-expires the
+    latch.
+    """
 
     def __init__(
         self, *, guarded: set[str], pause_calldata: str, duration: int | None, hardfork: str = "prague"
@@ -151,8 +137,7 @@ class StubAnvil:
 
     def increase_time(self, seconds: int) -> None:
         self.time += seconds
-        # Counted, not just applied: "the recipe did not warp at all" is a distinct
-        # assertion from "it warped and nothing expired" (A7's two None states).
+        # "Never warped" and "warped, nothing expired" are A7's two distinct None states.
         self.warped += 1
 
     def mine(self) -> None:
@@ -164,8 +149,6 @@ class StubAnvil:
     def set_storage_at(self, address: str, slot: str, value: str) -> None:
         self.storage[(address.lower(), slot.lower())] = value
 
-
-# --- the slot-faithful ERC-20 + vault ---------------------------------------
 
 VAULT = "0x" + "11" * 20
 ASSET = "0x" + "44" * 20
@@ -180,7 +163,6 @@ def sel(sig: str) -> str:
 
 
 def _arg(data: str, index: int) -> str:
-    """The address at word ``index`` of a calldata payload."""
     start = 10 + index * 64
     return "0x" + data[start + 24 : start + 64].lower()
 
@@ -190,10 +172,8 @@ def _slot(base: int, arity: int, holder: str, spender: str) -> str:
 
 
 class FakeChain:
-    """A slot-faithful ERC-20 plus a vault that wraps it.
-
-    ``balance_scale`` > 1 models a rebasing token whose ``balanceOf`` is COMPUTED
-    from the stored word — the shape whose read-back must never match.
+    """``balance_scale`` > 1 models a rebasing token whose ``balanceOf`` is computed, so a read-back must never
+    match.
     """
 
     def __init__(
@@ -210,8 +190,7 @@ class FakeChain:
         readback_liar: bool = False,
         asset_total_supply: int | None = None,
     ) -> None:
-        # ``None`` = the asset does not answer ``totalSupply()`` at all, which is
-        # the shape every pre-existing test here assumes.
+        # ``None`` means the asset doesn't answer ``totalSupply()``.
         self.asset_total_supply = asset_total_supply
         self.balance_base = balance_base
         self.allowance_base = allowance_base
@@ -224,7 +203,6 @@ class FakeChain:
         self.readback_liar = readback_liar
         self.blocks: list[tuple[list, str, dict | None]] = []
 
-    # -- helpers ------------------------------------------------------------
     def _diff(self, overrides, address):
         entry = (overrides or {}).get(address.lower()) or {}
         return entry.get("stateDiff") or {}
@@ -237,7 +215,6 @@ class FakeChain:
         raw = diff.get(_slot(base, arity, holder, spender))
         return int(raw, 16) if raw else 0
 
-    # -- the wire seam ------------------------------------------------------
     def __call__(self, calls, block_tag, overrides):
         self.blocks.append((list(calls), block_tag, overrides))
         results = []
@@ -278,7 +255,6 @@ class FakeChain:
             if stored is None:
                 return SimCallResult(False, "0x", "0x", ())
             return ok(uint_ret(stored))
-        # shares()/sharesOf() are absent on this token.
         return SimCallResult(False, "0x", "0x", ())
 
     def _vault_call(self, call, data, overrides) -> SimCallResult:

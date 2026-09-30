@@ -26,11 +26,6 @@ KECCAK_MAINNET = "0x" + "11" * 32
 KECCAK_BASE = "0x" + "22" * 32  # different bytecode: immutables differ per chain
 
 
-# ---------------------------------------------------------------------------
-# Fixtures (mirror the pattern in test_contract_materializations_*)
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def _clean_cm(db_session):
     db_session.query(ContractMaterialization).delete()
@@ -68,11 +63,6 @@ def _bundle(name: str = "C") -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# source_content_hash — determinism + what it does and does not cover
-# ---------------------------------------------------------------------------
-
-
 def _flat_result(
     src: str = "contract C {}", *, name: str = "C", evm: str = "shanghai", opt: str = "1", runs: str = "200"
 ):
@@ -93,7 +83,6 @@ def test_source_hash_order_independent_for_multi_file_bundle():
         files = {"A.sol": {"content": "contract A {}"}, "B.sol": {"content": "contract B {}"}}
         sources = {k: files[k] for k in order}
         payload = {"language": "Solidity", "sources": sources, "settings": {"remappings": ["p=q", "x=y"]}}
-        # Etherscan's standard-json double-brace wrapper: one extra brace each side.
         return {"ContractName": "A", "SourceCode": "{" + json.dumps(payload) + "}", "EVMVersion": "shanghai"}
 
     assert source_content_hash(bundle(["A.sol", "B.sol"])) == source_content_hash(bundle(["B.sol", "A.sol"]))
@@ -113,11 +102,6 @@ def test_source_hash_ignores_non_code_fields():
     r2["ContractCreationCode"] = "0xdeadbeef"  # constructor/immutable bytecode
     r2["ABI"] = "[]"
     assert source_content_hash(r2) == source_content_hash(r)
-
-
-# ---------------------------------------------------------------------------
-# Cross-chain reuse
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -145,7 +129,6 @@ def test_cross_chain_reuse_copies_bundle_and_skips_builder(_route_to_test_db, _c
     def build2() -> dict[str, Any]:
         raise AssertionError("cross-chain reuse must skip the forge+Slither build")
 
-    # Same source, Base deployment: different bytecode_keccak (immutables), so reuse must fire off the source hash.
     row2 = cm.materialize_or_wait(
         chain="base",
         address=ADDR_BASE,
@@ -158,18 +141,15 @@ def test_cross_chain_reuse_copies_bundle_and_skips_builder(_route_to_test_db, _c
     assert row2.bytecode_keccak == KECCAK_BASE
     assert row2.address == ADDR_BASE
     assert row2.source_content_hash == src_hash
-    # The CODE plane is reused byte-for-byte.
     assert cm.hydrate_analysis(row2) == row1.analysis
     assert cm.hydrate_tracking_plan(row2) == row1.tracking_plan
     assert cm.hydrate_predicate_trees(row2) == row1.predicate_trees
-    # Two distinct rows: state stays per (chain, address).
     assert cm.find_by_keccak(_clean_cm, chain="base", bytecode_keccak=KECCAK_BASE) is not None
     assert cm.find_by_keccak(_clean_cm, chain="ethereum", bytecode_keccak=KECCAK_BASE) is None
 
 
 @requires_postgres
 def test_reuse_ignores_old_schema_version_donor(_route_to_test_db, _clean_cm):
-    """An OLDER-analysis_schema_version row is not a reuse donor (the bundle shape may have changed)."""
     src_hash = "0x" + "ee" * 32
     stale = ContractMaterialization(
         chain="1",
@@ -248,7 +228,6 @@ def test_chain_key_normalized_to_decimal_id(_route_to_test_db, _clean_cm):
     )
     assert row.chain == "1", "mainnet must be stored under the decimal-id token"
 
-    # A name, an alias, the id string, and the int all resolve to the same row.
     for variant in ("ethereum", "mainnet", "1", 1):
         assert cm.find_by_keccak(_clean_cm, chain=variant, bytecode_keccak=KECCAK_MAINNET) is not None, variant
         assert cm.find_by_address(_clean_cm, chain=variant, address=ADDR_MAINNET) is not None, variant

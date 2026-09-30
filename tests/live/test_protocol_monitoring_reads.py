@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from tests.live.conftest import LiveClient

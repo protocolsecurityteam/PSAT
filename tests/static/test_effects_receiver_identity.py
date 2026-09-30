@@ -193,9 +193,6 @@ def _receiver(effects, signature: str, target: str) -> dict | None:
     return sinks[0].get("receiver")
 
 
-# --- the three provable shapes, pinned byte-exactly -------------------------
-
-
 def test_entry_parameter_receiver_is_caller_named(effects):
     assert _receiver(effects, "payParam(address,address,uint256)", "token.safeTransfer") == {
         "binding": "parameter",
@@ -214,9 +211,7 @@ def test_public_immutable_receiver_carries_its_minted_getter(effects):
         "binding": "state_variable",
         "param_scope": None,
         "param_index": None,
-        # Spelled the long way: an immutable is inlined into the
-        # IMPLEMENTATION's bytecode, so behind a proxy it is not an invariant of
-        # the address a consumer prices against.
+        # An immutable is inlined into the implementation, so it's not an invariant of the proxy address.
         "mutability": "immutable_in_implementation",
         "visibility": "public",
         "auto_getter_selector": "0x8e0191b5",
@@ -233,9 +228,7 @@ def test_internal_state_variable_receiver_mints_no_getter(effects):
         "param_index": None,
         "mutability": "mutable",
         "visibility": "internal",
-        # No accessor exists, so no selector may be published — and the KEY is
-        # present with a null value, never an absent key that a consumer could
-        # confuse with a shape this plane never examined.
+        # Present with null, never absent.
         "auto_getter_selector": None,
         "variable": "hiddenToken",
         "receiver_provenance": "contract_state_unresolved",
@@ -246,21 +239,14 @@ def test_constant_receiver_is_a_declaration_class_not_a_writer_finding(effects):
     receiver = _receiver(effects, "payConstant(address,uint256)", "CONST_TOKEN.safeTransfer")
     assert receiver is not None
     assert receiver["mutability"] == "constant"
-    # A ``public constant`` still gets a nullary accessor, so the selector is
-    # real; the mutability token describes the DECLARATION, not the write
-    # surface, which is the value-flow lattice's question and not this one's.
+    # The token describes the declaration, not the write surface.
     assert receiver["auto_getter_selector"] == _selector("CONST_TOKEN()")
 
 
-# --- R3a: the binding is decided by isinstance, never by visibility ---------
-
-
 def test_local_and_internal_state_variable_are_not_confused(effects):
-    """A ``LocalVariable`` and an internal ``StateVariable`` are indistinguishable
-    on ``visibility``/``is_immutable``/``is_constant`` — Slither answers
-    ``internal``/``False``/``False`` for both. Only the declared kind separates
-    them, and getting it wrong publishes a caller's argument as this contract's
-    storage."""
+    """Slither answers identically on visibility/immutable/constant for both; the wrong call publishes a caller's
+    argument as storage.
+    """
     local = _receiver(effects, "payLocal(address,uint256)", "local.safeTransfer")
     internal = _receiver(effects, "payInternal(address,uint256)", "hiddenToken.safeTransfer")
     assert local == {
@@ -276,14 +262,8 @@ def test_local_and_internal_state_variable_are_not_confused(effects):
     assert internal is not None and internal["binding"] == "state_variable"
 
 
-# --- A1: the DECLARED TYPE licenses the selector, not the identifier --------
-
-
 def test_parameterised_getter_publishes_no_selector(effects):
-    """``uint256[] public amounts`` is read by ``amounts(uint256)``; the
-    name-derived ``amounts()`` hashes to four bytes that address no function.
-    A library call's receiver is its first argument and may be any type, so
-    this arm is reachable — and four bytes collide."""
+    """``amounts()`` addresses no function, and a library receiver can be any type."""
     array = _receiver(effects, "readAmounts()", "amounts.total")
     mapping = _receiver(effects, "readBalance(address)", "balances.get")
     assert array is not None and mapping is not None
@@ -291,20 +271,13 @@ def test_parameterised_getter_publishes_no_selector(effects):
     assert mapping["binding"] == "state_variable" and mapping["visibility"] == "public"
     assert array["auto_getter_selector"] is None
     assert mapping["auto_getter_selector"] is None
-    # The values that must NOT appear, and the real accessors they are not.
     assert _selector("amounts()") != _selector("amounts(uint256)")
     assert array["auto_getter_selector"] not in (_selector("amounts()"), _selector("amounts(uint256)"))
     assert mapping["auto_getter_selector"] not in (_selector("balances()"), _selector("balances(address)"))
 
 
-# --- fail-closed arms ------------------------------------------------------
-
-
 def test_internal_helper_formal_is_not_an_abi_slot(effects):
-    """The send is sited inside ``_pay``/``SafeERC20``. Its formal is a real
-    parameter of the unit being walked, but whether the ENTRY's argument reaches
-    it is a dataflow question this walk does not ask — so no index, and no
-    ``caller_named``."""
+    """Whether the entry's argument reaches the formal is a dataflow question this walk doesn't ask."""
     receiver = _receiver(effects, "payHelper(address,address,uint256)", "token.safeTransfer")
     assert receiver == {
         "binding": "parameter",
@@ -319,9 +292,7 @@ def test_internal_helper_formal_is_not_an_abi_slot(effects):
 
 
 def test_disagreeing_sites_fold_to_not_determined(effects):
-    """Two sites collapse onto one sink record and bind differently. The fold
-    runs ONCE over the collected descriptors, so the outcome cannot depend on IR
-    order — a later agreeing site cannot restore what a conflict destroyed."""
+    """The fold runs once over all descriptors, so IR order can't matter."""
     assert _receiver(effects, "payBothScopes(IERC20,address,uint256)", "token.transfer") == {
         "binding": "not_determined",
         "param_scope": None,
@@ -336,9 +307,6 @@ def test_disagreeing_sites_fold_to_not_determined(effects):
 
 
 def test_receiver_schema_invariants(effects):
-    """Absent means never computed: a state write has no receiver, and the key must not appear holding a
-    null that a consumer could read as an answer. This plane resolves no address, so every state-variable
-    receiver reads ``contract_state_unresolved`` and carries no address key at all."""
     for info in effects["functions"].values():
         for sink in info["sinks"]:
             if sink["kind"] != "external_call":
@@ -354,14 +322,8 @@ def test_receiver_schema_invariants(effects):
             }
 
 
-# --- the claims projection: keyed by sink id, not listed per flow -----------
-
-
 def test_witness_joins_each_receiver_to_its_own_sink(tmp_path):
-    """Two assets moved by one function share a flow key (same selector, same
-    direction). A per-flow list would leave the consumer unable to say which
-    receiver carried which move; the map is keyed by sink id so the join is
-    exact."""
+    """Two assets in one function share a flow key; keying by sink id keeps the join exact."""
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     project = write_foundry_project(tmp_path, "Receivers", textwrap.dedent(_SRC).strip() + "\n")
@@ -374,8 +336,6 @@ def test_witness_joins_each_receiver_to_its_own_sink(tmp_path):
     witness = flow_claims[0]["witness"]
     receivers = witness["sink_receivers"]
 
-    # Every id in the map is one of the ids the same witness published, so the
-    # join never dangles.
     assert set(receivers) <= set(witness["sink_ids"])
     variables = {r["variable"] for r in receivers.values()}
     assert {"immToken", "hiddenToken"} <= variables, receivers
@@ -384,16 +344,10 @@ def test_witness_joins_each_receiver_to_its_own_sink(tmp_path):
     assert by_variable["hiddenToken"]["auto_getter_selector"] is None
 
 
-# --- F1: a declaration this contract does not have --------------------------
-
-
 def test_library_constant_is_not_this_contract_s_storage(foreign):
-    """The sink walk recurses into library calls, so a library's own
-    ``public constant`` arrives as a perfectly good ``StateVariable``. It is
-    inlined at each call site, it is not this unit's storage, and the accessor
-    it would name is NOT in this contract's ABI — a pinned read at the
-    deployment address would revert or fall through to a fallback. The
-    declaration's owner, not its type, is what refuses it."""
+    """The walk recurses into libraries; a library's ``public constant`` isn't in this contract's ABI, and a pinned
+    read would revert.
+    """
     receiver = _receiver(foreign["LibConstUser"], "pay(address,uint256)", "T.transfer")
     assert receiver is not None
     assert receiver == {
@@ -411,12 +365,7 @@ def test_library_constant_is_not_this_contract_s_storage(foreign):
 
 
 def test_same_named_foreign_declaration_does_not_read_as_agreement(foreign):
-    """Two ``T``s holding two different addresses — one on the contract, one on
-    the library — reach ONE sink record. Described by name alone their
-    descriptors are byte-identical (same visibility, same mutability, same
-    minted selector), so the fold would publish two distinct assets as one
-    agreed receiver. Refusing the foreign declaration is what makes the
-    disagreement visible."""
+    """By name alone the two descriptors are byte-identical and would fold into one agreed receiver."""
     receiver = _receiver(foreign["Collide"], "pay(address,uint256)", "T.transfer")
     assert receiver is not None
     assert receiver["binding"] == "not_determined"

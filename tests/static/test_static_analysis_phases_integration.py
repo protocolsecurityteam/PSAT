@@ -1,12 +1,4 @@
-"""Integration tests for StaticWorker._run_analysis_phase.
-
-The Slither CLI subprocess + its slither_results / analysis_report
-artifacts were removed when vulnerability-detector triage was split
-out of PSAT's cascade pipeline. The structured ``contract_analysis``
-artifact (built from Slither's Python IR) is what every downstream
-stage reads, so its phase is the only one with integration coverage
-here.
-"""
+"""The Slither CLI artifacts are gone; ``contract_analysis`` is what every downstream stage reads."""
 
 from __future__ import annotations
 
@@ -14,10 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from workers.static_worker import StaticWorker
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _job(**overrides):
@@ -39,11 +27,6 @@ def _capture_store_artifact(monkeypatch):
 
     monkeypatch.setattr("workers.static_worker.store_artifact", _fake_store)
     return calls
-
-
-# ---------------------------------------------------------------------------
-# _run_analysis_phase
-# ---------------------------------------------------------------------------
 
 
 class TestAnalysisPhaseSuccess:

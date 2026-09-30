@@ -1,9 +1,5 @@
-"""The Plane-0 hygiene lattice must rest on the lowered IR, not on identifiers.
-
-Fixtures are named ADVERSARIALLY (slot constants without ``slot``/``storage``, guards
-without ``reentran``/``locked``/``_status``), so a test passes only if the
-classification came from IR shape. Negative controls are the mirror image:
-identifiers that LOOK like slots or guards but whose IR proves they are neither.
+"""Fixtures are named adversarially, so hygiene classification must come from IR shape; negative controls have
+identifiers that look like slots or guards but aren't.
 """
 
 from __future__ import annotations
@@ -33,8 +29,6 @@ def _hygiene(effects, signature: str) -> dict[str, str]:
     return {w["var"]: w["hygiene_class"] for w in info["state_writes"]}
 
 
-# --- ERC-7201 storage-pointer bind: ``assembly { $.slot := C }`` -------------
-
 _NAMESPACED_SRC = """
 pragma solidity ^0.8.20;
 
@@ -61,13 +55,9 @@ contract Vault {
 
 
 def test_namespaced_slot_constant_is_pseudo_without_a_slot_name(tmp_path):
-    """``ACME_MAIN`` is bound to a storage-location local in assembly: proven by
-    the ``Assignment`` to an ``is_storage`` lvalue, not by its name."""
     effects = build_effects(_compile(tmp_path, _NAMESPACED_SRC, "Vault"))
     assert _hygiene(effects, "setHalted(bool)")["ACME_MAIN"] == "storage_location_pseudo"
 
-
-# --- Solady/EIP-1967 direct slot write: ``assembly { sstore(C, v) }`` --------
 
 _SSTORE_SRC = """
 pragma solidity ^0.8.20;
@@ -89,11 +79,9 @@ contract Handle {
 
 
 def test_sstore_target_constant_is_pseudo_and_a_value_constant_is_not(tmp_path):
-    """Solidity forbids assigning a constant, so an ``Assignment`` whose lvalue
-    IS one (outside the synthetic initializer) can only be ``sstore(C, …)``.
-    ``ADMIN_ROLE`` — same type, same declaration site, never a slot — stays a
-    plain ``constant``: the negative control that a value-blind name rule
-    ('bytes32 constant') could not give."""
+    """Assigning a constant is illegal, so an ``Assignment`` to one can only be ``sstore(C, …)``; ``ADMIN_ROLE`` is
+    the control a name rule couldn't give.
+    """
     effects = build_effects(_compile(tmp_path, _SSTORE_SRC, "Handle"))
     classes = _hygiene(effects, "setAdmin(address)")
     assert classes["ADMIN_HANDLE"] == "storage_location_pseudo"
@@ -116,15 +104,10 @@ contract Decoy {
 
 
 def test_slot_named_value_constant_is_not_a_pseudo_slot(tmp_path):
-    """The inverse control: a ``*_SLOT`` identifier that the IR never uses as a
-    slot must NOT be admitted as a namespaced latch/ownership pseudo-var. Under
-    the name rule this was a false hit that fed the pause and namespaced-write
-    matchers."""
+    """Under the name rule this fed the pause and namespaced-write matchers a false hit."""
     effects = build_effects(_compile(tmp_path, _SLOT_NAMED_VALUE_SRC, "Decoy"))
     assert _hygiene(effects, "flag()").get("OPERATOR_SLOT") in (None, "constant")
 
-
-# --- Reentrancy guard: set/restore around the modifier placeholder ----------
 
 _GUARD_SRC = """
 pragma solidity ^0.8.20;
@@ -149,9 +132,7 @@ contract Guarded {
 
 
 def test_guard_var_is_classified_without_a_guard_name(tmp_path):
-    """``entryFlag`` is written on both sides of the modifier's placeholder —
-    the defining shape of a reentrancy guard, and of nothing else. The real
-    state write (``treasury``) is untouched."""
+    """Written on both sides of the placeholder, which defines a reentrancy guard."""
     effects = build_effects(_compile(tmp_path, _GUARD_SRC, "Guarded"))
     classes = _hygiene(effects, "setTreasury(address)")
     assert classes["entryFlag"] == "reentrancy_guard"
@@ -176,8 +157,6 @@ contract HelperGuarded {
 
 
 def test_guard_split_into_helpers_is_still_classified(tmp_path):
-    """The OZ shape: the modifier body is two internal calls, so the set and the
-    restore are only visible through the callee walk."""
     effects = build_effects(_compile(tmp_path, _HELPER_GUARD_SRC, "HelperGuarded"))
     classes = _hygiene(effects, "bump()")
     assert classes["gateWord"] == "reentrancy_guard"
@@ -202,14 +181,10 @@ contract Pausable {
 
 
 def test_pause_latch_is_not_mistaken_for_a_guard(tmp_path):
-    """A latch is set and left set; only a guard is restored on the far side of
-    the placeholder. The pause flag must stay ``normal`` or the pause matcher
-    loses its only write fact."""
+    """A latch stays set; only a guard is restored."""
     effects = build_effects(_compile(tmp_path, _PAUSE_NOT_GUARD_SRC, "Pausable"))
     assert _hygiene(effects, "pause()")["halted"] == "normal"
 
-
-# --- token-first routed transfer: the callee's ISSUED selector --------------
 
 _TOKEN_FIRST_SRC = """
 // SPDX-License-Identifier: MIT
@@ -294,9 +269,7 @@ def _routed(unit, contract_name: str, signature: str) -> list[Any]:
 
 
 def test_routed_send_is_recovered_from_the_issued_selector(_token_first):
-    """``Mover.push`` is an assembly-only body: the walk cannot see the call, and
-    the name matches no idiom. The ``transfer`` selector literal in its ``mstore``
-    is the whole of the evidence, and it also fixes the direction (send)."""
+    """The ``transfer`` selector literal in an assembly ``mstore`` is the only evidence."""
     routed = _routed(_token_first, "Router", "withdraw(uint256,address)")
     assert len(routed) == 1, routed
     assert routed[0]["from_is_self"] is True
@@ -304,9 +277,6 @@ def test_routed_send_is_recovered_from_the_issued_selector(_token_first):
 
 
 def test_routed_pull_is_recovered_from_the_issued_selector(_token_first):
-    """``Mover.grab`` issues ``transferFrom``, whose ABI tail is
-    ``(address,address,uint256)`` — that is what selects the pull shape and the
-    shifted operand slots."""
     routed = _routed(_token_first, "Router", "deposit(uint256)")
     assert len(routed) == 1, routed
     assert routed[0]["target_kind"]["kind"] == "self"
@@ -314,13 +284,8 @@ def test_routed_pull_is_recovered_from_the_issued_selector(_token_first):
 
 
 def test_canonically_named_helper_that_moves_nothing_is_not_routed(_token_first):
-    """The inverse control. ``Mover.safeTransfer`` has the idiom's name and the
-    idiom's trailing types; its body issues no ERC-20 move, so there is no flow
-    and no ``value_router`` claim to publish."""
     assert _routed(_token_first, "Router", "decoyRoute(uint256,address)") == []
 
-
-# --- legacy value flows read the IR object, not its repr --------------------
 
 _LEGACY_FLOW_SRC = """
 // SPDX-License-Identifier: MIT
@@ -341,9 +306,7 @@ contract Payer {
 
 
 def test_value_flows_survive_an_unreadable_ir_repr(tmp_path, monkeypatch):
-    """``_extract_value_flows`` used to parse ``str(ir)``, a debug rendering that
-    can be reformatted upstream with no signal. Blanking every IR's ``__str__``
-    must leave the flows unchanged; under the repr parse this returned nothing."""
+    """``str(ir)`` is a debug rendering that can change upstream silently."""
     from slither.slithir.operations.high_level_call import HighLevelCall
     from slither.slithir.operations.low_level_call import LowLevelCall
 

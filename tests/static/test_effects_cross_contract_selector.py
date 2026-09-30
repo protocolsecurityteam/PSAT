@@ -1,8 +1,7 @@
-"""The cross-contract join matches a caller's body sink against the callee's OWN
-canonical selector, so the emitter must record a canonical selector for a direct
-high-level call, lowering struct / enum / interface params as the callee did;
-otherwise the join keys on a keccak of ``addAsset(ERC20)`` and the claim silently
-fails to propagate. A LibraryCall has no external selector and is left untouched.
+"""The join keys on the callee's canonical selector, so struct/enum/interface params must be lowered as the callee
+did.
+
+A LibraryCall has no external selector.
 """
 
 from __future__ import annotations
@@ -73,8 +72,6 @@ def _selector_for(effects, fn_sig: str, target: str) -> str:
 
 
 def test_interface_param_call_selector_is_canonical(effects):
-    # ``sib.addAsset(IToken)`` must record the selector of ``addAsset(address)``,
-    # which is the sibling's own canonical selector on the join.
     assert _selector_for(effects, "doAdd()", "sib.addAsset") == _sel("addAsset(address)")
 
 

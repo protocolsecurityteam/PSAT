@@ -63,10 +63,7 @@ def test_normalize_chain_tokens_rekeys_and_skips_collisions(_clean_cm):
     a2 = "0x" + "a2" * 20
     a3 = "0x" + "a3" * 20
 
-    # X: plain mainnet name → moves to "1".
     _clean_cm.add(_row("ethereum", k1, a1))
-    # Y (name "ethereum", keccak k2) collides with pre-existing Z ("1", keccak k2)
-    # on the (chain, bytecode_keccak) PK → Y must be left on "ethereum".
     _clean_cm.add(_row("ethereum", k2, a2))
     _clean_cm.add(_row("1", k2, a3))
     _clean_cm.commit()

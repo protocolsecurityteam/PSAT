@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import pytest
@@ -15,7 +14,6 @@ from services.discovery.protocol_resolver import (
     parse_listing_address,
     resolve_protocol,
 )
-
 
 AAVE = {
     "slug": "aave-v3",

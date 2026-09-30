@@ -1,7 +1,4 @@
-"""Integration tests for the ``stage_errors`` artifact written by ``BaseWorker`` (real Postgres).
-
-Object storage is intentionally not configured — inline JSONB is the offline path.
-"""
+"""Storage is unconfigured, so artifacts stay inline JSONB."""
 
 from __future__ import annotations
 
@@ -20,8 +17,7 @@ from workers.base import BaseWorker
 
 @pytest.fixture()
 def test_session_local(monkeypatch):
-    """``_persist_stage_errors`` opens a fresh ``SessionLocal()`` (to survive a broken
-    primary transaction); point it at ``TEST_DATABASE_URL``, not prod."""
+    """It opens a fresh session to survive a broken primary transaction."""
     test_url = os.environ.get("TEST_DATABASE_URL")
     if not test_url:
         pytest.skip("TEST_DATABASE_URL not set")
@@ -141,8 +137,6 @@ def test_combined_degraded_and_error_produce_one_artifact(db_session, test_sessi
 
 @requires_postgres
 def test_fresh_session_fail_path_persists_artifact(db_session, test_session_local):
-    """The artifact must land even if the primary session is broken; simulated by closing
-    the session before the raise so the handler's rollback fails too."""
     job = create_job(db_session, {"address": "0xabc", "name": "stage-err-4"})
     db_session.commit()
     job_id = job.id  # capture before close
@@ -157,12 +151,8 @@ def test_fresh_session_fail_path_persists_artifact(db_session, test_session_loca
             raise RuntimeError("session-poisoned")
 
     worker = _BrokenSessionWorker()
-    # Pre-close path will exercise the inner fail_job retry — verify the artifact
-    # write nonetheless lands (it uses its own SessionLocal).
     worker._execute_job(db_session, job)
 
-    # Open a fresh session pointed at the test DB to read — the test session
-    # is closed.
     fresh = test_session_local()
     try:
         payload = _read_stage_errors(fresh, job_id)

@@ -1,7 +1,3 @@
-"""Tests for static deps caching, dynamic deps caching/merge, classification
-caching, enrichment caching, upgrade history caching/merge, and all
-_resolve_*/_merge_* helper functions."""
-
 from __future__ import annotations
 
 import pytest
@@ -19,10 +15,6 @@ from tests.cache_helpers import (
     _patch_dep_phase_helpers,
     db_session,  # noqa: F401
 )
-
-# ---------------------------------------------------------------------------
-# Static dependency caching
-# ---------------------------------------------------------------------------
 
 
 def test_static_deps_stored_on_first_run(db_session, monkeypatch):
@@ -236,11 +228,6 @@ def test_dynamic_deps_still_run_on_cache_hit(db_session, monkeypatch):
     assert dynamic_called == [True]
 
 
-# ---------------------------------------------------------------------------
-# Dynamic dependency append-only caching
-# ---------------------------------------------------------------------------
-
-
 def test_merge_dynamic_deps():
     from workers.static_worker import _merge_dynamic_deps
 
@@ -261,7 +248,6 @@ def test_merge_dynamic_deps():
     prov_99 = merged["provenance"]["0x0000000000000000000000000000000000000099"]
     assert len(prov_99) == 1
 
-    # Dependency graph: old CALL edge + new STATICCALL edge + new CALL edge = 3 distinct edges
     assert len(merged["dependency_graph"]) == 3
 
     assert "debug_traceTransaction" in merged["trace_methods"]
@@ -399,11 +385,6 @@ def test_dynamic_deps_explicit_tx_hashes_skip_merge(db_session, monkeypatch):
     assert art["transactions_analyzed"] == FAKE_DYN_DEPS_NEW["transactions_analyzed"]
 
 
-# ---------------------------------------------------------------------------
-# Classification caching
-# ---------------------------------------------------------------------------
-
-
 def test_classifications_stored_on_first_run(db_session, monkeypatch):
     from db.queue import get_artifact
     from workers.static_worker import StaticWorker
@@ -459,7 +440,6 @@ def test_classifications_reused_via_pre_classified(db_session, monkeypatch):
 
     def mock_classify(*args, **kwargs):
         captured_kwargs.update(kwargs)
-        # Return extended output with a new address
         extended = dict(FAKE_CLS_OUTPUT)
         extended["classifications"] = dict(FAKE_CLS_OUTPUT["classifications"])
         extended["classifications"]["0x0000000000000000000000000000000000000099"] = {"type": "library"}
@@ -498,11 +478,6 @@ def test_classifications_reused_via_pre_classified(db_session, monkeypatch):
     art = get_artifact(db_session, job.id, "classifications")
     assert isinstance(art, dict)
     assert "0x0000000000000000000000000000000000000099" in art["classifications"]
-
-
-# ---------------------------------------------------------------------------
-# Upgrade history caching (append-only)
-# ---------------------------------------------------------------------------
 
 
 def test_merge_upgrade_history():
@@ -598,9 +573,7 @@ def test_upgrade_history_append_only_on_rerun(db_session, monkeypatch):
         "services.discovery.upgrade_history.build_upgrade_history",
         mock_build_uh,
     )
-    # The stored events are folded per transaction, one receipt read each. This
-    # test is about the merge, so the read is stubbed to the unfetchable outcome
-    # it already had — ``None``, which the fold counts as receipt-unusable.
+    # This test is about the merge; the per-tx receipt read is stubbed to the unfetchable ``None``.
     monkeypatch.setattr("services.discovery.upgrade_history._fetch_receipt", lambda *a, **kw: None)
 
     worker = StaticWorker()
@@ -652,8 +625,6 @@ def test_upgrade_history_no_new_events_uses_previous(db_session, monkeypatch):
         "services.discovery.upgrade_history.build_upgrade_history",
         mock_build_uh,
     )
-    # Same as above: the previously stored events are still folded, and the
-    # receipt read is stubbed to the unfetchable outcome it already had.
     monkeypatch.setattr("services.discovery.upgrade_history._fetch_receipt", lambda *a, **kw: None)
 
     worker = StaticWorker()
@@ -670,11 +641,6 @@ def test_upgrade_history_no_new_events_uses_previous(db_session, monkeypatch):
     proxy_addr = "0xdac17f958d2ee523a2206206994597c13d831ec7"
     assert proxy_addr in art["proxies"]
     assert art["total_upgrades"] == 1
-
-
-# ---------------------------------------------------------------------------
-# Enrichment cache tests
-# ---------------------------------------------------------------------------
 
 
 def test_enrichment_cache_skips_cached_addresses(db_session, monkeypatch):
@@ -754,11 +720,6 @@ def test_artifact_copied_by_copy_static_cache(db_session, name, data):
     assert art == data
 
 
-# ---------------------------------------------------------------------------
-# _merge_dynamic_deps -- duplicate edge provenance merge
-# ---------------------------------------------------------------------------
-
-
 def test_merge_dynamic_deps_duplicate_edge_provenance():
     from workers.static_worker import _merge_dynamic_deps
 
@@ -806,11 +767,6 @@ def test_merge_dynamic_deps_duplicate_edge_provenance():
     assert prov_hashes == {"0x111", "0x222"}
 
 
-# ---------------------------------------------------------------------------
-# _merge_dynamic_deps -- empty/missing fields
-# ---------------------------------------------------------------------------
-
-
 def test_merge_dynamic_deps_empty_inputs():
     from workers.static_worker import _merge_dynamic_deps
 
@@ -822,11 +778,6 @@ def test_merge_dynamic_deps_empty_inputs():
     assert merged2["dependencies"] == FAKE_DYN_DEPS_OLD["dependencies"]
 
 
-# ---------------------------------------------------------------------------
-# _merge_upgrade_history -- duplicate event deduplication
-# ---------------------------------------------------------------------------
-
-
 def test_merge_upgrade_history_deduplicates_events():
     from workers.static_worker import _merge_upgrade_history
 
@@ -835,11 +786,6 @@ def test_merge_upgrade_history_deduplicates_events():
     events = merged["proxies"][proxy_addr]["events"]
     assert len(events) == 1  # deduplicated
     assert merged["total_upgrades"] == 1
-
-
-# ---------------------------------------------------------------------------
-# _merge_dynamic_deps -- trace_errors merge
-# ---------------------------------------------------------------------------
 
 
 def test_merge_dynamic_deps_trace_errors():
@@ -877,16 +823,8 @@ def test_merge_dynamic_deps_trace_errors():
     assert error_hashes == {"0x111", "0x222"}
 
 
-# ---------------------------------------------------------------------------
-# F1/F2 — the dependency phase threads the job's chain into the Etherscan-bound
-# upgrade-history and dynamic-dependency fetches (not a mainnet default).
-# ---------------------------------------------------------------------------
-
-
 def test_dependency_phase_threads_job_chain_id_to_subphases(db_session, monkeypatch):
-    """For a Base job, both the dynamic-dependency (F2) and upgrade-history (F1)
-    sub-phases must receive chain_id=8453 — the txlist/getLogs Etherscan calls
-    would otherwise silently run on mainnet and return empty for L2 contracts."""
+    """The txlist/getLogs calls would otherwise silently run on mainnet and return empty for L2 contracts."""
     from workers.static_worker import StaticWorker
 
     captured: dict[str, int | None] = {}
@@ -900,12 +838,10 @@ def test_dependency_phase_threads_job_chain_id_to_subphases(db_session, monkeypa
         return {"schema_version": "0.1", "target_address": ADDR_A, "proxies": {}}
 
     _patch_dep_phase_helpers(monkeypatch, fake_find_dyn)
-    # build_upgrade_history is imported locally inside run_upgrade_history, so
-    # patch it at its source module.
+    # Imported locally inside run_upgrade_history, so patch it at the source module.
     monkeypatch.setattr("services.discovery.upgrade_history.build_upgrade_history", fake_build_upgrade_history)
 
-    # A Base submission: create_job dual-writes jobs.chain_id=8453 from the chain
-    # string, and _parent_chain_name reads that first-class column.
+    # create_job dual-writes jobs.chain_id=8453, which _parent_chain_name reads first.
     job = _make_dep_phase_job(db_session, extra_request={"chain": "base"})
 
     worker = StaticWorker()

@@ -59,4 +59,3 @@ def test_veda_teller_cancall_resolves_without_preempt(analyzed_veda_teller, live
 
     resolved = [f for f in cancall if (f.get("capability_expr") or {}).get("kind") != "unsupported"]
     assert resolved, "every canCall-guarded function is unsupported — canCall resolution is not working"
-

@@ -1,15 +1,6 @@
-"""Interprocedural forwarded-destination/amount recovery (Part A fixes #1-#3).
-
-The ``flow.out`` lattice walks value movement rooted at ONE external entry, so the
-argument forwarded at each internal-call site is unambiguous. These tests prove a
-nested ``parameter`` destination/amount is recovered to its entry-rooted origin (the
-recall regression that collapsed 76/78 live destinations to ``indeterminate``
-because every real ETH send lives one hop inside a helper/library), and that
-divergent origins, merged element bases and balance-DELTA amounts stay
-``indeterminate`` (witness bar). The last sections cover WHICH parameter a ``param``
-destination is (``target_param_index``) and the legacy ``eth_out`` flow.
-
-Precedent: ``test_flow_lattice.py`` (same compile-with-Slither harness).
+"""Interprocedural forwarded destination/amount recovery (Part A #1-#3). Real ETH sends live one hop inside a
+helper, which collapsed 76/78 live destinations to ``indeterminate``. Divergent origins, merged element bases
+and balance deltas must still stay ``indeterminate``. Same harness as ``test_flow_lattice.py``.
 """
 
 from __future__ import annotations
@@ -41,8 +32,6 @@ def _out_flow(info, kind: str | None = None) -> Any:
     assert flows, f"no matching out-flow in {info['value_flows']}"
     return flows[0]
 
-
-# --- OZ Address.sendValue / functionCallWithValue library shape ------------
 
 _OZ_ADDRESS_SRC = """
 pragma solidity ^0.8.20;
@@ -87,8 +76,6 @@ def test_oz_sendvalue_recovers_forwarded_param(tmp_path):
     contract = _compile(tmp_path, _OZ_ADDRESS_SRC, "Vault")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["withdraw(address,uint256)"])
-    # ``to`` is the entry's caller-chosen param, forwarded (through a payable
-    # cast) into the library's ``recipient.call{value: amount}`` site.
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
@@ -97,8 +84,6 @@ def test_oz_sendvalue_recovers_forwarded_immutable(tmp_path):
     contract = _compile(tmp_path, _OZ_ADDRESS_SRC, "Vault")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payTreasury(uint256)"])
-    # The immutable ``treasury`` forwarded into the library survives as immutable
-    # (operational routing), distinct from the caller-chosen case above.
     assert flow["target_kind"]["kind"] == "immutable"
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
@@ -110,8 +95,6 @@ def test_oz_functioncallwithvalue_recovers(tmp_path):
     assert flow["target_kind"]["kind"] == "param"
     assert flow["amount_kind"]["kind"] == "param"
 
-
-# --- Multi-hop (3-hop) forwarded receiver chain ----------------------------
 
 _MULTIHOP_SRC = """
 pragma solidity ^0.8.20;
@@ -139,13 +122,9 @@ def test_three_hop_forwarded_receiver_recovers_to_param(tmp_path):
     contract = _compile(tmp_path, _MULTIHOP_SRC, "Redemption")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["redeemEEth(uint256,address)"])
-    # ``receiver`` chains param->param->param across three internal calls.
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
-    # ``ethReceived`` is forwarded from ``amount`` (entry param) too.
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
-
-# --- msg.sender / tx.origin forwarded into a helper ------------------------
 
 _CALLER_FORWARD_SRC = """
 pragma solidity ^0.8.20;
@@ -159,8 +138,6 @@ contract Caller {
 }
 """
 
-
-# --- immutable / state-var forwarded destination + amount ------------------
 
 _STATEVAR_FORWARD_SRC = """
 pragma solidity ^0.8.20;
@@ -188,7 +165,6 @@ contract Routed {
 _STATIC_TRACE = "static_trace"
 
 
-# Each ``expected`` entry is a subset match on the flow's ``target_kind`` / ``amount_kind`` dicts.
 @pytest.mark.parametrize(
     ("src", "contract_name", "signature", "expected"),
     [
@@ -209,7 +185,6 @@ _STATIC_TRACE = "static_trace"
             {"target_kind": {"kind": "caller_controlled", "tier": _STATIC_TRACE}},
             id="tx_origin",
         ),
-        # ``cap`` (a state var) forwarded as the amount -> bounded_by_storage.
         pytest.param(
             _STATEVAR_FORWARD_SRC,
             "Routed",
@@ -235,8 +210,6 @@ def test_forwarded_helper_origin_kinds(tmp_path, src, contract_name, signature, 
     for key, want in expected.items():
         assert {field: flow[key][field] for field in want} == want
 
-
-# --- Mapping-element / storage-struct destination (fix #3) -----------------
 
 _MAPPING_ELEMENT_SRC = """
 pragma solidity ^0.8.20;
@@ -275,10 +248,8 @@ def test_mapping_element_destination_is_storage_setter(tmp_path):
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["claim(uint256)"])
     kind = flow["target_kind"]["kind"]
-    # The base mapping ``_requests`` is written on the request path -> redirectable.
     assert kind == "storage_setter", kind
-    # NEVER a caller-directed ``param`` (would under-flag an attacker-influenceable
-    # per-key destination), NEVER a false ``storage_no_setter`` / indeterminate.
+    # ``param`` would under-flag a per-key destination.
     assert kind not in ("param", "storage_no_setter", "indeterminate")
 
 
@@ -288,8 +259,6 @@ def test_mapping_element_destination_via_helper_is_storage_setter(tmp_path):
     flow = _out_flow(effects["functions"]["claimVia(uint256)"])
     assert flow["target_kind"]["kind"] == "storage_setter"
 
-
-# --- Negative: divergent multi-caller binding stays indeterminate ----------
 
 _DIVERGENT_SRC = """
 pragma solidity ^0.8.20;
@@ -318,18 +287,14 @@ def test_divergent_multi_caller_destination_is_indeterminate(tmp_path):
     contract = _compile(tmp_path, _DIVERGENT_SRC, "Divergent")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["router(address,uint256)"])
-    # param (site 1) vs immutable (site 2) -> never guess a member of the union.
-    # Both members are resolved, so the union is NAMED rather than hidden.
+    # Both members are resolved, so the union is named, never guessed.
     assert flow["target_kind"]["kind"] == "several"
     assert {e["kind"] for e in flow["target_kinds"]} == {"param", "immutable"}
-    # The amount is unambiguously the same forwarded param at both sites.
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
 
-# --- Zero-value call is not a flow (OZ SafeERC20 / Address shape) -----------
-# A ``.call{value: value}`` with a provably-constant 0 (the way SafeERC20 routes a
-# token transfer) moves no ETH. Registering it would fold with the real ETH send and
-# collapse the destination to ``indeterminate`` (seen on EtherFiRedemptionManager).
+# A provably-zero ``.call{value: 0}`` (SafeERC20's route) would collapse the real send's destination to
+# ``indeterminate`` (seen on EtherFiRedemptionManager).
 
 _ZERO_VALUE_SRC = """
 pragma solidity ^0.8.20;
@@ -374,16 +339,12 @@ def test_zero_value_call_does_not_pollute_real_send(tmp_path):
     contract = _compile(tmp_path, _ZERO_VALUE_SRC, "Mixed")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["redeem(address,uint256,bytes)"])
-    # The zero-value token call is excluded, so the real send's destination survives the fold.
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
 
-# --- Witness bar: a COMPUTED operand must never recover a member of a union ---
-# Recovery drops the entrypoint-Phi echoes beside a DIRECTLY-read nested parameter,
-# but a ``computed`` operand attaches ALL operand sources and can carry a genuine
-# co-origin with no Phi. Dropping it would make nested classification MORE specific
-# than the byte-identical entry-level code, which is the invariant guarded here.
+# A ``computed`` operand can carry a genuine co-origin with no Phi, so it never recovers a union member; nested must not
+# be more specific than entry.
 
 _COMPUTED_MIX_SRC = """
 pragma solidity ^0.8.20;
@@ -426,7 +387,6 @@ def test_computed_destination_mix_matches_entry_indeterminate(tmp_path):
     effects = build_effects(contract)
     nested = _out_flow(effects["functions"]["payDestNested(address)"])
     entry = _out_flow(effects["functions"]["payDestEntry(address)"])
-    # A param^stateVar destination is a real union: never guess the param member.
     assert nested["target_kind"]["kind"] == "indeterminate"
     assert entry["target_kind"]["kind"] == "indeterminate"
 
@@ -436,7 +396,6 @@ def test_computed_amount_mix_matches_entry_indeterminate(tmp_path):
     effects = build_effects(contract)
     nested = _out_flow(effects["functions"]["payAmtNested(address,uint256)"])
     entry = _out_flow(effects["functions"]["payAmtEntry(address,uint256)"])
-    # amt * rate mixes a caller param with a storage value -> indeterminate.
     assert nested["amount_kind"]["kind"] == "indeterminate"
     assert entry["amount_kind"]["kind"] == "indeterminate"
 
@@ -462,16 +421,11 @@ def test_computed_single_origin_struct_member_still_recovers(tmp_path):
     contract = _compile(tmp_path, _STRUCT_MEMBER_SRC, "StructMember")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["pay(StructMember.Payout)"])
-    # recipient/amount are members of a forwarded caller struct -> caller-directed.
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
 
-# Balance READ vs balance DELTA amounts. ``whole_balance`` asserts the send can
-# drain the contract; EtherFiRedemptionManager's ``address(this).balance -
-# prevBalance`` is a bounded delta, and interprocedural recovery now routes real
-# fund-out functions into that branch. Arithmetic on a balance is not the balance.
-# ---------------------------------------------------------------------------
+# EtherFiRedemptionManager's ``balance - prevBalance`` is a bounded delta, not ``whole_balance``.
 
 _BALANCE_AMOUNT_SRC = """
 pragma solidity ^0.8.20;
@@ -533,11 +487,8 @@ def test_balance_amount_nested_matches_entry(tmp_path):
     )
 
 
-# A parameter forwarded ONWARD through a second helper (Lido ``claimWithdrawalsTo``
-# -> ``_claim`` -> ``_sendValue``). ``_claim``'s entrypoint Phi carries sibling
-# entries' ``msg.sender``; the ARGUMENT resolver must drop those echoes like the
-# use-site classifiers do, or the binding is lost to a phantom disagreement.
-# ---------------------------------------------------------------------------
+# Lido ``claimWithdrawalsTo``: the argument resolver must drop sibling entries' ``msg.sender`` Phi echoes like the
+# use-site classifiers do.
 
 _ONWARD_FORWARD_SRC = """
 pragma solidity ^0.8.20;
@@ -583,8 +534,7 @@ def test_msg_sender_sibling_entries_unchanged(tmp_path):
     contract = _compile(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
     effects = build_effects(contract)
     fns = effects["functions"]
-    # The sibling entries that pass msg.sender into the SAME helper chain must
-    # keep their own origin — the echo-drop resolves per call site, not globally.
+    # The echo-drop resolves per call site, not globally.
     assert _out_flow(fns["claimSelf(uint256[],uint256[])"])["target_kind"]["kind"] == "msg_sender"
     assert _out_flow(fns["claimOne(uint256,uint256)"])["target_kind"]["kind"] == "msg_sender"
 
@@ -640,11 +590,8 @@ def test_two_hop_chain_does_not_leak_across_entries(tmp_path):
     assert _out_flow(fns["entryImmutable(uint256)"])["target_kind"]["kind"] == "immutable"
 
 
-# Array / struct ELEMENT destinations and amounts (TimelockController
-# ``executeBatch`` sends to ``targets[i]``). An element is classified from its ROOT
-# base, never the key: a caller-supplied root is ``param``; a STORAGE root keeps the
-# base var's mutability and can never become ``param``.
-# ---------------------------------------------------------------------------
+# TimelockController ``executeBatch``: an element classifies from its root base; a storage root can never become
+# ``param``.
 
 _ELEMENT_SRC = """
 pragma solidity ^0.8.20;
@@ -693,8 +640,7 @@ def test_param_array_element_destination_recovers_to_param(tmp_path):
     contract = _compile(tmp_path, _ELEMENT_SRC, "Batch")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["executeBatch(address[],uint256[])"])
-    # An element of a caller-supplied array is still caller-chosen. The loop's
-    # merged index says nothing about the destination's kind.
+    # The loop's merged index says nothing about the destination kind.
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
     assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
 
@@ -715,8 +661,6 @@ def test_storage_rooted_element_is_storage_setter_never_param(tmp_path):
     fns = effects["functions"]
     for name in ("payStored(uint256,uint256)", "payStoredVia(uint256,uint256)"):
         kind = _out_flow(fns[name])["target_kind"]["kind"]
-        # The caller-supplied KEY must never promote a storage destination to
-        # ``param`` — including when the element is forwarded as an argument.
         assert kind == "storage_setter", (name, kind)
 
 
@@ -724,7 +668,6 @@ def test_merged_element_base_stays_indeterminate(tmp_path):
     contract = _compile(tmp_path, _ELEMENT_SRC, "Batch")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payMergedBase(bool,uint256,uint256)"])
-    # payees|backups collapse: never guess a member of the base union.
     assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
 
 
@@ -754,15 +697,12 @@ def test_calldata_struct_member_destination_is_param(tmp_path):
     nested = _out_flow(fns["payNested(StructMemberEntry.Payout)"])
     assert entry["target_kind"] == {"kind": "param", "tier": "static_trace"}
     assert entry["amount_kind"] == {"kind": "param", "tier": "static_trace"}
-    # Entry-vs-nested parity for the struct-member operand shape.
     assert nested["target_kind"] == entry["target_kind"]
     assert nested["amount_kind"] == entry["amount_kind"]
 
 
-# ``target_param_index`` — WHICH entry parameter the destination is. The fork prober
-# needs the ABI slot to plant a sentinel in; an index is emitted only for a
-# destination that IS one whole entry parameter agreed by every contributing site.
-# ---------------------------------------------------------------------------
+# ``target_param_index`` gives the fork prober an ABI slot; emitted only when every site agrees on one whole entry
+# parameter.
 
 
 def _index(info) -> Any:
@@ -772,23 +712,18 @@ def _index(info) -> Any:
 def test_param_index_for_directly_forwarded_recipient(tmp_path):
     contract = _compile(tmp_path, _OZ_ADDRESS_SRC, "Vault")
     fns = build_effects(contract)["functions"]
-    # withdraw(address to, uint256 amt) -> library send site: slot 0.
     assert _index(fns["withdraw(address,uint256)"]) == 0
-    # forward(address to, bytes data, uint256 value): still slot 0.
     assert _index(fns["forward(address,bytes,uint256)"]) == 0
 
 
 def test_param_index_survives_a_three_hop_forward(tmp_path):
     contract = _compile(tmp_path, _MULTIHOP_SRC, "Redemption")
     fns = build_effects(contract)["functions"]
-    # redeemEEth(uint256 amount, address receiver): the recipient is slot 1, and
-    # the helper chain reorders it (``_processETHRedemption(receiver, amount)``)
-    # — the index follows the binding, not the callee's own position.
+    # The index follows the binding, not the callee's position.
     assert _index(fns["redeemEEth(uint256,address)"]) == 1
 
 
 def test_param_index_absent_for_non_param_destinations(tmp_path):
-    """immutable / msg_sender / tx.origin / storage destinations have no slot."""
     fns = build_effects(_compile(tmp_path, _OZ_ADDRESS_SRC, "Vault"))["functions"]
     assert _index(fns["payTreasury(uint256)"]) is None
     caller = build_effects(_compile(tmp_path, _CALLER_FORWARD_SRC, "Caller"))["functions"]
@@ -803,7 +738,6 @@ def test_param_index_absent_when_bindings_diverge(tmp_path):
     contract = _compile(tmp_path, _DIVERGENT_TWO_HOP_SRC, "DivergentTwoHop")
     fns = build_effects(contract)["functions"]
     assert _index(fns["router(address,uint256)"]) is None
-    # The unambiguous sibling entries still carry theirs.
     assert _index(fns["entryParam(address,uint256)"]) == 0
     assert _index(fns["entryImmutable(uint256)"]) is None
 
@@ -833,15 +767,12 @@ def test_param_index_absent_when_two_slots_reach_one_helper(tmp_path):
     both = _out_flow(fns["payBoth(address,address,uint256)"])
     assert both["target_kind"]["kind"] == "param"
     assert both.get("target_param_index") is None
-    # The helper is also reached with a DIFFERENT slot from another entry: the
-    # per-site re-walk must not let the first-seen index stand for it.
+    # The per-site re-walk must not let the first-seen index stand.
     assert _index(fns["paySecond(address,address,uint256)"]) == 1
 
 
 def test_param_index_absent_for_element_and_struct_member_destinations(tmp_path):
-    """A member/element of a parameter is not an ABI argument slot: planting a
-    sentinel would mean rewriting a field inside an encoded struct/array, which
-    the flat positional encoder cannot do. Kind stays ``param``, index absent."""
+    """The flat positional encoder can't plant a sentinel inside a struct or array."""
     batch = build_effects(_compile(tmp_path, _ELEMENT_SRC, "Batch"))["functions"]
     array_elem = _out_flow(batch["executeBatch(address[],uint256[])"])
     assert array_elem["target_kind"]["kind"] == "param"
@@ -857,17 +788,12 @@ def test_param_index_absent_for_element_and_struct_member_destinations(tmp_path)
 def test_param_index_for_guarded_onward_forward(tmp_path):
     contract = _compile(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
     fns = build_effects(contract)["functions"]
-    # claimTo(uint256[] ids, uint256[] hints, address recipient): slot 2, two
-    # hops deep through a helper sibling entries also call with msg.sender.
     assert _index(fns["claimTo(uint256[],uint256[],address)"]) == 2
     assert _index(fns["claimSelf(uint256[],uint256[])"]) is None
 
 
-# The legacy ``contract_analysis`` eth_out flow (``summaries._extract_value_flows``)
-# used to hardcode ``is_parameter=False`` on EVERY native send, asserting "no
-# caller-chosen address" even for the entry's own parameter. It now names the
-# recipient where visible and stays silent (not false) elsewhere.
-# ---------------------------------------------------------------------------
+# The legacy eth_out flow hardcoded ``is_parameter=False``; it now names the recipient where visible and stays silent
+# elsewhere.
 
 
 def _eth_flows(contract, full_name: str) -> list[dict]:
@@ -905,8 +831,6 @@ def test_legacy_eth_flow_stays_silent_for_storage_and_nested_recipients(tmp_path
     contract = _compile(tmp_path, _LEGACY_ETH_SRC, "Legacy")
     storage = _eth_flows(contract, "payTreasury(uint256)")[0]
     assert storage["token_var"] is None and storage["is_parameter"] is False
-    # One hop deep the destination is a CALLEE formal — not an ABI slot of the
-    # entry, so it is left unnamed here; the lattice's ``target_param_index``
-    # is what resolves it interprocedurally.
+    # A callee formal isn't an entry slot; ``target_param_index`` resolves it interprocedurally.
     nested = _eth_flows(contract, "payViaHelper(address,uint256)")[0]
     assert nested["token_var"] is None and nested["is_parameter"] is False

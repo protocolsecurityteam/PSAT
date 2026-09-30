@@ -1,9 +1,5 @@
-"""Tests for the writer-gate two-pass analyzer.
-
-Per v6/v7 plan: a 1-key caller-keyed bool/uint mapping can't be classified as auth vs
-personal-flag from the read site alone; the discriminator is how the var is *written*. The
-analyzer finds each candidate's writers, classifies the write key, and promotes leaves when
-the writer is itself authority-gated.
+"""A 1-key caller-keyed mapping can't be told apart as auth vs personal flag from the read site; the discriminator is
+how it's written.
 """
 
 from __future__ import annotations
@@ -51,9 +47,7 @@ def _build_trees(contract):
     return trees
 
 
-# ---------------------------------------------------------------------------
-# Rule a: ALL writers self_keyed → leave as business
-# ---------------------------------------------------------------------------
+# Rule a: all writers self-keyed stays business.
 
 
 def test_personal_flag_stays_business(tmp_path):
@@ -81,15 +75,11 @@ def test_personal_flag_stays_business(tmp_path):
     assert leaves[0]["authority_role"] == "business"
 
 
-# ---------------------------------------------------------------------------
-# Rule b.i: external_keyed writer is auth-gated → promote to caller_authority
-# ---------------------------------------------------------------------------
+# Rule b.i: an auth-gated external-keyed writer promotes.
 
 
 def test_blacklist_writer_gated_promotes(tmp_path):
-    """``_blacklist[user] = true`` is written by an Ownable function, so reading
-    ``require(!_blacklist[msg.sender])`` promotes to caller_authority (rule b.i) with MEDIUM
-    confidence: the auth signal comes from writer-side analysis, not the read site."""
+    """MEDIUM confidence because the signal comes from the writer side."""
     sl = _compile(
         tmp_path,
         """
@@ -119,18 +109,11 @@ def test_blacklist_writer_gated_promotes(tmp_path):
     assert leaf["confidence"] == "medium"
 
 
-# ---------------------------------------------------------------------------
-# Rule b.ii: self-administered (Maker wards style) → promote
-# ---------------------------------------------------------------------------
+# Rule b.ii: self-administered (Maker wards).
 
 
 def test_self_administered_wards_promotes(tmp_path):
-    """Maker wards-style: ``rely(addr)`` is gated by ``wards[msg.sender] == 1`` (same map,
-    value-compare form), so reading it in someAction promotes via rule b.ii, with HIGH
-    confidence (tight structural match, unlike b.i).
-
-    Critical for MakerDAO's canonical 'auth' pattern: without ``map[k]==1`` recognition the leaf
-    stays equality, pass-2 sees no membership leaf to gate on, and wards looks like a uint read."""
+    """Without ``map[k]==1`` recognition wards looks like a uint read. HIGH confidence: a tight structural match."""
     sl = _compile(
         tmp_path,
         """
@@ -159,9 +142,7 @@ def test_self_administered_wards_promotes(tmp_path):
     assert leaf["confidence"] == "high"
 
 
-# ---------------------------------------------------------------------------
-# Rule c: external_keyed writer is open (ungated) → keep business
-# ---------------------------------------------------------------------------
+# Rule c: an ungated external-keyed writer stays business.
 
 
 def test_open_registration_stays_business(tmp_path):
@@ -190,8 +171,6 @@ def test_open_registration_stays_business(tmp_path):
 
 
 def test_mixed_gated_and_public_external_writers_stays_business(tmp_path):
-    """A public external-keyed writer can grant membership, so an
-    otherwise gated writer is not enough to promote the mapping."""
     sl = _compile(
         tmp_path,
         """
@@ -220,21 +199,12 @@ def test_mixed_gated_and_public_external_writers_stays_business(tmp_path):
     assert leaves[0]["authority_role"] == "business"
 
 
-# ---------------------------------------------------------------------------
-# Regression pin: inherited OZ Ownable through the ``_checkOwner`` helper. The predicate builder
-# must walk ``owner() == _msgSender()`` through the inherited helper and bind the operand to
-# ``_owner``; otherwise the leaf is ``business``/empty and the resolver has nothing to enumerate.
-# Confirmed on the EtherFi LiquidityPool artifact.
-# ---------------------------------------------------------------------------
+# Inherited OZ Ownable through ``_checkOwner`` (EtherFi LiquidityPool): the builder must bind the operand to ``_owner``.
 
 
 def test_owner_eq_msgsender_through_helper_call(tmp_path):
-    """OZ-shaped Ownable: ``onlyOwner`` -> ``_checkOwner()`` -> view ``owner()`` returning
-    ``_owner``; the leaf must classify as ``caller_authority``."""
-    # Inheritance pattern matters: same-contract _checkOwner is already handled
-    # by the existing cross-fn helper traversal. EtherFi inherits from
-    # OwnableUpgradeable so the modifier + _checkOwner + owner() live in a
-    # different contract from transferOwnership.
+    # EtherFi inherits OwnableUpgradeable, so the helper lives in a different contract; same-contract is already
+    # handled.
     sl = _compile(
         tmp_path,
         """
@@ -259,19 +229,16 @@ def test_owner_eq_msgsender_through_helper_call(tmp_path):
         }
     """,
     )
-    # Use the most-derived contract (the inheriting one), not the abstract base.
     contract = next(c for c in sl.contracts if c.name == "C")
     trees = _build_trees(contract)
     apply_writer_gate_pass(contract, trees)
     leaves = _all_leaves(trees["transferOwnership(address)"])
     assert leaves, "expected at least one leaf for transferOwnership"
-    # caller_authority, not business (the empty fallback) and not unsupported.
     auth_leaves = [leaf for leaf in leaves if leaf["authority_role"] == "caller_authority"]
     assert auth_leaves, (
         f"expected a caller_authority leaf for transferOwnership; got "
         f"{[(leaf.get('authority_role'), leaf.get('kind')) for leaf in leaves]}"
     )
-    # And the descriptor or operand should reference the underlying storage var.
     leaf = auth_leaves[0]
     operands_have_owner = any(
         op.get("source") == "state_variable" and op.get("state_variable_name") == "_owner"

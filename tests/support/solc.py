@@ -1,15 +1,10 @@
-"""solc-select lookup shared by the real-Slither integration tests, which each
-previously carried a private copy.
-"""
-
 from __future__ import annotations
 
 from typing import cast
 
 
 def solc_path_for(floor: tuple[int, int, int]) -> str | None:
-    """Highest installed solc in the same major.minor line as ``floor`` whose
-    patch is >= floor (i.e. a ``^floor`` match). None if nothing satisfies it."""
+    """A ``^floor`` match; None if nothing satisfies it."""
     try:
         from solc_select import solc_select as ss
     except Exception:

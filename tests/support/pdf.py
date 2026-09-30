@@ -1,7 +1,4 @@
-"""Shared helper: build a minimal valid PDF carrying a single line of text.
-
-Kept pure-Python so the audit tests don't pull in reportlab / fpdf2 as dev
-deps just for a pypdf roundtrip."""
+"""Pure Python so audit tests don't need reportlab / fpdf2."""
 
 from __future__ import annotations
 

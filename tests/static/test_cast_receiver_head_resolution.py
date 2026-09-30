@@ -25,8 +25,7 @@ from services.effects.calldata import FunctionFacts, input_token_hints  # noqa: 
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
 from services.static.contract_analysis_pipeline.summaries import _extract_value_flows  # noqa: E402
 
-# A vault that pulls / reads an ERC-20 it holds, every reference reached through a
-# cast so the receiver is a temporary. Names are generic on purpose.
+# Every reference goes through a cast so the receiver is a temporary.
 _SRC = """
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -110,16 +109,12 @@ def effects(compiled):
     return build_effects(compiled)
 
 
-# --- seam 1: the sink head is the state var, not a temporary ---------------
-
-
 @pytest.mark.parametrize(
     "signature,resolved_head",
     [
         pytest.param("deposit(uint256)", "underlying.safeTransferFrom", id="state_var_double_cast"),
         pytest.param("depositDirect(uint256)", "underlying.transferFrom", id="direct_high_level_call"),
-        # Resolves to the parameter name, not a temporary (a parameter names no
-        # getter, which the hint layer enforces separately).
+        # A parameter names no getter; the hint layer enforces that separately.
         pytest.param("depositParam(address,uint256)", "token.safeTransferFrom", id="parameter_cast"),
     ],
 )
@@ -130,32 +125,25 @@ def test_head_resolved_through_cast(effects, signature, resolved_head):
 
 
 def test_mapping_element_is_not_resolved_to_a_getter(effects):
-    # A reference variable (``pool[id]``) is NOT temporary-rooted through a cast,
-    # so it must be left unresolved rather than invented into ``pool()``.
+    # ``pool[id]`` isn't temporary-rooted through a cast, so it stays unresolved rather than invented into ``pool()``.
     heads = _ext_heads(effects["functions"]["depositIdx(uint256,uint256)"])
     assert not any(h.startswith("pool.") for h in heads), heads
-
-
-# --- seam 2: the whole chain, compile -> build_effects -> hints ------------
 
 
 def test_input_token_hints_names_the_state_var_getter(effects):
     hints = input_token_hints(_facts(effects, "deposit(uint256)"))
     assert "underlying()" in hints, hints
-    # No junk temporary getter survives to the hint list.
     assert not any(h.startswith(("TMP_", "REF_", "TUPLE_")) for h in hints), hints
 
 
 def test_token_read_selector_names_the_token(effects):
-    # ``shares(address)`` pulls nothing, but its head names the token, so a read
-    # selector must still surface the getter (``_TOKEN_READ_SELECTORS``).
+    # A read selector must still surface the getter (``_TOKEN_READ_SELECTORS``).
     hints = input_token_hints(_facts(effects, "previewShares()"))
     assert "reserveToken()" in hints, hints
 
 
 def test_parameter_head_names_no_getter(effects):
-    # The head resolved to a parameter; a parameter's value is in calldata, so it
-    # must NOT become a getter hint.
+    # A parameter's value is in calldata, so it isn't a getter hint.
     hints = input_token_hints(_facts(effects, "depositParam(address,uint256)"))
     assert "token()" not in hints, hints
 
@@ -165,12 +153,7 @@ def test_mapping_element_invents_no_getter_hint(effects):
     assert not any(h.startswith(("TMP_", "REF_", "TUPLE_", "pool")) for h in hints), hints
 
 
-# --- summaries value-flow path: token_var resolves too ---------------------
-
-
 def test_value_flow_token_var_resolved(compiled):
-    # The direct high-level call's destination is a temporary; the flow's
-    # ``token_var`` must resolve to the state var rather than record ``TMP_n``.
     fn = next(fu for fu in compiled.functions if fu.name == "depositDirect")
     token_vars = [fl.get("token_var") for fl in _extract_value_flows(fn)]
     assert "underlying" in token_vars, token_vars

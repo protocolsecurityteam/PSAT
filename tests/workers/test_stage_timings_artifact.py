@@ -1,12 +1,6 @@
-"""Regression tests for the per-job stage_timing_<stage> artifacts written by
-``workers.base.BaseWorker._record_stage_timing``.
+"""A shared ``stages`` array raced: once ``advance_job`` commits the next worker can clobber this stage's entry.
 
-A single shared ``stages`` array had a read-modify-write race: once ``advance_job``
-commits, the next-stage worker can claim, complete, and clobber this stage's entry
-(also on ``JobHandledDirectly`` paths). Schema v2 writes one ``stage_timing_<stage>``
-artifact per stage so each worker owns its slot; bench reads via prefix scan.
-Payload keys: schema_version "2", stage, started_at, ended_at, elapsed_s, worker_id,
-status ("success"|"failed"|"handled_directly").
+Schema v2 writes one ``stage_timing_<stage>`` artifact per stage.
 """
 
 from __future__ import annotations
@@ -21,22 +15,17 @@ from workers.base import BaseWorker
 
 
 class _FakeWorker(BaseWorker):
-    """Minimal subclass for unit-testing the helper in isolation."""
-
     stage = JobStage.discovery
     next_stage = JobStage.static
     poll_interval = 0.0
 
 
 def _job(job_id: str = "job-1") -> Job:
-    """Build a duck-typed Job stub. The helper only reads ``id`` so a
-    SimpleNamespace satisfies the runtime contract; ``cast`` quiets pyright."""
+    """The helper only reads ``id``."""
     return cast(Job, SimpleNamespace(id=job_id, address="0xabc", name="test"))
 
 
 def test_record_writes_per_stage_artifact_with_flat_payload(monkeypatch):
-    """v2: per-stage artifact name and a single-record payload, so nothing else
-    writes the same name."""
     captured: dict = {}
 
     def _fake_store(*args, **kw):
@@ -67,8 +56,7 @@ def test_record_writes_per_stage_artifact_with_flat_payload(monkeypatch):
 
 
 def test_record_folds_stage_metrics_when_bound(monkeypatch):
-    """Folded under ``metrics`` so the monitoring UI can show "12 deps, 3 principals"
-    without log scraping."""
+    """So the monitoring UI can show counts without log scraping."""
     captured: dict = {}
     monkeypatch.setattr(
         "workers.base.store_artifact",
@@ -92,8 +80,7 @@ def test_record_folds_stage_metrics_when_bound(monkeypatch):
         stage_metrics_var.reset(token)
 
     assert captured["data"]["metrics"] == {"dependencies": 12, "is_proxy": False}
-    # Stored payload must be a copy — a later contextvar reset / mutation
-    # cannot retroactively change what we persisted.
+    # A later contextvar reset must not change what was persisted.
     metrics["dependencies"] = 999
     assert captured["data"]["metrics"]["dependencies"] == 12
 
@@ -131,7 +118,6 @@ def test_record_omits_metrics_key_when_none_recorded(monkeypatch):
 
 
 def test_record_failed_status_persists(monkeypatch):
-    """Timing must be captured for errored jobs too (bench: which stage fails, and after how long)."""
     captured: dict = {}
     monkeypatch.setattr(
         "workers.base.store_artifact",
@@ -151,14 +137,8 @@ def test_record_failed_status_persists(monkeypatch):
     assert captured["data"]["stage"] == "discovery"
 
 
-# ---------------------------------------------------------------------------
-# Codex-iter-1 finding: timing must be recorded before advance/complete
-# ---------------------------------------------------------------------------
-
-
 def test_record_timing_runs_before_advance_in_run_loop(monkeypatch):
-    """Codex iter-1: recording-first preserves this worker's exclusive control of the
-    row when its artifact lands, even with the v2 per-stage schema."""
+    """Codex iter-1: this worker still has exclusive control of the row when its artifact lands."""
     from db.models import JobStatus
     from workers import base
 
@@ -219,14 +199,7 @@ def test_record_timing_runs_before_advance_in_run_loop(monkeypatch):
     )
 
 
-# ---------------------------------------------------------------------------
-# Codex-iter-2 finding: rollback session on artifact-write failure
-# ---------------------------------------------------------------------------
-
-
 def test_run_loop_folds_recorded_metrics_into_artifact(monkeypatch):
-    """Exercises the full ``_execute_job`` wiring: the per-job dict is bound before
-    ``process()``, folded by ``_record_stage_timing``, and reset in the ``finally``."""
     from db.models import JobStatus
     from workers import base
 
@@ -245,7 +218,7 @@ def test_run_loop_folds_recorded_metrics_into_artifact(monkeypatch):
             record_stage_metric("dependencies", 5)
             record_stage_metric("is_proxy", True)
 
-    # lease_id absent → no heartbeat thread / inflight registration to stub.
+    # No lease_id means no heartbeat thread to stub.
     job = SimpleNamespace(
         id="job-metrics",
         address="0xabc",
@@ -281,13 +254,11 @@ def test_run_loop_folds_recorded_metrics_into_artifact(monkeypatch):
     assert timing["metrics"]["is_proxy"] is True
     assert timing["metrics"]["process_rss_peak_sampled_bytes"] >= timing["metrics"]["process_rss_start_bytes"]
     assert timing["metrics"]["process_rss_peak_sampled_bytes"] >= timing["metrics"]["process_rss_end_bytes"]
-    # Contextvar must be reset after the job — no leak into the next claim.
     assert stage_metrics_var.get() is None
 
 
 def test_record_rolls_back_session_on_store_failure(monkeypatch):
-    """Codex iter-2: a failed ``store_artifact`` leaves the session needing rollback, so
-    the next ``advance_job`` would raise ``PendingRollbackError`` and mark the job failed."""
+    """Codex iter-2: otherwise the next ``advance_job`` raises ``PendingRollbackError``."""
 
     def _boom(*_a, **_kw):
         raise RuntimeError("artifact storage offline")
@@ -308,7 +279,6 @@ def test_record_rolls_back_session_on_store_failure(monkeypatch):
 
 
 def test_record_does_not_rollback_on_successful_store(monkeypatch):
-    """Rolling back on success would discard the caller's pending writes from process()."""
     monkeypatch.setattr("workers.base.store_artifact", lambda *_a, **_kw: None)
 
     fake_session = MagicMock()

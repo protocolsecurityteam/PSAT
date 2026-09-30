@@ -28,7 +28,6 @@ def _sel(signature: str) -> str:
 
 
 class _Row:
-
     def __init__(self, topics: list[str], data_words: list[str]) -> None:
         self.topics = topics
         self.data_words = data_words

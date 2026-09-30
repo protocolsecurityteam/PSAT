@@ -1,10 +1,5 @@
-"""The name-independent mint/burn idiom: a zero-address-endpoint ERC-20 ``Transfer``
-corroborated by a monotone state-var write.
-
-A rebasing token (etherfi ``EETH``) tracks supply in ``totalShares`` and computes
-``totalSupply()`` externally, so the ``total_supply_sign`` name set never resolved its
-``mintShares`` / ``burnShares`` and they carried no supply claim. Drives Slither ->
-``build_effects`` -> ``build_claims`` on a synthetic token of that shape.
+"""EETH tracks supply in ``totalShares`` with a computed ``totalSupply()``, so the name set never saw ``mintShares``
+/ ``burnShares``; a zero-endpoint ``Transfer`` plus a monotone write is the name-independent evidence.
 """
 
 from __future__ import annotations
@@ -26,10 +21,6 @@ from tests.support.label_corpus import (
 
 pytestmark = pytest.mark.compile
 
-# A minimal ERC-20 whose supply lives in ``totalShares`` (not ``totalSupply``),
-# with a share-accounting mint/burn: the standard zero-address ``Transfer`` plus
-# a monotone ``totalShares`` write. ``totalSupply()`` is a computed external view
-# so ``total_supply_sign`` cannot see the write — only the Transfer idiom can.
 _SOURCE = """// SPDX-License-Identifier: MIT
 pragma solidity 0.8.27;
 
@@ -136,13 +127,10 @@ def test_share_fn_carries_supply_claim(rebasing_claims, signature, direction, op
     claim = _one(rebasing_claims[signature], f"supply.{direction}")
     assert claim["tier"] == "idiom_structural"
     assert claim["witness"] == {"kind": "mint_burn_transfer", "supply": direction}
-    # Direction is not crossed and the name-set path did not resolve it.
     assert f"supply.{opposite}" not in _ids(rebasing_claims[signature])
 
 
 def test_plain_transfer_is_not_a_supply_change(rebasing_claims):
-    """A ledger move emits ``Transfer`` with both endpoints non-zero, so the
-    zero-endpoint gate keeps it out of the supply family — the guard against a
-    forwarder re-emitting ``Transfer`` without changing its own supply."""
+    """Guards against a forwarder re-emitting ``Transfer`` without changing its supply."""
     for signature in ("transfer(address,uint256)", "transferFrom(address,address,uint256)"):
         assert not _ids(rebasing_claims[signature]) & {"supply.mint", "supply.burn"}, signature

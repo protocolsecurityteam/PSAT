@@ -181,7 +181,6 @@ def test_discovery_retries_narrow_when_the_wide_write_breaks_the_getter():
     """The wide write can clobber a slot the getter reads."""
 
     class FragileToken(FakeChain):
-
         def _asset_call(self, data, overrides):
             diff = self._diff(overrides, ASSET)
             wide = len(diff) > 40

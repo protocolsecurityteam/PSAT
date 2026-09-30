@@ -34,7 +34,6 @@ class _FakeResult:
 
 
 class _FakeSession:
-
     def __init__(self, *values):
         self._values = list(values)
         self._i = 0

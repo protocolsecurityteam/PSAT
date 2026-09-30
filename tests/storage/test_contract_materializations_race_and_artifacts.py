@@ -1,17 +1,6 @@
-"""Regression tests for the two PR-79 cache bugs.
-
-#1 Duplicate concurrent builds: ``materialize_or_wait`` released the advisory lock between the
-phase-1 ready-check and the phase-2 builder without recording the in-flight build, so two callers
-within the 60-150 s build window both ran the full pipeline (only the phase-3 *write* deduped). The
-fix is a ``status='building'`` claim row with ``builder_started_at``; the second caller polls it,
-with a staleness threshold so a crashed worker can't wedge the cache.
-
-#4 ``predicate_trees`` was dropped on the write path (``recursive.py`` ``_builder`` omitted it, and
-the row had no column), so every cache hit returned ``None`` and skipped mapping-writer enumeration.
-The fix adds a JSONB + blob column. ``effects`` has no consumer in this cache path
-(``copy_static_cache`` propagates it across same-bytecode jobs).
-
-Gated on ``requires_postgres``: serialization rides on ``pg_advisory_xact_lock`` and status transitions.
+"""PR-79 cache bugs. #1: the advisory lock was released between the ready-check and the builder, so two callers
+in the 60-150 s window both built; a ``status='building'`` claim row with a staleness threshold fixes it. #4:
+``predicate_trees`` was dropped on write, so every cache hit skipped mapping-writer enumeration.
 """
 
 from __future__ import annotations
@@ -28,10 +17,6 @@ import pytest
 from db import contract_materializations as cm
 from db.models import ContractMaterialization
 from tests.conftest import requires_postgres
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -63,22 +48,12 @@ def _route_to_test_db(monkeypatch):
 
 @pytest.fixture()
 def _short_wait_poll(monkeypatch):
-    """Tighten the wait-poll loop; staleness stays long so the test never trips stale-takeover."""
     monkeypatch.setenv("PSAT_MATERIALIZE_WAIT_POLL_INTERVAL_S", "0.05")
     monkeypatch.setenv("PSAT_MATERIALIZE_BUILDER_STALENESS_S", "120")
 
 
-# ---------------------------------------------------------------------------
-# Bug #1: concurrent builders must dedupe through the building-claim row
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _clean_cm, _short_wait_poll):
-    """Two threads call ``materialize_or_wait`` for one key while a slow builder runs.
-
-    Pre-fix both phase-1 ready-checks miss and both run the builder (``builder_invocations`` 2).
-    Post-fix A claims a ``status='building'`` row and B polls it to ``ready``; the builder runs once."""
     chain = "1"
     keccak = "0x" + "ab" * 32
 
@@ -90,7 +65,6 @@ def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _cl
         with builder_lock:
             invocations["n"] += 1
         builder_started.set()
-        # Hold long enough for B to observe the building row and start polling.
         time.sleep(0.6)
         return {
             "contract_name": "ConcurrentDedup",
@@ -118,7 +92,6 @@ def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _cl
     t1 = threading.Thread(target=call, args=("1",))
     t2 = threading.Thread(target=call, args=("2",))
     t1.start()
-    # Wait until A is inside the builder so B enters phase 1 against an in-flight building row.
     assert builder_started.wait(timeout=5), "thread A never entered builder"
     t2.start()
     t1.join(timeout=10)
@@ -137,15 +110,13 @@ def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _cl
 
 @requires_postgres
 def test_stale_building_row_is_taken_over(_route_to_test_db, _clean_cm, monkeypatch):
-    """A ``status='building'`` row older than the staleness threshold must NOT block callers (the
-    worker is presumed dead): the next caller re-claims, builds and writes ``ready``."""
+    """The worker is presumed dead."""
     monkeypatch.setenv("PSAT_MATERIALIZE_BUILDER_STALENESS_S", "60")
     monkeypatch.setenv("PSAT_MATERIALIZE_WAIT_POLL_INTERVAL_S", "0.05")
 
     chain = "1"
     keccak = "0x" + "cd" * 32
 
-    # Plant a stale building row: claimed 10 minutes ago, no live worker.
     stale_row = ContractMaterialization(
         chain=chain,
         bytecode_keccak=keccak,
@@ -180,16 +151,8 @@ def test_stale_building_row_is_taken_over(_route_to_test_db, _clean_cm, monkeypa
     assert row.builder_started_at is None, "ready row must clear builder_started_at"
 
 
-# ---------------------------------------------------------------------------
-# Bug #4: predicate_trees round-trips through the cache
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_predicate_trees_cached_inline(_route_to_test_db, _clean_cm):
-    """The bundle's ``predicate_trees`` must be persisted so cache hits return them; the builder
-    closure used to drop them, disabling mapping-writer enumeration
-    (``_mapping_writer_specs_from_predicate_trees``) on every hit."""
     chain = "1"
     keccak = "0x" + "11" * 32
 
@@ -237,14 +200,10 @@ def test_predicate_trees_cached_inline(_route_to_test_db, _clean_cm):
             builder=winner_builder,
         )
 
-    # Inline path: JSONB column populated, blob_key NULL.
     assert winner.predicate_trees == predicate_payload
     assert winner.predicate_trees_blob_key is None
-    # Hydrator returns the same shape.
     assert cm.hydrate_predicate_trees(winner) == predicate_payload
 
-    # A second caller (different address, same keccak) hits the cache
-    # and must receive predicate_trees, not None.
     def loser_builder() -> dict[str, Any]:
         raise AssertionError("loser must not re-run the builder")
 
@@ -297,8 +256,6 @@ def test_predicate_trees_cached_via_blob(_route_to_test_db, _clean_cm):
             builder=builder,
         )
 
-    # Blob path: predicate_trees_blob_key set, JSONB NULL, three puts
-    # total (analysis, tracking_plan, predicate_trees).
     assert row.predicate_trees is None
     assert row.predicate_trees_blob_key is not None
     keys_written = sorted(storage.put_calls)
@@ -309,7 +266,7 @@ def test_predicate_trees_cached_via_blob(_route_to_test_db, _clean_cm):
 
 
 def _row_stub(**kwargs: Any) -> Any:
-    """A SimpleNamespace row stub (``Any`` keeps pyright from rejecting it at the typed parameter)."""
+    """``Any`` keeps pyright from rejecting it at the typed parameter."""
     defaults = dict(
         analysis=None,
         analysis_blob_key=None,
@@ -330,7 +287,6 @@ def _row_stub(**kwargs: Any) -> Any:
             {"trees": {"f()": {}}},
             id="reads-predicate-trees-column",
         ),
-        # Pre-c1d2e3f4a5b6 rows have neither column; None lets the caller take its "no semantic artifact" path.
         pytest.param(
             {"analysis": {"controllers": []}, "tracking_plan": {"slots": []}}, None, id="pre-migration-row-is-none"
         ),
@@ -338,11 +294,6 @@ def _row_stub(**kwargs: Any) -> Any:
 )
 def test_hydrate_predicate_trees_unit(row_kwargs, expected):
     assert cm.hydrate_predicate_trees(_row_stub(**row_kwargs)) == expected
-
-
-# ---------------------------------------------------------------------------
-# analysis_schema_version: an analyzer bump invalidates old rows
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -368,7 +319,6 @@ def test_hydrate_predicate_trees_unit(row_kwargs, expected):
     ],
 )
 def test_find_filters_on_schema_version(_clean_cm, find, hit_attr, hit_idx, old_keys, cur_keys):
-    """keys are (bytecode_keccak, address)."""
     _clean_cm.add_all(
         [
             ContractMaterialization(
@@ -435,7 +385,6 @@ def test_materialize_rebuilds_old_schema_version_row(_route_to_test_db, _clean_c
 
 @requires_postgres
 def test_materialize_serves_current_schema_version_row(_route_to_test_db, _clean_cm, _short_wait_poll):
-    """A 'ready' row at the current version is a hit; a re-run would re-pay the forge+Slither cost."""
     chain = "1"
     keccak = "0x" + "c2" * 32
 

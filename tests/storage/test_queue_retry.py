@@ -1,9 +1,3 @@
-"""Integration tests for retry-related queue ops: ``claim_job`` next_attempt_at gating,
-``requeue_job``, ``fail_job_terminal``, and ``reclaim_stuck_jobs`` skipping failed_terminal rows.
-
-Postgres-gated via ``requires_postgres``; skips cleanly when ``TEST_DATABASE_URL`` is unset.
-"""
-
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -24,8 +18,7 @@ from tests.cache_helpers import requires_postgres
 
 @pytest.fixture()
 def clean_jobs(db_session):
-    """Drop leftover jobs/artifacts: ``db_session`` only sweeps monitoring tables, so older
-    rows would leak into the global queue-level queries."""
+    """``db_session`` only sweeps monitoring tables."""
     db_session.query(Artifact).delete()
     db_session.query(Job).delete()
     db_session.commit()
@@ -37,17 +30,11 @@ def clean_jobs(db_session):
 
 
 def _backdate(session, job_id, *, seconds_ago: int) -> None:
-    """Force ``updated_at`` into the past so the stale sweep predicate fires."""
     session.execute(
         text("UPDATE jobs SET updated_at = NOW() - (:s * INTERVAL '1 second') WHERE id = :id"),
         {"s": seconds_ago, "id": str(job_id)},
     )
     session.commit()
-
-
-# ---------------------------------------------------------------------------
-# claim_job honours next_attempt_at
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -88,11 +75,6 @@ def test_claim_job_claims_null_next_attempt_at(clean_jobs):
     assert claimed.id == job.id
 
 
-# ---------------------------------------------------------------------------
-# requeue_job
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_requeue_job_sets_retry_state(clean_jobs):
     db_session = clean_jobs
@@ -110,11 +92,6 @@ def test_requeue_job_sets_retry_state(clean_jobs):
     assert refreshed.last_failure_kind == "transient"
     assert refreshed.error == "boom traceback"
     assert refreshed.worker_id is None
-
-
-# ---------------------------------------------------------------------------
-# fail_job_terminal
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -155,11 +132,6 @@ def test_fail_job_terminal_preserves_retry_count(clean_jobs):
     assert refreshed.retry_count == 4  # unchanged by the terminal call
     assert refreshed.last_failure_kind == "transient"
     assert refreshed.status == JobStatus.failed_terminal
-
-
-# ---------------------------------------------------------------------------
-# reclaim_stuck_jobs ignores failed_terminal
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres

@@ -54,7 +54,6 @@ def _trees(tmp_path: Path, source: str) -> dict:
 
 
 class _NoEventsRepo:
-
     def iter_event_rows(self, **_: Any):
         return []
 

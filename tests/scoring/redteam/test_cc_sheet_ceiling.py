@@ -424,9 +424,9 @@ def test_cc1_a_partly_priced_sheet_bounds_the_priced_portion_and_not_the_move(fo
 
 def test_cc7_a_subsumed_rows_sheet_ceiling_leaks_into_the_budget_in_neither_direction(fold):
     """Subsumption leaks both ways with a sheet ceiling, on one principal unit.
-      IN: a subsumed row's ceiling at an entity the top row doesn't price would be charged, because the exposure
-      skip reads the top row's ceiling list.
-      OUT: the top row's ceiling marks the key occupied, discarding a subsumed row's witnessed value there.
+    IN: a subsumed row's ceiling at an entity the top row doesn't price would be charged, because the exposure
+    skip reads the top row's ceiling list.
+    OUT: the top row's ceiling marks the key occupied, discarding a subsumed row's witnessed value there.
     """
     top = sig(
         authority_openness="restricted",

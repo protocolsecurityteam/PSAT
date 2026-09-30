@@ -1,12 +1,6 @@
-"""Storage-layout slot constants must not be emitted as controller candidates.
+"""ERC-7201 locators and EIP-1967 slot constants produced dead ``eth_call_error`` rows and shadowed the OZ-v5 owner.
 
-ERC-7201 namespaced-storage locators (``OwnableStorageLocation`` …) and EIP-1967
-slot constants (``_IMPLEMENTATION_SLOT`` …) were being classified as
-``role_identifier`` / ``state_variable`` controllers — producing dead
-``eth_call_error`` rows (``OwnableStorageLocation()`` reverts) and, for OZ-v5
-Ownable, shadowing the real owner. They are storage-layout pointers, never
-controllers. The name list below is exactly the set observed erroring in the
-real etherfi controller_values audit.
+The list is exactly what errored in the etherfi controller_values audit.
 """
 
 from __future__ import annotations
@@ -17,7 +11,6 @@ from services.static.contract_analysis_pipeline.tracking import (
     _is_storage_layout_constant,
 )
 
-# Observed erroring in prod controller_values (protocol_id=1 etherfi run).
 SUPPRESSED = [
     "OwnableStorageLocation",
     "PausableStorageLocation",
@@ -34,7 +27,6 @@ SUPPRESSED = [
     "__self",
 ]
 
-# Real controllers/roles that MUST keep flowing through resolution.
 KEPT = [
     "DEFAULT_ADMIN_ROLE",
     "MINTER_ROLE",

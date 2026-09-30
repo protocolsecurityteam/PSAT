@@ -1,7 +1,3 @@
-"""Tests for ``build_predicate_artifacts``: compile a Solidity fixture, run the
-builder, and check the trees, the omissions, and ``json.dumps`` serializability.
-"""
-
 from __future__ import annotations
 
 import json
@@ -43,7 +39,6 @@ def _leaves(tree: dict) -> list[dict]:
 
 
 def test_artifact_includes_only_guarded_external_functions(tmp_path):
-    """Unguarded functions are OMITTED (resolver convention: absent = unguarded)."""
     sl = _compile(
         tmp_path,
         """
@@ -69,7 +64,6 @@ def test_artifact_includes_only_guarded_external_functions(tmp_path):
 
 
 def test_bool_returning_authority_check_goes_to_check_trees(tmp_path):
-    """Read-only authorization predicates are resolver inputs, not protected entrypoints."""
     sl = _compile(
         tmp_path,
         """
@@ -277,18 +271,15 @@ def test_artifact_omits_constructor(tmp_path):
     """,
     )
     artifact = build_predicate_artifacts(_contract(sl))
-    # Constructors are omitted so the resolver does not conflate construction-time gates with runtime gates.
     keys = list(artifact["trees"].keys())
     assert all("constructor" not in k for k in keys)
     assert "f()" in artifact["trees"]
 
 
 def test_artifact_with_low_level_call_provenance_serializes(tmp_path):
-    """A comparison operand derived from a low-level ``.staticcall`` via a built-in's
-    ``arg_origins``: Slither's ``LowLevelCall.function_name`` is a ``Constant``, and
-    before it was stringified at the provenance layer it crashed the ``json.dumps``
-    workspace write on 4 real contracts (PriceProvider, EmissionsController,
-    StrategyManager, DelegationManager; PR-161 failed_terminal)."""
+    """``LowLevelCall.function_name`` is a ``Constant``; unstringified, it crashed the workspace write on 4 real
+    contracts (PR-161 failed_terminal).
+    """
     sl = _compile(
         tmp_path,
         """
@@ -311,7 +302,6 @@ def test_artifact_with_low_level_call_provenance_serializes(tmp_path):
     decoded = json.loads(json.dumps(artifact))
     tree = decoded["trees"]["guarded(bytes32,uint256)"]
 
-    # The call kind survives as a plain string (not dropped to make serialization pass).
     def _iter(node):
         if node.get("op") == "LEAF":
             yield node.get("leaf") or {}
@@ -330,8 +320,6 @@ def test_artifact_with_low_level_call_provenance_serializes(tmp_path):
 
 
 def test_artifact_writer_gate_runs_on_full_contract(tmp_path):
-    """The writer-gate pass runs AFTER collecting all trees, so a 1-key blacklist
-    promoted via writer-gate shows caller_authority (not the un-promoted business)."""
     sl = _compile(
         tmp_path,
         """
@@ -371,8 +359,6 @@ def test_artifact_writer_gate_runs_on_full_contract(tmp_path):
 
 
 def test_artifact_runs_reentrancy_pause_pass(tmp_path):
-    """The ``whenNotPaused`` leaf classifies as ``pause`` only after the cross-function
-    pass; confirms the builder runs it."""
     sl = _compile(
         tmp_path,
         """
@@ -548,10 +534,7 @@ def test_artifact_preserves_bitmask_value_predicate_and_set_hint(tmp_path):
 
 
 def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
-    """Functions sharing a cross-fn helper (grantRole / revokeRole / renounceRole via
-    ``_checkRole``) get a per-call helper-engine cache. Pinned by counting
-    ProvenanceEngine instantiations; correctness is covered by the corpus tests, so
-    this guards that cache HITS HAPPEN."""
+    """Correctness is covered by the corpus tests; this pins that cache hits happen."""
     from services.static.contract_analysis_pipeline import predicates
     from services.static.contract_analysis_pipeline.predicates import (
         _helper_engine_cache,
@@ -585,7 +568,6 @@ def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
     )
     contract = _contract(sl)
 
-    # Count ProvenanceEngine constructions; cache hits make it lower than the no-cache baseline.
     instantiations: list[None] = []
     original_init = predicates.ProvenanceEngine.__init__
 
@@ -600,7 +582,6 @@ def test_artifact_helper_engine_cache_skips_repeated_callees(tmp_path):
         assert "grantRole(bytes32,address)" in artifact["trees"]
         assert "revokeRole(bytes32,address)" in artifact["trees"]
 
-        # Same work WITHOUT the cache scope: build_predicate_tree directly, no ambient cache.
         instantiations.clear()
         token = _helper_engine_cache.set(None)
         try:

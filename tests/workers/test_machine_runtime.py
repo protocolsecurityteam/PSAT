@@ -161,6 +161,5 @@ while not stop:
     finally:
         stop.set()
         thread.join(8)
-    # A failed sibling may make the deployment exit nonzero, but its failure
-    # must not have interrupted the healthy monitor before the stop request.
+    # The deployment may exit nonzero, but the healthy monitor must not be interrupted before the stop request.
     assert not thread.is_alive()

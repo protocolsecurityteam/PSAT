@@ -1,7 +1,5 @@
-"""``apply_solmate_authority_hint_pass`` attaches RolesAuthority event hints to
-``canCall`` external_set leaves so the event-log indexer enrolls the authority's
-role events (which the Solmate adapter then folds). canCall carries an
-``authority_contract`` but no events from the base static stage.
+"""The base static stage gives ``canCall`` an ``authority_contract`` but no events; this pass attaches the
+RolesAuthority hints the indexer enrolls.
 """
 
 from __future__ import annotations

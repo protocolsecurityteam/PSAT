@@ -1,8 +1,4 @@
-"""Integration tests for object-storage-backed artifacts, end to end (write -> row metadata ->
-read -> presigned URL -> API redirect).
-
-Requires TEST_DATABASE_URL and TEST_ARTIFACT_STORAGE_* (minio in docker-compose, real Tigris in CI).
-"""
+"""Requires TEST_DATABASE_URL and TEST_ARTIFACT_STORAGE_* (minio locally, Tigris in CI)."""
 
 from __future__ import annotations
 
@@ -17,11 +13,6 @@ from tests.cache_helpers import requires_postgres
 from tests.conftest import SessionFactory, requires_storage
 
 pytestmark = [requires_postgres, requires_storage]
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _admin_headers() -> dict[str, str]:
@@ -43,12 +34,10 @@ def api_with(monkeypatch, db_session, storage_bucket):
 
 @pytest.fixture()
 def materialization_key(db_session):
-    """Claim a ``(chain, bytecode_keccak)`` for a test that INSERTS a ``ContractMaterialization``.
+    """Fixed keys because blob keys derive from the keccak.
 
-    Keys are FIXED deliberately: the asserted blob keys derive from the keccak
-    (``cm._blob_key``), so randomizing would stop exercising the real key shape. Nothing here was
-    self-cleaning, so a second run against the same DB died on the composite primary key (hidden by
-    the drop-and-recreate workflow). Cleanup runs BEFORE (leftover rows from a crash) and AFTER."""
+    Cleanup runs before and after, since a crashed run left rows that broke the composite primary key.
+    """
     from db.models import ContractMaterialization
 
     claimed: list[tuple[str, str]] = []
@@ -75,11 +64,6 @@ def _completed_job(session, name: str, address: str = "0xabcdef00000000000000000
     job.stage = JobStage.done
     session.commit()
     return job
-
-
-# ---------------------------------------------------------------------------
-# 1. Full lifecycle — small + large artifacts both go to storage
-# ---------------------------------------------------------------------------
 
 
 def test_full_lifecycle_artifacts_round_trip(db_session, storage_bucket):
@@ -121,11 +105,6 @@ def test_full_lifecycle_artifacts_round_trip(db_session, storage_bucket):
     assert all_arts["analysis_report"] == text
 
 
-# ---------------------------------------------------------------------------
-# 2. Source files round-trip via storage
-# ---------------------------------------------------------------------------
-
-
 def test_source_files_round_trip_via_storage(db_session, storage_bucket):
     from db.models import SourceFile
     from db.queue import create_job, get_source_files, store_source_files
@@ -147,11 +126,6 @@ def test_source_files_round_trip_via_storage(db_session, storage_bucket):
     assert get_source_files(db_session, job.id) == files
 
 
-# ---------------------------------------------------------------------------
-# 3. Legacy inline rows still read (no storage_key)
-# ---------------------------------------------------------------------------
-
-
 def test_legacy_inline_artifact_still_reads(db_session, storage_bucket):
     from db.models import Artifact
     from db.queue import create_job, get_artifact
@@ -163,16 +137,8 @@ def test_legacy_inline_artifact_still_reads(db_session, storage_bucket):
     assert get_artifact(db_session, job.id, "legacy_blob") == {"v": 1}
 
 
-# ---------------------------------------------------------------------------
-# 4. Idempotent overwrite (deterministic key)
-# ---------------------------------------------------------------------------
-
-
 def test_nested_artifact_keys_round_trip_through_storage(db_session, storage_bucket):
-    """Regression: nested recursive.* artifact names must pass ``_safe_name``.
-
-    The name validator rejects colons; a prior ``recursive:<addr>:<kind>`` key format passed unit
-    tests (which stub ``store_artifact``) but failed whenever S3-compatible storage was active."""
+    """Unit tests stub ``store_artifact``, so a colon-bearing key only failed with real storage."""
     from db.nested_artifacts import ARTIFACT_KINDS, artifact_key, parse_key, store_bundle
     from db.queue import create_job, get_artifact
 
@@ -212,11 +178,6 @@ def test_repeat_store_overwrites_same_key(db_session, storage_bucket):
     assert get_artifact(db_session, job.id, "x") == {"v": 2}
 
 
-# ---------------------------------------------------------------------------
-# 5. /api/analyses/.../artifact endpoint serves storage-backed bodies
-# ---------------------------------------------------------------------------
-
-
 def test_artifact_endpoint_serves_storage_backed_json(api_with, db_session, storage_bucket):
     from db.queue import store_artifact
 
@@ -244,13 +205,9 @@ def test_artifact_endpoint_serves_storage_backed_text(api_with, db_session, stor
 
 
 def test_artifact_endpoint_publishes_three_answers_not_two(api_with, db_session, storage_bucket):
-    """The SPA's artifact boundary must not answer a storage outage with the same bytes as an
-    artifact the job never produced.
-
-    ``EntityActivity.jsx`` fetches ``.../artifact/upgrade_history`` and draws a proxy with no
-    history as never upgraded; ``dependencies.js`` fetches ``dependency_graph_viz``. Before the
-    fix: readable 200, outage 404, never-produced 404, the latter two byte-identical.
-    ``slither_results`` is used because upgrade_history has a UpgradeEvent synthesis fallback."""
+    """``EntityActivity.jsx`` draws a proxy with no history as never upgraded, and an outage was a 404 byte-identical
+    to never-produced. ``slither_results`` avoids upgrade_history's UpgradeEvent fallback.
+    """
     from db.models import Artifact
     from db.queue import store_artifact
     from db.storage import StorageClient, StorageUnavailable
@@ -264,25 +221,20 @@ def test_artifact_endpoint_publishes_three_answers_not_two(api_with, db_session,
     assert readable.status_code == 200
     assert readable.json() == {"results": {}}
 
-    # B — not determined. Its own status, its own header, and a safe reason:
-    # the third state is published distinctly, but the raw exception message is
-    # logged server-side only, never echoed to the (possibly public) caller.
+    # The raw exception is logged server-side only, never echoed to the caller.
     with patch.object(StorageClient, "_get_one", side_effect=StorageUnavailable("bucket unreachable")):
         outage = client.get(url, headers=_admin_headers())
     assert outage.status_code == 503
     assert outage.headers.get("X-PSAT-Artifact-State") == "not_determined"
     assert outage.json()["artifact"] == "slither_results"
     assert outage.json()["reason"] == "Artifact read did not complete"
-    # The raw exception message must not reach the client.
     assert "bucket unreachable" not in outage.text
 
     never = client.get("/api/analyses/three-answers/artifact/no_such_artifact.json", headers=_admin_headers())
     assert never.status_code == 404
     assert never.json() == {"detail": "Artifact not found"}
 
-    # D — proven absent the other way: the row exists, the bucket says it holds
-    # no such object. Same answer as C on purpose — both are determined — and
-    # distinct from B, which is the distinction that was missing.
+    # Same answer as C on purpose; both are determined.
     row = db_session.execute(
         select(Artifact).where(Artifact.job_id == job.id, Artifact.name == "slither_results")
     ).scalar_one()
@@ -296,23 +248,14 @@ def test_artifact_endpoint_publishes_three_answers_not_two(api_with, db_session,
 
 
 def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(api_with, db_session, storage_bucket):
-    """A keyless artifact row (``StorageKeyAbsent``) must be published as the not_determined third
-    state, with a safe reason label rather than the raw exception class name (the reason is
-    publicly reachable on consumer-safe artifacts).
-
-    Built through the real write path: ``store_artifact`` with an unconfigured backend and no
-    payload writes ``storage_key`` NULL beside a NULL inline body (``db/queue.py``). It answered a
-    404 byte-identical to the never-produced negative control below."""
+    """Built through the real write path; it used to 404 byte-identically to the never-produced control."""
     import db.queue.artifacts as queue_mod
     from db.models import Artifact
     from db.queue import store_artifact
 
     job = _completed_job(db_session, "keyless-third-state")
 
-    # The real inline path: backend unconfigured, nothing to serialise. Scoped with
-    # ``patch.object`` because ``monkeypatch.undo()`` would also revert ``api_with``'s shared
-    # ``deps.SessionLocal`` override, pointing the TestClient at ``DATABASE_URL`` (assertions then
-    # pass only where it coincides with TEST_DATABASE_URL).
+    # ``monkeypatch.undo()`` would also revert ``api_with``'s ``SessionLocal`` override.
     with patch.object(queue_mod, "get_storage_client", lambda: None):
         store_artifact(db_session, job.id, "dependencies")
 
@@ -329,8 +272,6 @@ def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(api_with, 
     assert unknown.json()["reason"] == "Artifact key not recorded"
     assert "StorageKeyAbsent" not in unknown.text
 
-    # Negative control — the job never produced this one. Determined, and it
-    # must stay a silent 404 with no state header.
     never = client.get("/api/analyses/keyless-third-state/artifact/no_such_artifact", headers=_admin_headers())
     assert never.status_code == 404
     assert never.json() == {"detail": "Artifact not found"}
@@ -339,8 +280,6 @@ def test_artifact_endpoint_publishes_a_keyless_row_as_the_third_state(api_with, 
 
 
 def test_artifact_endpoint_not_determined_still_prefers_a_real_synthesised_body(api_with, db_session, storage_bucket):
-    """The 503 is the *last* answer: a body rebuildable from another source (upgrade_history from
-    UpgradeEvent rows) still wins over an unknown. Negative control for the branch above."""
     from db.models import Contract, UpgradeEvent
     from db.storage import StorageClient, StorageUnavailable
 
@@ -367,19 +306,15 @@ def test_artifact_endpoint_not_determined_still_prefers_a_real_synthesised_body(
 
 
 def test_missing_upgrade_history_404s_only_for_a_proven_non_proxy(api_with, db_session, storage_bucket):
-    """``static_worker`` writes no ``upgrade_history`` row both when the stage found no proxies and
-    when it RAISED, and the SPA consumes the 404 as proven absence ("No activity before the line.").
-    Falsified on real data: ``0x3c55986cfee455e2533f4d29006634ecf9b7c03f`` (``is_proxy=False`` but
-    ``proxy_type='beacon'``) returned 404 with 0 artifact rows and **14** ``Upgraded(address)`` logs
-    by block 25619159; it now answers 503/not_determined and a self-consistent non-proxy still 404s."""
+    """The SPA reads the 404 as proven absence, but the stage writes nothing both when there are no proxies and when
+    it raised. ``0x3c55986c…`` (``is_proxy=False``, ``proxy_type='beacon'``) had 14 ``Upgraded`` logs.
+    """
     from db.models import Contract
 
     client = TestClient(api_with.app)
 
-    # A — proven absent. A Contract row that says self-consistently "not a proxy":
-    # a non-proxy has no upgrade history by construction, so nothing is hidden.
-    # POSITIVE CONTROL for every hedge below — without it the marker would land on
-    # every Safe and EOA in the protocol.
+    # A self-consistent non-proxy has no history by construction; without this control the marker would land on every
+    # Safe and EOA.
     plain_job = _completed_job(db_session, "uh-plain", address="0x" + "a1" * 20)
     db_session.add(Contract(job_id=plain_job.id, address="0x" + "a1" * 20, chain="ethereum", is_proxy=False))
     db_session.commit()
@@ -387,8 +322,7 @@ def test_missing_upgrade_history_404s_only_for_a_proven_non_proxy(api_with, db_s
     assert plain.status_code == 404
     assert plain.headers.get("X-PSAT-Artifact-State") is None
 
-    # B — the ambiguous row's shape: is_proxy false, proxy_type set. The row contradicts
-    # itself, so its non-proxy status cannot carry an absence.
+    # The row contradicts itself, so its non-proxy status can't carry an absence.
     beacon_job = _completed_job(db_session, "uh-beacon", address="0x" + "a2" * 20)
     db_session.add(
         Contract(
@@ -405,7 +339,6 @@ def test_missing_upgrade_history_404s_only_for_a_proven_non_proxy(api_with, db_s
     assert beacon.headers.get("X-PSAT-Artifact-State") == "not_determined"
     assert "inconsistent about proxyhood" in beacon.json()["reason"]
 
-    # C — a proxy with no artifact at all: it SHOULD have had one.
     proxy_job = _completed_job(db_session, "uh-proxy", address="0x" + "a3" * 20)
     db_session.add(Contract(job_id=proxy_job.id, address="0x" + "a3" * 20, chain="ethereum", is_proxy=True))
     db_session.commit()
@@ -413,7 +346,6 @@ def test_missing_upgrade_history_404s_only_for_a_proven_non_proxy(api_with, db_s
     assert proxy.status_code == 503
     assert proxy.headers.get("X-PSAT-Artifact-State") == "not_determined"
 
-    # D — no Contract row: nothing here knows whether the target is a proxy.
     _completed_job(db_session, "uh-bare", address="0x" + "a4" * 20)
     bare = client.get("/api/analyses/uh-bare/artifact/upgrade_history")
     assert bare.status_code == 503
@@ -423,11 +355,7 @@ def test_missing_upgrade_history_404s_only_for_a_proven_non_proxy(api_with, db_s
 
 
 def test_a_degraded_upgrade_history_stage_blocks_the_404(api_with, db_session, storage_bucket):
-    """A job whose ``dependency_upgrade_history`` sub-phase recorded a degraded failure cannot have its
-    missing artifact reported as a proven negative, even when the Contract row says non-proxy.
-
-    **0** of 123 local ``stage_errors`` artifacts carry this phase, so this branch has no realised
-    rows today (a lower bound, not a firing proof); the read is live via sibling phases."""
+    """0 of 123 local ``stage_errors`` carry this phase, so it has no realised rows yet."""
     from datetime import datetime, timezone
 
     from db.models import Contract
@@ -463,8 +391,6 @@ def test_a_degraded_upgrade_history_stage_blocks_the_404(api_with, db_session, s
     assert resp.headers.get("X-PSAT-Artifact-State") == "not_determined"
     assert "degraded failure" in resp.json()["reason"]
 
-    # NEGATIVE CONTROL: a degraded record for a DIFFERENT phase says nothing about
-    # the upgrade-history stage, so the 404 stands.
     other = _completed_job(db_session, "uh-other-phase", address="0x" + "a6" * 20)
     db_session.add(Contract(job_id=other.id, address="0x" + "a6" * 20, chain="ethereum", is_proxy=False))
     store_artifact(
@@ -491,11 +417,6 @@ def test_a_degraded_upgrade_history_stage_blocks_the_404(api_with, db_session, s
     assert client.get("/api/analyses/uh-other-phase/artifact/upgrade_history").status_code == 404
 
 
-# ---------------------------------------------------------------------------
-# 6. /api/jobs proxy detection works through storage
-# ---------------------------------------------------------------------------
-
-
 def test_list_jobs_detects_proxy_via_storage(api_with, db_session, storage_bucket):
     from db.queue import store_artifact
 
@@ -510,11 +431,6 @@ def test_list_jobs_detects_proxy_via_storage(api_with, db_session, storage_bucke
     by_id = {j["job_id"]: j for j in resp.json()}
     assert by_id[str(proxy_job.id)]["is_proxy"] is True
     assert by_id[str(plain_job.id)]["is_proxy"] is False
-
-
-# ---------------------------------------------------------------------------
-# 7. /api/health probes both the DB and storage
-# ---------------------------------------------------------------------------
 
 
 def test_health_endpoint_reports_db_and_storage(api_with):
@@ -540,11 +456,6 @@ def test_health_endpoint_503_when_storage_unreachable(api_with, monkeypatch):
     payload = resp.json()
     payload.pop("pool", None)
     assert payload == {"status": "unavailable", "db": "ok", "storage": "unavailable"}
-
-
-# ---------------------------------------------------------------------------
-# 8. End-to-end stub: simulated worker writes a full job, API reads it back
-# ---------------------------------------------------------------------------
 
 
 def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
@@ -588,11 +499,6 @@ def test_end_to_end_stubbed_worker(api_with, db_session, storage_bucket):
     assert artifact.json() == {"results": {"detectors": []}}
 
 
-# ---------------------------------------------------------------------------
-# 10. Inline-fallback path (no storage configured) still works
-# ---------------------------------------------------------------------------
-
-
 def test_inline_fallback_when_storage_unconfigured(db_session, monkeypatch):
     from db.models import Artifact
     from db.queue import create_job, get_artifact, store_artifact
@@ -614,11 +520,6 @@ def test_inline_fallback_when_storage_unconfigured(db_session, monkeypatch):
     assert row.storage_key is None
     assert row.data == {"v": 1}
     assert get_artifact(db_session, job.id, "x") == {"v": 1}
-
-
-# ---------------------------------------------------------------------------
-# 11. store_artifact cleans up the storage object when the DB write fails
-# ---------------------------------------------------------------------------
 
 
 def test_store_artifact_deletes_orphan_on_db_failure(db_session, storage_bucket):
@@ -643,11 +544,6 @@ def test_store_artifact_deletes_orphan_on_db_failure(db_session, storage_bucket)
 
     with pytest.raises(StorageKeyMissing):
         storage_bucket.get(key)
-
-
-# ---------------------------------------------------------------------------
-# 12. store_source_files deletes partial uploads when a later put fails
-# ---------------------------------------------------------------------------
 
 
 def test_store_source_files_cleans_up_orphans_on_midbatch_failure(db_session, storage_bucket):
@@ -686,11 +582,6 @@ def test_store_source_files_cleans_up_orphans_on_midbatch_failure(db_session, st
         storage_bucket.get(first_key)
 
 
-# ---------------------------------------------------------------------------
-# 13. Source file path is recoverable from S3 user-metadata
-# ---------------------------------------------------------------------------
-
-
 def test_source_file_path_recoverable_from_storage_metadata(db_session, storage_bucket):
     from db.models import SourceFile
     from db.queue import create_job, store_source_files
@@ -710,14 +601,8 @@ def test_source_file_path_recoverable_from_storage_metadata(db_session, storage_
     assert user_metadata.get("job_id") == str(job.id)
 
 
-# ---------------------------------------------------------------------------
-# 14. ARTIFACT_STORAGE_PREFIX scopes every storage key for multi-tenant buckets
-# ---------------------------------------------------------------------------
-
-
 def test_artifact_storage_prefix_scopes_keys_and_round_trips(monkeypatch, db_session, storage_bucket):
-    """With ARTIFACT_STORAGE_PREFIX set, artifact + source-file keys are prefixed and round-trip
-    (PR-preview environments share one Tigris bucket via prefix=pr-<N>/)."""
+    """PR previews share one Tigris bucket via prefix=pr-<N>/."""
     from db.queue import (
         artifact_key,
         create_job,
@@ -749,26 +634,14 @@ def test_artifact_storage_prefix_scopes_keys_and_round_trips(monkeypatch, db_ses
     assert artifact_key(job.id, "flagged") == f"artifacts/{job.id}/flagged"
 
 
-# /api/jobs reads ``Job.is_proxy`` directly (mirrored from ``contract_flags`` at write time); the
-# "resolver bug surfaces as 500" guarantee lives in /api/analyses and /api/analyses/{run_name}.
-
-
-# ---------------------------------------------------------------------------
-# 15. Rows written under a foreign environment prefix stay readable
-#
-# Storage keys are recorded verbatim including the writer's ARTIFACT_STORAGE_PREFIX, so a
-# different-prefix environment addressed objects never written there (8,256 rows unreadable).
-#
-# THE SHAPE MATTERS: on the working DB 8256/8256 rows are served by candidate index **1**, 0 by
-# index 0. A test writing the object AND recording the key under ``pr-160/`` passes with the
-# fallback deleted (candidate 0 answers). ``_divergent_key`` builds the production shape: bytes
-# only at the stripped path, so only the fallback can serve the row.
-# ---------------------------------------------------------------------------
+# Rows written under a foreign environment prefix stay readable. Keys include the writer's prefix, which left
+# 8,256 rows unreadable elsewhere. In production every row is served by candidate index 1 (the stripped path), so
+# ``_divergent_key`` puts bytes only there; writing and recording under ``pr-160/`` would pass with the fallback
+# deleted.
 
 
 @pytest.fixture()
 def preview_prefix(monkeypatch):
-    """Write as a preview environment would, then read as this one does."""
     from db import storage as storage_module
 
     monkeypatch.setenv("ARTIFACT_STORAGE_PREFIX", "pr-160/")
@@ -778,9 +651,6 @@ def preview_prefix(monkeypatch):
 
 
 def _divergent_key(bucket, prefixed_key: str) -> str:
-    """Move the object at *prefixed_key* to its prefix-stripped path (the production divergence:
-    the row records the prefixed key, the object lives at the stripped one). Asserts the prefixed
-    object is gone so a test cannot pass through candidate 0."""
     from db.storage import StorageKeyMissing
 
     assert prefixed_key.startswith("pr-160/")
@@ -793,7 +663,6 @@ def _divergent_key(bucket, prefixed_key: str) -> str:
 
 
 def test_artifact_written_under_a_foreign_prefix_is_still_readable(db_session, storage_bucket, preview_prefix):
-    """Column 1/5 — artifacts.storage_key (5,770 rows)."""
     import os
 
     from db.models import Artifact
@@ -807,16 +676,13 @@ def test_artifact_written_under_a_foreign_prefix_is_still_readable(db_session, s
     assert row.storage_key.startswith("pr-160/artifacts/")
     _divergent_key(storage_bucket, row.storage_key)
 
-    # Leave the preview environment. The row keeps its recorded key, which now
-    # addresses nothing; only the stripped candidate can answer.
     os.environ.pop("ARTIFACT_STORAGE_PREFIX", None)
     assert get_artifact(db_session, job.id, "effects") == payload
     assert get_all_artifacts(db_session, job.id)["effects"] == payload
 
 
 def test_source_files_written_under_a_foreign_prefix_are_still_readable(db_session, storage_bucket, preview_prefix):
-    """Column 2/5 — source_files.storage_key (2,261 rows). This is the population
-    behind ``search_source`` returning total_matches: 0 for every contract."""
+    """The population behind ``search_source`` returning 0 matches for every contract."""
     import os
 
     from db.models import SourceFile
@@ -838,8 +704,7 @@ def test_source_files_written_under_a_foreign_prefix_are_still_readable(db_sessi
 def test_materialization_blobs_written_under_a_foreign_prefix_are_still_readable(
     db_session, storage_bucket, preview_prefix, materialization_key
 ):
-    """Columns 3-5/5 - contract_materializations.{analysis,tracking_plan,predicate_trees}_blob_key.
-    ``hydrate_*`` swallowed an unreadable blob into ``None``, hiding this defect (75 rows)."""
+    """``hydrate_*`` swallowed unreadable blobs into ``None``, hiding this (75 rows)."""
     import os
 
     from db import contract_materializations as cm
@@ -875,8 +740,7 @@ def test_materialization_blobs_written_under_a_foreign_prefix_are_still_readable
 
 
 def test_a_genuinely_absent_object_is_still_reported_absent(db_session, storage_bucket):
-    """POSITIVE CONTROL: the fallback must not explain away a real absence. Mirrors
-    ``audit_reports`` id 183 (object gone at every candidate key), which must keep failing loudly."""
+    """Mirrors ``audit_reports`` id 183, which must keep failing loudly."""
     from db.storage import StorageKeyMissing
 
     with pytest.raises(StorageKeyMissing) as excinfo:
@@ -892,8 +756,7 @@ def test_a_genuinely_absent_object_is_still_reported_absent(db_session, storage_
 
 
 def test_artifact_row_with_no_key_and_no_body_is_not_reported_as_no_artifact(db_session, storage_bucket):
-    """A row that never recorded a key and holds no inline body means *not determined*, not ``None``
-    (which ``get_artifact`` also returns for a nonexistent artifact)."""
+    """``get_artifact`` also returns ``None`` for a nonexistent artifact."""
     from db.models import Artifact
     from db.queue import create_job, get_artifact
     from db.storage import StorageKeyAbsent
@@ -908,8 +771,6 @@ def test_artifact_row_with_no_key_and_no_body_is_not_reported_as_no_artifact(db_
 
 
 def test_copy_resolves_a_foreign_prefixed_source_key(db_session, storage_bucket, preview_prefix):
-    """``copy_artifacts_to_job`` server-side-copies from the row's recorded key;
-    an unresolved prefix turned every reuse into a storage failure."""
     import os
 
     from db.queue import artifact_key
@@ -924,10 +785,7 @@ def test_copy_resolves_a_foreign_prefixed_source_key(db_session, storage_bucket,
     assert storage_bucket._get_one("artifacts/job-dst/effects") == b'{"v":1}'
 
 
-# 16. At the consumer boundary - an outage is not an empty job
-#
-# On the working DB get_all_artifacts on the largest job returned 130 healthy, 0 under a bucket
-# outage, and 0 for a nonexistent job id: two identical numbers for opposite reasons.
+# ``get_all_artifacts`` returned 0 both under an outage and for a nonexistent job.
 
 
 def test_a_bucket_outage_is_not_the_same_answer_as_a_job_with_no_artifacts(db_session, storage_bucket):
@@ -943,10 +801,8 @@ def test_a_bucket_outage_is_not_the_same_answer_as_a_job_with_no_artifacts(db_se
     store_artifact(db_session, job.id, "contract_analysis", data={"v": 2})
     empty_job = create_job(db_session, {"address": "0xcd", "name": "outage-vs-empty-2"})
 
-    # A — healthy.
     assert set(get_all_artifacts(db_session, job.id)) == {"effects", "contract_analysis"}
 
-    # B — bucket unreachable. Not determined, and it says so.
     with patch.object(StorageClient, "_get_one", side_effect=StorageUnavailable("bucket unreachable")):
         with pytest.raises(StorageContentNotDetermined) as excinfo:
             get_all_artifacts(db_session, job.id)
@@ -954,8 +810,7 @@ def test_a_bucket_outage_is_not_the_same_answer_as_a_job_with_no_artifacts(db_se
     assert excinfo.value.proven_absent == {}
     assert classify(excinfo.value) == "transient"
 
-    # C — the bucket answered: the row asserts a key nothing is stored under.
-    # A different class from B, because a retry cannot change this answer.
+    # A retry can't change this answer.
     gone = db_session.execute(
         select(Artifact).where(Artifact.job_id == job.id, Artifact.name == "effects")
     ).scalar_one()
@@ -968,19 +823,16 @@ def test_a_bucket_outage_is_not_the_same_answer_as_a_job_with_no_artifacts(db_se
     assert classify(absent.value) == "terminal"
     assert not isinstance(absent.value, StorageContentNotDetermined)
 
-    # D — proven absent: a real job that stored nothing, and an id with no rows.
     assert get_all_artifacts(db_session, empty_job.id) == {}
     assert get_all_artifacts(db_session, _uuid.uuid4()) == {}
 
 
 def test_source_files_outage_is_not_the_same_answer_as_a_job_with_no_source(db_session, storage_bucket):
-    """``workers.static_worker`` compiles whatever ``get_source_files`` hands it; a short dict is
-    a static analysis over a partial contract with nothing recording the shortfall.
+    """A short dict means static analysis over a partial contract.
 
-    INVERTED on one arm: a *deleted object* used to be pinned as ``StorageContentNotDetermined``,
-    conflating "bucket said no such key" with "bucket could not be asked"; ``retry_policy`` then
-    called it transient while the identical single-key read (``StorageKeyMissing``) was terminal.
-    The exception type is the worker's only discriminator, so this test pins both verdicts."""
+    Inverted on one arm: a deleted object was ``StorageContentNotDetermined`` (transient) while the single-key read was
+    terminal; the exception type is the worker's only discriminator.
+    """
     from db.models import SourceFile
     from db.queue import create_job, get_source_files, store_source_files
     from db.storage import (
@@ -998,8 +850,6 @@ def test_source_files_outage_is_not_the_same_answer_as_a_job_with_no_source(db_s
 
     assert len(get_source_files(db_session, job.id)) == 2
 
-    # A — the bucket could not be asked. Not determined; a retry can still
-    # turn it into a fact.
     with patch.object(StorageClient, "_get_one", side_effect=StorageUnavailable("bucket unreachable")):
         with pytest.raises(StorageContentNotDetermined) as outage:
             get_source_files(db_session, job.id)
@@ -1012,33 +862,23 @@ def test_source_files_outage_is_not_the_same_answer_as_a_job_with_no_source(db_s
     ).scalar_one()
     storage_bucket.delete(gone.storage_key)
 
-    # B — the bucket answered. Determined, and terminal for the same reason the
-    # single-key read is: re-asking cannot change the answer.
     with pytest.raises(StorageContentAbsent) as excinfo:
         get_source_files(db_session, job.id)
     assert set(excinfo.value.proven_absent) == {"src/B.sol"}
     assert excinfo.value.not_determined == {}
     assert set(excinfo.value.values) == {"src/A.sol"}
     assert classify(excinfo.value) == "terminal"
-    # The verdict the collection read gives must match the one the single-key
-    # read gives for the same key — the contradiction this test now guards.
     with pytest.raises(StorageKeyMissing) as direct:
         storage_bucket.get(gone.storage_key)
     assert classify(direct.value) == classify(excinfo.value) == "terminal"
 
-    # C — proven absent because the job has no source rows at all. Still the
-    # empty dict: nothing fell short, so nothing is claimed to have.
     assert get_source_files(db_session, empty_job.id) == {}
 
 
 def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, storage_bucket):
-    """The third state through the two *collection* entry points.
-
-    ``_artifact_row_to_value`` raises ``StorageKeyAbsent`` for a keyless, bodyless row and
-    ``routers.analyses`` publishes a 503, but ``get_all_artifacts`` (and ``get_source_files``)
-    re-implemented the resolution with no ``else`` and silently dropped the row, one call from
-    ``services/aggregations/analysis_detail``. Negative controls: an empty job stays the empty
-    dict, and a row that did read is not dragged into the shortfall."""
+    """``get_all_artifacts`` and ``get_source_files`` re-implemented resolution with no ``else`` and silently dropped
+    the keyless row.
+    """
     from db.models import Artifact, SourceFile
     from db.queue import create_job, get_all_artifacts, get_source_files, store_artifact, store_source_files
     from db.storage import StorageContentNotDetermined
@@ -1046,8 +886,6 @@ def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, st
 
     job = create_job(db_session, {"address": "0xab", "name": "keyless-collection"})
     store_artifact(db_session, job.id, "effects", data={"v": 1})
-    # Exactly what ``store_artifact`` writes when the backend is unconfigured
-    # and the stage passed no payload.
     db_session.add(Artifact(job_id=job.id, name="dependencies", data=None, text_data=None, storage_key=None))
     db_session.commit()
 
@@ -1055,7 +893,6 @@ def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, st
         get_all_artifacts(db_session, job.id)
     assert set(arts.value.not_determined) == {"dependencies"}
     assert arts.value.proven_absent == {}
-    # The readable row is still carried, so a page that may degrade renders it.
     assert set(arts.value.values) == {"effects"}
     assert classify(arts.value) == "transient"
 
@@ -1071,8 +908,6 @@ def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, st
     assert set(srcs.value.values) == {"src/A.sol"}
     assert classify(srcs.value) == "transient"
 
-    # Negative control — a keyless row with no storage sibling is still the only
-    # thing short, and a job with no rows at all stays a silent empty dict.
     bare = create_job(db_session, {"address": "0xef", "name": "keyless-only"})
     db_session.add(SourceFile(job_id=bare.id, path="src/C.sol", content=None, storage_key=None))
     db_session.commit()
@@ -1087,9 +922,9 @@ def test_collection_reads_publish_a_keyless_row_as_not_determined(db_session, st
 
 
 def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_bucket, materialization_key):
-    """The same three states for ``contract_materializations``: ``_hydrate`` returned ``None`` for
-    all three and ``services/resolution/recursive`` writes ``or {}`` over it, so a bucket outage
-    rendered as "no analysis, plan or predicate trees" and seeded the effects probe."""
+    """``services/resolution/recursive`` writes ``or {}`` over ``None``, so an outage rendered as no analysis and
+    seeded the effects probe.
+    """
     from db import contract_materializations as cm
     from db.models import ContractMaterialization
     from db.storage import StorageClient, StorageContentAbsent, StorageContentNotDetermined, StorageUnavailable
@@ -1118,28 +953,22 @@ def test_hydrate_keeps_outage_absence_and_payload_apart(db_session, storage_buck
     db_session.add_all([row, keyless])
     db_session.commit()
 
-    # A — proven present.
     assert cm.hydrate_analysis(row) == {"functions": ["pauseContract()"]}
 
-    # B — not determined. The row asserts a key; the bucket could not answer.
     with patch.object(StorageClient, "_get_one", side_effect=StorageUnavailable("bucket unreachable")):
         with pytest.raises(StorageContentNotDetermined):
             cm.hydrate_analysis(row)
 
-    # C — proven absent: nothing was ever stored. This is the shape of the 6
-    # status='failed' rows in the working DB.
+    # The shape of the 6 status='failed' rows in the working DB.
     assert cm.hydrate_analysis(keyless) is None
 
-    # And the inline copy still wins over an unreadable blob — serving a
-    # possibly-stale real payload is not the same as inventing an absence.
+    # A possibly stale real payload beats an invented absence.
     keyless.analysis_blob_key = key
     keyless.analysis = {"functions": ["inline"]}
     with patch.object(StorageClient, "_get_one", side_effect=StorageUnavailable("bucket unreachable")):
         assert cm.hydrate_analysis(keyless) == {"functions": ["inline"]}
 
-    # D — the row asserts a key and the bucket answers "no such object", with no
-    # inline copy. A different class from B: this one is terminal, so the stage
-    # fails instead of re-asking a question the bucket already answered.
+    # Terminal, unlike B: the bucket already answered.
     storage_bucket.delete(key)
     with pytest.raises(StorageContentAbsent) as absent:
         cm.hydrate_analysis(row)
@@ -1172,10 +1001,8 @@ def test_claim_and_advance_job(db_session):
     assert claimed.status == JobStatus.processing
     assert claimed.worker_id == "test-worker"
 
-    # No more jobs to claim
     assert claim_job(db_session, JobStage.discovery, "test-worker-2") is None
 
-    # Advance to next stage
     advance_job(db_session, claimed.id, JobStage.static)
     db_session.refresh(claimed)
     assert claimed.stage == JobStage.static

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -29,7 +28,6 @@ def _parse_dt(s: str) -> datetime:
 
 
 class LiveClient:
-
     def __init__(self, base_url: str, admin_key: str) -> None:
         self.base_url = base_url.rstrip("/")
         self._session = requests.Session()
@@ -78,7 +76,6 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
-
     def analyze(self, address: str) -> dict[str, Any]:
         r = self._session.post(self._url("/api/analyze"), json={"address": address}, timeout=15)
         r.raise_for_status()
@@ -122,7 +119,6 @@ class LiveClient:
     def reextract_audit_scope(self, audit_id: int) -> requests.Response:
         return self._session.post(self._url(f"/api/audits/{audit_id}/reextract_scope"), timeout=15)
 
-
     def job(self, job_id: str) -> dict[str, Any]:
         r = self._session.get(self._url(f"/api/jobs/{job_id}"), timeout=15)
         r.raise_for_status()
@@ -155,7 +151,6 @@ class LiveClient:
         r = self._session.get(self._url(f"/api/analyses/{run_name}"), timeout=15)
         r.raise_for_status()
         return r.json()
-
 
     def company_response(self, company: str, section: str = "", *, wait_seconds: float = 60) -> requests.Response:
         suffix = f"/{section}" if section else ""
@@ -193,7 +188,6 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
-
     def list_address_labels(self) -> dict[str, Any]:
         r = self._session.get(self._url("/api/address_labels"), timeout=15)
         r.raise_for_status()
@@ -208,7 +202,6 @@ class LiveClient:
         r = self._session.delete(self._url(f"/api/address_labels/{address}"), timeout=15)
         r.raise_for_status()
         return r.json()
-
 
     def list_monitored_events(self, limit: int = 50) -> list[dict[str, Any]]:
         r = self._session.get(self._url("/api/monitored-events"), params={"limit": limit}, timeout=15)
@@ -225,7 +218,6 @@ class LiveClient:
 
     def audit_pdf(self, audit_id: int) -> requests.Response:
         return self._session.get(self._url(f"/api/audits/{audit_id}/pdf"), timeout=60)
-
 
     def add_audit(self, company: str, payload: dict[str, Any]) -> dict[str, Any]:
         r = self._session.post(
@@ -276,7 +268,6 @@ class LiveClient:
             time.sleep(interval)
         raise TimeoutError(f"Audit {audit_id} did not finish scope extraction within {timeout}s")
 
-
     def list_monitored_contracts(
         self,
         protocol_id: int | None = None,
@@ -299,7 +290,6 @@ class LiveClient:
         )
         r.raise_for_status()
         return r.json()
-
 
     def protocol_monitoring(self, protocol_id: int) -> list[dict[str, Any]]:
         r = self._session.get(self._url(f"/api/protocols/{protocol_id}/monitoring"), timeout=15)
@@ -353,7 +343,6 @@ class LiveClient:
         r.raise_for_status()
         return r.json()
 
-
     def poll_job_until_done(
         self,
         job_id: str,
@@ -382,7 +371,6 @@ class LiveClient:
                 return children
             time.sleep(interval)
         return self.children_of(parent_job_id)
-
 
     @staticmethod
     def job_duration_seconds(job: dict[str, Any]) -> float:

@@ -1,16 +1,6 @@
-"""``fallback`` / ``receive`` as first-class entry points.
-
-Two defects, one shape: having no 4-byte selector was treated as having no caller.
-
-1. ``_is_externally_callable`` excluded them, so no predicate tree was built and the
-   policy stage read "no gate found": an owner-gated fallback published the same
-   evidence as an open one. PriorityWithdrawalQueue and WithdrawRequestNFT gate
-   ``receive()`` on ``msg.sender != address(liquidityPool)`` and were published
-   ``authority_public = True``.
-2. Slither renders their signatures as ``fallback()`` / ``receive()``, which every
-   string-level canonicality test hashed (``0x552079dc`` / ``0xa3e76c0f`` persisted
-   as selectors on 7 rows). Neither is a dispatch any caller can send;
-   ``db/effect_cache.py`` fixes ``""`` as the sentinel.
+"""Having no selector was treated as having no caller. No tree was built, so PriorityWithdrawalQueue and
+WithdrawRequestNFT's gated ``receive()`` published ``authority_public = True``. And the rendered ``fallback()`` /
+``receive()`` were hashed into fake selectors on 7 rows; ``db/effect_cache.py`` fixes ``""`` as the sentinel.
 """
 
 from __future__ import annotations
@@ -61,12 +51,7 @@ def contract(tmp_path_factory):
     return next(c for c in slither.contracts if c.name == "C")
 
 
-# 1. The tree is attempted
-
-
 def test_gated_fallback_tree_carries_the_caller_authority_leaf(contract):
-    """The positive case. A tree that exists but lost the gate would satisfy the
-    test above and still publish the function as open."""
     tree = ((build_predicate_artifacts(contract) or {}).get("trees") or {})["fallback()"]
     leaves: list[dict] = []
 
@@ -86,14 +71,9 @@ def test_gated_fallback_tree_carries_the_caller_authority_leaf(contract):
 
 
 def test_open_receive_is_absent_after_being_attempted_not_before(contract):
-    """The negative control. ``receive()`` genuinely has no gate, so it still
-    has no tree -- but now that is a measured absence rather than an untried
-    one, and the two must not be conflated back together."""
+    """The absence is now measured, not untried."""
     trees = (build_predicate_artifacts(contract) or {}).get("trees") or {}
     assert "receive()" not in trees
-
-
-# 2. The selector sentinel
 
 
 @pytest.mark.parametrize("signature", ["fallback()", "receive()"])
@@ -110,8 +90,6 @@ def test_effects_emits_the_empty_selector_for_fallback_and_receive(contract):
 
 
 def test_fallback_state_write_publishes_no_writer_selector(contract):
-    """``writer_selectors`` replays a write by selector. Emitting
-    ``0x552079dc`` there named a dispatch that matches nothing on chain."""
     functions = build_effects(contract)["functions"]
     assert functions["fallback()"]["writer_selectors"] == []
     assert functions["fallback()"]["state_writes"], "the write itself is still recorded"
@@ -119,8 +97,6 @@ def test_fallback_state_write_publishes_no_writer_selector(contract):
 
 @pytest.mark.parametrize("signature", ["fallback()", "receive()"])
 def test_persisted_selector_is_the_empty_sentinel_not_a_fabricated_hash(signature):
-    """Three states at the persistence boundary: ``""`` proven-absent (here),
-    ``None`` not-determined (an unlowered signature), a hash when it is real."""
     abi_sig, selector = _abi_signature_and_selector(signature, {})
     assert abi_sig == signature
     assert selector == "", f"{signature} must carry the no-selector sentinel, got {selector!r}"
@@ -130,22 +106,15 @@ def test_persisted_selector_is_the_empty_sentinel_not_a_fabricated_hash(signatur
 
 
 def test_no_named_function_can_receive_the_selectorless_sentinel():
-    """The ``""`` sentinel is reserved for a PROVEN absence of a selector.
-
-    ``''`` on a named function re-opens an identity collision: ``_selector_key``
-    folds ``None`` onto ``""``, so the function would share an identity with the
-    contract's ``fallback``/``receive`` and inherit its observed claims.
-    ``fallbackHandler()`` is the discriminating control: recognition must stay
-    signature-EXACT, never a prefix or substring test.
+    """``_selector_key`` folds ``None`` onto ``""``, so a named function with it would inherit the fallback's claims;
+    recognition must be signature-exact.
     """
     named = [
         "alertMetadataUpdate(uint256)",
         "alertBatchMetadataUpdate(uint256,uint256)",
-        # Named functions whose names embed the selectorless keywords.
         "fallbackHandler()",
         "receiveELRewards()",
         "receiveWithAuthorization(address,address,uint256,uint256,uint256,bytes32,bytes)",
-        # Unlowered: not-determined, which is ``None`` — a different answer.
         "setAuthority(IFoo.Bar)",
     ]
     for signature in named:
@@ -153,11 +122,8 @@ def test_no_named_function_can_receive_the_selectorless_sentinel():
         assert selector != "", f"{signature} was handed the proven-no-selector sentinel"
         assert selector is None or selector.startswith("0x")
 
-    # Positive controls, so a helper that returned ``None`` for everything could
-    # not satisfy the assertions above.
     assert _abi_signature_and_selector("alertMetadataUpdate(uint256)", {})[1] == "0x6800a4f4"
     assert _abi_signature_and_selector("fallbackHandler()", {})[1] == "0xeed2f252"
     assert _abi_signature_and_selector("setAuthority(IFoo.Bar)", {})[1] is None
-    # Negative control: the two signatures that DO earn the sentinel still do.
     assert _abi_signature_and_selector("fallback()", {})[1] == ""
     assert _abi_signature_and_selector("receive()", {})[1] == ""

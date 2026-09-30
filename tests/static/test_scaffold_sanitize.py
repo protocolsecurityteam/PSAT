@@ -1,9 +1,3 @@
-"""Sanitization of attacker-controlled Etherscan verified-source metadata.
-
-Covers path-traversal confinement of scaffolded source files, the EVMVersion
-TOML-injection allowlist, and the remapping arbitrary-read filter.
-"""
-
 import importlib
 import json
 
@@ -27,18 +21,12 @@ def _standard_json_result(sources: dict, *, remappings=None, evm_version="shangh
     }
 
 
-# ---- FINDING 1: path traversal ----
-
-
 @pytest.mark.parametrize(
     "key",
     [
         pytest.param("contracts/../../../../tmp/evil.sol", id="parent_traversal"),
-        # Relativizing the anchor must not open a traversal hole: an absolute key with an embedded ".."
-        # segment is still refused.
         pytest.param("/tmp/../../etc/evil.sol", id="absolute_with_traversal"),
-        # "//"-anchored paths keep a distinct anchor part in PurePosixPath; the anchor strip and the ".."
-        # refusal must both still apply. Path-traversal confinement is a security boundary.
+        # Path-traversal confinement is a security boundary.
         pytest.param("//tmp/../../etc/evil.sol", id="double_slash_absolute_with_traversal"),
     ],
 )
@@ -49,9 +37,7 @@ def test_parse_sources_rejects_traversal(key):
 
 
 def test_parse_sources_relativizes_absolute():
-    # Verified standard-json bundles routinely carry absolute keys rooted in
-    # the verifying developer's machine (e.g. Circle's EURC FiatTokenV2_2);
-    # the root anchor is stripped so the source scaffolds project-relative.
+    # Verified bundles carry absolute keys from the developer's machine (e.g. Circle's EURC FiatTokenV2_2).
     eurc_key = (
         "/Users/aloysius.chan/Repositories/circlefin/"
         "stablecoin-evm-private-eurc-mainnet-eth/contracts/v2/FiatTokenV2_2.sol"
@@ -62,10 +48,7 @@ def test_parse_sources_relativizes_absolute():
 
 
 def test_parse_sources_windows_style_keys_stay_confined():
-    # Windows-style keys are not treated as absolute by the POSIX-path
-    # normalizer: a backslash key stays one opaque component, a drive-prefixed
-    # forward-slash key stays a relative multi-segment path. Both remain
-    # inside the project dir.
+    # The POSIX normalizer keeps Windows-style keys inside the project dir.
     result = _standard_json_result(
         {
             "C:\\Users\\dev\\A.sol": {"content": "a"},
@@ -79,8 +62,6 @@ def test_parse_sources_windows_style_keys_stay_confined():
 @pytest.mark.parametrize(
     ("key", "expected_file"),
     [
-        # End-to-end: an absolute key scaffolds to a project-relative file that passes the _confine
-        # containment check, so analysis proceeds.
         pytest.param(
             "/Users/dev/repo/contracts/v2/Token.sol", "Users/dev/repo/contracts/v2/Token.sol", id="relativized_absolute"
         ),
@@ -120,9 +101,6 @@ def test_scaffold_refuses_escaping_source(tmp_path):
     assert not escape.exists()
 
 
-# ---- FINDING 3: EVMVersion TOML injection ----
-
-
 def test_evm_version_injection_falls_back():
     injected = 'shanghai"\nffi = true\nx = "'
     assert fetch.sanitize_evm_version(injected) == "shanghai"
@@ -144,9 +122,6 @@ def test_scaffold_evm_injection_not_in_toml(tmp_path):
     assert "ffi = true" not in toml
 
 
-# ---- FINDING 4: remapping arbitrary read ----
-
-
 def test_parse_remappings_drops_escaping_target():
     result = _standard_json_result(
         {"src/C.sol": {"content": "x"}},
@@ -160,13 +135,11 @@ def test_remapping_target_is_safe():
     assert not fetch._remapping_target_is_safe("@x/=/etc/")
     assert not fetch._remapping_target_is_safe("@y/=../../secrets/")
     assert not fetch._remapping_target_is_safe("@z/=~/private/")
-    # mid-path traversal that escapes must be rejected, not just leading "../"
     assert not fetch._remapping_target_is_safe("@x/=lib/../../../etc/")
 
 
 def test_remapping_target_rejects_embedded_newline():
-    # A single hostile entry with an embedded LF would split into two
-    # remappings.txt lines, the second an absolute read root — F2.
+    # An embedded LF would split into a second, absolute remapping line (F2).
     assert not fetch._remapping_target_is_safe("@a/=lib/\n@x/=/etc/")
     assert not fetch._remapping_target_is_safe("@a/=lib/\r@x/=/etc/")
     assert not fetch._remapping_target_is_safe("@a/=lib/\r\n@x/=/etc/")
@@ -190,7 +163,5 @@ def test_static_prune_remappings_applies_escape_filter():
     from workers.static_worker import _prune_remappings
 
     remappings = ["@x/=/etc/", "@y/=lib/../../../etc/", "@oz/=lib/openzeppelin/"]
-    # lib/openzeppelin/ has a matching source file so it survives the existence prune;
-    # both escaping targets are dropped by the safety filter.
     kept = _prune_remappings(remappings, {"lib/openzeppelin/Ownable.sol"})
     assert kept == ["@oz/=lib/openzeppelin/"]
