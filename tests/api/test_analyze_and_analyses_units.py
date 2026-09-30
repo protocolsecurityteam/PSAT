@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.support.api_helpers import _mock_session_ctx
+
 
 def _fake_api_job(
     job_id: str | None = None,
@@ -50,11 +52,6 @@ def _fake_api_job(
         "updated_at": "2026-01-01T00:00:00+00:00",
     }
     return job
-
-
-def _mock_session_ctx(mock_session_cls, mock_session):
-    mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-    mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
 
 def _make_client() -> TestClient:

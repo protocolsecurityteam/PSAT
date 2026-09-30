@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests.support.api_helpers import _mock_session_ctx
 from utils.secrets import sanitize_obj, sanitize_string, sanitize_url
 
 _ALCHEMY = "https://eth-mainnet.g.alchemy.com/v2/FAKE_ALCHEMY_KEY_FOR_TESTS"
@@ -211,11 +212,6 @@ def _make_client():
     import api
 
     return TestClient(api.app)
-
-
-def _mock_session_ctx(mock_session_cls, mock_session):
-    mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-    mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
 
 def _build_real_job(request_body: dict, error: str | None = None):

@@ -2,28 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from db.models import Artifact, Job, JobStatus
+from db.models import Job, JobStatus
 from db.queue import create_job, fail_job_terminal
 from tests.cache_helpers import requires_postgres
-
-
-@pytest.fixture()
-def clean_jobs(db_session):
-    db_session.query(Artifact).delete()
-    db_session.query(Job).delete()
-    db_session.commit()
-    yield db_session
-    db_session.rollback()
-    db_session.query(Artifact).delete()
-    db_session.query(Job).delete()
-    db_session.commit()
-
-
-def _read_stage_errors(session, job_id):
-    art = session.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == "stage_errors").one_or_none()
-    if art is None or art.data is None:
-        return None
-    return art.data
+from tests.support.db_fixtures import (
+    _read_stage_errors,
+    clean_jobs,  # noqa: F401  (fixture, registered by import)
+)
 
 
 @requires_postgres

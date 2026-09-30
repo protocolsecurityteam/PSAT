@@ -17,6 +17,7 @@ from services.resolution.adapters.event_indexed import (
     _caller_event_arg_position,
     _implicit_membership_value_predicate,
 )
+from tests.support.hypersync_fakes import _FakeHypersyncModule
 
 CONTRACT = "0x789cbbe0739f1458905c9ca6d6e74f7997622a9b"
 CALLER_A = "0x7835fb36a8143a014a2c381363cd1a4dee586d2a"
@@ -33,26 +34,6 @@ def _indexed(addr_or_word: str) -> str:
 
 def _bool_word(value: bool) -> str:
     return "0x" + ("1".rjust(64, "0") if value else "0" * 64)
-
-
-class _FakeFieldEnumMeta(type):
-    _members = ("address", "topic0", "data", "block_number")
-
-    def __iter__(cls):
-        for name in cls._members:
-            yield cls(name)
-
-
-class _FakeFieldEnum(metaclass=_FakeFieldEnumMeta):
-    def __init__(self, name: str):
-        self.value = name
-
-
-class _FakeHypersyncModule:
-    Query = SimpleNamespace
-    LogSelection = SimpleNamespace
-    FieldSelection = SimpleNamespace
-    LogField = _FakeFieldEnum
 
 
 def _client(logs: list[Any]):

@@ -1,4 +1,8 @@
-"""DB-backed cases mirror ``tests/workers/test_baseworker_retry.py``."""
+"""Effects-stage foundations: enum placement, flag-dynamic transition, worker scaffolding, and
+fail-forward semantics (EFFECTS_RESOLUTION_SPEC Phase 1).
+
+DB-backed cases mirror ``tests/workers/test_baseworker_retry.py``. ``PSAT_EFFECTS_STAGE`` is asserted default-off.
+"""
 
 from __future__ import annotations
 
@@ -80,6 +84,7 @@ def test_scoring_tier_translation_resolves_the_string_collision():
     assert SCORING_TIER_OBSERVED != SCORING_TIER_STATIC_FALLBACK
     for stored in (TIER_HISTORICAL, TIER_CALL, TIER_FORK):
         assert scoring_tier_for_effects_tier(stored) == SCORING_TIER_OBSERVED
+    # Crucially NOT scoring Tier 2 despite the "tier2" string.
     assert scoring_tier_for_effects_tier(TIER_FORK) != SCORING_TIER_STATIC_FALLBACK
     assert scoring_tier_for_effects_tier(None) is None
     assert scoring_tier_for_effects_tier("tierX") is None
@@ -101,6 +106,8 @@ def test_policy_next_stage_flag_on_is_effects(monkeypatch):
 
 
 class _FailingEffectsWorker(EffectsWorker):
+    """Effects worker whose ``process()`` always raises, to drive fail-forward without a real harness."""
+
     poll_interval = 0.0
 
     def __init__(self, exc: BaseException) -> None:
@@ -147,7 +154,8 @@ def test_fail_forward_exhaustion_advances_never_terminal(clean_jobs, test_sessio
 
 @requires_postgres
 def test_fail_forward_on_terminal_kind_also_advances(clean_jobs, test_session_local):
-    """Upstream artifacts are already complete."""
+    """A deterministically-terminal exception (ValueError) must also fail-forward: upstream artifacts
+    are already complete."""
     session = clean_jobs
     job_row = create_job(session, {"address": "0xabc", "name": "effects-terminal-kind"})
 
@@ -180,7 +188,8 @@ def test_healthy_multi_proven_run_files_no_degraded_discrepancies(clean_effects,
     cands = [_candidate(addr, fns[addr]) for addr in addresses]
     monkeypatch.setattr("workers.effects_worker.select_candidates", lambda *a, **k: cands)
 
-    # Distinct hashes make every candidate a fresh miss.
+    # Distinct kernel hashes → every candidate is a fresh cache miss, so each
+    # proven verdict is witnessed anew and files its idiom candidate.
     hashes = {fns[addr]: (f"K{i}", f"S{i}") for i, addr in enumerate(addresses)}
     prober = _Prober(lambda c, ctx: proven(EFFECT_CLASS_SUPPLY, details={"supply_delta_sign": "mint"}))
     worker = EffectsWorker(prober=prober, hash_resolver=lambda s, c: hashes[c.function_id], seams=_seams(session, job))
@@ -189,6 +198,8 @@ def test_healthy_multi_proven_run_files_no_degraded_discrepancies(clean_effects,
     proven_rows = session.query(EffectVerdict).filter(EffectVerdict.verdict == VERDICT_PROVEN).all()
     assert len(proven_rows) == len(addresses)
 
+    # ZERO degraded stage_errors of any kind on a healthy run.
     assert errors == []
+    # Direction-2 events are a benign metric, not discrepancies.
     assert metrics["discrepancies_filed"] == 0
     assert metrics["new_idiom_candidates"] == len(addresses)

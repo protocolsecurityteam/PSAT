@@ -12,7 +12,6 @@ from typing import Any, cast
 
 import pytest
 
-from services.resolution.capabilities import CapabilityExpr
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
 from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
 from services.static.contract_analysis_pipeline.tracking import (
@@ -20,6 +19,7 @@ from services.static.contract_analysis_pipeline.tracking import (
     _oz_v5_ownership_getter_for_accessor,
     _oz_v5_ownership_getter_for_slot_constant,
 )
+from tests.support.authority_reads import _Adapter, _Outer, _stub_rpc_map
 from tests.support.eq_tree import eq_tree
 
 CONTRACT = "0x" + "11" * 20
@@ -32,22 +32,6 @@ DEAD_ACCESSOR_SELECTOR = "0xce49c281"
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "authority"
 
 
-class _Outer:
-    def __init__(self, rpc_url: str | None, contract_address: str | None, block: int | None = None) -> None:
-        self.rpc_url = rpc_url
-        self.contract_address = contract_address
-        self.block = block
-
-
-class _Adapter:
-    def __init__(self, outer: _Outer | None) -> None:
-        if outer is not None:
-            self._outer_ctx = outer
-
-    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:
-        return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial")
-
-
 def _ctx_with_rpc(rpc_url: str = "http://rpc.test") -> EvaluationContext:
     return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(_Outer(rpc_url, CONTRACT)))
 
@@ -58,18 +42,6 @@ def _ctx_no_rpc() -> EvaluationContext:
 
 def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
     return eq_tree(other_operand, "owner() != _msgSender()")
-
-
-def _stub_rpc_map(monkeypatch: pytest.MonkeyPatch, returns: dict[str, str | None], recorder: list) -> None:
-    def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
-        selector = params[0]["data"]
-        recorder.append(selector)
-        value = returns.get(selector)
-        if value is None:
-            raise RuntimeError("execution reverted")
-        return "0x" + value[2:].rjust(64, "0")
-
-    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
 
 
 def _called(recorder: list, selector: str) -> bool:

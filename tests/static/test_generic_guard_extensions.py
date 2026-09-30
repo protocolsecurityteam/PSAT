@@ -4,13 +4,9 @@ adapter.
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
-
 import pytest
 
 slither = pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
     build_predicate_tree,
@@ -18,13 +14,8 @@ from services.static.contract_analysis_pipeline.predicates import (  # noqa: E40
 from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
     apply_writer_gate_pass,
 )
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
+from tests.support.predicate_trees import _all_leaves  # noqa: E402
+from tests.support.slither_compile import _compile  # noqa: E402
 
 
 def _build_pipeline(contract):
@@ -35,17 +26,6 @@ def _build_pipeline(contract):
         trees[fn.full_name] = build_predicate_tree(fn)
     apply_writer_gate_pass(contract, trees)
     return trees
-
-
-def _all_leaves(tree):
-    if tree is None:
-        return []
-    if tree.get("op") == "LEAF":
-        return [tree["leaf"]] if tree.get("leaf") else []
-    out = []
-    for child in tree.get("children") or []:
-        out.extend(_all_leaves(child))
-    return out
 
 
 def test_diamond_acl_membership_classifies_caller_authority(tmp_path):

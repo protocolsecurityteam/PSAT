@@ -42,6 +42,7 @@ from services.discovery.deployer_enumeration import (
     session_deployer_enumerator,
 )
 from tests.conftest import ADDR, DATABASE_URL, requires_postgres
+from tests.support.membership_builders import _protocol
 from utils.evm import OWNER_SELECTOR
 from workers.discovery import (
     ENABLED_CHAINS_SEEN_KEY,
@@ -98,13 +99,6 @@ def test_concurrent_gate_cascades_mark_protocol_queues_in_one_order(db_session):
 
 _TX = "0x" + "34" * 32
 _ZERO_WORD = "0x" + "0" * 64
-
-
-def _protocol(session) -> Protocol:
-    row = Protocol(name=f"proto-{uuid.uuid4().hex[:12]}")
-    session.add(row)
-    session.flush()
-    return row
 
 
 def _contract(

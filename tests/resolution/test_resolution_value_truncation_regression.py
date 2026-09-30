@@ -7,12 +7,8 @@ processing, so the stale sweep requeued it forever. Needs real Postgres for the 
 
 from __future__ import annotations
 
-import os
-
 import pytest
 from eth_abi.abi import encode
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
 
 from db.models import Artifact, Contract, ControllerValue, Job, JobDependency, JobStage, JobStatus
 from db.queue import create_job
@@ -24,23 +20,15 @@ from services.resolution.tracking import (
     clear_classify_cache,
 )
 from tests.cache_helpers import requires_postgres
+from tests.support.db_fixtures import (
+    _read_stage_errors,
+    test_session_local,  # noqa: F401  (fixture, registered by import)
+)
 from workers.base import BaseWorker
 
 _ADDR = "0x2222222222222222222222222222222222222222"
 # The AccountantState shape: 194 chars.
 _RAW_STRUCT = "0x" + encode(["address", "uint96", "bool"], [_ADDR, 123, False]).hex()
-
-
-@pytest.fixture()
-def test_session_local(monkeypatch):
-    test_url = os.environ.get("TEST_DATABASE_URL")
-    if not test_url:
-        pytest.skip("TEST_DATABASE_URL not set")
-    test_engine = create_engine(test_url)
-    test_factory = sessionmaker(bind=test_engine, class_=Session, expire_on_commit=False)
-    monkeypatch.setattr("workers.base.SessionLocal", test_factory)
-    yield test_factory
-    test_engine.dispose()
 
 
 @pytest.fixture()
@@ -58,13 +46,6 @@ def clean_db(db_session):
     yield db_session
     db_session.rollback()
     _wipe()
-
-
-def _read_stage_errors(session, job_id):
-    art = session.query(Artifact).filter(Artifact.job_id == job_id, Artifact.name == "stage_errors").one_or_none()
-    if art is None or art.data is None:
-        return None
-    return art.data
 
 
 def test_decode_controller_value_refuses_unstorable_struct_blob():

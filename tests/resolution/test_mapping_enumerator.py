@@ -18,6 +18,7 @@ from services.resolution.mapping_enumerator import (
 from services.resolution.mapping_enumerator import (
     enumerate_mapping_allowlist as _enumerate,
 )
+from tests.support.hypersync_fakes import _FakeHypersyncModule
 
 
 @pytest.fixture(autouse=True)
@@ -82,26 +83,6 @@ def _fake_client(batches: Sequence[tuple[Sequence[Any], int | None]]):
             return SimpleNamespace(data=logs, next_block=next_block)
 
     return _Client(), calls
-
-
-class _FakeFieldEnumMeta(type):
-    _members = ("address", "topic0", "data", "block_number")
-
-    def __iter__(cls):
-        for name in cls._members:
-            yield cls(name)
-
-
-class _FakeFieldEnum(metaclass=_FakeFieldEnumMeta):
-    def __init__(self, name: str):
-        self.value = name
-
-
-class _FakeHypersyncModule:
-    Query = SimpleNamespace
-    LogSelection = SimpleNamespace
-    FieldSelection = SimpleNamespace
-    LogField = _FakeFieldEnum
 
 
 def _run(coroutine):

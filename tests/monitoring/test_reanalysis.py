@@ -41,6 +41,7 @@ from tests.support.anvil import (
     _compile_and_deploy,
     anvil_env,  # noqa: F401
 )
+from tests.support.isolation import _disable_scan_confirmation_depth  # noqa: F401  (fixture, registered by import)
 
 # ``upgraded_revision`` is included because Aave V2's revision bump is a delegate-target swap.
 _TRIGGERING_EVENT_TYPES = (
@@ -70,12 +71,6 @@ requires_anvil = pytest.mark.skipif(
 )
 
 pytestmark = [requires_postgres, pytest.mark.anvil, pytest.mark.compile]
-
-
-@pytest.fixture(autouse=True)
-def _disable_scan_confirmation_depth(monkeypatch):
-    # The 12-block confirmation clamp would hide events on a short Anvil chain.
-    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
 
 
 PAUSABLE_SOURCE = """

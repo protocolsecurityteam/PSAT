@@ -13,13 +13,15 @@ from typing import Any
 
 import pytest
 
-from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.policy.capability_surface import project_capability_surface
 from services.resolution import mapping_enumerator as ME
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
 from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from tests.support.authority_reads import _status
 from tests.support.eq_tree import eq_tree
+from tests.support.hypersync_fakes import _FakeHypersyncModule
 
 CONTRACT = "0x" + "11" * 20
 R1 = "0x" + "a1" * 20
@@ -105,13 +107,6 @@ class _FakeFieldEnum(metaclass=_FakeFieldEnumMeta):
         self.value = name
 
 
-class _FakeHypersyncModule:
-    Query = SimpleNamespace
-    LogSelection = SimpleNamespace
-    FieldSelection = SimpleNamespace
-    LogField = _FakeFieldEnum
-
-
 class _Outer:
     def __init__(self, meta: dict[str, Any], contract_address: str | None = CONTRACT) -> None:
         self.rpc_url = "http://rpc.test"
@@ -143,11 +138,6 @@ def _seeded_meta(*logs: SimpleNamespace) -> dict[str, Any]:
 
 def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
     return eq_tree(other_operand, "msg.sender == receivers[originEid]")
-
-
-def _status(cap: CapabilityExpr) -> str | None:
-    cap_dict = capability_to_dict(cap)
-    return capability_surface_status(cap_dict, project_capability_surface(cap_dict))
 
 
 def _principals(cap: CapabilityExpr) -> list[str]:
@@ -276,6 +266,7 @@ pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
+from tests.support.predicate_trees import _caller_operand  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile
@@ -291,25 +282,6 @@ def _receiver_contract() -> Any:
 
 def _tree_for(contract: Any, signature: str) -> Any:
     return build_predicate_artifacts(contract)["trees"][signature]
-
-
-def _caller_operand(tree: Any) -> dict[str, Any]:
-    out: list[dict[str, Any]] = []
-
-    def walk(node: Any) -> None:
-        if not isinstance(node, dict):
-            return
-        if node.get("op") == "LEAF":
-            leaf = node.get("leaf") or {}
-            if leaf.get("kind") == "equality" and leaf.get("authority_role") == "caller_authority":
-                out.extend(o for o in (leaf.get("operands") or []) if o.get("source") != "msg_sender")
-            return
-        for child in node.get("children") or []:
-            walk(child)
-
-    walk(tree)
-    assert len(out) == 1, f"expected one caller operand, got {out}"
-    return out[0]
 
 
 _ON_MESSAGE = "onMessageReceived(uint32,bytes32,address,uint256,uint256)"

@@ -10,7 +10,8 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy import select
 
-from tests.conftest import SessionFactory, requires_postgres, requires_storage
+from tests.conftest import requires_postgres, requires_storage
+from tests.support.audit_fixtures import api_with_storage  # noqa: F401  (fixture, registered by import)
 from tests.support.pdf import minimal_pdf_with_text
 
 pytestmark = [requires_postgres, requires_storage]
@@ -176,22 +177,6 @@ def test_claim_batch_flips_status_to_processing(db_session, storage_bucket, seed
 
     second = worker._claim_batch(db_session)
     assert second == []
-
-
-@pytest.fixture()
-def api_with_storage(monkeypatch, db_session, storage_bucket):
-    from fastapi.testclient import TestClient
-
-    import api as api_module
-    from routers import deps
-    from routers.deps import require_admin_key
-
-    monkeypatch.setattr(deps, "SessionLocal", SessionFactory(db_session))
-    api_module.app.dependency_overrides[require_admin_key] = lambda: None
-    try:
-        yield TestClient(api_module.app)
-    finally:
-        api_module.app.dependency_overrides.pop(require_admin_key, None)
 
 
 def test_api_get_audit_returns_full_metadata(

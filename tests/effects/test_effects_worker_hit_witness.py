@@ -6,8 +6,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from db import effect_cache
 from db.effect_cache import record_effect_verdict, upsert_cached_verdict
 from db.models import EffectBehaviorCache, EffectVerdict
@@ -15,6 +13,7 @@ from services.effects import claims_bridge
 from services.effects.harness import ObservedEffect
 from services.effects.selection import Candidate
 from tests.cache_helpers import requires_postgres
+from tests.support.effects_worker_harness import clean_effects  # noqa: F401  (fixture, registered by import)
 from workers.effects_worker import EffectsWorker, _Counters, _Item
 
 ADDR = "0x" + "ac" * 20
@@ -26,18 +25,6 @@ FRESH_DETAILS: dict[str, Any] = {
     "supply_delta_sign": "burn",
     "input_seeded": True,
 }
-
-
-@pytest.fixture()
-def clean_effects(db_session):
-    db_session.query(EffectVerdict).delete()
-    db_session.query(EffectBehaviorCache).delete()
-    db_session.commit()
-    yield db_session
-    db_session.rollback()
-    db_session.query(EffectVerdict).delete()
-    db_session.query(EffectBehaviorCache).delete()
-    db_session.commit()
 
 
 def _candidate() -> Candidate:

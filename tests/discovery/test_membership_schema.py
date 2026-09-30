@@ -2,23 +2,15 @@
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 
-from db.models import Contract, ContractMembershipWitness, Protocol, ProtocolDeployer
+from db.models import Contract, ContractMembershipWitness, ProtocolDeployer
 from tests.conftest import ADDR, requires_postgres
+from tests.support.membership_builders import _protocol
 
 pytestmark = [requires_postgres]
-
-
-def _protocol(session) -> Protocol:
-    row = Protocol(name=f"proto-{uuid.uuid4().hex[:12]}")
-    session.add(row)
-    session.flush()
-    return row
 
 
 def test_contracts_nominated_protocol_id_column(db_session):

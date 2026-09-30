@@ -13,6 +13,7 @@ from sqlalchemy import delete, func, select, update
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
+from tests.support.indexer_stubs import _DeterministicBlockHash
 from workers.event_log_indexer import enroll_event_cursor, scan_enrolled_events
 
 _MAX_SAFE_SPAN = 10_000
@@ -55,12 +56,6 @@ class _RangeCappedFetcher:
 class _FixedHead:
     def head_block(self) -> int:
         return _HEAD
-
-
-class _DeterministicBlockHash:
-    # Stored hash matches observed, so the reorg guard never rewinds.
-    def block_hash(self, block_number: int) -> bytes:
-        return block_number.to_bytes(32, "big")
 
 
 @pytest.fixture()

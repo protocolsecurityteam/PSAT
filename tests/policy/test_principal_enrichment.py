@@ -4,16 +4,8 @@ from db.models import (
     EDGE_RELATION_CONTROLLER_VALUE,
     EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED,
 )
-from services.concurrency import RpcExecutor
 from services.policy.principal_enrichment import build_principal_labels
-
-
-@pytest.fixture(autouse=True)
-def _reset_executor():
-    """``PSAT_RPC_FANOUT`` flips per test must rebuild the shared pool."""
-    RpcExecutor.reset_for_tests()
-    yield
-    RpcExecutor.reset_for_tests()
+from tests.support.isolation import _reset_executor  # noqa: F401  (fixture, registered by import)
 
 
 def test_build_principal_labels_enriches_safe_admin_and_operator(monkeypatch):

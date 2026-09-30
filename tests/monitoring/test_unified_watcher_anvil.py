@@ -35,6 +35,7 @@ from tests.support.anvil import (
     materialization_keys,
     purge_materializations,
 )
+from tests.support.isolation import _disable_scan_confirmation_depth  # noqa: F401  (fixture, registered by import)
 
 _has_anvil = shutil.which("anvil") is not None
 _has_cast = shutil.which("cast") is not None
@@ -50,12 +51,6 @@ pytestmark = [
     pytest.mark.anvil,
     pytest.mark.compile,
 ]
-
-
-@pytest.fixture(autouse=True)
-def _disable_scan_confirmation_depth(monkeypatch):
-    # The 12-block confirmation clamp would hide events on a short Anvil chain.
-    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
 
 
 SOLMATE_OWNED_SOURCE = """

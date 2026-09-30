@@ -4,23 +4,14 @@ redeem / unwrap shape). Not a bound and not proof of caller control. No rule key
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 slither = pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-
-
-def _compile(tmp_path: Path, source: str, name: str):
-    f = tmp_path / f"{name}.sol"
-    f.write_text(textwrap.dedent(source).strip() + "\n")
-    sl = Slither(str(f))
-    return next(c for c in sl.contracts if c.name == name)
+from tests.support.slither_compile import _compile_named  # noqa: E402
 
 
 def _out_flow(info) -> Any:
@@ -110,7 +101,7 @@ contract Wrapper {
 
 @pytest.fixture(scope="module")
 def flows(tmp_path_factory):
-    contract = _compile(tmp_path_factory.mktemp("param_derived"), PARAM_DERIVED_SRC, "Wrapper")
+    contract = _compile_named(tmp_path_factory.mktemp("param_derived"), PARAM_DERIVED_SRC, "Wrapper")
     fns = build_effects(contract)["functions"]
     return {
         name: _out_flow(info) for name, info in fns.items() if any(f["direction"] == "out" for f in info["value_flows"])

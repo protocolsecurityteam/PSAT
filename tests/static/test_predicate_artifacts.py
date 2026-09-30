@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import textwrap
-from pathlib import Path
 
 import pytest
 
@@ -13,13 +11,7 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
     SCHEMA_VERSION,
     build_predicate_artifacts,
 )
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
+from tests.support.slither_compile import _compile  # noqa: E402
 
 
 def _contract(sl: Slither, name: str | None = None):

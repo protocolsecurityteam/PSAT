@@ -5,17 +5,9 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
-
 from services.audits.coverage import CoverageMatch, _apply_equivalence_http, _EquivalenceInputs
 from services.concurrency import RpcExecutor
-
-
-@pytest.fixture(autouse=True)
-def _reset_executor():
-    RpcExecutor.reset_for_tests()
-    yield
-    RpcExecutor.reset_for_tests()
+from tests.support.isolation import _reset_executor  # noqa: F401  (fixture, registered by import)
 
 
 def _make_match(audit_id: int, contract_id: int, name: str = "MyPool") -> CoverageMatch:

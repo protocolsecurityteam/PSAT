@@ -11,13 +11,9 @@ the hygiene-gated ownership harvest; (e) native ``transfer``/``send`` value sink
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
-
 import pytest
 
 slither = pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
 
 from services.static.claims import (  # noqa: E402
     attach_claims_to_effects,
@@ -30,13 +26,7 @@ from services.static.contract_analysis_pipeline.effects import (  # noqa: E402
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts_with_pause_info,
 )
-
-
-def _compile(tmp_path: Path, source: str, name: str):
-    f = tmp_path / f"{name}.sol"
-    f.write_text(textwrap.dedent(source).strip() + "\n")
-    sl = Slither(str(f))
-    return next(c for c in sl.contracts if c.name == name)
+from tests.support.slither_compile import _compile_named  # noqa: E402
 
 
 def _effects_with_labels(contract):
@@ -84,7 +74,7 @@ contract Svc is Auth {
 
 
 def test_modifier_auth_call_is_guard_origin_and_never_an_effect(tmp_path):
-    contract = _compile(tmp_path, _GUARD_ORIGIN_SRC, "Svc")
+    contract = _compile_named(tmp_path, _GUARD_ORIGIN_SRC, "Svc")
     effects = build_effects(contract)
 
     pause = _info(effects, "pause()")
@@ -116,7 +106,7 @@ contract Manager is Pausable {
 
 def test_concrete_body_wins_over_zero_node_interface_declaration(tmp_path):
     """Keying by name alone let the 0-node interface clobber the real record."""
-    contract = _compile(tmp_path, _CLOBBER_SRC, "Manager")
+    contract = _compile_named(tmp_path, _CLOBBER_SRC, "Manager")
 
     pause_fns = [fn for fn in contract.functions if fn.full_name == "pause(uint256)"]
     assert len(pause_fns) >= 2
@@ -144,7 +134,7 @@ contract Accountant {
 
 def test_member_write_facts_carry_member_path_and_declared_type(tmp_path):
     """A pause claim needs to tell the bool member from the address member."""
-    contract = _compile(tmp_path, _MEMBER_SRC, "Accountant")
+    contract = _compile_named(tmp_path, _MEMBER_SRC, "Accountant")
     effects = build_effects(contract)
 
     def member_fact(signature):
@@ -189,7 +179,7 @@ contract Vault is OwnableUpgradeable {
 
 def test_oz_v5_slot_constant_ghost_is_not_ownership_and_is_hygiene_tagged(tmp_path):
     """Ghost immunity comes from standards, not write identity."""
-    contract = _compile(tmp_path, _OZ_V5_SRC, "Vault")
+    contract = _compile_named(tmp_path, _OZ_V5_SRC, "Vault")
     effects = _effects_with_labels(contract)
 
     assert "ownership_transfer" in _info(effects, "transferOwnership(address)")["effect_labels"]
@@ -222,7 +212,7 @@ contract Token is Ownable {
 
 
 def test_hygiene_gate_keeps_real_address_owner_ownership(tmp_path):
-    contract = _compile(tmp_path, _OZ_V4_OWNABLE_SRC, "Token")
+    contract = _compile_named(tmp_path, _OZ_V4_OWNABLE_SRC, "Token")
     effects = _effects_with_labels(contract)
 
     assert "ownership_transfer" in _info(effects, "transferOwnership(address)")["effect_labels"]
@@ -247,7 +237,7 @@ contract Pool is ReentrancyGuard {
 
 
 def test_reentrancy_guard_write_is_guard_origin_and_hygiene_tagged(tmp_path):
-    contract = _compile(tmp_path, _REENTRANCY_SRC, "Pool")
+    contract = _compile_named(tmp_path, _REENTRANCY_SRC, "Pool")
     effects = build_effects(contract)
     facts = {sw["var"]: sw for sw in _info(effects, "doWork(uint256)")["state_writes"]}
     assert facts["_status"]["hygiene_class"] == "reentrancy_guard"
@@ -276,7 +266,7 @@ contract W {
 
 def test_native_transfer_and_send_become_asset_send(tmp_path):
     """They lower to their own IR op, so the old scan missed them."""
-    contract = _compile(tmp_path, _NATIVE_TRANSFER_SRC, "W")
+    contract = _compile_named(tmp_path, _NATIVE_TRANSFER_SRC, "W")
     effects = build_effects(contract)
 
     withdraw = _info(effects, "withdraw(uint256)")
@@ -311,7 +301,7 @@ contract Rec {
 
 
 def test_transferfrom_from_self_is_asset_send_not_pull(tmp_path):
-    contract = _compile(tmp_path, _DIRECTION_SRC, "Rec")
+    contract = _compile_named(tmp_path, _DIRECTION_SRC, "Rec")
     effects = build_effects(contract)
 
     recover = _info(effects, "recover(address,address,uint256)")
@@ -340,7 +330,7 @@ contract A {
 
 
 def test_inline_assembly_write_is_assembly_slot_granularity(tmp_path):
-    contract = _compile(tmp_path, _ASSEMBLY_SLOT_SRC, "A")
+    contract = _compile_named(tmp_path, _ASSEMBLY_SLOT_SRC, "A")
     effects = build_effects(contract)
     facts = _info(effects, "setSlot(uint256)")["state_writes"]
     assembly_facts = [sw for sw in facts if sw["granularity"] == "assembly_slot"]
@@ -374,7 +364,7 @@ _PROBE_INPUT_SRC = """
 
 
 def test_parameter_names_and_payability_are_recorded(tmp_path):
-    contract = _compile(tmp_path, _PROBE_INPUT_SRC, "Redeemer")
+    contract = _compile_named(tmp_path, _PROBE_INPUT_SRC, "Redeemer")
     effects = build_effects(contract)
 
     pay = _info(effects, "payOut(address,uint256,uint256)")
@@ -385,7 +375,7 @@ def test_parameter_names_and_payability_are_recorded(tmp_path):
 
 
 def test_value_flow_records_which_parameter_carries_the_amount(tmp_path):
-    contract = _compile(tmp_path, _PROBE_INPUT_SRC, "Redeemer")
+    contract = _compile_named(tmp_path, _PROBE_INPUT_SRC, "Redeemer")
     effects = build_effects(contract)
     flows = [f for f in _info(effects, "payOut(address,uint256,uint256)")["value_flows"] if f["direction"] == "out"]
     assert flows, "expected a native transfer out"

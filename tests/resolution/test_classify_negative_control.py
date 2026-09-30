@@ -16,16 +16,10 @@ from services.resolution.tracking import (
     _classify_uncached_batched,
     read_contract_controllers,
 )
+from tests.support.isolation import _isolated_classify_cache  # noqa: F401  (fixture, registered by import)
 
 ADDR = "0x" + "ab" * 20
 OWNER = "0x" + "44" * 20
-
-
-@pytest.fixture(autouse=True)
-def _isolated_classify_cache():
-    tracking.clear_classify_cache()
-    yield
-    tracking.clear_classify_cache()
 
 
 def _uint(n: int) -> str:

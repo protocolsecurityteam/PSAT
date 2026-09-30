@@ -11,14 +11,9 @@ from sqlalchemy.exc import OperationalError
 
 from tests.cache_helpers import requires_postgres
 from tests.conftest import SessionFactory, requires_storage
+from tests.support.api_helpers import _admin_headers
 
 pytestmark = [requires_postgres, requires_storage]
-
-
-def _admin_headers() -> dict[str, str]:
-    from routers import deps
-
-    return {"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""}
 
 
 @pytest.fixture()

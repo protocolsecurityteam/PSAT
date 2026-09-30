@@ -5,15 +5,14 @@ at the transport boundary (``rpc_request`` / ``eth_call_batch`` /
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 
-from db.models import Contract, ContractCreationWitness, ContractProbeAttempt, Protocol
+from db.models import Contract, ContractCreationWitness, ContractProbeAttempt
 from services.clients.rpc import EthCallResult
 from services.discovery import membership_gate as gate
 from services.discovery import probes
 from tests.conftest import ADDR, requires_postgres
+from tests.support.membership_builders import _protocol
 from utils.evm import EIP1967_IMPL_SLOT, OWNER_SELECTOR
 
 pytestmark = [requires_postgres]
@@ -29,13 +28,6 @@ def _word(address: str) -> str:
 
 
 _ZERO_WORD = "0x" + "0" * 64
-
-
-def _protocol(session) -> Protocol:
-    row = Protocol(name=f"proto-{uuid.uuid4().hex[:12]}")
-    session.add(row)
-    session.flush()
-    return row
 
 
 def _contract(session, address: str, *, chain: str = "ethereum", nominated: int | None = None) -> Contract:

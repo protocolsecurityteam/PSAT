@@ -4,8 +4,6 @@ edges become witness rows + gate promotion — never a stamped ``protocol_id``.
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 
 from db.models import (
@@ -15,13 +13,13 @@ from db.models import (
     ContractCreationWitness,
     ContractMembershipWitness,
     ContractProbeAttempt,
-    Protocol,
 )
 from services.clients.rpc import EthCallResult
 from services.discovery import membership_gate as gate
 from services.discovery import probes
 from services.discovery.perimeter import _produce_structural_witnesses, produce_structural_witness
 from tests.conftest import ADDR, requires_postgres
+from tests.support.membership_builders import _protocol
 
 pytestmark = [requires_postgres]
 
@@ -55,13 +53,6 @@ def _stub_probe_wire(monkeypatch, *, code: str = "0x6001") -> dict:
     monkeypatch.setattr(probes, "rpc_batch_request", lambda rpc_url, calls, *a, **kw: [_ZERO_WORD for _ in calls])
     monkeypatch.setattr(probes.etherscan, "get", lambda module, action, chain_id, **params: {"result": []})
     return seen
-
-
-def _protocol(session) -> Protocol:
-    row = Protocol(name=f"proto-{uuid.uuid4().hex[:12]}")
-    session.add(row)
-    session.flush()
-    return row
 
 
 def _contract(session, address: str, **kwargs) -> Contract:

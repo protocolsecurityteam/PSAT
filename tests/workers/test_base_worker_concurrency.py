@@ -6,13 +6,12 @@ import signal
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from db.models import JobStage, JobStatus
+from db.models import JobStage
+from tests.support.worker_stubs import _make_job
 from workers.base import BaseWorker, JobHandledDirectly, _resolve_job_concurrency
 
 
@@ -26,22 +25,6 @@ class _DoneConcurrentWorker(BaseWorker):
     stage = JobStage.policy
     next_stage = JobStage.done
     poll_interval = 0
-
-
-def _make_job(**overrides):
-    defaults = dict(
-        id=uuid.uuid4(),
-        address="0x" + "a" * 40,
-        name="test-job",
-        status=JobStatus.processing,
-        stage=JobStage.discovery,
-        updated_at=datetime.now(timezone.utc),
-        worker_id="some-worker",
-        detail=None,
-        retry_count=0,
-    )
-    defaults.update(overrides)
-    return SimpleNamespace(**defaults)
 
 
 @pytest.mark.parametrize(

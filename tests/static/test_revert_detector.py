@@ -24,6 +24,8 @@ from services.static.contract_analysis_pipeline.revert_detect import (  # noqa: 
 from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
     apply_writer_gate_pass,
 )
+from tests.support.slither_compile import _compile, _function  # noqa: E402
+from tests.support.solc import _solc_086  # noqa: E402
 
 pytestmark = pytest.mark.compile
 
@@ -38,21 +40,6 @@ def _cap_for(sl: Slither, full_name: str, cname: str = "C"):
     apply_writer_gate_pass(contract, trees)
     apply_reentrancy_pause_pass(contract, trees)
     return evaluate_tree(trees[full_name])
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
-
-
-def _function(sl: Slither, name: str):
-    for c in sl.contracts:
-        for f in c.functions:
-            if f.name == name:
-                return f
-    raise LookupError(name)
 
 
 def _gate_kinds(gates: list[RevertGate]) -> list[str]:
@@ -331,23 +318,6 @@ def test_try_catch_around_external_authority_call_is_not_opaque(tmp_path):
 
 
 # Slither lowers ``require(cond, MyError())`` to ``require(bool,error)``; dropping it defaulted the function to public.
-
-
-def _solc_086() -> str:
-    """The offline guard blocks solc downloads, so a missing version skips. Locally: ``solc-select install 0.8.27``."""
-    import solc_select.solc_select as ss
-
-    best: tuple[int, int, int] | None = None
-    for version in ss.installed_versions():
-        try:
-            parsed = tuple(int(x) for x in version.split("."))
-        except ValueError:
-            continue
-        if len(parsed) == 3 and (0, 8, 26) <= parsed and parsed[:2] == (0, 8) and (best is None or parsed > best):
-            best = parsed
-    if best is None:
-        pytest.skip("no installed solc >=0.8.26 (run `solc-select install 0.8.27`)")
-    return str(ss.artifact_path(".".join(str(x) for x in best)))
 
 
 def _compile_086(tmp_path: Path, source: str) -> Slither:

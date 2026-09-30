@@ -12,9 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import select
 
 from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 from db.models import ContractMaterialization, Job, JobStage, JobStatus, MonitoredContract
@@ -28,25 +26,7 @@ from services.monitoring.materialization_reconciler import (
     plan_rebuilds,
 )
 from tests.conftest import requires_postgres
-
-
-@pytest.fixture()
-def cm_db(db_session, monkeypatch):
-    import os
-
-    test_url = os.environ.get("TEST_DATABASE_URL")
-    if not test_url:
-        pytest.skip("TEST_DATABASE_URL not set")
-    engine = create_engine(test_url)
-    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
-    monkeypatch.setattr("db.contract_materializations.SessionLocal", factory)
-    monkeypatch.setattr("db.contract_materializations.get_storage_client", lambda: None)
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-    yield db_session
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-    engine.dispose()
+from tests.support.materializations import cm_db  # noqa: F401  (fixture, registered by import)
 
 
 def _monitored(session, address: str, *, chain: str = "ethereum") -> MonitoredContract:

@@ -39,6 +39,7 @@ from tests.support.anvil import (
     _compile_and_deploy,
     anvil_env,  # noqa: F401
 )
+from tests.support.isolation import _disable_scan_confirmation_depth  # noqa: F401  (fixture, registered by import)
 
 _has_anvil = shutil.which("anvil") is not None
 _has_cast = shutil.which("cast") is not None
@@ -56,12 +57,6 @@ pytestmark = [
 ]
 
 PROTO_NAME = "__test_relational_sync__"
-
-
-@pytest.fixture(autouse=True)
-def _disable_scan_confirmation_depth(monkeypatch):
-    # The 12-block confirmation clamp would hide events on a short Anvil chain.
-    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
 
 
 # This variant also owns the EIP-1967 admin slot, which ``changeAdmin`` rotates.

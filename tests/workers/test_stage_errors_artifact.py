@@ -2,30 +2,12 @@
 
 from __future__ import annotations
 
-import os
-
-import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
-
 from db.models import Artifact, JobStage
 from db.queue import create_job
 from tests.cache_helpers import requires_postgres
+from tests.support.db_fixtures import test_session_local  # noqa: F401  (fixture, registered by import)
 from utils.logging import record_degraded
 from workers.base import BaseWorker
-
-
-@pytest.fixture()
-def test_session_local(monkeypatch):
-    """It opens a fresh session to survive a broken primary transaction."""
-    test_url = os.environ.get("TEST_DATABASE_URL")
-    if not test_url:
-        pytest.skip("TEST_DATABASE_URL not set")
-    test_engine = create_engine(test_url)
-    test_factory = sessionmaker(bind=test_engine, class_=Session, expire_on_commit=False)
-    monkeypatch.setattr("workers.base.SessionLocal", test_factory)
-    yield test_factory
-    test_engine.dispose()
 
 
 class _FailingWorker(BaseWorker):

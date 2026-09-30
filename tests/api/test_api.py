@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from tests.cache_helpers import requires_postgres
+from tests.support.api_helpers import _admin_headers
 
 
 def _make_fake_job(
@@ -52,12 +53,6 @@ def make_client() -> TestClient:
     import api
 
     return TestClient(api.app)
-
-
-def _admin_headers() -> dict[str, str]:
-    from routers import deps
-
-    return {"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""}
 
 
 def test_build_company_function_entry_filters_generic_authority_contract_when_specific_principals_exist() -> None:

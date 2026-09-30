@@ -16,17 +16,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from db.models import JobStage, JobStatus
+from tests.support.worker_stubs import _TestWorker
 from utils.logging import chain_var
-from workers.base import BaseWorker, _job_chain_log_value
-
-
-class _TestWorker(BaseWorker):
-    stage = JobStage.discovery
-    next_stage = JobStage.static
-    poll_interval = 0
-
-    def process(self, session, job):
-        pass
+from workers.base import _job_chain_log_value
 
 
 def _make_job(**overrides):

@@ -7,15 +7,13 @@ the integration tests confirm the facts land in ``principal_labels.details``.
 
 from typing import Any, cast
 
-import pytest
-
 from db.models import Contract, EffectiveFunction, FunctionPrincipal, Protocol
-from services.concurrency import RpcExecutor
 from services.policy.principal_enrichment import (
     _compute_signer_overlap,
     build_principal_labels,
     load_protocol_safe_owner_sets,
 )
+from tests.support.isolation import _reset_executor  # noqa: F401  (fixture, registered by import)
 
 # The pauser's owners are a strict subset: the etherfi shape the plan cites.
 OPS = "0x2aca71020de61bb532008049e1bd41e451ae8adc"
@@ -24,13 +22,6 @@ OPS_OWNERS = [f"0x{i:040x}" for i in range(1, 8)]  # 7 owners
 PAUSER_OWNERS = OPS_OWNERS[:5]  # strict subset of the ops signers
 DISJOINT = "0x" + "9" * 40
 DISJOINT_OWNERS = [f"0x{i:040x}" for i in range(100, 103)]
-
-
-@pytest.fixture(autouse=True)
-def _reset_executor():
-    RpcExecutor.reset_for_tests()
-    yield
-    RpcExecutor.reset_for_tests()
 
 
 def _registry(*entries):

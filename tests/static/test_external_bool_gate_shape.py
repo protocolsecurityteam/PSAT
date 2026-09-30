@@ -14,9 +14,6 @@ controls (RoleRegistry.only* void view calls, canCall oracles, merkle witness).
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
-
 import pytest
 
 slither = pytest.importorskip("slither")
@@ -33,13 +30,7 @@ from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
     _collect_state_var_authority_roles,
     build_controller_tracking,
 )
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
+from tests.support.slither_compile import _compile  # noqa: E402
 
 
 def _contract(sl: Slither, name: str):

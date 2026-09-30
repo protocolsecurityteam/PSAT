@@ -11,14 +11,7 @@ from services.resolution.tracking import (
     _classify_uncached,
     _classify_uncached_batched,
 )
-
-
-@pytest.fixture(autouse=True)
-def _isolated_classify_cache():
-    tracking.clear_classify_cache()
-    yield
-    tracking.clear_classify_cache()
-
+from tests.support.isolation import _isolated_classify_cache  # noqa: F401  (fixture, registered by import)
 
 ADDR_OWNER = "0x" + "11" * 20  # an "owner" address used in several mocks
 

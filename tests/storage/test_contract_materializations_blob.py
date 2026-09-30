@@ -16,6 +16,10 @@ from db import contract_materializations as cm
 from db.models import ContractMaterialization
 from db.storage import StorageError, StorageKeyMissing
 from tests.conftest import requires_postgres
+from tests.support.materializations import (
+    _clean_cm,  # noqa: F401  (fixture, registered by import)
+    _route_to_test_db,  # noqa: F401  (fixture, registered by import)
+)
 
 
 class _StubStorage:
@@ -129,33 +133,6 @@ def test_hydrate_tracking_plan_uses_tracking_plan_columns():
     )
     with patch("db.contract_materializations.get_storage_client", return_value=storage):
         assert cm.hydrate_tracking_plan(row) == {"slots": [1, 2]}
-
-
-@pytest.fixture()
-def _clean_cm(db_session):
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-    yield db_session
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-
-
-@pytest.fixture()
-def _route_to_test_db(monkeypatch):
-    import os
-
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import Session, sessionmaker
-
-    test_url = os.environ.get("TEST_DATABASE_URL")
-    if not test_url:
-        pytest.skip("TEST_DATABASE_URL not set")
-
-    engine = create_engine(test_url)
-    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
-    monkeypatch.setattr("db.contract_materializations.SessionLocal", factory)
-    yield
-    engine.dispose()
 
 
 @requires_postgres

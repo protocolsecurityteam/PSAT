@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.support.api_helpers import _mock_session_ctx
+
 _ADDR = "0x" + "ab" * 20
 _BASE = "base"
 _BASE_ID = 8453
@@ -21,11 +23,6 @@ def _client() -> TestClient:
     import api
 
     return TestClient(api.app)
-
-
-def _mock_session_ctx(mock_session_cls, mock_session):
-    mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-    mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
 
 def test_helper_accepts_supported_chain():

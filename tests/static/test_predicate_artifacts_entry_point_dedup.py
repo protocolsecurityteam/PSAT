@@ -5,8 +5,6 @@ this breaks before a live test pays a 17-minute stage.
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -20,13 +18,7 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
     _is_externally_callable,
     build_predicate_artifacts_with_pause_info,
 )
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
+from tests.support.slither_compile import _compile  # noqa: E402
 
 
 def _select_contract(sl: Slither, name: str):

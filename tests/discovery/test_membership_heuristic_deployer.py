@@ -25,6 +25,7 @@ from db.models import (
 )
 from services.discovery import membership_gate as gate
 from tests.conftest import requires_postgres
+from tests.support.membership_builders import _contract
 
 pytestmark = [requires_postgres]
 
@@ -54,13 +55,6 @@ def _code_fact(session, address: str, *, tx: str | None = _TX, absent: bool = Fa
         )
     )
     session.flush()
-
-
-def _contract(session, address: str, **fields) -> Contract:
-    row = Contract(address=address.lower(), chain=fields.pop("chain", "ethereum"), **fields)
-    session.add(row)
-    session.flush()
-    return row
 
 
 def _anchor(session, protocol: Protocol, address: str, *, deployer: str, **fields) -> Contract:

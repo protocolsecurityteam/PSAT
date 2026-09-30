@@ -6,7 +6,6 @@ FunctionPrincipal type resolver, and the mainnet byte-identity guarantee.
 
 import pytest
 
-from services.concurrency import RpcExecutor
 from services.policy.principal_enrichment import build_principal_labels
 from services.resolution.cross_chain_authority import (
     CROSS_CHAIN_AUTHORITY_TYPE,
@@ -15,6 +14,7 @@ from services.resolution.cross_chain_authority import (
     make_cross_chain_recognizer,
     undo_l1_to_l2_alias,
 )
+from tests.support.isolation import _reset_executor  # noqa: F401  (fixture, registered by import)
 from utils.chains import chain_by_id
 from workers.policy_worker import _make_principal_type_resolver
 
@@ -22,13 +22,6 @@ BASE_CHAIN_ID = 8453
 BASE = chain_by_id(BASE_CHAIN_ID)
 BASE_MESSENGER = "0x4200000000000000000000000000000000000007"
 BASE_BRIDGE = "0x4200000000000000000000000000000000000010"
-
-
-@pytest.fixture(autouse=True)
-def _reset_executor():
-    RpcExecutor.reset_for_tests()
-    yield
-    RpcExecutor.reset_for_tests()
 
 
 def _alias(l1: str) -> str:

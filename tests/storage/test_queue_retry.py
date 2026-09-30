@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from sqlalchemy import text
 
-from db.models import Artifact, Job, JobStage, JobStatus
+from db.models import Job, JobStage, JobStatus
 from db.queue import (
     claim_job,
     create_job,
@@ -14,19 +13,7 @@ from db.queue import (
     requeue_job,
 )
 from tests.cache_helpers import requires_postgres
-
-
-@pytest.fixture()
-def clean_jobs(db_session):
-    """``db_session`` only sweeps monitoring tables."""
-    db_session.query(Artifact).delete()
-    db_session.query(Job).delete()
-    db_session.commit()
-    yield db_session
-    db_session.rollback()
-    db_session.query(Artifact).delete()
-    db_session.query(Job).delete()
-    db_session.commit()
+from tests.support.db_fixtures import clean_jobs  # noqa: F401  (fixture, registered by import)
 
 
 def _backdate(session, job_id, *, seconds_ago: int) -> None:

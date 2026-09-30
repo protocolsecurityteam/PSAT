@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -15,21 +13,7 @@ from services.static.contract_analysis_pipeline.predicates import (  # noqa: E40
     build_predicate_tree,
     build_return_predicate_tree,
 )
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
-
-
-def _function(sl: Slither, name: str):
-    for c in sl.contracts:
-        for f in c.functions:
-            if f.name == name:
-                return f
-    raise LookupError(name)
+from tests.support.slither_compile import _compile, _function  # noqa: E402
 
 
 def _all_leaves(tree):

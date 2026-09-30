@@ -5,61 +5,21 @@ Not bytecode pinning.
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
-
 import pytest
 
 slither = pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
 
 from services.resolution.adapters import AdapterRegistry, EnumerationResult, EvaluationContext  # noqa: E402
 from services.resolution.adapters.event_indexed import EventIndexedAdapter  # noqa: E402
 from services.resolution.predicate_evaluator import (  # noqa: E402
     evaluate_tree_with_registry,
 )
-from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
-    build_predicate_tree,
-)
-from services.static.contract_analysis_pipeline.reentrancy_pause import (  # noqa: E402
-    apply_reentrancy_pause_pass,
-)
-from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
-    apply_writer_gate_pass,
-)
+from tests.support.predicate_trees import _all_leaves, _build_pipeline  # noqa: E402
+from tests.support.slither_compile import _compile  # noqa: E402
 
 ADDR_OWNER = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ADDR_USER = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 ADDR_OTHER = "0xcccccccccccccccccccccccccccccccccccccccc"
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
-
-
-def _build_pipeline(contract):
-    trees = {}
-    for fn in contract.functions:
-        if fn.is_constructor:
-            continue
-        trees[fn.full_name] = build_predicate_tree(fn)
-    apply_writer_gate_pass(contract, trees)
-    apply_reentrancy_pause_pass(contract, trees)
-    return trees
-
-
-def _all_leaves(tree):
-    if tree is None:
-        return []
-    if tree.get("op") == "LEAF":
-        return [tree["leaf"]] if tree.get("leaf") else []
-    out = []
-    for child in tree.get("children") or []:
-        out.extend(_all_leaves(child))
-    return out
 
 
 def _registry() -> AdapterRegistry:

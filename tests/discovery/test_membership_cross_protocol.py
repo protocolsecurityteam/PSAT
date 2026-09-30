@@ -14,6 +14,7 @@ import pytest
 from db.models import Contract, ContractCreationWitness, ContractMembershipWitness, Protocol
 from services.discovery import membership_gate as gate
 from tests.conftest import requires_postgres
+from tests.support.membership_builders import _contract
 
 pytestmark = [requires_postgres]
 
@@ -29,13 +30,6 @@ def _protocol(session, label: str) -> Protocol:
 
 def _addr(n: int) -> str:
     return "0x" + hex(n)[2:].zfill(40)
-
-
-def _contract(session, address: str, **fields) -> Contract:
-    row = Contract(address=address.lower(), chain=fields.pop("chain", "ethereum"), **fields)
-    session.add(row)
-    session.flush()
-    return row
 
 
 def _code_fact(session, address: str, *, tx: str | None = None) -> None:

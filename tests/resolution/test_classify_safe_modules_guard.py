@@ -17,6 +17,7 @@ from services.resolution.tracking import (
     _classify_uncached_batched,
     _resolve_pinned_block,
 )
+from tests.support.isolation import _isolated_classify_cache  # noqa: F401  (fixture, registered by import)
 
 
 def _protection(details: dict) -> dict:
@@ -68,13 +69,6 @@ def _abi_encode_string(s: str) -> str:
     raw = s.encode("utf-8")
     pad = (32 - (len(raw) % 32)) % 32
     return "0x" + format(32, "064x") + format(len(raw), "064x") + raw.hex() + ("00" * pad)
-
-
-@pytest.fixture(autouse=True)
-def _isolated_classify_cache():
-    tracking.clear_classify_cache()
-    yield
-    tracking.clear_classify_cache()
 
 
 def _wire(

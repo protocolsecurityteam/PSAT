@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import textwrap
-from pathlib import Path
 
 import pytest
 from eth_utils.crypto import keccak
@@ -24,6 +22,7 @@ from services.static.contract_analysis_pipeline.effects import (  # noqa: E402
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
     build_predicate_artifacts_with_pause_info,
 )
+from tests.support.slither_compile import _compile  # noqa: E402
 
 
 def _selector(signature: str) -> str:
@@ -32,13 +31,6 @@ def _selector(signature: str) -> str:
 
 def _claim_ids(info: EffectInfo) -> set[str]:
     return {claim["claim_id"] for claim in (info.get("claims") or [])}
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
 
 
 def _contract(sl: Slither, name: str | None = None):

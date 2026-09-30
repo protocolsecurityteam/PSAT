@@ -7,27 +7,18 @@ org-identity label. Pure fact + DB grouping + build_principal_labels integration
 
 from typing import Any, cast
 
-import pytest
-
 from db.models import Contract, Protocol
-from services.concurrency import RpcExecutor
 from services.policy.principal_enrichment import (
     _shared_deployer_fact,
     build_principal_labels,
     load_protocol_deployer_groups,
 )
+from tests.support.isolation import _reset_executor  # noqa: F401  (fixture, registered by import)
 
 DEPLOYER = "0x" + "d" * 40
 A = "0x" + "1" * 40
 B = "0x" + "2" * 40
 C = "0x" + "3" * 40
-
-
-@pytest.fixture(autouse=True)
-def _reset_executor():
-    RpcExecutor.reset_for_tests()
-    yield
-    RpcExecutor.reset_for_tests()
 
 
 def test_fact_emitted_for_shared_group():

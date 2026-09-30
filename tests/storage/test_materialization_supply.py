@@ -15,8 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import select
 
 from db import contract_materializations as cm
 from db.contract_materializations import (
@@ -37,6 +36,7 @@ from db.contract_materializations import (
 from db.models import ContractMaterialization, Job, JobStage, JobStatus
 from db.queue import proven_analysis_schema_version
 from tests.conftest import requires_postgres
+from tests.support.materializations import cm_db  # noqa: F401  (fixture, registered by import)
 
 ADDR = "0x" + "a1" * 20
 OTHER_ADDR = "0x" + "b2" * 20
@@ -46,25 +46,6 @@ OTHER_KECCAK = "0x" + "22" * 32
 ANALYSIS = {"subject": {"address": ADDR, "name": "C"}, "functions": []}
 PLAN = {"contract_address": ADDR, "tracked_controllers": []}
 TREES = {"schema_version": "semantic", "trees": {}}
-
-
-@pytest.fixture()
-def cm_db(db_session, monkeypatch):
-    import os
-
-    test_url = os.environ.get("TEST_DATABASE_URL")
-    if not test_url:
-        pytest.skip("TEST_DATABASE_URL not set")
-    engine = create_engine(test_url)
-    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
-    monkeypatch.setattr("db.contract_materializations.SessionLocal", factory)
-    monkeypatch.setattr("db.contract_materializations.get_storage_client", lambda: None)
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-    yield db_session
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-    engine.dispose()
 
 
 def _publish(**overrides: Any) -> str:

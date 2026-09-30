@@ -11,12 +11,16 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import SessionFactory, requires_postgres, requires_storage
+from tests.conftest import requires_postgres, requires_storage
 from tests.support.audit_coverage_builders import (
     _add_audit,
     _add_contract,
     _stub_get_code,
     seed_protocol,  # noqa: F401  (fixture, registered by import)
+)
+from tests.support.audit_fixtures import (
+    api_with_storage,  # noqa: F401  (fixture, registered by import)
+    worker,  # noqa: F401  (fixture, registered by import)
 )
 
 pytestmark = [
@@ -45,44 +49,6 @@ def _fixture_text(name: str) -> str:
     path = AUDITS_DIR / name
     assert path.exists(), f"missing audit fixture: {path}"
     return path.read_text()
-
-
-@pytest.fixture()
-def worker(monkeypatch):
-    from unittest.mock import patch
-
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    import workers.audit_scope_extraction as worker_mod
-    from tests.conftest import DATABASE_URL
-
-    test_engine = create_engine(DATABASE_URL)
-    test_session_factory = sessionmaker(bind=test_engine, expire_on_commit=False)
-    monkeypatch.setattr(worker_mod, "SessionLocal", test_session_factory)
-
-    with patch("signal.signal"):
-        w = worker_mod.AuditScopeExtractionWorker()
-    try:
-        yield w
-    finally:
-        test_engine.dispose()
-
-
-@pytest.fixture()
-def api_with_storage(monkeypatch, db_session, storage_bucket):
-    from fastapi.testclient import TestClient
-
-    import api as api_module
-    from routers import deps
-    from routers.deps import require_admin_key
-
-    monkeypatch.setattr(deps, "SessionLocal", SessionFactory(db_session))
-    api_module.app.dependency_overrides[require_admin_key] = lambda: None
-    try:
-        yield TestClient(api_module.app)
-    finally:
-        api_module.app.dependency_overrides.pop(require_admin_key, None)
 
 
 def _ts(year: int, month: int = 1, day: int = 1) -> datetime:

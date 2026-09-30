@@ -10,24 +10,15 @@ body sources and ``_forwarded_param_sources`` picked the mapping KEY out of it.
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 slither = pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
 
 from services.static.claims import build_claims  # noqa: E402
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
-
-
-def _compile(tmp_path: Path, source: str, name: str):
-    f = tmp_path / f"{name}.sol"
-    f.write_text(textwrap.dedent(source).strip() + "\n")
-    sl = Slither(str(f))
-    return next(c for c in sl.contracts if c.name == name)
+from tests.support.slither_compile import _compile_named  # noqa: E402
 
 
 def _out_flow(info) -> Any:
@@ -117,7 +108,7 @@ contract Queue {
 
 def test_token_owner_destination_is_not_a_caller_supplied_param(tmp_path):
     """``ownerOf(id)`` unions {view_call, state_variable, parameter}, the parameter being the key."""
-    contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
+    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
     effects = build_effects(contract)
     target = _out_flow(effects["functions"]["claim(uint256)"])["target_kind"]
     assert target["kind"] != "param", target
@@ -125,7 +116,7 @@ def test_token_owner_destination_is_not_a_caller_supplied_param(tmp_path):
 
 
 def test_token_owner_external_erc721_lookup(tmp_path):
-    contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
+    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
     effects = build_effects(contract)
     target = _out_flow(effects["functions"]["claimExternal(address,uint256)"])["target_kind"]
     assert target == {"kind": "token_owner", "tier": "static_trace"}, target
@@ -133,20 +124,20 @@ def test_token_owner_external_erc721_lookup(tmp_path):
 
 def test_token_owner_nested_matches_inline_entry(tmp_path):
     """The helper hop must not make the classification more specific than the entry."""
-    contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
+    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
     fns = build_effects(contract)["functions"]
     assert _out_flow(fns["claim(uint256)"])["target_kind"] == _out_flow(fns["claimInline(uint256)"])["target_kind"]
 
 
 def test_token_owner_batch_matches_single(tmp_path):
-    contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
+    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
     fns = build_effects(contract)["functions"]
     assert _out_flow(fns["batchClaim(uint256[])"])["target_kind"] == {"kind": "token_owner", "tier": "static_trace"}
 
 
 def test_token_owner_taint_is_not_a_token_owner_destination(tmp_path):
     """A positive def-chain test, so a merely tainted value can't borrow the kind."""
-    contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
+    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
     effects = build_effects(contract)
     target = _out_flow(effects["functions"]["claimMangled(uint256,uint160)"])["target_kind"]
     assert target["kind"] == "indeterminate", target
@@ -154,7 +145,7 @@ def test_token_owner_taint_is_not_a_token_owner_destination(tmp_path):
 
 def test_unrecognized_getter_result_is_not_a_caller_supplied_param(tmp_path):
     """Only the ERC-721 selector earns a name; every other callee falls to indeterminate."""
-    contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
+    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
     effects = build_effects(contract)
     target = _out_flow(effects["functions"]["claimUnknownGetter(uint256)"])["target_kind"]
     assert target["kind"] != "param", target
@@ -162,7 +153,7 @@ def test_unrecognized_getter_result_is_not_a_caller_supplied_param(tmp_path):
 
 
 def test_token_owner_union_with_storage_stays_indeterminate(tmp_path):
-    contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
+    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
     effects = build_effects(contract)
     target = _out_flow(effects["functions"]["claimUnion(uint256,bool)"])["target_kind"]
     assert target["kind"] == "indeterminate", target
@@ -170,7 +161,7 @@ def test_token_owner_union_with_storage_stays_indeterminate(tmp_path):
 
 def test_token_owner_reaches_the_claims_witness(tmp_path):
     """The frontend renders it from the witness."""
-    contract = _compile(tmp_path, TOKEN_OWNER_SRC, "Queue")
+    contract = _compile_named(tmp_path, TOKEN_OWNER_SRC, "Queue")
     effects = build_effects(contract)
     claims = build_claims(contract, effects, {})["functions"]
     out = [c for c in claims["claim(uint256)"] if c["claim_id"] == "flow.out"]
@@ -215,14 +206,14 @@ contract Requests {
 
 def test_calldata_struct_array_element_destination_is_param(tmp_path):
     """The single-struct twin is in ``test_flow_interproc.py``."""
-    contract = _compile(tmp_path, STRUCT_DEST_SRC, "Requests")
+    contract = _compile_named(tmp_path, STRUCT_DEST_SRC, "Requests")
     fns = build_effects(contract)["functions"]
     assert _out_flow(fns["batchClaim(Requests.Request[])"])["target_kind"]["kind"] == "param"
 
 
 def test_stored_request_row_destination_is_not_param(tmp_path):
     """The stored payee was fixed by an earlier tx; the caller only picked the key."""
-    contract = _compile(tmp_path, STRUCT_DEST_SRC, "Requests")
+    contract = _compile_named(tmp_path, STRUCT_DEST_SRC, "Requests")
     target = _out_flow(build_effects(contract)["functions"]["claimStored(uint256)"])["target_kind"]
     assert target["kind"] != "param", target
     assert target["kind"] in ("storage_no_setter", "storage_setter", "indeterminate"), target
@@ -286,14 +277,14 @@ contract Sweeper {
 
 
 def test_balance_delta_across_external_call(tmp_path):
-    contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
+    contract = _compile_named(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
     amount = _out_flow(build_effects(contract)["functions"]["sweepDelta(address,uint256)"])["amount_kind"]
     assert amount == {"kind": "balance_delta", "tier": "static_trace"}, amount
 
 
 def test_balance_minus_storage_is_a_delta_not_storage_bounded(tmp_path):
     """Crediting the storage value understates how much can leave."""
-    contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
+    contract = _compile_named(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
     amount = _out_flow(build_effects(contract)["functions"]["sweepStranded()"])["amount_kind"]
     assert amount["kind"] != "bounded_by_storage", amount
     assert amount == {"kind": "balance_delta", "tier": "static_trace"}, amount
@@ -301,14 +292,14 @@ def test_balance_minus_storage_is_a_delta_not_storage_bounded(tmp_path):
 
 def test_non_subtractive_balance_arithmetic_is_not_a_delta(tmp_path):
     """Before the balance-derivation guard the constant divisor won alone and read as ``fixed_constant``."""
-    contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
+    contract = _compile_named(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
     amount = _out_flow(build_effects(contract)["functions"]["half(address)"])["amount_kind"]
     assert amount["kind"] not in ("balance_delta", "fixed_constant"), amount
     assert amount["kind"] == "indeterminate", amount
 
 
 def test_balance_delta_reaches_the_claims_witness(tmp_path):
-    contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
+    contract = _compile_named(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
     effects = build_effects(contract)
     claims = build_claims(contract, effects, {})["functions"]
     out = [c for c in claims["sweepStranded()"] if c["claim_id"] == "flow.out"]
@@ -318,7 +309,7 @@ def test_balance_delta_reaches_the_claims_witness(tmp_path):
 
 
 def test_param_index_reaches_the_claims_witness(tmp_path):
-    contract = _compile(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
+    contract = _compile_named(tmp_path, BALANCE_DELTA_SRC, "Sweeper")
     effects = build_effects(contract)
     claims = build_claims(contract, effects, {})["functions"]
     out = [c for c in claims["half(address)"] if c["claim_id"] == "flow.out"]
@@ -373,7 +364,7 @@ contract Returns {
 
 @pytest.fixture(scope="module")
 def _returns(tmp_path_factory):
-    contract = _compile(tmp_path_factory.mktemp("returns"), HELPER_RETURN_SRC, "Returns")
+    contract = _compile_named(tmp_path_factory.mktemp("returns"), HELPER_RETURN_SRC, "Returns")
     return build_effects(contract)["functions"]
 
 
@@ -449,7 +440,7 @@ contract Merge {
 
 @pytest.fixture(scope="module")
 def _merge(tmp_path_factory):
-    contract = _compile(tmp_path_factory.mktemp("merge"), MERGE_SRC, "Merge")
+    contract = _compile_named(tmp_path_factory.mktemp("merge"), MERGE_SRC, "Merge")
     return build_effects(contract)["functions"]
 
 
@@ -521,7 +512,7 @@ contract Recognizer {
 
 @pytest.fixture(scope="module")
 def _recognizer(tmp_path_factory):
-    contract = _compile(tmp_path_factory.mktemp("recog"), RECOGNIZER_SRC, "Recognizer")
+    contract = _compile_named(tmp_path_factory.mktemp("recog"), RECOGNIZER_SRC, "Recognizer")
     return build_effects(contract)["functions"]
 
 
@@ -571,7 +562,7 @@ contract ZeroId {
 
 @pytest.fixture(scope="module")
 def _zero_id(tmp_path_factory):
-    contract = _compile(tmp_path_factory.mktemp("zeroid"), ZERO_ID_SRC, "ZeroId")
+    contract = _compile_named(tmp_path_factory.mktemp("zeroid"), ZERO_ID_SRC, "ZeroId")
     return build_effects(contract)["functions"]
 
 
@@ -641,7 +632,7 @@ contract Intent {
 
 @pytest.fixture(scope="module")
 def _zero_value(tmp_path_factory):
-    contract = _compile(tmp_path_factory.mktemp("zero_value"), ZERO_VALUE_CALL_SRC, "Intent")
+    contract = _compile_named(tmp_path_factory.mktemp("zero_value"), ZERO_VALUE_CALL_SRC, "Intent")
     return build_effects(contract)["functions"]
 
 

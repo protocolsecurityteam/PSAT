@@ -11,19 +11,13 @@ import pytest
 
 from services.resolution import tracking
 from services.resolution.tracking import _classify_uncached, _classify_uncached_batched
+from tests.support.isolation import _isolated_classify_cache  # noqa: F401  (fixture, registered by import)
 
 PROXY = "0x" + "8f" * 20  # stands in for the KING proxy 0x8f08b704...
 IMPL = "0x" + "1c" * 20  # its implementation
 OWNER = "0x" + "a0" * 20  # stands in for 0xa000244b... (the real authority)
 
 _ZERO_WORD = "0x" + "0" * 64
-
-
-@pytest.fixture(autouse=True)
-def _isolated_classify_cache():
-    tracking.clear_classify_cache()
-    yield
-    tracking.clear_classify_cache()
 
 
 def _uint(n: int) -> str:

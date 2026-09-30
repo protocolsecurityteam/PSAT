@@ -21,6 +21,7 @@ from services.resolution.predicate_evaluator import (
     _is_pending_authority_accessor_operand,
     evaluate_tree,
 )
+from tests.support.authority_reads import _Adapter, _Outer, _status
 from tests.support.eq_tree import eq_tree as _eq_tree
 
 CONTRACT = "0x" + "11" * 20
@@ -46,22 +47,6 @@ B_PENDING_DEFAULT_ADMIN_GETTER = {
 GUARD_OWNER = {"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR}
 
 
-class _Outer:
-    def __init__(self, rpc_url: str | None, contract_address: str | None, block: int | None = None) -> None:
-        self.rpc_url = rpc_url
-        self.contract_address = contract_address
-        self.block = block
-
-
-class _Adapter:
-    def __init__(self, outer: _Outer | None) -> None:
-        if outer is not None:
-            self._outer_ctx = outer
-
-    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:
-        return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial")
-
-
 def _ctx_with_rpc(rpc_url: str = "http://rpc.test") -> EvaluationContext:
     return EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(_Outer(rpc_url, CONTRACT)))
 
@@ -78,11 +63,6 @@ def _stub_rpc(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
         raise AssertionError(f"unexpected mode {mode}")
 
     monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
-
-
-def _status(cap: CapabilityExpr) -> str | None:
-    cap_dict = capability_to_dict(cap)
-    return capability_surface_status(cap_dict, project_capability_surface(cap_dict))
 
 
 def _assert_empty_by_design(cap: CapabilityExpr) -> None:

@@ -5,24 +5,15 @@ and balance deltas must still stay ``indeterminate``. Same harness as ``test_flo
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 slither = pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
 from services.static.contract_analysis_pipeline.summaries import _extract_value_flows  # noqa: E402
-
-
-def _compile(tmp_path: Path, source: str, name: str):
-    f = tmp_path / f"{name}.sol"
-    f.write_text(textwrap.dedent(source).strip() + "\n")
-    sl = Slither(str(f))
-    return next(c for c in sl.contracts if c.name == name)
+from tests.support.slither_compile import _compile_named  # noqa: E402
 
 
 def _out_flow(info, kind: str | None = None) -> Any:
@@ -73,7 +64,7 @@ contract Vault {
 
 
 def test_oz_sendvalue_recovers_forwarded_param(tmp_path):
-    contract = _compile(tmp_path, _OZ_ADDRESS_SRC, "Vault")
+    contract = _compile_named(tmp_path, _OZ_ADDRESS_SRC, "Vault")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["withdraw(address,uint256)"])
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
@@ -81,7 +72,7 @@ def test_oz_sendvalue_recovers_forwarded_param(tmp_path):
 
 
 def test_oz_sendvalue_recovers_forwarded_immutable(tmp_path):
-    contract = _compile(tmp_path, _OZ_ADDRESS_SRC, "Vault")
+    contract = _compile_named(tmp_path, _OZ_ADDRESS_SRC, "Vault")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payTreasury(uint256)"])
     assert flow["target_kind"]["kind"] == "immutable"
@@ -89,7 +80,7 @@ def test_oz_sendvalue_recovers_forwarded_immutable(tmp_path):
 
 
 def test_oz_functioncallwithvalue_recovers(tmp_path):
-    contract = _compile(tmp_path, _OZ_ADDRESS_SRC, "Vault")
+    contract = _compile_named(tmp_path, _OZ_ADDRESS_SRC, "Vault")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["forward(address,bytes,uint256)"])
     assert flow["target_kind"]["kind"] == "param"
@@ -119,7 +110,7 @@ contract Redemption {
 
 
 def test_three_hop_forwarded_receiver_recovers_to_param(tmp_path):
-    contract = _compile(tmp_path, _MULTIHOP_SRC, "Redemption")
+    contract = _compile_named(tmp_path, _MULTIHOP_SRC, "Redemption")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["redeemEEth(uint256,address)"])
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
@@ -205,7 +196,7 @@ _STATIC_TRACE = "static_trace"
     ],
 )
 def test_forwarded_helper_origin_kinds(tmp_path, src, contract_name, signature, expected):
-    effects = build_effects(_compile(tmp_path, src, contract_name))
+    effects = build_effects(_compile_named(tmp_path, src, contract_name))
     flow = _out_flow(effects["functions"][signature])
     for key, want in expected.items():
         assert {field: flow[key][field] for field in want} == want
@@ -244,7 +235,7 @@ contract Requests {
 
 
 def test_mapping_element_destination_is_storage_setter(tmp_path):
-    contract = _compile(tmp_path, _MAPPING_ELEMENT_SRC, "Requests")
+    contract = _compile_named(tmp_path, _MAPPING_ELEMENT_SRC, "Requests")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["claim(uint256)"])
     kind = flow["target_kind"]["kind"]
@@ -254,7 +245,7 @@ def test_mapping_element_destination_is_storage_setter(tmp_path):
 
 
 def test_mapping_element_destination_via_helper_is_storage_setter(tmp_path):
-    contract = _compile(tmp_path, _MAPPING_ELEMENT_SRC, "Requests")
+    contract = _compile_named(tmp_path, _MAPPING_ELEMENT_SRC, "Requests")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["claimVia(uint256)"])
     assert flow["target_kind"]["kind"] == "storage_setter"
@@ -284,7 +275,7 @@ contract Divergent {
 
 
 def test_divergent_multi_caller_destination_is_indeterminate(tmp_path):
-    contract = _compile(tmp_path, _DIVERGENT_SRC, "Divergent")
+    contract = _compile_named(tmp_path, _DIVERGENT_SRC, "Divergent")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["router(address,uint256)"])
     # Both members are resolved, so the union is named, never guessed.
@@ -336,7 +327,7 @@ contract Mixed {
 
 
 def test_zero_value_call_does_not_pollute_real_send(tmp_path):
-    contract = _compile(tmp_path, _ZERO_VALUE_SRC, "Mixed")
+    contract = _compile_named(tmp_path, _ZERO_VALUE_SRC, "Mixed")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["redeem(address,uint256,bytes)"])
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
@@ -383,7 +374,7 @@ contract Mix {
 
 
 def test_computed_destination_mix_matches_entry_indeterminate(tmp_path):
-    contract = _compile(tmp_path, _COMPUTED_MIX_SRC, "Mix")
+    contract = _compile_named(tmp_path, _COMPUTED_MIX_SRC, "Mix")
     effects = build_effects(contract)
     nested = _out_flow(effects["functions"]["payDestNested(address)"])
     entry = _out_flow(effects["functions"]["payDestEntry(address)"])
@@ -392,7 +383,7 @@ def test_computed_destination_mix_matches_entry_indeterminate(tmp_path):
 
 
 def test_computed_amount_mix_matches_entry_indeterminate(tmp_path):
-    contract = _compile(tmp_path, _COMPUTED_MIX_SRC, "Mix")
+    contract = _compile_named(tmp_path, _COMPUTED_MIX_SRC, "Mix")
     effects = build_effects(contract)
     nested = _out_flow(effects["functions"]["payAmtNested(address,uint256)"])
     entry = _out_flow(effects["functions"]["payAmtEntry(address,uint256)"])
@@ -418,7 +409,7 @@ contract StructMember {
 
 
 def test_computed_single_origin_struct_member_still_recovers(tmp_path):
-    contract = _compile(tmp_path, _STRUCT_MEMBER_SRC, "StructMember")
+    contract = _compile_named(tmp_path, _STRUCT_MEMBER_SRC, "StructMember")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["pay(StructMember.Payout)"])
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
@@ -471,13 +462,13 @@ contract BalanceAmounts {
 
 
 def test_bare_balance_read_stays_whole_balance(tmp_path):
-    contract = _compile(tmp_path, _BALANCE_AMOUNT_SRC, "BalanceAmounts")
+    contract = _compile_named(tmp_path, _BALANCE_AMOUNT_SRC, "BalanceAmounts")
     effects = build_effects(contract)
     assert _out_flow(effects["functions"]["drainEntry(address)"])["amount_kind"]["kind"] == "whole_balance"
 
 
 def test_balance_amount_nested_matches_entry(tmp_path):
-    contract = _compile(tmp_path, _BALANCE_AMOUNT_SRC, "BalanceAmounts")
+    contract = _compile_named(tmp_path, _BALANCE_AMOUNT_SRC, "BalanceAmounts")
     effects = build_effects(contract)
     fns = effects["functions"]
     assert _out_flow(fns["drainNested(address)"])["amount_kind"] == _out_flow(fns["drainEntry(address)"])["amount_kind"]
@@ -524,14 +515,14 @@ contract Queue {
 
 
 def test_param_forwarded_two_hops_through_shared_helper_recovers(tmp_path):
-    contract = _compile(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
+    contract = _compile_named(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["claimTo(uint256[],uint256[],address)"])
     assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
 
 
 def test_msg_sender_sibling_entries_unchanged(tmp_path):
-    contract = _compile(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
+    contract = _compile_named(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
     effects = build_effects(contract)
     fns = effects["functions"]
     # The echo-drop resolves per call site, not globally.
@@ -540,7 +531,7 @@ def test_msg_sender_sibling_entries_unchanged(tmp_path):
 
 
 def test_onward_forward_nested_matches_entry(tmp_path):
-    contract = _compile(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
+    contract = _compile_named(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
     effects = build_effects(contract)
     fns = effects["functions"]
     nested = _out_flow(fns["claimTo(uint256[],uint256[],address)"])["target_kind"]["kind"]
@@ -574,7 +565,7 @@ contract DivergentTwoHop {
 
 
 def test_divergent_two_hop_binding_stays_indeterminate(tmp_path):
-    contract = _compile(tmp_path, _DIVERGENT_TWO_HOP_SRC, "DivergentTwoHop")
+    contract = _compile_named(tmp_path, _DIVERGENT_TWO_HOP_SRC, "DivergentTwoHop")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["router(address,uint256)"])
     assert flow["target_kind"]["kind"] == "several"
@@ -583,7 +574,7 @@ def test_divergent_two_hop_binding_stays_indeterminate(tmp_path):
 
 
 def test_two_hop_chain_does_not_leak_across_entries(tmp_path):
-    contract = _compile(tmp_path, _DIVERGENT_TWO_HOP_SRC, "DivergentTwoHop")
+    contract = _compile_named(tmp_path, _DIVERGENT_TWO_HOP_SRC, "DivergentTwoHop")
     effects = build_effects(contract)
     fns = effects["functions"]
     assert _out_flow(fns["entryParam(address,uint256)"])["target_kind"]["kind"] == "param"
@@ -637,7 +628,7 @@ contract Batch {
 
 
 def test_param_array_element_destination_recovers_to_param(tmp_path):
-    contract = _compile(tmp_path, _ELEMENT_SRC, "Batch")
+    contract = _compile_named(tmp_path, _ELEMENT_SRC, "Batch")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["executeBatch(address[],uint256[])"])
     # The loop's merged index says nothing about the destination kind.
@@ -646,7 +637,7 @@ def test_param_array_element_destination_recovers_to_param(tmp_path):
 
 
 def test_array_element_nested_matches_entry(tmp_path):
-    contract = _compile(tmp_path, _ELEMENT_SRC, "Batch")
+    contract = _compile_named(tmp_path, _ELEMENT_SRC, "Batch")
     effects = build_effects(contract)
     fns = effects["functions"]
     nested = _out_flow(fns["executeBatch(address[],uint256[])"])
@@ -656,7 +647,7 @@ def test_array_element_nested_matches_entry(tmp_path):
 
 
 def test_storage_rooted_element_is_storage_setter_never_param(tmp_path):
-    contract = _compile(tmp_path, _ELEMENT_SRC, "Batch")
+    contract = _compile_named(tmp_path, _ELEMENT_SRC, "Batch")
     effects = build_effects(contract)
     fns = effects["functions"]
     for name in ("payStored(uint256,uint256)", "payStoredVia(uint256,uint256)"):
@@ -665,7 +656,7 @@ def test_storage_rooted_element_is_storage_setter_never_param(tmp_path):
 
 
 def test_merged_element_base_stays_indeterminate(tmp_path):
-    contract = _compile(tmp_path, _ELEMENT_SRC, "Batch")
+    contract = _compile_named(tmp_path, _ELEMENT_SRC, "Batch")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payMergedBase(bool,uint256,uint256)"])
     assert flow["target_kind"] == {"kind": "indeterminate", "tier": "static_trace"}
@@ -690,7 +681,7 @@ contract StructMemberEntry {
 
 
 def test_calldata_struct_member_destination_is_param(tmp_path):
-    contract = _compile(tmp_path, _STRUCT_MEMBER_ENTRY_SRC, "StructMemberEntry")
+    contract = _compile_named(tmp_path, _STRUCT_MEMBER_ENTRY_SRC, "StructMemberEntry")
     effects = build_effects(contract)
     fns = effects["functions"]
     entry = _out_flow(fns["payEntry(StructMemberEntry.Payout)"])
@@ -710,32 +701,32 @@ def _index(info) -> Any:
 
 
 def test_param_index_for_directly_forwarded_recipient(tmp_path):
-    contract = _compile(tmp_path, _OZ_ADDRESS_SRC, "Vault")
+    contract = _compile_named(tmp_path, _OZ_ADDRESS_SRC, "Vault")
     fns = build_effects(contract)["functions"]
     assert _index(fns["withdraw(address,uint256)"]) == 0
     assert _index(fns["forward(address,bytes,uint256)"]) == 0
 
 
 def test_param_index_survives_a_three_hop_forward(tmp_path):
-    contract = _compile(tmp_path, _MULTIHOP_SRC, "Redemption")
+    contract = _compile_named(tmp_path, _MULTIHOP_SRC, "Redemption")
     fns = build_effects(contract)["functions"]
     # The index follows the binding, not the callee's position.
     assert _index(fns["redeemEEth(uint256,address)"]) == 1
 
 
 def test_param_index_absent_for_non_param_destinations(tmp_path):
-    fns = build_effects(_compile(tmp_path, _OZ_ADDRESS_SRC, "Vault"))["functions"]
+    fns = build_effects(_compile_named(tmp_path, _OZ_ADDRESS_SRC, "Vault"))["functions"]
     assert _index(fns["payTreasury(uint256)"]) is None
-    caller = build_effects(_compile(tmp_path, _CALLER_FORWARD_SRC, "Caller"))["functions"]
+    caller = build_effects(_compile_named(tmp_path, _CALLER_FORWARD_SRC, "Caller"))["functions"]
     assert _index(caller["withdraw(uint256)"]) is None
     assert _index(caller["withdrawToOrigin(uint256)"]) is None
-    routed = build_effects(_compile(tmp_path, _STATEVAR_FORWARD_SRC, "Routed"))["functions"]
+    routed = build_effects(_compile_named(tmp_path, _STATEVAR_FORWARD_SRC, "Routed"))["functions"]
     assert _index(routed["drainToSink()"]) is None
     assert _index(routed["drainToTreasury(uint256)"]) is None
 
 
 def test_param_index_absent_when_bindings_diverge(tmp_path):
-    contract = _compile(tmp_path, _DIVERGENT_TWO_HOP_SRC, "DivergentTwoHop")
+    contract = _compile_named(tmp_path, _DIVERGENT_TWO_HOP_SRC, "DivergentTwoHop")
     fns = build_effects(contract)["functions"]
     assert _index(fns["router(address,uint256)"]) is None
     assert _index(fns["entryParam(address,uint256)"]) == 0
@@ -762,7 +753,7 @@ contract TwoSlots {
 
 
 def test_param_index_absent_when_two_slots_reach_one_helper(tmp_path):
-    contract = _compile(tmp_path, _TWO_SLOT_SRC, "TwoSlots")
+    contract = _compile_named(tmp_path, _TWO_SLOT_SRC, "TwoSlots")
     fns = build_effects(contract)["functions"]
     both = _out_flow(fns["payBoth(address,address,uint256)"])
     assert both["target_kind"]["kind"] == "param"
@@ -773,12 +764,12 @@ def test_param_index_absent_when_two_slots_reach_one_helper(tmp_path):
 
 def test_param_index_absent_for_element_and_struct_member_destinations(tmp_path):
     """The flat positional encoder can't plant a sentinel inside a struct or array."""
-    batch = build_effects(_compile(tmp_path, _ELEMENT_SRC, "Batch"))["functions"]
+    batch = build_effects(_compile_named(tmp_path, _ELEMENT_SRC, "Batch"))["functions"]
     array_elem = _out_flow(batch["executeBatch(address[],uint256[])"])
     assert array_elem["target_kind"]["kind"] == "param"
     assert array_elem.get("target_param_index") is None
 
-    struct = build_effects(_compile(tmp_path, _STRUCT_MEMBER_ENTRY_SRC, "StructMemberEntry"))["functions"]
+    struct = build_effects(_compile_named(tmp_path, _STRUCT_MEMBER_ENTRY_SRC, "StructMemberEntry"))["functions"]
     for name in ("payEntry(StructMemberEntry.Payout)", "payNested(StructMemberEntry.Payout)"):
         member = _out_flow(struct[name])
         assert member["target_kind"]["kind"] == "param"
@@ -786,7 +777,7 @@ def test_param_index_absent_for_element_and_struct_member_destinations(tmp_path)
 
 
 def test_param_index_for_guarded_onward_forward(tmp_path):
-    contract = _compile(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
+    contract = _compile_named(tmp_path, _ONWARD_FORWARD_SRC, "Queue")
     fns = build_effects(contract)["functions"]
     assert _index(fns["claimTo(uint256[],uint256[],address)"]) == 2
     assert _index(fns["claimSelf(uint256[],uint256[])"]) is None
@@ -820,7 +811,7 @@ contract Legacy {
 
 
 def test_legacy_eth_flow_names_a_direct_entry_param_recipient(tmp_path):
-    contract = _compile(tmp_path, _LEGACY_ETH_SRC, "Legacy")
+    contract = _compile_named(tmp_path, _LEGACY_ETH_SRC, "Legacy")
     flow = _eth_flows(contract, "payParam(address,uint256)")[0]
     assert flow["token_var"] == "to"
     assert flow["is_parameter"] is True
@@ -828,7 +819,7 @@ def test_legacy_eth_flow_names_a_direct_entry_param_recipient(tmp_path):
 
 
 def test_legacy_eth_flow_stays_silent_for_storage_and_nested_recipients(tmp_path):
-    contract = _compile(tmp_path, _LEGACY_ETH_SRC, "Legacy")
+    contract = _compile_named(tmp_path, _LEGACY_ETH_SRC, "Legacy")
     storage = _eth_flows(contract, "payTreasury(uint256)")[0]
     assert storage["token_var"] is None and storage["is_parameter"] is False
     # A callee formal isn't an entry slot; ``target_param_index`` resolves it interprocedurally.

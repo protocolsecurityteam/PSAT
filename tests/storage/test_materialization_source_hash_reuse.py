@@ -19,20 +19,12 @@ from db.contract_materializations import ANALYSIS_SCHEMA_VERSION
 from db.models import ContractMaterialization
 from services.discovery.fetch import source_content_hash
 from tests.conftest import requires_postgres
+from tests.support.materializations import _clean_cm  # noqa: F401  (fixture, registered by import)
 
 ADDR_MAINNET = "0x" + "a1" * 20
 ADDR_BASE = "0x" + "b2" * 20
 KECCAK_MAINNET = "0x" + "11" * 32
 KECCAK_BASE = "0x" + "22" * 32  # different bytecode: immutables differ per chain
-
-
-@pytest.fixture()
-def _clean_cm(db_session):
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-    yield db_session
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
 
 
 @pytest.fixture()

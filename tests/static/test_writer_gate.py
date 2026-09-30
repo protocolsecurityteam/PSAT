@@ -4,48 +4,15 @@ how it's written.
 
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
-
 import pytest
 
 slither = pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
 
-from services.static.contract_analysis_pipeline.predicates import (  # noqa: E402
-    build_predicate_tree,
-)
 from services.static.contract_analysis_pipeline.writer_gate import (  # noqa: E402
     apply_writer_gate_pass,
 )
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
-
-
-def _all_leaves(tree):
-    if tree is None:
-        return []
-    if tree.get("op") == "LEAF":
-        return [tree["leaf"]] if tree.get("leaf") else []
-    out = []
-    for child in tree.get("children") or []:
-        out.extend(_all_leaves(child))
-    return out
-
-
-def _build_trees(contract):
-    trees = {}
-    for fn in contract.functions:
-        if fn.is_constructor:
-            continue
-        trees[fn.full_name] = build_predicate_tree(fn)
-    return trees
-
+from tests.support.predicate_trees import _all_leaves, _build_trees  # noqa: E402
+from tests.support.slither_compile import _compile  # noqa: E402
 
 # Rule a: all writers self-keyed stays business.
 

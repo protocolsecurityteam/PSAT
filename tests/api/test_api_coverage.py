@@ -9,22 +9,13 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
+from tests.support.api_helpers import _admin_headers, _mock_session_ctx
+
 
 def _make_client() -> TestClient:
     import api
 
     return TestClient(api.app)
-
-
-def _admin_headers() -> dict[str, str]:
-    from routers import deps
-
-    return {"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""}
-
-
-def _mock_session_ctx(mock_session_cls, mock_session):
-    mock_session_cls.return_value.__enter__ = MagicMock(return_value=mock_session)
-    mock_session_cls.return_value.__exit__ = MagicMock(return_value=False)
 
 
 def _fake_job(

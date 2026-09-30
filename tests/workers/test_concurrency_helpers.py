@@ -6,17 +6,10 @@ from concurrent.futures import Future
 import pytest
 
 from services.concurrency import (
-    RpcExecutor,
     parallel_map,
     submit_rpc,
 )
-
-
-@pytest.fixture(autouse=True)
-def _reset_executor():
-    RpcExecutor.reset_for_tests()
-    yield
-    RpcExecutor.reset_for_tests()
+from tests.support.isolation import _reset_executor  # noqa: F401  (fixture, registered by import)
 
 
 def test_parallel_map_preserves_input_order():

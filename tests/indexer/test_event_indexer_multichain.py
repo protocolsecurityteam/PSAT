@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from services.resolution.repos.event_logs_rpc import FetchedEventLog
 from tests.conftest import DATABASE_URL as _DB_URL
 from tests.conftest import _can_connect, requires_postgres
+from tests.support.indexer_stubs import _DeterministicBlockHash
 from tests.support.solmate_trees import _SOLMATE_CANCALL_TREES
 from utils.chains import ChainInfo, chain_by_id
 from workers.event_log_indexer import (
@@ -171,11 +172,6 @@ class _FixedHead:
 
     def head_block(self) -> int:
         return self._head
-
-
-class _DeterministicBlockHash:
-    def block_hash(self, block_number: int) -> bytes:
-        return block_number.to_bytes(32, "big")
 
 
 @requires_postgres

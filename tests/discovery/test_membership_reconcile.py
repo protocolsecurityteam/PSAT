@@ -6,7 +6,6 @@ apply; the report is read-only.
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 
 from sqlalchemy import select, text
@@ -28,24 +27,11 @@ from scripts.reconcile_membership import (
 )
 from services.discovery import membership_gate as gate
 from tests.conftest import ADDR, requires_postgres
+from tests.support.membership_builders import _contract, _protocol
 
 pytestmark = [requires_postgres]
 
 _TX = "0x" + "ab" * 32
-
-
-def _protocol(session) -> Protocol:
-    row = Protocol(name=f"proto-{uuid.uuid4().hex[:12]}")
-    session.add(row)
-    session.flush()
-    return row
-
-
-def _contract(session, address: str, **fields) -> Contract:
-    row = Contract(address=address.lower(), chain=fields.pop("chain", "ethereum"), **fields)
-    session.add(row)
-    session.flush()
-    return row
 
 
 def _code_fact(session, address: str, *, absent: bool = False, tx: str | None = None) -> None:

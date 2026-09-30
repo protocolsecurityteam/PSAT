@@ -18,7 +18,6 @@ from db.models import (
     Contract,
     EffectBehaviorCache,
     EffectiveFunction,
-    EffectVerdict,
     JobStage,
     Protocol,
 )
@@ -31,6 +30,7 @@ from services.effects.selection import AuthorityGraph, select_candidates
 from tests.cache_helpers import requires_postgres
 from tests.support.effects_ir import _fn, _ir, _node, _var
 from tests.support.effects_stubs import CTX, RecordingStore, ScriptedSimulate, ok, transfer_log, uint_ret
+from tests.support.effects_worker_harness import clean_effects  # noqa: F401  (fixture, registered by import)
 from workers.base import _resolve_job_concurrency
 from workers.effects_worker import EffectsWorker
 
@@ -39,18 +39,6 @@ pytestmark = pytest.mark.anvil
 CONTRACT = "0x" + "11" * 20
 PRINCIPAL = "0x" + "22" * 20
 SENTINEL = "0x" + "ee" * 20
-
-
-@pytest.fixture()
-def clean_effects(db_session):
-    db_session.query(EffectVerdict).delete()
-    db_session.query(EffectBehaviorCache).delete()
-    db_session.commit()
-    yield db_session
-    db_session.rollback()
-    db_session.query(EffectVerdict).delete()
-    db_session.query(EffectBehaviorCache).delete()
-    db_session.commit()
 
 
 def test_inv1_no_name_drives_effect():

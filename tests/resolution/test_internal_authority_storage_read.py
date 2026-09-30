@@ -12,11 +12,12 @@ from typing import Any
 
 import pytest
 
-from services.policy.capability_surface import capability_surface_status, project_capability_surface
+from services.policy.capability_surface import project_capability_surface
 from services.resolution.capabilities import CapabilityExpr
 from services.resolution.capability_resolver import capability_to_dict
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
 from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from tests.support.authority_reads import _Adapter, _Outer, _status, _stub
 from tests.support.eq_tree import eq_tree
 
 CONTRACT = "0x" + "11" * 20
@@ -44,22 +45,6 @@ D_STRUCT_MEMBER_WITH_SLOT: dict[str, Any] = {
 }
 
 
-class _Outer:
-    def __init__(self, rpc_url: str | None, contract_address: str | None, block: int | None = None) -> None:
-        self.rpc_url = rpc_url
-        self.contract_address = contract_address
-        self.block = block
-
-
-class _Adapter:
-    def __init__(self, outer: _Outer | None) -> None:
-        if outer is not None:
-            self._outer_ctx = outer
-
-    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:
-        return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial")
-
-
 def _ctx_with_rpc(rpc_url: str = "http://rpc.test", address: str = CONTRACT) -> EvaluationContext:
     return EvaluationContext(contract_address=address, adapter=_Adapter(_Outer(rpc_url, address)))
 
@@ -68,29 +53,8 @@ def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
     return eq_tree(other_operand, "msg.sender == address(membershipManager)")
 
 
-def _stub(monkeypatch: pytest.MonkeyPatch, *, slot: str, getter: str = "revert", recorder: list | None = None) -> None:
-
-    def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
-        if recorder is not None:
-            recorder.append((method, params))
-        if method == "eth_getStorageAt":
-            if slot == "revert":
-                raise RuntimeError("execution reverted")
-            return slot
-        if getter == "revert":
-            raise RuntimeError("execution reverted")
-        return getter
-
-    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
-
-
 def _word(addr: str) -> str:
     return "0x" + addr[2:].rjust(64, "0")
-
-
-def _status(cap: CapabilityExpr) -> str | None:
-    cap_dict = capability_to_dict(cap)
-    return capability_surface_status(cap_dict, project_capability_surface(cap_dict))
 
 
 def _principals(cap: CapabilityExpr) -> list[str]:
@@ -188,6 +152,7 @@ from services.static.contract_analysis_pipeline.internal_authority_slot import (
     _slots_for_vars,
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import build_predicate_artifacts  # noqa: E402
+from tests.support.predicate_trees import _caller_operand  # noqa: E402
 from tests.support.solc import solc_path_for as _solc_path_for  # noqa: E402
 
 pytestmark = pytest.mark.compile
@@ -203,25 +168,6 @@ def _membership_nft() -> Any:
 
 def _tree_for(contract: Any, signature: str) -> Any:
     return build_predicate_artifacts(contract)["trees"][signature]
-
-
-def _caller_operand(tree: Any) -> dict[str, Any]:
-    out: list[dict[str, Any]] = []
-
-    def walk(node: Any) -> None:
-        if not isinstance(node, dict):
-            return
-        if node.get("op") == "LEAF":
-            leaf = node.get("leaf") or {}
-            if leaf.get("kind") == "equality" and leaf.get("authority_role") == "caller_authority":
-                out.extend(o for o in (leaf.get("operands") or []) if o.get("source") != "msg_sender")
-            return
-        for child in node.get("children") or []:
-            walk(child)
-
-    walk(tree)
-    assert len(out) == 1, f"expected one caller operand, got {out}"
-    return out[0]
 
 
 class TestMembershipNFTStorageSlot:

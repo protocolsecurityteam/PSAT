@@ -5,17 +5,9 @@ The registry is empty by default.
 
 from __future__ import annotations
 
-import pytest
-
 from services.resolution import tracking
 from services.resolution.tracking import _classify_uncached, _classify_uncached_batched
-
-
-@pytest.fixture(autouse=True)
-def _isolated_classify_cache():
-    tracking.clear_classify_cache()
-    yield
-    tracking.clear_classify_cache()
+from tests.support.isolation import _isolated_classify_cache  # noqa: F401  (fixture, registered by import)
 
 
 def _stub_get_code(monkeypatch, code: str = "0x60806040"):

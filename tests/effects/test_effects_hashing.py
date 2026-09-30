@@ -17,6 +17,7 @@ from services.effects.hashing import (
     resolved_function_hash,
 )
 from tests.support.effects_ir import _fn, _ir, _node, _var
+from tests.support.solc import _solc_086
 
 pytestmark = pytest.mark.compile
 
@@ -144,22 +145,6 @@ def test_contract_surface_hash_is_selectorless_and_masks():
     a = prefix + b"\xaa\xbb\xcc\xdd" + b"\xfe"
     b = prefix + b"\x00\x11\x22\x33" + b"\xfe"
     assert contract_surface_hash(a, immutable_references=refs) == contract_surface_hash(b, immutable_references=refs)
-
-
-def _solc_086() -> str:
-    import solc_select.solc_select as ss
-
-    best: tuple[int, int, int] | None = None
-    for version in ss.installed_versions():
-        try:
-            parsed = tuple(int(x) for x in version.split("."))
-        except ValueError:
-            continue
-        if len(parsed) == 3 and (0, 8, 26) <= parsed and parsed[:2] == (0, 8) and (best is None or parsed > best):
-            best = parsed
-    if best is None:
-        pytest.skip("no installed solc >=0.8.26 (run `solc-select install 0.8.27`)")
-    return str(ss.artifact_path(".".join(str(x) for x in best)))
 
 
 def test_override_vs_mixin_resolved_hashes_differ_real_slither(tmp_path: Path):

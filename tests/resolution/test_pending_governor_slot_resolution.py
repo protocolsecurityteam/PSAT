@@ -10,11 +10,11 @@ from typing import Any
 
 import pytest
 
-from services.policy.capability_surface import capability_surface_status, project_capability_surface
-from services.resolution.capabilities import CapabilityExpr
+from services.policy.capability_surface import project_capability_surface
 from services.resolution.capability_resolver import capability_to_dict
 from services.resolution.predicate_evaluator import EvaluationContext, evaluate_tree
 from services.static.contract_analysis_pipeline.predicate_types import PredicateTree
+from tests.support.authority_reads import _Adapter, _Outer, _status, _stub
 from tests.support.eq_tree import eq_tree
 
 CONTRACT = "0x" + "11" * 20
@@ -38,22 +38,6 @@ A_PENDING_GOVERNOR_NO_SLOT: dict[str, Any] = {
 }
 
 
-class _Outer:
-    def __init__(self, rpc_url: str | None, contract_address: str | None, block: int | None = None) -> None:
-        self.rpc_url = rpc_url
-        self.contract_address = contract_address
-        self.block = block
-
-
-class _Adapter:
-    def __init__(self, outer: _Outer | None) -> None:
-        if outer is not None:
-            self._outer_ctx = outer
-
-    def enumerate(self, descriptor: Any, contract_address: str | None) -> CapabilityExpr:
-        return CapabilityExpr.finite_set([], quality="lower_bound", confidence="partial")
-
-
 def _ctx_with_rpc(rpc_url: str = "http://rpc.test", address: str = CONTRACT) -> EvaluationContext:
     return EvaluationContext(contract_address=address, adapter=_Adapter(_Outer(rpc_url, address)))
 
@@ -62,29 +46,8 @@ def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
     return eq_tree(other_operand, "msg.sender == _pendingGovernor()")
 
 
-def _stub(monkeypatch: pytest.MonkeyPatch, *, slot: str, getter: str = "revert", recorder: list | None = None) -> None:
-
-    def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
-        if recorder is not None:
-            recorder.append((method, params))
-        if method == "eth_getStorageAt":
-            if slot == "revert":
-                raise RuntimeError("execution reverted")
-            return slot
-        if getter == "revert":
-            raise RuntimeError("execution reverted")
-        return getter
-
-    monkeypatch.setattr("services.clients.rpc.rpc_request", fake)
-
-
 def _word(addr: str) -> str:
     return "0x" + addr[2:].rjust(64, "0")
-
-
-def _status(cap: CapabilityExpr) -> str | None:
-    cap_dict = capability_to_dict(cap)
-    return capability_surface_status(cap_dict, project_capability_surface(cap_dict))
 
 
 def test_nonzero_slot_resolves_to_pending_governor(monkeypatch: pytest.MonkeyPatch) -> None:

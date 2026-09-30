@@ -40,6 +40,7 @@ from tests.support.anvil import (
     materialization_keys,
     purge_materializations,
 )
+from tests.support.isolation import _disable_scan_confirmation_depth  # noqa: F401  (fixture, registered by import)
 
 _has_anvil = shutil.which("anvil") is not None
 _has_cast = shutil.which("cast") is not None
@@ -59,12 +60,6 @@ pytestmark = [
 ACCOUNT1 = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 
 PROTO_NAME = "__test_enrollment_anvil__"
-
-
-@pytest.fixture(autouse=True)
-def _disable_scan_confirmation_depth(monkeypatch):
-    # The production 12-block clamp would hide every just-emitted event on a short chain.
-    monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
 
 
 # Selectors and event signatures match the real Safe / Ownable.

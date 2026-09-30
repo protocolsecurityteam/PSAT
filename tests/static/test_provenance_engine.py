@@ -19,13 +19,7 @@ from services.static.contract_analysis_pipeline.provenance import (  # noqa: E40
     is_top,
     union,
 )
-
-
-def _compile(tmp_path: Path, source: str) -> Slither:
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    return Slither(str(f))
+from tests.support.slither_compile import _compile  # noqa: E402
 
 
 def _function(sl: Slither, fn_name: str):

@@ -8,40 +8,14 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
-import pytest
 from sqlalchemy import text
 
 from db import contract_materializations as cm
-from db.models import ContractMaterialization
 from tests.conftest import requires_postgres
-
-
-@pytest.fixture()
-def _clean_cm(db_session):
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-    yield db_session
-    db_session.query(ContractMaterialization).delete()
-    db_session.commit()
-
-
-@pytest.fixture()
-def _route_to_test_db(monkeypatch):
-    """Duplicated so this file stays a standalone reproduction."""
-    import os
-
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import Session, sessionmaker
-
-    test_url = os.environ.get("TEST_DATABASE_URL")
-    if not test_url:
-        pytest.skip("TEST_DATABASE_URL not set")
-
-    engine = create_engine(test_url)
-    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
-    monkeypatch.setattr("db.contract_materializations.SessionLocal", factory)
-    yield
-    engine.dispose()
+from tests.support.materializations import (
+    _clean_cm,  # noqa: F401  (fixture, registered by import)
+    _route_to_test_db,  # noqa: F401  (fixture, registered by import)
+)
 
 
 @requires_postgres

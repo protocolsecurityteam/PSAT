@@ -15,21 +15,10 @@ from db.effect_cache import (
 )
 from db.models import Contract, EffectBehaviorCache, EffectiveFunction, EffectVerdict
 from tests.cache_helpers import requires_postgres
+from tests.support.effects_worker_harness import clean_effects  # noqa: F401  (fixture, registered by import)
 
 KERNEL = "kernel"
 PROJECTION = "projection"
-
-
-@pytest.fixture()
-def clean_effects(db_session):
-    db_session.query(EffectVerdict).delete()
-    db_session.query(EffectBehaviorCache).delete()
-    db_session.commit()
-    yield db_session
-    db_session.rollback()
-    db_session.query(EffectVerdict).delete()
-    db_session.query(EffectBehaviorCache).delete()
-    db_session.commit()
 
 
 @requires_postgres

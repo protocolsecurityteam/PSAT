@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-import textwrap
-from pathlib import Path
-
 import pytest
 
 slither = pytest.importorskip("slither")
-from slither import Slither  # noqa: E402
 
 from services.static.contract_analysis_pipeline.effects import build_effects  # noqa: E402
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
@@ -18,18 +14,11 @@ from services.static.contract_analysis_pipeline.summaries import (  # noqa: E402
 from services.static.contract_analysis_pipeline.tracking import (  # noqa: E402
     build_controller_tracking,
 )
-
-
-def _compile(tmp_path: Path, source: str, contract_name: str = "C"):
-    src = textwrap.dedent(source).strip() + "\n"
-    f = tmp_path / "C.sol"
-    f.write_text(src)
-    sl = Slither(str(f))
-    return next(c for c in sl.contracts if c.name == contract_name)
+from tests.support.slither_compile import _compile_contract  # noqa: E402
 
 
 def _build(tmp_path, source, contract_name="C"):
-    contract = _compile(tmp_path, source, contract_name)
+    contract = _compile_contract(tmp_path, source, contract_name)
     predicate_trees = build_predicate_artifacts(contract)
     effects = build_effects(contract)
     semantic_control = _build_semantic_control_summary(contract, tmp_path, predicate_trees, effects)
@@ -107,7 +96,7 @@ def test_struct_state_var_read_spec_preserves_field_components(tmp_path):
         }
     }
     """
-    contract = _compile(tmp_path, source)
+    contract = _compile_contract(tmp_path, source)
     predicate_trees = build_predicate_artifacts(contract)
     effects = build_effects(contract)
     semantic_control = _build_semantic_control_summary(contract, tmp_path, predicate_trees, effects)

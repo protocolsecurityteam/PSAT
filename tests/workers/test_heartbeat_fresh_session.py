@@ -12,16 +12,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from db.models import JobStage, JobStatus
-from workers.base import BaseWorker
-
-
-class _TestWorker(BaseWorker):
-    stage = JobStage.discovery
-    next_stage = JobStage.static
-    poll_interval = 0
-
-    def process(self, session, job):
-        pass
+from tests.support.worker_stubs import _TestWorker
 
 
 def _make_job(**overrides):

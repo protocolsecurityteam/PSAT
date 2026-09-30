@@ -61,6 +61,8 @@ def _contract(db_session, address, *, protocol_id=None, nominated=None, chain="e
 
 
 def _anchored_member(db_session, protocol, address, *, factory=None):
+    """A member whose admitting witness rests on no via-fact at all (W5) — the
+    only kind that anchors outright."""
     row = _contract(db_session, address, protocol_id=protocol.id, nominated=protocol.id, factory=factory)
     gate.write_witness(
         db_session,
@@ -104,6 +106,8 @@ def _probe_read(db_session, subject, value):
 
 
 def _caller_gate(db_session, subject, value, controller_id="owner"):
+    """The subject's resolved owner/authority on both derivations the gate
+    reads: the static caller-gate row and the probe read that admits under D2."""
     _probe_read(db_session, subject, value)
     db_session.add(
         ControllerValue(
@@ -117,7 +121,9 @@ def _caller_gate(db_session, subject, value, controller_id="owner"):
 
 
 def _unclaimed_ward(db_session, controller):
-    """So the exclusivity arm cannot stand in for the rule under test."""
+    """A row the controller is observed to control that no protocol claims —
+    every D2 fixture carries one so the pre-existing exclusivity arm cannot
+    stand in for the rule under test, and a refusal is a real refusal."""
     row = Contract(address=ADDR(int(controller.address, 16) + 0x800000), chain="ethereum")
     db_session.add(row)
     db_session.flush()
@@ -126,7 +132,8 @@ def _unclaimed_ward(db_session, controller):
 
 
 def _d2_only_member(db_session, protocol, address, *, controls):
-    """The EndpointV2 shape."""
+    """The EndpointV2 shape: a row that entered ONLY as a resolved controller
+    of a member (W3-D2), so it anchors nothing."""
     row = _contract(db_session, address, nominated=protocol.id)
     _caller_gate(db_session, controls, row.address)
     _unclaimed_ward(db_session, row)
@@ -139,7 +146,8 @@ def _d2_only_member(db_session, protocol, address, *, controls):
 
 
 AUTHORITY_PATH = ["enumerable_role_store"]
-# Membership of a mapping the contract's own writers populate, not authority.
+#: The resolver derived this caller set by enumerating a param-keyed mapping —
+#: membership of a mapping the contract's own writers populate, not authority.
 MAPPING_PATH = ["param_keyed_mapping_enumeration"]
 
 
@@ -267,8 +275,15 @@ def test_w4_factory_evidence_round_trips():
     assert gate._validate_evidence(WITNESS_RULE_W4_FACTORY, evidence) == evidence
 
 
+# ---------------------------------------------------------------------------
+# (a) D2-principal — the old-timelock shape
+# ---------------------------------------------------------------------------
+
+
 def test_resolved_principal_of_many_members_admits_the_controller(db_session, protocol):
-    """The old EtherFiTimelock: its only admitting evidence is the principal edge."""
+    """The old EtherFiTimelock: a resolved ``timelock`` principal on many
+    member functions and nothing else. Its only admitting evidence is the
+    principal edge."""
     members = [_anchored_member(db_session, protocol, ADDR(0x1000 + i)) for i in range(3)]
     timelock = _contract(db_session, ADDR(0x1010), nominated=protocol.id)
     for member in members:
@@ -302,7 +317,9 @@ def test_safe_and_contract_principals_admit(db_session, protocol, resolved_type)
 
 @pytest.mark.parametrize("resolved_type", ["eoa", None, "unknown"])
 def test_untyped_and_eoa_principals_never_admit(db_session, protocol, resolved_type):
-    """An eoa-typed principal on a contract row is a resolution artifact; NULL is not_determined."""
+    """An EOA is not deployed code, so a CONTRACT row carrying an eoa-typed
+    principal is a resolution artifact; a NULL/unknown type is not_determined.
+    Neither proves control of the member."""
     member = _anchored_member(db_session, protocol, ADDR(0x1200))
     candidate = _contract(db_session, ADDR(0x1201), nominated=protocol.id)
     _principal(db_session, member, candidate.address, resolved_type=resolved_type)
@@ -312,6 +329,8 @@ def test_untyped_and_eoa_principals_never_admit(db_session, protocol, resolved_t
 
 
 def test_principal_on_a_foreign_chain_member_never_admits(db_session, protocol):
+    """A principal fact is an observation on a deployment, and a deployment is
+    (address, chain)."""
     member = _anchored_member(db_session, protocol, ADDR(0x1300))
     member.chain = "base"
     db_session.flush()
@@ -322,8 +341,15 @@ def test_principal_on_a_foreign_chain_member_never_admits(db_session, protocol):
     assert candidate.protocol_id is None
 
 
+# ---------------------------------------------------------------------------
+# (b) D1-principal — the AtomicQueue shape, and its authority cascade
+# ---------------------------------------------------------------------------
+
+
 def test_owner_that_is_a_member_principal_admits_and_cascades(db_session, protocol):
-    """AtomicQueue: its owner EOA is a resolved principal of an anchored member."""
+    """AtomicQueue: its owner EOA is a resolved principal of an anchored
+    member, so the queue admits on W3-D1 — and the row the queue in turn
+    controls admits behind it."""
     member = _anchored_member(db_session, protocol, ADDR(0x2000))
     owner_eoa = ADDR(0x2001)
     _principal(db_session, member, owner_eoa, resolved_type="eoa")
@@ -341,6 +367,7 @@ def test_owner_that_is_a_member_principal_admits_and_cascades(db_session, protoc
     assert witness.via_address == owner_eoa.lower()
     assert witness.evidence["principal_fact"]["member_contract_id"] == member.id
     assert witness.evidence["principal_fact"]["kind"] == "function_principal"
+    # The cascade: the queue is now an anchored member, so its own ward admits.
     assert ward.protocol_id == protocol.id
 
 
@@ -385,7 +412,9 @@ def test_only_an_eoa_principal_proves_d1_transitivity(db_session, protocol, reso
 
 
 def test_d2_only_member_recorded_as_a_principal_still_licenses_nothing(db_session, protocol):
-    """The principal arm must not be a second door into transitivity."""
+    """D2 non-transitivity survives the new arm. A D2-only member controller is
+    normally recorded as its member's principal too, so the principal arm must
+    not be a second door into transitivity for it."""
     anchor = _anchored_member(db_session, protocol, ADDR(0x2300))
     ops_safe = _d2_only_member(db_session, protocol, ADDR(0x2301), controls=anchor)
     _principal(db_session, anchor, ops_safe.address, resolved_type="safe", details={"owners": [ADDR(0x2302)]})
@@ -427,12 +456,16 @@ def test_d1_via_controlling_a_foreign_row_is_refused(db_session, protocol):
 
 
 def test_principal_hosted_only_on_a_d2_member_is_refused(db_session, protocol):
-    """The EndpointV2 shape: its D2 entry is non-transitive, so its facts license nothing."""
+    """The EndpointV2 shape. Its principals (an EOA, a Safe) must license
+    nothing: the D2 entry that made it a member is itself non-transitive, so
+    the facts it hosts cannot license more than it does."""
     anchor = _anchored_member(db_session, protocol, ADDR(0x3000))
     endpoint = _d2_only_member(db_session, protocol, ADDR(0x3001), controls=anchor)
 
+    # D2 direction: a controller-typed principal of the D2-only member.
     controller = _contract(db_session, ADDR(0x3002), nominated=protocol.id)
     _principal(db_session, endpoint, controller.address, resolved_type="timelock")
+    # D1 direction: a subject whose owner is an EOA principal of the same row.
     lone_eoa = ADDR(0x3003)
     _principal(db_session, endpoint, lone_eoa, resolved_type="eoa")
     subject = _contract(db_session, ADDR(0x3004), nominated=protocol.id)
@@ -446,6 +479,7 @@ def test_principal_hosted_only_on_a_d2_member_is_refused(db_session, protocol):
 
 
 def test_the_same_principals_admit_once_an_anchoring_member_hosts_them(db_session, protocol):
+    """Control for the refusal above: the fact, not the row, is what changes."""
     anchor = _anchored_member(db_session, protocol, ADDR(0x3100))
     endpoint = _d2_only_member(db_session, protocol, ADDR(0x3101), controls=anchor)
     controller = _contract(db_session, ADDR(0x3102), nominated=protocol.id)
@@ -494,6 +528,8 @@ def test_hosting_member_demotion_revokes_and_cascades(db_session, protocol):
 
 
 def test_dropping_the_principal_row_revokes_the_witness(db_session, protocol):
+    """The FunctionPrincipal rewrite path: a re-analysis that no longer
+    resolves the principal must not leave the witness standing."""
     member = _anchored_member(db_session, protocol, ADDR(0x4100))
     timelock = _contract(db_session, ADDR(0x4101), nominated=protocol.id)
     row = _principal(db_session, member, timelock.address, resolved_type="timelock")
@@ -544,7 +580,9 @@ def test_integration_operands_never_admit_through_a_principal_edge(db_session, p
 
 
 def test_call_target_operand_is_not_a_principal_fact(db_session, protocol):
-    """The principal arms read ``FunctionPrincipal`` rows only."""
+    """A ``call_target`` row is an integration operand even when the same
+    address is also read as a probe value elsewhere — the principal arms read
+    ``FunctionPrincipal`` rows only."""
     member = _anchored_member(db_session, protocol, ADDR(0x5100))
     weth = _contract(db_session, ADDR(0x5101), nominated=protocol.id)
     db_session.add(
@@ -566,6 +604,11 @@ def test_call_target_operand_is_not_a_principal_fact(db_session, protocol):
         )
         == []
     )
+
+
+# ---------------------------------------------------------------------------
+# (f) Member-factory admission (owner ruling)
+# ---------------------------------------------------------------------------
 
 
 def test_child_of_a_member_factory_admits(db_session, protocol):
@@ -595,6 +638,7 @@ def _child_with_null_factory(db_session, protocol):
     return _contract(db_session, ADDR(0x6301), nominated=protocol.id, factory=None)
 
 
+# CRITICAL: only an anchored (non-D2-only) member factory may license its children.
 @pytest.mark.parametrize(
     "build_child",
     [
@@ -629,7 +673,9 @@ def test_factory_demotion_cascades_to_its_children(db_session, protocol):
 
 
 def test_promoting_the_factory_targets_its_children(db_session, protocol):
-    """The factory enters on W3-D1, the weakest entry that still anchors."""
+    """The other arrival order: the child is recorded first and the factory
+    becomes a member later. Only the promotion delta names it. The factory
+    enters on W3-D1, the weakest entry that still anchors."""
     anchor = _anchored_member(db_session, protocol, ADDR(0x6500))
     owner_eoa = ADDR(0x6503)
     factory = _contract(db_session, ADDR(0x6501), nominated=protocol.id)
@@ -644,6 +690,11 @@ def test_promoting_the_factory_targets_its_children(db_session, protocol):
     db_session.flush()
     assert factory.protocol_id == protocol.id
     assert child.protocol_id == protocol.id
+
+
+# ---------------------------------------------------------------------------
+# (g) Confluence — arrival order does not change the settled state
+# ---------------------------------------------------------------------------
 
 
 def _settled_state(db_session, proto, base):
@@ -666,7 +717,8 @@ def test_principal_arms_settle_identically_across_arrival_orders(db_session):
         owner_eoa = ADDR(base + 3)
         ward = _contract(db_session, ADDR(base + 4), nominated=proto.id)
         _caller_gate(db_session, ward, owner_eoa)
-        # A D2 entry anchors nothing, factory lineage included.
+        # The spawn hangs off the ward, which enters on W3-D1 — a D2 entry
+        # (the timelock) anchors nothing, factory lineage included.
         spawn = _contract(db_session, ADDR(base + 5), nominated=proto.id, factory=ward.address)
 
         def land_principals():
@@ -697,7 +749,9 @@ def test_principal_arms_settle_identically_across_arrival_orders(db_session):
 
 
 def test_settling_is_idempotent_under_the_principal_arms(db_session, protocol):
-    """A non-monotone transitivity arm would make rows oscillate here."""
+    """A second evaluation over unchanged evidence must promote and demote
+    nothing. A non-monotone transitivity arm shows up here first: it makes a
+    row oscillate between promoted and demoted instead of settling."""
     anchor = _anchored_member(db_session, protocol, ADDR(0x7300))
     timelock = _contract(db_session, ADDR(0x7301), nominated=protocol.id)
     _principal(db_session, anchor, timelock.address, resolved_type="timelock")
@@ -728,6 +782,8 @@ def test_losing_the_anchoring_witness_without_demotion_still_cascades(db_session
     owner_eoa = ADDR(0x8001)
     _principal(db_session, anchor, owner_eoa, resolved_type="eoa")
 
+    # The factory enters on BOTH a D1 (anchoring) and a D2 (non-anchoring)
+    # witness, so losing the D1 leaves it a member that no longer anchors.
     factory = _contract(db_session, ADDR(0x8002), nominated=protocol.id)
     _caller_gate(db_session, factory, owner_eoa)
     _caller_gate(db_session, anchor, factory.address)
@@ -782,6 +838,8 @@ def test_a_principal_with_no_authority_derivation_never_admits(db_session, proto
 
 @pytest.mark.parametrize("resolver_path", sorted(gate.W3_PRINCIPAL_AUTHORITY_RESOLVERS))
 def test_every_authority_derivation_admits(db_session, protocol, resolver_path):
+    """Control for the refusal above: the recorded derivation, not the function
+    or the principal, is what decides."""
     member = _anchored_member(db_session, protocol, ADDR(0x9400))
     pauser = _contract(db_session, ADDR(0x9401 + sorted(gate.W3_PRINCIPAL_AUTHORITY_RESOLVERS).index(resolver_path)))
     pauser.nominated_protocol_id = protocol.id
@@ -793,6 +851,8 @@ def test_every_authority_derivation_admits(db_session, protocol, resolver_path):
 
 
 def test_authority_derivation_admits_even_on_a_token_entry_point(db_session, protocol):
+    """The rule is about the DERIVATION, not the function: a proven role holder
+    that is also permitted on a transfer entry point is still a role holder."""
     member = _anchored_member(db_session, protocol, ADDR(0x9500))
     role_holder = _contract(db_session, ADDR(0x9501), nominated=protocol.id)
     _principal(
