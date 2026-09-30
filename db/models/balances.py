@@ -540,6 +540,34 @@ def exactness_eligible_cursor_clause():
     return or_(*clauses)
 
 
+# Per-address deploy-floor witness, kept independently of cursors. ``first_indexed_block`` is set only with
+# ``creation_block_minus_one``; ``not_determined`` means a witness was attempted and did not prove the floor. No row
+# means none was ever attempted.
+FLOOR_WITNESS_BASES = (FIRST_INDEXED_BASIS_CREATION, CURSOR_BASIS_NOT_DETERMINED)
+
+
+class AddressFloorWitness(Base):
+    __tablename__ = "address_floor_witnesses"
+
+    chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    address: Mapped[str] = mapped_column(String(42), primary_key=True)
+    first_indexed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    basis: Mapped[str] = mapped_column(String(32), nullable=False)
+    witnessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            f"basis IN ('{FIRST_INDEXED_BASIS_CREATION}', '{CURSOR_BASIS_NOT_DETERMINED}')",
+            name="ck_address_floor_witnesses_basis",
+        ),
+        CheckConstraint(
+            f"(basis = '{FIRST_INDEXED_BASIS_CREATION}') = (first_indexed_block IS NOT NULL)",
+            name="ck_address_floor_witnesses_block_iff_proven",
+        ),
+        CheckConstraint("address = lower(address)", name="ck_address_floor_witnesses_address_lower"),
+    )
+
+
 # No token means "looked and found nobody".
 HOLDERS_BASIS_PINNED_HAS_ROLE = "pinned_has_role_confirmed"
 HOLDER_SET_EXHAUSTIVE_NOT_DETERMINED = "not_determined"

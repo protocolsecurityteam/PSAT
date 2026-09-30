@@ -12,6 +12,7 @@ from __future__ import annotations
 from db.models import Base
 
 EXPECTED_TABLES = [
+    "address_floor_witnesses",
     "address_labels",
     "artifacts",
     "audit_contract_coverage",

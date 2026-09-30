@@ -39,6 +39,7 @@ _STORAGE_ENV_KEYS = (
 )
 
 from db.models import (  # noqa: E402
+    AddressFloorWitness,
     AuditContractCoverage,
     BalanceCollectionState,
     CompanyPagePurge,
@@ -686,6 +687,7 @@ def db_session():
             WatchedProxy,
             IndexedEventLog,
             IndexedEventCursor,
+            AddressFloorWitness,
             # A poll/scan value-change queues a re-analysis Job (discovery
             # stage, queued). Left behind, it's claimable by an unrelated
             # claim_job in another test on the same xdist worker. FK children

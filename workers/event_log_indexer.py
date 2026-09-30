@@ -18,6 +18,13 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from db.floor_witnesses import (
+    WITNESS_FAILED,
+    WITNESS_PRIOR_INCARNATION,
+    WITNESS_PROVEN,
+    WitnessOutcome,
+    record_floor_witness,
+)
 from db.models import (
     CURSOR_BASIS_NOT_DETERMINED,
     ENROLLMENT_BASIS_PREDICATE_HINT,
@@ -326,6 +333,7 @@ def _witness_seed_block(
     cache: dict[tuple[int, str], tuple[int | None, str]],
     *,
     chain_id: int,
+    session: Session | None = None,
 ) -> tuple[int | None, str]:
     """Grade ``seed`` as a proven lower bound with three pinned reads; returns ``(first_indexed_block, basis)``.
 
@@ -336,13 +344,15 @@ def _witness_seed_block(
     ever stops being allowed it raises and lands on ``not_determined``.
 
     Every failure (either code read, the log read, errors, timeouts, non-list responses, a 7702 stub) returns ``(None,
-    not_determined)``: the block is dropped with the basis.
+    not_determined)``: the block is dropped with the basis. With a ``session``, the outcome is also upserted into
+    ``address_floor_witnesses`` (once per cached address).
     """
     addr = address.lower()
     key = (chain_id, addr)
     if key in cache:
         return cache[key]
     graded: tuple[int | None, str] = (None, BASIS_NOT_DETERMINED)
+    outcome: WitnessOutcome = WITNESS_FAILED
     try:
         rpc_url = require_rpc_url(chain_id=chain_id)
         code_before = rpc_request(rpc_url, "eth_getCode", [addr, hex(seed)], chain_id=chain_id)
@@ -356,7 +366,9 @@ def _witness_seed_block(
             )
             if isinstance(prior_logs, list) and not prior_logs:
                 graded = (seed, FIRST_INDEXED_BASIS_CREATION)
+                outcome = WITNESS_PROVEN
             elif isinstance(prior_logs, list):
+                outcome = WITNESS_PRIOR_INCARNATION
                 logger.info(
                     "logs observed below the creation seed; lower bound not determined",
                     extra={
@@ -373,6 +385,8 @@ def _witness_seed_block(
             extra={"address": addr, "chain_id": chain_id, "seed": seed, "exc_type": type(exc).__name__},
         )
     cache[key] = graded
+    if session is not None:
+        record_floor_witness(session, chain_id=chain_id, address=addr, outcome=outcome, first_indexed_block=graded[0])
     return graded
 
 
@@ -904,7 +918,7 @@ def _enroll_witnessed(
         if pending is not None:
             pending.add((chain_id, address.lower()))
         return False
-    first_indexed_block, basis = _witness_seed_block(address, seed, witness_cache, chain_id=chain_id)
+    first_indexed_block, basis = _witness_seed_block(address, seed, witness_cache, chain_id=chain_id, session=session)
     inserted = enroll_event_cursor(
         session,
         chain_id=chain_id,

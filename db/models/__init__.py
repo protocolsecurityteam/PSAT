@@ -16,6 +16,7 @@ from .balances import (
     EXACTNESS_ELIGIBLE_ENROLLMENT_BASES,
     FIRST_INDEXED_BASIS_CREATION,
     FIRST_INDEXED_BASIS_EXPLICIT,
+    FLOOR_WITNESS_BASES,
     HOLDER_SET_EXHAUSTIVE_NOT_DETERMINED,
     HOLDERS_BASIS_PINNED_HAS_ROLE,
     HOLDERS_WITHHELD_SQL,
@@ -29,6 +30,7 @@ from .balances import (
     WINDOW_STATS_CONTINUOUS,
     WINDOW_STATS_NOT_DETERMINED,
     WINDOW_STATS_UNMEASURED_LEGACY,
+    AddressFloorWitness,
     ContractBalance,
     ContractBalanceFetch,
     ContractBalanceLatest,
@@ -155,6 +157,7 @@ from .tokens import (
 )
 
 __all__ = [
+    "AddressFloorWitness",
     "BalanceCollectionState",
     "PendingEffectsWork",
     "ADMITTING_WITNESS_RULES",
@@ -211,6 +214,7 @@ __all__ = [
     "EtherscanCache",
     "FIRST_INDEXED_BASIS_CREATION",
     "FIRST_INDEXED_BASIS_EXPLICIT",
+    "FLOOR_WITNESS_BASES",
     "FunctionPrincipal",
     "FunctionScoreSignal",
     "HOLDERS_BASIS_PINNED_HAS_ROLE",
