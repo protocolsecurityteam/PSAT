@@ -19,6 +19,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    and_,
     func,
     or_,
 )
@@ -516,10 +517,11 @@ class IndexedEventCursor(Base):
     # caller-supplied, not a witness; ``not_determined`` = witness failed (block NULL).
     first_indexed_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     first_indexed_block_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # How the cursor came to exist and, via ``enrollment_basis_permits_exactness``, whether it may support an exact
-    # empty. ``predicate_tree_hint`` and NULL are eligible; everything else isn't, including ``tracked_topics_asserted``
-    # (topics with no variable attribution) and the default ``not_determined``. Read in ``_cursor_state``
-    # (services/resolution/repos/event_logs_pg.py), ``_authority_has_role_store_cursor`` and ``_authority_backfilled``.
+    # How the cursor came to exist and, with ``first_indexed_block_basis`` via ``cursor_permits_exactness``, whether it
+    # may support an exact result. ``predicate_tree_hint`` and NULL are eligible bases; everything else isn't, including
+    # ``tracked_topics_asserted`` (topics with no variable attribution) and the default ``not_determined``. Read in
+    # ``_cursor_state`` (services/resolution/repos/event_logs_pg.py), ``_authority_has_role_store_cursor`` and
+    # ``_authority_backfilled``. Only ever upgraded, to ``predicate_tree_hint``, and only on a witnessed cursor.
     enrollment_basis: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Largest accepted page, the cap in force, and whether the record is continuous from ``first_indexed_block``. A page
     # at the cap may be truncated, so absence is proven only when every window came back under an enforced cap. NULL on
@@ -530,14 +532,24 @@ class IndexedEventCursor(Base):
 
 
 def exactness_eligible_cursor_clause():
-    """SQL form of :func:`enrollment_basis_permits_exactness`, derived from the same frozenset so they can't drift."""
+    """SQL form of :func:`cursor_permits_exactness`, derived from the same frozenset so they can't drift."""
     non_null = sorted(b for b in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES if b is not None)
     clauses = []
     if None in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES:
         clauses.append(IndexedEventCursor.enrollment_basis.is_(None))
     if non_null:
         clauses.append(IndexedEventCursor.enrollment_basis.in_(non_null))
-    return or_(*clauses)
+    return and_(or_(*clauses), IndexedEventCursor.first_indexed_block_basis == FIRST_INDEXED_BASIS_CREATION)
+
+
+def cursor_permits_exactness(enrollment_basis: str | None, first_indexed_block_basis: str | None) -> bool:
+    """An exact result needs both an allow-listed ``enrollment_basis`` and a witnessed lower bound; NULL and
+    ``explicit_seed`` first-block bases are not witnesses.
+    """
+    return (
+        enrollment_basis_permits_exactness(enrollment_basis)
+        and first_indexed_block_basis == FIRST_INDEXED_BASIS_CREATION
+    )
 
 
 # Per-address deploy-floor witness, kept independently of cursors. ``first_indexed_block`` is set only with

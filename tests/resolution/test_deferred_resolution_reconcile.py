@@ -120,6 +120,8 @@ def _seed_role_cursors(
                 topic0=topic0.lower(),
                 last_indexed_block=last_block,
                 backfill_complete=backfill_complete,
+                first_indexed_block=0,
+                first_indexed_block_basis="creation_block_minus_one",
             )
         )
 
@@ -664,6 +666,8 @@ def _seed_role_store_cursor(
             topic0=_ROLE_SET_TOPIC0.lower(),
             last_indexed_block=last_block,
             backfill_complete=backfill_complete,
+            first_indexed_block=0,
+            first_indexed_block_basis="creation_block_minus_one",
         )
     )
 

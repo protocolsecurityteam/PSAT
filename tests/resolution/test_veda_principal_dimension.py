@@ -170,6 +170,8 @@ def _seed_role_events(session, *, authority: str, events: list[dict]):
                 last_indexed_block=max(max_block, _ROLE_FRONTIER),
                 backfill_complete=True,
                 last_run_at=datetime.now(timezone.utc),
+                first_indexed_block=0,
+                first_indexed_block_basis="creation_block_minus_one",
             )
         )
     session.commit()

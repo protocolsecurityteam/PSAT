@@ -27,7 +27,7 @@ from db.models import (
     FIRST_INDEXED_BASIS_CREATION,
     WINDOW_STATS_CONTINUOUS,
     IndexedEventCursor,
-    enrollment_basis_permits_exactness,
+    cursor_permits_exactness,
 )
 from services.resolution.repos.event_logs_rpc import default_result_cap
 from utils.scoring_status import NOT_DETERMINED
@@ -105,10 +105,12 @@ def absence_coverage(
     warm = sorted(
         str(row.topic0).lower()
         for row in rows
-        if bool(row.backfill_complete) and enrollment_basis_permits_exactness(row.enrollment_basis)
+        if bool(row.backfill_complete) and cursor_permits_exactness(row.enrollment_basis, row.first_indexed_block_basis)
     )
     exactness_ineligible = sorted(
-        str(row.topic0).lower() for row in rows if not enrollment_basis_permits_exactness(row.enrollment_basis)
+        str(row.topic0).lower()
+        for row in rows
+        if not cursor_permits_exactness(row.enrollment_basis, row.first_indexed_block_basis)
     )
     asserted = _normalize_topics(write_surface_topics)
 

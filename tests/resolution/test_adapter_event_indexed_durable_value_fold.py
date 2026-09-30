@@ -86,6 +86,8 @@ def _cursor(topic0: str, *, last_block: int, complete: bool) -> IndexedEventCurs
         topic0=topic0,
         last_indexed_block=last_block,
         backfill_complete=complete,
+        first_indexed_block=0,
+        first_indexed_block_basis="creation_block_minus_one",
     )
 
 

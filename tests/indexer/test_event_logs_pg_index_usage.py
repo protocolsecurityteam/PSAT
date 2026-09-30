@@ -111,6 +111,8 @@ def test_repo_returns_rows_with_raw_column_comparison(db_session):
             topic0=TARGET_TOPIC0,
             last_indexed_block=10_000,
             backfill_complete=True,
+            first_indexed_block=0,
+            first_indexed_block_basis="creation_block_minus_one",
         )
     )
     db_session.flush()

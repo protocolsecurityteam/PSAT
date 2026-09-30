@@ -598,6 +598,8 @@ def _adapter_live_seed_hook(callee_sig: str):
                 topic0=_ROLE_SET_TOPIC0.lower(),
                 last_indexed_block=25_000_000,
                 backfill_complete=True,
+                first_indexed_block=0,
+                first_indexed_block_basis="creation_block_minus_one",
             )
         )
 

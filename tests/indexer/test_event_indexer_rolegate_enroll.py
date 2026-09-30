@@ -401,8 +401,9 @@ def test_second_pass_with_cursor_skips_detection(session, monkeypatch):
     # A2/F1: once the authority has a role-store cursor, a later pass skips
     # detection entirely — zero eth_getCode for the whole 250-gate steady state.
     from db.models import Contract
+    from tests.support.witness_wire import stub_seed_witness
 
-    _seed_creation_block(monkeypatch, 22_039_954)
+    stub_seed_witness(monkeypatch, creation_block=22_039_954)
     _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
     session.add(Contract(address=_PROXY, implementation=_IMPL, is_proxy=True, chain="ethereum"))
     session.commit()
@@ -420,6 +421,33 @@ def test_second_pass_with_cursor_skips_detection(session, monkeypatch):
     monkeypatch.setattr(eli, "resolve_probe_code", _counting)
     enroll_from_completed_jobs(session)  # cursor present → skip detection
     assert calls["n"] == 0
+
+
+@requires_postgres
+def test_unwitnessed_cursor_does_not_skip_detection(session, monkeypatch):
+    # A cursor with no witnessed lower bound can't license exactness, so it doesn't count as the authority's
+    # role-store cursor.
+    from db.models import Contract
+    from tests.support.witness_wire import stub_seed_witness
+
+    stub_seed_witness(monkeypatch, creation_block=22_039_954, fail=True)
+    _stub_probe_code(monkeypatch, _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors))
+    session.add(Contract(address=_PROXY, implementation=_IMPL, is_proxy=True, chain="ethereum"))
+    session.commit()
+    _completed_job_with_gate(session, _gate_descriptor())
+
+    enroll_from_completed_jobs(session)
+
+    calls = {"n": 0}
+    real = eli.resolve_probe_code
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(eli, "resolve_probe_code", _counting)
+    enroll_from_completed_jobs(session)
+    assert calls["n"] == 1
 
 
 @requires_postgres

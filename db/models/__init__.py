@@ -40,6 +40,7 @@ from .balances import (
     RestakingPosition,
     RestakingPositionLatest,
     TvlSnapshot,
+    cursor_permits_exactness,
     enrollment_basis_permits_exactness,
     exactness_eligible_cursor_clause,
 )
@@ -280,6 +281,7 @@ __all__ = [
     "WorkerHeartbeat",
     "WorkerLifecycle",
     "derive_job_chain_id",
+    "cursor_permits_exactness",
     "engine",
     "enrollment_basis_permits_exactness",
     "exactness_eligible_cursor_clause",

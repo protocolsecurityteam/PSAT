@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from db.models import IndexedEventCursor, IndexedEventLog, enrollment_basis_permits_exactness
+from db.models import IndexedEventCursor, IndexedEventLog, cursor_permits_exactness
 from services.resolution.adapters import EnumerationResult
 from services.resolution.caller_sources import CALLER_SOURCES as _CALLER_SOURCES
 from utils.logging import record_stage_metric
@@ -513,18 +513,19 @@ class PostgresEventLogRepo:
         """``(last_indexed_block, backfill_complete)`` for one cursor, or ``(None, False)``.
 
         Every exactness gate goes through here, and a complete zero-row fold is published as exact-empty. Eligibility is
-        an allow-list over ``enrollment_basis`` (``enrollment_basis_permits_exactness``), so unknown bases and
-        ``not_determined`` are ineligible by default.
+        an allow-list (``cursor_permits_exactness``): an attributed ``enrollment_basis`` and a witnessed
+        ``first_indexed_block_basis``, so unknown bases, ``not_determined``, NULL and ``explicit_seed`` lower bounds are
+        ineligible by default.
 
         E.g. a cursor enrolled from a monitoring plan only proves that topic never fired, not that the variable was
-        never written. Ineligible cursors report ``complete=False`` and route to the inline fallback. Legacy NULL bases
-        stay eligible.
+        never written. Ineligible cursors report ``complete=False`` and route to the inline fallback.
         """
         row = self.session.execute(
             select(
                 IndexedEventCursor.last_indexed_block,
                 IndexedEventCursor.backfill_complete,
                 IndexedEventCursor.enrollment_basis,
+                IndexedEventCursor.first_indexed_block_basis,
             )
             .where(IndexedEventCursor.chain_id == chain_id)
             .where(IndexedEventCursor.event_address == event_address.lower())
@@ -532,7 +533,7 @@ class PostgresEventLogRepo:
         ).first()
         if row is None:
             return None, False
-        if not enrollment_basis_permits_exactness(row[2]):
+        if not cursor_permits_exactness(row[2], row[3]):
             return row[0], False
         return row[0], bool(row[1])
 

@@ -432,22 +432,45 @@ def test_ineligible_basis_cannot_mint_an_exact_empty(db_session, basis):
 
 
 @requires_postgres
-def test_legacy_and_hint_cursors_still_fold_enumerable(db_session):
-    """R1 companion. Rows predating the column (NULL) and static-hint rows keep folding enumerable."""
-    for topic, basis in ((_TOPIC_ALLOW_TO, None), (_TOPIC_ALLOW_FROM, ENROLLMENT_BASIS_PREDICATE_HINT)):
-        enroll_event_cursor(
-            db_session, chain_id=1, event_address=_ADDR, topic0=topic, start_block=_SEED, enrollment_basis=basis
-        )
-    db_session.execute(text("UPDATE indexed_event_cursors SET backfill_complete = true, last_indexed_block = 25000000"))
+@pytest.mark.parametrize(
+    "enrollment_basis, first_basis, licensed",
+    [
+        (ENROLLMENT_BASIS_PREDICATE_HINT, FIRST_INDEXED_BASIS_CREATION, True),
+        (None, FIRST_INDEXED_BASIS_CREATION, True),
+        (ENROLLMENT_BASIS_PREDICATE_HINT, None, False),
+        (ENROLLMENT_BASIS_PREDICATE_HINT, "explicit_seed", False),
+        (ENROLLMENT_BASIS_PREDICATE_HINT, "not_determined", False),
+        (None, None, False),
+    ],
+    ids=[
+        "hint_witnessed",
+        "legacy_basis_witnessed",
+        "hint_null_bound",
+        "hint_explicit_seed",
+        "hint_not_determined",
+        "legacy",
+    ],
+)
+def test_exactness_needs_an_attributed_basis_and_a_witnessed_lower_bound(
+    db_session, enrollment_basis, first_basis, licensed
+):
+    """The enrolment basis is an allow-list and so is the lower bound: only ``creation_block_minus_one`` is a
+    witness, so NULL and ``explicit_seed`` bounds never license an exact fold."""
+    enroll_event_cursor(db_session, chain_id=1, event_address=_ADDR, topic0=_TOPIC_ALLOW_TO, start_block=_SEED)
     db_session.execute(
-        text("UPDATE indexed_event_cursors SET enrollment_basis = NULL WHERE topic0 = :t"),
-        {"t": _TOPIC_ALLOW_TO},
+        text(
+            "UPDATE indexed_event_cursors SET backfill_complete = true, last_indexed_block = 25000000, "
+            "enrollment_basis = :e, first_indexed_block_basis = :f, first_indexed_block = :b"
+        ),
+        {"e": enrollment_basis, "f": first_basis, "b": _SEED if first_basis == FIRST_INDEXED_BASIS_CREATION else None},
     )
     db_session.commit()
-    for topic in (_TOPIC_ALLOW_TO, _TOPIC_ALLOW_FROM):
-        result = _fold(db_session, topic)
-        assert result.confidence == "enumerable", topic
-        assert result.partial_reason is None
+    result = _fold(db_session, _TOPIC_ALLOW_TO)
+    if licensed:
+        assert (result.confidence, result.partial_reason) == ("enumerable", None)
+    else:
+        assert (result.confidence, result.partial_reason) == ("partial", "no_index_cursor")
+    assert (_authority_backfilled(db_session, 1, _ADDR)) is licensed
 
 
 @requires_postgres
@@ -501,6 +524,15 @@ def test_out_of_band_readers_ignore_refused_cursors(db_session):
     db_session.execute(
         text("UPDATE indexed_event_cursors SET enrollment_basis = :b"),
         {"b": ENROLLMENT_BASIS_PREDICATE_HINT},
+    )
+    db_session.commit()
+    # Attributed but unwitnessed: still refused.
+    assert _authority_has_role_store_cursor(db_session, 1, _ADDR) is False
+    assert _authority_backfilled(db_session, 1, _ADDR) is False
+
+    db_session.execute(
+        text("UPDATE indexed_event_cursors SET first_indexed_block = :s, first_indexed_block_basis = :f"),
+        {"s": _SEED, "f": FIRST_INDEXED_BASIS_CREATION},
     )
     db_session.commit()
     assert _authority_has_role_store_cursor(db_session, 1, _ADDR) is True

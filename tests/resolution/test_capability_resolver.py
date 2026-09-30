@@ -143,6 +143,8 @@ def test_resolve_yields_finite_set_with_indexed_event_repo(session):
             last_indexed_block=18_500_000,
             last_indexed_block_hash=b"\xcc" * 32,
             backfill_complete=True,
+            first_indexed_block=0,
+            first_indexed_block_basis="creation_block_minus_one",
         )
     )
     session.commit()
@@ -522,6 +524,8 @@ def test_external_set_resolves_to_indexed_event_members(session):
             last_indexed_block=18_500_000,
             last_indexed_block_hash=b"\xcc" * 32,
             backfill_complete=True,
+            first_indexed_block=0,
+            first_indexed_block_basis="creation_block_minus_one",
         )
     )
     session.commit()
@@ -740,6 +744,8 @@ def test_external_authority_inlining_follows_proxy_to_impl_predicate_trees(sessi
             last_indexed_block=18_500_000,
             last_indexed_block_hash=b"\xff" * 32,
             backfill_complete=True,
+            first_indexed_block=0,
+            first_indexed_block_basis="creation_block_minus_one",
         )
     )
     session.commit()
@@ -777,6 +783,8 @@ def test_unscanned_event_cursor_defers_pending_index(session, monkeypatch):
             topic0=topic0,
             last_indexed_block=0,
             last_indexed_block_hash=None,
+            first_indexed_block=0,
+            first_indexed_block_basis="creation_block_minus_one",
         )
     )
     session.commit()
@@ -1250,6 +1258,8 @@ def test_external_authority_inlining_uses_check_trees_and_call_frame(session):
             last_indexed_block=200,
             last_indexed_block_hash=b"\x86" * 32,
             backfill_complete=True,
+            first_indexed_block=0,
+            first_indexed_block_basis="creation_block_minus_one",
         )
     )
     session.commit()
