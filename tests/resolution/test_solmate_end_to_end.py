@@ -92,6 +92,8 @@ def _resolve(tree_key: str, selector: str) -> CapabilityExpr:
     ctx = EvaluationContext(
         chain_id=1,
         contract_address=data["contract"],
+        # Covered by FixtureRepo's cursor (21_000_000).
+        block=20_999_000,
         meta={"event_log_repo": FixtureRepo(_event_rows())},
         state_var_values={"authority": "0x3994741a5b29c60d0ab318de1024f9256fe959dc", "owner": ZERO},
         call_frame=CallFrame.root(

@@ -20,6 +20,8 @@ from eth_utils.crypto import keccak
 from utils.evm import CANCALL_SIGNATURE
 
 from ..capabilities import CapabilityExpr, Condition, ExternalCheck
+from ..event_tail import tail_scanner_for
+from ..repos.event_logs_pg import _cursor_covers_block
 from . import EvaluationContext
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,8 @@ ROLE_CAPABILITY_UPDATED = _t0("RoleCapabilityUpdated(uint8,address,bytes4,bool)"
 PUBLIC_CAPABILITY_UPDATED = _t0("PublicCapabilityUpdated(address,bytes4,bool)")
 USER_ROLE_UPDATED = _t0("UserRoleUpdated(address,uint8,bool)")
 _ROLE_TOPICS = [ROLE_CAPABILITY_UPDATED, PUBLIC_CAPABILITY_UPDATED, USER_ROLE_UPDATED]
+# Cold, or warm but behind the evaluated block with no complete tail.
+_INDEX_WAIT_BASES = frozenset({"no_index_cursor", "cursor_behind_block"})
 
 CANCALL_SELECTOR = "0x" + keccak(text=CANCALL_SIGNATURE).hex()[:8]
 
@@ -101,8 +105,34 @@ class SolmateRolesAuthorityAdapter:
         if authority is None or target is None or selector is None or iter_rows is None:
             return _check_only(authority, descriptor, basis)
 
+        last_block = _min_indexed_block(repo, ctx.chain_id, authority)
+        if last_block is None:
+            # Not indexed to head: a partial set would freeze and an empty one would falsely say "nobody". Always defer;
+            # ``no_index_cursor`` is marked for the reconciler.
+            return _check_only(authority, descriptor, ["no_index_cursor"])
+        covered_through = last_block
+        scan_window: dict[str, Any] | None = None
         try:
-            rows = iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=_ROLE_TOPICS, block=ctx.block)
+            if _cursor_covers_block(last_block, ctx.block):
+                rows = list(
+                    iter_rows(chain_id=ctx.chain_id, event_address=authority, topic0s=_ROLE_TOPICS, block=ctx.block)
+                )
+            else:
+                # A grant or revoke in (cursor, block] would be missing from an index-only fold.
+                scanner = tail_scanner_for(ctx)
+                scan = (
+                    scanner(authority, _ROLE_TOPICS, last_block, ctx.block)
+                    if scanner is not None and isinstance(ctx.block, int)
+                    else None
+                )
+                if scan is None or not scan.complete:
+                    return _check_only(authority, descriptor, ["cursor_behind_block"])
+                durable = iter_rows(
+                    chain_id=ctx.chain_id, event_address=authority, topic0s=_ROLE_TOPICS, block=last_block
+                )
+                rows = [*durable, *scan.logs]
+                covered_through = scan.to_block
+                scan_window = scan.trace_fields()
         except Exception:
             return _check_only(authority, descriptor, ["event_log_backend_error"])
 
@@ -148,7 +178,6 @@ class SolmateRolesAuthorityAdapter:
         for role in roles_for_target_sig:
             members |= users_by_role.get(role, set())
 
-        last_block = _min_indexed_block(repo, ctx.chain_id, authority)
         trace = [
             {
                 "step": "solmate_roles_authority",
@@ -156,12 +185,9 @@ class SolmateRolesAuthorityAdapter:
                 "target": target,
                 "selector": selector,
                 "roles": sorted(roles_for_target_sig),
+                **(scan_window or {}),
             }
         ]
-        if last_block is None:
-            # Not indexed to head: a partial set would freeze and an empty one would falsely say "nobody". Always defer;
-            # ``no_index_cursor`` is marked for the reconciler.
-            return _check_only(authority, descriptor, ["no_index_cursor"])
         if not rows:
             # Indexed but no role events: can't confirm this is a RolesAuthority, so fail closed to a probe.
             return _check_only(authority, descriptor, ["authority_unconfirmed_no_role_events"])
@@ -180,22 +206,23 @@ class SolmateRolesAuthorityAdapter:
             sorted(members),
             quality="exact",
             confidence="enumerable",
-            last_indexed_block=last_block,
+            last_indexed_block=covered_through,
             trace=trace,
         )
 
 
 def _check_only(authority: str | None, descriptor: dict, basis: list[str]) -> CapabilityExpr:
     extra: dict[str, Any] = {"basis": basis, "adapter": "solmate_roles_authority"}
-    # Only ``no_index_cursor`` waits on the index; marking the settled bases would make the reconciler loop forever.
-    if "no_index_cursor" in basis:
+    # Only the index-wait bases defer; marking the settled bases would make the reconciler loop forever.
+    waits_on_index = bool(_INDEX_WAIT_BASES.intersection(basis))
+    if waits_on_index:
         extra["deferred_pending_index"] = True
     logger.debug(
         "solmate_roles decision",
         extra={
             "adapter": "solmate_roles_authority",
             "address": authority,
-            "decision": "deferred" if "no_index_cursor" in basis else "external_check",
+            "decision": "deferred" if waits_on_index else "external_check",
             "reason": ",".join(basis),
         },
     )
