@@ -36,6 +36,8 @@ def _import_in_fresh_interpreter(module: str) -> None:
         "workers.policy_worker",
         # The policy-first package order itself (minimal reproducer of the cycle).
         "services.policy",
+        "workers.company_pages",
+        "workers.web_runtime",
     ],
 )
 def test_policy_first_import_order(module):

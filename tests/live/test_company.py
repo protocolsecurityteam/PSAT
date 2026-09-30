@@ -1,8 +1,36 @@
-"""Company-scoped reads. ``GET /api/company/{name}`` is the 700+-line aggregator the company page hangs off."""
+"""Company reads must exercise the deployed cache and background builder."""
 
 from __future__ import annotations
 
+import pytest
+
 from tests.live.conftest import DEFAULT_TEST_COMPANY, LiveClient
+
+
+@pytest.mark.parametrize("section", ["", "functions", "summary"], ids=["overview", "functions", "summary"])
+def test_company_reads_are_prepared_for_public_and_admin(
+    analyzed_company, live_client: LiveClient, public_live_client: LiveClient, section: str
+):
+    for client in (live_client, public_live_client):
+        response = client.company_response(DEFAULT_TEST_COMPANY, section)
+        assert response.headers.get("X-PSAT-Response-Source") in {"prepared", "prepared-stale"}, (
+            "Company cache is disabled or the deployed response bypassed it"
+        )
+        assert response.headers.get("X-PSAT-Prepared-At")
+        assert isinstance(response.json(), dict)
+
+
+def test_company_refresh_invalidates_the_prepared_page(analyzed_company, live_client: LiveClient):
+    before = live_client.company_response(DEFAULT_TEST_COMPANY)
+    refresh = live_client._session.post(live_client._url(f"/api/company/{DEFAULT_TEST_COMPANY}/refresh"), timeout=15)
+    assert refresh.status_code == 202, refresh.text
+    after = live_client.company_response(DEFAULT_TEST_COMPANY)
+    # The debounced rebuild may not have run yet; until it does the old build is labelled stale.
+    if after.headers.get("X-PSAT-Response-Source") == "prepared":
+        assert after.headers["X-PSAT-Prepared-At"] != before.headers["X-PSAT-Prepared-At"]
+    else:
+        assert after.headers.get("X-PSAT-Response-Source") == "prepared-stale"
+        assert after.headers.get("X-PSAT-Stale-Reason") == "data"
 
 
 def test_company_overview_basic_shape(analyzed_company, live_client: LiveClient):

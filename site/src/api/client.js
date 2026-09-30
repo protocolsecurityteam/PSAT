@@ -33,7 +33,7 @@ function buildHeadersWithKey(options, key) {
   return headers;
 }
 
-export async function api(path, options = {}) {
+async function request(path, options = {}) {
   // `silent: true` skips the 401 prompt. Background polls (e.g. the open
   // detail panel refreshing every 2.5s) use this so a missing/wrong admin
   // key doesn't surface a modal prompt on every tick — the caller catches
@@ -59,9 +59,11 @@ export async function api(path, options = {}) {
     let message = response.status >= 500
       ? "The server is temporarily unavailable. Please try again."
       : `Request failed (${response.status}). Please try again.`;
+    let code;
     if (type.includes("application/json")) {
       try {
         const body = await response.json();
+        code = body.code;
         if (typeof body.detail === "string" && body.detail.length <= 300 && !/<[^>]+>/.test(body.detail)) {
           message = body.detail;
         }
@@ -72,11 +74,64 @@ export async function api(path, options = {}) {
     }
     const err = new Error(message);
     err.status = response.status;
+    err.code = code;
     throw err;
   }
   const type = response.headers.get("content-type") || "";
-  if (type.includes("application/json")) {
-    return response.json();
+  const data = type.includes("application/json") ? await response.json() : await response.text();
+  return { data, headers: response.headers };
+}
+
+export async function api(path, options = {}) {
+  return (await request(path, options)).data;
+}
+
+// Matches PAYLOAD_SCHEMA in services/company_pages.py.
+export const SUPPORTED_PAYLOAD_SCHEMA = { overview: 1, functions: 1, summary: 1 };
+
+function companyMeta(headers) {
+  const schema = headers.get("X-PSAT-Payload-Schema");
+  return {
+    source: headers.get("X-PSAT-Response-Source"),
+    preparedAt: headers.get("X-PSAT-Prepared-At"),
+    staleReason: headers.get("X-PSAT-Stale-Reason"),
+    schema: schema === null ? null : Number(schema),
+  };
+}
+
+
+// Preparation is shared by all readers. Retry only the server's explicit
+// preparing state, with a bounded wait and navigation cancellation. A prepared
+// payload in a schema this build cannot read is still preparing for us.
+export async function companyApi(path, options = {}) {
+  const section = path.match(/\/(functions|summary)$/)?.[1] || "overview";
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const { data, headers } = await request(path, options);
+      const meta = companyMeta(headers);
+      if (meta.source?.startsWith("prepared") && meta.schema !== SUPPORTED_PAYLOAD_SCHEMA[section]) {
+        const err = new Error("Company data is being prepared. Please retry shortly.");
+        err.status = 503;
+        err.code = "company_preparing";
+        throw err;
+      }
+      return { data, meta };
+    } catch (err) {
+      if (err.status !== 503 || err.code !== "company_preparing" || attempt >= 15) throw err;
+      await new Promise((resolve, reject) => {
+        const signal = options.signal;
+        const abort = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
+          reject(new DOMException("Request aborted", "AbortError"));
+        };
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", abort);
+          resolve();
+        }, 2000);
+        if (signal?.aborted) abort();
+        else signal?.addEventListener("abort", abort, { once: true });
+      });
+    }
   }
-  return response.text();
 }

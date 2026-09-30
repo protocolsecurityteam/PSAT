@@ -7,7 +7,10 @@ test("anonymous browsing, origin denial, and both operator credentials", async (
   await expect(page.getByRole("button", { name: "Menu", exact: true })).toBeVisible();
   const company = await request.get("/api/company/Example");
   expect(company.status()).toBe(200);
-  expect(company.headers()["cache-control"]).toContain("s-maxage=60");
+  // Origin validation starts the TTL; response transport consumes part of it.
+  const ttl = Number(company.headers()["cache-control"].match(/s-maxage=(\d+)/)?.[1]);
+  expect(ttl).toBeGreaterThan(0);
+  expect(ttl).toBeLessThanOrEqual(60);
   expect((await company.json()).company).toBe("Example");
 
   await page.getByRole("button", { name: "Menu", exact: true }).click();

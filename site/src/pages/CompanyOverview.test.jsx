@@ -212,3 +212,52 @@ describe("CompanyOverview — hero subtitle before coverage loads", () => {
     expect(subtitle.textContent).not.toMatch(/\b0 reports on file/);
   });
 });
+
+describe("CompanyOverview — prepared provenance", () => {
+  const preparedHeaders = (source, preparedAt) => ({
+    "Content-Type": "application/json",
+    "X-PSAT-Response-Source": source,
+    "X-PSAT-Prepared-At": preparedAt,
+    "X-PSAT-Payload-Schema": "1",
+    ...(source === "prepared-stale" ? { "X-PSAT-Stale-Reason": "data" } : {}),
+  });
+
+  function installPrepared(summarySource) {
+    const served = { summary: 0 };
+    installTwinMocks();
+    setFetchHandler(
+      (url) => url.pathname === "/api/company/twinco/summary",
+      () => {
+        served.summary += 1;
+        return new Response(JSON.stringify({ tvl: null }), {
+          headers: preparedHeaders(summarySource, "2026-09-29T10:00:00Z"),
+        });
+      },
+    );
+    setFetchHandler(
+      (url) => url.pathname === "/api/company/twinco",
+      () => new Response(
+        JSON.stringify({ protocol_id: 42, contracts: [], principals: [], fund_flows: [], ownership_hierarchy: [] }),
+        { headers: preparedHeaders("prepared", "2026-09-29T09:00:00Z") },
+      ),
+    );
+    return served;
+  }
+
+  it("shows one banner dated by the oldest shown section when any section is stale", async () => {
+    installPrepared("prepared-stale");
+    render(<CompanyOverview companyName="twinco" />);
+    const expected = `Updating — data as of ${new Date("2026-09-29T09:00:00Z").toLocaleString()}`;
+    await screen.findByText(expected);
+    expect(screen.getAllByText(/^Updating — data as of/)).toHaveLength(1);
+  });
+
+  it("shows no banner when every section is fresh", async () => {
+    const served = installPrepared("prepared");
+    render(<CompanyOverview companyName="twinco" />);
+    await screen.findByText("Covered");
+    await waitFor(() => expect(served.summary).toBe(1));
+    await act(async () => {});
+    expect(screen.queryByText(/^Updating — data as of/)).toBeNull();
+  });
+});

@@ -402,7 +402,7 @@ def test_f3_implementation_name_chain_scoped(db_session):
     _add_contract(s, address=impl, job=base_impl_job, protocol_id=p.id, chain="base", contract_name="BaseImplName")
     s.commit()
 
-    rows = all_addresses_for_protocol(s, p, [])
+    rows = all_addresses_for_protocol(s, p)
     by_key = {(r["address"].lower(), (r.get("chain") or "").lower()): r for r in rows}
     eth_row = by_key[(proxy_eth.lower(), "ethereum")]
     base_row = by_key[(proxy_base.lower(), "base")]

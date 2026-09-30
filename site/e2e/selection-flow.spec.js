@@ -1,5 +1,5 @@
 /**
- * Full-flow selection regression (SELECTION_FILTERING_DIAGNOSIS.md).
+ * Full-flow selection regression.
  *
  * Mirrors the original diagnosis reproduction: search-commit a safe, then walk
  * Detail / Agent / Audits / Activity asserting the safe — never one
@@ -109,6 +109,9 @@ async function goToSurface(page, { admin = false } = {}) {
     // The Agent tab gates on the presence of an admin key only.
     await page.addInitScript(() => window.localStorage.setItem("psat_admin_key", "e2e"));
   }
+  await page.route(/\/api\/company\/[^/]+\/summary$/, (route) =>
+    route.fulfill({ contentType: "application/json", body: "{}" })
+  );
   await page.route("**/api/company/seltest", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FIXTURE) })
   );

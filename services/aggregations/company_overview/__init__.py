@@ -6,9 +6,7 @@ called by the router.
 
 Stages (each returns plain Python data, not ORM rows that pin a session):
 
-1. ``resolve_company_jobs`` — protocol lookup with legacy-company fallback
-   that walks ``parent_job_id`` chains for older jobs that don't carry a
-   protocol_id.
+1. ``resolve_company_jobs`` — the protocol's completed member jobs.
 2. ``prefetch_contracts`` — batch fetch ``Contract`` rows by ``job_id``,
    with an address+chain fallback for jobs whose Contract row was
    reassigned by ``copy_static_cache`` to a newer job.

@@ -17,7 +17,6 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
@@ -36,6 +35,7 @@ from routers import (
     spa,
 )
 from utils.company_limit import CompanyReadLimit
+from utils.compression import NegotiatedGZipMiddleware
 from utils.edge import CloudflareBoundary, EdgeConfig
 from utils.logging import bind_trace_context, configure_logging, trace_id_var
 from utils.ratelimit import SlidingWindowRateLimiter, client_ip
@@ -328,7 +328,7 @@ async def trace_id_middleware(request: Request, call_next):
 # Compress JSON > 1KB on the wire. /api/company/{name} routinely returns
 # 1-3 MB of nested control-graph data; gzip cuts it ~5-10x and is the single
 # largest win for the company page's perceived load time.
-app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+app.add_middleware(NegotiatedGZipMiddleware, minimum_size=1024, compresslevel=6)
 # Outside gzip so a slot covers the entire serialized/compressed response;
 # the Cloudflare boundary registered below authenticates before admission.
 app.add_middleware(CompanyReadLimit)

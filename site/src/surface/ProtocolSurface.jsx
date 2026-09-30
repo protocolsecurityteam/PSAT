@@ -1,3 +1,4 @@
+import { companyApi } from "../api/client.js";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -21,6 +22,7 @@ import { useChainScope } from "./hooks/useChainScope.js";
 import { useAuditCoverage } from "./hooks/useAuditCoverage.js";
 import { useSurfaceModel } from "./hooks/useSurfaceModel.js";
 import { useReachOverlay } from "./hooks/useReachOverlay.js";
+import StaleBanner from "../shared/StaleBanner.jsx";
 
 // Audit-coverage highlight set — lives with the coverage hook; re-exported
 // here for existing importers (tests target this module's public surface).
@@ -35,6 +37,7 @@ function ProtocolSurface({
   initialData = null,
   initialCoverage = null,
   initialFunctions = null,
+  initialScore = undefined,
   embedded = false,
 }, ref) {
   const isAdmin = useIsAdmin();
@@ -44,6 +47,8 @@ function ProtocolSurface({
   // (vitest, e2e) still embed functions on each contract entry, so
   // fall back to those when neither prop is provided.
   const [companyData, setCompanyData] = useState(initialData);
+  // Only sections this surface fetched itself; a parent labels what it hands in.
+  const [sectionMetas, setSectionMetas] = useState([]);
   const { availableChains, activeChain, isMultichain, rescopeChain } = useChainScope({
     companyData,
     embedded,
@@ -152,7 +157,9 @@ function ProtocolSurface({
   useEffect(() => {
     if (!companyName) return undefined;
     setError(null);
+    setSectionMetas([]);
     let cancelled = false;
+    const controller = new AbortController();
 
     const haveCompanyData = Boolean(initialData);
     // Fixtures (vitest, e2e) still embed functions on each contract,
@@ -170,11 +177,13 @@ function ProtocolSurface({
     // of payload inside the main endpoint); doing it alongside keeps the
     // canvas TTI down without waiting on the function inspector data.
     if (!haveCompanyData) {
-      fetch(`/api/company/${encodeURIComponent(companyName)}`)
-        .then((r) => {
-          if (!r.ok) throw new Error("Failed to load company overview");
-          return r.json();
-        })
+      Promise.all([
+        companyApi(`/api/company/${encodeURIComponent(companyName)}`, { signal: controller.signal }),
+        companyApi(`/api/company/${encodeURIComponent(companyName)}/summary`, { signal: controller.signal }),
+      ]).then(([overview, summary]) => {
+        if (!cancelled) setSectionMetas((current) => [...current, overview.meta, summary.meta]);
+        return { ...overview.data, ...summary.data };
+      })
         .then((d) => {
           if (cancelled) return;
           setCompanyData(d);
@@ -199,10 +208,10 @@ function ProtocolSurface({
       setFunctionsLoading(true);
     } else {
       setFunctionsLoading(true);
-      fetch(`/api/company/${encodeURIComponent(companyName)}/functions`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
+      companyApi(`/api/company/${encodeURIComponent(companyName)}/functions`, { signal: controller.signal })
+        .then(({ data: d, meta }) => {
           if (cancelled) return;
+          setSectionMetas((current) => [...current, meta]);
           const incoming = d && typeof d === "object" && d.functions;
           if (incoming && Object.keys(incoming).length > 0) {
             setLocallyFetched(incoming);
@@ -214,6 +223,7 @@ function ProtocolSurface({
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [companyName, initialData, initialFunctions]);
 
@@ -585,6 +595,8 @@ function ProtocolSurface({
 
   return (
     <div className="ps-surface ps-surface-fullscreen">
+      {/* Floats like the selection toast so the fullscreen layout keeps its height. */}
+      <StaleBanner metas={sectionMetas} className="company-select-toast" />
       <SurfaceFilterPanel
         machines={allMachines}
         principals={visiblePrincipals}
@@ -676,6 +688,7 @@ function ProtocolSurface({
           {sidebarMode === "detail" && !selectedPrincipal && !selectedMachine && (
             <DetailEmptyState
               companyName={companyName}
+              initialScore={initialScore}
               companyData={scopedCompanyData}
               machines={allMachines}
               principals={visiblePrincipals}

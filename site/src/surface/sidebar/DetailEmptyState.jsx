@@ -180,6 +180,7 @@ export function DetailEmptyState({
   machines = [],
   principals = [],
   onSelectAddress = null,
+  initialScore = undefined,
 }) {
   const [scoreDoc, setScoreDoc] = useState(null);
   const [scoreState, setScoreState] = useState("loading");
@@ -187,6 +188,16 @@ export function DetailEmptyState({
 
   useEffect(() => {
     if (!companyName) return undefined;
+    // The embedded overview owns this request, including pending/error states.
+    // Standalone surfaces retain their own fetch; undefined means no owner.
+    if (initialScore !== undefined) {
+      const doc = initialScore.data;
+      setScoreDoc(doc?.grade_state ? doc : null);
+      setScoreState(initialScore.error
+        ? (initialScore.error.status === 404 ? "absent" : "error")
+        : (doc == null ? "loading" : doc.grade_state ? "ok" : "absent"));
+      return undefined;
+    }
     let cancelled = false;
     setScoreState("loading");
     fetchScoreDoc(companyName).then((doc) => {
@@ -202,7 +213,7 @@ export function DetailEmptyState({
     return () => {
       cancelled = true;
     };
-  }, [companyName]);
+  }, [companyName, initialScore]);
 
   const protocolId = companyData?.protocol_id;
   useEffect(() => {

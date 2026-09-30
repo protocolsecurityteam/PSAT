@@ -84,6 +84,9 @@ const FIXTURE = {
 };
 
 async function goToSurface(page) {
+  await page.route(/\/api\/company\/[^/]+\/summary$/, (route) =>
+    route.fulfill({ contentType: "application/json", body: "{}" })
+  );
   await page.route("**/api/company/cctest", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(FIXTURE) })
   );
