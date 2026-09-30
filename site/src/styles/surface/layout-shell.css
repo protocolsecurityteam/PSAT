@@ -1,5 +1,3 @@
-/* ── Protocol Surface (vending-machine layout) ────────────────────────────── */
-
 .page:has(.ps-surface) {
   background: #12151a;
   max-width: none;
@@ -14,7 +12,6 @@
   overflow: auto;
 }
 
-/* Fullscreen surface: canvas fills entire area, overlays float on top */
 .ps-surface.ps-surface-fullscreen {
   position: relative;
   padding: 0;
@@ -31,13 +28,7 @@
   border: none;
 }
 
-/* Floating toolbar overlay (role filter) */
-/* Unified filter panel — top-left. One glass box replacing the former three
-   overlays (bottom-left role bar + top-left search-modes + search cluster).
-   Stacked rows: search/sort/nav · Type · Roles · preview (preview shows only
-   while browsing). overflow:hidden is a hard guarantee that no control — e.g.
-   the "↵ select" hint — can ever render outside the rounded box; box-sizing
-   keeps the fixed width honest so the padding is inside it. */
+/* overflow:hidden guarantees no control renders outside the rounded box. */
 .ps-filter-overlay {
   position: absolute;
   top: 16px;
@@ -54,15 +45,12 @@
   padding: 8px 9px;
 }
 
-/* Collapsed: the panel folds to just the pill. Width follows the pill, so the
-   toggle occupies the same top-left spot in both states. */
 .ps-filter-overlay--collapsed {
   width: auto;
   padding: 0;
 }
 
-/* The pill IS the expand/collapse toggle, first element of the panel in both
-   states so it never moves under the pointer. */
+/* First element in both states so it never moves under the pointer. */
 .ps-filter-pill {
   display: inline-flex;
   align-items: center;
@@ -78,7 +66,6 @@
 
 .ps-filter-pill:hover { color: #e2e8f0; transform: none; }
 
-/* Expanded: the pill becomes the panel's header row. */
 .ps-filter-overlay:not(.ps-filter-overlay--collapsed) .ps-filter-pill {
   padding: 0 2px 6px;
 }
@@ -101,8 +88,6 @@
   min-width: 0;
 }
 
-/* A labeled filter row: a fixed-width gutter so the Type and Roles chip strips
-   align on the same left edge; the strip wraps within the box, never past it. */
 .ps-filter-row {
   display: flex;
   align-items: baseline;
@@ -126,8 +111,7 @@
   padding: 0;
 }
 
-/* Every <button> in the panel inherits the global forms.css hover lift;
-   flatten it so the filter chips don't bounce. */
+/* Flatten forms.css's hover lift so chips don't bounce. */
 .ps-filter-overlay button:hover {
   transform: none;
 }

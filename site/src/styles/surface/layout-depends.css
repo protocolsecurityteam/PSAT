@@ -1,7 +1,5 @@
-/* Depends-on tab — the contract's outbound call surface. Chips reuse
-   .ps-ctrl-fnchip at the same 11px the Governs tab scopes them to, so function
-   chips are byte-identical across the two tabs; the read/write/delegatecall
-   distinction is carried by the colored .ps-depends-verb-lbl, not the chip. */
+/* Chips reuse .ps-ctrl-fnchip at the Governs tab's 11px so they're identical;
+   the verb label carries read/write/delegatecall. */
 .ps-depends {
   display: flex;
   flex-direction: column;
@@ -27,8 +25,6 @@
   letter-spacing: 0;
 }
 
-/* Verb line: a small colored label (writes / reads / delegatecall) followed by
-   its chips or a note. Shared by internal rows and external cards. */
 .ps-depends-verb {
   display: flex;
   align-items: flex-start;
@@ -60,8 +56,6 @@
   padding-top: 1px;
 }
 
-/* Internal call row — collapsed by default. Head layout mirrors .ps-governs-head
-   (name previews on canvas, → commits); the count doubles as the expand toggle. */
 .ps-depends-row {
   border-top: 1px solid rgba(148, 163, 184, 0.06);
   padding: 4px 0;
@@ -91,7 +85,6 @@
   border-radius: 4px;
 }
 
-/* Gold wash = the "browse/preview" affordance, matching the canvas peek. */
 .ps-depends-preview:hover {
   background: rgba(212, 160, 23, 0.08);
 }
@@ -121,8 +114,7 @@
   flex: 1 1 auto;
 }
 
-/* Count summary doubles as the expand toggle — ghost button, zeroing the
-   global forms.css chrome the same way .ps-governs-expand does. */
+/* Ghost button; zeroes the global button chrome like .ps-governs-expand. */
 .ps-depends-toggle {
   flex: 0 0 auto;
   margin-left: auto;

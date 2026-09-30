@@ -1,11 +1,5 @@
-/* Surface sidebar Audits panel (AuditsListPanel). Split out of the former
-   surface/upgrades.css — that file mixed the retired Upgrades-tab styles
-   with these still-live ps-audits-* rules; only the audits half survives. */
-
-/* ── Proof-first Audits panel ──────────────────────────────────────────────
- * One verdict only ("Running audited code" — the deployed source hash-matches
- * the reviewed commit). Colored dots, never emoji. No low-confidence or
- * accusatory signals. See site/prototypes/audit-panel/HANDOFF.md. */
+/* One verdict only; coloured dots, never emoji; no low-confidence or accusatory
+   signals (site/prototypes/audit-panel/HANDOFF.md). */
 .ps-audits-panel {
   padding: 12px;
   display: flex;
@@ -27,8 +21,6 @@
   flex: none;
 }
 
-/* Proof-first summary: the one-glance "how audited is this protocol?" answer,
-   built only from cryptographic proofs. */
 .ps-audits-summary {
   display: flex;
   flex-direction: column;
@@ -58,7 +50,6 @@
   vertical-align: middle;
 }
 
-/* The summary line doubles as the "ring every proven contract" control. */
 .ps-audits-summary-btn {
   display: flex;
   align-items: flex-start;
@@ -93,9 +84,6 @@
   color: #4ade80;
 }
 
-/* The proven-contract roster, disclosed under the summary when "all" is picked.
-   Rows mirror the Governs/Depends reference-row idiom: name + short address, the
-   body peeks the contract on the canvas, the → arrow commits to its card. */
 .ps-audits-covlist {
   display: flex;
   flex-direction: column;
@@ -150,7 +138,6 @@
   color: #cbd5e1;
 }
 
-/* The single proven tier. */
 .ps-audits-tier {
   border: 1px solid rgba(148, 163, 184, 0.14);
   border-radius: 10px;
@@ -192,7 +179,6 @@
   padding: 0 8px 10px;
 }
 
-/* Audit row — collapsed summary; expands to a per-contract breakdown. */
 .ps-audits-arow {
   border: 1px solid rgba(148, 163, 184, 0.14);
   border-radius: 9px;
@@ -302,8 +288,6 @@
   transform: none;
 }
 
-/* Per-contract breakdown inside an expanded audit row (the honest unit —
-   the verdict lives on the audit × contract pair). */
 .ps-audits-cc-wrap {
   border-top: 1px solid rgba(148, 163, 184, 0.14);
   background: rgba(8, 11, 17, 0.55);
@@ -362,7 +346,6 @@
   flex-wrap: wrap;
 }
 
-/* The one verdict badge. */
 .ps-audits-verdict {
   display: inline-flex;
   align-items: center;
@@ -387,7 +370,6 @@
   border: 1px solid rgba(45, 212, 191, 0.30);
 }
 
-/* Contract-selected mode. */
 .ps-audits-back {
   align-self: flex-start;
   background: transparent;

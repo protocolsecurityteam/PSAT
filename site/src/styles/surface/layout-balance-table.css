@@ -1,4 +1,3 @@
-/* Balance section in sidebar */
 .ps-balance-section {
   margin-top: 4px;
 }
@@ -102,16 +101,13 @@
   text-align: right;
 }
 
-/* Additive. A holding whose USD value was never determined is not a money
-   figure, so it does not take the money colour. Higher specificity than the
-   rule above by one class, and reachable only from the new `unpriced` marker —
-   no existing element gains or loses a declaration. */
+/* Unpriced holdings aren't money figures, so no money colour. One class higher
+   specificity; nothing else changes. */
 .ps-balance-usd.unpriced {
   color: #64748b;
   font-weight: 500;
 }
 
-/* Additive. Coverage/asymmetry disclosure lines under the balances header. */
 .ps-balance-coverage {
   color: #64748b;
   font-size: 9px;

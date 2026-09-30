@@ -1,5 +1,4 @@
-/* Entry point — splits live in ./styles/. Import order matches the
-   original concatenation order so the cascade is preserved. */
+/* Import order preserves the original cascade. */
 @import "./styles/tokens.css";
 @import "./styles/base.css";
 @import "./styles/shell/top-nav.css";

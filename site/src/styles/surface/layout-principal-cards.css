@@ -1,4 +1,3 @@
-/* Clickable principal cards */
 .ps-principal-clickable {
   cursor: pointer;
   transition: background 100ms ease;
@@ -8,12 +7,8 @@
   background: rgba(255, 255, 255, 0.04);
 }
 
-/* Shared "go to" commit arrow — the one control that commits an in-card entity
-   reference (lane caller buttons, Governs rows, Guard Inspector principal
-   cards); the reference body only previews. Neutral-gray ghost that brightens on
-   hover; zeroes the global forms.css button chrome (teal gradient + drop shadow
-   + hover lift), same pattern as .ps-governs-expand / .ps-selection-clear.
-   margin-left:auto pins it to the row's right edge. */
+/* The one commit control on in-card references; the body only previews. Zeroes
+   the global button chrome. */
 .ps-goto-arrow {
   flex-shrink: 0;
   margin-left: auto;
@@ -39,17 +34,13 @@
   transform: none;
 }
 
-/* Hovering the reference body hints its arrow is the commit target. */
 .ps-principal-clickable:hover .ps-goto-arrow,
 .ps-caller-btn:hover .ps-goto-arrow,
 .ps-governs-head:hover .ps-goto-arrow {
   color: #94a3b8;
 }
 
-/* Principal detail sidebar */
-/* Reached-from route block (score-page click-through on a transitive target).
-   Violet, matching the canvas reach chips — the same relationship in both
-   places. */
+/* Violet, like the canvas reach chips. */
 .ps-reach {
   margin-top: 8px;
   padding: 7px 9px;
@@ -94,9 +85,7 @@
   line-height: 1.4;
 }
 
-/* The sidebar is narrow and contract names are long, so the hop stacks: the
-   pair on its own line, what witnessed it underneath. Nothing is allowed to
-   run off the card — a clipped role label is a withheld one. */
+/* The hop stacks in the narrow sidebar; a clipped role label is a withheld one. */
 .ps-reach-body {
   min-width: 0;
   display: flex;
@@ -126,8 +115,6 @@
   color: rgba(124, 58, 237, 0.85);
 }
 
-/* The relation/label the control graph witnessed for this hop; the flow type
-   leads and stands alone when nothing witnessed a relation. */
 .ps-reach-kind {
   font-size: 9px;
   color: #64748b;

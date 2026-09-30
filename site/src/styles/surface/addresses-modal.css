@@ -1,4 +1,4 @@
-/* Addresses modal — reuses .ps-audit-modal-* backdrop + shell, adds its own toolbar/table */
+/* Reuses the .ps-audit-modal-* backdrop and shell. */
 .ps-addresses-modal {
   width: min(1200px, 100%);
   height: min(820px, 100%);

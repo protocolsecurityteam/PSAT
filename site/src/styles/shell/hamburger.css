@@ -1,4 +1,3 @@
-/* Hamburger button */
 .hamburger-btn {
   background: none;
   border: none;
@@ -38,7 +37,6 @@
 .hamburger-icon::before { top: -6px; }
 .hamburger-icon::after { top: 6px; }
 
-/* Hamburger drawer */
 .hamburger-backdrop {
   position: fixed;
   inset: 0;

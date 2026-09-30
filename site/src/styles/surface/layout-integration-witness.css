@@ -1,5 +1,5 @@
-/* External integration card — the off-protocol trust surface, elevated. Warm
-   amber border for an external protocol, blue for a linked library. */
+/* External integration card: amber for an external protocol, blue for a linked
+   library. */
 .ps-depends-ext {
   border: 1px solid rgba(224, 145, 63, 0.32);
   background: rgba(224, 145, 63, 0.06);
@@ -236,17 +236,13 @@
 .ps-port.ps-port-score-highlight {
   border-color: rgba(251, 113, 133, 0.9);
   box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.85);
-  /* The row is scrolled into view when it takes the mark; without a margin the
-     minimal scroll parks it flush against the fold, where it reads as cut off. */
+  /* Otherwise the scrolled-to row sits flush against the fold and looks cut
+     off. */
   scroll-margin: 28px;
 }
 
-/* The warning names an action AND who can take it, so the ONE caller chip for
-   the controller it named is marked alongside the row. Only that chip: a row's
-   other callers are other principals, and a border on them would read as "these
-   are who the deduction was about" for principals it was not about. Where the
-   named controller is not among this row's callers, the row wears the mark
-   alone. */
+/* Only the named controller's chip: marking other callers would imply the
+   deduction was about them. */
 .ps-port.ps-port-score-highlight .ps-caller-btn.ps-caller-score-highlight {
   border-color: rgba(251, 113, 133, 0.9);
   box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.7);
@@ -273,8 +269,6 @@
   line-height: 1.35;
 }
 
-/* Per-function caller buttons: one navigable button per direct caller; a function
-   with no resolved caller (open/unknown) renders a non-navigable .ps-caller-status pill. */
 .ps-callers { display: flex; flex-direction: column; }
 .ps-callers-label {
   font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
@@ -287,7 +281,7 @@
   padding: 4px 8px; border-radius: 6px;
   border: 1px solid rgba(148, 163, 184, 0.18); background: #141820;
   color: #e8edf3; cursor: pointer; font-size: 11px; font-weight: 400; line-height: 1.1;
-  /* Override the global button drop-shadow (teal glow) + hover lift. */
+  /* Override the global button shadow and lift. */
   box-shadow: none;
   transition: background 120ms ease, border-color 120ms ease;
 }
@@ -461,8 +455,6 @@
   line-height: 1.45;
 }
 
-/* Witness facts: verbose destination/expiry/backing/reach
-   rows in the function inspector. */
 .ps-witness-facts {
   margin: 0;
   display: grid;
@@ -490,8 +482,6 @@
   line-height: 1.4;
 }
 
-/* Non-terminal way-point / terminal-controller note under a principal card. The
-   "open" variant flags an unresolved/ambiguous controller — never a settled key. */
 .ps-principal-terminal {
   color: #94a3b8;
   font-size: 11px;
@@ -510,8 +500,6 @@
   margin-bottom: 4px;
 }
 
-/* Per-plane list under a multi-plane controller note — each parallel plane's own
-   terminal outcome, so the weakest plane is visible. */
 .ps-principal-planes {
   list-style: none;
   margin: 2px 0 0;
@@ -523,8 +511,8 @@
   line-height: 1.45;
 }
 
-/* Shared-deployer attribution HINT — a heuristic, deliberately dimmer than the
-   Tier-1 signer-overlap note so it never reads as a control claim. */
+/* Deliberately dimmer than the signer-overlap note: a heuristic, never a
+   control claim. */
 .ps-principal-deployer {
   color: #7c8899;
   font-size: 11px;

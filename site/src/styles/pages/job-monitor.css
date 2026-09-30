@@ -1,11 +1,7 @@
-/* Job monitor (/monitor) — runs-table master-detail + fleet system-health
-   strip + enhanced drill-in dock. Replaces the bespoke SVG pipeline in
-   pipeline-dashboard.css. New classes only; existing .job-panel-*,
-   .window-*, .panel-header, .eyebrow, .chip(s) are reused as-is.
-   Translated verbatim from site/_proto/s0*.html so the live page matches
-   the approved screenshots; tokens used where the prototype used them. */
+/* Job monitor (/monitor), translated from site/_proto/s0*.html to match the
+   approved screenshots. Reuses .job-panel-*, .window-*, .panel-header, .eyebrow
+   and .chip(s). */
 
-/* ── History toolbar: status filters + search ─────────────────────────── */
 .runs-toolbar {
   display: flex;
   gap: 7px;
@@ -49,7 +45,6 @@
   font: 12.5px "Instrument Sans";
 }
 
-/* ── Split layout: flat bordered tables on the page bg + a docked panel ── */
 .split {
   display: grid;
   grid-template-columns: 1fr 442px;
@@ -197,7 +192,6 @@
   color: var(--amber-deep);
 }
 
-/* ── Dock: the docked drill-in panel (job or process detail) ──────────── */
 .dock {
   position: sticky;
   top: 62px;
@@ -214,7 +208,6 @@
   z-index: 1;
 }
 
-/* ── Enhanced drill-in: live-progress block + stage timeline ──────────── */
 .jp-detail {
   margin: 0;
   padding: 9px 11px;
@@ -347,7 +340,6 @@
   color: #64748b;
 }
 
-/* ── Fleet system-health strip ────────────────────────────────────────── */
 .sys-strip {
   display: flex;
   align-items: center;
@@ -419,15 +411,12 @@
   font: 700 11px "JetBrains Mono", monospace;
 }
 
-/* ── Daemon detail (in the dock) ──────────────────────────────────────── */
 .dmn-kind {
   font: 700 9px "JetBrains Mono", monospace;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: #64748b;
 }
-/* Progress/throughput rate annotation next to a work metric (e.g. "+18/min",
-   "+12.3K blocks/min"). Colored at the call site by direction. */
 .dmn-rate {
   margin-left: 7px;
   font: 600 10px "JetBrains Mono", monospace;
@@ -490,7 +479,6 @@
   vertical-align: middle;
 }
 
-/* ── Empty dock placeholder ───────────────────────────────────────────── */
 .dock-empty {
   display: flex;
   flex-direction: column;
@@ -515,7 +503,6 @@
   max-width: 250px;
 }
 
-/* ── Responsive: below 900px the dock collapses to an overlay drawer ──── */
 .dock-backdrop {
   display: none;
 }
@@ -534,8 +521,7 @@
     z-index: 100;
     box-shadow: -18px 0 40px rgba(0, 0, 0, 0.5);
   }
-  /* With nothing selected the dock would otherwise cover the list as a
-     full-height fixed overlay — hide it until a selection opens it. */
+  /* Otherwise the empty dock covers the list as a full-height overlay. */
   .dock:not(.open) {
     display: none;
   }

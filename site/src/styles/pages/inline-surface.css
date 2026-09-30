@@ -1,5 +1,3 @@
-/* ── Inline Control Surface embed on /company/:name ──────────────────────── */
-
 .company-surface-band {
   max-width: 1440px;
   margin: 0 auto;
@@ -86,9 +84,7 @@
   color: #f0fdfa;
 }
 
-/* The real ProtocolSurface expects full-viewport height. Inside this
-   bounded container we override the 100vh assumptions so it fits the
-   allotted box. No props changes to ProtocolSurface needed. */
+/* ProtocolSurface assumes 100vh; fit it to the embed box instead. */
 .company-surface-embed {
   position: relative;
   height: 780px;
@@ -113,15 +109,11 @@
   max-height: 100%;
 }
 
-/* Overlays inside ProtocolSurface are positioned with `top: 16px`,
-   which now places them inside the embed container — good. */
-
 @media (max-width: 960px) {
   .company-surface-band { padding: 12px 16px 4px; }
   .company-surface-embed { height: 520px; }
 }
 
-/* ── Company pages — phone (≤720px) ──────────────────────────────────────── */
 @media (max-width: 720px) {
   .company-hero-band { padding: 24px 16px 20px; }
   .company-hero-title { font-size: 30px; }
@@ -153,7 +145,6 @@
   .company-surface-embed { height: 460px; }
 }
 
-/* ── Company pages — small phone (≤480px) ────────────────────────────────── */
 @media (max-width: 480px) {
   .company-hero-band { padding: 20px 14px 16px; }
   .company-hero-title { font-size: 26px; }
@@ -166,17 +157,14 @@
   .company-surface-embed { height: 380px; }
 }
 
-/* Mobile-only label inside the sidebar handle — hidden by default */
 .ps-sidebar-mobile-label { display: none; }
 
-/* ── ProtocolSurface page (/company/:name/surface) — phone ───────────────── */
 @media (max-width: 720px) {
   .ps-sidebar-mobile-label { display: block; }
   .ps-surface { padding: 12px; }
   .ps-layout { height: calc(100vh - 120px); }
 
-  /* Sidebar becomes a bottom sheet that slides up from the bottom. The
-   * sidebar's inline `width` style still applies, so we override it. */
+  /* Bottom sheet on phones; overrides the sidebar's inline `width`. */
   .ps-sidebar {
     position: fixed !important;
     bottom: 0 !important;
@@ -197,13 +185,11 @@
     z-index: 60;
   }
 
-  /* Collapsed: just the drag handle peeking from the bottom. Tap to expand. */
   .ps-sidebar.ps-sidebar-collapsed {
     height: 48px !important;
     max-height: 48px !important;
   }
 
-  /* The handle column becomes a top row. Make it a wide drag/tap target. */
   .ps-sidebar .ps-sidebar-handle {
     flex-direction: row !important;
     justify-content: center;
@@ -216,7 +202,6 @@
     border-bottom: 1px solid rgba(148, 163, 184, 0.14);
     position: relative;
   }
-  /* Add a "grabber bar" above the handle */
   .ps-sidebar .ps-sidebar-handle::before {
     content: "";
     position: absolute;
@@ -235,7 +220,6 @@
   .ps-sidebar.ps-sidebar-collapsed .ps-sidebar-handle::before {
     background: rgba(226, 232, 240, 0.65);
   }
-  /* Visible label on the handle so tap-to-open/close is obvious */
   .ps-sidebar .ps-sidebar-mobile-label {
     position: absolute;
     bottom: 6px;
@@ -261,8 +245,6 @@
     bottom: 12px;
   }
 
-  /* Vertical rail with the expand button on desktop becomes a tap target
-   * on mobile that fills the collapsed bar. */
   .ps-sidebar .ps-sidebar-rail {
     position: absolute;
     inset: 0;
@@ -282,7 +264,7 @@
     display: none;
   }
 
-  /* Hide content when collapsed (avoid layout-shift jank during transition) */
+  /* Avoids layout-shift jank during the transition. */
   .ps-sidebar.ps-sidebar-collapsed .ps-sidebar-content {
     display: none;
   }
@@ -294,16 +276,12 @@
     min-height: 0;
   }
 
-  /* Embedded variant: make the bottom-sheet behavior work inside the
-   * `.company-surface-embed` container too (rather than fixed to viewport). */
+  /* Bottom sheet inside the embed container rather than fixed to the viewport. */
   .company-surface-embed .ps-sidebar {
     position: absolute !important;
   }
 }
 
-/* Reported miss when a score-page entity button names something this graph
-   does not carry. Transient — the click has to say what happened rather than
-   look broken. */
 .company-select-toast {
   position: fixed;
   left: 50%;
