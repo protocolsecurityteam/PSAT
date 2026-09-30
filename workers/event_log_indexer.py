@@ -14,7 +14,7 @@ from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterator, Literal, Mapping, MutableMapping, Protocol, Sequence, TypeGuard, cast
 
 from eth_utils.crypto import keccak
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -29,6 +29,7 @@ from db.models import (
     CURSOR_BASIS_NOT_DETERMINED,
     ENROLLMENT_BASIS_PREDICATE_HINT,
     ENROLLMENT_BASIS_TRACKED_TOPICS,
+    EXACTNESS_ELIGIBLE_ENROLLMENT_BASES,
     FIRST_INDEXED_BASIS_CREATION,
     WINDOW_STATS_CONTINUOUS,
     WINDOW_STATS_NOT_DETERMINED,
@@ -403,6 +404,31 @@ def _cursor_exists(session: Session, chain_id: int, event_address: str, topic0: 
         ).first()
         is not None
     )
+
+
+def _upgrade_to_predicate_hint(session: Session, *, chain_id: int, address: str, topic0: str) -> bool:
+    """Upgrade an existing, witnessed cursor whose basis isn't already eligible to ``predicate_tree_hint``; no other
+    column changes. A cursor without a ``creation_block_minus_one`` lower bound is never upgraded.
+    """
+    eligible = [b for b in EXACTNESS_ELIGIBLE_ENROLLMENT_BASES if b is not None]
+    result = session.execute(
+        update(IndexedEventCursor)
+        .where(IndexedEventCursor.chain_id == chain_id)
+        .where(func.lower(IndexedEventCursor.event_address) == address.lower())
+        .where(func.lower(IndexedEventCursor.topic0) == topic0.lower())
+        .where(IndexedEventCursor.first_indexed_block_basis == FIRST_INDEXED_BASIS_CREATION)
+        .where(IndexedEventCursor.enrollment_basis.is_not(None))
+        .where(IndexedEventCursor.enrollment_basis.not_in(eligible))
+        .values(enrollment_basis=ENROLLMENT_BASIS_PREDICATE_HINT)
+        .execution_options(synchronize_session=False)
+    )
+    upgraded = bool(getattr(result, "rowcount", 0))
+    if upgraded:
+        logger.info(
+            "cursor enrollment basis upgraded to predicate_tree_hint",
+            extra={"chain_id": chain_id, "event_address": address.lower(), "topic0": topic0.lower()},
+        )
+    return upgraded
 
 
 _FETCHER_ACCEPTS_WINDOW_STATS: dict[type, bool] = {}
@@ -908,8 +934,14 @@ def _enroll_witnessed(
     pending: set[tuple[int, str]] | None = None,
     progress: Callable[[], None] | None = None,
 ) -> bool:
-    """Seed, witness-grade and enrol one cursor; True if inserted. An unresolvable creation block inserts nothing."""
+    """Seed, witness-grade and enrol one cursor; True if inserted. An unresolvable creation block inserts nothing.
+
+    A predicate-hint enrolment that finds the cursor already present upgrades its basis (see
+    ``_upgrade_to_predicate_hint``), so the enrolment order never decides eligibility.
+    """
     if _cursor_exists(session, chain_id, address, topic0):
+        if enrollment_basis == ENROLLMENT_BASIS_PREDICATE_HINT:
+            _upgrade_to_predicate_hint(session, chain_id=chain_id, address=address, topic0=topic0)
         return False
     if progress is not None:
         progress()
