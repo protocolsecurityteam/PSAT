@@ -1,14 +1,6 @@
-// Selection-time legend. Renders only while a contract is selected so
-// the chip-color convention (warm = selected acts outward, cool =
-// other acts on selected) doesn't have to be memorised — the legend
-// is right there with the chips it explains. Uses "acts on" because
-// the edges represent any directed relationship (controls / calls /
-// sends value / owns / proxies-to); the chip text spells out which
-// specifically.
-//
-// The reach row appears only when the selection HAS transitive reach: a legend
-// entry for a chip nothing on the canvas is wearing would name a relationship
-// this selection does not have.
+// Explains the chip colours while something is selected (warm = selection acts
+// outward, cool = acts on it). The reach row only appears when the selection
+// has reach.
 export function SelectionLegend({ onClear, hasReach = false }) {
   return (
     <div className="ps-selection-legend">
@@ -26,8 +18,7 @@ export function SelectionLegend({ onClear, hasReach = false }) {
           <span>selected reaches this contract</span>
         </div>
       )}
-      {/* Explicit deselect — the pane-click clear exists but is invisible;
-          this makes it discoverable and teaches the Esc shortcut. */}
+      {/* The pane-click clear is invisible; this makes it discoverable. */}
       <button className="ps-selection-clear" onClick={onClear} title="Clear selection (Esc)">
         <kbd>esc</kbd> deselect
       </button>

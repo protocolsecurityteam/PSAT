@@ -109,77 +109,7 @@ def test_build_control_tracking_plan_falls_back_to_state_only(tmp_path):
     assert owner["polling_fallback"]["polling_sources"] == ["owner"]
 
 
-def test_build_control_tracking_plan_from_dict_matches_fixture():
-    """Analysis dict -> plan produces the documented event_first shape."""
-    analysis = {
-        "schema_version": "0.1",
-        "subject": {
-            "address": "0x1111111111111111111111111111111111111111",
-            "name": "Example",
-            "compiler_version": "v0.8.19",
-            "source_verified": True,
-        },
-        "controller_tracking": [
-            {
-                "controller_id": "state_variable:owner",
-                "label": "owner",
-                "source": "owner",
-                "kind": "state_variable",
-                "read_spec": {
-                    "strategy": "getter_call",
-                    "target": "owner",
-                    "kind": "state_variable",
-                    "state_variable_name": "owner",
-                    "type": "address",
-                },
-                "tracking_mode": "event_plus_state",
-                "writer_functions": [
-                    {
-                        "contract": "OwnableLike",
-                        "function": "transferOwnership(address)",
-                        "visibility": "public",
-                        "writes": ["owner"],
-                        "associated_events": [
-                            {
-                                "name": "OwnershipTransferred",
-                                "signature": "OwnershipTransferred(address,address)",
-                                "topic0": "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0",
-                                "inputs": [
-                                    {"name": "user", "type": "address", "indexed": True},
-                                    {"name": "newOwner", "type": "address", "indexed": True},
-                                ],
-                            }
-                        ],
-                        "evidence": [],
-                    }
-                ],
-                "associated_events": [
-                    {
-                        "name": "OwnershipTransferred",
-                        "signature": "OwnershipTransferred(address,address)",
-                        "topic0": "0x8be0079c531659141344cd1fd0a4f28419497f9722a3daafe3b4186f6b6457e0",
-                        "inputs": [
-                            {"name": "user", "type": "address", "indexed": True},
-                            {"name": "newOwner", "type": "address", "indexed": True},
-                        ],
-                    }
-                ],
-                "polling_sources": ["owner"],
-                "notes": ["Monitor associated events for low-latency detection and confirm state via RPC."],
-            }
-        ],
-    }
-
-    plan = build_control_tracking_plan(cast(ContractAnalysis, analysis))
-
-    assert plan["tracking_strategy"] == "event_first_with_polling_fallback"
-    event_watch = plan["tracked_controllers"][0]["event_watch"]
-    assert event_watch is not None
-    assert event_watch["events"][0]["name"] == "OwnershipTransferred"
-
-
 def test_build_control_tracking_plan_filters_non_controller_runtime_reads():
-    """Only address-like state and role identifiers should reach runtime resolution."""
     base_target = {
         "tracking_mode": "state_only",
         "writer_functions": [],

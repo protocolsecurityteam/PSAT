@@ -1,8 +1,4 @@
-"""Pydantic request models for the FastAPI surface.
-
-Kept separate from ``schemas/`` output models because these mirror the HTTP
-request payloads, not the artifact-output JSON shape.
-"""
+"""Pydantic request models for the FastAPI surface."""
 
 from __future__ import annotations
 
@@ -13,19 +9,16 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from schemas.control_tracking import MonitoredContractType
 
-#: A 20-byte lowercase-or-checksummed hex address. Shared by every request
-#: model so no ingest path accepts a 42-char string that is not actually hex.
+# So no ingest path accepts a 42-char string that isn't hex.
 _HEX_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
-#: The only hosts a Discord webhook can legitimately live on.
 _DISCORD_WEBHOOK_HOSTS = {"discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"}
 
 _DAPP_URLS_MAX = 50
 
 
 def _require_http_url(value: str) -> str:
-    # A URL leaves this service as an href or an outbound fetch; only http(s)
-    # is inert to the click that ``javascript:``/``data:``/``file:`` schemes weaponize.
+    # Only http(s) is inert when rendered as an href (``javascript:``/``data:``/``file:`` aren't).
     if urlparse(value).scheme.lower() not in ("http", "https"):
         raise ValueError("URL must use the http or https scheme")
     return value
@@ -37,9 +30,7 @@ class AnalyzeRequest(BaseModel):
     @field_validator("address")
     @classmethod
     def _lowercase_address(cls, v: str | None) -> str | None:
-        # One canonical form in the DB: the job row and request are joined
-        # case-insensitively everywhere else, but exact-match consumers (spawn
-        # dedup, listing joins) must never see a checksummed variant.
+        # Exact-match consumers (spawn dedup, listing joins) must never see a checksummed variant.
         if not isinstance(v, str):
             return v
         v = v.lower()
@@ -75,7 +66,6 @@ class AnalyzeRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_target(self) -> "AnalyzeRequest":
-        # address + company is allowed (address is target, company is context)
         primary = [self.address, self.dapp_urls, self.defillama_protocol]
         company_only = self.company and not any(primary)
         has_primary = sum(bool(t) for t in primary) == 1
@@ -92,12 +82,8 @@ class ProtocolSubscribeRequest(BaseModel):
     @field_validator("discord_webhook_url")
     @classmethod
     def _validate_discord_webhook_url(cls, v: str) -> str:
-        # The monitor POSTs findings to this URL; it must be an https endpoint on
-        # a Discord host and nothing else — no arbitrary outbound target. Host is
-        # derived via the shared egress helper (lazy-imported to keep the request
-        # schemas free of the outbound-HTTP stack) so this gate reads the same
-        # authority the client would dial — a backslash/userinfo host that
-        # ``urlparse`` reports as Discord but urllib3 dials elsewhere is rejected.
+        # The monitor POSTs findings here, so https on a Discord host only. The host comes from ``connect_host`` so a
+        # backslash/userinfo trick that urllib3 dials elsewhere is rejected.
         from utils.egress import UnsafeUrlError, connect_host
 
         if urlparse(v).scheme.lower() != "https":
@@ -122,8 +108,7 @@ class ProtocolSubscribeRequest(BaseModel):
         event_types = v["event_types"]
         if not isinstance(event_types, list):
             raise ValueError(f"event_filter.event_types must be a list of strings, got {type(event_types).__name__}")
-        # Lazy import — avoids pulling the monitoring stack into every
-        # process that imports request schemas (workers, scripts, etc.).
+        # Lazy: keeps the monitoring stack out of every importer.
         from services.monitoring.event_topics import ALL_EVENT_TOPICS
 
         valid_types = set(ALL_EVENT_TOPICS.values()) | {"state_changed_poll"}
@@ -135,23 +120,11 @@ class ProtocolSubscribeRequest(BaseModel):
         return v
 
 
-#: The ``monitoring_config`` keys ``enrollment._build_monitoring_config`` derives
-#: from analysis and the live monitor then ACTS on. Both are ANALYSIS outputs —
-#: read off the tracking-plan artifact by ``enrollment._load_tracking_plan_artifacts``
-#: / ``polling_plan.build_polling_plan`` — and a caller has no witnessed value for
-#: either. Rejected rather than dropped: each drives the monitor on the wire, so a
-#: silently discarded value would leave the caller believing the monitor is doing
-#: something it is not.
-#:
-#: These are the only two analysis-derived keys. The rest of the config splits as:
-#: the ``watch_*`` booleans, which only gate whether an already-detected event
-#: notifies (``unified_watcher._should_watch``) — no wire call, no minted finding,
-#: so a caller preference and settable; ``tracking_plan_not_determined``, which the
-#: route OWNS by overwriting (``routers.monitored._stamp_caller_supplied``),
-#: defeating forgery without breaking a read-modify-write of a stamped row; the two
-#: staleness stamps (``tracked_topics_stale_since`` / ``polling_plan_stale_since``),
-#: which are meaningless without the analyzer-owned keys they date and so cannot
-#: assert anything on their own; and ``scan_gaps``, rejected below.
+# Analysis outputs the live monitor acts on; a caller has no witnessed value. Rejected rather than dropped, since
+# dropping would let the caller believe the monitor uses them.
+#
+# The other keys: ``watch_*`` only gate notification (settable); ``tracking_plan_not_determined`` is overwritten by the
+# route; the ``*_stale_since`` stamps mean nothing alone; ``scan_gaps`` is rejected below.
 _ANALYZER_OWNED_CONFIG_KEYS = {
     "tracked_topics": (
         "monitoring_config.tracked_topics is derived from the contract's tracking-plan "
@@ -165,14 +138,8 @@ _ANALYZER_OWNED_CONFIG_KEYS = {
 }
 
 
-#: Keys the SCANNER owns: records of what monitoring did or did not observe.
-#: ``scan_gaps`` names block intervals a row's scanner never covered — written
-#: only by the operator-run cursor-clamp tooling and carried across every
-#: config rebuild by ``tracking_plan_state.preserve_scan_plane_facts``. That
-#: durability is exactly why it cannot be caller-settable: a fabricated entry
-#: would be indistinguishable from a clamp-authored one and would outlive every
-#: subsequent enrollment, asserting a coverage hole (or, by omission, continuous
-#: coverage) that nothing observed.
+# ``scan_gaps`` is written only by operator clamp tooling and survives every rebuild, so a fabricated entry would be
+# indistinguishable and permanent.
 _SCANNER_OWNED_CONFIG_KEYS = {
     "scan_gaps": (
         "monitoring_config.scan_gaps records block intervals this row's scanner never "
@@ -185,24 +152,10 @@ _SCANNER_OWNED_CONFIG_KEYS = {
 def _reject_analyzer_owned_config_keys(value: dict | None) -> dict | None:
     """``tracked_topics``, ``polling_plan`` and ``scan_gaps`` are not caller-settable.
 
-    ``services/monitoring/unified_watcher._scan_topics_union`` unions
-    ``monitoring_config->'tracked_topics'`` over every active row straight into
-    the live scan filter, so a caller-supplied entry decides what the scanner
-    decodes chain-wide.
-
-    ``polling_plan`` goes further — it is acted on, not merely filtered on:
-    ``unified_watcher.poll_for_state_changes`` turns each entry into an
-    ``eth_call``/``eth_getStorageAt`` (``_rpc_call_for_entry``) and
-    ``_apply_poll_result`` mints a ``state_changed_poll`` ``MonitoredEvent``
-    keyed on the entry's own ``field`` name — a published finding on the monitor
-    surface derived from a slot no analyzer witnessed. The caller-provenance
-    stamp cannot substitute for this rejection: the stamp records where the
-    CONFIG came from, while the event the plan produces carries no provenance
-    at all.
-
-    ``scan_gaps`` is the scanner's own record rather than an analysis output,
-    but it fails the same test: it is a claim about what was observed, a caller
-    has no witness for it, and it now survives every config rebuild.
+    ``tracked_topics`` feeds the chain-wide scan filter directly. ``polling_plan`` is acted on: each entry becomes an
+    RPC read and a published ``state_changed_poll`` event from a slot no analyzer witnessed; the provenance stamp can't
+    cover that, since the event carries none. ``scan_gaps`` is an observation claim the caller can't witness and it
+    survives rebuilds.
     """
     if not isinstance(value, dict):
         return value
@@ -245,8 +198,7 @@ class AddAuditRequest(BaseModel):
     @field_validator("url", "pdf_url")
     @classmethod
     def _validate_audit_url(cls, v: str | None) -> str | None:
-        # These are rendered as links on the admin surface; a non-http(s) scheme
-        # would become an executable href.
+        # Rendered as admin links; a non-http(s) scheme would be an executable href.
         if v is None:
             return v
         return _require_http_url(v)
@@ -260,8 +212,7 @@ class UpdateMonitoredContractRequest(BaseModel):
     @field_validator("monitoring_config")
     @classmethod
     def validate_monitoring_config(cls, value: dict | None) -> dict | None:
-        # Same rule as the upsert: PATCH replaces the config wholesale, so it is
-        # the same door into the scan filter and the poller.
+        # PATCH replaces the config wholesale, so it's the same door.
         return _reject_analyzer_owned_config_keys(value)
 
 

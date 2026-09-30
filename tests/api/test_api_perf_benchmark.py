@@ -1,16 +1,12 @@
 """Query-count budgets for high-impact API hotspots (issues #1-6 in the perf review).
 
-Seeds a realistic-shape protocol (50 contracts × 50 effective functions
-each, control graph nodes/edges, balances, upgrade events, principal
-labels), then asserts each hot endpoint answers with the expected payload
-shape and stays under its SQL-statement budget, counted via the SQLAlchemy
-``before_cursor_execute`` event.
+Seeds a realistic-shape protocol (50 contracts x 50 effective functions each, control graph,
+balances, upgrade events, principal labels), then asserts each hot endpoint returns the expected
+payload shape within its SQL-statement budget (counted via ``before_cursor_execute``).
 
-Run:
+Run with ``-s`` to see the printed actual/budget table:
     set -a; source .env; set +a
     uv run pytest tests/api/test_api_perf_benchmark.py -s -m "not live"
-
-The ``-s`` flag is what surfaces the printed actual/budget table.
 """
 
 from __future__ import annotations
@@ -65,22 +61,17 @@ _PERF_STAGE_TIMING_STAGES = (
 
 
 def _addr(seed: int) -> str:
-    """Deterministic 0x-prefixed 20-byte address."""
     return "0x" + format(seed, "040x")
 
 
 def _wipe_perf_data(session) -> None:
     """Remove rows the perf seed may have left behind on the shared test DB.
 
-    The standard ``db_session`` fixture only cleans monitoring + protocol
-    tables — Job/Contract rows from prior runs would skew SQL counts. Clean by
-    Protocol name (cascades to AuditReport, Contract via SET NULL on
-    contracts.protocol_id, Jobs via SET NULL on jobs.protocol_id) plus a sweep
-    of the company-tagged jobs.
-
-    Also wipes storage-keyed orphan jobs from sibling fixtures — their DB rows
-    outlive MinIO teardown and would break /api/analyses once
-    ``_scrub_storage_env`` strips the storage config.
+    ``db_session`` only cleans monitoring + protocol tables, so Job/Contract rows from prior runs
+    would skew SQL counts. Clean by Protocol name (cascades / SET NULL) plus a sweep of
+    company-tagged jobs, and wipe storage-keyed orphan jobs from sibling fixtures: their rows
+    outlive MinIO teardown and would break /api/analyses once ``_scrub_storage_env`` strips
+    the storage config.
     """
     session.execute(
         text("DELETE FROM artifacts WHERE job_id IN (SELECT id FROM jobs WHERE company = :c)"),
@@ -172,7 +163,6 @@ def seeded(db_session, storage_bucket):
             )
         )
 
-        # Two balance rows per contract (native + one ERC20)
         db_session.add(
             ContractBalance(
                 contract_id=contract.id,
@@ -186,7 +176,6 @@ def seeded(db_session, storage_bucket):
             )
         )
 
-        # Effective functions + principals
         ef_rows = []
         for f in range(N_FUNCTIONS_PER_CONTRACT):
             ef = EffectiveFunction(
@@ -217,7 +206,6 @@ def seeded(db_session, storage_bucket):
                     )
                 )
 
-        # Control graph (nodes + edges)
         for n in range(N_NODES_PER_CONTRACT):
             db_session.add(
                 ControlGraphNode(
@@ -245,7 +233,6 @@ def seeded(db_session, storage_bucket):
                 )
             )
 
-        # Controller values
         for cv_i in range(3):
             db_session.add(
                 ControllerValue(
@@ -260,7 +247,6 @@ def seeded(db_session, storage_bucket):
                 )
             )
 
-        # Upgrade events
         db_session.add(
             UpgradeEvent(
                 contract_id=contract.id,
@@ -272,7 +258,6 @@ def seeded(db_session, storage_bucket):
             )
         )
 
-        # Principal labels
         for pl in range(2):
             db_session.add(
                 PrincipalLabel(
@@ -394,9 +379,7 @@ def seeded(db_session, storage_bucket):
 
     db_session.commit()
 
-    # Stage timings on perf_000 so the /api/jobs/{id}/stage_timings benchmark
-    # has eight storage-backed rows to fan out (one per stage that actually
-    # ran; ``done`` is terminal and never gets a timing).
+    # Stage timings on perf_000 so the stage_timings benchmark has eight storage-backed rows to fan out.
     timing_target = jobs[0]
     for stage in _PERF_STAGE_TIMING_STAGES:
         store_artifact(
@@ -480,12 +463,9 @@ def test_query_count_budgets(seeded, api_client, db_session, monkeypatch, record
         "stage_timings": lambda: api_client.get(f"/api/jobs/{stage_timings_job_id}/stage_timings"),
     }
 
-    # Payload-shape sanity first: a wrong-shaped 200 makes the query counts
-    # below meaningless, so shape gates the budget rather than the other way
-    # round. Seed adds a proxy + impl pair on top of N_CONTRACTS regulars; the
-    # proxy-merge pass in /api/analyses depends on artifact flags we
-    # deliberately omit (the audit_timeline case only needs UpgradeEvent +
-    # coverage), so just assert the listing carries at least the regulars.
+    # Shape gates the budget: a wrong-shaped 200 makes query counts meaningless. The proxy-merge
+    # pass depends on artifact flags the seed omits, so only assert the listing carries at
+    # least the regulars.
     overview = api_client.get(f"/api/company/{PROTOCOL_NAME}").json()
     assert overview["contract_count"] >= N_CONTRACTS
     analyses = api_client.get("/api/analyses").json()
@@ -505,7 +485,6 @@ def test_query_count_budgets(seeded, api_client, db_session, monkeypatch, record
     actuals: dict[str, int] = {}
     failures: list[str] = []
     for label, fn in cases.items():
-        # Warm-up — don't measure planner/JIT cost.
         fn()
         db_session.commit()
         db_session.expire_all()

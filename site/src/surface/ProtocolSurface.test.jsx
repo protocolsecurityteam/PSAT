@@ -738,7 +738,7 @@ describe("ProtocolSurface — stage-1 selection model", () => {
     // Scope to the Governs panel — the canvas also renders a "LiquidityPool"
     // node label.
     const row = await waitFor(() => {
-      const el = document.querySelector(".ps-governs-name");
+      const el = document.querySelector(".ref-name");
       expect(el).toBeTruthy();
       return el;
     });
@@ -1121,12 +1121,12 @@ describe("ProtocolSurface — machine-only authority (motivating bug)", () => {
     const card = machineName.closest(".ps-machine");
     const tabBar = card.querySelector(".ps-machine-tabs");
     expect(within(tabBar).getByRole("button", { name: /^Control/ })).toHaveClass("active");
-    expect(card.querySelector(".ps-governs-name")).toBeNull();
+    expect(card.querySelector(".ref-name")).toBeNull();
 
     // Governs is still one click away and lists the contract this authority governs.
     await user.click(within(tabBar).getByRole("button", { name: /^Governs/ }));
     const governsRow = await waitFor(() => {
-      const el = card.querySelector(".ps-governs-name");
+      const el = card.querySelector(".ref-name");
       expect(el).toBeTruthy();
       return el;
     });

@@ -19,11 +19,11 @@ export function WatcherDetail({ watchers, rate, onClose }) {
         <button type="button" className="job-panel-close" onClick={onClose} aria-label="Close panel">×</button>
       </header>
       <div className="job-panel-meta">
-        <span className="job-panel-tag" style={{ color: TONE_DOT[tone], borderColor: `${TONE_DOT[tone]}66` }}>
+        <span className="tag tag-md tag-pill job-panel-tag" style={{ color: TONE_DOT[tone], borderColor: `${TONE_DOT[tone]}66` }}>
           {stale ? "stale" : "active"}
         </span>
-        <span className="job-panel-tag job-panel-next">state {humanAge(w.last_update_age_s)} ago</span>
-        <span className="job-panel-tag job-panel-next">tvl {humanAge(w.tvl_last_snapshot_age_s)} ago</span>
+        <span className="tag tag-md tag-pill tag-plain job-panel-tag job-panel-next">state {humanAge(w.last_update_age_s)} ago</span>
+        <span className="tag tag-md tag-pill tag-plain job-panel-tag job-panel-next">tvl {humanAge(w.tvl_last_snapshot_age_s)} ago</span>
       </div>
       {stale && (
         <section className="job-panel-section">

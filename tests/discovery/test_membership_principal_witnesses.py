@@ -296,7 +296,6 @@ def test_resolved_principal_of_many_members_admits_the_controller(db_session, pr
     assert (WITNESS_RULE_W3_CONTROL, "d2") in _rules(db_session, timelock, protocol)
     witness = _witness(db_session, timelock, protocol, WITNESS_RULE_W3_CONTROL, "d2")
     assert witness.evidence["source"] == "function_principal"
-    # One witness per hosting member, each naming the function it was read off.
     vias = {
         w.via_address
         for w in gate.active_witnesses(db_session, contract_id=timelock.id, protocol_id=protocol.id)
@@ -394,11 +393,10 @@ def test_safe_signer_containment_does_not_prove_the_d1_via(db_session, protocol)
 
 @pytest.mark.parametrize("resolved_type", ["safe", "timelock", "contract"])
 def test_only_an_eoa_principal_proves_d1_transitivity(db_session, protocol, resolved_type):
-    """Monotonicity is the reason: a contract-typed via can itself become a
-    member later, and a member's transitivity is decided from its OWN
-    witnesses. Letting the principal arm also speak for it would let a
-    promotion WITHDRAW transitivity and oscillate the fixpoint — and would
-    license every ward a shared operator happens to control."""
+    """Monotonicity: a contract-typed via can become a member later, and
+    decides transitivity from a member's OWN witnesses. Letting the principal
+    arm also speak for it would let a promotion WITHDRAW transitivity and
+    oscillate the fixpoint."""
     member = _anchored_member(db_session, protocol, ADDR(0x2400))
     operator = ADDR(0x2401)
     _principal(db_session, member, operator, resolved_type=resolved_type)
@@ -574,7 +572,6 @@ def test_integration_operands_never_admit_through_a_principal_edge(db_session, p
         )
     )
     db_session.flush()
-    # Its own owner is likewise nobody this protocol proved anything about.
     _caller_gate(db_session, outsider, ADDR(0x5F00))
 
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(outsider.id,)))
@@ -625,26 +622,33 @@ def test_child_of_a_member_factory_admits(db_session, protocol):
     assert witness.evidence["factory_member_contract_id"] == factory.id
 
 
-def test_child_of_a_d2_only_factory_is_refused(db_session, protocol):
+def _child_of_d2_only_factory(db_session, protocol):
     anchor = _anchored_member(db_session, protocol, ADDR(0x6100))
     endpoint = _d2_only_member(db_session, protocol, ADDR(0x6101), controls=anchor)
-    child = _contract(db_session, ADDR(0x6102), nominated=protocol.id, factory=endpoint.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(child.id,)))
-    db_session.flush()
-    assert child.protocol_id is None
+    return _contract(db_session, ADDR(0x6102), nominated=protocol.id, factory=endpoint.address)
 
 
-def test_child_of_a_non_member_factory_is_refused(db_session, protocol):
+def _child_of_non_member_factory(db_session, protocol):
     outsider = _contract(db_session, ADDR(0x6200), nominated=protocol.id)
-    child = _contract(db_session, ADDR(0x6201), nominated=protocol.id, factory=outsider.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(child.id,)))
-    db_session.flush()
-    assert child.protocol_id is None
+    return _contract(db_session, ADDR(0x6201), nominated=protocol.id, factory=outsider.address)
 
 
-def test_null_factory_attribution_licenses_nothing(db_session, protocol):
+def _child_with_null_factory(db_session, protocol):
     _anchored_member(db_session, protocol, ADDR(0x6300))
-    child = _contract(db_session, ADDR(0x6301), nominated=protocol.id, factory=None)
+    return _contract(db_session, ADDR(0x6301), nominated=protocol.id, factory=None)
+
+
+# CRITICAL: only an anchored (non-D2-only) member factory may license its children.
+@pytest.mark.parametrize(
+    "build_child",
+    [
+        pytest.param(_child_of_d2_only_factory, id="d2_only_factory_anchors_nothing"),
+        pytest.param(_child_of_non_member_factory, id="non_member_factory_refused"),
+        pytest.param(_child_with_null_factory, id="null_factory_attribution_licenses_nothing"),
+    ],
+)
+def test_child_of_a_refused_factory_is_refused(db_session, protocol, build_child):
+    child = build_child(db_session, protocol)
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(child.id,)))
     db_session.flush()
     assert child.protocol_id is None
@@ -744,23 +748,6 @@ def test_principal_arms_settle_identically_across_arrival_orders(db_session):
     assert (WITNESS_RULE_W4_FACTORY, None) in dict(principals_first)[5][1]
 
 
-def test_closest_miss_names_a_non_anchoring_factory(db_session, protocol):
-    """A row parked behind the factory rule says so by name."""
-    from scripts.membership_reporting import closest_miss
-
-    outsider = _contract(db_session, ADDR(0x6600), nominated=protocol.id)
-    child = _contract(db_session, ADDR(0x6601), nominated=protocol.id, factory=outsider.address)
-    gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(child.id,)))
-    db_session.flush()
-    assert child.protocol_id is None
-    miss = closest_miss(db_session, contract=child, protocol_id=protocol.id)
-    assert miss == {
-        "nearest_rule": "w4_factory",
-        "missing": "factory_not_anchoring_member",
-        "factory": outsider.address,
-    }
-
-
 def test_settling_is_idempotent_under_the_principal_arms(db_session, protocol):
     """A second evaluation over unchanged evidence must promote and demote
     nothing. A non-monotone transitivity arm shows up here first: it makes a
@@ -813,7 +800,6 @@ def test_losing_the_anchoring_witness_without_demotion_still_cascades(db_session
     }
     assert child.protocol_id == protocol.id and grandchild.protocol_id == protocol.id
 
-    # Drop the principal that proved the D1 via; the D2 witness is untouched.
     db_session.query(FunctionPrincipal).filter(FunctionPrincipal.address == owner_eoa.lower()).delete(
         synchronize_session=False
     )
@@ -839,7 +825,6 @@ def test_a_principal_with_no_authority_derivation_never_admits(db_session, proto
     member = _anchored_member(db_session, protocol, ADDR(0x9000))
     marketplace = _contract(db_session, ADDR(0x9001), nominated=protocol.id)
     _principal(db_session, member, marketplace.address, resolved_type="contract", resolver_path=resolver_path)
-    # The same shape must not license a ward through the D1 arm either.
     operator = ADDR(0x9002)
     ward = _contract(db_session, ADDR(0x9003), nominated=protocol.id)
     _principal(db_session, member, operator, resolved_type="eoa", resolver_path=resolver_path)

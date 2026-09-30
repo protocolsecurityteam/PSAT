@@ -1,7 +1,5 @@
-"""Verdict/report helpers for the membership reconcile CLI.
-
-Everything here re-uses the gate's own verification internals — the verdict a
-CLI reports is the verdict ``membership_gate`` would reach, never a fork of it.
+"""Verdict/report helpers for the membership reconcile CLI, built on the
+gate's own internals so they can't fork.
 """
 
 from __future__ import annotations
@@ -29,10 +27,9 @@ ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 def would_promote(session: Session, contract: Contract, protocol_id: int) -> bool:
-    """The gate's own promotion verdict for (contract, protocol) from stored
-    witnesses, computed without persisting anything: ``promote`` runs inside a
-    savepoint that is always rolled back. A member row is tested with its
-    stamp cleared so the verdict is earned, not assumed."""
+    """The gate's verdict without persisting: ``promote`` runs in an always-rolled-back savepoint, and members are
+    tested with their stamp cleared.
+    """
     savepoint = session.begin_nested()
     try:
         if contract.protocol_id is not None:
@@ -50,9 +47,9 @@ def active_witness_rules(session: Session, *, contract_id: int, protocol_id: int
 
 
 def _heuristic_edge_miss(session: Session, contract: Contract, protocol_id: int) -> dict[str, Any] | None:
-    """Near-miss class "impl/child of heuristic member": a member's stored
-    pointer names this candidate, but that member holds heuristic witnesses
-    only and the edge is not one of the same-contract kinds that inherit."""
+    """A member's pointer names this candidate, but the member is heuristic-only and the edge isn't an inheriting
+    kind.
+    """
     address = (contract.address or "").lower()
     if not address:
         return None
@@ -87,9 +84,7 @@ def _heuristic_edge_miss(session: Session, contract: Contract, protocol_id: int)
 
 
 def _heuristic_deployer_miss(session: Session, *, protocol_id: int, deployer: str) -> dict[str, Any] | None:
-    """Near-miss classes "deployer one anchor short" and "affinity below the
-    floor" — the two W4-H qualification bars,
-    reported with the measured numbers so a reviewer sees the gap."""
+    """The two W4-H bars, with the measured numbers."""
     affinity = gate.compute_deployer_affinity(session, protocol_id=protocol_id, address=deployer)
     if affinity.anchor_count == 0:
         return None
@@ -112,9 +107,7 @@ def _heuristic_deployer_miss(session: Session, *, protocol_id: int, deployer: st
 
 
 def closest_miss(session: Session, contract: Contract, protocol_id: int) -> dict[str, Any]:
-    """Which witness rule came nearest and what named piece of evidence is
-    missing. Token fields only, never
-    composed prose."""
+    """Nearest witness rule and the missing evidence. Token fields only."""
     address = (contract.address or "").lower()
     chain_id = chain_id_for_chain_name(contract.chain)
     if chain_id is None:
@@ -146,8 +139,7 @@ def closest_miss(session: Session, contract: Contract, protocol_id: int) -> dict
         )
     ]
     if verified:
-        # An admitting witness verifies, so the only thing withholding
-        # membership is the W1 code precondition.
+        # Only the W1 code precondition withholds membership.
         if not code_probed:
             missing = "w1_code_probe"
         elif code_row is not None and code_row.code_absent_at_probe:

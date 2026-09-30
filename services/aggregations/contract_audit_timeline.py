@@ -1,5 +1,3 @@
-"""Build the per-contract audit timeline (impl windows + coverage rows)."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -15,16 +13,7 @@ from utils.chains import UnknownChainError, chain_by_name
 
 
 def _bytecode_keccak_now_batch(addresses: set[str], *, chain_id: int = 1) -> dict[str, str | None]:
-    """Return ``{lower_address: keccak_hex_or_None}`` for a set of addresses.
-
-    Reads ``code_keccak`` from the durable ``bytecode_cache`` (services.clients.rpc PG
-    layer) on ``chain_id`` — derived from the timeline's contract row so an L2
-    contract reads its own chain's cache, not mainnet's; only addresses absent
-    there are fetched live. There is no timeline-local cache — dedup and
-    size-bounding live in those shared layers, so a rapid reload of the surface
-    view doesn't fire one RPC per audit row. The live fetch fallback
-    (``services.audits.coverage._fetch_bytecode_keccak``) reads on the same
-    chain, derived from ``chain_id`` via the registry."""
+    """``{address: keccak or None}`` from ``bytecode_cache`` on the contract's own chain, fetching only misses live."""
     from services.audits.coverage import _fetch_bytecode_keccak
     from services.clients.rpc import _pg_bytecode_get
     from utils.chains import chain_by_id
@@ -44,12 +33,10 @@ def _bytecode_keccak_now_batch(addresses: set[str], *, chain_id: int = 1) -> dic
 
 
 def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[str, Any] | None:
-    """Per-impl audit timeline annotated with coverage. ``None`` for unknown contract."""
     contract = session.get(Contract, contract_id)
     if contract is None:
         return None
 
-    # Historical upgrade windows on this contract if it's a proxy.
     upgrade_rows = (
         session.execute(
             select(UpgradeEvent)
@@ -76,13 +63,7 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
             }
         )
 
-    # Coverage rows. For a proxy the timeline should show every audit
-    # that covered ANY impl in its history — not just direct name matches
-    # on the proxy row. We union:
-    #   - rows keyed to the contract itself (direct or impl_era coverage)
-    #   - for proxies, rows keyed to every historical-impl Contract.id
-    #     resolved from UpgradeEvent.new_impl, plus the current pointer
-    #     in Contract.implementation
+    # For a proxy, union rows keyed to the contract and to every historical impl.
     scope_contract_ids: set[int] = {contract.id}
     if contract.is_proxy:
         impl_addrs: set[str] = set()
@@ -119,10 +100,7 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
             a.id: a for a in session.execute(select(AuditReport).where(AuditReport.id.in_(audit_ids))).scalars().all()
         }
 
-    # Dedupe: multiple impl rows can produce rows against the same
-    # audit_id (the audit's scope name matched several historical impls).
-    # Rank by (confidence, match_type) so cryptographic source-equivalence
-    # proofs always beat heuristic temporal matches at equal confidence.
+    # Rank by (confidence, match_type) so source-equivalence proofs beat temporal matches.
     from services.audits.coverage import _row_score
 
     best_by_audit: dict[int, Any] = {}
@@ -138,10 +116,6 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
         ).all()
     }
 
-    # Live bytecode keccak for every impl referenced by a coverage row —
-    # one RPC per distinct address, cached briefly so repeated hits don't
-    # spam the provider. Compared against the persisted
-    # ``bytecode_keccak_at_match`` to produce ``bytecode_drift``.
     try:
         anchor_chain_id = chain_by_name(contract.chain).chain_id if contract.chain else 1
     except UnknownChainError:
@@ -162,16 +136,12 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
         brief["bytecode_keccak_at_match"] = r.bytecode_keccak_at_match
         now_keccak = live_keccaks.get(impl_addr.lower()) if impl_addr else None
         brief["bytecode_keccak_now"] = now_keccak
-        # Drift is only asserted when BOTH are known and differ. A NULL
-        # on either side leaves drift=None so the UI can say
-        # "unverified" rather than falsely flashing a drift warning.
+        # Drift only when both are known and differ; otherwise ``None`` (unverified).
         if r.bytecode_keccak_at_match and now_keccak:
             brief["bytecode_drift"] = r.bytecode_keccak_at_match.lower() != now_keccak.lower()
         else:
             brief["bytecode_drift"] = None
         brief["verified_at"] = r.verified_at.isoformat() if r.verified_at else None
-        # live_findings: audit.findings filtered to non-'fixed' statuses.
-        # None/missing findings yield an empty list.
         findings = audit.findings or []
         brief["live_findings"] = [
             f for f in findings if isinstance(f, dict) and (f.get("status") or "").lower() != "fixed"
@@ -195,14 +165,8 @@ def build_contract_audit_timeline(session: Session, contract_id: int) -> dict[st
 
 
 def _current_status(session: Session, contract: Contract, cov_rows: Sequence[Any]) -> str:
-    """Compute the badge state for a contract's current code.
-
-    "audited" is a strong claim we only grant when the current impl has a
-    HIGH-confidence open-ended coverage row (audit dated inside the impl's
-    active window). A 'medium' match means the audit sits in the grace
-    zone on either side of the window boundary — those audits still
-    appear in the ``coverage`` array, but the contract isn't badged as
-    audited on their strength alone.
+    """ "audited" only for a high-confidence open-ended row on the current impl; 'medium' grace-zone matches appear in
+    ``coverage`` but don't earn the badge.
     """
     if not contract.is_proxy:
         return "non_proxy_audited" if cov_rows else "non_proxy_unaudited"
@@ -221,36 +185,11 @@ def _current_status(session: Session, contract: Contract, cov_rows: Sequence[Any
         return "unaudited_since_upgrade" if cov_rows else "never_audited"
 
     current_cov = [r for r in cov_rows if r.contract_id == impl_contract.id]
-    # 'audited' requires definitive coverage of the currently-open impl
-    # window. Two paths:
-    #   (a) any row on this impl has a cryptographic proof
-    #       (equivalence_status='proven') with a non-coincidental
-    #       proof kind — strongest evidence, overrides everything else;
-    #   (b) a high-confidence open-ended temporal match AND no
-    #       hash_mismatch anywhere on the impl. hash_mismatch is strong
-    #       negative evidence — deployed code differs from what the
-    #       auditor reviewed — so we don't let a heuristic temporal
-    #       match paper over cryptographic disproof from a different
-    #       audit. Weak ``proof_kind='cited_only'`` rows don't qualify
-    #       here either just because their coverage row is
-    #       ``reviewed_commit/high``.
+    # Either (a) a proven, non-``cited_only`` equivalence row, or (b) a high open-ended temporal match with no
+    # hash_mismatch anywhere on the impl (cryptographic disproof beats heuristics).
     has_proven = any(r.equivalence_status == "proven" and r.proof_kind != "cited_only" for r in current_cov)
-    # ``covered_to_block is None`` alone is NOT "this row covers the currently-open
-    # impl window" — it is also what a row whose upper bound was never
-    # determined looks like, and this module's own ImplWindow docstring declares
-    # that inference invalid ("``to_block=None`` alone does NOT mean 'still
-    # current' — ``successor`` is what says that"). ``AuditContractCoverage``
-    # carries no ``successor``-equivalent column, so the only evidence available
-    # here is the LOWER bound: a row with a determined ``covered_from_block`` and
-    # no upper bound is open-ended, while a row with neither bound was never
-    # windowed at all and cannot earn the badge on the strength of a missing
-    # number.
-    #
-    # Armed population 15 (``match_confidence='high'`` with BOTH bounds NULL);
-    # realised badge changes today 0, because such a row does not currently land in
-    # ``current_cov`` — the 2 high-confidence rows that DO are
-    # ``covered_from_block`` set / ``covered_to_block`` NULL, i.e. genuinely
-    # open-ended, and they keep the badge.
+    # ``covered_to_block is None`` alone isn't open-ended; it's also an undetermined bound. Require a determined
+    # ``covered_from_block``.
     has_temporal_high = any(
         r.match_confidence == "high"
         and r.covered_from_block is not None

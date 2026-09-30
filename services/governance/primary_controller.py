@@ -1,38 +1,15 @@
-"""Per-contract primary-controller assignment.
+"""Per-contract primary-controller assignment, shared by canvas grouping and monitoring enrollment so they can't
+drift.
 
-Both the Surface canvas grouping and the unified monitoring enrollment
-need to answer the same question: "for each contract in this protocol,
-which non-contract principal (Safe / Timelock / EOA / proxy admin) is
-its canonical governing authority?". Computing the answer in one place
-on the server is what keeps those two views from drifting — the
-frontend used to derive it locally from ``principal.controls`` + a
-priority constant, and the enrollment path used to enroll *every*
-safe/timelock CGN node regardless of relation, so a fee-destination
-Safe stored in a state variable (e.g. ``accountantState.payoutAddress``)
-ended up in the Monitoring tab as a fully-watched governance multisig.
+(Enrollment used to watch every Safe/Timelock CGN node, so fee-destination Safes like ``payoutAddress`` were monitored
+as governance.)
 
-Eligibility uses ``function_principals`` membership, the same signal
-``services/aggregations/company_overview`` already trusts for
-in-protocol contract principals: an address is a primary-controller
-candidate for a contract iff it has a ``FunctionPrincipal`` row on at
-least one ``EffectiveFunction`` of that contract. State-variable
-destinations don't appear in FP — they describe where the contract
-*sends* something, not who can call it — so they drop out
-automatically without a label heuristic. This intentionally diverges
-from a CGN-walk because CGN is a flattened transitive graph and would
-re-introduce the fee-destination misclassification it's meant to fix.
+Candidates are principals with a ``FunctionPrincipal`` row on the contract: state-variable destinations aren't callers,
+so they drop out without heuristics. Not CGN, which is transitive and reintroduces the misclassification.
 
-When several principals are eligible for the same contract, one wins
-deterministically, ranked by per-contract evidence: first the authority
-*tier* the principal provably holds on that contract (governs > grants
-> operates — see :func:`_authority_tier`), then principal type
-(Safe > Timelock > EOA > proxy admin: Safes are where the actual
-signers live; proxy_admin tends to wrap an EOA), then lex-smallest
-address. The key is built only from facts about the contested contract
-itself, so analyzing more of the protocol can never flip an existing
-assignment — the old "owns more contracts overall" tiebreak was a count
-over whatever subset happened to be analyzed, and box identity flipped
-as coverage grew.
+Winner: authority tier on that contract (governs > grants > operates), then type (Safe > Timelock > EOA > proxy admin),
+then lex-smallest address. Only per-contract facts, so analyzing more of the protocol never flips an assignment (the old
+"owns more contracts" tiebreak did).
 """
 
 from __future__ import annotations
@@ -47,20 +24,9 @@ PRINCIPAL_PRIORITY: dict[str, int] = {
     "proxy_admin": 1,
 }
 
-# One shared vocabulary: effect facts → capability chip. Feeds the machine
-# ``capabilities`` field (the contract card / contract-click chips), the
-# per-(controller, contract) detail (guardian / co-controller chips, sidebar
-# "Can Call"), and the authority-tier ranking below. One map means the same
-# power reads the same word no matter what you click — a Safe's "fund-out" on
-# EETH matches the chip you'd see clicking EETH itself.
-#
-# ``CLAIM_CAPABILITY`` is the Plane-1 vocabulary, authoritative per function.
-# It adds the ``timelock`` / ``safe`` chips (no legacy label ever mapped to
-# them) and finally produces ``arbitrary-call`` (its ``arbitrary_external_call``
-# legacy source was corpus-dead). The hook/external exclusion is now structural:
-# ``external_contract_call`` isn't representable as a claim at all, and
-# ``callee_pointer.rotate`` (the precise hook-pointer rotation) is deliberately
-# unmapped, so those functions are still shown by name.
+# One effect->chip vocabulary for contract chips, controller detail and tier ranking, so a power reads the same
+# everywhere. Claims win per function. ``external_contract_call`` isn't a claim and ``callee_pointer.rotate`` is
+# deliberately unmapped; those functions show by name.
 CLAIM_CAPABILITY: dict[str, str] = {
     "pause.set": "pause",
     "pause.unset": "pause",
@@ -89,9 +55,7 @@ CLAIM_CAPABILITY: dict[str, str] = {
     "contract_deployment": "deploy",
 }
 
-# Legacy effect_labels → chip, the fallback for claim-less rows (stale data /
-# degraded artifact). ``delegatecall_execution`` is a Plane-0 fact with no claim
-# projection, so it only ever surfaces a chip through this path.
+# Legacy fallback for claim-less rows. ``delegatecall_execution`` has no claim projection, so it only surfaces here.
 EFFECT_CAPABILITY: dict[str, str] = {
     "pause_toggle": "pause",
     "ownership_transfer": "ownership",
@@ -109,24 +73,15 @@ EFFECT_CAPABILITY: dict[str, str] = {
 
 
 def function_capabilities(labels: Iterable[str], claim_ids: Iterable[str]) -> set[str]:
-    """Capability chips for ONE function. Plane-1 claims are authoritative when
-    present; a claim-less function falls back to the legacy effect_labels map.
-    Coarse effects with no clean chip drop out — their functions are shown by
-    name instead."""
+    """Claims win when present, else legacy labels. Coarse effects without a clean chip drop out."""
     claim_id_set = set(claim_ids)
     if claim_id_set:
         return {CLAIM_CAPABILITY[cid] for cid in claim_id_set if cid in CLAIM_CAPABILITY}
     return {EFFECT_CAPABILITY[label] for label in labels if label in EFFECT_CAPABILITY}
 
 
-# Authority tiers for the primary contest. Tier 3 ("governs"): can replace the
-# contract's code or reassign who controls it — upgrade / ownership / authority /
-# delegatecall capabilities, or driving a timelock (schedule/execute claims: the
-# driver of a timelock exercises everything the timelock owns). Tier 2
-# ("grants"): can grant or revoke access. Tier 1 ("operates"): everything else —
-# pause, fund recovery, whitelists, parameter setters. An operational Safe with
-# rights on many contracts must never outrank the contract's actual owner, which
-# is what the old portfolio-count tiebreak allowed.
+# Tier 3 governs (replace code / reassign control, or drive a timelock); tier 2 grants access; tier 1 operates. An
+# operational Safe must never outrank the actual owner.
 _GOVERNING_CAPS: frozenset[str] = frozenset({"upgrade", "ownership", "authority", "arbitrary-call", "delegatecall"})
 _GRANTING_CAPS: frozenset[str] = frozenset({"roles"})
 _GOVERNING_CLAIMS: frozenset[str] = frozenset({"timelock.schedule", "timelock.execute"})
@@ -140,19 +95,12 @@ def _authority_tier(caps: set[str], claim_ids: set[str]) -> int:
     return 1
 
 
-# Maximum number of governance contracts (Timelock / ProxyAdmin) an
-# ownership chain may traverse before we stop. Real stacks are 1–2 hops
-# (multisig → timelock → governed contract); the cap only guards against
-# pathological or cyclic FP graphs — the visited-set already breaks cycles.
+# Real stacks are 1–2 hops; the visited-set breaks cycles.
 _MAX_GOVERNANCE_HOPS = 4
 
 
 def _addr_of(token: str) -> str:
-    """Bare lowercased address of a possibly-composite ``<chain>::<address>``
-    token. A plain address (no ``"::"``) passes through unchanged, so callers
-    that key by bare address (the pre-multichain shape, and the unit tests) work
-    identically to callers that key by composite entity (the Surface pipeline,
-    which keeps twins on different chains from merging)."""
+    """Bare address from a possibly-composite token; plain addresses pass through."""
     return token.rsplit("::", 1)[-1]
 
 
@@ -164,69 +112,22 @@ def assign_primary_controllers(
 ) -> dict[str, list[str]]:
     """Pick one primary controller per contract.
 
-    *principals* — non-contract principals (the ``_build_flows_and_principals``
-    output shape). Each must have ``address`` and ``type``; only those whose
-    ``type`` is in :data:`PRINCIPAL_PRIORITY` participate.
+    *fp_addrs_by_contract* and *fp_function_detail_by_contract* keys and values may be bare or composite entities, but
+    consistently. Drop ``signature_witness`` rows first.
 
-    *fp_addrs_by_contract* — for every contract key, the set of
-    ``function_principals.address`` values attached to any ``EffectiveFunction``
-    of that contract. Keys and values may be bare lowercased addresses OR
-    composite ``<chain>::<address>`` entity tokens; the two must be in the same
-    keyspace so the passthrough walk connects a governance contract's caller edge
-    to its own contract key. The returned contract keys mirror whatever keyspace
-    was passed in. The caller is expected to drop ``signature_witness`` rows
-    before building this map.
+    *governance_passthrough* — in-protocol Timelocks/ProxyAdmins that mediate control; eligibility resolves through
+    their FP callers. Only FP edges are followed, so fund destinations can't re-enter. ``None`` = one hop.
 
-    *governance_passthrough* — addresses of in-protocol governance contracts
-    (Timelocks / ProxyAdmins) that *mediate* control rather than hold it: the
-    real authority calls them, and they in turn call the governed contracts.
-    When a contract's FP caller is one of these, eligibility is resolved one
-    hop further — through that governance contract's own FP callers — until a
-    terminal principal is reached. Because only FP (call-authority) edges are
-    traversed, fund-destination addresses (e.g. ``payoutAddress`` Safes, which
-    never hold an FP row) cannot be re-introduced. ``None`` ⇒ no traversal:
-    every caller is terminal, i.e. the original one-hop behavior.
+    With function detail (``None`` degrades each to evidence-free):
 
-    *fp_function_detail_by_contract* — per contract key (same keyspace as
-    *fp_addrs_by_contract*), the per-function ``{"callers": set, "labels": set,
-    "claims": [claim_id, ...]}`` rows (the ``fp_function_detail`` projection).
-    Caller values may be bare addresses (what the projection emits) or
-    composite entity tokens — both are normalized to bare for the evidence
-    lookups, so either convention matches the FP graph's caller tokens.
-    Supplies the evidence for the rank refinements below; ``None`` degrades
-    all of them to the evidence-free default:
+    * **Tier** — the strongest capability held on the contract; passthrough principals rank by the mediator's functions.
+    No detail means every candidate is tier 1.
+    * **Driver gating** — expand through a mediator only to callers that can make it act (or whose power is
+    undetermined). A cancel-only veto inherits nothing.
+    * **Significance** — callers whose functions are all broad whitelists (``createBid``) aren't eligible, directly or
+    via a mediator. Same test as :func:`assign_co_controllers`.
 
-    * **Authority tier.** Each eligible principal is ranked by the strongest
-      capability it provably holds on the contested contract
-      (:func:`_authority_tier`): a direct caller by its own functions there, a
-      passthrough-resolved principal by the *mediator's* functions there (the
-      mediator is what actually acts on the contract). Best tier across all
-      paths wins. No detail ⇒ every candidate ranks tier 1 — absence of a
-      proven capability is not proof of one, so nothing outranks anything.
-
-    * **Driver gating.** The walk expands through a mediator only to callers
-      that can make it act (:func:`_can_inherit_through`): a proven driving
-      function — timelock schedule/execute claims, or a governing/granting
-      capability on the mediator — or a claim-less function whose power is
-      not determined. A caller every one of whose mediator functions is
-      proven non-driving (a cancel-only veto, a delay setter) can block the
-      mediator but never wield what it owns, so it inherits nothing. Callers
-      with no rows at all expand as before — absence of evidence excludes
-      nothing.
-
-    * **Significance gating.** A caller whose proven functions on a contract
-      are all insignificant — not privileged and shared wider than the
-      co-controller gate threshold (a broad whitelist like ``createBid``) —
-      is not primary-eligible for that contract at all, and the same bar
-      applies to inheriting through a mediator (a whitelist on the mediator
-      anchors nothing one hop out either). Same two-arm test as
-      :func:`assign_co_controllers`, so primary eligibility is a subset of
-      real-authority. Callers with no detail rows stay eligible.
-
-    Returns ``{principal_address_lc: [contract_address_lc, ...]}`` for every
-    eligible principal. Principals that lose every contract still appear in
-    the dict with an empty list so a caller can distinguish "not primary"
-    from "unknown principal". Each list is sorted for deterministic output.
+    Returns ``{principal: [contracts]}`` for every eligible principal, empty lists included, sorted.
     """
     principal_by_addr: dict[str, dict[str, Any]] = {}
     for p in principals:
@@ -237,34 +138,13 @@ def assign_primary_controllers(
             continue
         principal_by_addr[addr] = p
 
-    # Normalize the FP graph to lower-case keys/values once so the closure
-    # below can walk it directly (callers don't always normalize both sides).
     fp_graph: dict[str, set[str]] = {}
     for contract_addr, fp_addrs in fp_addrs_by_contract.items():
         fp_graph.setdefault(contract_addr.lower(), set()).update((a or "").lower() for a in fp_addrs)
     passthrough = {(a or "").lower() for a in (governance_passthrough or ())}
 
-    # Per (contract_lc, caller_addr_lc): the capabilities and claim ids the
-    # caller holds across that contract's functions (the tier evidence), plus
-    # two per-pair facts the gates below read. Caller keys are normalized
-    # through ``_addr_of`` so composite ``<chain>::<address>`` caller tokens in
-    # the detail map key identically to the bare addresses the projection
-    # emits today — a keyspace mismatch must not silently disable the gates.
-    #
-    # *significant_on* — the caller holds at least one significant function:
-    # privileged or tightly gated, the same two arms
-    # :func:`assign_co_controllers` uses. A caller whose proven functions on a
-    # contract are all insignificant (a broad whitelist like ``createBid``)
-    # holds no governance there and must not be primary-eligible: with the
-    # portfolio-count tiebreak gone, an arbitrary lex-smallest bidder would
-    # otherwise win the box.
-    #
-    # *driver_on* — the caller can provably MAKE the contract act (a
-    # timelock.schedule/execute claim, or a governing/granting capability), or
-    # holds a claim-less function whose power is therefore not determined.
-    # What stays out is a caller every one of whose functions is proven
-    # non-driving — cancel-only vetoes, delay setters — which can block or
-    # tune a mediator but never wield what it owns.
+    # Per (contract, caller): capabilities and claim ids, plus ``significant_on`` and ``driver_on``. Caller keys
+    # normalized via ``_addr_of`` so a keyspace mismatch can't silently disable the gates.
     caps_on: dict[tuple[str, str], set[str]] = {}
     claims_on: dict[tuple[str, str], set[str]] = {}
     with_rows: set[tuple[str, str]] = set()
@@ -300,36 +180,21 @@ def assign_primary_controllers(
         return _authority_tier(caps_on.get(key, set()), claims_on.get(key, set()))
 
     def _has_governance_on(contract_lc: str, caller_token: str) -> bool:
-        """Whether the caller's authority on the contract can anchor a primary
-        claim. Requires a significant function when the caller's rows are in
-        evidence; a caller with no detail rows stays eligible — absence of
-        rows is not proof its authority is a broad whitelist."""
+        """No detail rows stays eligible: absence isn't proof of a broad whitelist."""
         key = (contract_lc, _addr_of(caller_token))
         return key in significant_on or key not in with_rows
 
     def _can_inherit_through(mediator_lc: str, caller_token: str) -> bool:
-        """Whether the caller inherits the mediator's authority over what the
-        mediator governs. Needs the same significance a direct primary claim
-        needs (a broad whitelist on the mediator anchors nothing one hop out
-        either), plus driving evidence: a proven driver function, or a
-        claim-less one whose power is not determined. A caller whose every
-        function on the mediator is proven non-driving (cancel-only veto,
-        delay setter) can block the mediator, never act through it. No rows
-        at all ⇒ legacy expansion — absence of evidence excludes nothing."""
+        """Needs significance plus driving evidence (or undetermined power). No rows means legacy expansion."""
         key = (mediator_lc, _addr_of(caller_token))
         if key not in with_rows:
             return True
         return key in significant_on and key in driver_on
 
     def _effective_controllers(contract_lc: str) -> dict[str, int]:
-        """Terminal controllers of *contract_lc* with the best authority tier
-        each holds there: direct FP callers at their own tier, and — for any
-        caller that is itself a ``passthrough`` governance contract — its
-        inheriting callers (see :func:`_can_inherit_through`) at the
-        *mediator's* tier (the mediator is the thing acting on the contract;
-        its driver wields that same authority). Depth-bounded; re-visiting
-        only on a strictly better tier both breaks cycles and keeps the best
-        tier across multiple governance paths."""
+        """Terminal controllers with their best tier: direct callers at their own tier, passthrough-inherited ones at
+        the mediator's. Revisiting only on a strictly better tier breaks cycles.
+        """
         best: dict[str, int] = {}
         stack: list[tuple[str, int, int]] = [
             (a, _tier_on(contract_lc, a), 1)
@@ -349,12 +214,7 @@ def assign_primary_controllers(
                 )
         return best
 
-    # eligibility[principal_lc] = {contract_lc: best authority tier}. A
-    # principal is eligible for a contract iff it is one of that contract's
-    # effective controllers (its FP callers, resolved transitively through any
-    # in-protocol governance contract in between). Contract keys and caller
-    # tokens may be composite ``<chain>::<address>`` entities; principal
-    # identity is the bare address, so map each caller back.
+    # Principal identity is the bare address.
     eligibility: dict[str, dict[str, int]] = {addr: {} for addr in principal_by_addr}
     for contract_lc in fp_graph:
         for ctrl, tier in _effective_controllers(contract_lc).items():
@@ -378,10 +238,8 @@ def assign_primary_controllers(
                 continue
             ptype = principal_by_addr[addr].get("type") or ""
             priority = PRINCIPAL_PRIORITY.get(ptype, 0)
-            # Smaller tuple wins: negate tier/priority so larger sorts earlier;
-            # raw address (lex-smallest) is the final stable tiebreak. Every
-            # component is a per-contract fact or a constant, so the winner
-            # cannot change when unrelated contracts enter the analysis.
+            # Negated so larger sorts first; every component is per-contract, so unrelated contracts can't change the
+            # winner.
             key = (-tier, -priority, addr)
             if best_key is None or key < best_key:
                 best_addr = addr
@@ -401,42 +259,14 @@ def assign_operand_render_groups(
     governance_passthrough: set[str],
     primary_for: Mapping[str, list[str]],
 ) -> dict[str, str]:
-    """Rendering home for machinery contracts whose operand unit lives in
-    another principal's group.
+    """Render home for machinery contracts (FP authority on other contracts) whose operands were won by a different
+    principal, based on the machinery's own FP rows.
 
-    An in-protocol contract that holds FP authority on other contracts is
-    *machinery*: it acts on its operands on behalf of whoever controls it —
-    a passthrough timelock executing governance calls, a Pauser fanning out
-    ``pauseAll``, an L1 bridge receiver feeding one sync pool. The primary
-    contest correctly assigns such a contract to its own controller, but when
-    everything it operates on was won by a different principal, rendering it
-    inside its controller's box separates it from the unit it exists to serve.
-    This computes, per machinery contract, the operand group it belongs with.
-    The placement witness is the contract's own FP rows on that group's
-    members, never a name or a guess. Two arms:
+    * **Any contract — unanimity**: every operand owned by one principal.
+    * **Passthrough mediator — strict plurality**; ties emit nothing.
 
-    * **Any contract — unanimity.** Every operand is owned, and all by the
-      same principal. One split operand (or one unowned one) is evidence the
-      machinery serves more than one unit, so it stays with its controller.
-
-    * **Passthrough mediator — strict plurality.** Timelocks / ProxyAdmins
-      exist only to mediate governance, so the bar is lower: the group owning
-      strictly more of its operands than any other is its home even when a
-      few operands live elsewhere. A tie emits nothing.
-
-    ``primary_for`` itself is untouched: the controller keeps the contract for
-    enrollment and every authority claim, and the operand group's Controllers
-    accordion lists it as a controller row (the frontend's group-controller
-    fold reads ``primary_for`` as well as ``co_controls`` for exactly this
-    case). Operand homes are taken from ``primary_for`` alone (never from
-    other overrides), so placement is single-pass and order-independent.
-
-    All inputs share one keyspace (bare or composite entity keys, as in
-    :func:`assign_primary_controllers`). *contract_keys* is the set of
-    rendered contract entities — only members of it are re-homed, so a
-    principal appearing as an FP caller can never be pulled into a box.
-    Returns ``{contract_key: principal_address_lc}`` only where the operand
-    home differs from the contract's own primary controller.
+    ``primary_for`` is untouched (enrollment and authority claims keep the true controller). Only members of
+    *contract_keys* are re-homed. Returns entries only where the home differs from the primary.
     """
     primary_of: dict[str, str] = {}
     for paddr, owned in primary_for.items():
@@ -446,9 +276,7 @@ def assign_operand_render_groups(
     contract_keys_lc = {(c or "").lower() for c in contract_keys}
     passthrough_lc = {(m or "").lower() for m in governance_passthrough}
 
-    # operand_homes[x] = {owner_addr_or_None: count} over x's operands; None
-    # counts operands nobody won (they block the unanimity arm but stay out of
-    # the mediator plurality, which only weighs proven homes).
+    # None counts unowned operands: they block unanimity but don't weigh in the plurality.
     operand_homes: dict[str, dict[str | None, int]] = {}
     for contract_addr, callers in fp_addrs_by_contract.items():
         c_lc = contract_addr.lower()
@@ -465,7 +293,6 @@ def assign_operand_render_groups(
         own = primary_of.get(x_lc)
         homes = [h for h in counts if h is not None]
         if len(counts) == 1 and homes:
-            # Unanimous: every operand owned by the same principal.
             target = homes[0]
         elif x_lc in passthrough_lc and homes:
             ranked = sorted(((h, counts[h]) for h in homes), key=lambda kv: (-kv[1], kv[0]))
@@ -479,13 +306,8 @@ def assign_operand_render_groups(
     return out
 
 
-# Effect labels that mark a function as a governance/admin power on their own.
-# Holding authority on one is enough to treat a non-primary FP caller as a real
-# co-controller worth surfacing/monitoring, no matter how many callers share
-# the function. ``external_contract_call`` / ``hook_update`` are intentionally
-# absent: they're borne by both privileged config setters AND permissionless
-# callers (EtherFi ``createBid`` is ``external_contract_call``), so they don't
-# discriminate — the caller-set-size arm separates those.
+# Holding one of these makes a non-primary caller a real co-controller. ``external_contract_call`` / ``hook_update`` are
+# absent: permissionless callers bear them too (``createBid``).
 PRIVILEGED_EFFECT_LABELS: frozenset[str] = frozenset(
     {
         "pause_toggle",
@@ -502,14 +324,7 @@ PRIVILEGED_EFFECT_LABELS: frozenset[str] = frozenset(
     }
 )
 
-# Plane-1 claims mirror of :data:`PRIVILEGED_EFFECT_LABELS` — the claim families
-# whose presence on a function marks its authorized callers as real
-# co-controllers: control-plane + value-flow + exec. ``callee_pointer.rotate``
-# (the precise hook-pointer rotation) and external-call facts are excluded for
-# the same reason the legacy set omits ``hook_update`` / ``external_contract_call``
-# — they ride on permissionless callers too, so they don't discriminate.
-# ``upgrade.*`` now fires (it never did as the corpus-dead ``implementation_update``
-# label), so upgrade functions gain co-controller significance for the first time.
+# Claims mirror of :data:`PRIVILEGED_EFFECT_LABELS`, with the same exclusions.
 _PRIVILEGED_CLAIM_PREFIXES = (
     "ownership.",
     "roles.",
@@ -530,10 +345,7 @@ _EXCLUDED_CLAIM_IDS: frozenset[str] = frozenset({"callee_pointer.rotate"})
 
 
 def _function_is_privileged(claims: Any, labels_lc: set[str], privileged_labels: frozenset[str]) -> bool:
-    """Whether a function is a governance/admin power on its own. Plane-1 claims
-    (the ``fp_function_detail`` projection's pre-extracted claim-id strings) are
-    authoritative when present; a claim-less function falls back to the legacy
-    effect_labels."""
+    """Claims win when present, else legacy labels."""
     claim_ids = {c for c in claims if isinstance(c, str) and c} if isinstance(claims, list) else set()
     if claim_ids:
         return any(
@@ -544,12 +356,7 @@ def _function_is_privileged(claims: Any, labels_lc: set[str], privileged_labels:
     return bool(labels_lc & privileged_labels)
 
 
-# A function shared by more than this many distinct authorized callers reads as
-# a broad whitelist (permissionless-ish), not an access-controlled governance
-# gate. EtherFi's ``createBid`` is shared by ~33 callers; real admin gates
-# (pause / recover / setCapacity) are held by 1–3. Anything in [3, 32] cleanly
-# separates them on the observed data; 4 leaves margin for a small
-# multisig + timelock + operator-EOA set sharing one gate.
+# ``createBid`` has ~33 callers; real admin gates have 1–3. Anything in [3, 32] separates them; 4 leaves margin.
 _MAX_GATE_CALLERS = 4
 
 
@@ -561,40 +368,13 @@ def assign_co_controllers(
     max_gate_callers: int = _MAX_GATE_CALLERS,
     privileged_labels: frozenset[str] = PRIVILEGED_EFFECT_LABELS,
 ) -> dict[str, list[str]]:
-    """Per principal, the contracts it *co-controls*: holds real authority on
-    without being the canonical primary controller.
+    """Per principal, contracts it co-controls: real authority without being primary (a pause/recovery guardian Safe
+    that lost the contest would otherwise vanish from canvas and monitoring).
 
-    :func:`assign_primary_controllers` names one primary per contract, so a
-    legitimate co-governor that loses the contest — e.g. a pause / fund-recovery
-    guardian Safe whose contracts a bigger governance Safe also wins — drops off
-    both the Surface canvas and monitoring enrollment. This recovers exactly
-    that set while excluding the noise the bare FP-authority signal admits:
-    permissionless callers like whitelisted auction bidders.
-
-    *fp_function_detail_by_contract* — ``{contract_addr_lc: [{"callers":
-    set[addr], "labels": set[str], "claims": [claim_id, ...]}, ...]}``, one entry
-    per ``EffectiveFunction`` of the contract that has at least one
-    (non-``signature_witness``) FP caller. ``claims`` is optional (Plane-1); when
-    present it is authoritative for the privileged-function test, with ``labels``
-    the fallback for claim-less rows. Contract addresses are the *rendered*
-    (proxy) addresses, matching *primary_for* and Surface group containment.
-
-    *primary_for* — the :func:`assign_primary_controllers` output. A principal
-    is never listed as co-controlling a contract it already primary-controls.
-
-    A principal ``P`` (type in :data:`PRINCIPAL_PRIORITY`) co-controls contract
-    ``C`` iff ``P`` is an authorized caller of some *significant* function ``f``
-    of ``C``: ``f`` bears a label in *privileged_labels*, or ``f`` is gated to at
-    most *max_gate_callers* distinct callers. The arms are complementary — the
-    gate arm catches privileged functions the analyzer labels weakly
-    (``setCapacity`` / ``sweepFunds`` surface only as ``external_contract_call``)
-    regardless of label, while the label arm keeps a privileged function even
-    when its role-holder set is larger than the gate. Together they keep
-    guardians and drop broad whitelists.
-
-    Returns ``{principal_address_lc: [contract_address_lc, ...]}`` for every
-    eligible principal (empty list when it co-controls nothing), each list
-    sorted — same shape as :func:`assign_primary_controllers`.
+    ``P`` co-controls ``C`` iff it can call a significant function of ``C``: privileged by label/claim, or gated to at
+    most *max_gate_callers*. The gate arm catches weakly-labeled admin functions (``setCapacity``); the label arm keeps
+    privileged ones with large role sets. Never lists a contract ``P`` already primary-controls. Same return shape as
+    :func:`assign_primary_controllers`.
     """
     principal_addrs: set[str] = set()
     for p in principals:

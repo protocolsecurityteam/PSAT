@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from db.models import Base
 
-EXPECTED_TABLE_COUNT = 63
-
 EXPECTED_TABLES = [
     "address_labels",
     "artifacts",
@@ -20,6 +18,9 @@ EXPECTED_TABLES = [
     "audit_reports",
     "balance_collection_state",
     "bytecode_cache",
+    "company_page_purges",
+    "company_page_revisions",
+    "company_page_snapshots",
     "contract_balance_fetches",
     "contract_balances",
     "contract_balances_latest",
@@ -78,10 +79,6 @@ EXPECTED_TABLES = [
     "worker_heartbeats",
     "worker_lifecycle",
 ]
-
-
-def test_metadata_table_count_matches_pre_split_module():
-    assert len(Base.metadata.tables) == EXPECTED_TABLE_COUNT
 
 
 def test_metadata_table_names_match_pre_split_snapshot():

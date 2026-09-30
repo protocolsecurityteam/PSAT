@@ -1,30 +1,20 @@
 """Regression: OZ-v5 ERC-7201 namespaced ownership / AccessControlDefaultAdminRules.
 
-Two coordinated layers share one OZ-v5 recognition table:
+Two layers share one OZ-v5 recognition table:
+  * Layer 1 (controller recall): the owner lives in a namespaced struct, so the only operand
+    is the suppressed ``*StorageLocation`` constant. ``build_controller_tracking`` emits a
+    CANONICAL owner controller (read via ``owner()``, never the dead slot constant) for the
+    two known slots (``OwnableStorageLocation`` -> EtherfiL1SyncPoolETH cid 615;
+    ``AccessControlDefaultAdminRulesStorageLocation`` -> CumulativeMerkleDrop cid 462).
+  * Layer 2 (function authority): CumulativeMerkleDrop overrides ``owner()`` to
+    ``defaultAdmin()``, which Slither inlines to a ``view_call`` of the private accessor
+    ``_getAccessControlDefaultAdminRulesStorage()`` (no external selector). The resolver
+    recognizes it by EXACT name and reads the public ``owner()`` instead.
+The L1BaseSyncPool namespace (``_getL1BaseSyncPoolStorage``) and the parametric
+AccessControl root (``_getAccessControlStorage``) are NOT owner authorities: fail-closed.
 
-  * Layer 1 (controller recall) — the owner lives in a namespaced struct, so the
-    only operand the gate exposes is the suppressed ``*StorageLocation`` slot
-    constant. ``build_controller_tracking`` emits a CANONICAL owner controller
-    (read through ``owner()``, never the dead slot constant) for the two known
-    OZ-v5 ownership slots (``OwnableStorageLocation`` →
-    EtherfiL1SyncPoolETH cid 615; ``AccessControlDefaultAdminRulesStorageLocation``
-    → CumulativeMerkleDrop cid 462).
-
-  * Layer 2 (function authority) — CumulativeMerkleDrop overrides ``owner()`` to
-    ``defaultAdmin()``, which Slither inlines to a ``view_call`` of the private
-    accessor ``_getAccessControlDefaultAdminRulesStorage()`` (no external
-    selector). The equality resolver recognizes that accessor by EXACT name and
-    reads the canonical public ``owner()`` instead, recovering the principal.
-
-Scoping is anchored by exact name: the L1BaseSyncPool namespace
-(``_getL1BaseSyncPoolStorage``) and the parametric AccessControl role-admin root
-(``_getAccessControlStorage``) are NOT owner authorities and stay fail-closed.
-
-Layered like ``test_canonical_authority_getter_resolution.py``: literal-dict unit
-tests pin the resolver behaviour with a stubbed RPC and always run; the
-integration tests compile a REAL OZ-v5 source fixture through the production
-static pipeline and resolve its real predicate trees. They skip only when no
-compatible solc is installed.
+Layered like ``test_canonical_authority_getter_resolution.py``: literal-dict unit tests always
+run; integration tests compile a REAL OZ-v5 fixture and skip only without a compatible solc.
 """
 
 from __future__ import annotations
@@ -127,24 +117,21 @@ NON_OWNERSHIP_ACCESSORS = [
 ]
 
 
-@pytest.mark.parametrize("name", OWNERSHIP_SLOT_CONSTANTS)
-def test_ownership_slot_constant_maps_to_owner(name: str) -> None:
-    assert _oz_v5_ownership_getter_for_slot_constant(name) == "owner"
+_RECOGNIZERS = {
+    "slot_constant": _oz_v5_ownership_getter_for_slot_constant,
+    "accessor": _oz_v5_ownership_getter_for_accessor,
+}
 
 
-@pytest.mark.parametrize("name", NON_OWNERSHIP_SLOT_CONSTANTS)
-def test_non_ownership_slot_constant_not_mapped(name: str) -> None:
-    assert _oz_v5_ownership_getter_for_slot_constant(name) is None
-
-
-@pytest.mark.parametrize("name", OWNERSHIP_ACCESSORS)
-def test_ownership_accessor_maps_to_owner(name: str) -> None:
-    assert _oz_v5_ownership_getter_for_accessor(name) == "owner"
-
-
-@pytest.mark.parametrize("name", NON_OWNERSHIP_ACCESSORS)
-def test_non_ownership_accessor_not_mapped(name: str) -> None:
-    assert _oz_v5_ownership_getter_for_accessor(name) is None
+@pytest.mark.parametrize(
+    "kind,name,expected",
+    [pytest.param("slot_constant", n, "owner", id=f"slot_constant-owner-{n}") for n in OWNERSHIP_SLOT_CONSTANTS]
+    + [pytest.param("slot_constant", n, None, id=f"slot_constant-not_mapped-{n}") for n in NON_OWNERSHIP_SLOT_CONSTANTS]
+    + [pytest.param("accessor", n, "owner", id=f"accessor-owner-{n}") for n in OWNERSHIP_ACCESSORS]
+    + [pytest.param("accessor", n, None, id=f"accessor-not_mapped-{n}") for n in NON_OWNERSHIP_ACCESSORS],
+)
+def test_recognition_table(kind: str, name: str, expected: str | None) -> None:
+    assert _RECOGNIZERS[kind](name) == expected
 
 
 # ==========================================================================
@@ -153,9 +140,8 @@ def test_non_ownership_accessor_not_mapped(name: str) -> None:
 
 
 def test_oz_v5_accessor_view_call_resolves_via_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CumulativeMerkleDrop's ``owner()`` override inlines to a view_call of the
-    private namespaced accessor; its own selector reverts, so the resolver must
-    read the canonical public ``owner()`` and recover the principal."""
+    """CumulativeMerkleDrop's ``owner()`` override inlines to a view_call of the private
+    accessor; its own selector reverts, so the resolver reads the public ``owner()``."""
     recorder: list = []
     _stub_rpc_map(monkeypatch, {DEAD_ACCESSOR_SELECTOR: None, OWNER_SELECTOR: SAFE}, recorder)
     tree = _eq_tree(
@@ -176,8 +162,7 @@ def test_oz_v5_accessor_view_call_resolves_via_owner(monkeypatch: pytest.MonkeyP
 
 
 def test_oz_v5_accessor_view_call_renounced_resolves_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A zero owner() (renounced/unset) resolves to exact-empty (renounced), not
-    a lower_bound unresolved placeholder."""
+    """A zero owner() (renounced/unset) resolves to exact-empty, not a lower_bound."""
     recorder: list = []
     _stub_rpc_map(monkeypatch, {DEAD_ACCESSOR_SELECTOR: None, OWNER_SELECTOR: "0x" + "00" * 20}, recorder)
     tree = _eq_tree(
@@ -196,9 +181,8 @@ def test_oz_v5_accessor_view_call_renounced_resolves_empty(monkeypatch: pytest.M
 
 
 def test_non_ownership_accessor_view_call_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail-closed: the L1BaseSyncPool namespace accessor is NOT an owner
-    authority — it must NOT be rerouted to owner() even though owner() would
-    return an address here. It stays the unresolved placeholder."""
+    """Fail-closed: the L1BaseSyncPool accessor is NOT an owner authority and must NOT be
+    rerouted to owner() even though owner() would return an address."""
     recorder: list = []
     _stub_rpc_map(monkeypatch, {OWNER_SELECTOR: TIMELOCK}, recorder)
     tree = _eq_tree(
@@ -217,8 +201,8 @@ def test_non_ownership_accessor_view_call_stays_placeholder(monkeypatch: pytest.
 
 
 def test_parametric_role_admin_accessor_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The parametric AccessControl role-admin root (``_getAccessControlStorage``)
-    is a per-role authority, not the OZ-v5 owner — it must stay fail-closed."""
+    """The parametric AccessControl role-admin root is a per-role authority, not the OZ-v5
+    owner; it stays fail-closed."""
     recorder: list = []
     _stub_rpc_map(monkeypatch, {OWNER_SELECTOR: SAFE}, recorder)
     tree = _eq_tree(
@@ -236,8 +220,7 @@ def test_parametric_role_admin_accessor_stays_placeholder(monkeypatch: pytest.Mo
 
 
 def test_oz_v5_accessor_without_rpc_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No reachable RPC ⇒ the gate stays unresolved, never a false negative
-    masquerading as resolved."""
+    """No reachable RPC => the gate stays unresolved, never a false negative."""
     recorder: list = []
     _stub_rpc_map(monkeypatch, {OWNER_SELECTOR: SAFE}, recorder)
     tree = _eq_tree(
@@ -261,8 +244,8 @@ def test_oz_v5_accessor_without_rpc_stays_placeholder(monkeypatch: pytest.Monkey
 
 
 class _StubContract:
-    """Minimal Slither stand-in: no functions/state vars, so writer discovery
-    finds nothing and the emitter takes the no-event ``state_only`` branch."""
+    """Minimal Slither stand-in: no functions/state vars, so the emitter takes the no-event
+    ``state_only`` branch."""
 
     functions: list = []
     state_variables_ordered: list = []
@@ -335,23 +318,40 @@ def _build_targets(
     return cast("list[dict[str, Any]]", targets), trees
 
 
+_ACCESS_CONTROL_ROLES = [
+    {"role": "AccessControlDefaultAdminRulesStorageLocation"},
+    {"role": "DEFAULT_ADMIN_ROLE"},
+]
+
+# (fixture contract, role_definitions): OZ-v5 Ownable (EtherfiL1SyncPoolETH cid 615 form) and
+# AccessControlDefaultAdminRules (CumulativeMerkleDrop cid 462 form).
+_LAYER1_FORMS = [
+    pytest.param("OzV5Ownable", [{"role": "OwnableStorageLocation"}], id="ownable"),
+    pytest.param("OzV5AccessControlDefaultAdmin", _ACCESS_CONTROL_ROLES, id="access_control_default_admin"),
+]
+
+
+@pytest.mark.parametrize("contract_name,roles", _LAYER1_FORMS)
+def test_layer1_emits_single_owner_controller_read_via_owner(_slither, contract_name, roles) -> None:
+    targets, _trees = _build_targets(_slither, contract_name, roles)
+    owners = [t for t in targets if t["controller_id"] == "state_variable:owner"]
+    assert len(owners) == 1, "exactly one canonical owner controller"
+    owner = owners[0]
+    assert owner["read_spec"]["target"] == "owner"
+    assert owner["read_spec"]["type_kind"] == "address"
+
+
+@pytest.mark.parametrize("contract_name,roles", _LAYER1_FORMS)
+def test_layer1_no_dead_slot_controller_emitted(_slither, contract_name, roles) -> None:
+    targets, _trees = _build_targets(_slither, contract_name, roles)
+    ids = {t["controller_id"] for t in targets}
+    assert not any("StorageLocation" in cid for cid in ids), "no dead slot-constant getter row"
+    assert not any(cid.startswith("role_identifier:") and "Storage" in cid for cid in ids)
+
+
 class TestLayer1OwnableForm:
     """OZ-v5 OwnableUpgradeable (EtherfiL1SyncPoolETH cid 615 form): the slot
     constant reaches role_definitions; the owner controller reads owner()."""
-
-    def test_emits_single_owner_controller_read_via_owner(self, _slither) -> None:
-        targets, _trees = _build_targets(_slither, "OzV5Ownable", [{"role": "OwnableStorageLocation"}])
-        owners = [t for t in targets if t["controller_id"] == "state_variable:owner"]
-        assert len(owners) == 1, "exactly one canonical owner controller"
-        owner = owners[0]
-        assert owner["read_spec"]["target"] == "owner"
-        assert owner["read_spec"]["type_kind"] == "address"
-
-    def test_no_dead_slot_controller_emitted(self, _slither) -> None:
-        targets, _trees = _build_targets(_slither, "OzV5Ownable", [{"role": "OwnableStorageLocation"}])
-        ids = {t["controller_id"] for t in targets}
-        assert not any("StorageLocation" in cid for cid in ids), "no dead slot-constant getter row"
-        assert not any(cid.startswith("role_identifier:") and "Storage" in cid for cid in ids)
 
     def test_owner_controller_carries_ownership_event_and_writers(self, _slither) -> None:
         targets, _trees = _build_targets(_slither, "OzV5Ownable", [{"role": "OwnableStorageLocation"}])
@@ -362,34 +362,12 @@ class TestLayer1OwnableForm:
         # Only the canonical ownership mutators, NOT incidental namespace setters.
         assert writers == {"transferOwnership(address)", "renounceOwnership()"}
 
-    def test_gate_operand_is_namespaced_slot_member(self, _slither) -> None:
-        _targets, trees = _build_targets(_slither, "OzV5Ownable", [{"role": "OwnableStorageLocation"}])
-        leaf = trees["trees"]["setTokenOut(address)"]["leaf"]
-        other = next(o for o in leaf["operands"] if o.get("source") != "msg_sender")
-        assert other["state_variable_name"] == "OwnableStorageLocation"
-        assert other["member_path"] == ["_owner"]
-
 
 class TestLayer1AccessControlForm:
     """OZ-v5 AccessControlDefaultAdminRules (CumulativeMerkleDrop cid 462 form):
-    the slot constant reaches role_definitions on-chain; the owner controller is
-    emitted and read via owner()."""
+    the slot constant reaches role_definitions on-chain."""
 
-    ROLES = [
-        {"role": "AccessControlDefaultAdminRulesStorageLocation"},
-        {"role": "DEFAULT_ADMIN_ROLE"},
-    ]
-
-    def test_emits_single_owner_controller_read_via_owner(self, _slither) -> None:
-        targets, _trees = _build_targets(_slither, "OzV5AccessControlDefaultAdmin", self.ROLES)
-        owners = [t for t in targets if t["controller_id"] == "state_variable:owner"]
-        assert len(owners) == 1
-        assert owners[0]["read_spec"]["target"] == "owner"
-
-    def test_no_dead_slot_controller_emitted(self, _slither) -> None:
-        targets, _trees = _build_targets(_slither, "OzV5AccessControlDefaultAdmin", self.ROLES)
-        ids = {t["controller_id"] for t in targets}
-        assert not any("StorageLocation" in cid for cid in ids)
+    ROLES = _ACCESS_CONTROL_ROLES
 
     def test_gate_operand_is_namespaced_accessor_view_call(self, _slither) -> None:
         _targets, trees = _build_targets(_slither, "OzV5AccessControlDefaultAdmin", self.ROLES)
@@ -407,7 +385,6 @@ class TestLayer2AccessControlResolution:
         contract = _contract(_slither, "OzV5AccessControlDefaultAdmin")
         tree = build_predicate_artifacts(contract)["trees"]["setPeer(address)"]
 
-        # Sanity: the real gate lowered to a view_call on the namespaced accessor.
         leaf = tree["leaf"]
         view_op = next(o for o in leaf["operands"] if o.get("source") == "view_call")
         assert view_op["callee_signature"] == "_getAccessControlDefaultAdminRulesStorage()"

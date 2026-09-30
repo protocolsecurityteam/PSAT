@@ -1,15 +1,8 @@
-"""Regression: event-log cursors are seeded from the event address's *creation
-block*, not block 0 — the slowness half of the block-0 cursor bug.
+"""Regression: event-log cursors are seeded from the event address's *creation block*, not block 0.
 
-A freshly-enrolled RolesAuthority cursor used to start at block 0 and rescan the
-~20M empty pre-deployment blocks (hundreds of empty ``eth_getLogs`` per topic)
-before reaching its first real event. These tests pin that:
-
-  * the backfill's first window starts AT the seed and never scans below it, and
-    a cold cursor that reaches head flips ``backfill_complete``;
-  * ``enroll_from_completed_jobs`` seeds a Solmate authority's role cursors at
-    ``creation_block - 1`` (resolved via Etherscan ``getcontractcreation``);
-  * the companion pins the old behavior — seeding at 0 fetches from block 1.
+A fresh RolesAuthority cursor used to start at block 0 and rescan ~20M empty pre-deployment blocks.
+Pins that backfill starts AT the seed, ``enroll_from_completed_jobs`` seeds Solmate role cursors at
+``creation_block - 1`` (Etherscan ``getcontractcreation``), and the companion pins the old seed-0 behavior.
 """
 
 from __future__ import annotations
@@ -34,10 +27,8 @@ from workers.event_log_indexer import (
 
 @pytest.fixture(autouse=True)
 def _no_creation_witness(monkeypatch):
-    """Enrollment grades its seed with three pinned chain reads before writing
-    the cursor. Nothing in this module asserts that grade — the subject is the
-    seed itself — so the wire is stubbed to the unreachable-RPC failure, whose
-    documented outcome is ``(None, not_determined)``."""
+    """Enrollment grades its seed with three chain reads; this module asserts the seed, not the grade,
+    so the wire is stubbed to the unreachable-RPC outcome ``(None, not_determined)``."""
     import workers.event_log_indexer as eli
 
     def _no_wire(*_a, **_kw):
@@ -56,9 +47,7 @@ _TOPIC = "0x" + "ab" * 32
 
 
 class _SeedAwareFetcher:
-    """Records every ``from_block`` and refuses to scan below the deploy block —
-    the empty pre-deployment range the creation-block seed must skip. Emits one
-    synthetic event at the deploy block so the backfill has something to index."""
+    """Records every ``from_block`` and refuses to scan below the deploy block; emits one event at it."""
 
     def __init__(self, deploy: int) -> None:
         self.deploy = deploy
@@ -85,8 +74,7 @@ class _SeedAwareFetcher:
 
 
 class _RecordingFetcher:
-    """Records ``from_block`` only — never raises — so the companion test can
-    observe the wasteful low scan a block-0 seed produces."""
+    """Records ``from_block`` only, so the companion test can observe the block-0 seed's wasteful low scan."""
 
     def __init__(self) -> None:
         self.from_blocks: list[int] = []
@@ -171,27 +159,6 @@ def test_backfill_starts_at_seed_and_never_scans_pre_deploy(session):
     last_block, complete = _cursor_state(session, _AUTHORITY)
     assert last_block == _TARGET
     assert complete is True
-
-
-@requires_postgres
-def test_block0_seed_scans_pre_deploy_range(session):
-    # The bug, pinned: a cursor seeded at 0 fetches from block 1 — the empty
-    # pre-deployment scan the creation-block seed eliminates.
-    enroll_event_cursor(session, chain_id=1, event_address=_AUTHORITY, topic0=_TOPIC, start_block=0)
-    session.commit()
-
-    fetcher = _RecordingFetcher()
-    fetchers, heads, hashes = _maps(fetcher)
-    scan_enrolled_events(
-        session,
-        fetchers=fetchers,
-        head_fetchers=heads,
-        block_hash_fetchers=hashes,
-        confirmation_depth=_CONFIRMATIONS,
-        max_block_span=_MAX_SPAN,
-        max_windows_per_cursor=5,
-    )
-    assert fetcher.from_blocks and min(fetcher.from_blocks) == 1
 
 
 @requires_postgres
@@ -297,68 +264,62 @@ def test_enroll_from_completed_jobs_skips_zero_authority(session, monkeypatch):
     assert zero_cursors == 0
 
 
-def test_get_contract_creation_block_prefers_blocknumber(monkeypatch):
-    import services.clients.etherscan as es
-
-    monkeypatch.setattr(
-        es,
-        "get",
-        lambda module, action, **params: {
-            "status": "1",
-            "result": [
-                {"contractAddress": "0x" + "ab" * 20, "contractCreator": "0x" + "cd" * 20, "blockNumber": "18500000"}
-            ],
-        },
-    )
-    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) == 18_500_000
+def _etherscan_down(*_a, **_k):
+    raise RuntimeError("etherscan down")
 
 
-def test_get_contract_creation_block_falls_back_to_txhash(monkeypatch):
+_CREATOR = "0x" + "ab" * 20
+
+
+@pytest.mark.parametrize(
+    ("address", "es_get", "kwargs", "expected"),
+    [
+        pytest.param(
+            _CREATOR,
+            lambda module, action, **params: {
+                "status": "1",
+                "result": [
+                    {"contractAddress": _CREATOR, "contractCreator": "0x" + "cd" * 20, "blockNumber": "18500000"}
+                ],
+            },
+            {},
+            18_500_000,
+            id="prefers_blocknumber",
+        ),
+        pytest.param(
+            _CREATOR,
+            lambda module, action, **params: {"status": "1", "result": [{"txHash": "0x" + "11" * 32}]},
+            {"rpc_url": "http://stub"},
+            18_500_000,
+            id="falls_back_to_txhash",
+        ),
+        # A transient lookup failure yields None, never a genesis 0.
+        pytest.param(_CREATOR, _etherscan_down, {}, None, id="none_on_failure"),
+        pytest.param(
+            _CREATOR,
+            lambda module, action, **params: {"status": "1", "result": [{"blockNumber": 18_500_000}]},
+            {},
+            18_500_000,
+            id="accepts_int_blocknumber",
+        ),
+        pytest.param("not-an-address", _etherscan_down, {}, None, id="rejects_non_address"),
+        # Neither blockNumber nor a usable txHash -> None (caller defers enrollment).
+        pytest.param(
+            _CREATOR,
+            lambda module, action, **params: {"status": "1", "result": [{"contractCreator": "0x" + "cd" * 20}]},
+            {},
+            None,
+            id="none_when_no_block_and_no_txhash",
+        ),
+    ],
+)
+def test_get_contract_creation_block(monkeypatch, address, es_get, kwargs, expected):
     import services.clients.etherscan as es
     import services.clients.rpc as rpc
 
-    monkeypatch.setattr(
-        es,
-        "get",
-        lambda module, action, **params: {"status": "1", "result": [{"txHash": "0x" + "11" * 32}]},
-    )
+    monkeypatch.setattr(es, "get", es_get)
     monkeypatch.setattr(rpc, "rpc_request", lambda url, method, params, chain_id=None: {"blockNumber": hex(18_500_000)})
-    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1, rpc_url="http://stub") == 18_500_000
-
-
-def test_get_contract_creation_block_returns_none_on_failure(monkeypatch):
-    import services.clients.etherscan as es
-
-    def _raise(*_a, **_k):
-        raise RuntimeError("etherscan down")
-
-    monkeypatch.setattr(es, "get", _raise)
-    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) is None
-
-
-def test_get_contract_creation_block_accepts_int_blocknumber(monkeypatch):
-    import services.clients.etherscan as es
-
-    monkeypatch.setattr(
-        es, "get", lambda module, action, **params: {"status": "1", "result": [{"blockNumber": 18_500_000}]}
-    )
-    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) == 18_500_000
-
-
-def test_get_contract_creation_block_rejects_non_address():
-    import services.clients.etherscan as es
-
-    assert es.get_contract_creation_block("not-an-address", chain_id=1) is None
-
-
-def test_get_contract_creation_block_none_when_no_block_and_no_txhash(monkeypatch):
-    import services.clients.etherscan as es
-
-    # Neither blockNumber nor a usable txHash → None (caller defers enrollment).
-    monkeypatch.setattr(
-        es, "get", lambda module, action, **params: {"status": "1", "result": [{"contractCreator": "0x" + "cd" * 20}]}
-    )
-    assert es.get_contract_creation_block("0x" + "ab" * 20, chain_id=1) is None
+    assert es.get_contract_creation_block(address, chain_id=1, **kwargs) == expected
 
 
 def test_seed_block_defers_on_lookup_error(monkeypatch):
@@ -409,11 +370,8 @@ def test_index_step_marks_backfill_complete_when_already_at_head(session):
 
 @requires_postgres
 def test_pg_repo_not_backfill_complete_is_not_trusted(session):
-    # The durable read gating that makes creation-block seeding safe: a cursor
-    # seeded at the deploy block (positive) but not yet backfilled must NOT be
-    # trusted — min_indexed_block returns None and the folds report
-    # no_index_cursor (so the read fails closed) rather than folding a partial
-    # history as if it were exact. Once the backfill completes, it's trusted.
+    # Seeded at the deploy block but not yet backfilled must NOT be trusted: no_index_cursor (fail closed),
+    # not a partial history folded as exact.
     from db.models import IndexedEventCursor, IndexedEventLog
     from services.resolution.repos.event_logs_pg import PostgresEventLogRepo
 
@@ -466,10 +424,7 @@ def test_pg_repo_not_backfill_complete_is_not_trusted(session):
     cursor.backfill_complete = True
     session.commit()
     assert repo.min_indexed_block(chain_id=1, event_address=addr, topic0s=[topic]) == 19_000_000
-    # Evaluate at a height the (now backfilled) cursor covers — the resolver pins a
-    # finalized height for this purpose (#119). A bare ``block=None`` would mean
-    # "evaluate at live head", which the durable cursor structurally lags, so the
-    # coverage gate correctly demotes that to lower_bound.
+    # Evaluate at a height the backfilled cursor covers (#119); block=None would demote to lower_bound.
     hist2 = repo.fold_event_history(
         chain_id=1,
         event_address=addr,

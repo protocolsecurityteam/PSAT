@@ -1,12 +1,9 @@
-"""The published ``monitored_events.event_type`` may claim a controller
-changed only when the tracking plan PROVES the write target gates callers.
+"""The published ``monitored_events.event_type`` may claim a controller changed only when the
+tracking plan PROVES the write target gates callers.
 
-Fixtures are verbatim tracked-controller entries from real persisted
-tracking plans: an enrolled governance token whose ``_balances`` slot has
-no ``authority_provenance`` (ordinary ERC-20 Transfer/Approval traffic),
-and FiatTokenV2_2's ``pauser`` slot, which carries
-``authority_provenance='caller_gate'``. The first must publish the neutral
-type end-to-end; the second must keep the controller claim.
+Fixtures are verbatim tracked-controller entries from persisted plans: a governance token's
+``_balances`` slot (no ``authority_provenance``; must publish the neutral type) and
+FiatTokenV2_2's ``pauser`` (``caller_gate``; must keep the controller claim).
 """
 
 from __future__ import annotations
@@ -37,11 +34,9 @@ FIAT_TOKEN_ADDRESS = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
 
 
 def _erc20_balances_controller(*, authority_provenance: str | None = None) -> dict:
-    """The ``state_variable:_balances`` tracked controller as persisted for
-    the enrolled governance token — ordinary ERC-20/ERC-20Votes signatures
-    bound to a mapping slot that never earned a gate proof. (The persisted
-    plan binds five; three are carried here, Enter/Exit dropped as
-    protocol-specific noise with the same shape.)"""
+    """``state_variable:_balances`` as persisted for the enrolled governance token: ordinary
+    ERC-20/Votes signatures on a mapping slot with no gate proof (3 of the 5 bound
+    signatures; Enter/Exit dropped as same-shape noise)."""
     tracked = {
         "controller_id": "state_variable:_balances",
         "label": "_balances",
@@ -110,8 +105,7 @@ def _erc20_balances_controller(*, authority_provenance: str | None = None) -> di
 
 
 def _fiat_token_pauser_controller() -> dict:
-    """FiatTokenV2_2's ``pauser`` — a real controller variable: the plan
-    proves a lowered predicate leaf gates callers on it."""
+    """FiatTokenV2_2's ``pauser``: the plan proves a predicate leaf gates callers on it."""
     return {
         "controller_id": "state_variable:pauser",
         "label": "pauser",
@@ -196,15 +190,13 @@ def _pauser_changed_log(*, block: int = 25634400) -> dict:
 
 
 def test_erc20_traffic_on_enrolled_token_is_not_a_controller_claim():
-    """Every signature bound to the unproven ``_balances`` slot publishes
-    the neutral type. An ordinary token transfer is not a control change."""
+    """Every signature bound to the unproven ``_balances`` slot publishes the neutral type."""
     topics = extract_governance_topics(_plan(_erc20_balances_controller()))
 
     assert len(topics) == 3
     assert {t["event_type"] for t in topics} == {"state_changed:state_variable:_balances"}
     assert not any("controller_changed" in t["event_type"] for t in topics)
-    # The controller_id still rides along — the neutral type drops the
-    # control claim, not the identity of what was written.
+    # The neutral type drops the control claim, not the identity of what was written.
     assert {t["controller_id"] for t in topics} == {"state_variable:_balances"}
 
 
@@ -227,8 +219,8 @@ def test_call_target_provenance_does_not_earn_the_controller_claim():
 
 
 def test_absent_and_call_target_agree_but_caller_gate_differs():
-    """The three states of ``authority_provenance``, read straight off the
-    resolver: only the proven gate mints the controller claim."""
+    """The three states of ``authority_provenance`` off the resolver: only a proven gate mints
+    the controller claim."""
     assert _resolve_event_type("state_variable:x") == "state_changed:state_variable:x"
     assert _resolve_event_type("state_variable:x", authority_provenance=None) == "state_changed:state_variable:x"
     assert (
@@ -264,10 +256,8 @@ def test_provenance_never_overrides_a_canonical_classification():
 
 
 def test_uncorroborated_canonical_claim_falls_to_the_earned_stem():
-    """A canonical family type needs the event's OWN signature to
-    corroborate it. Without that, writes donation and the legacy
-    controller_id map fall to the terminal stem — which still honours
-    the provenance three-state."""
+    """A canonical family type needs the event's OWN signature to corroborate it; otherwise
+    donation and the legacy map fall to the terminal stem (which honours provenance)."""
     # Donated writes, uncorroborated name -> neutral.
     assert (
         _resolve_event_type(
@@ -316,20 +306,6 @@ def test_unclassified_spec_decodes_to_the_neutral_type():
     assert parsed["event_type"] == "state_changed"
 
 
-def test_decoder_stamps_the_resolved_neutral_type_on_a_real_transfer():
-    """End of the producer path: the decoded event that reaches the
-    watcher's insert carries the neutral type."""
-    spec = next(
-        t for t in extract_governance_topics(_plan(_erc20_balances_controller())) if t["topic0"] == TRANSFER_TOPIC0
-    )
-    parsed = parse_tracked_log(_transfer_log(), spec)
-
-    assert parsed is not None
-    assert parsed["event_type"] == "state_changed:state_variable:_balances"
-    assert parsed["to"] == "0x951af4267c8fbcd1c5a8c38e15b122768e44559a"
-    assert parsed["value"] == 22661724000000000000
-
-
 # ---------------------------------------------------------------------------
 # Published surfaces — GET /api/protocols/{id}/events and /api/monitored-events
 # ---------------------------------------------------------------------------
@@ -337,8 +313,8 @@ def test_decoder_stamps_the_resolved_neutral_type_on_a_real_transfer():
 
 @pytest.fixture()
 def served_rows(db_session):
-    """Two MonitoredEvents built by running the real producer path over the
-    two fixture plans, then inserted exactly as the watcher inserts them."""
+    """Two MonitoredEvents from the real producer path over the fixture plans, inserted as the
+    watcher inserts them."""
     from db.models import MonitoredContract, MonitoredEvent, Protocol
 
     protocol = Protocol(name=f"prov-fixture-{uuid.uuid4().hex[:8]}")

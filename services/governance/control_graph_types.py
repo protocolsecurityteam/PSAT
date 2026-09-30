@@ -1,53 +1,15 @@
-"""Reconcile ``control_graph_nodes`` typing + intrinsic config from ``FunctionPrincipal``.
+"""Fold ``FunctionPrincipal`` typing + intrinsic config back into ``control_graph_nodes``.
 
-The pipeline types a governance principal (Safe / Timelock / proxy admin)
-in two places, at two stages:
+The resolution walk only classifies addresses it reaches structurally, so a principal controlling a contract only via
+per-function authority (a multisig calling ``EtherFiTimelock.cancel``) stays ``unknown`` in CGN. The policy stage
+classifies it live into FP. The classifier is deterministic, so FP is simply more complete, but nothing propagated it
+back to CGN readers (enrollment, chat, the canvas).
 
-* The **resolution stage** writes ``control_graph_nodes.resolved_type`` from
-  its graph walk, and — for the safes/timelocks it reaches — the intrinsic
-  config that defines them (a safe's ``owners`` / ``threshold``, a timelock's
-  ``delay``). The walk only runs the on-chain classifier on addresses it
-  reaches structurally, so a principal that controls a contract *only* through
-  per-function authority — e.g. a multisig that calls ``EtherFiTimelock.cancel``
-  but appears nowhere in the storage-slot graph — is left ``unknown`` with no
-  intrinsic config at all.
-* The **policy stage** writes ``function_principals.resolved_type`` with a
-  *live* ``classify_resolved_address`` fallback for cache misses, so the same
-  address comes out ``safe`` / ``timelock`` / ``proxy_admin`` — and that
-  classifier returns the intrinsic config (``owners`` / ``threshold`` / delay)
-  in the same call, stored on ``function_principals.details``.
+Type and config travel together: a ``safe`` node with no ``owners`` renders as a signerless multisig. Protocol-wide
+because a principal's unknown nodes live on the contracts it governs while its FP rows sit on the timelock it calls.
 
-The classifier is deterministic and address-only, so the policy stage's answer
-is simply more complete — not a different opinion. But it never propagates back
-to ``control_graph_nodes``, so every consumer that reads CGN (monitoring
-enrollment's candidate walk, the chat context layer, the Surface canvas) can see
-a stale ``unknown`` for an address the system has already classified.
-
-This pass closes that gap protocol-wide. It folds back **both** halves of the
-classifier's answer — the type *and* the intrinsic config that justifies it.
-Folding the type alone would leave a node asserting ``safe`` with no ``owners``,
-a state the resolution stage never produces; the Surface principal builder then
-reads that owner-less node and renders a multisig with no signers. The config
-travels with the type so a reconciled node is indistinguishable from a
-structurally-resolved one. It must be protocol-wide rather than per-contract
-because a principal's ``unknown`` CGN nodes live on the contracts it *governs*,
-while its FP authority sits on a different contract (the timelock it calls) — a
-per-contract write-back would miss most of them.
-
-Only ``unknown`` / NULL types are upgraded, and only to the governance principal
-types (Safe / Timelock / proxy admin) that downstream views treat as
-principals; a concrete graph-walk type is never overwritten, and EOAs/plain
-contracts are left alone so this can't reshape unrelated Surface nodes.
-Intrinsic keys are merged with ``setdefault`` semantics onto nodes whose type
-already matches the folded one, so a structurally-resolved node's own config is
-never clobbered. Because a node already carrying both type and config is left
-untouched, re-running on already-typed rows backfills config a prior
-(type-only) reconcile left missing — and converges: a second run changes
-nothing.
-
-That pass is UPDATE-only, and :func:`materialize_fp_principal_nodes` below is
-the INSERT half it always lacked — see that function's docstring for the defect
-it closes.
+Only ``unknown``/NULL types are upgraded, only to governance types; config merges with ``setdefault``. Idempotent and
+convergent. :func:`materialize_fp_principal_nodes` is the INSERT half.
 """
 
 from __future__ import annotations
@@ -83,52 +45,27 @@ from utils.chains import chain_enabled
 
 logger = logging.getLogger(__name__)
 
-# FP ``resolved_type`` values folded back into CGN. These spellings are shared
-# with the CGN vocabulary verbatim. EOA / contract are intentionally excluded:
-# they're not monitored controllers and writing them would surface unrelated
-# nodes on the Surface canvas (whose node-keep filter admits any principal type).
+# EOA/contract are excluded: not monitored controllers, and the canvas keeps any principal type.
 _RECONCILABLE_TYPES: tuple[ResolvedControllerType, ...] = ("safe", "timelock", "proxy_admin")
 
-# Tie-break when one address holds more than one FP type across functions:
-# prefer the higher-authority kind (a Safe that also looks like a proxy admin
-# is a Safe). Matches the Safe > Timelock > proxy admin precedence used by
-# ``services.governance.primary_controller``.
+# Safe > Timelock > proxy admin, as in ``primary_controller``.
 _TYPE_PRIORITY: dict[ResolvedControllerType, int] = {"safe": 3, "timelock": 2, "proxy_admin": 1}
 
-# Intrinsic principal-config keys that travel WITH the type — the classifier
-# returns them in the same call (a safe's signer set + threshold, a timelock's
-# delay). Relationship-specific FP keys (``conditions`` / ``trace`` /
-# ``confidence`` / ``source`` / ``membership_quality``) are deliberately
-# excluded: they describe a per-function authority edge, not the principal
-# address, and carry no meaning on a CGN node.
+# Relationship keys (conditions, trace, membership_quality) describe a per-function edge, not the address.
 _INTRINSIC_DETAIL_KEYS = ("owners", "threshold", "delay", "delay_seconds", "min_delay")
 
 
 def _chain_key(chain: str | None) -> str:
-    """Normalize a contract's chain-name for keying: a NULL/blank chain is a
-    legacy mainnet row, folded to the same key as an explicit ``ethereum`` so
-    the two never split a mainnet principal across two buckets."""
+    """NULL/blank chain is legacy mainnet, keyed with ``ethereum``."""
     return _coalesce_chain(chain)
 
 
 def _coherent_analysis_state(node: Any) -> str | None:
-    """The ``analysis_state`` the resolution walk itself would stamp on this
-    node's CURRENT ``resolved_type`` — the single source of truth is
-    ``services.resolution.recursive._analysis_state``, applied to the row's own
-    fields.
-
-    Used after a type upgrade so the pair stays coherent: the walk left
-    ``analysis_state`` NULL because the type was ``unknown`` at walk time, and
-    folding in ``safe`` without revisiting the state leaves a row that types an
-    address as a Safe while claiming its analyzability was never determined.
-
-    ``graph_max_depth`` NULL (legacy rows) suppresses the depth comparison by
-    using an unreachable horizon: without the walk's recorded horizon we cannot
-    honestly claim ``beyond_depth_horizon``, and the fallthrough for analyzable
-    types is ``None`` — which leaves the column NULL, not a guess.
+    """The ``analysis_state`` the walk (``recursive._analysis_state``) would stamp on the current type, so an
+    upgraded node doesn't claim to be a Safe with undetermined analyzability. NULL ``graph_max_depth`` can't
+    justify ``beyond_depth_horizon``, so the column stays NULL.
     """
-    # Lazy import: module-level would re-create the resolution↔policy package
-    # cycle this file's callers already tiptoe around.
+    # Lazy: avoids the resolution↔policy package cycle.
     from services.resolution.recursive import _analysis_state
 
     max_depth = node.graph_max_depth if isinstance(node.graph_max_depth, int) else (node.depth or 0) + 1
@@ -142,9 +79,7 @@ def _coherent_analysis_state(node: Any) -> str | None:
 
 
 def _merge_intrinsic(into: dict[str, Any], src: Mapping[str, Any]) -> None:
-    """Fold intrinsic principal-config keys from *src* into *into*, keeping the
-    most complete value: the longest ``owners`` list, the first non-null scalar
-    for everything else."""
+    """Longest ``owners``; first non-null scalar otherwise."""
     for key in _INTRINSIC_DETAIL_KEYS:
         value = src.get(key)
         if value is None:
@@ -160,23 +95,11 @@ def _merge_intrinsic(into: dict[str, Any], src: Mapping[str, Any]) -> None:
 
 
 def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int]) -> int:
-    """Fold authoritative FunctionPrincipal typing + intrinsic config into CGN.
-
-    *contract_ids* — the protocol's analyzed contract ids (the same set the
-    caller enrolls). Both the FP read and the CGN write are scoped to it.
-
-    Returns the number of ``control_graph_nodes`` rows changed (a type upgrade,
-    a config backfill, or both, counts once). Idempotent.
-    """
+    """Fold FP typing + config into CGN for *contract_ids*. Returns rows changed. Idempotent."""
     if not contract_ids:
         return 0
 
-    # Per (chain, address): every (type, details) the protocol's FP rows assign
-    # it, so we can pick the best type AND pull intrinsic config from the rows of
-    # that type. Keyed by chain too — the same address is a distinct principal on
-    # each chain (a Safe on ethereum, a Timelock on base), and control edges never
-    # cross chains, so a per-address fold would let one chain's higher-
-    # priority type overwrite the twin's node on another chain.
+    # Keyed by chain: the same address is a distinct principal per chain and control never crosses chains.
     rows_by_key: dict[tuple[str, str], list[tuple[ResolvedControllerType, dict[str, Any]]]] = {}
     for chain, addr, resolved_type, details in session.execute(
         select(
@@ -196,8 +119,6 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
         if not addr or not resolved_type:
             continue
         key = (_chain_key(chain), addr)
-        # The SQL filter above guarantees membership; the coercion carries the
-        # proof to the type level without a cast.
         rows_by_key.setdefault(key, []).append(
             (coerce_resolved_controller_type(resolved_type), details if isinstance(details, dict) else {})
         )
@@ -211,9 +132,7 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
         typed_rows: list[ResolvedControllerType] = [rt for rt, _ in rows]
         best = max(typed_rows, key=_priority)
         best_by_key[key] = best
-        # Intrinsic config comes only from the rows of the winning type — a
-        # safe's owners must not bleed onto a timelock-typed write, and vice
-        # versa.
+        # Only from the winning type's rows, so a Safe's owners never land on a timelock.
         intrinsic: dict[str, Any] = {}
         for rtype, det in rows:
             if rtype == best:
@@ -224,11 +143,8 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
     if not best_by_key:
         return 0
 
-    # Load the nodes for these addresses that are either still untyped OR
-    # already one of the governance types — the latter lets a re-run backfill
-    # intrinsic config onto rows a prior type-only reconcile already upgraded.
-    # ControlGraphNode has no chain column; the chain comes from the node's own
-    # parent Contract, so join it in and key the fold lookup on (chain, address).
+    # Includes already-governance-typed nodes so re-runs backfill config. CGN has no chain column; it comes from the
+    # parent Contract.
     cgn_rows = session.execute(
         select(ControlGraphNode, Contract.chain)
         .join(Contract, Contract.id == ControlGraphNode.contract_id)
@@ -251,15 +167,12 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
             continue
         changed = False
 
-        # Type upgrade: only fill unknown/NULL, never overwrite a concrete type.
+        # Never overwrite a concrete type.
         if node.resolved_type in (None, "unknown") and new_type != node.resolved_type:
             node.resolved_type = new_type
             changed = True
 
-        # Intrinsic-config fold: add owners/threshold/delay onto a node whose
-        # type matches the folded one (so we never attach a safe's owners to a
-        # timelock), without clobbering config the resolution stage already
-        # wrote. JSONB isn't a MutableDict, so reassign to mark it dirty.
+        # Only onto a matching type, without clobbering. JSONB isn't MutableDict, so reassign.
         node_intrinsic = intrinsic_by_key.get(key)
         if node_intrinsic and node.resolved_type == new_type:
             current = dict(node.details) if isinstance(node.details, dict) else {}
@@ -268,16 +181,7 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
                 node.details = {**current, **missing}
                 changed = True
 
-        # analysis_state coherence: the walk stamped NULL ("not determined")
-        # while the type was ``unknown``; once this pass types the node, the
-        # pair ('safe', NULL) reads "typed as a Safe, analyzability not
-        # determined" — a claim the same row refutes. Stamp exactly what the
-        # walk would now derive from the row's own fields, and only onto NULL:
-        # a determined state ('analyzed', 'attempt_failed', ...) is never
-        # overwritten. Also heals rows a prior type-only reconcile already
-        # upgraded (type unchanged this run, state still NULL). For analyzable
-        # upgrades (timelock / proxy_admin) the derivation returns None and the
-        # column honestly stays NULL. Converges: a second run changes nothing.
+        # Stamp what the walk would now derive, only onto NULL; a determined state is never overwritten.
         if node.resolved_type == new_type and node.analysis_state is None:
             derived_state = _coherent_analysis_state(node)
             if derived_state is not None:
@@ -290,47 +194,22 @@ def reconcile_control_graph_types(session: Session, contract_ids: Sequence[int])
     return updated
 
 
-#: How many nodes ONE ``(contract, deployment)`` anchor may mint per pass.
-#:
-#: **A HARD CAP WITH A PERMANENT TAIL, not a delay.** An earlier draft of this
-#: constant claimed a cut candidate would be picked up by the next pass, because
-#: ``existing_node`` is checked before the budget. That is FALSE in production
-#: and the sequence is what refutes it: every job rewrites this
-#: ``(contract, deployment)`` scope wholesale (resolution stage, then the policy
-#: stage) BEFORE the mint runs, so no minted row survives into the next pass for
-#: ``existing_node`` to find. The candidate order is ``sorted(candidates)``, so
-#: each pass re-mints the same lexicographic prefix and drops the same tail —
-#: permanently, until the cap is raised. Replayed 3 jobs deep on the PR-161
-#: corpus at a cap of 16: one anchor over budget (27 candidates), 11 addresses
-#: permanently invisible, 2 of them contract-typed job candidates appearing at
-#: no other anchor (0xc4922d64…, 0xfd78ee91…) — a residual of 35 rather than
-#: 37. The boundary is inclusive of the cap slot: rank 16 mints, because the
-#: budget gate only bites after the 16th insert.
-#:
-#: The default is therefore sized to leave NO LIVE TAIL rather than to be a
-#: tuning knob: 64 is 2x the observed per-anchor maximum of 31 distinct
-#: principals (0 of 83 corpus anchors exceed it; 2 exceed 16). It is a BACKSTOP
-#: against a pathological anchor, and a NAMED MODEL CHOICE — no number here is
-#: claimed to be derived from the corpus, which is also why it is not pinned at
-#: 31 or 32. Fan-out is bounded elsewhere and unchanged: ``PERIMETER_SPAWN_LIMIT``
-#: (8) caps jobs per policy refresh and ``PERIMETER_SPAWN_DEPTH_CAP`` (2) caps
-#: generations; this cap bounds ROW growth only, and minting costs no RPC.
-#:
-#: Lowering it re-introduces a permanent tail. Every cut still lands in
-#: ``omitted[]`` with ``budget_exhausted``, so the tail is always named — but it
-#: must be read as a loss, not a queue.
+# Max nodes one ``(contract, deployment)`` anchor may mint per pass.
+#
+# A hard cap with a permanent tail, not a delay: each job rewrites the scope before minting, so nothing minted survives
+# for ``existing_node`` to find, and ``sorted(candidates)`` drops the same tail every pass. At 16, one PR-161 anchor
+# lost 11 addresses permanently.
+#
+# 64 is 2x the observed per-anchor max (31), so no live tail; a backstop and a named model choice, not a corpus-derived
+# number. Cuts are recorded as ``budget_exhausted`` in ``omitted[]`` and must be read as a loss.
 FP_MATERIALIZE_LIMIT = int(os.getenv("PSAT_FP_MATERIALIZE_LIMIT", "64"))
 
 
 def _address_node_id(address: str) -> str:
-    """The graph's node-id convention, ``address:0x…``.
+    """``address:0x…`` node ids.
 
-    Mirrors ``services.resolution.recursive._address_node_id`` verbatim and is
-    duplicated rather than imported for the same reason every other symbol in
-    this module is lazily imported from there: a module-level import re-creates
-    the resolution↔policy package cycle. It is the identity
-    ``control_graph_edges.from_node_id`` / ``to_node_id`` are joined on
-    (``services.effects.selection._NODE_PREFIX``), so it must not drift.
+    Duplicated from ``services.resolution.recursive`` to avoid the package cycle; edges join on it, so it must not
+    drift.
     """
     return f"address:{address.lower()}"
 
@@ -345,78 +224,28 @@ def materialize_fp_principal_nodes(
 ) -> tuple[FpMaterializationResult, list[dict[str, Any]]]:
     """Mint the ``control_graph_nodes`` rows ``function_principals`` implies.
 
-    ``function_principals`` was a TERMINAL plane: nothing converted an FP row
-    into a node. The graph's only two principal ingresses are
-    ``authority_roles[].principals`` and ``controllers[].principals``, and an
-    address in neither could never enter the graph — so every node-driven spawn
-    path was structurally blind to it, and :func:`reconcile_control_graph_types`
-    (the one FP→CGN fold) is UPDATE-only and can never re-admit it. On the
-    PR-161 corpus that hid 73 addresses / 411 of 1,200 FP rows (34.3%) across 43
-    of 93 contracts, including an EtherFiTimelock with 53 rows and a monitored
-    Safe with 127; 72 of the 73 have no ``contracts`` row at all, so raising the
-    discovery ``analyze_limit`` could not reach the class. Each upstream refusal
-    was witness-correct — a ``_ROLE_DISSOLVING_TRACE_STEPS`` trace leaves
-    ``authority_roles`` JSON null, and ``authority_roles == []`` means authority
-    that is not role-keyed. The defect was reading "role not determined" as
-    "principal does not exist".
+    FP was terminal: graph ingress is only via ``authority_roles`` / ``controllers`` principals, and
+    ``reconcile_control_graph_types`` is UPDATE-only. On PR-161 that hid 73 addresses (34% of FP rows), 72 with no
+    ``contracts`` row at all. The defect was reading "role not determined" as "principal does not exist".
 
-    **What a minted node asserts, and only this:** the FP row proves this
-    address is a resolved principal of a gated function on the anchor contract.
-    Everything else stays not-determined — ``analyzed`` is False and
-    ``analysis_state`` is NULL (never stamped; stamping ``analyzed`` would make
-    the perimeter spawn on a node no walk ever produced), ``graph_max_depth`` is
-    NULL because no walk horizon covered this node, ``contract_name`` is NULL,
-    and no intrinsic config (a safe's owners, a timelock's delay) is invented
-    here — :func:`reconcile_control_graph_types` folds that in from the FP row's
-    own ``details`` on its next run, which is where that witness already lives.
+    A minted node asserts only that the address is a resolved principal of a gated function on the anchor. ``analyzed``
+    False, ``analysis_state`` / ``graph_max_depth`` / ``contract_name`` NULL, no invented config (reconcile folds it
+    from FP ``details``).
 
-    **This mints NODES; it creates no jobs.** Job eligibility stays entirely
-    with ``queue_discovered_contracts``'s gates. Because ``safe`` and ``eoa``
-    are not in ``ANALYZABLE_TYPES`` they mint ``node_type='principal'``, which
-    that walker rejects as ``not_contract_node`` — node yes, job never — and
-    this ledger records the same fact from the mint side as
-    ``not_analyzable_type``.
+    Mints nodes, never jobs: ``safe``/``eoa`` mint ``node_type='principal'``, which ``queue_discovered_contracts``
+    rejects.
 
-    **Idempotence key:** ``(chain, lower(address), contract_id,
-    deployment_scope(deployment_address))``. Never the name, label or origin —
-    ``origin`` is a single constant on 1,200/1,200 corpus rows and would key
-    nothing. The ``existing_node`` arm it drives dedups against whatever nodes
-    the scope currently holds — the walk's own, and this pass's earlier work
-    within one transaction. It does NOT carry state across jobs: the rewrite
-    below empties the scope first. See ``FP_MATERIALIZE_LIMIT`` for what that
-    means for a budget cut.
+    Idempotence key: ``(chain, lower(address), contract_id, deployment_scope)``, never name/label/origin (``origin`` is
+    constant). ``replace_control_graph_rows`` wipes the scope, so the strategy is re-mint by ordering: this runs after
+    the job's last rewrite. Budget-cut nodes are lost (see ``FP_MATERIALIZE_LIMIT``).
 
-    **Rewrite survival.** ``replace_control_graph_rows`` deletes wholesale
-    within exactly this ``(contract_id, deployment)`` scope, so a minted row
-    cannot be made durable against it. The strategy is therefore RE-MINT, made
-    sound by ORDERING rather than by hope: the caller runs this strictly after
-    the last rewrite that can occur in the job's stage sequence (the policy
-    stage's rewrite, which itself runs after the resolution stage's), and the
-    pass is idempotent, so a rewrite from any later re-analysis is always
-    followed by another mint. A wiped node is never a silently lost one — but a
-    node the BUDGET cut is, because the wipe also destroys the record that would
-    let a later pass resume. See ``FP_MATERIALIZE_LIMIT``.
+    Returns ``(ledger, minted_node_payloads)``; payloads are not written into ``resolved_control_graph``, which is the
+    walk's output.
 
-    *deployment_address* is the caller's own scope value — the same one it
-    passes to ``replace_control_graph_rows`` — so the mint scope, the rewrite
-    scope and the FP read scope are one scope by construction.
-
-    Returns ``(ledger, minted_node_payloads)``. The payloads are graph-shaped
-    node dicts for the caller to hand to ``queue_discovered_contracts``; they
-    are deliberately NOT written into the persisted ``resolved_control_graph``
-    artifact, which is the walk's output and must not acquire nodes no walk
-    produced.
-
-    **Commits per mint, and the ledger is written only after the commit.** Not a
-    style choice: the ledger is persisted from the caller's ``finally``, on a
-    FRESH session when the primary one is poisoned, so a rollback after the loop
-    would publish ``minted[]`` and ``budget_used`` naming rows that do not
-    exist — a positive fact about a row nothing wrote. ``queue_discovered_contracts``
-    commits after each ``create_job`` for exactly this reason, and the claimed
-    equivalence with it requires the same boundary here.
+    Commits per mint before the ledger records it: the ledger is persisted from the caller's ``finally``, possibly on a
+    fresh session, so a later rollback must not leave it naming rows that don't exist.
     """
-    # Lazy: module-level would re-create the resolution↔policy package cycle
-    # this file's callers already tiptoe around.
+    # Lazy: avoids the resolution↔policy package cycle.
     from services.resolution.recursive import ANALYZABLE_TYPES
 
     if result is None:
@@ -438,18 +267,12 @@ def materialize_fp_principal_nodes(
         result["out_of_population"].append({"address": address, "reason": reason})
 
     contract = session.get(Contract, contract_id)
-    # Mainnet-coalesced: a legacy NULL chain is a mainnet row, and
-    # coalescing it here is what keeps a mainnet anchor from being read as a
-    # chain we cannot name. An ABSENT contract is not coalesced to anything —
-    # there is no chain to claim, so every candidate fails closed below.
+    # NULL is legacy mainnet. An absent contract has no chain; its candidates fail closed.
     chain = _mainnet_coalesced_chain(contract.chain) if contract is not None else None
-    # ``or None`` deliberately: a blank ``Contract.address`` is no anchor at all,
-    # and letting it through would mint an edge from the node id ``address:`` —
-    # an identity no node has. Absent and blank fail the same way.
+    # A blank address would mint an edge from ``address:``.
     anchor_address = ((contract.address or "").lower() or None) if contract is not None else None
 
-    # Every FP row in this scope, ordered so a budget cut drains in a stable
-    # sequence across passes and the ledger is byte-reproducible.
+    # Stable order so budget cuts and the ledger are reproducible.
     rows = session.execute(
         select(
             func.lower(FunctionPrincipal.address),
@@ -490,9 +313,7 @@ def materialize_fp_principal_nodes(
         ).all()
     }
 
-    # Depth is the anchor contract's own node depth + 1. Absent that node we
-    # have no witnessed depth for it, so the minted node's depth stays NULL
-    # (not determined) rather than being guessed at 0 or 1.
+    # No anchor node means no witnessed depth; NULL, not a guess.
     anchor_depth = None
     if anchor_address is not None:
         anchor_depth = (
@@ -518,8 +339,7 @@ def materialize_fp_principal_nodes(
             _out(addr, "zero_address")
             continue
         if contract is None or chain is None or anchor_address is None:
-            # No anchor contract => no chain. A node with a chain we cannot name
-            # is exactly the row this pass must never write.
+            # Never write a node whose chain we can't name.
             _out(addr, "no_contract_anchor")
             continue
         if addr == anchor_address:
@@ -530,11 +350,8 @@ def materialize_fp_principal_nodes(
             _out(addr, "resolved_type_not_determined")
             continue
         if len(types) > 1:
-            # The FP plane holds two types for one principal at one anchor and
-            # never resolved them. Picking one would mint a type nothing proved;
-            # 0 of the corpus's 413 (anchor, address) PAIRS — across 83 anchors
-            # — reach this, and a first occurrence should surface as a refusal,
-            # not as a coin flip.
+            # Two FP types for one principal at one anchor; picking one would mint an unproven type. 0 of 413 corpus
+            # pairs.
             _out(addr, "resolved_type_conflict")
             continue
         if addr in existing:
@@ -562,11 +379,8 @@ def materialize_fp_principal_nodes(
                 address=addr,
                 node_type=node_type,
                 resolved_type=resolved_type,
-                # NULL, deliberately. A label is display copy, and this plane
-                # has none to witness — but ``Job.name`` and the overview's
-                # display sites fall back to it, so any constant here would be
-                # published as the principal's IDENTITY on every spawned child.
-                # ``resolved_type`` already carries the only noun that is proven.
+                # ``Job.name`` and display sites fall back to the label, so any constant would become the principal's
+                # identity.
                 label=None,
                 contract_name=None,
                 depth=minted_depth,
@@ -589,14 +403,10 @@ def materialize_fp_principal_nodes(
             )
         )
 
-        # Commit BEFORE the ledger records the mint. The ledger is persisted
-        # from the caller's ``finally``, on a fresh session if this one is
-        # poisoned, so recording first would let a rollback publish a row that
-        # does not exist.
+        # Commit before the ledger records the mint (see docstring).
         session.commit()
 
-        # Budget is spent HERE and only here — at the committed INSERT — so
-        # every earlier gate provably consumes none of it.
+        # Spent only at the committed INSERT.
         result["budget_used"] += 1
         result["minted"].append(
             {
@@ -626,13 +436,9 @@ def materialize_fp_principal_nodes(
         if node_type == "contract":
             result["queued"].append({"address": addr, "resolved_type": resolved_type})
         else:
-            # Minted, and structurally never a job: the walker's
-            # ``node_type == 'contract'`` gate rejects it as
-            # ``not_contract_node``. Recorded rather than skipped so the two
-            # ledgers agree from both sides.
+            # Minted, never a job (``not_contract_node``); recorded so both ledgers agree.
             _out(addr, "not_analyzable_type")
 
-    # Loop exit, and only loop exit: every candidate now sits in exactly one
-    # disposition. A raise above leaves the prefix marked incomplete.
+    # Only on loop exit; a raise leaves the prefix incomplete.
     result["walked"] = True
     return result, payloads

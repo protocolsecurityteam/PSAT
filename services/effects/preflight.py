@@ -1,14 +1,7 @@
 """``eth_simulateV1`` capability preflight.
 
-Support is *probed, never assumed*: worker preflight issues one trivial
-``eth_simulateV1`` per chain when the injected store has no cached answer.
-Value-out and supply recipes consult that capability; where unsupported they
-route to their declared Tier-2 fallback — an explicit cost-model change, never a
-silent degradation.
-
-Persistence is behind an injectable :class:`CapabilityStore` seam. The local
-implementation keeps answers in memory and is the worker default. Callers can
-inject another store; this module does not provide durable DB persistence.
+Support is probed per chain at stage init and persisted; recipes needing it route to their declared Tier-2 fallback when
+unsupported. Persistence is behind the injectable :class:`CapabilityStore` (in-memory for now).
 """
 
 from __future__ import annotations
@@ -17,23 +10,17 @@ from typing import Protocol
 
 from services.effects.simulate import SimCall, Simulate, SimulateUnsupportedError
 
-# A well-formed no-op call: read-only, no state, no value. A node that implements
-# eth_simulateV1 answers with a structured (possibly reverting) result; one that
-# doesn't raises SimulateUnsupportedError from the real wrapper.
+# A read-only no-op call: supporting nodes answer (maybe reverting); others raise SimulateUnsupportedError.
 _ZERO_ADDR = "0x" + "00" * 20
 
 
 class CapabilityStore(Protocol):
-    """Per-chain ``eth_simulateV1`` support persistence seam."""
-
     def get_simulate_support(self, chain_id: int) -> bool | None: ...
 
     def set_simulate_support(self, chain_id: int, supported: bool) -> None: ...
 
 
 class InMemoryCapabilityStore:
-    """Process-local capability store (offline suite + single-run default)."""
-
     def __init__(self) -> None:
         self._support: dict[int, bool] = {}
 
@@ -52,13 +39,9 @@ def probe_simulate_support(
     block: str = "latest",
     force: bool = False,
 ) -> bool:
-    """Probe + persist ``eth_simulateV1`` support for ``chain_id``.
-
-    Idempotent: a persisted answer is reused unless ``force``. A structured
-    response (even an all-reverting one) proves support; only
-    :class:`SimulateUnsupportedError` — the real wrapper's signal that the node
-    rejected the METHOD — records ``False``. Any other transport error
-    propagates (a flake must not be cached as "unsupported").
+    """Probe and persist ``eth_simulateV1`` support for ``chain_id``. Reused unless ``force``. Any structured
+    response proves support; only :class:`SimulateUnsupportedError` records
+    ``False``; other errors propagate so flakes aren't cached.
     """
     if not force:
         cached = store.get_simulate_support(chain_id)

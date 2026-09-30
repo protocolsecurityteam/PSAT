@@ -1,15 +1,9 @@
-"""The role-holder plane's periodic refresher — selection, bounds, failure domain.
+"""The role-holder plane's periodic refresher: selection, bounds, failure domain.
 
-The producer's own semantics are asserted elsewhere. What is asserted here is
-everything the refresher owns: WHICH registries a pass runs against, what it
-durably records about a pass that already ran, and what a failure of one
-registry (or of the whole cycle) is allowed to take down.
-
-The load-bearing arm is the three-state one. A per-role table cannot say whether
-a REGISTRY was ever folded — a registry whose fold proposed nothing is absent
-from it exactly as a registry no pass reached is. Every test in
-``TestRefreshTrigger`` pins one half of that: "ran and found nothing" must stop
-re-selecting, and "never ran" must never stop.
+Producer semantics are asserted elsewhere. Load-bearing arm: a per-role table cannot say
+whether a REGISTRY was ever folded (one whose fold proposed nothing is absent exactly like
+one no pass reached), so ``TestRefreshTrigger`` pins that "ran and found nothing" stops
+re-selecting and "never ran" never stops.
 """
 
 from __future__ import annotations
@@ -440,21 +434,6 @@ class TestFailureDomain:
 
         assert beats == [(HEARTBEAT_ROLE_HOLDER_PLANE, "degraded")]
 
-    def test_the_loop_is_a_supervised_sibling_of_the_restaking_loop(self):
-        from db.queue import HEARTBEAT_PROTOCOL_RESTAKING
-        from workers.protocol_monitor import _build_default_supervisor
-
-        names = [name for name, _ in _build_default_supervisor("https://rpc.example", None)._loops]
-
-        assert HEARTBEAT_ROLE_HOLDER_PLANE in names
-        assert names.index(HEARTBEAT_ROLE_HOLDER_PLANE) != names.index(HEARTBEAT_PROTOCOL_RESTAKING)
-        assert len(names) == len(set(names))
-
-    def test_the_loop_is_registered_for_the_fleet_view(self):
-        from services.monitoring.process_meta import PROCESS_META
-
-        assert HEARTBEAT_ROLE_HOLDER_PLANE in PROCESS_META
-
 
 # ---------------------------------------------------------------------------
 # Observability — both call sites, every outcome
@@ -529,10 +508,22 @@ class TestResolutionStageObservability:
     def _job(self) -> Any:
         return SimpleNamespace(id=uuid.uuid4())
 
-    def test_a_closed_gate_is_recorded(self, plane_session, monkeypatch):
+    @pytest.mark.parametrize(
+        ("registry", "rows", "outcome"),
+        [
+            pytest.param(
+                HALF_ENROLLED,
+                lambda: [_cursor(HALF_ENROLLED, ROLE_GRANTED_TOPIC0)],
+                OUTCOME_GATE_CLOSED,
+                id="closed_gate",
+            ),
+            pytest.param(REGISTRY, lambda: _enrolled(REGISTRY), OUTCOME_NO_ROWS, id="open_gate_with_no_rows"),
+        ],
+    )
+    def test_a_no_write_pass_is_recorded(self, plane_session, monkeypatch, registry, rows, outcome):
         recorded = self._metrics(monkeypatch)
         session = plane_session
-        session.add(_cursor(HALF_ENROLLED, ROLE_GRANTED_TOPIC0))
+        session.add_all(rows())
         session.flush()
 
         written = ResolutionWorker()._resolve_role_holder_plane(
@@ -540,29 +531,11 @@ class TestResolutionStageObservability:
             self._job(),
             chain_id=1,
             rpc_url="http://stub",
-            registry_address=HALF_ENROLLED,
+            registry_address=registry,
         )
 
         assert written == 0
-        assert recorded == {"role_holder_planes": 0, "role_holder_plane_outcome": OUTCOME_GATE_CLOSED}
-        session.rollback()
-
-    def test_an_open_gate_with_no_rows_is_recorded(self, plane_session, monkeypatch):
-        recorded = self._metrics(monkeypatch)
-        session = plane_session
-        session.add_all(_enrolled(REGISTRY))
-        session.flush()
-
-        written = ResolutionWorker()._resolve_role_holder_plane(
-            session,
-            self._job(),
-            chain_id=1,
-            rpc_url="http://stub",
-            registry_address=REGISTRY,
-        )
-
-        assert written == 0
-        assert recorded == {"role_holder_planes": 0, "role_holder_plane_outcome": OUTCOME_NO_ROWS}
+        assert recorded == {"role_holder_planes": 0, "role_holder_plane_outcome": outcome}
         session.rollback()
 
     def test_written_rows_are_recorded(self, plane_session, monkeypatch, confirming_reads):

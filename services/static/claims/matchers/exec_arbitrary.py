@@ -1,29 +1,11 @@
-"""``exec.arbitrary`` — forwards caller-supplied target and calldata.
+"""``exec.arbitrary``: forwards caller-supplied target and calldata.
 
-Resurrects the dead ``arbitrary_external_call`` label (0 producers; the 0.95
-severity and ``_manager`` principal-tag consumers had nothing to key on). Three
-evidence paths, gate-open because they span unrelated contract shapes:
+Three paths: Safe exec entries and OZ timelock ``execute``/``executeBatch`` (standard_exact), and the ``manage`` idiom,
+a body call with a parameter-tainted destination and calldata (idiom_structural). A plain ``transfer`` has no arbitrary
+calldata.
 
-* Safe ``execTransaction`` / module-exec entries (Safe gate) — standard_exact.
-* OZ timelock ``execute`` / ``executeBatch`` (oz_timelock gate) — standard_exact;
-  these also carry ``timelock.execute``.
-* The ``manage`` idiom — a body-origin call forwarding a parameter-tainted
-  destination and calldata (BoringVault.manage) — idiom_structural.
-
-A plain ``transfer(address,uint256)`` value send has an address-tainted
-destination but no arbitrary calldata, so no path fires.
-
-Neither does a function whose EVERY candidate call op has a destination PROVEN
-to be a state variable. The claim's sentence is *"forwards a caller-supplied
-target"*; a ``state_var`` destination is the proof that the caller does not
-supply it, and minting the claim beside that proof asserts the negation of its
-own witness. The quantifier is the taint helper's: its fragment answers over
-all candidate ops and lets ``state_var`` through only when no op resolved to
-anything else, so a Safe-guard body — ``guard.checkTransaction(target, data)``
-then ``target.call(data)`` — keeps its genuine arbitrary call regardless of
-statement order. The two remaining destination states still mint: ``param`` is
-the claim, and ``not_determined`` is an open question a hedged claim is the
-right answer to.
+Not minted when every candidate call's destination is proven to be a state variable: that proves the caller doesn't
+choose it. ``param`` and ``not_determined`` destinations still mint.
 """
 
 from __future__ import annotations
@@ -42,13 +24,7 @@ from ._taint import _slither_function, arbitrary_exec_taint
 
 
 def _destination_constraint(ctx: ClaimContext, function: str, destination_param: str | None) -> dict[str, object]:
-    """The three-state mandatory-gate verdict for the destination parameter.
-
-    The claim's sentence asserts the caller chooses the target; whether a
-    mandatory revert gate pins that choice (an allowlist, a hash commitment) is
-    the A3 narrowing. The name is resolved to its ABI index against the
-    function's own parameter list — a name the taint layer could not bind
-    (``None``) is ``not_determined`` by construction."""
+    """Three-state mandatory-gate verdict for the destination parameter; an unbound name is ``not_determined``."""
     index = None
     if destination_param:
         slither_fn = _slither_function(ctx, function)
@@ -78,15 +54,8 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     sink_ids = _body_external_call_sink_ids(ctx, function)
 
     if selector in SAFE_EXEC_SELECTORS and is_safe_gate(ctx):
-        # execTransaction's target is committed under the owners' threshold
-        # signatures — the standard is the constraint proof, and the helper
-        # publishes it for the flow witness too. The module-exec entries earn
-        # the claim from the same gate, but their guard (``modules[msg.sender]``)
-        # is an allowlist on the CALLER and commits nothing about the
-        # destination — the helper answers ``None`` there and the verdict comes
-        # from the mandatory-gate walk instead, asked about the parameter the
-        # published ABI fixes as the destination: ``to`` at index 0 on every
-        # Safe exec entry.
+        # execTransaction's target is committed by the owners' signatures. Module-exec entries only allowlist the
+        # caller, so their verdict comes from the gate walk on ``to`` (index 0 on every Safe exec entry).
         constraint = _facts.standard_destination_commitment(ctx, function)
         if constraint is None:
             constraint = _facts.param_constraint(ctx, function, 0, mode="external_call")
@@ -108,41 +77,25 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
                 "standard": "oz_timelock",
                 "selector": selector,
                 "sink_ids": sink_ids,
-                # The gate proved the OZ TimelockController shape, whose execute
-                # path re-derives ``hashOperation(target, …)`` and requires the
-                # operation ready: the target is hash-committed by the standard.
-                # Published from the same helper the flow witness reads, so the
-                # two verdicts on one function cannot contradict each other.
+                # The timelock execute path re-derives ``hashOperation(target, ...)``, so the target is committed. Same
+                # helper as the flow witness so the two can't disagree.
                 "destination_constraint": _facts.standard_destination_commitment(ctx, function),
             },
         )
 
-    # Idiom tier: prove arbitrariness by taint, anchored to a real body call sink.
     if not sink_ids:
         return None
     taint = arbitrary_exec_taint(ctx, function)
     if taint is None:
         return None
     if taint["destination_kind"] == "state_var":
-        # A PROVEN-ABSENT caller-chosen destination, and the proof is
-        # function-wide: the taint fragment ranks every candidate call op and
-        # publishes ``state_var`` only when no op resolved to ``param`` or
-        # ``not_determined``. This is the ``LRTSquaredAdmin.rebalance`` shape
-        # and it is a pure false positive: the call goes to the storage-held
-        # ``swapper``, the two address parameters ride along as ARGUMENTS of a
-        # fixed-selector call, and the read-set test that mints the claim cannot
-        # tell an argument from a destination. ``not_determined`` deliberately
-        # still mints — an unanswered question is not a proof of absence — so
-        # this drops exactly the rows where the witness contradicts the
-        # sentence on every op it could describe.
+        # Every candidate op's destination is storage-held (``LRTSquaredAdmin.rebalance``: address params are arguments
+        # to a fixed call, not destinations). The witness would contradict the claim.
         return None
     witness = {
         "kind": "param_taint",
         "sink_ids": sink_ids,
-        # ``*_param`` names a binding only when the matching ``*_kind`` is
-        # ``param``; ``state_var`` / ``call_argument`` are proven absences and
-        # ``not_determined`` is an open question. All three publish a null
-        # name, so the kind is the only thing that separates them.
+        # ``*_param`` is only non-null when ``*_kind`` is ``param``; the kind separates the three states.
         "destination_param": taint["destination_param"],
         "destination_kind": taint["destination_kind"],
         "destination_basis": taint["destination_basis"],
@@ -150,9 +103,7 @@ def exec_arbitrary(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
         "calldata_kind": taint["calldata_kind"],
         "calldata_basis": taint["calldata_basis"],
     }
-    # A3 narrowing: attached only where a destination parameter exists to ask
-    # about. Absence of the field reads as ``not_determined`` downstream — never
-    # as a proof in either direction.
+    # Only where a destination parameter exists; absence reads as ``not_determined``.
     if taint["destination_kind"] == "param":
         witness["destination_constraint"] = _destination_constraint(ctx, function, taint["destination_param"])
     return ClaimEvidence(tier="idiom_structural", witness=witness)

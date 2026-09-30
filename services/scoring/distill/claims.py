@@ -22,9 +22,7 @@ _TIER_TOKENS = {
     "idiom_structural": WITNESS_TIER_IDIOM_STRUCTURAL,
     "policy_derived": WITNESS_TIER_POLICY_DERIVED,
 }
-# Strongest first. Used only to pick the signal's descriptive tier; the gates
-# that matter (a behavioural existence proof, a policy_derived block) are
-# applied per claim entry where they arise.
+# Strongest first. Only picks the descriptive tier; the gating checks happen per claim entry.
 _TIER_RANK = (
     WITNESS_TIER_BEHAVIORAL_OBSERVED,
     WITNESS_TIER_STANDARD_EXACT,
@@ -32,8 +30,6 @@ _TIER_RANK = (
     WITNESS_TIER_POLICY_DERIVED,
     WITNESS_TIER_NOT_DETERMINED,
 )
-
-# ---------------------------------------------------------------- claim reads
 
 
 def _claims(func: Any) -> list[dict[str, Any]]:
@@ -59,7 +55,6 @@ def _best_tier(tiers: set[str]) -> str:
 
 
 def _target_kinds(flow: dict[str, Any]) -> list[str | None]:
-    """A ``several`` target expands to its members; an unreadable member fails closed."""
     target = flow.get("target_kind") or {}
     kind = target.get("kind")
     if kind != "several":
@@ -75,13 +70,11 @@ def _target_kinds(flow: dict[str, Any]) -> list[str | None]:
 
 
 def _considered_out_flows(claims: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str | None]:
-    """Every out-flow entry of the function, or the reason the set cannot be read.
+    """Every out-flow entry of the function, or the reason the set can't be read.
 
-    Two rules, each of which fails OPEN if skipped: ``value_router`` flows are
-    inside the conjunction, and a ``flow.out``/``value_router`` claim with no
-    ``flows`` key BLOCKS — silence is not evidence. ``policy_derived`` blocks for
-    the same reason. A blocked set is returned as a named reason rather than as
-    an empty list, so a universal over it cannot come out vacuously true.
+    ``value_router`` flows are included, and a ``flow.out``/``value_router`` claim with no ``flows`` key (or
+    ``policy_derived``) blocks. A blocked set returns a reason, not an empty list, so a universal over it can't be
+    vacuously true.
     """
     considered: list[dict[str, Any]] = []
     for claim in claims:
@@ -94,8 +87,7 @@ def _considered_out_flows(claims: list[dict[str, Any]]) -> tuple[list[dict[str, 
         flows = witness.get("flows")
         if flows is None:
             return [], "blocked_no_flows"
-        # ``direction`` lives on the WITNESS. Read off a flow entry it is always
-        # absent, which silently empties the conjunction.
+        # ``direction`` lives on the witness, not the flow entry.
         direction = str(witness.get("direction") or ("value_router" if claim_id == "value_router" else "out"))
         if direction not in ("out", "eth_out", "value_router"):
             continue
@@ -104,11 +96,7 @@ def _considered_out_flows(claims: list[dict[str, Any]]) -> tuple[list[dict[str, 
 
 
 def _static_destination_shape(claims: list[dict[str, Any]]) -> tuple[str | None, str]:
-    """Replay of the static lattice over every out-flow of the function.
-
-    ``several`` reduces to its worst member, over the flow set
-    ``_considered_out_flows`` closes.
-    """
+    """Replay of the static lattice over every out-flow; ``several`` reduces to its worst member."""
     considered, blocked = _considered_out_flows(claims)
     if blocked is not None:
         return None, blocked
@@ -126,13 +114,8 @@ def _static_destination_shape(claims: list[dict[str, Any]]) -> tuple[str | None,
         return "storage_determined", "static_conjunction_admin"
     caller_relative = known & K.CALLER_RELATIVE_TARGET_KINDS
     if caller_relative and known <= (K.FIXED_TARGET_KINDS | K.CALLER_RELATIVE_TARGET_KINDS):
-        # A PROVEN kind, not a gap — but not a fixed destination either: the
-        # recipient is a known function of the caller / of token ownership. The
-        # conjunction still takes the WORST member (``TARGET_KIND_RANK``), so a
-        # flow set mixing an immutable payee with a caller payee reduces to the
-        # caller one rather than to whichever entry was read last. What the kind
-        # is WORTH is decided by the caller gate in ``_flow_destination``;
-        # nothing here scores it.
+        # Caller-relative kinds are proven but not fixed; the conjunction still takes the worst member. Their worth is
+        # decided by the caller gate in ``_flow_destination``.
         worst = min(caller_relative, key=lambda kind: K.TARGET_KIND_RANK[kind])
         return worst, f"static_conjunction_{worst}"
     return None, "not_fixed"

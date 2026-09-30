@@ -42,17 +42,18 @@ def _alias(l1: str) -> str:
 # --- alias arithmetic --------------------------------------------------------
 
 
-def test_alias_round_trip_is_identity():
-    l1 = "0x1234000000000000000000000000000000005678"
-    assert undo_l1_to_l2_alias(_alias(l1)) == l1
-
-
-def test_alias_wraps_modulo_address_space():
-    # An address whose alias overflows 2**160 wraps rather than growing.
-    high = "0xffff000000000000000000000000000000000000"
-    aliased = _alias(high)
+@pytest.mark.parametrize(
+    "l1",
+    [
+        pytest.param("0x1234000000000000000000000000000000005678", id="round-trip-is-identity"),
+        # An address whose alias overflows 2**160 wraps rather than growing.
+        pytest.param("0xffff000000000000000000000000000000000000", id="wraps-modulo-address-space"),
+    ],
+)
+def test_alias_round_trip(l1):
+    aliased = _alias(l1)
     assert aliased.startswith("0x") and len(aliased) == 42
-    assert undo_l1_to_l2_alias(aliased) == high
+    assert undo_l1_to_l2_alias(aliased) == l1
 
 
 @pytest.mark.parametrize("bad", [None, "", "0x123", "not-hex", "0xZZ00000000000000000000000000000000000000"])
@@ -63,15 +64,17 @@ def test_alias_rejects_malformed(bad):
 # --- classify_cross_chain_authority ------------------------------------------
 
 
-def test_classify_recognizes_cross_domain_messenger():
-    result = classify_cross_chain_authority(BASE_MESSENGER, chain_info=BASE)
-    assert result == (CROSS_CHAIN_AUTHORITY_TYPE, {"address": BASE_MESSENGER, "role": "cross_domain_messenger"})
-
-
-def test_classify_recognizes_bridge_executor():
-    result = classify_cross_chain_authority(BASE_BRIDGE.upper(), chain_info=BASE)
-    # Case-insensitive registry match, normalized address in the details.
-    assert result == (CROSS_CHAIN_AUTHORITY_TYPE, {"address": BASE_BRIDGE, "role": "bridge_executor"})
+@pytest.mark.parametrize(
+    "queried, expected_address, expected_role",
+    [
+        pytest.param(BASE_MESSENGER, BASE_MESSENGER, "cross_domain_messenger", id="cross-domain-messenger"),
+        # Upper-cased query: recognition is case-insensitive and returns the canonical address.
+        pytest.param(BASE_BRIDGE.upper(), BASE_BRIDGE, "bridge_executor", id="bridge-executor-case-insensitive"),
+    ],
+)
+def test_classify_recognizes_bridge_addresses(queried, expected_address, expected_role):
+    result = classify_cross_chain_authority(queried, chain_info=BASE)
+    assert result == (CROSS_CHAIN_AUTHORITY_TYPE, {"address": expected_address, "role": expected_role})
 
 
 def test_classify_recognizes_aliased_owner_of_known_address():
@@ -108,22 +111,9 @@ def test_classify_ignores_ordinary_address():
 # --- make_cross_chain_recognizer factory -------------------------------------
 
 
-def test_recognizer_is_none_on_mainnet():
-    assert make_cross_chain_recognizer(1) is None
-
-
-def test_recognizer_is_none_on_unknown_chain():
-    assert make_cross_chain_recognizer(999999) is None
-    assert make_cross_chain_recognizer(None) is None
-
-
-def test_recognizer_bound_to_base_recognizes_messenger():
-    recognize = make_cross_chain_recognizer(BASE_CHAIN_ID)
-    assert recognize is not None
-    assert recognize(BASE_MESSENGER) == (
-        CROSS_CHAIN_AUTHORITY_TYPE,
-        {"address": BASE_MESSENGER, "role": "cross_domain_messenger"},
-    )
+@pytest.mark.parametrize("chain_id", [1, 999999, None], ids=["mainnet", "unknown-chain", "no-chain"])
+def test_recognizer_is_none(chain_id):
+    assert make_cross_chain_recognizer(chain_id) is None
 
 
 # --- build_principal_labels wiring -------------------------------------------
@@ -161,38 +151,28 @@ def _classify_stub(kind: str):
     return _stub
 
 
-def test_labels_classifies_messenger_as_cross_chain_authority(monkeypatch):
-    # Generic classify would call this a bare contract; the recognizer wins.
+@pytest.mark.parametrize(
+    "address, role, display_name",
+    [
+        pytest.param(BASE_MESSENGER, "cross_domain_messenger", "Cross-domain messenger", id="messenger"),
+        pytest.param(BASE_BRIDGE, "bridge_executor", "Bridge executor", id="bridge"),
+    ],
+)
+def test_labels_classifies_as_cross_chain_authority(monkeypatch, address, role, display_name):
     monkeypatch.setattr(
         "services.policy.principal_enrichment.classify_resolved_address_with_status",
         _classify_stub("contract"),
     )
     payload = build_principal_labels(
-        _effective_permissions_with_principal(BASE_MESSENGER),
+        _effective_permissions_with_principal(address),
         rpc_url="http://rpc.example",
         cross_chain_recognizer=make_cross_chain_recognizer(BASE_CHAIN_ID),
     )
-    principal = {p["address"]: p for p in payload["principals"]}[BASE_MESSENGER]
+    principal = {p["address"]: p for p in payload["principals"]}[address]
     assert principal["resolved_type"] == CROSS_CHAIN_AUTHORITY_TYPE
-    assert principal["details"]["role"] == "cross_domain_messenger"
-    assert principal["display_name"] == "Cross-domain messenger"
+    assert principal["details"]["role"] == role
+    assert principal["display_name"] == display_name
     assert "cross_chain_authority" in principal["labels"]
-
-
-def test_labels_classifies_bridge_as_cross_chain_authority(monkeypatch):
-    monkeypatch.setattr(
-        "services.policy.principal_enrichment.classify_resolved_address_with_status",
-        _classify_stub("contract"),
-    )
-    payload = build_principal_labels(
-        _effective_permissions_with_principal(BASE_BRIDGE),
-        rpc_url="http://rpc.example",
-        cross_chain_recognizer=make_cross_chain_recognizer(BASE_CHAIN_ID),
-    )
-    principal = {p["address"]: p for p in payload["principals"]}[BASE_BRIDGE]
-    assert principal["resolved_type"] == CROSS_CHAIN_AUTHORITY_TYPE
-    assert principal["details"]["role"] == "bridge_executor"
-    assert principal["display_name"] == "Bridge executor"
 
 
 def test_labels_classifies_aliased_owner_with_hint(monkeypatch):
@@ -239,7 +219,6 @@ def test_labels_mainnet_output_is_byte_identical(monkeypatch):
 
 
 def test_fp_resolver_prioritizes_cross_chain_over_classify(monkeypatch):
-    # The classifier stub would return "contract"; the recognizer must win.
     monkeypatch.setattr(
         "workers.policy_worker.classify_resolved_address_with_status",
         _classify_stub("contract"),

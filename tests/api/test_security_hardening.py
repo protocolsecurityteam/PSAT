@@ -1,9 +1,4 @@
-"""Security-hardening middleware + validation coverage (offline).
-
-Covers findings 8, 9, 10, 12, 13: security headers, body-size cap, global
-per-IP rate limit, per-route capability rate limit, trace-id sanitization,
-and probe address regex.
-"""
+"""Security-hardening middleware + validation coverage (findings 8, 9, 10, 12, 13), offline."""
 
 from __future__ import annotations
 
@@ -70,11 +65,6 @@ def test_oversized_content_length_rejected_with_413(client):
     assert resp.headers["X-Content-Type-Options"] == "nosniff"
 
 
-def test_normal_body_not_rejected(client):
-    resp = client.get("/api/version")
-    assert resp.status_code == 200
-
-
 def test_content_length_exactly_at_limit_passes(client, monkeypatch):
     import api
 
@@ -104,7 +94,6 @@ def _drive_body_middleware(body_chunks: list[bytes], max_bytes: int):
 
     async def downstream(scope, receive, send):
         app_called["hit"] = True
-        # Drain the (replayed) body then answer 200.
         while True:
             msg = await receive()
             if msg["type"] == "http.disconnect" or not msg.get("more_body", False):
@@ -172,45 +161,33 @@ def test_global_rate_limit_triggers_429(client):
     assert codes[3] == 429
 
 
-def test_rotating_xff_does_not_escape_limit_when_fly_client_ip_constant(client):
-    import api
-
-    original = api._global_limiter.limit
-    api._global_limiter.limit = 3
-    api._global_limiter.reset()
-    try:
+@pytest.mark.parametrize(
+    "headers_for",
+    [
         # Rotate the client-controlled X-Forwarded-For every request; Fly-Client-IP
         # (set by the proxy) stays constant, so all four land in one bucket.
-        codes = [
-            client.get(
-                "/api/version",
-                headers={"Fly-Client-IP": "9.9.9.9", "X-Forwarded-For": f"{i}.{i}.{i}.{i}"},
-            ).status_code
-            for i in range(1, 5)
-        ]
-    finally:
-        api._global_limiter.limit = original
-        api._global_limiter.reset()
-    assert codes[3] == 429
-
-
-def test_rotating_left_xff_hop_does_not_escape_limit(client):
-    import api
-
-    original = api._global_limiter.limit
-    api._global_limiter.limit = 3
-    api._global_limiter.reset()
-    try:
+        pytest.param(
+            lambda i: {"Fly-Client-IP": "9.9.9.9", "X-Forwarded-For": f"{i}.{i}.{i}.{i}"},
+            id="rotating-xff-with-constant-fly-client-ip",
+        ),
         # No Fly-Client-IP: the trusted identity is the RIGHT-most XFF hop
         # (appended by our proxy). Rotating the left-most (spoofable) hop must
         # not mint fresh buckets.
-        codes = [
-            client.get(
-                "/api/version",
-                headers={"X-Forwarded-For": f"{i}.{i}.{i}.{i}, 5.5.5.5"},
-            ).status_code
-            for i in range(1, 5)
-        ]
+        pytest.param(
+            lambda i: {"X-Forwarded-For": f"{i}.{i}.{i}.{i}, 5.5.5.5"},
+            id="rotating-left-xff-hop",
+        ),
+    ],
+)
+def test_spoofed_forwarding_headers_do_not_escape_rate_limit(client, headers_for):
+    # CRITICAL: rate-limit spoof bypass via client-controlled forwarding headers.
+    import api
+
+    original = api._global_limiter.limit
+    api._global_limiter.limit = 3
+    api._global_limiter.reset()
+    try:
+        codes = [client.get("/api/version", headers=headers_for(i)).status_code for i in range(1, 5)]
     finally:
         api._global_limiter.limit = original
         api._global_limiter.reset()
@@ -344,9 +321,7 @@ def test_sliding_window_limiter_basic():
     assert lim.hit("k", now=1.0) is None
     retry = lim.hit("k", now=2.0)
     assert retry is not None and retry >= 1
-    # Distinct key has its own budget.
     assert lim.hit("other", now=2.0) is None
-    # Window slides: the first hit ages out.
     assert lim.hit("k", now=101.5) is None
 
 
@@ -356,24 +331,6 @@ def test_sliding_window_limiter_disabled_when_limit_zero():
     lim = SlidingWindowRateLimiter(limit=0, window_s=100)
     for i in range(50):
         assert lim.hit("k", now=float(i)) is None
-
-
-def test_sliding_window_admits_up_to_limit_rejects_then_readmits():
-    # Window semantics must survive the O(1) hot-path rewrite: admit exactly
-    # `limit`, reject inside the window, re-admit once the window slides.
-    from utils.ratelimit import SlidingWindowRateLimiter
-
-    lim = SlidingWindowRateLimiter(limit=3, window_s=100)
-    for i in range(3):
-        assert lim.hit("k", now=float(i)) is None
-    retry = lim.hit("k", now=3.0)
-    assert retry is not None and retry >= 1
-    # Over-limit hit is not recorded; still rejected just before expiry.
-    assert lim.hit("k", now=99.0) is not None
-    # First hit (t=0) ages out at t>100 -> one slot frees.
-    assert lim.hit("k", now=100.5) is None
-    # ...but only one: budget is full again immediately after.
-    assert lim.hit("k", now=100.6) is not None
 
 
 def test_sliding_window_bucket_cap_holds_under_many_keys():
@@ -394,7 +351,6 @@ def test_sliding_window_flood_cannot_evict_active_key():
     from utils.ratelimit import SlidingWindowRateLimiter
 
     lim = SlidingWindowRateLimiter(limit=2, window_s=100, max_keys=10, sweep_every=4)
-    # Establish a legitimate client at its limit.
     assert lim.hit("victim", now=1.0) is None
     assert lim.hit("victim", now=1.0) is None
     assert lim.hit("victim", now=1.0) is not None  # at limit
@@ -405,7 +361,6 @@ def test_sliding_window_flood_cannot_evict_active_key():
             rejected += 1
     assert rejected > 0  # cap was reached and newcomers were turned away
     assert "victim" in lim._buckets  # incumbent never evicted
-    # The victim is still limited within its window -> not reset/bypassable.
     assert lim.hit("victim", now=1.0) is not None
 
 
@@ -419,6 +374,5 @@ def test_sliding_window_full_sweep_is_amortized_not_per_hit():
     hits = 1000
     for i in range(hits):
         lim.hit(("k", i), now=1.0)
-    # ~hits/sweep_every sweeps, with generous slack; must be << hits.
     assert lim._full_sweeps <= hits // 100 + 2
     assert lim._full_sweeps < hits

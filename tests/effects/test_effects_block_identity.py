@@ -1,37 +1,14 @@
 """The height an effects verdict was observed at, and the honest absence of it.
 
-Two defects are pinned here.
-
-**The fork was never pinned.** ``_build_anvil_cmd`` passed ``--fork-url`` and no
-``--fork-block-number``, so a Tier-2 anvil forked at whatever head the upstream
-served AT SPAWN while the transcript recorded the preflight's height — a height
-that is not provably the height the fork was taken at. Measured on the PR-161
-run: 274 ``effect_verdicts``, **0** carrying a ``block_number`` (the key was
-absent from ``witness`` entirely), and the 304 transcript blobs spanning 51
-distinct heights over 495 blocks in one run. The argv assertions below are exact
-LIST compares rather than membership checks precisely so an edit that drops the
-pin fails here instead of silently restoring the unrecorded head.
-
-**Zero is not a height.** ``_preflight`` returns ``block = 0`` when the head
-cannot be pinned; ``0`` forks at GENESIS and would read as a real height. Every
-failure arm below therefore asserts the two witness keys are ABSENT — not ``0``,
-not ``None`` — which is the not_determined state a consumer must read as "this
-verdict's observation height is unknown". Nothing is back-filled onto the 78
-existing Tier-2 rows: an unpinned fork's true height is unrecoverable, not merely
-unrecorded.
-
-The B5 section pins a LABEL and nothing else. The four proven ``freeze_pause``
-rows (``effect_verdicts`` 137/149/173/219, all ``pauseUntil()``) publish
-``auto_expiry``/``duration_bound_seconds`` null with
-``duration_bound_source = 'not_determined'``, and that must stay a confidence gap
-in both directions: the window is mutable (``setPauseUntilDuration(uint256)``
-dispatches on all four) and re-pause is unbounded, so no observed window bounds
-the freeze and no bound may be published as a severity reducer.
+Pins two defects: (1) ``_build_anvil_cmd`` never passed ``--fork-block-number``, so a Tier-2 fork
+sat at whatever head was served at spawn while the transcript recorded the preflight's height
+(PR-161 run: 274 verdicts, 0 with ``block_number``). Argv asserts are exact LIST compares so a
+dropped pin fails here. (2) ``0`` is not a height: failure arms assert the witness keys are ABSENT,
+and B5 pins a LABEL only: ``freeze_pause`` windows stay not_determined and never reduce severity.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -71,7 +48,6 @@ from workers.effects_worker import EffectsWorker, _Seams
 
 pytestmark = pytest.mark.anvil
 
-# The reference height every pinned read in the investigation reproduces at.
 PINNED_BLOCK = 25643300
 CONTRACT = "0x" + "11" * 20
 PRINCIPAL = "0x" + "22" * 20
@@ -145,8 +121,7 @@ def test_a_forking_spawn_pins_the_block_on_the_command_line():
 
 
 def test_the_pin_survives_the_authenticated_upstream_form():
-    # The production spawn carries eRPC's auth header; the pin must not be
-    # dropped by whichever argument was added last.
+    # The production spawn carries eRPC's auth header; the pin must survive it.
     assert _build_anvil_cmd(
         "anvil", 8600, "prague", "https://erpc/main/evm/1", {"X-ERPC-Secret-Token": "sec"}, PINNED_BLOCK
     ) == [
@@ -175,8 +150,7 @@ def test_an_unpinnable_head_forks_unpinned_rather_than_at_genesis(unpinnable):
 
 
 def test_a_non_forking_spawn_never_pins():
-    # No fork, no fork height: the offline integration anvil starts from an empty
-    # chain, and a pin there would be a claim about a state it does not have.
+    # No fork, no fork height: a pin on the empty-chain offline anvil would claim state it lacks.
     assert _build_anvil_cmd("anvil", 8546, "prague", None, {"X": "y"}, PINNED_BLOCK) == [
         "anvil",
         "--port",
@@ -305,8 +279,7 @@ def test_tier1_publishes_the_pinned_height_and_the_scope_of_the_pin():
         simulate_supported=True,
     )
     assert eff.verdict == VERDICT_PROVEN
-    # The simulation ran at hex(block_number), so the recorded height IS the
-    # observation height — byte-exact, and the scope says how far it is shared.
+    # Simulation ran at hex(block_number), so the recorded height IS the observation height.
     assert eff.details["block_number"] == PINNED_BLOCK
     assert eff.details["block_source"] == BLOCK_SOURCE_INVOCATION_PIN
     assert eff.witness_payload["block_number"] == PINNED_BLOCK
@@ -438,8 +411,7 @@ def test_the_claims_consumer_receives_the_height_or_its_absence():
     carried = _observed_summary(_V({"pause_effective": True, "block_number": PINNED_BLOCK, "block_source": "run_pin"}))
     assert carried["block_number"] == PINNED_BLOCK
     assert carried["block_source"] == "run_pin"
-    # Absent on the witness ⇒ absent on the projection. A consumer must not be
-    # handed a height the verdict does not have.
+    # Absent on the witness => absent on the projection.
     blank = _observed_summary(_V({"pause_effective": True}))
     assert "block_number" not in blank
     assert "block_source" not in blank
@@ -464,8 +436,7 @@ def test_the_publication_point_refuses_a_height_that_is_not_one(bad_block):
 
 
 def test_the_pin_scope_vocabulary_is_closed():
-    # An unrecognized source is not a source: the stamp is gated on membership,
-    # so a typo'd or invented scope publishes nothing rather than a free-text tag.
+    # Membership-gated: a typo'd or invented scope publishes nothing.
     assert BLOCK_SOURCES == ("invocation_pin", "job_pin", "run_pin")
     ctx = SimContext(chain_id=1, block=PINNED_BLOCK, hardfork="prague", block_source="head_minus_12")
     assert "block_source" not in new_transcript(ctx, feature="f", tier="tier1", effect_class="supply")
@@ -515,7 +486,6 @@ def test_a_readable_window_is_still_published_as_not_determined(address, readabl
         pause_calldata=PAUSE,
         entry_points=_entry_points(),
         predicted_guard_set=["foo"],
-        # What the static plane hands over for these rows: no ceiling it can prove.
         max_pause_duration=None,
         duration_bound_source=DURATION_BOUND_NOT_DETERMINED,
     )
@@ -523,24 +493,9 @@ def test_a_readable_window_is_still_published_as_not_determined(address, readabl
     assert eff.details["auto_expiry"] is None
     assert eff.details["duration_bound_seconds"] is None
     assert eff.details["duration_bound_source"] == DURATION_BOUND_NOT_DETERMINED
-    # No warp was attempted: an unmeasured window is not probed into a number.
     assert transport.warped == 0
     for key in BANNED_BOUND_KEYS:
         if key == "duration_bound_source":
             continue
         assert key not in eff.details
-    # And nothing that would let a consumer read a mitigation out of it.
     assert eff.details["duration_bound_source"] != "fork_observed_recovery"
-
-
-def test_the_inspector_calls_an_unread_window_not_determined():
-    """The rendered LABEL for the four rows above. Pinned here as well as in
-    ``site/src/vocab/witnessFacts.test.js`` because the Python side is what decides the
-    three-state the string is chosen from, and the two must not drift apart."""
-    vocab = (Path(__file__).resolve().parents[2] / "site" / "src" / "vocab" / "witnessFacts.js").read_text()
-    assert 'value: "window not determined"' in vocab
-    # POSITIVE CONTROL: the proven-indefinite sentence is a PROVEN positive about
-    # a different state (``no_time_reference``) and must survive intact — the
-    # not_determined rename must not be applied by erasing a proven label.
-    assert 'value: "indefinite latch (no self-recovery bound)"' in vocab
-    assert "not determined (no freeze window read)" not in vocab

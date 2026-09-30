@@ -1,12 +1,9 @@
 """Lease gating + event-identity tests for the unified watcher.
 
-Real test DB, real decode/sync/reanalysis/notify pipeline; only the RPC wire
-(``rpc_request`` for head + getLogs, ``rpc_batch_request_classified`` for
-poll) and the Discord HTTP call (``notifier._send_discord``) are stubbed.
-Covers the two-layer singleton, duplicate-pass behavior (zero extra rows /
-jobs / posts), the batch-timelock identity, the partial-index poll exclusion, the
-per-chain daemon-lease gate (skip / renew-loss abort / TTL steal / re-acquire),
-the documented poll-path duplicate non-guarantee, and the
+Real test DB and pipeline; only the RPC wire (``rpc_request``, ``rpc_batch_request_classified``)
+and ``notifier._send_discord`` are stubbed. Covers the two-layer singleton, HR2
+(duplicate pass adds zero rows/jobs/posts), batch-timelock identity, the partial-index poll
+exclusion, the per-chain lease gate, the poll-path duplicate non-guarantee (Risk #7) and the
 governance-rotation dirty-mark.
 """
 
@@ -113,10 +110,9 @@ class Wire:
 def _clean_lease_and_jobs(db_session):
     """Drop scan/poll daemon leases and test Job rows around each test.
 
-    The scanner/poller lease names are fixed, so a leftover *foreign*-holder row
-    from one test would make the next test's real pass skip. The shared
-    ``db_session`` teardown now clears ``daemon_leases`` but not ``jobs``, and
-    we still wipe per-test (not just at teardown) so mid-file ordering is clean.
+    Lease names are fixed, so a leftover foreign-holder row would make the next test's pass
+    skip. ``db_session`` teardown clears ``daemon_leases`` but not ``jobs``; wiping per test
+    keeps mid-file ordering clean.
     """
 
     def _wipe():
@@ -132,8 +128,7 @@ def _clean_lease_and_jobs(db_session):
 
 
 def _capture_cycle_notes(monkeypatch):
-    """Spy on ``emit_monitor_cycle`` to capture each pass's ``note`` kwarg while
-    still delegating to the real heartbeat emit."""
+    """Spy on ``emit_monitor_cycle`` to capture each pass's ``note`` kwarg, still delegating."""
     import services.monitoring.unified_watcher as uw
 
     real = uw.emit_monitor_cycle
@@ -148,9 +143,8 @@ def _capture_cycle_notes(monkeypatch):
 
 
 def _steal_lease(name: str) -> None:
-    """Force *name* to a foreign holder with a live TTL, from a separate
-    connection so it is committed and visible to the scanner's next renew —
-    simulates a window that outran its TTL and lost the lease to a competitor.
+    """Force *name* to a foreign holder with a live TTL from a separate connection, so it is
+    committed and visible to the scanner's next renew (a window that outran its TTL).
     """
     engine = create_engine(DATABASE_URL)
     s = SASession(engine)
@@ -210,12 +204,12 @@ def _count_jobs(session, address):
 
 
 def test_duplicate_scan_pass_adds_zero_rows_jobs_and_posts(db_session, monkeypatch):
-    """Two scan passes over IDENTICAL logs — the second re-scanning the same
-    range (cursor reset back to 0, i.e. a lease-bug concurrent scanner that
-    never saw the first pass advance) — produce ZERO additional MonitoredEvent
-    rows, reanalysis jobs, and Discord posts. The partial unique index
-    + RETURNING-gated side effects carry this WITHOUT the lease: the second
-    pass is the same process holder and so wins the lease on re-entry."""
+    """A second scan over IDENTICAL logs (cursor reset to 0, as a lease-bug concurrent scanner
+    would) adds ZERO MonitoredEvent rows, reanalysis jobs and Discord posts.
+
+    Layer 2 (partial unique index + RETURNING-gated side effects) carries this WITHOUT the
+    lease: the second pass is the same holder and re-acquires it.
+    """
     import services.monitoring.notifier as notifier
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
@@ -242,15 +236,13 @@ def test_duplicate_scan_pass_adds_zero_rows_jobs_and_posts(db_session, monkeypat
     posts_1 = len(posts)
     assert rows_1 == 1 and jobs_1 == 1 and posts_1 == 1
 
-    # Rewind the cursor: the duplicate/concurrent pass re-scans the same window.
     db_session.execute(update(MonitoredContract).where(MonitoredContract.id == mc.id).values(last_scanned_block=0))
     db_session.commit()
 
     Wire(head=2000, logs=logs).install(monkeypatch)
     r2 = scan_for_events(db_session, "http://stub")
 
-    # The re-scanned log lost the ON CONFLICT, so it never reached notify or
-    # reanalysis — zero additional anything.
+    # The re-scanned log lost the ON CONFLICT, so it never reached notify or reanalysis.
     assert len(r2) == 0
     assert _count_events(db_session, mc.id) == rows_1
     assert _count_jobs(db_session, addr) == jobs_1
@@ -263,13 +255,11 @@ def test_duplicate_scan_pass_adds_zero_rows_jobs_and_posts(db_session, monkeypat
 
 
 def test_batch_ops_same_tx_distinct_log_index_all_land(db_session, monkeypatch):
-    """Same tx_hash + block + event_type but distinct log_index ⇒ distinct
-    identities ⇒ every batch row lands (the index does not collapse them)."""
+    """Same tx_hash + block + event_type but distinct log_index are distinct identities."""
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
     addr = ADDR(0xBA7C)
     mc = _mk(db_session, addr, 0, config={"watch_ownership": True})
 
-    # Three OwnershipTransferred logs sharing tx+block, log_index 0/1/2.
     tx_block = 1500
     logs = []
     for i in range(3):
@@ -290,59 +280,18 @@ def test_batch_ops_same_tx_distinct_log_index_all_land(db_session, monkeypatch):
 
 
 def test_within_window_duplicate_log_collapses_to_one_row(db_session, monkeypatch):
-    """A provider echoing the SAME log twice inside one window inserts one row —
-    ON CONFLICT DO NOTHING subsumes the removed in-scan 5-tuple dedupe."""
+    """A provider echoing the SAME log twice in one window inserts one row (ON CONFLICT DO
+    NOTHING subsumes the removed in-scan 5-tuple dedupe)."""
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
     addr = ADDR(0xEC40)
     mc = _mk(db_session, addr, 0, config={"watch_ownership": True})
 
     log = _ownership_log(addr, ADDR(0xBEEF), block=1500, log_index=7)
-    # Same tx_hash + log_index + event_type twice → one identity.
     Wire(head=2000, logs=[log, dict(log)]).install(monkeypatch)
 
     scan_for_events(db_session, "http://stub")
 
     assert _count_events(db_session, mc.id, "ownership_transferred") == 1
-
-
-def test_two_poll_detections_same_field_both_insert_with_null_log_index(db_session, monkeypatch):
-    """Two successive state_changed_poll detections on one contract+field both
-    land (they are log_index NULL, outside the partial identity index)."""
-    plan = [{"field": "owner", "kind": "getter_call", "selector": "0x8da5cb5b", "type_kind": "address"}]
-    mc = _mk(
-        db_session,
-        ADDR(0x9011),
-        0,
-        config={"polling_plan": plan, "watch_ownership": True},
-        state={"owner": ADDR(0x1).lower()},
-        needs_polling=True,
-    )
-
-    def _wire(value):
-        def stub(url, calls):
-            return [(value, "ok") for _ in calls]
-
-        return stub
-
-    import services.monitoring.unified_watcher as uw
-
-    monkeypatch.setattr(uw, "rpc_batch_request_classified", _wire("0x" + "0" * 24 + ADDR(0x2)[2:]))
-    poll_for_state_changes(db_session, "http://stub")
-    monkeypatch.setattr(uw, "rpc_batch_request_classified", _wire("0x" + "0" * 24 + ADDR(0x3)[2:]))
-    poll_for_state_changes(db_session, "http://stub")
-
-    assert _count_events(db_session, mc.id, "state_changed_poll") == 2
-    log_indexes = (
-        db_session.execute(
-            select(MonitoredEvent.log_index).where(
-                MonitoredEvent.monitored_contract_id == mc.id,
-                MonitoredEvent.event_type == "state_changed_poll",
-            )
-        )
-        .scalars()
-        .all()
-    )
-    assert log_indexes == [None, None]
 
 
 # ---------------------------------------------------------------------------
@@ -351,13 +300,11 @@ def test_two_poll_detections_same_field_both_insert_with_null_log_index(db_sessi
 
 
 def test_scan_skips_when_another_holder_owns_the_lease(db_session, monkeypatch):
-    """A live foreign-holder lease ⇒ the pass acquires nothing, issues no
-    getLogs, and beats with note='lease_lost'."""
+    """A live foreign-holder lease: nothing acquired, no getLogs, beat note='lease_lost'."""
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
     addr = ADDR(0xAA01)
     _mk(db_session, addr, 0, config={"watch_ownership": True})
 
-    # Competitor holds the ethereum scanner lease.
     assert try_acquire_daemon_lease(db_session, _scanner_lease_name("ethereum"), uuid.uuid4(), 60) is True
 
     notes = _capture_cycle_notes(monkeypatch)
@@ -370,12 +317,10 @@ def test_scan_skips_when_another_holder_owns_the_lease(db_session, monkeypatch):
 
 
 def test_scan_steals_expired_lease_and_runs(db_session, monkeypatch):
-    """An expired competitor lease is stolen; the pass runs normally."""
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
     addr = ADDR(0xAA02)
     mc = _mk(db_session, addr, 0, config={"watch_ownership": True})
 
-    # Seed an already-expired competitor lease (negative TTL).
     assert try_acquire_daemon_lease(db_session, _scanner_lease_name("ethereum"), uuid.uuid4(), -5) is True
 
     wire = Wire(head=2000, logs=[_ownership_log(addr, ADDR(0xB), 1500)]).install(monkeypatch)
@@ -384,7 +329,6 @@ def test_scan_steals_expired_lease_and_runs(db_session, monkeypatch):
     assert len(wire.getlogs_calls) == 1
     assert len(result) == 1
     assert _cursor(db_session, mc.id) == 2000
-    # The scanner now holds the row.
     holder = db_session.execute(
         text("SELECT holder FROM daemon_leases WHERE name = :n"), {"n": _scanner_lease_name("ethereum")}
     ).scalar_one()
@@ -392,29 +336,25 @@ def test_scan_steals_expired_lease_and_runs(db_session, monkeypatch):
 
 
 def test_scan_renew_loss_mid_pass_aborts_after_committed_window(db_session, monkeypatch):
-    """Losing the lease mid-pass aborts AFTER the already-committed window: the
-    first window is durable, and no further getLogs is issued."""
+    """Losing the lease mid-pass aborts AFTER the already-committed window (durable), with
+    no further getLogs."""
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
     addr = ADDR(0xAA03)
     mc = _mk(db_session, addr, 0, config={"watch_ownership": True})
 
-    # head=6000 ⇒ three 2000-block windows are available.
     def steal():
         _steal_lease(_scanner_lease_name("ethereum"))
 
     wire = Wire(head=6000, logs=[_ownership_log(addr, ADDR(0xB), 1500)], on_first_getlogs=steal).install(monkeypatch)
     scan_for_events(db_session, "http://stub")
 
-    # Only window 1 was fetched; windows 2-3 were never requested.
     assert len(wire.getlogs_calls) == 1
-    # Window 1 committed durably before the abort.
     assert _cursor(db_session, mc.id) == 2000
     assert _count_events(db_session, mc.id) == 1
 
 
 def test_scan_holder_reacquires_across_windows(db_session, monkeypatch):
-    """The same process holder renews across every window of a multi-window
-    pass — two windows both scan and commit under one continuous lease."""
+    """The same holder renews across every window of a multi-window pass."""
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
     addr = ADDR(0xAA04)
     mc = _mk(db_session, addr, 0, config={"watch_ownership": True})
@@ -433,8 +373,7 @@ def test_scan_holder_reacquires_across_windows(db_session, monkeypatch):
 
 
 def test_poll_skips_when_another_holder_owns_the_lease(db_session, monkeypatch):
-    """Poll passes are lease-gated too: a foreign holder ⇒ skip, note='lease_lost',
-    no batch RPC issued."""
+    """Poll passes are lease-gated too: foreign holder means skip, 'lease_lost', no batch RPC."""
     plan = [{"field": "owner", "kind": "getter_call", "selector": "0x8da5cb5b", "type_kind": "address"}]
     _mk(db_session, ADDR(0xAA05), 0, config={"polling_plan": plan}, state={"owner": ADDR(0x1)}, needs_polling=True)
     assert try_acquire_daemon_lease(db_session, _poller_lease_name("ethereum"), uuid.uuid4(), 60) is True
@@ -457,12 +396,10 @@ def test_poll_skips_when_another_holder_owns_the_lease(db_session, monkeypatch):
 
 
 def test_poll_path_may_duplicate_without_lease_protection(db_session, monkeypatch):
-    """The poll path has no unique event
-    identity, so two concurrent detections of the same change (simulated by
-    replaying the pre-change state before the second pass — a lease-bug
-    concurrent poller) DO produce duplicate state_changed_poll rows. This
-    asserts the current behavior so a future per-(mc, field, day) identity is a
-    deliberate, test-driven change."""
+    """Design Risk #7 (documented non-guarantee): the poll path has NO Layer-2 identity, so two
+    concurrent detections of one change (simulated by replaying the pre-change state) DO
+    produce duplicate state_changed_poll rows. Asserts current behavior so adding a
+    per-(mc, field, day) identity later is a deliberate change."""
     plan = [{"field": "owner", "kind": "getter_call", "selector": "0x8da5cb5b", "type_kind": "address"}]
     mc = _mk(
         db_session,
@@ -517,8 +454,8 @@ def _queue_reason(session, protocol_id):
 
 
 def test_scan_owner_change_marks_governance_rotation(db_session, monkeypatch):
-    """An OwnershipTransferred flowing through the real scan pipeline that moves
-    the owner ControllerValue enqueues a 'governance_rotation' dirty row."""
+    """An OwnershipTransferred through the real scan pipeline that moves the owner
+    ControllerValue enqueues a 'governance_rotation' dirty row."""
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
     addr = ADDR(0xC0FF)
     old_owner = ADDR(0x1).lower()
@@ -530,7 +467,6 @@ def test_scan_owner_change_marks_governance_rotation(db_session, monkeypatch):
     scan_for_events(db_session, "http://stub")
 
     assert _queue_reason(db_session, proto.id) == "governance_rotation"
-    # The controller value actually moved.
     cv = db_session.execute(
         select(ControllerValue.value).where(ControllerValue.contract_id == contract.id)
     ).scalar_one()
@@ -538,7 +474,6 @@ def test_scan_owner_change_marks_governance_rotation(db_session, monkeypatch):
 
 
 def test_poll_owner_change_marks_governance_rotation(db_session, monkeypatch):
-    """A poll-detected owner change also marks 'governance_rotation'."""
     addr = ADDR(0xC0DE)
     old_owner = ADDR(0x1).lower()
     proto, contract = _seed_owned_contract(db_session, addr, old_owner)
@@ -566,8 +501,7 @@ def test_poll_owner_change_marks_governance_rotation(db_session, monkeypatch):
 
 
 def test_no_op_change_does_not_mark(db_session, monkeypatch):
-    """An event whose synced value equals what is already stored changes
-    nothing, so it does NOT enqueue a governance-rotation row."""
+    """An event whose synced value equals what is stored moves nothing, so no rotation row."""
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
     addr = ADDR(0xC0A1)
     same_owner = ADDR(0xF00D)

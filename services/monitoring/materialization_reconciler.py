@@ -1,25 +1,8 @@
-"""Keeping every monitored contract's materialization current, at a decided price.
+"""Keep monitored contracts' materializations current, within a budget.
 
-A completed analysis must leave a current materialization row.
-The main pipeline now writes one, so the invariant holds going forward —
-but it does not hold *retroactively*, and it stops holding the moment
-``ANALYSIS_SCHEMA_VERSION`` is bumped: every existing row reads as a miss at
-once, and the whole monitored fleet silently falls back to baseline-only
-watching until something re-analyzes it.
-
-This module is the two halves of not letting that happen quietly:
-
-  * :func:`materialization_backlog` — how many active monitored contracts have
-    no current row, and why. Published unconditionally on the fleet and ops
-    surfaces so the decay is visible while it is small.
-  * :func:`plan_rebuilds` — which contracts to re-analyze, capped by a daily
-    budget. Rebuild is real spend (forge + Slither + LLM per job), so the work
-    is *decided*, never emergent: the cap is an env knob, the jobs already
-    queued against it are counted, and the remainder is reported rather than
-    quietly issued.
-
-The mutating half lives in ``scripts/reconcile_materializations.py``, which is
-``--dry-run`` by default and operator-run.
+An ``ANALYSIS_SCHEMA_VERSION`` bump makes every row a miss and drops the fleet to baseline-only watching.
+:func:`materialization_backlog` publishes that decay; :func:`plan_rebuilds` picks re-analysis jobs under a daily cap,
+since rebuilds are real spend. ``scripts/reconcile_materializations.py`` does the queuing (dry-run by default).
 """
 
 from __future__ import annotations
@@ -39,32 +22,25 @@ from utils.chains import chain_cache_token
 
 logger = logging.getLogger(__name__)
 
-#: Marker on a job this reconciler queued. Also how the budget counts itself:
-#: a rebuild is only budgeted against reconciler-issued work, never against
-#: re-analysis a governance event triggered.
+# Marks reconciler-queued jobs; only these count against the budget.
 REBUILD_REQUEST_KEY = "materialization_rebuild"
 
-#: Why a monitored contract has no current materialization row. Four distinct
-#: facts with four different remedies — a failed build is not a missing one,
-#: and an in-flight build needs nothing at all.
+# Why a contract has no current row; each reason has a different remedy.
 REASON_NO_ROW = "no_row"
 REASON_SUPERSEDED_VERSION = "superseded_version"
 REASON_FAILED = "failed"
 REASON_IN_PROGRESS = "in_progress"
 
-#: What the census is a census *of*: rows present at read time. A contract
-#: counted here is one whose enrollment reads ``no_current_materialization``
-#: today — not a claim about how long it has been that way.
+# Rows present at read time, not how long a contract has lacked one.
 BACKLOG_BASIS = "materialization rows present at read time, per active monitored contract"
 
 DEFAULT_REBUILD_BUDGET_PER_DAY = 25
 
 
 def rebuild_budget_per_day() -> int:
-    """Daily cap on reconciler-issued rebuild jobs. ``0`` disables queuing.
+    """Daily cap on reconciler rebuild jobs; ``0`` disables.
 
-    Deliberately small by default: a schema bump invalidates the whole fleet at
-    once, and draining it at full speed is a bill nobody decided to pay.
+    Small by default: a schema bump invalidates the whole fleet at once.
     """
     raw = os.getenv("PSAT_MATERIALIZATION_REBUILD_BUDGET_PER_DAY")
     if raw is None:
@@ -95,12 +71,8 @@ def _materialization_state_by_key(
 ) -> dict[tuple[str, str], tuple[str, int | None, datetime | None]]:
     """``(chain_token, address) -> (status, analysis_schema_version, builder_started_at)``.
 
-    Not a SQL join: ``contract_materializations.chain`` holds chain-id tokens
-    while ``monitored_contracts.chain`` holds names, and the two are only
-    comparable through ``chain_cache_token`` (see ``tracking_plan_state``). The
-    address filter keeps the read proportional to the monitored fleet rather
-    than to every contract the pipeline has ever materialized — this runs on
-    every ``/api/fleet`` request and every ops tick.
+    Not a SQL join: the two tables spell chains differently (see ``chain_cache_token``). Filtered by address because
+    this runs on every ``/api/fleet`` request.
     """
     if not addresses:
         return {}
@@ -119,14 +91,11 @@ def _materialization_state_by_key(
 
 
 def _backlog_reason(state: tuple[str, int | None, datetime | None] | None) -> str | None:
-    """The reason this address has no current row, or None when it has one."""
     if state is None:
         return REASON_NO_ROW
     status, version, builder_started_at = state
     if status == "building":
-        # A claim whose builder has gone stale is a crashed worker's leftover,
-        # not a build in flight — ``materialize_or_wait`` takes such a row over.
-        # Counting it as in-flight would exempt it from rebuild forever.
+        # A stale builder claim is a crashed worker's leftover, so it needs a rebuild.
         return REASON_NO_ROW if builder_claim_is_stale(status, builder_started_at) else REASON_IN_PROGRESS
     if status == "pending":
         return REASON_IN_PROGRESS
@@ -140,11 +109,7 @@ def _backlog_reason(state: tuple[str, int | None, datetime | None] | None) -> st
 
 
 def backlog_candidates(session: Session) -> list[RebuildCandidate]:
-    """Every active monitored contract without a current materialization row.
-
-    Unbudgeted and unordered-by-priority — the backlog itself. ``plan_rebuilds``
-    is what turns it into work.
-    """
+    """Every active monitored contract without a current row (unbudgeted)."""
     monitored = (
         session.execute(
             select(MonitoredContract)
@@ -166,24 +131,14 @@ def backlog_candidates(session: Session) -> list[RebuildCandidate]:
 
 
 def _job_key(job: Job) -> tuple[str, str]:
-    """``(chain_token, address)`` for a rebuild job.
-
-    Chain-qualified because the same address on two chains is two deployments
-    with two materializations: keying on the address alone would let a rebuild
-    in flight for the mainnet contract suppress its Base twin indefinitely.
-    """
+    """Chain-qualified: a mainnet rebuild must not suppress its Base twin."""
     request = job.request if isinstance(job.request, dict) else {}
     chain = job.chain_id if isinstance(getattr(job, "chain_id", None), int) else request.get("chain")
     return (chain_cache_token(chain), (job.address or "").lower())
 
 
 def _rebuild_jobs_since(session: Session, since: datetime) -> list[Job]:
-    """Reconciler-issued jobs created since *since*, plus any still in flight.
-
-    Both halves matter: the recent ones are the budget already spent, and their
-    deployments are the ones a second pass must not re-queue. An older job that
-    is still queued or processing is in flight regardless of age.
-    """
+    """Reconciler jobs since *since* (budget spent), plus any still in flight regardless of age."""
     return list(
         session.execute(
             select(Job).where(
@@ -202,25 +157,10 @@ def materialization_backlog(
     now: datetime | None = None,
     _candidates: list[RebuildCandidate] | None = None,
 ) -> dict[str, Any]:
-    """Backlog census for the fleet and ops surfaces.
+    """Backlog census for the fleet and ops surfaces, with budget fields alongside.
 
-    ``by_reason`` partitions ``contracts``. The budget fields are published
-    alongside because the backlog on its own does not say whether anything is
-    being done about it: a large backlog under a spent budget and the same
-    backlog under an untouched one are different operational facts.
-
-    ``attempted_not_yet_resolved`` counts the deployments this reconciler has a
-    job out for that are STILL IN THE BACKLOG — work issued that has not yet
-    produced a row, which is a different fact from work not yet issued. An
-    attempt whose contract now has its row is resolved and is not counted; the
-    number is meant to answer "how much outstanding work is there", and counting
-    successes in it would answer nothing.
-
-    No alert threshold is invented here — the counts ride the same
-    publish-unconditionally rule as ``plan_coverage`` and ``verification_gaps``.
-
-    *_candidates* lets a caller that already computed the backlog pass it in
-    rather than pay for the scan twice; it is not part of the surface contract.
+    ``attempted_not_yet_resolved`` counts contracts with a job out that are still in the backlog. *_candidates* lets a
+    caller reuse a backlog it already computed.
     """
     now = now or datetime.now(timezone.utc)
     candidates = _candidates or backlog_candidates(session)
@@ -255,22 +195,11 @@ def plan_rebuilds(
     budget: int | None = None,
     now: datetime | None = None,
 ) -> tuple[list[RebuildCandidate], dict[str, Any]]:
-    """The rebuild jobs the budget allows right now, and the census behind them.
+    """The rebuild jobs the budget allows now, and the census; returns ``(candidates, backlog)``.
 
-    Returns ``(candidates, backlog)``. Two exclusions, and the second is why a
-    second pass makes progress:
-
-    * ``in_progress`` — a builder is already running, so a job would pay for the
-      same bundle twice.
-    * any deployment this reconciler already has a job out for (in flight, or
-      issued within the budget window). The 24 h counter bounds how MANY jobs
-      are issued, not WHICH — without this, every pass re-proposes the head of
-      the list, and a contract that keeps failing to rebuild starves the tail
-      forever. Chain-qualified, so a mainnet rebuild does not suppress its Base
-      twin.
-
-    The remaining order is stable (chain, address), so a dry run and the
-    ``--apply`` that follows it propose the same work.
+    Excludes ``in_progress`` builds and any deployment with a job already out (in flight or within the window); without
+    the latter, a contract that keeps failing would starve the tail. Order is stable so a dry run matches the
+    ``--apply`` after it.
     """
     now = now or datetime.now(timezone.utc)
     candidates = backlog_candidates(session)

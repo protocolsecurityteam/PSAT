@@ -1,15 +1,7 @@
-"""Integration tests for retry-related queue operations.
+"""Integration tests for retry-related queue ops: ``claim_job`` next_attempt_at gating,
+``requeue_job``, ``fail_job_terminal``, and ``reclaim_stuck_jobs`` skipping failed_terminal rows.
 
-Covers:
-- ``claim_job`` honours ``next_attempt_at`` (skips future, claims past).
-- ``requeue_job`` sets retry_count + next_attempt_at + queued + transient.
-- ``fail_job_terminal`` sets failed_terminal + last_failure_kind, no requeue.
-- ``reclaim_stuck_jobs`` does not touch ``failed_terminal`` rows even if
-  their ``updated_at`` is ancient.
-
-Postgres-gated via the standard ``requires_postgres`` mark in
-``tests/cache_helpers.py``; skips cleanly when ``TEST_DATABASE_URL`` is
-unset.
+Postgres-gated via ``requires_postgres``; skips cleanly when ``TEST_DATABASE_URL`` is unset.
 """
 
 from __future__ import annotations
@@ -32,13 +24,8 @@ from tests.cache_helpers import requires_postgres
 
 @pytest.fixture()
 def clean_jobs(db_session):
-    """Drop any leftover jobs/artifacts so the global queue-level queries
-    (``claim_job``, ``reclaim_stuck_jobs``) only see this test's rows.
-
-    The shared ``db_session`` fixture only sweeps monitoring tables on
-    teardown — anything older than this test session can otherwise leak
-    into our assertions.
-    """
+    """Drop leftover jobs/artifacts: ``db_session`` only sweeps monitoring tables, so older
+    rows would leak into the global queue-level queries."""
     db_session.query(Artifact).delete()
     db_session.query(Job).delete()
     db_session.commit()

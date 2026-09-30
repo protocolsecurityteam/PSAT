@@ -1,11 +1,7 @@
-"""``upgrade.implementation`` — changes which code executes behind a deployment.
+"""``upgrade.implementation``: changes which code runs behind a deployment.
 
-Standard-gated only: the never-fired same-contract dataflow detectors are
-retired. Recovers UUPS (EETH-class ``upgradeToAndCall``), 1967
-``Upgraded``-marker impls, and delegatecall-fallback proxy shells (wBETH-class
-``upgradeTo``) — all invisible to the legacy detector, which emitted 0 of 2,182.
-The near-miss guard: a bespoke ``upgradeTo(address)`` that merely rotates a
-pointer carries the selector but qualifies for no upgrade gate, so no claim.
+Standard-gated (UUPS, 1967 ``Upgraded`` marker, or delegatecall-fallback shell), so a bespoke ``upgradeTo(address)``
+that only rotates a pointer earns no claim.
 """
 
 from __future__ import annotations
@@ -27,9 +23,7 @@ def upgrade_implementation(ctx: ClaimContext, function: str) -> ClaimEvidence | 
     selector = ctx.canonical_selector(function)
     if selector not in UPGRADE_SELECTORS:
         return None
-    # Record the delegatecall sink(s) this claim explains so the projection
-    # layer can suppress the standalone delegatecall_execution emphasis on the
-    # same entry.
+    # Lets the projection suppress the standalone ``delegatecall_execution`` emphasis on this entry.
     explained = ctx.sink_ids(function, "delegatecall")
     return ClaimEvidence(
         tier="standard_exact",

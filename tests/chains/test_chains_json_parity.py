@@ -1,8 +1,7 @@
-"""Parity-or-die: the committed ``site/src/surface/chains.json`` must match the registry.
+"""Parity-or-die: committed ``site/src/surface/chains.json`` must match the registry.
 
-If the chain registry changes and ``scripts/gen_chains_json.py`` isn't re-run,
-this test fails — so the frontend's generated chain map can never silently drift
-from ``utils.chains``.
+Fails if ``scripts/gen_chains_json.py`` isn't re-run after a registry change, so the frontend chain map
+can't silently drift from ``utils.chains``.
 """
 
 from __future__ import annotations

@@ -34,11 +34,6 @@ if TYPE_CHECKING:
     from .balances import ContractBalance
 
 
-# ---------------------------------------------------------------------------
-# Pipeline artifact tables (replace JSONB blobs)
-# ---------------------------------------------------------------------------
-
-
 class Contract(Base):
     __tablename__ = "contracts"
 
@@ -49,9 +44,8 @@ class Contract(Base):
     protocol_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("protocols.id", ondelete="SET NULL"), nullable=True
     )
-    # Which protocol NOMINATED this address.
-    # Never a membership claim: ``protocol_id`` stays the single member stamp,
-    # and only ``services.discovery.membership_gate`` may write it.
+    # The protocol that nominated this address. Not membership: ``protocol_id`` is the member stamp, written
+    # only by ``services.discovery.membership_gate``.
     nominated_protocol_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("protocols.id", ondelete="SET NULL"), nullable=True
     )
@@ -72,22 +66,16 @@ class Contract(Base):
     implementation: Mapped[str | None] = mapped_column(String(42), nullable=True)
     beacon: Mapped[str | None] = mapped_column(String(42), nullable=True)
     admin: Mapped[str | None] = mapped_column(String(42), nullable=True)
-    # Additional logic contracts this proxy delegates to beyond the EIP-1967
-    # slot ``implementation`` — the split-proxy / admin-impl pattern where the
-    # primary impl's ``fallback`` delegatecalls an address held in an ordinary
-    # state variable (e.g. ether.fi LRTSquared's ``adminImpl``). Resolved
-    # against the PROXY's storage and analyzed as proxy-child jobs so their
-    # authority resolves to the proxy's controller. See
-    # services/discovery/secondary_impl.py.
+    # Extra logic contracts beyond the EIP-1967 implementation: split proxies whose fallback delegatecalls an address in
+    # a state variable (e.g. LRTSquared's ``adminImpl``). Resolved against the proxy's storage and analysed as
+    # proxy-child jobs. See services/discovery/secondary_impl.py.
     secondary_implementations: Mapped[list[str] | None] = mapped_column(ARRAY(String(42)), nullable=True)
     deployer: Mapped[str | None] = mapped_column(String(42), nullable=True)
     remappings: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     rank_score: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
     confidence: Mapped[float | None] = mapped_column(Numeric(10, 4), nullable=True)
-    # Every source that has independently confirmed this contract for the
-    # protocol. Writers union their tag in instead of overwriting, so
-    # ranking can boost contracts corroborated by multiple discovery
-    # pipelines (e.g. shown on the docs page AND called by the DApp).
+    # Every source that confirmed this contract; writers union their tag so ranking can boost multiply-corroborated
+    # contracts.
     discovery_sources: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)), nullable=True)
     discovery_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     chains: Mapped[list[str] | None] = mapped_column(ARRAY(String(100)), nullable=True)
@@ -171,30 +159,22 @@ class ControllerValue(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
-    # Proxy/deployment this row was resolved against (NULL = own/sole deployment).
-    # Lets one impl-bytecode contract row hold N per-proxy sets; see migration d4e8f1a9c2b7.
+    # The proxy this row was resolved against (NULL = own deployment), so one impl row can hold per-proxy sets
+    # (migration d4e8f1a9c2b7).
     deployment_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     controller_id: Mapped[str] = mapped_column(String(255), nullable=False)
     value: Mapped[str | None] = mapped_column(String(66), nullable=True)
     resolved_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     source: Mapped[str | None] = mapped_column(String(255), nullable=True)
     block_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # ``none_as_null=True``: a Python ``None`` here means "not determined" and
-    # must reach the database as SQL NULL. SQLAlchemy's default renders it as
-    # the jsonb scalar ``null``, which is a DIFFERENT state that no ``IS NULL``
-    # test can see (db/jsonb.py). The watcher clears this field on a
-    # controller rotation, so the distinction is load-bearing.
+    # ``none_as_null`` so ``None`` (not determined) is SQL NULL, not the jsonb ``null`` that ``IS NULL`` can't see
+    # (db/jsonb.py). The watcher clears this on rotation.
     details: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
-    # How the current value was observed: 'eth_call' / 'eth_call_impl_fallback'
-    # / 'eth_call_error' / 'beacon_owner' from the resolution snapshot, or
-    # 'event_log' / 'storage_poll' when the watcher rotated it.
+    # 'eth_call' / 'eth_call_impl_fallback' / 'eth_call_error' / 'beacon_owner' from the resolution snapshot, or
+    # 'event_log' / 'storage_poll' from the watcher.
     observed_via: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    # 'caller_gate' | 'call_target' | NULL. NULL is a third state — the static
-    # stage did not determine why this address is attached — and is NOT a
-    # synonym for either value. Before this column the analyzer unioned "the
-    # caller is checked against this address" with "this address gets called",
-    # so a callee (eETH, lido, liquidityPool) was indistinguishable from an
-    # authority registry on the persisted row. See ``ControllerProvenance``.
+    # 'caller_gate' | 'call_target' | NULL (not determined, not a synonym for either). Separates authority registries
+    # from mere callees. See ``ControllerProvenance``.
     authority_provenance: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="controller_values")
@@ -214,22 +194,14 @@ class ControlGraphNode(Base):
     label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     contract_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # Kept for compatibility; ``False`` on it is four different populations at
-    # once. ``analysis_state`` is what a consumer must read.
+    # Compatibility only; ``False`` conflates four populations. Read ``analysis_state``.
     analyzed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    # 'analyzed' | 'not_analyzable' | 'attempt_failed' | 'beyond_depth_horizon'
-    # | NULL (not determined). ``beyond_depth_horizon`` is a fact about OUR
-    # walk, not about the address, and is the one the bool could never express:
-    # without ``graph_max_depth`` below it was not even derivable from the row.
-    # Two writers: the resolution walk's stamp, and
-    # ``services.governance.control_graph_types.reconcile_control_graph_types``,
-    # which fills NULL (only NULL) with the walk's own derivation after a type
-    # fold determines analyzability the walk could not.
-    # See ``schemas.resolved_control_graph.ResolvedAnalysisState``.
+    # 'analyzed' | 'not_analyzable' | 'attempt_failed' | 'beyond_depth_horizon' | NULL. ``beyond_depth_horizon`` is
+    # about our walk, not the address. Written by the resolution walk, and NULLs are filled by
+    # ``services.governance.control_graph_types.reconcile_control_graph_types``. See
+    # ``schemas.resolved_control_graph.ResolvedAnalysisState``.
     analysis_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # The ``max_depth`` of the walk that produced this row. NULL = not
-    # determined. Without it ``depth`` alone cannot say whether an unanalysed
-    # contract was skipped by the horizon or by something else.
+    # The producing walk's ``max_depth`` (NULL = unknown), so ``depth`` can show a horizon cutoff.
     graph_max_depth: Mapped[int | None] = mapped_column(Integer, nullable=True)
     details: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
 
@@ -256,56 +228,25 @@ class ControlGraphEdge(Base):
     __table_args__ = (Index("ix_control_graph_edges_contract_id", "contract_id"),)
 
 
-# ``ControlGraphEdge.relation`` vocabulary.
-#
-# ``controller_value`` and the owner/principal relations are *control* claims:
-# reversed, they say the to-node has authority over the from-node.
-# ``external_call_target`` is not — it says the from-node calls the to-node,
-# which is a proven fact about the code but carries no authority: being called
-# by X confers nothing over X. Until this split both were written as
-# ``controller_value``, and 66 directed edge pairs asserted "A controls B" and
-# "B controls A" at once.
+# ``ControlGraphEdge.relation`` vocabulary. ``controller_value`` and owner/principal relations are control claims
+# (reversed: the to-node controls the from-node). ``external_call_target`` only says the from-node calls the to-node,
+# which confers no authority.
 EDGE_RELATION_CONTROLLER_VALUE = "controller_value"
 EDGE_RELATION_EXTERNAL_CALL_TARGET = "external_call_target"
-# The third state. ``controller_value`` asserts "the to-node has authority over
-# the from-node"; ``external_call_target`` asserts the opposite positive fact
-# ("merely called, confers nothing"). A tracked controller whose
-# ``authority_provenance`` is ABSENT supports NEITHER: the static stage answered
-# neither question, so the address appeared in a lowered predicate tree without
-# ever being shown to gate a caller or to be a call destination. Writing it
-# ``controller_value`` makes an authority claim nothing proved (widening the
-# lowered tree minted 37 such targets at once, incl. pure constants like
-# HUNDRED_PERCENT_IN_BPS and non-authority mappings like _balances); writing it
-# ``external_call_target`` asserts the other unproven fact. This relation keeps
-# the edge VISIBLE and out of ``CONTROL_EDGE_RELATIONS``, so it moves no
-# authority and no value through the closure.
+# For a tracked controller with absent ``authority_provenance``: neither an authority claim nor a callee claim is
+# proven. Keeps the edge visible but out of ``CONTROL_EDGE_RELATIONS``.
 EDGE_RELATION_CONTROLLER_VALUE_UNATTRIBUTED = "controller_value_unattributed"
 
-# A ``function_principals`` row, materialized into the graph plane by
+# A ``function_principals`` row materialized into the graph by
 # ``services.governance.control_graph_types.materialize_fp_principal_nodes``.
 #
-# Deliberately NOT ``role_principal``. That relation asserts a WITNESSED ROLE
-# ("this address holds role R"), and the largest population reaching this pass
-# is precisely the one for which ``capability_role_grants`` REFUSED to assert a
-# role: a ``_ROLE_DISSOLVING_TRACE_STEPS`` trace leaves
-# ``effective_functions.authority_roles`` JSON null, and 127 further rows carry
-# ``authority_roles == []`` (authority proven, not role-keyed). Writing those as
-# ``role_principal`` would mint the exact claim the upstream declined to make.
-#
-# What it DOES assert is the FP row itself: this address is a resolved principal
-# of a gated function on the from-node contract. That is an authority claim, so
-# it belongs in ``CONTROL_EDGE_RELATIONS`` below. It moves NO NEW VALUE through
-# the effects closure: ``services.effects.selection.build_authority_graph``
-# already folds ``function_principals`` straight into the closure as
-# "principal -> the contract the function lives on", so this edge duplicates an
-# authority link the closure carries anyway — it makes it reachable in the TABLE
-# plane (Surface, chat, enrollment) that reads edges instead of FP rows.
+# Not ``role_principal``, which asserts a witnessed role; many of these rows are ones where ``capability_role_grants``
+# refused to assert one. It does assert authority (a resolved principal of a gated function), so it's in
+# ``CONTROL_EDGE_RELATIONS``. It adds no new value to the effects closure (``build_authority_graph`` already folds FP
+# rows); it makes the link visible to table-plane readers.
 EDGE_RELATION_CAPABILITY_PRINCIPAL = "capability_principal"
 
-# Allowlist, not a denylist: a relation this set does not name contributes no
-# authority. A new relation therefore has to be classified deliberately before
-# it can move value through the authority closure, instead of being folded in
-# by default the way ``external_call_target`` would have been.
+# Allowlist: new relations move no authority until classified here.
 CONTROL_EDGE_RELATIONS = frozenset(
     {
         EDGE_RELATION_CONTROLLER_VALUE,
@@ -319,27 +260,20 @@ CONTROL_EDGE_RELATIONS = frozenset(
 )
 
 
-# ``ControllerValue.observed_via`` values written by the monitoring watcher.
-# The resolution snapshot's own vocabulary ('eth_call', 'eth_call_error',
-# 'eth_call_impl_fallback', 'beacon_owner') lives in services/resolution.
+# Values written by the monitoring watcher; the resolution snapshot's own live in services/resolution.
 CONTROLLER_OBSERVED_VIA_EVENT_LOG = "event_log"
 CONTROLLER_OBSERVED_VIA_STORAGE_POLL = "storage_poll"
 
 
-# ``UpgradeEvent.source`` vocabulary. Three writers, three values; NULL is the
-# fourth state ("writer unknown") and belongs to rows written before the column.
+# ``UpgradeEvent.source`` vocabulary; NULL means the writer is unknown (pre-column rows).
 UPGRADE_SOURCE_BACKFILL = "backfill"
 UPGRADE_SOURCE_EVENT_SCAN = "event_scan"
 UPGRADE_SOURCE_POLL = "poll"
 
 
-# ``UpgradeTransaction.executor_kind`` vocabulary. The enum is deliberately
-# three-valued: the two positives are each a *proven* routing fact (a
-# keccak-matched marker log whose emitter an independent classifier typed), and
-# ``not_determined`` is the single state every failure, revert, absence and
-# unclassified-emitter path reaches. There is no ``eoa_one_hop`` member: a
-# receipt proves ``tx.from`` was msg.sender in the TOP-LEVEL frame, which is not
-# proof it was msg.sender at the upgrade site, and never proof of who authorised.
+# ``UpgradeTransaction.executor_kind``. Two proven positives (a keccak-matched marker log whose emitter was
+# independently typed) and ``not_determined`` for everything else. No ``eoa_one_hop``: a receipt's ``tx.from`` isn't
+# proof of the caller at the upgrade site.
 EXECUTOR_KIND_TIMELOCK_ROUTED = "timelock_routed"
 EXECUTOR_KIND_SAFE_DIRECT = "safe_direct"
 EXECUTOR_KIND_NOT_DETERMINED = "not_determined"
@@ -351,80 +285,45 @@ EXECUTOR_KINDS = (
 
 
 class UpgradeTransaction(Base):
-    """Receipt-derived facts about ONE upgrade transaction.
+    """Receipt-derived facts about one upgrade transaction.
 
-    Keyed on the transaction, not the event, because the facts are properties of
-    the transaction: one tx emits up to 19 ``Upgraded`` logs across 19 proxies in
-    this corpus, and storing the executor fact per event would store 19 mutable
-    copies of one fact and let a consumer count one governance action 19 times.
-    ``(chain_id, tx_hash)`` IS the governance action id.
-
-    **Row existence is the coverage discriminator.** A row means a receipt was
-    read and decoded; its absence means never read or read failed. That is the
-    distinction nullable columns on ``upgrade_events`` could not express —
-    ``executor_kind IS NULL`` would conflate "not fetched" with "fetched and
-    undetermined", which is a defaulted witness by construction.
+    Keyed on the transaction because one tx can emit many ``Upgraded`` logs; ``(chain_id, tx_hash)`` is the governance
+    action id. A row means a receipt was read and decoded; absence means never read or read failed, which nullable
+    columns on ``upgrade_events`` couldn't express.
     """
 
     __tablename__ = "upgrade_transactions"
 
     chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    # Lowercased 0x-prefixed 32-byte hash. Also the ``governance_action_id``:
-    # aggregate on this, never on ``upgrade_events.id``.
+    # Lowercased; also the governance action id (aggregate on this, not ``upgrade_events.id``).
     tx_hash: Mapped[str] = mapped_column(String(66), primary_key=True)
-    # Observation coordinates. ``eth_getTransactionReceipt`` takes no block
-    # parameter, so this read cannot be pinned by parameter the way every other
-    # chain read in the codebase is; ``block_hash`` is what lets a later reader
-    # DETECT a reorg instead of having to trust the original observation.
+    # ``eth_getTransactionReceipt`` can't be pinned, so ``block_hash`` lets later readers detect a reorg.
     block_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
     block_hash: Mapped[str] = mapped_column(String(66), nullable=False)
-    # 1 = success, 0 = reverted. A reverted transaction cannot have upgraded
-    # anything, so every positive below is withheld unless this is 1.
+    # 1 = success, 0 = reverted. A reverted tx upgraded nothing, so positives are withheld unless 1.
     tx_status: Mapped[int] = mapped_column(Integer, nullable=False)
     receipt_from: Mapped[str] = mapped_column(String(42), nullable=False)
-    # NULL is a FACT (the transaction is a contract creation), distinguished
-    # from "unknown" by the row existing at all.
+    # NULL is a fact (contract creation); "unknown" is the absence of the row.
     receipt_to: Mapped[str | None] = mapped_column(String(42), nullable=True)
     created_contract_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     is_contract_creation: Mapped[bool] = mapped_column(Boolean, nullable=False)
     executor_kind: Mapped[str] = mapped_column(String(20), nullable=False)
     executor_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
-    # Which persisted plane typed the emitter, and as what. Recorded so the
-    # verdict is auditable; the plane order is fixed and is NOT a strength
-    # ranking — planes that disagree yield ``not_determined``.
+    # Which plane typed the emitter, for auditability. Plane order isn't a strength ranking; disagreement is
+    # ``not_determined``.
     executor_classification_source: Mapped[str | None] = mapped_column(String(40), nullable=True)
     executor_classified_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    # Height at which the emitter was classified, from the classifier's own
-    # ``safe_protection.probe_block``. NULL = not determined. The classification
-    # plane carries no block on rows written before that probe existed, so this
-    # is the field that keeps ``executor_kind`` from implying "…and the emitter
-    # was a Safe AT the upgrade's block", which the receipt cannot prove.
+    # The height the emitter was classified at (``safe_protection.probe_block``), so ``executor_kind`` doesn't imply the
+    # emitter was a Safe at the upgrade's block.
     executor_classification_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # The ``target`` word decoded from each ``CallExecuted`` log, gated on
-    # ``executor_kind='timelock_routed'`` (NULL otherwise — the strength gate is
-    # not detachable from the payload). Lets a reader tell which proxies the
-    # timelock call actually targeted instead of attributing every log in the
-    # transaction to it.
-    # ``none_as_null`` so an absent target list is SQL NULL (not determined),
-    # never the JSON literal ``null`` — the CHECK below distinguishes them and
-    # so would any consumer.
+    # ``CallExecuted`` targets, only for ``timelock_routed`` (NULL otherwise), so readers know which proxies the
+    # timelock actually targeted. ``none_as_null`` so absence is SQL NULL, which the CHECK distinguishes.
     executor_call_targets: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
-    # COMPUTED, never asserted. True only when (i) every stored ``Upgraded``
-    # event for this tx is present in the receipt's own log array, emitted by
-    # its proxy, (ii) the ``logsBloom`` is present, well-formed and passes a
-    # positive control — it must confirm an ``Upgraded`` log the array actually
-    # carries, which is what rules out the all-zero bloom that answers "absent"
-    # to everything — and (iii) that usable bloom agrees with the log array
-    # about ``CallExecuted`` (a bloom has no false negatives, so bloom-absent is
-    # then independent proof of absence; bloom-present with no such log means
-    # the array may be pruned). False withdraws every marker-ABSENCE inference —
-    # which is the whole basis of ``safe_direct``.
+    # Computed. True only when every stored ``Upgraded`` event for the tx is in the receipt logs, the ``logsBloom`` is
+    # well-formed and confirms a present ``Upgraded`` (ruling out an all-zero bloom), and the bloom agrees with the logs
+    # about ``CallExecuted``. False withdraws every marker-absence inference, which ``safe_direct`` depends on.
     receipt_log_set_complete_for_tx: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    # The receipt's own ``Upgraded``-log count per emitting proxy. Kept because
-    # the projected rows cannot witness their own under-projection: if only one
-    # of two logs was stored, the stored pair count says "one event" and the
-    # deployment guard would exclude a transaction that also carried a real
-    # implementation change.
+    # The receipt's own ``Upgraded`` count per proxy, since stored rows can't reveal their own under-projection.
     receipt_upgraded_counts: Mapped[Any] = mapped_column(JSONB, nullable=False)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -433,19 +332,15 @@ class UpgradeTransaction(Base):
             "executor_kind IN ('timelock_routed', 'safe_direct', 'not_determined')",
             name="ck_upgrade_transactions_executor_kind",
         ),
-        # The strength gate may never be published apart from its payload: a
-        # positive kind must carry its emitter AND the plane that typed it, and
-        # ``not_determined`` may carry neither.
+        # A positive kind must carry its emitter and typing plane; ``not_determined`` carries neither.
         CheckConstraint(
             "(executor_kind = 'not_determined') = (executor_address IS NULL) "
             "AND (executor_kind = 'not_determined') = (executor_classification_source IS NULL) "
             "AND (executor_kind = 'not_determined') = (executor_classified_type IS NULL)",
             name="ck_upgrade_transactions_executor_gate_attached",
         ),
-        # ``jsonb_typeof`` rather than a SQL null test: a null test also passes
-        # the jsonb scalar ``null``, and a written-null here would be a target
-        # list a writer claimed to have recorded. Only the never-written state
-        # is admissible outside ``timelock_routed``.
+        # ``jsonb_typeof`` because a null test also passes jsonb ``null``; only never-written is allowed outside
+        # ``timelock_routed``.
         CheckConstraint(
             "executor_kind = 'timelock_routed' OR coalesce(jsonb_typeof(executor_call_targets), 'unset') = 'unset'",
             name="ck_upgrade_transactions_call_targets_gated",
@@ -457,37 +352,22 @@ class UpgradeTransaction(Base):
 class ContractCreationWitness(Base):
     """Two independent witnesses that an address was created in a given tx.
 
-    The receipt rule (``to IS NULL AND contractAddress == proxy``) catches only
-    the proxies deployed by an EOA-sent creation transaction. A proxy deployed
-    BY A FACTORY has a populated ``receipt.to`` and is indistinguishable from an
-    upgrade on the receipt alone, so its deployment-time ``Upgraded`` log gets
-    counted as an upgrade. This table carries the second arm.
-
-    **Both witnesses are required and they must agree.** ``creation_tx_hash``
-    alone is a claim by an indexer; ``code_absent_at_probe`` alone proves only
-    that the address was empty at some height. Together — the indexer names this
-    exact tx AND the address provably had no code in the block before the event
-    — they prove the event is a deployment. Disagreement, or either witness
-    missing, yields ``not_determined``, and a ``not_determined`` event stays
-    COUNTED (an upgrade count that may over-count is honest; one that silently
-    drops real upgrades is not).
+    The receipt rule (``to IS NULL AND contractAddress == proxy``) misses factory-deployed proxies, whose
+    deployment-time ``Upgraded`` log would otherwise count as an upgrade. The indexer's ``creation_tx_hash`` and
+    ``code_absent_at_probe`` (no code the block before) must both be present and agree; otherwise ``not_determined``,
+    and the event stays counted (over-counting is honest, dropping real upgrades isn't).
     """
 
     __tablename__ = "contract_creation_witnesses"
 
     chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     address: Mapped[str] = mapped_column(String(42), primary_key=True)
-    # From Etherscan ``getcontractcreation``. NULL = the indexer did not answer,
-    # never "the address has no creation tx".
+    # From Etherscan ``getcontractcreation``. NULL = no answer, not "no creation tx".
     creation_tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
     creation_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # ``getcontractcreation``'s ``contractFactory``: the contract whose CREATE/
-    # CREATE2 frame minted this address. NULL = no factory attribution recorded
-    # — never "created directly by an EOA".
+    # The factory contract whose CREATE/CREATE2 minted this address. NULL = not recorded, not "EOA-created".
     creation_factory: Mapped[str | None] = mapped_column(String(42), nullable=True)
-    # The height at which ``eth_getCode`` was read, and what it said. NULL/NULL
-    # = not probed; the pair is written together so "probed and code was there"
-    # is distinguishable from "never probed".
+    # Written together with the result, so "probed and code present" differs from "never probed".
     code_probe_block: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     code_absent_at_probe: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -500,23 +380,17 @@ class ContractCreationWitness(Base):
     )
 
 
-# ``ContractMembershipWitness.rule`` vocabulary.
-# Deterministic evidence only; no rule may ever be produced from LLM output.
+# ``ContractMembershipWitness.rule`` vocabulary; deterministic evidence only, never LLM output.
 WITNESS_RULE_W1_CODE = "w1_code"
 WITNESS_RULE_W2_STRUCTURAL = "w2_structural"
 WITNESS_RULE_W3_CONTROL = "w3_control"
 WITNESS_RULE_W4_DEPLOYER = "w4_deployer"
-# W4 family, second arm (owner ruling): lineage from the protocol's own
-# ANCHORING MEMBER factory, per the recorded ``creation_factory`` attribution.
-# Its via-fact is a member, not a registry EOA, so it carries its own
-# revocation story — the factory's demotion revokes it.
+# W4 second arm: lineage from the protocol's own member factory; revoked when the factory is demoted.
 WITNESS_RULE_W4_FACTORY = "w4_factory"
 WITNESS_RULE_W5_HUMAN = "w5_human"
 WITNESS_RULE_W6_LLAMA_SEED = "w6_llama_seed"
-# W4-H: lineage from a trust-class-H deployer,
-# admitted on measured affinity rather than on proof. The distinct rule string
-# is the honesty boundary — no display, export or API may present a heuristic
-# membership as proven.
+# W4-H: admitted on measured deployer affinity, not proof. The distinct rule string is
+# how nothing presents it as proven.
 WITNESS_RULE_W4H_DEPLOYER_AFFINITY = "w4h_deployer_affinity"
 WITNESS_RULES = frozenset(
     {
@@ -530,16 +404,14 @@ WITNESS_RULES = frozenset(
         WITNESS_RULE_W6_LLAMA_SEED,
     }
 )
-# Rules that admit membership on their own. W1 is the code precondition for
-# every promotion and alone admits nothing.
+# W1 is the code precondition for every promotion and admits nothing alone.
 ADMITTING_WITNESS_RULES = frozenset(WITNESS_RULES - {WITNESS_RULE_W1_CODE})
 
 
 class ContractMembershipWitness(Base):
-    """One recorded reason a contract is (or was) a member of a protocol.
+    """One reason a contract is (or was) a protocol member.
 
-    Member ⇔ ``contracts.protocol_id`` set AND ≥1 row here with
-    ``revoked_at IS NULL``. Rows are revoked, never deleted.
+    Member iff ``contracts.protocol_id`` is set and at least one unrevoked row exists. Rows are revoked, never deleted.
     """
 
     __tablename__ = "contract_membership_witnesses"
@@ -548,8 +420,7 @@ class ContractMembershipWitness(Base):
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
     protocol_id: Mapped[int] = mapped_column(Integer, ForeignKey("protocols.id", ondelete="CASCADE"), nullable=False)
     rule: Mapped[str] = mapped_column(String(32), nullable=False)
-    # The via-fact the witness rests on (member proxy, perimeter controller,
-    # deployer EOA). NULL for rules with no via-fact (w1/w5/w6).
+    # The via-fact (member proxy, perimeter controller, deployer EOA); NULL for w1/w5/w6.
     via_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
     evidence: Mapped[Any] = mapped_column(JSONB, nullable=False)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -565,10 +436,7 @@ class ContractMembershipWitness(Base):
         ),
         Index("ix_contract_membership_witnesses_contract_id", "contract_id"),
         Index("ix_contract_membership_witnesses_protocol_id", "protocol_id"),
-        # Uniqueness on (contract, protocol, rule, via_address) — as a partial
-        # pair because Postgres treats NULL ≠ NULL: a plain composite unique
-        # would admit duplicate via-less (w1/w5/w6) rows (same trap
-        # ``uq_contract_address_chain`` already hit; see ``AddressLabel``).
+        # Partial uniques because Postgres treats NULL ≠ NULL; a plain composite would admit duplicate via-less rows.
         Index(
             "uq_membership_witness_with_via",
             "contract_id",
@@ -586,16 +454,13 @@ class ContractMembershipWitness(Base):
             unique=True,
             postgresql_where=text("via_address IS NULL"),
         ),
-        # The revocation frontier probes the via ALONE, which the composite
-        # uniques above cannot serve (via_address is their fourth column), and
-        # only over live rows — a revoked witness is history, never a target.
+        # For revocation lookups by via alone, over live rows.
         Index(
             "ix_contract_membership_witnesses_active_via",
             "via_address",
             postgresql_where=text("revoked_at IS NULL AND via_address IS NOT NULL"),
         ),
-        # Serves the ``evidence @> …`` containment that finds a W3-D1 witness
-        # by an address inside its published anchor chain.
+        # Serves the ``evidence @> …`` lookup for a W3-D1 witness by an address in its anchor chain.
         Index(
             "ix_contract_membership_witnesses_evidence",
             "evidence",
@@ -606,23 +471,17 @@ class ContractMembershipWitness(Base):
 
 
 class ContractProbeAttempt(Base):
-    """Latest corroboration-probe attempt per (contract, chain).
-
-    Exists so a candidate's parked state is explainable from persisted rows:
-    which reads ran, at what block, and what each resolved.
-    Code/creation facts stay in ``contract_creation_witnesses``; this row
-    carries the owner/authority/EIP-1967 reads that table cannot express.
+    """Latest corroboration-probe attempt per (contract, chain): which reads ran, at what block, and what
+    they resolved, so a parked candidate is explainable.
     """
 
     __tablename__ = "contract_probe_attempts"
 
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), primary_key=True)
     chain_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    # Height the reads were pinned at. NULL = the probe never reached the wire
-    # (unroutable chain), which ``results.status`` states explicitly.
+    # NULL = the probe never reached the wire (unroutable chain).
     block_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    # {"status": "probed"|"not_routable", "reads": {read: {ok, value, error}},
-    #  "resolved_addresses": [..]} — the address list feeds the gate's targeted
+    # {"status": "probed"|"not_routable", "reads": {...}, "resolved_addresses": [...]}; the addresses feed targeted
     # candidate lookups.
     results: Mapped[Any] = mapped_column(JSONB, nullable=False)
     probed_at: Mapped[datetime] = mapped_column(
@@ -644,9 +503,7 @@ class UpgradeEvent(Base):
     __tablename__ = "upgrade_events"
     __table_args__ = (
         Index("ix_upgrade_events_contract_id", "contract_id"),
-        # MATCH SIMPLE: a NULL in EITHER column disables the constraint, which
-        # is what lets an event exist before (or without) its receipt fact and
-        # what carries the poll writer's tx_hash-less rows.
+        # MATCH SIMPLE: a NULL in either column disables it, so an event can exist without its receipt fact.
         ForeignKeyConstraint(
             ["chain_id", "tx_hash"],
             ["upgrade_transactions.chain_id", "upgrade_transactions.tx_hash"],
@@ -657,33 +514,18 @@ class UpgradeEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     contract_id: Mapped[int] = mapped_column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=False)
     proxy_address: Mapped[str] = mapped_column(String(42), nullable=False)
-    # NULL means "this writer does not record the predecessor", not "there was
-    # no predecessor". ``source`` is what tells the two apart: the backfiller
-    # projects an artifact that never carried old_impl, the watcher reads the
-    # slot's previous value. Without the discriminator both are NULL.
+    # NULL means this writer doesn't record the predecessor, not that there wasn't one; ``source`` tells them apart.
     old_impl: Mapped[str | None] = mapped_column(String(42), nullable=True)
     new_impl: Mapped[str | None] = mapped_column(String(42), nullable=True)
-    # NULL = the block was not determined by the writer. Never 0: every
-    # consumer orders by this column with ``nullslast()``, and 0 sorts ahead
-    # of the genuine genesis deployment, which shifts every impl-era window.
+    # NULL = undetermined. Never 0, which would sort ahead of the real genesis deployment.
     block_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # For ``source='backfill'`` / ``'event_scan'`` this is the on-chain block
-    # timestamp. For ``source='poll'`` no block is known, so it carries the
-    # detection time — an upper bound within one poll interval of the change.
-    # ``source`` is the only thing that distinguishes the two readings.
+    # Block timestamp for ``backfill``/``event_scan``; detection time (an upper bound) for ``poll``.
     timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
-    # Which writer produced this row: 'backfill' (upgrade-history artifact
-    # projection), 'event_scan' (log-derived), 'poll' (storage-slot poll).
-    # NULL = written before this column existed; the writer is unknown, which
-    # is a third state and not a synonym for either value.
+    # 'backfill' | 'event_scan' | 'poll'; NULL = pre-column, writer unknown.
     source: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    # Link half of the composite FK to ``upgrade_transactions``. Set ONLY once
-    # the receipt-fact row for this ``tx_hash`` exists, so NULL means "no linked
-    # receipt fact" — it is NOT a claim that the chain is unknown (the chain is
-    # always derivable from ``contracts.chain``). Nothing reads it as a chain
-    # discriminator; it exists so the join to the per-transaction facts is a
-    # real foreign key rather than a convention.
+    # Half of the FK to ``upgrade_transactions``, set only once that row exists. NULL means no linked receipt, not an
+    # unknown chain.
     chain_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     contract: Mapped[Contract] = relationship("Contract", back_populates="upgrade_events")
@@ -712,10 +554,8 @@ class EffectiveFunction(Base):
             "-- this column alone cannot tell a gated function from an unread one."
         ),
     )
-    # Three-state counterpart to ``authority_public`` (whose ``False`` merges a
-    # witnessed caller restriction with "we could not determine the authority"):
-    # 'open' | 'restricted' | 'not_determined'. NULL = the writer that produced
-    # this row predates the column and cannot be read as any of the three.
+    # Three-state counterpart to ``authority_public``: 'open' | 'restricted' | 'not_determined'. NULL = written before
+    # the column.
     authority_openness: Mapped[str | None] = mapped_column(
         String(20),
         nullable=True,
@@ -741,26 +581,14 @@ class EffectiveFunction(Base):
     capability_expr: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     conditions: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    # Plane-1 claims: list of {claim_id, tier, witness}, dual-written alongside
-    # the legacy effect_labels. NULL/[] on rows written before the claims plane.
+    # Plane-1 claims ``{claim_id, tier, witness}``, dual-written beside effect_labels; NULL/[] on older rows.
     claims: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
 
-    # State-mutability witness, carried from the effects stage's ``EffectInfo``.
-    # Before these columns the only way to ask "does this function write state"
-    # was ``effect_targets``, which concatenates state-write variable names with
-    # dotted external-call heads: 501 of its 1642 populated rows carry only call
-    # heads, so a populated value asserted a write that was never proven.
+    # State-mutability witness from ``EffectInfo``. ``effect_targets`` mixes state writes with call heads, so it
+    # couldn't answer "does this write state".
     #
-    # All four are nullable BECAUSE SQL NULL is a distinct fact here — "not
-    # determined", i.e. no effects record covered this signature, or the record
-    # contradicted itself (see ``_mutability_fields``). ``[]`` / ``false`` mean
-    # the effects stage looked and proved none. A consumer that cannot tell those
-    # apart re-creates the defect these columns exist to remove.
-    #
-    # ``none_as_null=True`` on the JSONB pair is load-bearing: SQLAlchemy's
-    # default renders a Python ``None`` as the jsonb scalar ``null``, which is a
-    # DIFFERENT state from SQL NULL and is why ``conditions`` above is unusable
-    # in a null test on 780 of its 1773 rows (see ``db/jsonb.py``).
+    # NULL means not determined (no effects record, or a contradictory one; see ``_mutability_fields``);
+    # ``[]``/``false`` mean proven none. ``none_as_null`` on the JSONB pair keeps ``None`` as SQL NULL (db/jsonb.py).
     state_changing: Mapped[bool | None] = mapped_column(
         Boolean,
         nullable=True,
@@ -856,33 +684,13 @@ class PrincipalLabel(Base):
 
 
 class AddressLabel(Base):
-    """Admin-curated human-readable name for an arbitrary address.
+    """Admin-curated name for an arbitrary address, mainly Safe signers and EOA principals.
 
-    Exists to give Safe signers and EOA principals — which are just raw
-    addresses with no on-chain metadata — a legible name in the UI. Distinct
-    from ``PrincipalLabel`` which is worker-populated and scoped per-contract.
+    Distinct from worker-populated, per-contract ``PrincipalLabel``.
 
-    Global-plus-override model: ``chain`` is a nullable
-    chain-NAME string (``'ethereum'``, ``'base'`` — entity tables key on canonical
-    chain names, not ids).
-
-      * ``chain IS NULL`` is a **global** label that applies on every chain.
-        This is the right semantics for EOA/Safe-signer labels — the same key
-        controls the same off-chain account everywhere — and is this table's
-        entire legacy population, so those rows stay untouched and behave
-        exactly as before (no backfill).
-      * A row with a concrete ``chain`` **overrides** the global label on that
-        chain only. This is what makes *contract* labels safe cross-chain: the
-        same address is a different contract on each chain and can carry a
-        different name per network.
-
-    Identity is a surrogate ``id`` (the bare-address PK collided for contracts
-    at the same address on two chains). Uniqueness is enforced by two PARTIAL
-    unique indexes rather than a plain ``UNIQUE(address, chain)`` — Postgres
-    treats NULL ≠ NULL, so a plain composite unique would admit duplicate
-    global rows (this codebase was already bitten by exactly that on
-    ``uq_contract_address_chain``). A sentinel chain value was also rejected
-    because the sentinel would leak into API semantics.
+    Global plus per-chain override. ``chain IS NULL`` is global (right for EOAs; the whole legacy
+    population). A concrete ``chain`` overrides on that chain only, which matters for contracts. Surrogate ``id``;
+    uniqueness via two partial unique indexes, since Postgres treats NULL ≠ NULL.
     """
 
     __tablename__ = "address_labels"

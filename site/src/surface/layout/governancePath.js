@@ -1,53 +1,27 @@
-// Control-relation edge indexing and the witnessed-agency walk. Pure — no
-// React.
+// Control-edge indexing and the witnessed-agency walk. Reach claims come from
+// the server (serverReach.js); this serves the ReachPath block
+// (buildControlEdgeIndex + shortestControlPath) and the indirect-caller
+// derivation (the agency-gated closure).
 //
-// Reach CLAIMS on the surface (chips / routes / Governs-tab path rows) come
-// from the server's reach block (`companyData.reach`, see serverReach.js) —
-// nothing here publishes reach any more. What remains has two consumers:
-//   - buildControlEdgeIndex + shortestControlPath: the ReachPath sidebar
-//     block, illustrating a host → reach-entity pair the score document
-//     already vouches for;
-//   - the agency-gated closure walk (buildControlAdjacency / buildAgencyIndex
-//     / controlClosure / agencyRoute): the indirect-caller derivation
-//     (controlGraph.js), which reports governance STANDING above a function's
-//     direct callers.
-//
-// The walk follows the payload's control-relation fund_flows edges, but
-// transitivity is not free: standing on a node confers that node's own powers
-// only when the walker can act AS the node. Where the payload witnesses what a
-// controller can do to a target (principals[].controls_detail capabilities),
-// the walk continues through the target only if that power is
-// agency-conferring — pausing a contract reaches the contract, it never
-// confers the contract's authority over anything else. Where no such witness
-// exists (a plain contract standpoint, a machine-only authority like
-// EtherFiTimelock), the walk stays blind.
+// Transitivity isn't free: standing on a node confers its powers only if the
+// walker can act AS it. With controls_detail witnessing the power, the walk
+// continues only through agency-conferring ones (pausing doesn't confer
+// authority). With no witness, the walk stays blind.
 
 import { coalesceChain } from "../entityKey.js";
 
-// Control-relation edge types the walk follows. `controls_value` belongs here:
-// the backend emits it INSTEAD OF `controls` for an owner edge whose target
-// moves value (company_overview._build_flows_and_principals) — it is an
-// ownership edge wearing a value marker, not a value-movement edge, and the
-// scorer's closure walks the same pair. Excluding it hid every owner →
-// value-moving-contract hop from the reach walk.
+// `controls_value` is an ownership edge with a value marker (the backend emits
+// it instead of `controls`); excluding it hid every owner → value-moving hop.
 const CONTROL_EDGE_TYPES = new Set(["principal", "controller", "controls", "controls_value"]);
 
-// Whether a fund_flows edge belongs to ``activeChain``. A flow is intra-chain
-// (``from_chain`` === ``to_chain`` in the payload), so ``to_chain`` is
-// representative. With no active chain the page is single-chain and every flow
-// is kept; a legacy flow with no chain field is kept on any chain —
-// the single home for this predicate so the canvas fund-flow scope (the edges
-// SurfaceCanvas draws) and the governance-adjacency walk agree.
+// Flows are intra-chain; legacy flows without a chain are kept.
+// Shared by the canvas and the walk so they agree.
 export function flowOnChain(flow, activeChain) {
   if (!activeChain || !flow || flow.to_chain == null) return true;
   return coalesceChain(flow.to_chain) === activeChain;
 }
 
-// from-address (lc) → Set<to-address (lc)> over control-relation edges only.
-//
-// The Surface page is chain-scoped, so when ``activeChain`` is given only flows
-// on that chain feed the adjacency: a same-address twin's edge on another chain
-// must not enter this chain's walk (see flowOnChain).
+// Chain-scoped so a twin's edge can't enter this chain's walk.
 export function buildControlAdjacency(fundFlows = [], activeChain = null) {
   const adjacency = new Map();
   for (const flow of fundFlows || []) {
@@ -62,11 +36,8 @@ export function buildControlAdjacency(fundFlows = [], activeChain = null) {
   return adjacency;
 }
 
-// from-address (lc) → Map<to-address (lc), edge> over the same control-relation
-// edges buildControlAdjacency walks, keeping the edge itself so a hop can name
-// what it is. Parallel edges between one pair collapse to the first seen — the
-// backend already dedups fund_flows per (chain, from, to), so a second entry
-// here would be a payload the graph never emits.
+// The backend dedups fund_flows per (chain, from, to), so the first edge per
+// pair wins.
 export function buildControlEdgeIndex(fundFlows = [], activeChain = null) {
   const index = new Map();
   for (const flow of fundFlows || []) {
@@ -82,11 +53,8 @@ export function buildControlEdgeIndex(fundFlows = [], activeChain = null) {
   return index;
 }
 
-// The witnessed claims on a control edge, normalized to one list. The payload
-// publishes the single-claim case as scalar relation/label and the multi-claim
-// case as `relations` (services/aggregations/company_overview/governance_view.py); an edge the
-// control graph never witnessed a relation for yields [] — the consumer shows
-// the flow type alone rather than inventing a name for the hop.
+// Scalar relation/label or `relations` (governance_view.py); [] when
+// unwitnessed.
 export function edgeClaims(flow) {
   if (!flow) return [];
   if (Array.isArray(flow.relations)) {
@@ -96,18 +64,10 @@ export function edgeClaims(flow) {
   return [];
 }
 
-// Capability chips that confer AGENCY over the contract they are held on:
-// holding one lets the holder act as that contract (upgrade it, own it,
-// replace its authority, grant themselves roles on it, make it execute
-// arbitrary calls / delegatecalls) — so control witnessed one hop further
-// genuinely transfers. This is the chip-vocabulary projection of the scorer's
-// TRANSITIVE_CAPABILITIES (services/scoring/constants.py) through
-// CLAIM_CAPABILITY (services/governance/primary_controller.py); the payload
-// publishes chips, not claim ids, so the chip is the witness granularity
-// available here. Chips are coarser than claims ("ownership" also covers
-// renounce/accept, "roles" also covers revoke), so the gate can admit a seed
-// the scorer's finer set would not — but never a capability family the scorer
-// rules non-transitive: pause, fund flows, mint/burn never expand.
+// Chips conferring agency over the contract (act as it). The chip projection of
+// the scorer's TRANSITIVE_CAPABILITIES via CLAIM_CAPABILITY; coarser than
+// claims, but never a family the scorer rules non-transitive (pause, fund
+// flows, mint/burn).
 const AGENCY_CAPABILITIES = new Set([
   "upgrade", // upgrade.implementation, proxy.admin_change
   "arbitrary-call", // exec.arbitrary
@@ -117,17 +77,13 @@ const AGENCY_CAPABILITIES = new Set([
   "roles", // roles.grant, roles.configure (+revoke at chip granularity)
 ]);
 
-// controller address (lc) → Set<target address (lc)> of contracts the payload
-// witnesses an agency-conferring capability on, read off controls_detail — the
-// one per-(controller, contract) capability witness the payload carries.
+// controller → targets with a witnessed agency-conferring capability
+// (controls_detail).
 //
-// EVERY principal with a controls_detail gets an entry, possibly empty: an
-// emitted principal whose witnessed powers are all non-agency (a pause-only
-// EOA) must gate CLOSED, and that is a different state from an address the
-// payload never emitted as a principal at all (no entry — the walk treats it
-// as a plain contract node and stays blind, matching the backend closure).
-// Detail entries are chain-scoped like the adjacency; an entry with
-// no chain field is legacy and kept on any chain.
+// Every principal with controls_detail gets an entry, possibly empty: a
+// pause-only EOA gates closed, which differs from a never-emitted address (no
+// entry, blind like the backend closure). Chain-scoped; chainless legacy
+// entries kept.
 export function buildAgencyIndex(principals = [], activeChain = null) {
   const index = new Map();
   for (const principal of principals || []) {
@@ -146,30 +102,19 @@ export function buildAgencyIndex(principals = [], activeChain = null) {
   return index;
 }
 
-// Whether the walk may CONTINUE through `to` when standing on `from`: the
-// witnessed-agency rule where a witness exists, blind where none does.
 function walkContinues(agencyIndex, from, to) {
   const agency = agencyIndex ? agencyIndex.get(from) : undefined;
   return agency ? agency.has(to) : true;
 }
 
-// The agency-gated closure from `address` over the control adjacency — the
-// standing behind the indirect-caller derivation (controlGraph.js).
-//
-// Returns { distances, expandHops, expandParent }; the first two are
-// Map<addrLc, hop> with the start excluded from distances:
-//  - distances:  every reached address at the hop count of the SHORTEST route
-//    to it;
-//  - expandHops: the hop at which the walk could first CONTINUE from an
-//    address (start at 0). An address held only by a non-agency power is
-//    reached but absent here — it is where a claim ends, not a thoroughfare.
-//    It can still be re-entered later through an agency route (its shortest
-//    hop stands; expansion resumes at the longer one) — dropping that
-//    re-entry would hide routes the control graph carries.
-//  - expandParent: Map<addrLc, addrLc> — the node the walk stood on when it
-//    licensed continuing through the key. Following it back to the start
-//    reconstructs one agency-licensed route (every hop on it passed
-//    walkContinues): it justifies standing, not merely a hop count.
+// The agency-gated closure from `address`. Returns { distances, expandHops,
+// expandParent }:
+// - distances: shortest hop to every reached address (start excluded);
+// - expandHops: hop at which the walk could first continue from an address
+//    (start 0). Non-agency holdings are reached but absent here; they can be
+//    re-entered later via an agency route;
+// - expandParent: the node that licensed continuing; following it reconstructs
+//    an agency route.
 export function controlClosure(address, adjacency, agencyIndex = null) {
   const start = String(address || "").toLowerCase();
   const distances = new Map();
@@ -193,14 +138,8 @@ export function controlClosure(address, adjacency, agencyIndex = null) {
   return { distances, expandHops, expandParent };
 }
 
-// The agency-licensed route the closure walked from its start to `target`,
-// as [{ from, to, flow }] hops in walk order — or null when the closure was
-// never licensed to stand on `target` (absent from expandHops). Every hop on
-// the route passed the witnessed-agency gate, so the route supports "the
-// start can act AS the target", not merely "the start reaches it". `flow` is
-// read off `edgeIndex` so a consumer can name the hop with what was
-// witnessed; a hop whose pair the index does not carry keeps flow: null
-// rather than inventing one.
+// The agency-licensed route to `target` as [{ from, to, flow }], or null if
+// never licensed. `flow` is null for pairs the index doesn't carry.
 export function agencyRoute(target, closure, edgeIndex) {
   const goal = String(target || "").toLowerCase();
   if (!goal || !closure?.expandHops?.has(goal) || !closure?.expandParent) return null;
@@ -215,19 +154,12 @@ export function agencyRoute(target, closure, edgeIndex) {
   return hops;
 }
 
-// Shortest control-graph route from any of `fromAddresses` to `toAddress`.
+// Shortest control route from any of `fromAddresses` to `toAddress`,
+// deliberately not agency-gated: it illustrates a pair the server already
+// witnessed.
 //
-// Deliberately NOT agency-gated: its callers illustrate a reach pair the
-// SERVER already witnessed (a finding's host → reach entity), and the backend
-// closure that witnessed it walks hops this client holds no capability detail
-// for. Gating here would refuse to draw routes the score document vouches for;
-// the route names control relations along the way, it does not claim the
-// walker wields each hop.
-//
-// Returns { host, hops: [{ from, to, flow }] } for a route this graph carries,
-// or { host: null, hops: null } when it carries none — an absent route is a
-// distinct third state from a zero-length one, and the consumer must say the
-// path is not carried rather than draw nothing and imply directness.
+// Returns { host, hops } or { host: null, hops: null } when uncarried, which
+// must be said rather than drawn as nothing.
 export function shortestControlPath(fromAddresses, toAddress, edgeIndex) {
   const target = String(toAddress || "").toLowerCase();
   const starts = (Array.isArray(fromAddresses) ? fromAddresses : [fromAddresses])
@@ -236,8 +168,7 @@ export function shortestControlPath(fromAddresses, toAddress, edgeIndex) {
   const none = { host: null, hops: null };
   if (!target || !starts.length || !edgeIndex) return none;
 
-  // Multi-source BFS: whichever host reaches the target in the fewest hops wins,
-  // and `origin` remembers which one that was so the block can name it.
+  // `origin` remembers which host won.
   const prev = new Map();
   const origin = new Map();
   const seen = new Set();
@@ -273,12 +204,7 @@ export function shortestControlPath(fromAddresses, toAddress, edgeIndex) {
   return none;
 }
 
-// Dedup a governed-contract row list by lowercased address, then disambiguate
-// genuine same-name families that differ by address: when a name maps to both a
-// proxy and a non-proxy address, tag each `proxy` / `impl`. Same-name rows that
-// don't split proxy-vs-impl are left untagged (the short address disambiguates
-// them). Rows are { address, name, is_proxy, ... }; returns fresh objects with a
-// lowercased address and an optional `tag`.
+// Dedup by address; tag same-name proxy/impl families `proxy` / `impl`.
 export function dedupeAndTagRows(rows = []) {
   const seen = new Set();
   const out = [];

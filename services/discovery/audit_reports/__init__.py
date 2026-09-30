@@ -1,24 +1,13 @@
 """Orchestrator for protocol audit report discovery.
 
-Pipeline:
-
-    Stage 0 — Solodit: seed canonical entries from Cyfrin's aggregator.
-    Stage 1 — Tavily broad + LLM follow-up query + LLM classify.
+    Stage 0 — Solodit: seed entries from Cyfrin's aggregator.
+    Stage 1 — Tavily search + LLM follow-up query + LLM classify.
     Stage 2 — fetch confirmed pages (GitHub API or HTML) + LLM extract.
-    Stage 3 — follow links discovered in Stage 2 (one level).
+    Stage 3 — follow links found in Stage 2 (one level).
     Stage 3.5 — curated auditor-portfolio crawl.
-    Dedup — URL key, then filename, then LLM validate-and-cluster
-    (heuristic mirror collapse fallback).
+    Dedup — URL, then filename, then LLM validate-and-cluster (heuristic fallback).
 
-``search_audit_reports`` is the entry point. ``merge_audit_reports`` is
-append-only across successive discovery runs: reports are never removed.
-
-Submodules:
-    _urls          — URL/filename utilities, no external deps
-    _github        — all GitHub API calls + org/repo/tree enumeration
-    _fetch         — HTML page fetch + ``_fetch_and_extract`` dispatcher
-    _dedup         — filename collapse + LLM validate-and-cluster + mirror
-                     heuristic fallback
+``search_audit_reports`` is the entry point. ``merge_audit_reports`` is append-only across runs.
 """
 
 from __future__ import annotations
@@ -69,23 +58,14 @@ from ._urls import (
     _normalize_url,
 )
 
-# --- Stage budget caps ----------------------------------------------------
-
 _MAX_STAGE2_PAGES = 5
 _MAX_LINK_FOLLOWS = 5
 _MAX_TOTAL_EXTRACTIONS = 8
 
 
-# --- Auto-hop policy ------------------------------------------------------
-
-
 def _should_auto_hop_org(url: str, company: str, auto_hopped: set[str]) -> bool:
-    """Return True when the caller should fan out from ``url`` to the org.
-
-    Three conditions: (1) URL parses as GitHub org/tree/blob/repo, (2) the
-    owner substring-matches the company name (excludes third-party vendor
-    orgs holding hundreds of unrelated repos), and (3) we haven't already
-    hopped for this owner this run.
+    """Whether to fan out from ``url`` to its GitHub org: it parses as a GitHub URL, the owner matches the company
+    (vendor orgs hold hundreds of unrelated repos), and we haven't hopped for this owner yet.
     """
     github = _parse_github_url(url)
     if not github:
@@ -111,12 +91,9 @@ def _maybe_auto_hop_to_org(
     reports: list[dict[str, Any]],
     debug: bool = False,
 ) -> None:
-    """Enumerate the whole org when ``url`` triggers an auto-hop.
+    """Enumerate the whole org when ``url`` qualifies; mutates ``auto_hopped_orgs`` and ``reports``.
 
-    Mutates ``auto_hopped_orgs`` and ``reports`` in place. A no-op when
-    the URL isn't eligible. ``auto_hopped_orgs`` is only updated when
-    enumeration actually completed — a rate-limited call leaves the set
-    untouched so per-URL fallback can still run.
+    The org is only marked hopped when enumeration completed, so a rate-limited call still allows per-URL fallback.
     """
     if not _should_auto_hop_org(url, company, auto_hopped_orgs):
         return
@@ -134,20 +111,16 @@ def _maybe_auto_hop_to_org(
         reports.append(_build_report_entry(report, org_url, confidence, now_iso))
 
 
-# --- Report entry assembly ------------------------------------------------
-
-
 def _build_report_entry(
     report: dict[str, Any],
     source_url: str,
     confidence: float,
     now_iso: str,
 ) -> dict[str, Any]:
-    """Build a final report dict from extracted LLM data.
+    """Build a report dict from extracted LLM data.
 
-    ``source_commit`` / ``source_repo`` / ``source_path`` (when captured
-    upstream) record exactly where the PDF lived at discovery time — linking can
-    use this provenance to verify the artifact hasn't moved.
+    ``source_commit``/``source_repo``/``source_path`` record where the PDF lived so later linking can verify it hasn't
+    moved.
     """
     pdf_url = github_blob_to_raw(str(report.get("pdf_url") or "").strip()) or None
     report_url = github_blob_to_raw(str(report.get("report_url") or "").strip()) or None
@@ -177,7 +150,6 @@ def _build_fallback_entry(
     now_iso: str,
     pdf_url: str | None = None,
 ) -> dict[str, Any]:
-    """Build a report entry from Stage 1 metadata when extraction fails."""
     tavily_match = next((r for r in all_results if r.get("url") == url), None)
     tavily_title = (tavily_match.get("title") or "").strip() if tavily_match else ""
     title = str(classification.get("title") or "").strip() or tavily_title or f"{company} Audit Report"
@@ -195,12 +167,8 @@ def _build_fallback_entry(
     }
 
 
-# --- Curated auditor-portfolio allowlist (Stage 3.5) ----------------------
-
-# Every run crawls each portfolio and filters by company-name filename
-# match. Unrelated files drop silently; cost is one recursive-tree call.
-# Framework audits (EigenLayer-of-LRT etc.) belong to the framework's
-# own protocol record and get joined separately.
+# Crawled every run and filtered by company name in filenames (one recursive-tree call each). Framework audits belong to
+# the framework's own protocol.
 _AUDITOR_PORTFOLIO_REPOS: tuple[tuple[str, str], ...] = (
     ("Zellic", "publications"),
     ("spearbit", "portfolio"),
@@ -210,9 +178,6 @@ _AUDITOR_PORTFOLIO_REPOS: tuple[tuple[str, str], ...] = (
     ("sherlock-protocol", "sherlock-reports"),
     ("ChainSecurity-Public", "audits"),
 )
-
-
-# --- Main orchestrator ----------------------------------------------------
 
 
 def search_audit_reports(
@@ -241,8 +206,7 @@ def search_audit_reports(
     auto_hopped_orgs: set[str] = set()
     extraction_count = 0
 
-    # --- Stage 0: Solodit ---
-    # Best-effort: outage / rate-limit → empty list, pipeline continues.
+    # Stage 0. Best-effort: failures yield an empty list.
     solodit_results = _solodit.search(clean_company, debug=debug)
     for entry in solodit_results:
         url = entry.get("url", "")
@@ -268,7 +232,7 @@ def search_audit_reports(
         notes.append(f"Solodit: {len(solodit_results)} audit(s)")
         _debug_log(debug, f"Solodit seeded {len(solodit_results)} audit(s)")
 
-    # --- Stage 1a: Tavily broad search + LLM follow-up query ---
+    # Stage 1a.
 
     broad_results = _tavily_search(
         f'"{clean_company}" smart contract security audit report',
@@ -295,22 +259,19 @@ def search_audit_reports(
     if not all_results:
         notes.append("No search results found")
 
-    # --- Stage 1b: LLM classification ---
-    # Still runs on empty input (returns []); Solodit-seeded reports then
-    # flow straight into validate+cluster at the end.
+    # Stage 1b. Runs on empty input too, so Solodit seeds still reach validate+cluster.
     classified = classify_search_results(all_results, clean_company, debug=debug)
     notes.append(f"LLM classified {len(classified)} result(s) as audit reports")
     if not classified and all_results:
         notes.append("No results classified as audit reports")
 
-    # Listing pages first (each expands into many reports); then confidence
-    # descending. Without this an aggregator URL gets pushed below individual
-    # PDF hits and misses the Stage-2 cap.
+    # Listing pages first (they expand into many reports), then confidence, so aggregators aren't pushed past the Stage
+    # 2 cap.
     classified.sort(key=lambda x: (x.get("type") != "listing", -x.get("confidence", 0)))
 
     discovered_links: list[dict[str, Any]] = []
 
-    # --- Stage 2: fetch + LLM extract confirmed pages ---
+    # Stage 2.
 
     for item in classified[:_MAX_STAGE2_PAGES]:
         if extraction_count >= _MAX_TOTAL_EXTRACTIONS:
@@ -339,8 +300,7 @@ def search_audit_reports(
             _debug_log(debug, f"Skipping {url} — org {github['owner']} already enumerated")
             continue
 
-        # GitHub blob PDFs still route through _fetch_and_extract so the
-        # parent directory gets expanded for auditor-portfolio repos.
+        # Route GitHub blob PDFs through _fetch_and_extract so the parent directory is expanded.
         is_github_blob_pdf = github is not None and github["kind"] == "blob" and _is_pdf_url(github["path"])
 
         if _is_pdf_url(url) and not is_github_blob_pdf:
@@ -396,7 +356,7 @@ def search_audit_reports(
     stage2_count = len(reports)
     _debug_log(debug, f"Stage 2 complete: {stage2_count} report(s) from {extraction_count} page(s)")
 
-    # --- Stage 3: follow discovered links (one level only) ---
+    # Stage 3.
 
     links_followed = 0
     for link_item in discovered_links:
@@ -476,7 +436,7 @@ def search_audit_reports(
         _debug_log(debug, f"Stage 3: {stage3_count} additional report(s) from {links_followed} linked page(s)")
         notes.append(f"Link following: {stage3_count} additional report(s) from {links_followed} linked page(s)")
 
-    # --- Stage 3.5: curated auditor-portfolio crawl ---
+    # Stage 3.5.
 
     portfolio_yielded = 0
     portfolio_skipped = 0
@@ -512,7 +472,7 @@ def search_audit_reports(
             f"portfolio(s) had {clean_company}-named report(s)"
         )
 
-    # --- Dedup: URL → filename → LLM validate+cluster (+ heuristic fallback) ---
+    # Dedup.
 
     seen_report_urls: set[str] = set()
     deduped: list[dict[str, Any]] = []
@@ -540,8 +500,7 @@ def search_audit_reports(
             f"title_fixed={vstats['title_fixed']})"
         )
     else:
-        # LLM unavailable — heuristic mirror dedup keeps cross-host mirrors
-        # from surviving into the output.
+        # LLM unavailable; the heuristic keeps cross-host mirrors out.
         reports = _collapse_same_audit_mirrors(reports)
         if pre_validate != len(reports):
             notes.append(
@@ -567,20 +526,12 @@ def search_audit_reports(
     }
 
 
-# --- Append-only merge ----------------------------------------------------
-
-
 def _richness(report: dict[str, Any]) -> int:
-    """Count non-null detail fields as a richness score."""
     return sum(1 for key in ("pdf_url", "date") if report.get(key))
 
 
 def merge_audit_reports(prev: dict[str, Any], new: dict[str, Any]) -> dict[str, Any]:
-    """Merge previous and new audit report results (append-only).
-
-    URL-keyed: overlap keeps the richer entry (prefer new on tie). Prev-only
-    reports survive unchanged; new-only reports get added.
-    """
+    """Merge previous and new results, append-only. On URL overlap keep the richer entry (new on tie)."""
     prev_reports = {_normalize_url(r["url"]): r for r in prev.get("reports", []) if r.get("url")}
     new_reports = {_normalize_url(r["url"]): r for r in new.get("reports", []) if r.get("url")}
 
@@ -615,16 +566,13 @@ def merge_audit_reports(prev: dict[str, Any], new: dict[str, Any]) -> dict[str, 
 
 
 __all__ = [
-    # Orchestration
     "search_audit_reports",
     "merge_audit_reports",
-    # Report assembly
     "_build_report_entry",
     "_build_fallback_entry",
-    # Auto-hop
     "_should_auto_hop_org",
     "_maybe_auto_hop_to_org",
-    # URL helpers (re-exported for tests)
+    # Re-exported for tests.
     "_normalize_url",
     "_dedupe_results_by_url",
     "_is_pdf_url",
@@ -632,13 +580,11 @@ __all__ = [
     "_filename_mentions_company",
     "_extract_date_from_filename",
     "_augment_filename_metadata",
-    # Dedup (re-exported for tests)
     "_collapse_by_filename",
     "_collapse_same_audit_mirrors",
     "_llm_validate_and_cluster",
     "_title_tokens",
     "_richness_score",
-    # GitHub (re-exported for tests)
     "_parse_github_url",
     "github_blob_to_raw",
     "_github_api_headers",
@@ -656,15 +602,13 @@ __all__ = [
     "_fetch_github_org_as_reports",
     "_fetch_github_raw",
     "_llm_extract_filename_metadata",
-    # Fetch (re-exported for tests)
     "_fetch_html_page",
     "_page_to_text",
     "_fetch_and_extract",
-    # Portfolio + caps
     "_AUDITOR_PORTFOLIO_REPOS",
     "_MAX_STAGE2_PAGES",
     "_MAX_LINK_FOLLOWS",
     "_MAX_TOTAL_EXTRACTIONS",
-    # Request module re-exported so tests can monkeypatch
+    # So tests can monkeypatch.
     "_requests",
 ]

@@ -1,15 +1,12 @@
 """The Etherscan asset-list read: the empty answer, and where the list ends.
 
-Two states used to be one. ``status=0 / 'No token found' / []`` is the endpoint
-ANSWERING that its index holds no tokens for an address; every other ``status=0``
-is a failure. Filing both as ``fetch_failed`` threw away the only cheap trigger
-this pipeline has for looking at the chain — and 1,027 attempts over 142
-contracts had been throwing it away for days.
+``status=0 / 'No token found' / []`` is the endpoint ANSWERING that its index holds no tokens
+for an address; every other ``status=0`` is a failure. Filing both as ``fetch_failed`` threw
+away the pipeline's only cheap trigger for looking at the chain (1,027 attempts over 142
+contracts, for days).
 
-The second state is the end of the list. One page proves nothing about a holder
-with more assets than fit in it; only a SHORT page does. Anything else — the page
-budget, a mid-paging failure, an endpoint that re-serves page 1 — leaves a prefix,
-which is a lower bound and must never read as an at-most.
+The end of the list is only proven by a SHORT page. The page budget, a mid-paging failure, or
+an endpoint re-serving page 1 leave a prefix: a lower bound that must never read as an at-most.
 """
 
 from __future__ import annotations
@@ -40,13 +37,10 @@ def _entry(index: int) -> dict:
 
 @pytest.fixture(autouse=True)
 def _no_throttle(monkeypatch):
-    """The endpoint's 1 req/s limiter is real; these arms replay the wire."""
     monkeypatch.setattr(etherscan, "_throttle_token_balance_call", lambda: None)
 
 
 class _Wire:
-    """``get``, scripted per page."""
-
     def __init__(self, pages):
         self.pages = list(pages)
         self.requested: list[str] = []
@@ -65,8 +59,7 @@ class TestTheEmptyAnswerIsNotAFailure:
         ["No token found", "No transactions found"],
     )
     def test_exactly_the_empty_triple_comes_back_as_data(self, monkeypatch, message):
-        # Both empty-list answers: an address holding no tokens, and an
-        # address/tx with no transactions (the deployer-enumeration shapes).
+        # Both empty-list answers: no tokens for an address, and no transactions (deployer-enumeration shapes).
         payload = {"status": "0", "message": message, "result": []}
         monkeypatch.setattr(etherscan.requests, "get", lambda *a, **kw: _Response(payload))
         monkeypatch.setattr(etherscan, "_get_api_key", lambda: "k")
@@ -177,66 +170,45 @@ class _Response:
 
 
 class TestGetNativePrice:
-    """``get_native_price`` picks the per-chain stats action and reads the price
-    from the ``*usd`` field, never inferring the asset from the response key."""
-
-    def test_eth_native_uses_ethprice_action(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "chain_id,result,action,expected_price",
+        [
+            # ethprice carries ethbtc + ethusd + *_timestamp siblings; only bare ``*usd`` is the price.
+            pytest.param(
+                1,
+                {"ethbtc": "0.05", "ethbtc_timestamp": "1", "ethusd": "1841.99", "ethusd_timestamp": "2"},
+                "ethprice",
+                1841.99,
+                id="eth",
+            ),
+            # Polygon's POL price comes back under "ethusd"; generic *usd parse must
+            # read it without inferring "ETH" from the key.
+            pytest.param(
+                137,
+                {"ethbtc": "0", "ethusd": "0.0826", "ethusd_timestamp": "1"},
+                "ethprice",
+                0.0826,
+                id="polygon_pol_under_lying_ethusd_key",
+            ),
+            # BSC rejects "ethprice": the registry override must drive the call to
+            # "bnbprice", whose value is (mislabeled) under "ethusd".
+            pytest.param(56, {"ethusd": "567.97"}, "bnbprice", 567.97, id="bsc_uses_bnbprice"),
+        ],
+    )
+    def test_native_price_per_chain(self, monkeypatch, chain_id, result, action, expected_price):
         import services.clients.etherscan as es
 
         captured: dict[str, object] = {}
 
         def _fake_get(module, action, chain_id, **params):
             captured.update(module=module, action=action, chain_id=chain_id)
-            # ethprice carries ethbtc + ethusd + *_timestamp siblings; only the
-            # bare ``*usd`` field is the price.
-            return {
-                "result": {
-                    "ethbtc": "0.05",
-                    "ethbtc_timestamp": "1",
-                    "ethusd": "1841.99",
-                    "ethusd_timestamp": "2",
-                }
-            }
+            return {"result": result}
 
         monkeypatch.setattr(es, "get", _fake_get)
-        price = es.get_native_price(1)
+        price = es.get_native_price(chain_id)
 
-        assert price == 1841.99
-        assert captured == {"module": "stats", "action": "ethprice", "chain_id": 1}
-
-    def test_polygon_pol_priced_under_lying_ethusd_key(self, monkeypatch):
-        # Polygon's POL price comes back under "ethusd"; generic *usd parse must
-        # read it without inferring "ETH" from the key.
-        import services.clients.etherscan as es
-
-        captured: dict[str, object] = {}
-
-        def _fake_get(module, action, chain_id, **params):
-            captured.update(action=action, chain_id=chain_id)
-            return {"result": {"ethbtc": "0", "ethusd": "0.0826", "ethusd_timestamp": "1"}}
-
-        monkeypatch.setattr(es, "get", _fake_get)
-        price = es.get_native_price(137)
-
-        assert price == 0.0826
-        assert captured == {"action": "ethprice", "chain_id": 137}
-
-    def test_bsc_uses_bnbprice_action(self, monkeypatch):
-        # BSC rejects "ethprice": the registry override must drive the call to
-        # "bnbprice", whose value is (mislabeled) under "ethusd".
-        import services.clients.etherscan as es
-
-        captured: dict[str, object] = {}
-
-        def _fake_get(module, action, chain_id, **params):
-            captured.update(module=module, action=action, chain_id=chain_id)
-            return {"result": {"ethusd": "567.97"}}
-
-        monkeypatch.setattr(es, "get", _fake_get)
-        price = es.get_native_price(56)
-
-        assert price == 567.97
-        assert captured == {"module": "stats", "action": "bnbprice", "chain_id": 56}
+        assert price == expected_price
+        assert captured == {"module": "stats", "action": action, "chain_id": chain_id}
 
     def test_missing_usd_field_raises(self, monkeypatch):
         import services.clients.etherscan as es
@@ -244,9 +216,3 @@ class TestGetNativePrice:
         monkeypatch.setattr(es, "get", lambda *a, **k: {"result": {"ethbtc": "0.05"}})
         with pytest.raises(RuntimeError):
             es.get_native_price(1)
-
-    def test_get_eth_price_delegates_to_native(self, monkeypatch):
-        import services.clients.etherscan as es
-
-        monkeypatch.setattr(es, "get", lambda *a, **k: {"result": {"ethusd": "2000.0"}})
-        assert es.get_eth_price(1) == 2000.0

@@ -1,17 +1,8 @@
-"""Cross-source dedup + LLM validate-and-cluster.
+"""Cross-source dedup and LLM validate-and-cluster.
 
-Three passes in total:
-
-    1. ``_collapse_by_filename`` — groups by normalized filename stem +
-       year-month; keeps the richest entry per group.
-    2. ``_llm_validate_and_cluster`` — single LLM call that validates
-       entries, clusters mirrors, fills missing auditors, and fixes
-       garbled titles. Replaces the heuristic pass when the LLM
-       round-trip succeeds.
-    3. ``_collapse_same_audit_mirrors`` — heuristic fallback when the
-       LLM call fails. Same-date Unknown-auditor entries on unique
-       hosts get dropped as cross-host mirrors; named-auditor +
-       title-token matches collapse.
+1. ``_collapse_by_filename``: group by filename stem + year-month, keep the richest.
+2. ``_llm_validate_and_cluster``: one LLM call that validates, clusters mirrors, fills auditors and fixes titles.
+3. ``_collapse_same_audit_mirrors``: heuristic fallback when the LLM call fails.
 """
 
 from __future__ import annotations
@@ -42,10 +33,9 @@ _GENERIC_TITLE_TOKENS = frozenset(
 
 
 def _title_tokens(title: str) -> set[str]:
-    """Lowercase word-tokens with generic audit words removed.
+    """Lowercase word tokens minus generic audit words.
 
-    Single-character tokens stay so consecutive reports like ``V3.Prelude - 1``
-    and ``V3.Prelude - 2`` remain distinguishable.
+    Single characters stay so ``V3.Prelude - 1`` and ``- 2`` differ.
     """
     if not title:
         return set()
@@ -61,13 +51,10 @@ def _collapse_by_filename(
     reports: list[dict[str, Any]],
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Collapse entries that share the same filename + year-month.
+    """Collapse entries sharing ``(normalized_filename_stem, YYYY-MM)``.
 
-    Key: ``(normalized_filename_stem, YYYY-MM)`` — stem is URL-decoded,
-    extension-stripped, lowercase, non-alphanumerics removed. Entries
-    with no filename (org-root URLs, opaque UUIDs) never group. Within
-    a group, keep the richest by ``(has_pdf, has_date, has_named_auditor,
-    title_length)``; ties resolve to the first occurrence.
+    Entries without a filename never group. Keeps the richest by ``(has_pdf, has_date, has_named_auditor,
+    title_length)``, first on ties.
     """
     if len(reports) <= 1:
         return reports
@@ -118,8 +105,6 @@ def _collapse_by_filename(
     return [r for i, r in enumerate(reports) if i not in drop]
 
 
-# Prompt factored out so the function body stays scannable. Still inlined
-# in one place — the validate+cluster call — so a stray edit can't drift.
 _VALIDATE_CLUSTER_PROMPT = """\
 You are reviewing {count} candidate audit reports discovered for the \
 {company} smart-contract protocol.
@@ -191,11 +176,9 @@ def _llm_validate_and_cluster(
     company: str,
     debug: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, int]] | None:
-    """One-shot LLM pass to validate + cluster candidates.
+    """One LLM pass to validate and cluster.
 
-    Returns ``(cleaned, stats)`` or ``None`` on LLM failure. The caller
-    falls back to ``_collapse_same_audit_mirrors`` on ``None`` so a
-    transient LLM failure never silently widens the output.
+    Returns ``(cleaned, stats)`` or ``None`` on failure, so the caller falls back to ``_collapse_same_audit_mirrors``.
     """
     from ..audit_reports_llm import _parse_json_object
 
@@ -234,8 +217,7 @@ def _llm_validate_and_cluster(
             temperature=0.0,
         )
     except Exception as exc:
-        # Returning None drops the run back to the heuristic mirror collapse —
-        # a quieter, worse dedup that otherwise leaves no trace above DEBUG.
+        # The fallback is a quieter, worse dedup; record it.
         record_degraded(
             phase="audit_validate_cluster",
             exc=exc,
@@ -268,8 +250,7 @@ def _llm_validate_and_cluster(
         _debug_log(debug, "Validate+cluster: LLM returned no usable entries")
         return None
 
-    # Partial responses must preserve untouched entries — drop only what
-    # the LLM explicitly marked invalid.
+    # Partial responses keep untouched entries; drop only what's explicitly marked invalid.
     clusters: dict[int, list[int]] = {}
     standalone: list[int] = []
     dropped = 0
@@ -333,22 +314,14 @@ def _llm_validate_and_cluster(
 
 
 def _collapse_same_audit_mirrors(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Heuristic cross-host mirror dedup.
+    """Heuristic cross-host mirror dedup, designed not to merge distinct audits:
 
-    Three passes, each designed not to merge genuinely distinct audits:
-
-        1. Drop same-date Unknown-auditor entries on hosts no named
-           same-date entry uses (cross-host mirror signature). Same-host
-           Unknowns stay — they're sibling files whose auditor the LLM
-           missed.
-        2. For each (auditor, date) group spread across >1 host, keep
-           the richest entry. All-on-one-host groups defer to pass 3,
-           which has better title-token logic.
-        3. Group by (auditor, date, non-generic title tokens); keep the
-           richest per group. Distinct same-day audits by the same auditor
-           still pass through because their title tokens differ.
+        1. Drop same-date Unknown-auditor entries on hosts no named same-date entry uses (same-host ones are siblings
+    the LLM missed).
+        2. For (auditor, date) groups spread across hosts, keep the richest; single-host groups go to pass 3.
+        3. Group by (auditor, date, non-generic title tokens) and keep the richest; distinct same-day audits differ in
+    tokens.
     """
-    # Pass 1: track named-auditor hosts per date.
     named_dates_hosts: dict[str, set[str]] = {}
     for r in reports:
         auditor = (r.get("auditor") or "").strip().lower()
@@ -367,7 +340,6 @@ def _collapse_same_audit_mirrors(reports: list[dict[str, Any]]) -> list[dict[str
                 continue
         pass1.append(r)
 
-    # Pass 2: cross-host named-auditor mirrors.
     drop_cross_host: set[int] = set()
     cross_host_groups: dict[tuple[str, str], list[int]] = {}
     for i, r in enumerate(pass1):
@@ -392,7 +364,6 @@ def _collapse_same_audit_mirrors(reports: list[dict[str, Any]]) -> list[dict[str
 
     pass1 = [r for i, r in enumerate(pass1) if i not in drop_cross_host]
 
-    # Pass 3: (auditor, date, title-tokens) collapse.
     drop: set[int] = set()
     groups: dict[tuple[str, str, frozenset[str]], list[int]] = {}
     for i, r in enumerate(pass1):

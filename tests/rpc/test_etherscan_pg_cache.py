@@ -1,24 +1,10 @@
-"""Regression tests for the Postgres-backed Etherscan cache layer in
-``services.clients.etherscan``.
+"""Regression tests for the Postgres-backed Etherscan cache layer in ``services.clients.etherscan``.
 
-Phase B Step 5. The in-memory cache (``_cache``) was per-process; this
-adds a Postgres-backed layer (``etherscan_cache`` table) so worker
-processes share hits across the fleet — a cold cascade on worker A
-that fetched WETH source code populates the cache for worker B's
-sibling cascade later.
-
-What we pin:
-1. params hashing: same equivalence class as in-memory _cache_key
-2. PG-cache disabled (env flag off) → no DB calls attempted
-3. PG-cache enabled, DB unavailable → graceful degradation (no crash,
-   no exception bubbling)
-4. PG-cache hit → returned without calling Etherscan AND populated
-   into the in-memory layer (so the second call in same process is
-   free again)
-5. PG-cache miss → Etherscan called, response cached in BOTH layers
-
-Mocks at the module-level boundary (db.models.SessionLocal,
-requests.get for Etherscan) so no real DB or network access.
+Phase B Step 5: a PG layer (``etherscan_cache``) lets workers share hits across the fleet on
+top of the per-process ``_cache``. Pinned: params-hash equivalence with the in-memory key;
+disabled flag and DB outages degrade gracefully; a PG hit skips Etherscan and is promoted
+in-memory; a miss populates both layers. Mocks at the module boundary (db.models.SessionLocal,
+requests.get): no real DB or network.
 """
 
 from __future__ import annotations
@@ -38,7 +24,6 @@ def _isolated_inmem_cache():
 
 
 def _stable_etherscan_response_mock(payload: dict):
-    """Build a mock for `requests.get` returning a successful Etherscan envelope."""
     resp = MagicMock()
     resp.status_code = 200
     resp.raise_for_status.return_value = None
@@ -46,57 +31,48 @@ def _stable_etherscan_response_mock(payload: dict):
     return resp
 
 
-def test_params_hash_is_stable_for_same_inputs():
-    """Hash must be deterministic — same module/action/chain_id/params
-    in any param order yields the same hash."""
-    h1 = etherscan._params_hash("contract", "getsourcecode", 1, {"address": "0xabc", "extra": "x"})
-    h2 = etherscan._params_hash("contract", "getsourcecode", 1, {"extra": "x", "address": "0xabc"})
-    assert h1 == h2
+@pytest.mark.parametrize(
+    ("params_a", "params_b", "equal"),
+    [
+        # Key order must not change the hash.
+        pytest.param(
+            {"address": "0xabc", "extra": "x"}, {"extra": "x", "address": "0xabc"}, True, id="stable_across_key_order"
+        ),
+        pytest.param({"address": "0xa"}, {"address": "0xb"}, False, id="changes_with_params"),
+    ],
+)
+def test_params_hash(params_a, params_b, equal):
+    h1 = etherscan._params_hash("contract", "getsourcecode", 1, params_a)
+    h2 = etherscan._params_hash("contract", "getsourcecode", 1, params_b)
+    assert (h1 == h2) is equal
     assert len(h1) == 64  # sha256 hex
 
 
-def test_params_hash_changes_with_params():
-    """Different params must yield different hashes (collision rejection)."""
-    h1 = etherscan._params_hash("contract", "getsourcecode", 1, {"address": "0xa"})
-    h2 = etherscan._params_hash("contract", "getsourcecode", 1, {"address": "0xb"})
-    assert h1 != h2
-
-
 def test_pg_cache_disabled_skips_db(monkeypatch):
-    """ETHERSCAN_PG_CACHE=0 → _pg_cache_get must NOT attempt to import
-    db.models / open a session. CLI tooling that doesn't have a DB
-    must keep working."""
+    """ETHERSCAN_PG_CACHE=0 must not import db.models / open a session (DB-less CLI tooling must keep working)."""
     monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", False)
-    # If a DB call were attempted this would fail; instead we expect None.
     result = etherscan._pg_cache_get("contract", "getsourcecode", 1, {"address": "0xa"})
     assert result is None
 
 
 def test_pg_cache_get_returns_none_on_db_unavailable(monkeypatch):
-    """Graceful degradation: importing/using db.models can fail (DB not
-    configured, connection refused). Must not crash; just return None."""
     monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
 
     def _raise_session(*_a, **_kw):
         raise RuntimeError("DB connection refused")
 
-    # Patch the lazy-imported SessionLocal to blow up on use.
     with patch.dict("sys.modules", {"db.models": MagicMock(SessionLocal=_raise_session)}):
         result = etherscan._pg_cache_get("contract", "getsourcecode", 1, {"address": "0xa"})
     assert result is None
 
 
 def test_pg_cache_get_hit_promotes_whitelisted_to_in_memory(monkeypatch):
-    """A PG-cache hit on an in-mem-whitelisted action (getabi) must
-    populate the in-memory cache too — second call in the same process
-    should be free (never reaches PG)."""
     monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
     monkeypatch.setattr(etherscan, "_CACHE_ENABLED", True)
     cached_response = {"status": "1", "result": "from-pg"}
     monkeypatch.setattr(etherscan, "_pg_cache_get", lambda *a, **kw: cached_response)
     monkeypatch.setattr(etherscan, "_pg_cache_put", lambda *a, **kw: None)
 
-    # If we hit Etherscan, fail loudly.
     monkeypatch.setattr(
         etherscan, "requests", MagicMock(get=MagicMock(side_effect=AssertionError("must not call Etherscan")))
     )
@@ -105,7 +81,6 @@ def test_pg_cache_get_hit_promotes_whitelisted_to_in_memory(monkeypatch):
     result = etherscan.get("contract", "getabi", 1, address="0xabc")
     assert result == cached_response
 
-    # In-memory cache now populated — second call doesn't even hit PG.
     def _no_pg(*_a, **_kw):
         raise AssertionError("PG hit must promote to in-memory; second call must short-circuit")
 
@@ -115,10 +90,9 @@ def test_pg_cache_get_hit_promotes_whitelisted_to_in_memory(monkeypatch):
 
 
 def test_getsourcecode_served_from_bounded_source_cache_not_metadata_cache(monkeypatch):
-    """getsourcecode never enters the small-entry metadata ``_cache`` (256 multi-MB
-    source blobs would be the OOM). It IS held in the SEPARATE, tightly bounded
-    ``_source_cache`` so a contract's source isn't re-deserialized from Postgres on
-    every read within a run: the first read hits PG, the second is served in-process."""
+    """getsourcecode never enters the small-entry metadata ``_cache`` (256 multi-MB blobs would be the OOM).
+    It IS held in the SEPARATE, tightly bounded ``_source_cache`` so a run doesn't re-deserialize
+    it from Postgres on every read: first read hits PG, second is served in-process."""
     monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
     monkeypatch.setattr(etherscan, "_CACHE_ENABLED", True)
     cached_response = {"status": "1", "result": [{"SourceCode": "contract Foo {}"}]}
@@ -144,8 +118,6 @@ def test_getsourcecode_served_from_bounded_source_cache_not_metadata_cache(monke
 
 
 def test_pg_cache_miss_calls_etherscan_then_writes_back(monkeypatch):
-    """PG-cache miss → Etherscan is hit → response is written to BOTH
-    in-memory and PG. Verify the write-back fires."""
     monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
     monkeypatch.setattr(etherscan, "_CACHE_ENABLED", True)
     monkeypatch.setattr(etherscan, "_pg_cache_get", lambda *a, **kw: None)
@@ -170,37 +142,27 @@ def test_pg_cache_miss_calls_etherscan_then_writes_back(monkeypatch):
 
 
 def test_pg_cache_put_swallows_db_errors(monkeypatch):
-    """Best-effort write: DB errors during _pg_cache_put must NOT
-    propagate (the in-memory cache + caller's retry loop are the safety
-    net). A flaky cache write should never fail an otherwise-successful
-    Etherscan call."""
+    """Best-effort write: DB errors in _pg_cache_put must NOT propagate; a flaky cache write must never fail a
+    successful Etherscan call."""
     monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
 
     def _raise_session(*_a, **_kw):
         raise RuntimeError("DB write timeout")
 
     with patch.dict("sys.modules", {"db.models": MagicMock(SessionLocal=_raise_session)}):
-        # Should not raise.
         etherscan._pg_cache_put("contract", "getsourcecode", 1, {"address": "0xa"}, {"status": "1"})
 
 
-# ---------------------------------------------------------------------------
 # Codex iter-4 P1: PG cache whitelist gates non-immutable actions
-# ---------------------------------------------------------------------------
 
 
 def test_pg_cache_skips_non_whitelisted_actions(monkeypatch):
-    """Codex iter-4 P1: with PG cache enabled, dynamic Etherscan actions
-    (account/balance, stats/ethprice, etc.) MUST NOT be persisted —
-    after the first balance lookup, every worker would see that stale
-    value forever. Whitelist gates which actions get the PG layer."""
+    """Codex iter-4 P1: dynamic actions (account/balance, stats/ethprice) MUST NOT be persisted, or
+    every worker would see the first balance lookup's stale value forever."""
     monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
-    # account/balance is intentionally NOT in _PG_CACHE_WHITELIST.
     assert etherscan._pg_cache_eligible("account", "balance") is False
     assert etherscan._pg_cache_eligible("stats", "ethprice") is False
 
-    # _pg_cache_get must short-circuit (return None) for non-whitelisted
-    # without ever reaching the DB.
     def _no_db(*_a, **_kw):
         raise AssertionError("non-whitelisted action must not touch DB")
 
@@ -208,24 +170,18 @@ def test_pg_cache_skips_non_whitelisted_actions(monkeypatch):
         result = etherscan._pg_cache_get("account", "balance", 1, {"address": "0xa"})
     assert result is None
 
-    # Same for puts.
     with patch.dict("sys.modules", {"db.models": MagicMock(SessionLocal=_no_db)}):
         etherscan._pg_cache_put("account", "balance", 1, {"address": "0xa"}, {"status": "1"})
 
 
 def test_pg_cache_whitelisted_actions_pass_through(monkeypatch):
-    """Whitelisted actions (contract/getsourcecode + adjacent immutable
-    contract metadata) DO go to the DB. Without this the entire PG
-    layer is dead code."""
+    """Whitelisted actions DO go to the DB (else the PG layer is dead code)."""
     assert etherscan._pg_cache_eligible("contract", "getsourcecode") is True
     assert etherscan._pg_cache_eligible("contract", "getabi") is True
     assert etherscan._pg_cache_eligible("contract", "getcontractcreation") is True
 
 
 def test_pg_cache_txlistinternal_by_txhash_only(monkeypatch):
-    """A mined tx's internal frames are immutable → the per-TXHASH form is
-    PG-cacheable; the by-ADDRESS form is living history and must never be
-    served stale."""
     assert etherscan._pg_cache_eligible("account", "txlistinternal", {"txhash": "0x" + "11" * 32}) is True
     assert etherscan._pg_cache_eligible("account", "txlistinternal", {"address": "0xa"}) is False
     assert etherscan._pg_cache_eligible("account", "txlistinternal") is False
@@ -233,15 +189,11 @@ def test_pg_cache_txlistinternal_by_txhash_only(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Empty-result caching: immutable per-txhash empties persist; dynamic empties
-# stay uncached
+# Empty-result caching: immutable per-txhash empties persist; dynamic empties stay uncached
 # ---------------------------------------------------------------------------
 
 
 class _FakePgStore:
-    """Dict-backed stand-in for the PG layer that keeps the REAL eligibility
-    gate (``_pg_cache_eligible``) — only the DB round-trip is faked."""
-
     def __init__(self):
         self.store: dict[str, dict] = {}
 
@@ -270,10 +222,8 @@ def _wire_empty(payload: dict, monkeypatch, pg: _FakePgStore):
 
 
 def test_empty_txhash_txlistinternal_cached_in_pg_for_mature_tx(monkeypatch):
-    """A MATURE mined tx with no internal frames is a permanent fact → with
-    the caller's ``cache_empty=True`` attestation the empty per-txhash
-    ``txlistinternal`` answer persists and the second call is served from the
-    PG cache (exactly one wire call)."""
+    """A MATURE mined tx with no internal frames is a permanent fact: with the caller's
+    ``cache_empty=True`` attestation the empty answer persists (exactly one wire call)."""
     empty = {"status": "0", "message": "No transactions found", "result": []}
     pg = _FakePgStore()
     wire = _wire_empty(empty, monkeypatch, pg)
@@ -290,10 +240,8 @@ def test_empty_txhash_txlistinternal_cached_in_pg_for_mature_tx(monkeypatch):
 
 
 def test_empty_txhash_txlistinternal_not_cached_for_immature_tx(monkeypatch):
-    """Etherscan's trace indexing lags the head: an empty answer for a tx the
-    caller has NOT attested mature (the ``cache_empty`` default) is a possible
-    transient false-empty — never persisted, so the second call hits the wire
-    and can see the frames arrive."""
+    """Etherscan's trace indexing lags the head: an empty answer without the ``cache_empty``
+    maturity attestation may be a transient false-empty, so it is never persisted."""
     empty = {"status": "0", "message": "No transactions found", "result": []}
     pg = _FakePgStore()
     wire = _wire_empty(empty, monkeypatch, pg)
@@ -304,41 +252,32 @@ def test_empty_txhash_txlistinternal_not_cached_for_immature_tx(monkeypatch):
     assert pg.store == {}, "immature empty must never persist"
 
 
-def test_empty_by_address_txlist_not_cached(monkeypatch):
-    """An empty by-address ``txlist`` is living history — never cached; both
-    calls hit the wire."""
-    empty = {"status": "0", "message": "No transactions found", "result": []}
+@pytest.mark.parametrize(
+    ("action", "message", "reason"),
+    [
+        pytest.param("txlist", "No transactions found", "by-address empty must never persist", id="txlist_by_address"),
+        pytest.param(
+            "addresstokenbalance", "No token found", "dynamic empty must never persist", id="addresstokenbalance"
+        ),
+    ],
+)
+def test_dynamic_empty_not_cached(monkeypatch, action, message, reason):
+    empty = {"status": "0", "message": message, "result": []}
     pg = _FakePgStore()
     wire = _wire_empty(empty, monkeypatch, pg)
 
-    etherscan.get("account", "txlist", 1, empty_result_ok=True, address="0xabc")
-    etherscan.get("account", "txlist", 1, empty_result_ok=True, address="0xabc")
+    etherscan.get("account", action, 1, empty_result_ok=True, address="0xabc")
+    etherscan.get("account", action, 1, empty_result_ok=True, address="0xabc")
     assert wire.get.call_count == 2
-    assert pg.store == {}, "by-address empty must never persist"
+    assert pg.store == {}, reason
 
 
-def test_empty_addresstokenbalance_not_cached(monkeypatch):
-    """An empty token-balance answer is a statement about one moment — never
-    cached; both calls hit the wire."""
-    empty = {"status": "0", "message": "No token found", "result": []}
-    pg = _FakePgStore()
-    wire = _wire_empty(empty, monkeypatch, pg)
-
-    etherscan.get("account", "addresstokenbalance", 1, empty_result_ok=True, address="0xabc")
-    etherscan.get("account", "addresstokenbalance", 1, empty_result_ok=True, address="0xabc")
-    assert wire.get.call_count == 2
-    assert pg.store == {}, "dynamic empty must never persist"
-
-
-# ---------------------------------------------------------------------------
 # Codex iter-5 P2: skip caching empty-source / unverified responses
-# ---------------------------------------------------------------------------
 
 
 def test_is_persistable_skips_empty_getsourcecode():
-    """Etherscan returns status="1" for not-yet-verified contracts but
-    with an empty SourceCode field. Persisting that would poison the
-    cache after the contract gets verified."""
+    """Etherscan returns status="1" with empty SourceCode for not-yet-verified contracts; persisting it would poison
+    the cache after verification."""
     response = {
         "status": "1",
         "result": [
@@ -353,7 +292,6 @@ def test_is_persistable_skips_empty_getsourcecode():
 
 
 def test_is_persistable_accepts_real_source():
-    """Successful getsourcecode WITH source content must be persistable."""
     response = {
         "status": "1",
         "result": [
@@ -364,15 +302,12 @@ def test_is_persistable_accepts_real_source():
 
 
 def test_is_persistable_other_actions_pass_through():
-    """Non-getsourcecode whitelisted actions don't have the empty-success
-    pattern; they always persist."""
     assert etherscan._is_persistable("contract", "getabi", {"status": "1", "result": "[]"}) is True
     assert etherscan._is_persistable("contract", "getcontractcreation", {"status": "1", "result": []}) is True
 
 
 def test_pg_cache_put_skips_unverified_source(monkeypatch):
-    """The full _pg_cache_put path: empty-source response must not
-    reach the DB at all (skips before SessionLocal is even imported)."""
+    """An empty-source response must not reach the DB at all (skips before SessionLocal is imported)."""
     monkeypatch.setattr(etherscan, "_PG_CACHE_ENABLED", True)
 
     def _no_db(*_a, **_kw):
@@ -388,15 +323,12 @@ def test_pg_cache_put_skips_unverified_source(monkeypatch):
         )
 
 
-# ---------------------------------------------------------------------------
 # In-memory cache: narrow whitelist + bounded LRU
-# ---------------------------------------------------------------------------
 
 
 def test_inmem_cache_eligible_whitelist():
-    """Only the small, immutable contract metadata actions are held in
-    process memory. Source is psql-only; volatile data (balances, prices,
-    tx history, logs) is never in-mem-cached."""
+    """Only small, immutable contract metadata is held in process memory; source is psql-only and volatile data is
+    never in-mem-cached."""
     assert etherscan._inmem_cache_eligible("contract", "getabi") is True
     assert etherscan._inmem_cache_eligible("contract", "getcontractcreation") is True
     assert etherscan._inmem_cache_eligible("contract", "getsourcecode") is False
@@ -408,7 +340,6 @@ def test_inmem_cache_eligible_whitelist():
 
 
 def _wire_status1(payload: dict, monkeypatch):
-    """Wire every Etherscan call to a successful envelope; skip PG + rate limit."""
     monkeypatch.setattr(etherscan, "_CACHE_ENABLED", True)
     monkeypatch.setattr(etherscan, "_pg_cache_get", lambda *a, **kw: None)
     monkeypatch.setattr(etherscan, "_pg_cache_put", lambda *a, **kw: None)
@@ -419,8 +350,6 @@ def _wire_status1(payload: dict, monkeypatch):
 
 
 def test_volatile_actions_never_inmem_cached(monkeypatch):
-    """A successful wire fetch of balances/prices/tx history must leave the
-    in-mem cache empty — these are gated out by the whitelist."""
     _wire_status1({"status": "1", "result": "123"}, monkeypatch)
     etherscan.get("account", "balance", 1, address="0xabc", tag="latest")
     etherscan.get("stats", "ethprice", 1)
@@ -429,19 +358,14 @@ def test_volatile_actions_never_inmem_cached(monkeypatch):
 
 
 def test_whitelisted_action_is_inmem_cached(monkeypatch):
-    """getabi (whitelisted) IS held in-mem: the second call serves from the
-    cache and never re-hits the wire."""
     _wire_status1({"status": "1", "result": "[]"}, monkeypatch)
     etherscan.get("contract", "getabi", 1, address="0xfeed")
     assert len(etherscan._cache) == 1
-    # Second call hits in-mem; wire must not be called again.
     setattr(etherscan.requests.get, "side_effect", AssertionError("second call must hit in-mem cache"))
     etherscan.get("contract", "getabi", 1, address="0xfeed")
 
 
 def test_inmem_cache_bound_evicts(monkeypatch):
-    """The in-mem cache cannot grow past _CACHE_MAX — the oldest quartile is
-    evicted at the cap (the cap, not a TTL, is the memory bound)."""
     monkeypatch.setattr(etherscan, "_CACHE_MAX", 8)
     _wire_status1({"status": "1", "result": "[]"}, monkeypatch)
     for i in range(20):
@@ -450,8 +374,6 @@ def test_inmem_cache_bound_evicts(monkeypatch):
 
 
 def test_clear_etherscan_cache_resets_pressure_state(monkeypatch):
-    """clear_etherscan_cache empties the dict AND resets the cache-pressure
-    threshold so a later genuine pressure event still logs."""
     from utils import memory
 
     monkeypatch.setattr(etherscan, "_CACHE_MAX", 8)
@@ -468,15 +390,12 @@ def test_clear_etherscan_cache_resets_pressure_state(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Bounded in-process source cache (getsourcecode only): cut redundant in-run
-# multi-MB Postgres deserializes WITHOUT reintroducing the OOM — a SEPARATE,
-# tightly bounded LRU, never the 256-entry metadata cache.
+# Bounded in-process source cache (getsourcecode only): cuts redundant multi-MB Postgres
+# deserializes WITHOUT reintroducing the OOM (separate tightly bounded LRU).
 # ---------------------------------------------------------------------------
 
 
 def test_source_cache_eligible():
-    """Only getsourcecode uses the separate bounded source cache; the in-mem-whitelisted
-    metadata actions and volatile actions do not."""
     assert etherscan._source_cache_eligible("contract", "getsourcecode") is True
     assert etherscan._source_cache_eligible("contract", "getabi") is False
     assert etherscan._source_cache_eligible("contract", "getcontractcreation") is False
@@ -484,34 +403,30 @@ def test_source_cache_eligible():
 
 
 def test_source_cache_wire_fetch_populates_then_serves(monkeypatch):
-    """A getsourcecode PG miss → wire fetch must populate the bounded source cache (and
-    never the metadata cache); the next read is served in-process without re-hitting the wire."""
     payload = {"status": "1", "result": [{"SourceCode": "contract Bar {}"}]}
     _wire_status1(payload, monkeypatch)
     etherscan.get("contract", "getsourcecode", 1, address="0xfeed")
     assert len(etherscan._source_cache) == 1
     assert etherscan._cache == {}, "source must not enter the metadata cache"
-    # Second call hits the source cache; wire must not be called again.
     setattr(etherscan.requests.get, "side_effect", AssertionError("second call must hit the source cache"))
     result = etherscan.get("contract", "getsourcecode", 1, address="0xfeed")
     assert result == payload
 
 
 def test_source_cache_skips_empty_source(monkeypatch):
-    """An unverified-contract empty-source response must NOT be pinned in the source cache
-    (mirrors the PG persistability gate), so a later verification isn't masked by a stale empty."""
+    """An empty-source response must NOT be pinned in the source cache (mirrors the PG gate), so a later verification
+    isn't masked."""
     monkeypatch.setattr(etherscan, "_CACHE_ENABLED", True)
     key = ("contract", "getsourcecode", 1, (("address", "0xunverified"),))
     etherscan._source_cache_put(key, "contract", "getsourcecode", {"status": "1", "result": [{"SourceCode": ""}]})
     assert etherscan._source_cache == {}, "empty/unverified source must not be cached"
-    # Real source IS cached.
     etherscan._source_cache_put(key, "contract", "getsourcecode", {"status": "1", "result": [{"SourceCode": "x"}]})
     assert len(etherscan._source_cache) == 1
 
 
 def test_source_cache_bound_evicts(monkeypatch):
-    """The source cache cannot grow past _SOURCE_CACHE_MAX — the oldest quartile is evicted
-    at the cap (the cap, not a TTL, is the memory bound). This is the OOM guard for multi-MB blobs."""
+    """The source cache cannot grow past _SOURCE_CACHE_MAX: the OOM guard for multi-MB blobs (the cap, not a TTL, is
+    the bound)."""
     monkeypatch.setattr(etherscan, "_SOURCE_CACHE_MAX", 8)
     _wire_status1({"status": "1", "result": [{"SourceCode": "contract X {}"}]}, monkeypatch)
     for i in range(20):
@@ -520,8 +435,6 @@ def test_source_cache_bound_evicts(monkeypatch):
 
 
 def test_clear_etherscan_cache_clears_source_cache_and_pressure(monkeypatch):
-    """clear_etherscan_cache empties BOTH the metadata and source caches and resets both
-    pressure thresholds so a later genuine pressure event still logs."""
     from utils import memory
 
     monkeypatch.setattr(etherscan, "_SOURCE_CACHE_MAX", 8)

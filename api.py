@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""FastAPI application: middleware, lifespan, and router registration.
-
-The endpoint handlers live in ``routers/*``; aggregation logic lives in
-``services/aggregations/*``. This file's only job is to wire them together.
-"""
+"""FastAPI app wiring: middleware, lifespan, routers."""
 
 from __future__ import annotations
 
@@ -17,7 +13,6 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
@@ -36,6 +31,7 @@ from routers import (
     spa,
 )
 from utils.company_limit import CompanyReadLimit
+from utils.compression import NegotiatedGZipMiddleware
 from utils.edge import CloudflareBoundary, EdgeConfig
 from utils.logging import bind_trace_context, configure_logging, trace_id_var
 from utils.ratelimit import SlidingWindowRateLimiter, client_ip
@@ -44,33 +40,21 @@ logger = logging.getLogger(__name__)
 
 TRACE_ID_HEADER = "X-PSAT-Trace-Id"
 
-# Job.trace_id is String(32); the id is reflected in a response header and
-# injected into log fields, so a client-supplied value must be a bounded,
-# character-safe token or it is discarded and a fresh id minted.
+# Reflected in a header and log fields, so a client value must be a bounded safe token or a fresh id is minted.
 _TRACE_ID_RE = re.compile(r"[A-Za-z0-9-]{1,32}")
 
-# A request slower than this is logged at WARNING even on a 2xx — a slow
-# endpoint is degraded service worth surfacing without a separate alert rule.
+# Slow 2xx responses log at WARNING: degraded service without a separate alert rule.
 _SLOW_REQUEST_MS = 1000
 
-# Reject a request whose declared Content-Length exceeds this ceiling before
-# it is read into memory. PSAT_MAX_BODY_BYTES overrides (bytes).
 _MAX_BODY_BYTES = int(os.environ.get("PSAT_MAX_BODY_BYTES", str(4 * 1024 * 1024)))
 
-# Fleet-wide per-IP request cap. Generous by default so the SPA's burst of
-# API calls per page is unaffected; a scraper/abuser is throttled.
-# PSAT_GLOBAL_RATE_LIMIT / _WINDOW_S override; 0 disables.
+# Generous so the SPA's per-page burst is unaffected. 0 disables.
 _GLOBAL_RATE_LIMIT = int(os.environ.get("PSAT_GLOBAL_RATE_LIMIT", "300"))
 _GLOBAL_RATE_WINDOW_S = float(os.environ.get("PSAT_GLOBAL_RATE_WINDOW_S", "60"))
 _global_limiter = SlidingWindowRateLimiter(_GLOBAL_RATE_LIMIT, _GLOBAL_RATE_WINDOW_S)
 
-# script-src stays 'self' (no inline scripts in the built SPA); style-src keeps
-# 'unsafe-inline' for the styled-component / inline-style surface and allows the
-# Google Fonts stylesheet host. connect-src adds the CoinGecko logo API the SPA
-# fetches directly; img-src is pinned to the two CoinGecko asset hosts the logo
-# URLs resolve to (plus 'self'/data:) rather than a blanket https: sink.
-# frame-ancestors 'self' keeps the same-origin audit-pdf iframe working while
-# blocking cross-site framing.
+# No inline scripts in the built SPA. Inline styles and Google Fonts are allowed; img/connect pinned to the CoinGecko
+# hosts. frame-ancestors 'self' keeps the audit-pdf iframe working.
 _CSP = (
     "default-src 'self'; "
     "script-src 'self'; "
@@ -102,15 +86,10 @@ def _security_headers_response(
 
 
 class BodySizeLimitMiddleware:
-    """Reject request bodies larger than the configured cap with 413.
+    """413 for bodies over the cap.
 
-    A declared ``Content-Length`` is rejected up-front (the honest common
-    case, and the server holds the peer to that length). A
-    ``Transfer-Encoding: chunked`` request carries no length, so the received
-    stream is counted and the request rejected the moment its cumulative body
-    crosses the cap — closing the unbounded-buffering bypass. The cap is read
-    live from ``_MAX_BODY_BYTES`` so an env/test override takes effect without
-    reconstructing the app.
+    Content-Length is checked up front; chunked bodies are counted as received, closing the unbounded-buffering bypass.
+    The cap is read live so overrides need no app rebuild.
     """
 
     def __init__(self, app) -> None:
@@ -134,13 +113,11 @@ class BodySizeLimitMiddleware:
             if length < 0 or length > max_bytes:
                 await self._reject(scope, send, max_bytes)
                 return
-            # Server enforces the declared length: the body can't exceed it.
+            # The server holds the peer to the declared length.
             await self.app(scope, receive, send)
             return
 
-        # No Content-Length (chunked): buffer-and-count before invoking the app
-        # so an over-cap body is rejected without any downstream send having
-        # started (no response-conflict), then replay the body downstream.
+        # Buffer before invoking the app so an over-cap body is rejected before any response starts.
         chunks: list[bytes] = []
         total = 0
         while True:
@@ -167,9 +144,8 @@ class BodySizeLimitMiddleware:
             if not replayed:
                 replayed = True
                 return {"type": "http.request", "body": body, "more_body": False}
-            # Body completion is not a client disconnect. In particular, an
-            # ordinary GET has no Content-Length; the admission queue must
-            # continue waiting for the real connection rather than discard it.
+            # Body completion isn't a disconnect; a plain GET has no Content-Length and the admission queue must keep
+            # waiting.
             return await receive()
 
         await self.app(scope, replay_receive, send)
@@ -185,29 +161,24 @@ class BodySizeLimitMiddleware:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Install JSON logging and verify DB reachability on startup."""
     EdgeConfig.from_env()
     configure_logging()
     try:
-        # Local import dodges a circular at module load (db.models indirectly
-        # imports modules that read api during eager evaluation in some envs).
+        # Avoids a circular import at module load.
         from db.models import engine
 
         with engine.connect() as conn:
             conn.execute(select(1))
         logger.info("Database connection verified")
     except Exception as exc:
-        # Degraded-but-continuing: the app boots so it can serve a 503 once the
-        # DB returns. Carry the root cause as a queryable field instead of a
-        # bare message (matches routers/meta.py's exc_type convention).
+        # Boot anyway so the app can serve 503 once the DB returns.
         logger.warning(
             "Database not reachable at startup - endpoints will fail until DB is available: %s",
             exc,
             extra={"exc_type": type(exc).__name__},
         )
 
-    # Ops watchdog: web is the only fly-health-checked, auto-started group, so it
-    # is where the process that watches the monitoring daemons for silence lives.
+    # Web is the only health-checked, auto-started group, so the watchdog for silent monitoring daemons lives here.
     from services.monitoring.ops_alerts import run_ops_alerter_loop
 
     ops_stop = asyncio.Event()
@@ -233,13 +204,7 @@ app = FastAPI(title="PSAT Demo", version="0.1.0", lifespan=lifespan)
 
 
 def _log_request(*, method: str, path: str, status_code: int, duration_ms: int, trace_id: str) -> None:
-    """Emit one structured line per served request.
-
-    INFO for a healthy fast response; WARNING when the response is a 5xx or
-    when the request crossed the slow threshold — both are degraded service.
-    Facts go in ``extra`` so request rate, latency, and error spikes are
-    single Loki aggregations rather than message-regex over uvicorn plaintext.
-    """
+    """One line per request: INFO when healthy, WARNING on 5xx or slow. Facts in ``extra`` for Loki aggregation."""
     level = logging.INFO
     if status_code >= 500 or duration_ms >= _SLOW_REQUEST_MS:
         level = logging.WARNING
@@ -261,13 +226,9 @@ def _log_request(*, method: str, path: str, status_code: int, duration_ms: int, 
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """Last-resort handler for exceptions that escape a route.
+    """Last-resort handler: ERROR with traceback, since this returns a 500.
 
-    Logs at ERROR with the traceback and the request's ``trace_id`` — this is
-    a genuinely request-failing path (it returns a 500), so ERROR + ``exc_info``
-    is the correct level here, not a swallowed-continue WARNING. FastAPI routes
-    ``HTTPException`` through its own handler, so this only fires on a truly
-    unhandled error.
+    ``HTTPException`` goes through FastAPI's own handler.
     """
     logger.error(
         "unhandled exception serving %s %s",
@@ -291,29 +252,17 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
 
 @app.middleware("http")
 async def trace_id_middleware(request: Request, call_next):
-    """Bind a per-request ``trace_id`` for the entire request lifecycle.
+    """Bind a ``trace_id`` for the request (client ``X-PSAT-Trace-Id`` or fresh) and echo it in the response.
 
-    Reads the client's ``X-PSAT-Trace-Id`` if present; otherwise mints a
-    fresh 16-char hex id. Echoes the resolved id back as a response
-    header so the caller can grep their fly logs for that exact id.
-
-    Registered before GZipMiddleware below so the bind covers every
-    nested middleware (compression, CORS) plus the route handler. Note
-    that FastAPI runs ``add_middleware`` in reverse order of registration,
-    so registering this with the decorator first puts it on the outside
-    of the stack regardless of where the others land.
+    Middleware runs in reverse registration order, so registering this first puts it outermost.
     """
     incoming = request.headers.get(TRACE_ID_HEADER)
-    # A client-supplied id is trusted only when it is a bounded, char-safe
-    # token; anything else is discarded and a fresh id minted, so the value
-    # reflected back and stored on Job.trace_id is always well-formed.
     trace_id = incoming if incoming and _TRACE_ID_RE.fullmatch(incoming) else uuid.uuid4().hex[:16]
     started = time.monotonic()
     with bind_trace_context(trace_id=trace_id):
         response = await call_next(request)
-        # Logged inside the bound context so the line also carries the
-        # contextvar-injected trace_id. A request that raises is logged by
-        # ``unhandled_exception_handler`` (registered above) instead.
+        # Inside the bound context so the line carries trace_id. Raising requests are logged by
+        # ``unhandled_exception_handler``.
         _log_request(
             method=request.method,
             path=request.url.path,
@@ -325,12 +274,9 @@ async def trace_id_middleware(request: Request, call_next):
     return response
 
 
-# Compress JSON > 1KB on the wire. /api/company/{name} routinely returns
-# 1-3 MB of nested control-graph data; gzip cuts it ~5-10x and is the single
-# largest win for the company page's perceived load time.
-app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
-# Outside gzip so a slot covers the entire serialized/compressed response;
-# the Cloudflare boundary registered below authenticates before admission.
+# /api/company payloads are 1-3 MB; gzip cuts them ~5-10x.
+app.add_middleware(NegotiatedGZipMiddleware, minimum_size=1024, compresslevel=6)
+# Outside gzip so a slot covers the full compressed response; the Cloudflare boundary authenticates first.
 app.add_middleware(CompanyReadLimit)
 app.add_middleware(
     CORSMiddleware,
@@ -349,7 +295,6 @@ def _apply_security_headers(response):
 
 @app.middleware("http")
 async def edge_guard_middleware(request: Request, call_next):
-    """Security headers for application responses; boundary rejections carry these too."""
     response = await call_next(request)
     return _apply_security_headers(response)
 
@@ -366,10 +311,8 @@ def _rate_limit_response(request: Request):
     return None
 
 
-# The body-size cap precedes middleware that buffers the request body; the
-# provenance wrapper below inspects headers without consuming the stream.
+# Before any middleware that buffers the body.
 app.add_middleware(BodySizeLimitMiddleware)
-# Authenticate the origin before trusting visitor headers or consuming a rate bucket.
 app.add_middleware(CloudflareBoundary, rate_limit=_rate_limit_response, denial_headers=_SECURITY_HEADERS)
 
 
@@ -386,34 +329,18 @@ app.include_router(monitored.router)
 app.include_router(address_labels.router)
 app.include_router(agent.router)
 app.include_router(predicate_capabilities.router)
-# SPA catch-all MUST be last - its /{full_path:path} would otherwise
-# swallow any /api/* route registered after it.
+# SPA catch-all MUST be last.
 app.include_router(spa.router)
 
 
 def serve() -> None:
-    """Launch uvicorn with this project's logging wired in.
+    """Launch uvicorn with JSON logging.
 
-    The uvicorn CLI can only accept a log config as a *file path*, so
-    ``uvicorn api:app`` has no way to reach :func:`uvicorn_log_config` and
-    every server line — including a bind failure like ``Address already in
-    use``, which is emitted before the app's own lifespan runs — lands as
-    plaintext outside the JSON stream. Launching programmatically is the one
-    mechanism that covers those lines, so this is the entrypoint every launch
-    script uses.
+    The uvicorn CLI only takes a log config file, so bind failures (emitted before lifespan) would land as plaintext;
+    launching programmatically covers them. ``access_log=False``: ``trace_id_middleware`` already logs a superset line.
 
-    ``access_log=False`` retires uvicorn's access line outright rather than
-    reformatting it: ``trace_id_middleware`` already logs one line per served
-    request carrying ``trace_id``, ``duration_ms`` and a WARNING level for
-    5xx/slow — a strict superset. Keeping both logged every request twice.
-    ``uvicorn.error`` (startup, shutdown, bind failures) still routes through
-    ``JsonFormatter``.
-
-    Call it from ``serve.py``, never by running this file. ``uvicorn.run`` is
-    given the import string ``"api:app"``, so uvicorn imports this module —
-    ``python api.py`` would have already run the same file as ``__main__``, and
-    the body would execute twice (measured), building a second fully-wired app
-    that is then discarded.
+    Call from ``serve.py``, never ``python api.py``: uvicorn imports ``"api:app"``, so running this file as ``__main__``
+    executes the module body twice.
     """
     import uvicorn
 
@@ -421,8 +348,7 @@ def serve() -> None:
 
     limit_concurrency = os.environ.get("PSAT_API_LIMIT_CONCURRENCY")
     uvicorn.run(
-        # Import string, not the ``app`` object: ``reload`` needs it, and it
-        # keeps the served app the same one under both settings.
+        # ``reload`` needs an import string.
         "api:app",
         host=os.environ.get("PSAT_API_HOST", "127.0.0.1"),
         port=int(os.environ.get("PSAT_API_PORT", "8000")),

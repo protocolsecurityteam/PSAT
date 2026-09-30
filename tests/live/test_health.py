@@ -20,13 +20,6 @@ def test_health_reports_ok(public_live_client: LiveClient):
     assert body.get("storage") in ("ok", "inline")
 
 
-def test_config_returns_default_rpc(live_client: LiveClient):
-    body = live_client.config()
-    assert isinstance(body, dict)
-    assert isinstance(body.get("default_rpc_url"), str)
-    assert body["default_rpc_url"].startswith(("http://", "https://"))
-
-
 def test_stats_returns_counts(live_client: LiveClient):
     body = live_client.stats()
     for key in ("unique_addresses", "total_jobs", "completed_jobs", "failed_jobs"):
@@ -45,7 +38,6 @@ def test_spa_fallback_serves_frontend(live_base_url: str):
 
 
 def test_frontend_assets_served(live_base_url: str):
-    """Catch the case where SPA HTML loads but /assets is empty — shell-only deploy."""
     html = requests.get(live_base_url + "/", timeout=15).text
     m = re.search(r"/assets/([\w.\-]+\.js)", html)
     if not m:

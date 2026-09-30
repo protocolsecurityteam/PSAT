@@ -1,10 +1,8 @@
 """Tests for `GET /api/monitored-events` filter modes.
 
-The address+chain filter is the new path that lets the frontend render a
-per-Safe / per-Timelock activity panel without first having to resolve
-the MonitoredContract uuid. Existing contract_id and event_type filter
-modes are also exercised here so a future refactor that drops one of
-them fails loudly.
+The address+chain filter lets the frontend render a per-Safe / per-Timelock activity panel without
+resolving the MonitoredContract uuid; the contract_id and event_type modes are exercised too so a
+refactor that drops one fails loudly.
 """
 
 from __future__ import annotations
@@ -100,9 +98,6 @@ def seeded_events(db_session):
 
 
 def test_filter_by_address_returns_all_chains(api_client, seeded_events):
-    """Without ``chain``, the address filter returns events from every
-    MonitoredContract that shares the address — both ethereum and base.
-    """
     resp = api_client.get("/api/monitored-events", params={"address": seeded_events["addr"]})
     assert resp.status_code == 200
     body = resp.json()
@@ -110,79 +105,37 @@ def test_filter_by_address_returns_all_chains(api_client, seeded_events):
     assert block_numbers == [100, 101, 200]
 
 
-def test_filter_by_address_and_chain(api_client, seeded_events):
-    """``chain`` narrows to one MonitoredContract row's events."""
-    resp = api_client.get(
-        "/api/monitored-events",
-        params={"address": seeded_events["addr"], "chain": "ethereum"},
-    )
+@pytest.mark.parametrize(
+    ("make_params", "expected_blocks"),
+    [
+        pytest.param(lambda s: {"address": s["addr"], "chain": "ethereum"}, [100, 101], id="address_and_chain"),
+        pytest.param(
+            lambda s: {"address": s["addr"], "event_type": "safe_tx_executed"}, [100, 200], id="address_and_event_type"
+        ),
+        # Address with no MonitoredContract row -> empty list, not 404.
+        pytest.param(lambda s: {"address": "0x" + "00" * 20}, [], id="unknown_address"),
+        # Regression: ``chain`` alone was silently ignored and returned global recent events (codex flagged on
+        # review). Ethereum events: mc_eth (100, 101) + mc_other (300).
+        pytest.param(lambda s: {"chain": "ethereum"}, [100, 101, 300], id="chain_only"),
+        pytest.param(lambda s: {"chain": "moonbeam"}, [], id="chain_only_unknown"),
+        # ethereum + safe_tx_executed: mc_eth (100), mc_other (300)
+        pytest.param(
+            lambda s: {"chain": "ethereum", "event_type": "safe_tx_executed"}, [100, 300], id="chain_and_event_type"
+        ),
+    ],
+)
+def test_filter_modes(api_client, seeded_events, make_params, expected_blocks):
+    resp = api_client.get("/api/monitored-events", params=make_params(seeded_events))
     assert resp.status_code == 200
-    body = resp.json()
-    block_numbers = sorted(e["block_number"] for e in body)
-    assert block_numbers == [100, 101]
-
-
-def test_filter_by_address_and_event_type(api_client, seeded_events):
-    """address + event_type filters compose."""
-    resp = api_client.get(
-        "/api/monitored-events",
-        params={"address": seeded_events["addr"], "event_type": "safe_tx_executed"},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    block_numbers = sorted(e["block_number"] for e in body)
-    assert block_numbers == [100, 200]
-
-
-def test_unknown_address_returns_empty(api_client):
-    """Address that has no MonitoredContract row → empty list, not 404."""
-    resp = api_client.get(
-        "/api/monitored-events",
-        params={"address": "0x" + "00" * 20},
-    )
-    assert resp.status_code == 200
-    assert resp.json() == []
+    assert sorted(e["block_number"] for e in resp.json()) == expected_blocks
 
 
 def test_address_lookup_lowercases(api_client, seeded_events):
-    """Mixed-case address input still resolves — keep the URL bar friendly."""
     addr = seeded_events["addr"]
     resp = api_client.get("/api/monitored-events", params={"address": addr.upper()})
     assert resp.status_code == 200
     block_numbers = sorted(e["block_number"] for e in resp.json())
     assert block_numbers == [100, 101, 200]
-
-
-def test_filter_by_chain_only(api_client, seeded_events):
-    """``chain`` alone narrows to all MonitoredContracts on that chain.
-
-    Without this, a request like ``?chain=base`` was silently ignored
-    and returned global recent events (codex flagged on review).
-    """
-    resp = api_client.get("/api/monitored-events", params={"chain": "ethereum"})
-    assert resp.status_code == 200
-    block_numbers = sorted(e["block_number"] for e in resp.json())
-    # ethereum events: mc_eth (100, 101) + mc_other (300)
-    assert block_numbers == [100, 101, 300]
-
-
-def test_filter_by_chain_only_unknown(api_client):
-    """Unknown chain → empty list (no events on a chain we don't track)."""
-    resp = api_client.get("/api/monitored-events", params={"chain": "moonbeam"})
-    assert resp.status_code == 200
-    assert resp.json() == []
-
-
-def test_filter_by_chain_and_event_type(api_client, seeded_events):
-    """chain + event_type compose."""
-    resp = api_client.get(
-        "/api/monitored-events",
-        params={"chain": "ethereum", "event_type": "safe_tx_executed"},
-    )
-    assert resp.status_code == 200
-    block_numbers = sorted(e["block_number"] for e in resp.json())
-    # ethereum + safe_tx_executed: mc_eth (100), mc_other (300)
-    assert block_numbers == [100, 300]
 
 
 def test_same_detected_at_orders_stably_by_block_then_id(api_client, db_session):
@@ -231,7 +184,6 @@ def test_same_detected_at_orders_stably_by_block_then_id(api_client, db_session)
         resp = api_client.get("/api/monitored-events", params={"address": addr})
         assert resp.status_code == 200
         body = resp.json()
-        # Newest block first.
         assert [e["block_number"] for e in body] == [3000, 2000, 1000]
     finally:
         for e in events:
@@ -262,8 +214,6 @@ def test_upsert_monitoring_seeds_enrollment_block_at_head(api_client, db_session
             json={"address": addr, "chain": "ethereum", "contract_type": "regular"},
         )
         assert resp.status_code == 200
-        # The serialized payload surfaces enrollment_block so the frontend can
-        # place the monitoring-start boundary on the Activity timeline.
         assert resp.json()["enrollment_block"] == head
 
         mc = db_session.execute(select(MonitoredContract).where(MonitoredContract.address == addr)).scalar_one()
@@ -319,7 +269,6 @@ def test_protocol_monitoring_list_serializes_enrollment_block(api_client, db_ses
         by_addr = {row["address"]: row for row in resp.json()}
         assert "enrollment_block" in by_addr[with_block.address]
         assert by_addr[with_block.address]["enrollment_block"] == 24_900_000
-        # Nullable — the field is present and null, never absent.
         assert by_addr[legacy.address]["enrollment_block"] is None
     finally:
         for mc in (with_block, legacy):

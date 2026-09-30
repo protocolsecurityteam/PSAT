@@ -36,8 +36,6 @@ from .facts import (
 
 logger = logging.getLogger("services.scoring.distill")
 
-# ---------------------------------------------------------------- reach/value
-
 
 @dataclass(frozen=True)
 class _Reach:
@@ -61,7 +59,6 @@ def _no_reach(basis: str, notes: tuple[str, ...] = ()) -> _Reach:
 
 
 def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str) -> _Reach:
-    """The magnitude a flow is PROVEN to reach, and whose value it is."""
     reach_determined = _is_true(observed.get("reach_determined"))
     value_usd = _f(observed.get("observed_reach_value_usd")) if reach_determined else None
     holders = [_lower(h) for h in (observed.get("observed_reach_holders") or []) if h]
@@ -69,10 +66,7 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
     if reach_determined and value_usd is not None:
         keys = tuple(sorted({entity_key(facts.chain, h) for h in holders}))
         if value_usd > 0.0 and not keys:
-            # A proven magnitude whose HOLDER was never named belongs to an
-            # entity this signal cannot identify. Attributing it to the analysed
-            # deployment is the entity misattribution the register measures in
-            # dollars, so the magnitude is published as unattributed instead.
+            # Holder unnamed: publish as unattributed rather than misattribute to this deployment.
             return _no_reach("observed_reach_value_usd_without_holder(not_determined)", ("reach_holder_not_named",))
         if value_usd <= 0.0 and not holders:
             return _Reach(
@@ -84,20 +78,12 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
             )
         return _Reach(
             state=VALUE_STATE_PROVEN_REACH,
-            # The ENTITY-SET bound, and it is exact here: ``keys`` is every
-            # holder the observation named, not a floor over them. A different
-            # axis from the magnitude state below, which grades the DOLLARS.
+            # The entity-set bound (every named holder), distinct from the dollar magnitude state.
             bound=VALUE_BOUND_EXACT,
             entity_keys=keys,
             basis="observed_reach_value_usd(fork-proven)",
-            # F4. This is the ATTRIBUTION path: the probe moved a compile-time
-            # constant amount and ``recipes._add_reach`` credited the holder's
-            # ENTIRE priced balance for the pair, discarding the transferred
-            # value. Nothing here witnesses that the call moves that balance, so
-            # the figure is an upper bound on what one call moves — exactness is
-            # unearnable in principle on this path. It is not re-pointed at
-            # ``proven_floor`` either: that state's prose means "at least this
-            # much", and this figure bounds the opposite direction.
+            # F4: attribution path. The probe moved a constant and ``recipes._add_reach`` credited the holder's whole
+            # balance, so this is an upper bound, not exact, and not a floor either.
             magnitude=_proven_number(MAGNITUDE_STATE_PROVEN_UPPER_BOUND, value_usd),
             notes=("reach_holder_is_not_this_entity",) if holders and acting_key not in keys else (),
         )
@@ -113,16 +99,13 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
                 basis="observed_reach_floor_usd(>= floor, reach_indeterminate)",
                 magnitude=_proven_number(MAGNITUDE_STATE_PROVEN_FLOOR, floor),
             )
-        # A 0.0 floor is "no proven bound": an all-unpriced sheet sums to the
-        # same zero as a proven-empty one, and an ungated floor is not the
-        # registered shape at all.
+        # A 0.0 floor proves nothing: an unpriced sheet sums to the same zero.
         return _no_reach(
             "observed_reach_floor_usd_zero(not_determined)" if gated else "observed_reach_floor_usd_ungated",
             ("reach_floor_not_a_bound",),
         )
     if gated:
-        # The key's own ABSENCE is the third state: no balance row existed for
-        # the acting deployment, so there is no floor to state.
+        # No balance row for the acting deployment, so no floor.
         return _no_reach("observed_reach_floor_absent(not_determined)", ("reach_floor_absent",))
 
     priced = _f(observed.get("observed_reach_priced_usd"))
@@ -138,8 +121,7 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
             notes=("reach_partially_priced",),
         )
     if _is_true(observed.get("contract_balance_seeded")):
-        # The contract's own balance was overridden before the payout, so the
-        # verdict proves a code capability, not an outflow of present treasury.
+        # Balance was seeded before the payout: proves capability, not an outflow of real treasury.
         return _no_reach("contract_balance_seeded(not_determined)", ("reach_seeded_balance_only",))
     return _no_reach("reach_not_witnessed(not_determined)")
 
@@ -147,35 +129,12 @@ def _flow_reach(observed: dict[str, Any], facts: _ContractFacts, acting_key: str
 def _proving_execution_gate(facts: _ContractFacts, func: Any, entries: list[dict[str, Any]]) -> Tri[dict[str, Any]]:
     """The execution that proved this signal's magnitude, as a gate envelope.
 
-    The gate answers a question the distiller can ALWAYS answer — "does a
-    persisted execution record exist for this signal?" — which is why both of its
-    states are proven. The record's own three-state answer to the different
-    question ("what execution proved this figure?") rides inside the payload,
-    together with the typed reason where there is none. It has to be spelled that
-    way round: a ``Tri.not_determined()`` envelope may carry no value at all, so
-    routing the negative through it would delete the reason, and a reader could
-    not tell a row that predates the record from a transcript that failed to
-    store.
+    Both gate states are proven ("does a record exist" is always answerable); the record's three-state answer and typed
+    reason ride in the payload, since a ``Tri.not_determined()`` envelope can't carry a reason.
 
-    Read off the claim witness the effects→claims bridge projects wherever the
-    record is persisted — that is the cheap path and the one every future verdict
-    takes. Where the residue carries none, the verdict's own transcript is read
-    (:class:`_TranscriptReader`), because the call IS in there and "not written
-    to the column" is not "not determined". Every verdict in the reference corpus
-    predates the write, so the fallback is the whole of the corpus's coverage
-    today and the fast path is the whole of it tomorrow. A fault reaching the
-    transcript keeps its own reason and is NOT collapsed into the residue's.
-
-    Which entry is read is :func:`_cited_verdict_entry`'s decision and NOT this
-    function's, so the execution published here and the ``effect_verdict_id`` the
-    signal publishes are the same row by construction rather than by two
-    independent scans that happen to agree. They did not agree before: this
-    function took the FIRST verdict-bearing entry and the signal took the LAST,
-    which on a claim carrying two would have paired one verdict's dollars with
-    another's caller — the failure ``_destination_magnitudes`` forbids one file
-    over. (No signal in the reference corpus carries two, so the disagreement was
-    latent; a comment asserting an invariant the code did not hold is the part
-    that was live.)
+    Read from the claim witness when persisted, else from the verdict's transcript (:class:`_TranscriptReader`);
+    transcript faults keep their own reason. The entry comes from :func:`_cited_verdict_entry`, so the execution and the
+    published ``effect_verdict_id`` are the same row by construction.
     """
     entry = _cited_verdict_entry(entries)
     if entry is None:
@@ -200,21 +159,14 @@ def _proving_execution_gate(facts: _ContractFacts, func: Any, entries: list[dict
 
 
 def _verdict_bearing_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Every claim entry naming an effect verdict, in stored order."""
     return [e for e in entries if ((e.get("witness") or {}).get("effect_verdict_id")) is not None]
 
 
 def _cited_verdict_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The ONE entry whose verdict this signal is about, or ``None``.
+    """The one entry whose verdict this signal is about, or ``None``.
 
-    The LAST verdict-bearing entry, which is the rule the published
-    ``effect_verdict_id`` already used — preserved rather than replaced, because
-    changing which verdict a signal cites is a claim change and this seam exists
-    to remove a disagreement, not to introduce one.
-
-    A claim carrying TWO verdicts is a genuine ambiguity and is disclosed at the
-    call site rather than resolved silently here: the rule below is stored order,
-    which is not evidence about which verdict the claim is really about.
+    The last verdict-bearing entry, matching the existing ``effect_verdict_id`` rule. Two verdicts on one claim are
+    ambiguous and disclosed at the call site; stored order isn't evidence.
     """
     bearing = _verdict_bearing_entries(entries)
     return bearing[-1] if bearing else None
@@ -223,32 +175,17 @@ def _cited_verdict_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None
 def _repointed_entities(
     entry: dict[str, Any], facts: _ContractFacts
 ) -> tuple[list[str], list[str], list[dict[str, Any]]]:
-    """Entities the witness itself names as where the value is / what is affected.
+    """Entities the witness itself names as where the value is.
 
-    A repoint adds a foreign entity to a reach set, which is the same act as the
-    backlink licence one screen up — and it was performed with none of that
-    function's checks: no protocol, no chain, no existence, and no check that the
-    witness naming the entity is a witness that proved anything about value.
+    A repoint adds a foreign entity to reach, so it gets the backlink licence's checks:
 
-    Three admissions, each earned:
+    * the tier must be in the ``REPOINT_ADMISSIBLE_TIERS`` allowlist (``policy_derived`` and ``not_determined`` are
+    inferences, not value evidence);
+    * the address must be a contract of this protocol on this chain;
+    * the burn address is never an entity.
 
-    * The witness must be a VALUE witness, and that is tested as an ALLOWLIST of
-      the tiers that are one (``REPOINT_ADMISSIBLE_TIERS``). A denylist of
-      ``policy_derived`` would admit every tier nobody has classified — including
-      the ``not_determined`` an absent or unrecognised ``tier`` token falls to,
-      which is precisely a witness that proved nothing. A ``policy_derived``
-      claim is a static inference: the ``configures`` producer uses a written
-      storage variable as a proxy for what the hook reads. An inference about
-      what a function configures is not evidence about where value sits.
-    * The named address must be a contract of THIS protocol on THIS chain, the
-      same three checks :func:`_licensed_reach_entities` makes.
-    * The burn address is never an entity. It is the graph's single largest
-      fan-out and the sentinel every renunciation writes.
-
-    A repoint never supplies a magnitude and never upgrades ``value_state``:
-    naming a callee proves a call, not that value moves. Refusals are returned
-    rather than dropped, so a reach this scorer declined is visible on the signal
-    instead of being absent from it.
+    A repoint never supplies a magnitude or upgrades ``value_state``. Refusals are returned so declined reach is
+    visible.
     """
     from services.scoring.planes import is_zero_key
 

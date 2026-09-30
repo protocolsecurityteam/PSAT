@@ -1,14 +1,11 @@
-// A resolved-principal's terminal-controller note. Reads
-// the non-terminal marking + terminal walk so the inspector NEVER implies a
-// settled key where the control chain didn't terminate. Returns null for a
-// principal that is itself terminal (a settled Safe/EOA/timelock), or when there
-// is nothing to say. Shape: {kind: "terminated"|"ambiguous"|"unresolved", ...}.
+// Never implies a settled key where the chain didn't terminate. Null for
+// terminal principals. Shape: {kind: "terminated"|"ambiguous"|"unresolved",
+// ...}.
 export function terminalControllerNote(principal) {
   const details = (principal && principal.details) || {};
   const resolvedType =
     (principal && (principal.resolvedType || principal.resolved_type)) ||
     "unknown";
-  // A settled key (terminal === true) needs no way-point note.
   if (details.terminal === true) return null;
 
   const tp = details.terminal_principal;
@@ -20,11 +17,8 @@ export function terminalControllerNote(principal) {
         resolvedType: String(tp.resolved_type || "unknown"),
       };
     }
-    // Multiple parallel control planes (Solmate/Solady Auth owner + authority).
-    // `multi_plane` at the top level carries `tp.planes` — each plane walked to
-    // its OWN terminal — so the verbose inspector can show every plane's controller
-    // and outcome (a reviewer needs to see the weakest plane). The header still says
-    // "no single settled key"; we never collapse to one key.
+    // Parallel control planes: show each plane's own walk so the weakest is
+    // visible; never collapse to one key.
     if (
       tp.status === "multi_plane" &&
       Array.isArray(tp.planes) &&
@@ -44,33 +38,25 @@ export function terminalControllerNote(principal) {
       });
       return { kind: "multi_plane", planes };
     }
-    // `ambiguous_controllers` (a nested plane that itself forked) has no per-plane
-    // walk to show — render the flat controller count as "no single settled key".
-    // A `multi_plane` status without a usable `planes` array degrades here too.
+    // No per-plane walk to show (nested fork, or planes missing).
     if (tp.status === "multi_plane" || tp.status === "ambiguous_controllers") {
       const planes = Array.isArray(tp.controllers) ? tp.controllers : [];
       return { kind: "ambiguous", planes };
     }
     // cycle | depth_exceeded | unknown_unfetched | controllers_not_determined
-    // (canonical getters silent — NOT proof of no controller; the record
-    // carries probes_silent/undetermined_at as the basis) | legacy
-    // no_controller rows persisted before the proven-absence claim was
-    // retired → all honestly unresolved, with the true status carried through.
+    // (silent getters, not proof of no controller) | legacy no_controller rows:
+    // all unresolved, status carried through.
     return { kind: "unresolved", status: tp.status || "unknown" };
   }
 
-  // resolved_type=contract way-point with no terminal walk: still non-terminal.
   if (resolvedType === "contract" || details.terminal === false) {
     return { kind: "unresolved", status: "unknown_unfetched" };
   }
   return null;
 }
 
-// Signer-overlap attribution CONTEXT for a Safe principal.
-// Tier 1 (on-chain owner reads). NB the honesty boundary baked into the copy this
-// feeds: shared signers is attribution context, NOT proof of shared org identity.
-// Returns {selfOwnerCount, strongest: {address, sharedCount, otherOwnerCount,
-// subset, superset, equal, jaccard}} or null.
+// Tier 1 signer overlap: attribution context, not proof of shared organization.
+// Returns {selfOwnerCount, strongest} or null.
 export function signerOverlapNote(principal) {
   const so = principal && principal.details && principal.details.signer_overlap;
   if (!so || !Array.isArray(so.overlaps) || !so.overlaps.length) return null;
@@ -96,21 +82,16 @@ export function signerOverlapNote(principal) {
   };
 }
 
-// Shared-deployer attribution HINT for a principal.
-// A Tier-1 on-chain read (`provenance:"deployer_read"`) but a HEURISTIC for
-// attribution — factories, shared deployer EOAs and vanity-deployer services all
-// defeat "same deployer ⇒ same org". The fact is honest; the conclusion is not.
-// INSPECTOR-ONLY (never a chip qualifier), and the copy this feeds MUST carry the
-// hedge whenever `heuristic` is true — never phrased as org identity or control.
-// Returns {deployer, otherCount, heuristic} or null (absent fact → nothing).
+// Same deployer is witnessed but only a heuristic for attribution (factories
+// defeat it). Inspector-only, and the copy must hedge when `heuristic`. Returns
+// {deployer, otherCount, heuristic} or null.
 export function sharedDeployerNote(principal) {
   const sd =
     principal && principal.details && principal.details.shared_deployer;
   if (!sd || typeof sd.deployer !== "string") return null;
   const addresses = Array.isArray(sd.addresses) ? sd.addresses : [];
   const self = String((principal && principal.address) || "").toLowerCase();
-  // `addresses` is the full deployer group INCLUDING this principal; count the
-  // OTHERS. Fall back to the raw length only if self isn't in the list.
+  // `addresses` includes this principal.
   const others = addresses.filter((a) => String(a).toLowerCase() !== self);
   const otherCount = others.length || Math.max(0, addresses.length - 1);
   if (otherCount <= 0) return null;

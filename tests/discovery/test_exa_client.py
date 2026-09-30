@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
+from db.storage import StorageKeyMissing, StorageUnavailable
 from services.clients import exa
 from services.clients.exa import _cache_key
 
@@ -72,19 +73,17 @@ def test_get_api_key_present(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_search_rejects_empty_query():
+@pytest.mark.parametrize(
+    ("query", "kwargs"),
+    [
+        pytest.param("   ", {"max_results": 5}, id="empty_query"),
+        pytest.param("q", {"max_results": 0}, id="zero_results"),
+        pytest.param("q", {"max_results": 5, "mode": "bogus"}, id="unsupported_mode"),
+    ],
+)
+def test_search_rejects_invalid_arguments(query, kwargs):
     with pytest.raises(ValueError):
-        exa.search("   ", max_results=5)
-
-
-def test_search_rejects_zero_results():
-    with pytest.raises(ValueError):
-        exa.search("q", max_results=0)
-
-
-def test_search_rejects_unsupported_mode():
-    with pytest.raises(ValueError):
-        exa.search("q", max_results=5, mode="bogus")
+        exa.search(query, **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -116,16 +115,13 @@ def test_search_happy_path_normalizes(monkeypatch):
                 "text": "snip-a",
                 "score": 0.9,
             },
-            # text as dict
             {
                 "url": "https://b.example.com",
                 "title": "B",
                 "text": {"text": "from-dict"},
                 "score": 0.5,
             },
-            # content fallback when no text
             {"url": "https://c.example.com", "content": "from-content"},
-            # skipped: no url
             {"title": "no url"},
         ]
     }
@@ -217,58 +213,57 @@ def test_deep_research_happy_path(monkeypatch):
     assert out["data"]["auditReports"][0]["url"] == "https://example.com/a"
 
 
-def test_deep_research_create_http_error(monkeypatch):
-    monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
-    monkeypatch.setattr(
-        exa.requests,
-        "post",
-        lambda *a, **kw: _FakeResp(status_code=500, text="server boom"),
-    )
-    with pytest.raises(exa.ExaError) as ei:
-        exa.deep_research("inst")
-    assert ei.value.error["status_code"] == 500
-    assert "create" in ei.value.error["error"]
-
-
-def test_deep_research_no_task_id(monkeypatch):
-    monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
-    monkeypatch.setattr(exa.requests, "post", lambda *a, **kw: _FakeResp(payload={"foo": "bar"}))
-    with pytest.raises(exa.ExaError) as ei:
-        exa.deep_research("inst")
-    assert "no task id" in ei.value.error["error"]
-
-
-def test_deep_research_poll_http_error(monkeypatch):
+@pytest.mark.parametrize(
+    ("create_resp", "poll_resp", "status_code", "fragment"),
+    [
+        pytest.param(_FakeResp(status_code=500, text="server boom"), None, 500, "create", id="create_http_error"),
+        pytest.param(
+            _FakeResp(payload={"id": "t1"}),
+            _FakeResp(status_code=503, text="unavail"),
+            503,
+            "poll",
+            id="poll_http_error",
+        ),
+    ],
+)
+def test_deep_research_http_errors_carry_status(monkeypatch, create_resp, poll_resp, status_code, fragment):
     import time as _time
 
     monkeypatch.setattr(_time, "sleep", lambda _s: None)
     monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
-    monkeypatch.setattr(exa.requests, "post", lambda *a, **kw: _FakeResp(payload={"id": "t1"}))
-    monkeypatch.setattr(exa.requests, "get", lambda *a, **kw: _FakeResp(status_code=503, text="unavail"))
+    monkeypatch.setattr(exa.requests, "post", lambda *a, **kw: create_resp)
+    monkeypatch.setattr(exa.requests, "get", lambda *a, **kw: poll_resp)
     with pytest.raises(exa.ExaError) as ei:
         exa.deep_research("inst", timeout_seconds=60)
-    assert ei.value.error["status_code"] == 503
-    assert "poll" in ei.value.error["error"]
+    assert ei.value.error["status_code"] == status_code
+    assert fragment in ei.value.error["error"]
 
 
-def test_deep_research_failed_status(monkeypatch):
+@pytest.mark.parametrize(
+    ("create_resp", "poll_resp", "fragment"),
+    [
+        pytest.param(_FakeResp(payload={"foo": "bar"}), None, "no task id", id="no_task_id"),
+        pytest.param(
+            _FakeResp(payload={"id": "t1"}),
+            _FakeResp(payload={"status": "failed", "error": "model down"}),
+            "failed",
+            id="failed_status",
+        ),
+    ],
+)
+def test_deep_research_task_errors(monkeypatch, create_resp, poll_resp, fragment):
     import time as _time
 
     monkeypatch.setattr(_time, "sleep", lambda _s: None)
     monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
-    monkeypatch.setattr(exa.requests, "post", lambda *a, **kw: _FakeResp(payload={"id": "t1"}))
-    monkeypatch.setattr(
-        exa.requests,
-        "get",
-        lambda *a, **kw: _FakeResp(payload={"status": "failed", "error": "model down"}),
-    )
+    monkeypatch.setattr(exa.requests, "post", lambda *a, **kw: create_resp)
+    monkeypatch.setattr(exa.requests, "get", lambda *a, **kw: poll_resp)
     with pytest.raises(exa.ExaError) as ei:
         exa.deep_research("inst", timeout_seconds=60)
-    assert "failed" in ei.value.error["error"]
+    assert fragment in ei.value.error["error"]
 
 
 def test_deep_research_timeout(monkeypatch):
-    """When poll never returns terminal status, deadline expires and raises."""
     import time as _time
 
     # Fake monotonic that jumps past the deadline on the second tick.
@@ -293,8 +288,6 @@ def test_deep_research_timeout(monkeypatch):
 
 
 class TestCacheKey:
-    """The cache key must drop api_key and react to every other request field."""
-
     def _key_for(self, **overrides):
         base = {
             "api_key": "secret",
@@ -309,18 +302,18 @@ class TestCacheKey:
     def test_api_key_excluded(self):
         assert self._key_for(api_key="A") == self._key_for(api_key="B")
 
-    def test_query_drives_key(self):
-        assert self._key_for(query="x") != self._key_for(query="y")
-
-    def test_num_results_drives_key(self):
-        assert self._key_for(numResults=5) != self._key_for(numResults=10)
-
-    def test_type_drives_key(self):
-        assert self._key_for(type="neural") != self._key_for(type="keyword")
-
-    def test_endpoint_drives_key(self):
-        # search and deep_research with otherwise-equal payloads must not collide.
-        assert self._key_for(endpoint="search") != self._key_for(endpoint="deep_research")
+    @pytest.mark.parametrize(
+        ("a", "b"),
+        [
+            pytest.param({"query": "x"}, {"query": "y"}, id="query"),
+            pytest.param({"numResults": 5}, {"numResults": 10}, id="num_results"),
+            pytest.param({"type": "neural"}, {"type": "keyword"}, id="type"),
+            # search and deep_research with otherwise-equal payloads must not collide.
+            pytest.param({"endpoint": "search"}, {"endpoint": "deep_research"}, id="endpoint"),
+        ],
+    )
+    def test_field_drives_key(self, a, b):
+        assert self._key_for(**a) != self._key_for(**b)
 
     def test_stable_across_dict_ordering(self):
         # sort_keys=True in _cache_key guards against insertion-order drift.
@@ -330,8 +323,6 @@ class TestCacheKey:
 
 
 class TestSearchCacheBehavior:
-    """search() consults the cache only when PSAT_EXA_CACHE is set."""
-
     def test_disabled_skips_storage(self, monkeypatch):
         monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
         monkeypatch.delenv("PSAT_EXA_CACHE", raising=False)
@@ -460,48 +451,26 @@ class TestSearchCacheBehavior:
         assert result[0]["url"] == "https://fresh"
         post_mock.assert_called_once()
 
-    def test_no_storage_client_falls_through(self, monkeypatch):
-        monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
-        monkeypatch.setenv("PSAT_EXA_CACHE", "1")
-        post_mock = MagicMock(return_value=_FakeResp(payload={"results": [{"url": "https://x"}]}))
-
-        with patch("db.storage.get_storage_client", return_value=None):
-            monkeypatch.setattr(exa.requests, "post", post_mock)
-            result = exa.search("q", max_results=3)
-
-        assert result[0]["url"] == "https://x"
-        post_mock.assert_called_once()
-
-    def test_cache_write_failure_does_not_break_search(self, monkeypatch):
-        from db.storage import StorageKeyMissing, StorageUnavailable
-
+    @pytest.mark.parametrize(
+        ("has_client", "get_exc", "put_exc"),
+        [
+            pytest.param(False, None, None, id="no_storage_client"),
+            pytest.param(True, StorageKeyMissing("k"), StorageUnavailable("bucket down"), id="cache_write_failure"),
+            pytest.param(True, StorageUnavailable("read flake"), None, id="cache_read_failure"),
+        ],
+    )
+    def test_storage_trouble_falls_through_to_network(self, monkeypatch, has_client, get_exc, put_exc):
         monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
         monkeypatch.setenv("PSAT_EXA_CACHE", "1")
 
         storage_client = MagicMock()
-        storage_client.get.side_effect = StorageKeyMissing("k")
-        storage_client.put.side_effect = StorageUnavailable("bucket down")
+        storage_client.get.side_effect = get_exc
+        storage_client.put.side_effect = put_exc
         post_mock = MagicMock(return_value=_FakeResp(payload={"results": [{"url": "https://x"}]}))
 
-        with patch("db.storage.get_storage_client", return_value=storage_client):
+        with patch("db.storage.get_storage_client", return_value=storage_client if has_client else None):
             monkeypatch.setattr(exa.requests, "post", post_mock)
-            # Bucket flake on write must not surface to the caller.
-            result = exa.search("q", max_results=3)
-
-        assert result[0]["url"] == "https://x"
-
-    def test_cache_read_failure_falls_through(self, monkeypatch):
-        from db.storage import StorageUnavailable
-
-        monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
-        monkeypatch.setenv("PSAT_EXA_CACHE", "1")
-
-        storage_client = MagicMock()
-        storage_client.get.side_effect = StorageUnavailable("read flake")
-        post_mock = MagicMock(return_value=_FakeResp(payload={"results": [{"url": "https://x"}]}))
-
-        with patch("db.storage.get_storage_client", return_value=storage_client):
-            monkeypatch.setattr(exa.requests, "post", post_mock)
+            # Bucket flake on read or write must not surface to the caller.
             result = exa.search("q", max_results=3)
 
         assert result[0]["url"] == "https://x"
@@ -509,29 +478,6 @@ class TestSearchCacheBehavior:
 
 
 class TestDeepResearchCacheBehavior:
-    """deep_research() consults the cache only when PSAT_EXA_CACHE is set."""
-
-    def test_disabled_skips_storage(self, monkeypatch):
-        import time as _time
-
-        monkeypatch.setattr(_time, "sleep", lambda _s: None)
-        monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
-        monkeypatch.delenv("PSAT_EXA_CACHE", raising=False)
-
-        storage_client = MagicMock()
-        post_mock = MagicMock(return_value=_FakeResp(payload={"id": "t1"}))
-        get_mock = MagicMock(return_value=_FakeResp(payload={"status": "completed", "data": {"x": 1}}))
-
-        with patch("db.storage.get_storage_client", return_value=storage_client):
-            monkeypatch.setattr(exa.requests, "post", post_mock)
-            monkeypatch.setattr(exa.requests, "get", get_mock)
-            out = exa.deep_research("inst", timeout_seconds=60)
-
-        assert out["data"] == {"x": 1}
-        post_mock.assert_called_once()  # task created
-        storage_client.get.assert_not_called()
-        storage_client.put.assert_not_called()
-
     def test_hit_skips_task_creation(self, monkeypatch):
         monkeypatch.setattr(exa, "_get_api_key", lambda: "k")
         monkeypatch.setenv("PSAT_EXA_CACHE", "1")
@@ -589,7 +535,6 @@ class TestDeepResearchCacheBehavior:
         assert envelope["payload"]["data"]["auditReports"] == [{"a": 1}]
 
     def test_empty_data_not_cached(self, monkeypatch):
-        """A completed task with no data shouldn't poison the cache."""
         import time as _time
 
         from db.storage import StorageKeyMissing

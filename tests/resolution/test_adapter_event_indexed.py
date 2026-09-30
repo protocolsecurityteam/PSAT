@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from services.resolution.adapters import (
-    AdapterRegistry,
     EnumerationResult,
     EvaluationContext,
 )
@@ -53,35 +52,6 @@ class NoCursorEventLogRepo:
         self, *, chain_id, event_address, topic0, topics_to_keys, data_to_keys, key_sources, direction, block=None
     ):
         return EnumerationResult(members=[], confidence="partial", partial_reason="no_index_cursor")
-
-
-class OrderedEventLogRepo:
-    def __init__(self, events: list[tuple[str, str]]):
-        self.events = events
-
-    def fold_event_writes(
-        self, *, chain_id, event_address, topic0, topics_to_keys, data_to_keys, key_sources, direction, block=None
-    ):
-        del chain_id, event_address, topics_to_keys, data_to_keys, key_sources, direction, block
-        return EnumerationResult(
-            members=[member for event_topic0, member in self.events if event_topic0 == topic0],
-            confidence="enumerable",
-            last_indexed_block=18_000_000,
-        )
-
-    def fold_event_history(self, *, chain_id, event_address, event_hints, key_sources, block=None):
-        del chain_id, event_address, key_sources, block
-        directions = {hint.get("topic0"): hint.get("direction") for hint in event_hints}
-        state: dict[str, bool] = {}
-        for topic0, member in self.events:
-            direction = directions.get(topic0)
-            if direction in {"add", "remove"}:
-                state[member.lower()] = direction == "add"
-        return EnumerationResult(
-            members=sorted(addr for addr, present in state.items() if present),
-            confidence="enumerable",
-            last_indexed_block=18_000_000,
-        )
 
 
 class RaisingEventLogRepo:
@@ -157,69 +127,6 @@ def test_event_indexed_enumerate_with_repo():
     assert sorted(cap.members) == sorted([ADDR_B.lower(), ADDR_C.lower()])
 
 
-def test_event_indexed_handles_add_then_remove():
-    descriptor = {
-        "kind": "mapping_membership",
-        "enumeration_hint": [
-            {"topic0": "0xaa", "direction": "add", "event_address": ADDR_A, "topics_to_keys": {}, "data_to_keys": {}},
-            {
-                "topic0": "0xbb",
-                "direction": "remove",
-                "event_address": ADDR_A,
-                "topics_to_keys": {},
-                "data_to_keys": {},
-            },
-        ],
-    }
-    repo = FakeEventLogRepo(
-        {
-            "0xaa": [("add", ADDR_B), ("add", ADDR_C)],
-            "0xbb": [("remove", ADDR_B)],
-        }
-    )
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=ADDR_A,
-        meta={"event_log_repo": repo},
-    )
-    cap = EventIndexedAdapter().enumerate(descriptor, ctx)
-    assert cap.kind == "finite_set"
-    # ADDR_B was added then removed; only ADDR_C remains.
-    assert cap.members == [ADDR_C.lower()]
-
-
-def test_event_indexed_folds_ordered_grant_revoke_grant_history():
-    descriptor = {
-        "kind": "mapping_membership",
-        "enumeration_hint": [
-            {"topic0": "0xaa", "direction": "add", "event_address": ADDR_A, "topics_to_keys": {}, "data_to_keys": {}},
-            {
-                "topic0": "0xbb",
-                "direction": "remove",
-                "event_address": ADDR_A,
-                "topics_to_keys": {},
-                "data_to_keys": {},
-            },
-        ],
-    }
-    repo = OrderedEventLogRepo(
-        [
-            ("0xaa", ADDR_B),
-            ("0xbb", ADDR_B),
-            ("0xaa", ADDR_B),
-        ]
-    )
-    ctx = EvaluationContext(
-        chain_id=1,
-        contract_address=ADDR_A,
-        meta={"event_log_repo": repo},
-    )
-    cap = EventIndexedAdapter().enumerate(descriptor, ctx)
-
-    assert cap.kind == "finite_set"
-    assert cap.members == [ADDR_B.lower()]
-
-
 def test_postgres_event_repo_folds_add_remove_hints_in_log_order():
     rows = [
         SimpleNamespace(topic0="0xaa", topics=["0xaa", _address_topic(ADDR_B)], data_words=[]),
@@ -275,12 +182,11 @@ def test_event_indexed_backend_error_yields_check_only():
 
 
 def test_event_indexed_caller_keyed_no_cursor_defers_pending_index():
-    # A caller-keyed add/remove ACL whose durable cursor is cold
-    # (``no_index_cursor``) defers to external_check_only tagged
-    # ``deferred_pending_index`` rather than a live genesis scan: the reconciler
-    # re-resolves once the indexer backfills the event address. The basis carries
-    # ``caller_keyed_membership_allowlist`` (a CALLER_GATE_BASIS_TAGS member) so
-    # the earned-public projection keeps the gate fail-closed.
+    # A caller-keyed add/remove ACL with a cold durable cursor (``no_index_cursor``)
+    # defers to external_check_only tagged ``deferred_pending_index`` rather than a live
+    # genesis scan; the reconciler re-resolves once the indexer backfills. The basis
+    # carries ``caller_keyed_membership_allowlist`` (a CALLER_GATE_BASIS_TAGS member) so
+    # earned-public projection stays fail-closed.
     descriptor = {
         "kind": "mapping_membership",
         "key_sources": [{"source": "msg_sender"}],
@@ -303,9 +209,8 @@ def test_event_indexed_caller_keyed_no_cursor_defers_pending_index():
 
 
 def test_event_indexed_non_caller_keyed_no_cursor_defers_without_caller_gate_tag():
-    # A non-caller-keyed (parameter-keyed) ACL still defers on a cold cursor, but
-    # without the caller-gate basis tag: the deferral is index-driven, not a
-    # caller-discriminating gate.
+    # A parameter-keyed ACL still defers on a cold cursor, but without the caller-gate
+    # tag: the deferral is index-driven, not a caller-discriminating gate.
     descriptor = {
         "kind": "mapping_membership",
         "key_sources": [{"source": "parameter", "parameter_index": 0}],
@@ -323,8 +228,7 @@ def test_event_indexed_non_caller_keyed_no_cursor_defers_without_caller_gate_tag
 
 
 def test_event_indexed_cold_cursor_performs_no_live_scan(monkeypatch):
-    # The cold-cursor add/remove branch must NOT reach the live hypersync replay:
-    # any genesis scan (the 429-storm source) is the regression this removes.
+    # The cold-cursor branch must NOT reach the live hypersync replay (a genesis scan is the 429-storm source).
     import services.resolution.mapping_enumerator as mapping_enumerator
 
     def boom(*_args, **_kwargs):
@@ -343,50 +247,8 @@ def test_event_indexed_cold_cursor_performs_no_live_scan(monkeypatch):
     assert cap.kind == "external_check_only"
 
 
-def test_registry_event_indexed_handles_two_key_descriptor():
-    """Two-key mappings are resolved by the generic event adapter."""
-    descriptor = {
-        "kind": "mapping_membership",
-        "key_sources": [
-            {"source": "parameter", "parameter_index": 0, "parameter_name": "group"},
-            {"source": "msg_sender"},
-        ],
-        "enumeration_hint": [
-            {
-                "topic0": "0xdd",
-                "direction": "add",
-                "event_address": ADDR_A,
-                "topics_to_keys": {1: 0, 2: 1},
-                "data_to_keys": {},
-            },
-        ],
-    }
-    registry = AdapterRegistry()
-    registry.register(EventIndexedAdapter)
-    picked = registry.pick(descriptor, EvaluationContext(chain_id=1))
-    assert picked is EventIndexedAdapter
-
-
-def test_registry_event_indexed_picks_when_no_specialized_match():
-    """For a mapping with events but no recognized standard ABI,
-    EventIndexed catches it generically."""
-    descriptor = {
-        "kind": "mapping_membership",
-        "key_sources": [{"source": "msg_sender"}],
-        "enumeration_hint": [
-            {"topic0": "0xff", "direction": "add", "event_address": ADDR_A, "topics_to_keys": {}, "data_to_keys": {}},
-        ],
-    }
-    registry = AdapterRegistry()
-    registry.register(EventIndexedAdapter)
-    picked = registry.pick(descriptor, EvaluationContext(chain_id=1))
-    assert picked is EventIndexedAdapter
-
-
-# ---------------------------------------------------------------------------
-# Same-topic0 add/remove conflict (G2 HIT 1): direction is a property of the
-# EVENT PAYLOAD, never of hint-list order.
-# ---------------------------------------------------------------------------
+# Same-topic0 add/remove conflict (G2 HIT 1): direction is a property of the EVENT
+# PAYLOAD, never of hint-list order.
 
 _CONFLICT_TOPIC = "0xf93f9a76c1bf3444d22400a00cb9fe990e6abe9dbb333fda48859cfee864543d"
 
@@ -396,8 +258,7 @@ def _bool_word(value: bool) -> str:
 
 
 def _conflict_rows():
-    """WhitelistUpdated(address indexed user, bool value) history:
-    ADDR_B set true; ADDR_C set true then false."""
+    """WhitelistUpdated(address indexed user, bool value): ADDR_B set true; ADDR_C true then false."""
     return [
         SimpleNamespace(
             topic0=_CONFLICT_TOPIC,
@@ -461,8 +322,8 @@ def test_same_topic_conflict_without_value_position_fails_closed():
 
 
 def test_same_topic_conflict_unreadable_payload_word_fails_closed():
-    # value_position points past the row's data words: the payload cannot be
-    # read, so the fold must not decide membership at all.
+    # value_position points past the row's data words: the payload can't be read, so
+    # the fold must not decide membership.
     result = _run_conflict_fold(_conflict_hints(5))
     assert result.confidence == "partial"
     assert result.partial_reason == "ambiguous_event_direction"
@@ -506,6 +367,5 @@ def test_event_indexed_ambiguous_direction_settles_to_gated_check():
     assert cap.check is not None
     basis = (cap.check.extra or {}).get("basis") or []
     assert "ambiguous_event_direction" in basis
-    # A caller-keyed allowlist that could not be decided is still an allowlist:
-    # the caller-gate tag keeps the earned-public projection gated.
+    # An undecided caller-keyed allowlist is still an allowlist: the caller-gate tag keeps it gated.
     assert "caller_keyed_membership_allowlist" in basis

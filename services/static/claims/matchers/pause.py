@@ -1,22 +1,8 @@
-"""``pause.set`` / ``pause.unset`` — the contract toggles a flag that blocks or
-unblocks its own state-changing entry points.
+"""``pause.set`` / ``pause.unset``: toggling a flag that blocks the contract's own entry points.
 
-Two tiers share one derivation:
-
-* **standard_exact** — OZ ``Pausable``: the contract publishes the standard's
-  full entry set (``pause()`` + ``unpause()`` + the ``paused()`` view), and the
-  claim is on one of the two toggles. A ``bool public paused`` counts: Solidity
-  publishes ``paused()`` for it, so this is the contract's ABI, not its
-  vocabulary. Nothing here inspects what the flag variable is *called* — a
-  pauser whose latch is named anything else still reaches standard_exact, and a
-  contract that merely spells a flag ``paused`` without the standard's ABI does
-  not.
-* **idiom_structural** — the PauseAnalyzer idiom with its four fixes, read off
-  Plane-0 facts: the flag is a ``bool`` state-write (member-path facts recover
-  struct-member and inherited-private flags) that another entry point reads as a
-  *mandatory* revert gate (kills a branch-mode selector such as OneSig
-  ``executorRequired``), the writer is caller/authority-gated, and it is not a
-  one-shot initializer latch.
+standard_exact: the full OZ Pausable ABI (``pause()``, ``unpause()``, ``paused()``, where a public bool counts), never
+the flag's name. idiom_structural: a guarded write to a bool that another entry point reads as a mandatory revert gate,
+excluding one-shot initializer latches.
 """
 
 from __future__ import annotations
@@ -26,7 +12,6 @@ from ..decorator import claim_matcher
 from ..types import ClaimEvidence
 from . import _facts
 
-# OpenZeppelin Pausable's published ABI.
 PAUSE = abi_selector("pause()")
 UNPAUSE = abi_selector("unpause()")
 PAUSED = abi_selector("paused()")
@@ -50,17 +35,12 @@ def _pause_evidence(ctx: ClaimContext, function: str, want: str) -> ClaimEvidenc
     namespaced = _facts.namespaced_write_vars(ctx, function)
     matched: list[dict[str, str | None]] = []
     for var, member in sorted(targets, key=lambda pair: (pair[0], pair[1] or "")):
-        # A namespaced latch is written through a local storage pointer, so the
-        # member the GUARD reads on this slot is the only handle on which flag
-        # the assignment touched.
+        # Namespaced latches are written through a storage pointer; the member the guard reads identifies the flag.
         aliases = frozenset(m for v, m in gate_reads if v == var and m) if member is None else frozenset()
         polarity = _facts.toggle_polarity(fn, var, member, alias_members=aliases) if fn is not None else "both"
         if var in namespaced and polarity == "both":
-            # An ERC-7201 slot holds the whole struct, so writing it proves
-            # nothing about a boolean latch on its own — `transferOwnership`
-            # writes the same slot the owner gate reads. Only a definite
-            # constant-bool toggle of a guard-read member is a pause; anything
-            # else fails closed.
+            # An ERC-7201 slot holds a whole struct, so writing it proves nothing; only a constant-bool toggle of a
+            # guard-read member counts.
             continue
         if polarity in (want, "both"):
             matched.append({"var": var, "member": member})

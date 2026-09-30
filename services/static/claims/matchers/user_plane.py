@@ -1,9 +1,5 @@
-"""User-plane behavior claims: token-holder operations and OApp config.
-
-These describe what an ordinary caller does (``erc20.*``, ``weth.*``,
-``gov.delegate``) or a peer/delegate configuration (``lz_oapp.*``). They are
-registered in their own consumer families so the value/user operations stay out
-of the control lane while the LayerZero config claims read as control-plane.
+"""User-plane claims (``erc20.*``, ``weth.*``, ``gov.delegate``) and LayerZero OApp config (``lz_oapp.*``), in their
+own consumer families so user operations stay out of the control lane.
 """
 
 from __future__ import annotations
@@ -13,7 +9,6 @@ from ..decorator import claim_matcher
 from ..types import ClaimEvidence
 from . import _facts
 
-# LayerZero OApp published configuration ABI.
 _SET_PEER = abi_selector("setPeer(uint32,bytes32)")
 _PEERS = abi_selector("peers(uint32)")
 _ENDPOINT = abi_selector("endpoint()")
@@ -86,8 +81,7 @@ def weth_withdraw(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
     return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth", "op": "withdraw"})
 
 
-# The Compound/OZ Votes delegation log. Its argument list is fixed by the
-# standard, so topic0 is what a delegation provably writes to the chain.
+# The Votes delegation log; the standard fixes its arguments, so topic0 is the proof.
 DELEGATE_CHANGED_TOPIC0 = abi_topic0("DelegateChanged(address,address,address)")
 
 
@@ -98,13 +92,8 @@ DELEGATE_CHANGED_TOPIC0 = abi_topic0("DelegateChanged(address,address,address)")
     consumer_family="user_plane",
 )
 def gov_delegate(ctx: ClaimContext, function: str) -> ClaimEvidence | None:
-    """Comp/OZ-Votes delegation.
-
-    ``standard_exact`` when the call emits ``DelegateChanged`` — the published
-    governance log, matched on topic0, so the proof is the record the chain
-    keeps. The older state-write shape (``delegates`` + ``checkpoints``) is kept
-    as a fallback, but only at ``idiom_structural``: those are variable names, and
-    a name cannot prove a standard.
+    """Comp/OZ-Votes delegation: standard_exact when ``DelegateChanged`` is emitted; the ``delegates`` +
+    ``checkpoints`` write shape is idiom_structural, since variable names can't prove a standard.
     """
     fn = _facts.contract_function(ctx, function)
     if fn is not None and _facts.emits_event_topic(ctx, fn, DELEGATE_CHANGED_TOPIC0):

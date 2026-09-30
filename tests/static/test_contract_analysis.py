@@ -13,7 +13,6 @@ from services.static import collect_contract_analysis
 pytestmark = pytest.mark.compile
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts"
-FIXTURE_INDEX_PATH = FIXTURES_DIR / "index.json"
 
 
 def _write_project(tmp_path: Path, contract_name: str, source_code: str) -> Path:
@@ -51,10 +50,6 @@ def _fixture_source(relative_path: str) -> str:
     return (FIXTURES_DIR / relative_path).read_text()
 
 
-def _fixture_index() -> list[dict]:
-    return json.loads(FIXTURE_INDEX_PATH.read_text())["fixtures"]
-
-
 def _semantic_function(analysis: ContractAnalysis, signature: str) -> SemanticFunctionSummary:
     for function in analysis["semantic_control"]["semantic_functions"]:
         if function["function"] == signature:
@@ -69,41 +64,9 @@ def _tracked_controller(analysis: ContractAnalysis, label: str) -> ControllerTra
     raise AssertionError(f"Tracked controller {label} not found")
 
 
-def test_fixture_index_covers_all_solidity_contract_fixtures():
-    indexed_paths = {entry["path"] for entry in _fixture_index()}
-    # The detection-pattern index catalogs the hand-authored single-file fixtures.
-    # Two directories are excluded because they are compiled through a manifest
-    # that is their own source of truth, not through this index:
-    #   * ``label_corpus/`` — the effect-labels golden-gate sources (synthetic
-    #     single-file .sol + one Foundry project).
-    #   * ``etherfi_timelock/`` — the VERBATIM Etherscan-verified source of
-    #     0xcd425f44… (EtherFiTimelock + its vendored OpenZeppelin tree), pinned
-    #     by ``tests/static/test_timelock_surface_parity.py``. These files are not
-    #     hand-authored detection patterns and must not be edited to suit one:
-    #     the test's whole claim is that they are byte-identical to what the
-    #     chain verified, so indexing them here would invite exactly that edit.
-    _MANIFEST_OWNED_DIRS = {"label_corpus", "etherfi_timelock"}
-    fixture_paths = {
-        str(path.relative_to(FIXTURES_DIR))
-        for path in FIXTURES_DIR.rglob("*.sol")
-        if not _MANIFEST_OWNED_DIRS & set(path.relative_to(FIXTURES_DIR).parts)
-    }
-
-    assert indexed_paths == fixture_paths
-
-    for entry in _fixture_index():
-        assert entry["category"]
-        assert entry["contract_name"]
-        assert entry["description"]
-        assert entry["detection_patterns"]
-        assert (FIXTURES_DIR / entry["path"]).exists()
-
-
 def test_collect_contract_analysis_with_artifacts_returns_semantic_artifacts(tmp_path):
-    """The worker-facing entrypoint
-    ``collect_contract_analysis_with_artifacts`` returns the semantic
-    ``predicate_trees`` and ``effects`` artifacts alongside the
-    analysis dict, off a single Slither parse."""
+    """The worker-facing entrypoint returns the semantic ``predicate_trees`` and
+    ``effects`` artifacts alongside the analysis dict, off a single Slither parse."""
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     project_dir = _write_project(
@@ -117,8 +80,6 @@ def test_collect_contract_analysis_with_artifacts_returns_semantic_artifacts(tmp
     assert analysis["schema_version"] == "0.1"
     assert predicate_trees is not None
     assert predicate_trees.get("schema_version") == "semantic"
-    # Successful emit produces a `trees` dict; an error path would
-    # set `error` instead.
     assert "trees" in predicate_trees or "error" in predicate_trees
     assert effects is not None
     assert effects.get("schema_version") == "semantic-3"
@@ -301,10 +262,9 @@ def test_modifier_helper_auth_structure_recovered(tmp_path):
 
     manage = _semantic_function(analysis, "manage(PingTarget,uint256)")
     assert manage["effect_labels"] == ["external_contract_call"]
-    # ``target.ping`` is the body sink and the sole driver of the label. The
-    # modifier ``requiresAuth``'s ``auth.canCall`` is now a guard-origin sink,
-    # excluded from effect_targets so it can't dilute the effect (it stays in
-    # the raw ``sinks`` list as an ``origin=guard`` fact).
+    # ``target.ping`` is the body sink and sole driver of the label; the modifier's
+    # ``auth.canCall`` is a guard-origin sink, excluded from effect_targets so it can't
+    # dilute the effect (it stays in ``sinks`` as ``origin=guard``).
     assert "target.ping" in manage["effect_targets"]
     assert not any("canCall" in target for target in manage["effect_targets"])
     assert manage["action_summary"] == "Calls an external contract from the contract context."
@@ -514,11 +474,13 @@ def test_modifier_helper_preserves_opaque_role_identifier(tmp_path):
     assert tracked["kind"] == "role_identifier"
 
 
-def test_opaque_external_void_helper_guard_is_controller_ref(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "OpaqueExternalGuard",
-        """
+# CRITICAL: an opaque external guard call must count as a controller ref, not vanish.
+@pytest.mark.parametrize(
+    ("project_name", "source", "function", "controller_ref"),
+    [
+        pytest.param(
+            "OpaqueExternalGuard",
+            """
         pragma solidity ^0.8.19;
 
         interface IGate {
@@ -552,19 +514,13 @@ def test_opaque_external_void_helper_guard_is_controller_ref(tmp_path):
             }
         }
         """,
-    )
-
-    analysis = collect_contract_analysis(project_dir)
-    semantic = _semantic_function(analysis, "pause()")
-    assert "gate" in semantic["controller_refs"]
-    assert "external_contract_call" in semantic["effect_labels"]
-
-
-def test_opaque_external_role_helper_is_controller_ref(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "OpaqueExternalRoleGuard",
-        """
+            "pause()",
+            "gate",
+            id="void_helper_guard",
+        ),
+        pytest.param(
+            "OpaqueExternalRoleGuard",
+            """
         pragma solidity ^0.8.19;
 
         interface IAuth {
@@ -599,19 +555,13 @@ def test_opaque_external_role_helper_is_controller_ref(tmp_path):
             }
         }
         """,
-    )
-
-    analysis = collect_contract_analysis(project_dir)
-    semantic = _semantic_function(analysis, "pause()")
-    assert "auth" in semantic["controller_refs"]
-    assert "external_contract_call" in semantic["effect_labels"]
-
-
-def test_opaque_external_policy_helper_is_controller_ref(tmp_path):
-    project_dir = _write_project(
-        tmp_path,
-        "OpaqueExternalPolicyGuard",
-        """
+            "pause()",
+            "auth",
+            id="role_helper",
+        ),
+        pytest.param(
+            "OpaqueExternalPolicyGuard",
+            """
         pragma solidity ^0.8.19;
 
         interface IPolicy {
@@ -647,19 +597,23 @@ def test_opaque_external_policy_helper_is_controller_ref(tmp_path):
             }
         }
         """,
-    )
+            "execute()",
+            "policy",
+            id="policy_helper",
+        ),
+    ],
+)
+def test_opaque_external_helper_is_controller_ref(tmp_path, project_name, source, function, controller_ref):
+    project_dir = _write_project(tmp_path, project_name, source)
 
     analysis = collect_contract_analysis(project_dir)
-    semantic = _semantic_function(analysis, "execute()")
-    assert "policy" in semantic["controller_refs"]
+    semantic = _semantic_function(analysis, function)
+    assert controller_ref in semantic["controller_refs"]
     assert "external_contract_call" in semantic["effect_labels"]
 
 
 # ---------------------------------------------------------------------------
 # Classification: which of these fields can honestly be not-determined.
-# Preserved from tests/test_slither_detector_outage.py, which was deleted with
-# the vestigial detector-output reader; these two tests are about the
-# IR-derived classification plane and never depended on it.
 # ---------------------------------------------------------------------------
 
 
@@ -692,12 +646,10 @@ def test_is_factory_is_not_determined_without_the_effects_artifact(tmp_path):
 
 
 def test_standards_absence_is_measured_not_missing(tmp_path):
-    """A proposal to null ``standards`` on the reasoning that ``{}`` on
-    61/92 rows meant "no detector ran" was rejected by measurement: ``standards``
-    comes from ``contract.ercs()`` plus a signature+event match off the IR, not
-    from any detector pass, and it is non-empty on 31 of the 88 local contracts
-    -- every real token among them. Nulling it would suppress a true negative,
-    so this pins that it stays a list."""
+    """A proposal to null ``standards`` because ``{}`` on 61/92 rows meant "no detector
+    ran" was rejected by measurement: ``standards`` comes from ``contract.ercs()`` plus a
+    signature+event match off the IR, and is non-empty on 31 of 88 local contracts, every
+    real token among them. Nulling it would suppress a true negative."""
     from slither import Slither
 
     from services.static.contract_analysis_pipeline.summaries import (

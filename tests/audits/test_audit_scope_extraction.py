@@ -18,7 +18,6 @@ from services.audits.scope_extraction import (
     _build_prompt,
     _call_llm,
     _split_text_into_chunks,
-    build_artifact_payload,
     extract_contracts_regex_fallback,
     extract_date_from_pdf_text,
     extract_scope_via_chunk_scan,
@@ -33,7 +32,6 @@ from services.audits.scope_extraction import (
 
 
 def _page(n: int, body: str) -> str:
-    """Wrap ``body`` in the same page marker that pypdf extraction emits."""
     return f"\f\n--- page {n} ---\n\f\n{body}"
 
 
@@ -43,7 +41,6 @@ def _doc(*pages: str) -> str:
 
 @pytest.fixture(autouse=True)
 def _clear_stub_env(monkeypatch):
-    """Ensure tests control PSAT_LLM_STUB_DIR explicitly."""
     monkeypatch.delenv("PSAT_LLM_STUB_DIR", raising=False)
     monkeypatch.delenv("PSAT_SCOPE_LLM_MODEL", raising=False)
 
@@ -53,39 +50,77 @@ def _clear_stub_env(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_locate_scope_section_finds_basic_scope_header():
-    text = _doc(
-        _page(1, "Audit Report for Example Protocol\nExecutive Summary text."),
-        _page(2, "Scope\nThe following contracts were reviewed: Pool.sol, Vault.sol"),
-        _page(3, "Findings\nNone critical."),
-    )
+@pytest.mark.parametrize(
+    ("pages", "contains"),
+    [
+        pytest.param(
+            (
+                "Audit Report for Example Protocol\nExecutive Summary text.",
+                "Scope\nThe following contracts were reviewed: Pool.sol, Vault.sol",
+                "Findings\nNone critical.",
+            ),
+            ("Pool.sol",),
+            id="basic-header",
+        ),
+        # "Smart Contracts in Scope" appears before "Scope"; both resolve to the
+        # same region via the overlap-merge.
+        pytest.param(
+            (
+                "Introduction",
+                "Smart Contracts in Scope\nPool.sol\nVault.sol\nStrategy.sol",
+                "End of scope",
+            ),
+            ("Pool.sol",),
+            id="longer-phrase",
+        ),
+        pytest.param(("Intro", "FILES IN SCOPE\nPool.sol"), ("Pool.sol",), id="case-insensitive"),
+        pytest.param(
+            ("Intro", "Scope\nsome prose", "Files in scope\nPool.sol", "More prose"),
+            ("Pool.sol",),
+            id="merges-overlapping-slices",
+        ),
+        # Halborn: "5. SCOPE" -- numbered section prefix the first regex rejected.
+        pytest.param(
+            ("Cover", "5. SCOPE\nFILES AND REPOSITORY\n(c) Items in scope:\nsrc/Token.sol"),
+            ("Token.sol",),
+            id="numbered-header",
+        ),
+        pytest.param(
+            ("Intro", "5.1 Files in scope\nPool.sol\nVault.sol"),
+            ("Pool.sol",),
+            id="decimal-numbered-header",
+        ),
+        pytest.param(
+            (
+                "Cover",
+                "Project Scope\nProject Name\nether.fi",
+                "The following contract list is included in the scope of this audit:\n- src/Pool.sol",
+            ),
+            ("Pool.sol",),
+            id="project-scope-header",
+        ),
+        # Nethermind: "2 Audited Files" -- heading style of audits with file-count tables.
+        pytest.param(
+            ("Cover", "2 Audited Files\nContract LoC Comments\n1 src/Pool.sol 420"),
+            ("Pool.sol",),
+            id="audited-files-header",
+        ),
+        # pypdf emits "Project  Scope" (two spaces) for Certora-style PDFs; a rigid
+        # single-space match would miss the header.
+        pytest.param(
+            ("Intro", "Project  Scope  \nProject  Name: ether.fi\nPool.sol"),
+            ("Pool.sol",),
+            id="double-spaces-between-words",
+        ),
+    ],
+)
+def test_locate_scope_section_finds_header_variants(pages, contains):
+    text = _doc(*(_page(i, body) for i, body in enumerate(pages, start=1)))
     sections = locate_scope_section(text)
     assert len(sections) == 1
     assert sections[0].start_page == 2
-    assert "Pool.sol" in sections[0].text_slice
-
-
-def test_locate_scope_section_finds_longer_phrases():
-    # "Smart Contracts in Scope" appears before "Scope" — we should hit
-    # the more-specific one first. Both resolve to the same region due to
-    # the overlap-merge.
-    text = _doc(
-        _page(1, "Introduction"),
-        _page(2, "Smart Contracts in Scope\nPool.sol\nVault.sol\nStrategy.sol"),
-        _page(3, "End of scope"),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) == 1
-    assert "Pool.sol" in sections[0].text_slice
-
-
-def test_locate_scope_section_case_insensitive():
-    text = _doc(
-        _page(1, "Intro"),
-        _page(2, "FILES IN SCOPE\nPool.sol"),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) == 1
+    for needle in contains:
+        assert needle in sections[0].text_slice
 
 
 def test_locate_scope_section_returns_empty_when_no_header():
@@ -98,8 +133,6 @@ def test_locate_scope_section_returns_empty_when_no_header():
 
 
 def test_locate_scope_section_captures_three_pages_of_context():
-    # Header on page 2, table extends onto page 4. Worker should include
-    # pages 2-4 (3 pages total) in the slice.
     text = _doc(
         _page(1, "Cover"),
         _page(2, "Scope\n\nPool.sol 420 nSLOC"),
@@ -111,21 +144,7 @@ def test_locate_scope_section_captures_three_pages_of_context():
     assert len(sections) == 1
     assert "Pool.sol" in sections[0].text_slice
     assert "Strategy.sol" in sections[0].text_slice
-    # Page 5 stays out of the slice.
     assert "Findings" not in sections[0].text_slice
-
-
-def test_locate_scope_section_merges_overlapping_slices():
-    # "Scope" on p.2 and "Files in scope" on p.3 — their 3-page windows
-    # overlap, so we expect one merged section, not two.
-    text = _doc(
-        _page(1, "Intro"),
-        _page(2, "Scope\nsome prose"),
-        _page(3, "Files in scope\nPool.sol"),
-        _page(4, "More prose"),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) == 1
 
 
 def test_merged_section_preserves_text_from_later_match():
@@ -144,8 +163,6 @@ def test_merged_section_preserves_text_from_later_match():
         _page(5, "Findings"),
     )
     sections = locate_scope_section(text)
-    # The two header regions (Project Scope, Files in scope, Additional)
-    # overlap, merge into one wider ScopeSection.
     assert len(sections) == 1
     # Both contract names must be in the final text slice; the old
     # implementation lost SubBContract.sol because the merge kept only
@@ -155,73 +172,10 @@ def test_merged_section_preserves_text_from_later_match():
 
 
 def test_locate_scope_section_survives_no_page_markers():
-    # Guard against bodies that somehow skipped the page-marker shim.
     text = "Scope\nPool.sol reviewed.\nMore content."
     sections = locate_scope_section(text)
     assert len(sections) == 1
     assert sections[0].start_page == 1
-
-
-def test_locate_scope_section_matches_numbered_headers():
-    # Halborn: "5. SCOPE" — numbered section prefix. Real-world audit PDF
-    # format that the first iteration of the regex rejected.
-    text = _doc(
-        _page(1, "Cover"),
-        _page(2, "5. SCOPE\nFILES AND REPOSITORY\n(c) Items in scope:\nsrc/Token.sol"),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) == 1
-    assert "Token.sol" in sections[0].text_slice
-
-
-def test_locate_scope_section_matches_decimal_numbered_headers():
-    # "5.1 Files in scope" — sub-section numbering.
-    text = _doc(
-        _page(1, "Intro"),
-        _page(2, "5.1 Files in scope\nPool.sol\nVault.sol"),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) == 1
-    assert "Pool.sol" in sections[0].text_slice
-
-
-def test_locate_scope_section_matches_project_scope_header():
-    # Certora: "Project Scope" as a section heading.
-    text = _doc(
-        _page(1, "Cover"),
-        _page(2, "Project Scope\nProject Name\nether.fi"),
-        _page(
-            3,
-            "The following contract list is included in the scope of this audit:\n- src/Pool.sol",
-        ),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) == 1
-    assert "Pool.sol" in sections[0].text_slice
-
-
-def test_locate_scope_section_matches_audited_files_header():
-    # Nethermind: "2 Audited Files" — the heading style most audits with
-    # inline file-count tables use.
-    text = _doc(
-        _page(1, "Cover"),
-        _page(2, "2 Audited Files\nContract LoC Comments\n1 src/Pool.sol 420"),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) == 1
-    assert "Pool.sol" in sections[0].text_slice
-
-
-def test_locate_scope_section_tolerates_double_spaces_between_words():
-    # pypdf emits "Project  Scope" (two spaces) for Certora-style PDFs.
-    # A rigid single-space match would miss the header.
-    text = _doc(
-        _page(1, "Intro"),
-        _page(2, "Project  Scope  \nProject  Name: ether.fi\nPool.sol"),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) == 1
-    assert "Pool.sol" in sections[0].text_slice
 
 
 # ---------------------------------------------------------------------------
@@ -242,41 +196,27 @@ def test_locate_scope_section_normalizes_ligatures_in_headers():
     assert "EthfiL2Token.sol" in sections[0].text_slice
 
 
-def test_validate_contracts_after_ligature_normalization():
-    # The worker normalizes raw text before validation; this test pins
-    # the post-normalization behaviour — "EthfiL2Token" should survive
-    # even if the LLM returned the clean form.
-    from services.audits.scope_extraction import _normalize_ligatures
-
-    raw_with_ligature = "Items in scope: src/EthﬁL2Token.sol reviewed."
-    normalized = _normalize_ligatures(raw_with_ligature)
-    assert "EthfiL2Token" in normalized
-    assert validate_contracts(["EthfiL2Token"], normalized) == ["EthfiL2Token"]
-
-
 # ---------------------------------------------------------------------------
 # validate_contracts
 # ---------------------------------------------------------------------------
 
 
-def test_validate_contracts_drops_hallucinated_names():
-    names = ["Pool", "Vault", "FakeContract"]
-    raw = "We audited Pool and Vault. Findings inside."
-    assert validate_contracts(names, raw) == ["Pool", "Vault"]
-
-
-def test_validate_contracts_is_case_insensitive():
-    names = ["POOL", "vault"]
-    raw = "Pool and Vault contracts."
-    assert validate_contracts(names, raw) == ["POOL", "vault"]
-
-
-def test_validate_contracts_empty_input():
-    assert validate_contracts([], "anything") == []
-
-
-def test_validate_contracts_drops_empty_strings():
-    assert validate_contracts(["", "Pool", "  "], "Pool") == ["Pool"]
+@pytest.mark.parametrize(
+    ("names", "raw", "expected"),
+    [
+        pytest.param(
+            ["Pool", "Vault", "FakeContract"],
+            "We audited Pool and Vault. Findings inside.",
+            ["Pool", "Vault"],
+            id="drops-hallucinated",
+        ),
+        pytest.param(["POOL", "vault"], "Pool and Vault contracts.", ["POOL", "vault"], id="case-insensitive"),
+        pytest.param([], "anything", [], id="empty-input"),
+        pytest.param(["", "Pool", "  "], "Pool", ["Pool"], id="drops-empty-strings"),
+    ],
+)
+def test_validate_contracts(names, raw, expected):
+    assert validate_contracts(names, raw) == expected
 
 
 def test_validate_contracts_preserves_interfaces_with_matching_impls():
@@ -300,24 +240,19 @@ def test_validate_contracts_preserves_interfaces_with_matching_impls():
 # ---------------------------------------------------------------------------
 
 
-def test_regex_fallback_picks_up_dotsol_names():
-    text = "Reviewed Pool.sol and Vault.sol; also mentioned Mocks/foo.txt."
-    assert extract_contracts_regex_fallback(text) == ["Pool", "Vault"]
-
-
-def test_regex_fallback_ignores_lowercase_start():
-    text = "pool.sol is a dep; Vault.sol is in scope."
-    assert extract_contracts_regex_fallback(text) == ["Vault"]
-
-
-def test_regex_fallback_dedupes():
-    text = "Pool.sol in repo A, Pool.sol in repo B, Vault.sol elsewhere."
-    assert extract_contracts_regex_fallback(text) == ["Pool", "Vault"]
-
-
-def test_regex_fallback_handles_vyper():
-    text = "CurvePool.vy and ConvexBooster.sol"
-    assert extract_contracts_regex_fallback(text) == ["CurvePool", "ConvexBooster"]
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            "Reviewed Pool.sol and Vault.sol; also mentioned Mocks/foo.txt.", ["Pool", "Vault"], id="dotsol-names"
+        ),
+        pytest.param("pool.sol is a dep; Vault.sol is in scope.", ["Vault"], id="ignores-lowercase-start"),
+        pytest.param("Pool.sol in repo A, Pool.sol in repo B, Vault.sol elsewhere.", ["Pool", "Vault"], id="dedupes"),
+        pytest.param("CurvePool.vy and ConvexBooster.sol", ["CurvePool", "ConvexBooster"], id="vyper"),
+    ],
+)
+def test_regex_fallback_extracts_names(text, expected):
+    assert extract_contracts_regex_fallback(text) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -325,88 +260,34 @@ def test_regex_fallback_handles_vyper():
 # ---------------------------------------------------------------------------
 
 
-def test_extract_date_iso_format():
-    text = "Audit Report\nSpearbit 2024-12-19\nby Alice and Bob"
-    assert extract_date_from_pdf_text(text) == "2024-12-19"
-
-
-def test_extract_date_day_month_year():
-    text = "Cover page\nPublished 19 December 2024 by Spearbit"
-    assert extract_date_from_pdf_text(text) == "2024-12-19"
-
-
-def test_extract_date_month_year_only():
-    text = "Cover page\nAudit delivered December 2024"
-    assert extract_date_from_pdf_text(text) == "2024-12-00"
-
-
-def test_extract_date_returns_none_when_no_match():
-    text = "Cover page with no date anywhere on the first few lines."
-    assert extract_date_from_pdf_text(text) is None
-
-
-def test_extract_date_looks_only_at_title_region():
-    # A date deep in the body (past the title-region window) should not
-    # be picked up as the title-page date.
-    title = "Cover page without any date\n" + ("filler " * 1200)
-    footer = "2024-01-01"
-    text = title + footer
-    assert extract_date_from_pdf_text(text) is None
-
-
-def test_extract_date_handles_ordinal_suffix_day_first():
-    # Halborn-style: "19th December 2024"
-    text = "Cover\nDelivered on 19th December 2024 by Firm"
-    assert extract_date_from_pdf_text(text) == "2024-12-19"
-
-
-def test_extract_date_handles_ordinal_suffix_month_first():
-    # "December 19th, 2024"
-    text = "Cover\nPublished December 19th, 2024"
-    assert extract_date_from_pdf_text(text) == "2024-12-19"
-
-
-def test_extract_date_handles_all_ordinal_suffixes():
-    # 1st / 2nd / 3rd / 4th — all four forms.
-    for day_str, day in (("1st", 1), ("2nd", 2), ("3rd", 3), ("4th", 4)):
-        text = f"Cover\nDelivered {day_str} January 2024"
-        assert extract_date_from_pdf_text(text) == f"2024-01-{day:02d}"
-
-
-def test_extract_date_handles_us_slash_format():
-    # "12/19/2024" — second group > 12 so this is unambiguously MM/DD/YYYY.
-    text = "Cover\nAudit date: 12/19/2024"
-    assert extract_date_from_pdf_text(text) == "2024-12-19"
-
-
-def test_extract_date_disambiguates_slash_format_when_first_is_day():
-    # "19/12/2024" — first group > 12, so must be DD/MM/YYYY. We flip.
-    text = "Cover\n19/12/2024"
-    assert extract_date_from_pdf_text(text) == "2024-12-19"
-
-
-def test_extract_date_skips_ambiguous_slash_format():
-    # "05/02/2024" — both operands ≤ 12, could be May 2 or Feb 5.
-    # Rather than guessing (and silently producing wrong dates for
-    # auditors that use DD/MM like Certora), skip to the next pattern.
-    # With no other date in the text, the extractor returns None.
-    text = "Cover\nAudit date: 05/02/2024"
-    assert extract_date_from_pdf_text(text) is None
-
-
-def test_extract_date_prefers_prose_over_ambiguous_slash():
-    # When an ambiguous slash date appears alongside a prose date, we
-    # should return the prose one (which is unambiguous).
-    text = "Cover\nAudit: 05/02/2024\nDelivered: 10 March 2024"
-    assert extract_date_from_pdf_text(text) == "2024-03-10"
-
-
-def test_extract_date_extended_window_catches_dates_past_2000_chars():
-    # Some PDFs have long cover boilerplate before the date. The window
-    # was extended from 2000 → 6000 chars; a date at ~3500 should hit.
-    prefix = "boilerplate " * 250  # ~3000 chars
-    text = prefix + "2024-03-14 " + "more " * 100
-    assert extract_date_from_pdf_text(text) == "2024-03-14"
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param("Audit Report\nSpearbit 2024-12-19\nby Alice and Bob", "2024-12-19", id="iso"),
+        pytest.param("Cover page\nPublished 19 December 2024 by Spearbit", "2024-12-19", id="day-month-year"),
+        pytest.param("Cover page\nAudit delivered December 2024", "2024-12-00", id="month-year-only"),
+        pytest.param("Cover page with no date anywhere on the first few lines.", None, id="no-match"),
+        pytest.param("Cover page without any date\n" + ("filler " * 1200) + "2024-01-01", None, id="title-region-only"),
+        pytest.param("Cover\nDelivered on 19th December 2024 by Firm", "2024-12-19", id="ordinal-day-first"),
+        pytest.param("Cover\nPublished December 19th, 2024", "2024-12-19", id="ordinal-month-first"),
+        pytest.param("Cover\nDelivered 1st January 2024", "2024-01-01", id="ordinal-1st"),
+        pytest.param("Cover\nDelivered 2nd January 2024", "2024-01-02", id="ordinal-2nd"),
+        pytest.param("Cover\nDelivered 3rd January 2024", "2024-01-03", id="ordinal-3rd"),
+        pytest.param("Cover\nDelivered 4th January 2024", "2024-01-04", id="ordinal-4th"),
+        # Second group > 12, so unambiguously MM/DD/YYYY.
+        pytest.param("Cover\nAudit date: 12/19/2024", "2024-12-19", id="us-slash"),
+        # First group > 12, so must be DD/MM/YYYY; we flip.
+        pytest.param("Cover\n19/12/2024", "2024-12-19", id="slash-first-is-day"),
+        # Both operands <= 12 (May 2 or Feb 5): skip rather than guess, since DD/MM
+        # auditors like Certora would yield silently wrong dates.
+        pytest.param("Cover\nAudit date: 05/02/2024", None, id="ambiguous-slash-skipped"),
+        pytest.param(
+            "Cover\nAudit: 05/02/2024\nDelivered: 10 March 2024", "2024-03-10", id="prose-over-ambiguous-slash"
+        ),
+    ],
+)
+def test_extract_date_from_pdf_text(text, expected):
+    assert extract_date_from_pdf_text(text) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -438,12 +319,19 @@ def test_call_llm_raises_when_no_stub(tmp_path, monkeypatch):
         _call_llm("no matching fixture")
 
 
-def test_call_llm_live_path_uses_default_model(monkeypatch):
+@pytest.mark.parametrize(
+    ("env", "expected_model"),
+    [
+        pytest.param({}, "google/gemini-2.5-flash-lite", id="default-model"),
+        pytest.param({"PSAT_SCOPE_LLM_MODEL": "anthropic/claude-test"}, "anthropic/claude-test", id="model-override"),
+    ],
+)
+def test_call_llm_live_path_selects_model(monkeypatch, env, expected_model):
     """With no stub dir, ``_call_llm`` selects the model and calls OpenRouter.
     The offline suite always sets ``PSAT_LLM_STUB_DIR``, so this is the only test
     exercising the live branch (and pins the default model)."""
-    monkeypatch.delenv("PSAT_LLM_STUB_DIR", raising=False)
-    monkeypatch.delenv("PSAT_SCOPE_LLM_MODEL", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
     captured = {}
 
     def fake_chat(messages, model=None, **kwargs):
@@ -453,16 +341,8 @@ def test_call_llm_live_path_uses_default_model(monkeypatch):
     monkeypatch.setattr("utils.llm.openrouter.chat", fake_chat)
     response, model = _call_llm("a scope prompt")
     assert response == '["FromLLM"]'
-    assert model == "google/gemini-2.5-flash-lite"
-    assert captured["model"] == "google/gemini-2.5-flash-lite"
-
-
-def test_call_llm_live_path_honors_model_override(monkeypatch):
-    monkeypatch.delenv("PSAT_LLM_STUB_DIR", raising=False)
-    monkeypatch.setenv("PSAT_SCOPE_LLM_MODEL", "anthropic/claude-test")
-    monkeypatch.setattr("utils.llm.openrouter.chat", lambda *a, **k: "[]")
-    _response, model = _call_llm("a scope prompt")
-    assert model == "anthropic/claude-test"
+    assert model == expected_model
+    assert captured["model"] == expected_model
 
 
 # ---------------------------------------------------------------------------
@@ -475,37 +355,33 @@ def _setup_stub(tmp_path, monkeypatch, response_body: str) -> None:
     monkeypatch.setenv("PSAT_LLM_STUB_DIR", str(tmp_path))
 
 
-def test_extract_scope_with_llm_parses_string_array(tmp_path, monkeypatch):
-    _setup_stub(tmp_path, monkeypatch, '["Pool","Vault","Strategy"]')
-    sections = [ScopeSection(1, 1, "scope", "Pool.sol Vault.sol Strategy.sol")]
+@pytest.mark.parametrize(
+    ("response_body", "section_text", "expected"),
+    [
+        pytest.param(
+            '["Pool","Vault","Strategy"]',
+            "Pool.sol Vault.sol Strategy.sol",
+            ["Pool", "Vault", "Strategy"],
+            id="string-array",
+        ),
+        pytest.param('```json\n["Pool"]\n```', "Pool.sol", ["Pool"], id="markdown-fence"),
+        pytest.param(
+            '["Pool.sol","pool","Vault.vy"]', "Pool Vault", ["Pool", "Vault"], id="strips-extensions-and-dedupes"
+        ),
+        pytest.param(
+            '[{"name":"Pool"},{"contract_name":"Vault"},{"file":"Strategy.sol"}]',
+            "Pool Vault Strategy.sol",
+            ["Pool", "Vault", "Strategy"],
+            id="object-entries",
+        ),
+        pytest.param("[]", "anything", [], id="empty-array"),
+    ],
+)
+def test_extract_scope_with_llm_parses_response(tmp_path, monkeypatch, response_body, section_text, expected):
+    _setup_stub(tmp_path, monkeypatch, response_body)
+    sections = [ScopeSection(1, 1, "scope", section_text)]
     names, _, _, _, _ = extract_scope_with_llm(sections, "T", "A")
-    assert names == ["Pool", "Vault", "Strategy"]
-
-
-def test_extract_scope_with_llm_tolerates_markdown_fence(tmp_path, monkeypatch):
-    _setup_stub(tmp_path, monkeypatch, '```json\n["Pool"]\n```')
-    sections = [ScopeSection(1, 1, "scope", "Pool.sol")]
-    names, _, _, _, _ = extract_scope_with_llm(sections, "T", "A")
-    assert names == ["Pool"]
-
-
-def test_extract_scope_with_llm_strips_extensions_and_dedupes(tmp_path, monkeypatch):
-    _setup_stub(tmp_path, monkeypatch, '["Pool.sol","pool","Vault.vy"]')
-    sections = [ScopeSection(1, 1, "scope", "Pool Vault")]
-    names, _, _, _, _ = extract_scope_with_llm(sections, "T", "A")
-    # "Pool.sol" and "pool" dedupe under case-insensitive match.
-    assert names == ["Pool", "Vault"]
-
-
-def test_extract_scope_with_llm_accepts_object_entries(tmp_path, monkeypatch):
-    _setup_stub(
-        tmp_path,
-        monkeypatch,
-        '[{"name":"Pool"},{"contract_name":"Vault"},{"file":"Strategy.sol"}]',
-    )
-    sections = [ScopeSection(1, 1, "scope", "Pool Vault Strategy.sol")]
-    names, _, _, _, _ = extract_scope_with_llm(sections, "T", "A")
-    assert names == ["Pool", "Vault", "Strategy"]
+    assert names == expected
 
 
 def test_extract_scope_with_llm_parses_classified_commits_from_object(tmp_path, monkeypatch):
@@ -623,48 +499,15 @@ def test_extract_scope_with_llm_raises_on_unparseable(tmp_path, monkeypatch):
         extract_scope_with_llm(sections, "T", "A")
 
 
-def test_extract_scope_with_llm_handles_empty_array(tmp_path, monkeypatch):
-    _setup_stub(tmp_path, monkeypatch, "[]")
-    sections = [ScopeSection(1, 1, "scope", "anything")]
-    names, _, _, _, _ = extract_scope_with_llm(sections, "T", "A")
-    assert names == []
-
-
-# ---------------------------------------------------------------------------
-# build_artifact_payload
-# ---------------------------------------------------------------------------
-
-
-def test_build_artifact_payload_preserves_scope_section_text():
-    payload = build_artifact_payload(
-        ["Pool"],
-        method="llm_chunk_scan",
-        model="google/gemini-2.0-flash-001",
-        extracted_date="2024-12-19",
-        raw_response='["Pool"]',
-        scope_section_text="The following contracts were audited:\nsrc/Pool.sol",
-    )
-    assert payload["scope_section_text"] == ("The following contracts were audited:\nsrc/Pool.sol")
-
-
 # ---------------------------------------------------------------------------
 # build_prompt sanity
 # ---------------------------------------------------------------------------
-
-
-def test_build_prompt_includes_title_and_scope_text():
-    sections = [ScopeSection(1, 1, "scope", "Pool.sol  Vault.sol")]
-    prompt = _build_prompt(sections, "My Audit", "SomeFirm")
-    assert "My Audit" in prompt
-    assert "SomeFirm" in prompt
-    assert "Pool.sol" in prompt
 
 
 def test_build_prompt_truncates_very_large_scope_text():
     huge = "A" * 100_000
     sections = [ScopeSection(1, 1, "scope", huge)]
     prompt = _build_prompt(sections, "T", "A")
-    # The prompt body shouldn't approach 100k chars — it's capped.
     assert len(prompt) < 60_000
 
 
@@ -673,41 +516,20 @@ def test_build_prompt_truncates_very_large_scope_text():
 # ---------------------------------------------------------------------------
 
 
-def test_locate_scope_section_matches_body_prose_contract_list():
-    # Certora-style: scope is introduced by a prose phrase, not a section
-    # header. The pattern catches the intro and the 2-page window pulls
-    # in the bulleted list that follows.
-    text = _doc(
-        _page(1, "Cover\nProject Overview"),
-        _page(
-            2,
+@pytest.mark.parametrize(
+    "page2",
+    [
+        # Certora-style: scope introduced by a prose phrase, not a header; the 2-page window pulls in the bullets.
+        pytest.param(
             "The following contract list is included in the scope of this audit:\n- src/Pool.sol\n- src/Vault.sol",
+            id="body-prose-contract-list",
         ),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) >= 1
-    assert any("Pool.sol" in s.text_slice for s in sections)
-
-
-def test_locate_scope_section_matches_following_files_phrase():
-    text = _doc(
-        _page(1, "Cover"),
-        _page(
-            2,
-            "We reviewed the following files:\nPool.sol\nVault.sol\nStrategy.sol",
-        ),
-    )
-    sections = locate_scope_section(text)
-    assert len(sections) >= 1
-    assert any("Pool.sol" in s.text_slice for s in sections)
-
-
-def test_locate_scope_section_matches_colon_intro():
-    # "Contracts reviewed:" / "Files audited:" — a common trailing-colon form.
-    text = _doc(
-        _page(1, "Cover"),
-        _page(2, "Contracts reviewed:\n- Pool.sol\n- Vault.sol"),
-    )
+        pytest.param("We reviewed the following files:\nPool.sol\nVault.sol\nStrategy.sol", id="following-files"),
+        pytest.param("Contracts reviewed:\n- Pool.sol\n- Vault.sol", id="colon-intro"),
+    ],
+)
+def test_locate_scope_section_matches_content_pattern(page2):
+    text = _doc(_page(1, "Cover"), _page(2, page2))
     sections = locate_scope_section(text)
     assert len(sections) >= 1
     assert any("Pool.sol" in s.text_slice for s in sections)
@@ -722,23 +544,7 @@ def test_content_pattern_does_not_match_mere_scope_mention():
         _page(3, "More prose without any scope listing."),
     )
     sections = locate_scope_section(text)
-    # No header, no valid content intro — should be []
     assert sections == []
-
-
-def test_content_pattern_coexists_with_header_pattern():
-    # When BOTH a header and a content-pattern exist, both get captured
-    # (the LLM benefits from seeing both locations).
-    text = _doc(
-        _page(1, "Cover"),
-        _page(2, "Scope\n(see later sections)"),
-        _page(4, "The following contracts were audited:\n- Pool.sol"),
-    )
-    sections = locate_scope_section(text)
-    # At least one section; could be merged or two, depending on overlap.
-    assert len(sections) >= 1
-    combined = "\n".join(s.text_slice for s in sections)
-    assert "Pool.sol" in combined
 
 
 # ---------------------------------------------------------------------------
@@ -757,7 +563,6 @@ def test_split_text_into_chunks_caps_at_max_chunks():
 def test_split_text_into_chunks_covers_pages_contiguously():
     text = _doc(*(_page(i, f"page {i} body ") * 30 for i in range(1, 21)))
     chunks = _split_text_into_chunks(text)
-    # First chunk starts at page 1. Pages are contiguous across chunks.
     assert chunks[0].start_page == 1
     for prev, nxt in zip(chunks, chunks[1:]):
         assert nxt.start_page == prev.end_page + 1
@@ -786,9 +591,6 @@ def test_chunk_scan_stops_at_first_hit(tmp_path, monkeypatch):
     assert names == ["Pool", "Vault"]
     assert chunks_used == 2
     assert model == "stub"
-    # The winning chunk carries the exact text the LLM saw — asserting
-    # its presence and marker content proves the provenance field is
-    # populated for artifact writes.
     assert winning_chunk is not None
     assert "UNIQUE_SCOPE_MARKER_XYZ" in winning_chunk.text_slice
     assert len(prompts_seen) == 2
@@ -803,7 +605,6 @@ def test_chunk_scan_returns_empty_when_no_chunk_has_scope(tmp_path, monkeypatch)
     text = _doc(*(_page(i, "no scope anywhere " * 20) for i in range(1, 11)))
     names, _, _, response, model, chunks_used, winning_chunk = extract_scope_via_chunk_scan(text, "T", "A")
     assert names == []
-    # Every chunk got consulted because none hit.
     assert chunks_used >= 1
     assert winning_chunk is None
 
@@ -831,8 +632,6 @@ def test_chunk_scan_rejects_findings_only_chunks_without_scope_signal(
 
     monkeypatch.setattr("services.audits.scope_extraction._llm._call_llm", fake_call)
 
-    # Each contract name appears exactly once — classic findings-title
-    # extraction artifact.
     text = _doc(
         _page(1, "L-01: Pool has an edge case\nSeverity: Low\nDescription: lorem ipsum."),
         _page(2, "L-02: Vault config needs review\nSeverity: Info\nOther prose."),
@@ -842,23 +641,39 @@ def test_chunk_scan_rejects_findings_only_chunks_without_scope_signal(
     assert winning_chunk is None
 
 
-def test_chunk_scan_accepts_chunk_with_scope_signal(monkeypatch):
-    # Same LLM response, but this time the chunk clearly has scope
-    # content (flat .sol listing) — should be accepted.
-    def fake_call(prompt):
-        return '["Pool", "Vault"]', "stub"
-
-    monkeypatch.setattr("services.audits.scope_extraction._llm._call_llm", fake_call)
-
-    text = _doc(
-        _page(
-            1,
-            "Audited Files:\nsrc/Pool.sol (420 nSLOC)\nsrc/Vault.sol (310 nSLOC)\n",
+@pytest.mark.parametrize(
+    ("llm_response", "pages", "expected"),
+    [
+        pytest.param(
+            '["Pool", "Vault"]',
+            (
+                "Audited Files:\nsrc/Pool.sol (420 nSLOC)\nsrc/Vault.sol (310 nSLOC)\n",
+                "Findings",
+            ),
+            ["Pool", "Vault"],
+            id="scope-signal",
         ),
-        _page(2, "Findings"),
-    )
+        # Certora-style single-focus audit: no scope header, no .sol suffixes, but
+        # the name is mentioned >=2 times, so the frequency fallback accepts it.
+        pytest.param(
+            '["WeETHWithdrawAdapter"]',
+            (
+                "L-01: WeETHWithdrawAdapter may revert\n"
+                "The WeETHWithdrawAdapter contract has issue X. Recommendation: "
+                "update the function. Customer response: acknowledged.",
+                "L-02: WeETHWithdrawAdapter rate limit issue\nAdditional analysis of WeETHWithdrawAdapter.",
+            ),
+            ["WeETHWithdrawAdapter"],
+            id="single-focus-frequency",
+        ),
+    ],
+)
+def test_chunk_scan_accepts_chunk_passing_signal_gate(monkeypatch, llm_response, pages, expected):
+    monkeypatch.setattr("services.audits.scope_extraction._llm._call_llm", lambda prompt: (llm_response, "stub"))
+
+    text = _doc(*(_page(i, body) for i, body in enumerate(pages, start=1)))
     names, _, _, _, _, _, winning_chunk = extract_scope_via_chunk_scan(text, "T", "A")
-    assert names == ["Pool", "Vault"]
+    assert names == expected
     assert winning_chunk is not None
 
 
@@ -879,9 +694,6 @@ def test_chunk_scan_merges_across_multiple_passing_chunks(monkeypatch):
 
     monkeypatch.setattr("services.audits.scope_extraction._llm._call_llm", fake_call)
 
-    # Chunk 1 (pages 1-5): title with TitleContract mentioned multiple
-    # times AND appearing as .sol. Chunk 2 (pages 6-10): main scope
-    # table MAIN_SCOPE_MARKER. Both should pass the signal gate.
     text = _doc(
         _page(
             1,
@@ -903,41 +715,10 @@ def test_chunk_scan_merges_across_multiple_passing_chunks(monkeypatch):
         _page(10, "body"),
     )
     names, _, _, _, _, chunks_used, winning_chunk = extract_scope_via_chunk_scan(text, "T", "A")
-    # Merged across both chunks; dedupes, preserves first-seen order.
     assert "TitleContract" in names
     assert "Pool" in names
     assert "Vault" in names
     assert "Strategy" in names
-    # Both chunks were consulted.
     assert calls["count"] == 2
-    # Winning chunk is the first accepted one (chunk 1).
     assert winning_chunk is not None
     assert "TITLE_PAGE_MARKER" in winning_chunk.text_slice
-
-
-def test_chunk_scan_accepts_single_focus_audit_via_frequency(monkeypatch):
-    # Certora-style "WeETH Withdrawal Adapter" single-focus audit —
-    # no formal scope header, no .sol suffixes, but the contract name
-    # is mentioned multiple times across findings. The frequency
-    # fallback rule (>=2 mentions) should accept it.
-    def fake_call(prompt):
-        return '["WeETHWithdrawAdapter"]', "stub"
-
-    monkeypatch.setattr("services.audits.scope_extraction._llm._call_llm", fake_call)
-
-    text = _doc(
-        _page(
-            1,
-            "L-01: WeETHWithdrawAdapter may revert\n"
-            "The WeETHWithdrawAdapter contract has issue X. Recommendation: "
-            "update the function. Customer response: acknowledged.",
-        ),
-        _page(
-            2,
-            "L-02: WeETHWithdrawAdapter rate limit issue\nAdditional analysis of WeETHWithdrawAdapter.",
-        ),
-    )
-    names, _, _, _, _, _, winning_chunk = extract_scope_via_chunk_scan(text, "T", "A")
-    # Accepted because WeETHWithdrawAdapter appears multiple times.
-    assert names == ["WeETHWithdrawAdapter"]
-    assert winning_chunk is not None

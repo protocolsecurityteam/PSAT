@@ -1,5 +1,3 @@
-// Graph layout for SurfaceCanvas. Pure helpers + an ELK instance that runs
-// the async layered pass. No React — but `elkLayout` is async because ELK is.
 
 import ELK from "elkjs/lib/elk.bundled.js";
 
@@ -22,12 +20,11 @@ function hierarchicalLayout(machines, edgePairs) {
   if (n === 0) return [];
   if (n === 1) return [{ x: 0, y: 0 }];
 
-  // Build directed adjacency: from → Set<to> (controller → target)
   const addrToIdx = new Map();
   machines.forEach((m, i) => addrToIdx.set(m.address?.toLowerCase(), i));
 
-  const children = new Map(); // idx → Set<idx>  (who this node controls)
-  const parents = new Map();  // idx → Set<idx>  (who controls this node)
+  const children = new Map(); // idx → Set<idx> (who this node controls)
+  const parents = new Map();  // idx → Set<idx> (who controls this node)
   for (let i = 0; i < n; i++) { children.set(i, new Set()); parents.set(i, new Set()); }
 
   for (const [from, to] of edgePairs) {
@@ -39,13 +36,12 @@ function hierarchicalLayout(machines, edgePairs) {
     }
   }
 
-  // Assign tiers via BFS from roots (nodes with no parents)
   const tier = new Array(n).fill(-1);
   const roots = [];
   for (let i = 0; i < n; i++) {
     if (parents.get(i).size === 0) roots.push(i);
   }
-  // If no roots (cycles), pick the node with most children
+  // No roots (cycles): start from the node with most children.
   if (roots.length === 0) {
     let best = 0;
     for (let i = 1; i < n; i++) {
@@ -70,20 +66,17 @@ function hierarchicalLayout(machines, edgePairs) {
     }
   }
 
-  // Unconnected nodes get their own tier at the bottom
   const maxTier = Math.max(0, ...tier.filter((t) => t >= 0));
   for (let i = 0; i < n; i++) {
     if (tier[i] < 0) tier[i] = maxTier + 1;
   }
 
-  // Group nodes by tier
   const tiers = new Map();
   for (let i = 0; i < n; i++) {
     if (!tiers.has(tier[i])) tiers.set(tier[i], []);
     tiers.get(tier[i]).push(i);
   }
 
-  // Score each node by influence
   const outCount = new Array(n).fill(0);
   const inCount = new Array(n).fill(0);
   const hasEdge = new Set();
@@ -94,7 +87,6 @@ function hierarchicalLayout(machines, edgePairs) {
     if (ti !== undefined) { inCount[ti]++; hasEdge.add(ti); }
   }
 
-  // Split connected vs isolated
   const connected = [];
   const isolated = [];
   for (let i = 0; i < n; i++) {
@@ -102,7 +94,6 @@ function hierarchicalLayout(machines, edgePairs) {
     else isolated.push(i);
   }
 
-  // Rank connected by influence (more outgoing = higher)
   connected.sort((a, b) => {
     const sa = outCount[a] - inCount[a];
     const sb = outCount[b] - inCount[b];
@@ -112,12 +103,10 @@ function hierarchicalLayout(machines, edgePairs) {
 
   const NODE_W = 250;
   const NODE_H = 160;
-  // Scale columns based on node count — more nodes = wider layout
   const colCount = n <= 9 ? 3 : n <= 20 ? 4 : 5;
   const spread = NODE_W * 1.15;
   const positions = new Array(n);
 
-  // Connected nodes: multi-column stagger, spreading wider as we go down
   for (let rank = 0; rank < connected.length; rank++) {
     const idx = connected[rank];
     const col = rank % colCount;
@@ -125,9 +114,7 @@ function hierarchicalLayout(machines, edgePairs) {
     const rowSpread = spread * (1 + row * 0.08);
     let x, y;
     y = row * NODE_H;
-    // Spread columns evenly around center
     const colOffset = (col - (colCount - 1) / 2) * rowSpread;
-    // Deterministic jitter (subtle)
     const jx = ((rank * 7 + 13) % 30 - 15);
     const jy = ((rank * 11 + 7) % 16 - 8);
     x = colOffset + jx;
@@ -135,7 +122,6 @@ function hierarchicalLayout(machines, edgePairs) {
     positions[idx] = { x: Math.round(x), y: Math.round(y) };
   }
 
-  // Isolated nodes: ellipse ring around the connected core
   if (isolated.length > 0) {
     const cxs = connected.map((i) => positions[i].x);
     const cys = connected.map((i) => positions[i].y);
@@ -156,12 +142,8 @@ function hierarchicalLayout(machines, edgePairs) {
   return positions;
 }
 
-// `bandHeights` ({ groupId: px }) reserves each group's real header-band
-// height. GroupNode measures the rendered band (colored bar + Controllers
-// accordion, including any capability summary that wraps to several lines) and
-// reports it per group; we reserve that exact height so ELK packs the canvas
-// to fit (rather than a wrapped row overflowing / overlapping cards). Until a
-// group is measured we fall back to a constant estimate.
+// `bandHeights` ({ groupId: px }) reserves each group's measured header band; a
+// constant estimate until measured.
 export function buildGraphLayout(machines, fundFlows, principals, bandHeights = {}, chain = "ethereum") {
   const sorted = [...machines].sort((a, b) => b.totalFunctions - a.totalFunctions);
   const principalList = principals || [];
@@ -172,10 +154,9 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
 
   const { contractToGroup, groupChildren } = assignGroups(sorted, principalList);
 
-  // Layout contracts only — principals get positioned relative to what they control
+  // Principals are positioned relative to what they control.
   const contractEntities = sorted.map((m) => ({ address: m.address?.toLowerCase(), kind: "contract" }));
 
-  // Collect contract-to-contract edge pairs
   const edgePairs = [];
   const byName = new Map();
   for (const m of sorted) {
@@ -199,15 +180,10 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
     }
   }
 
-  // Fallback positions (only used if ELK fails) — keep the old hierarchical
-  // layout for that path; it doesn't understand groups but it never
-  // renders unless ELK errors out.
+  // Only used if ELK fails.
   const fallbackPositions = hierarchicalLayout(contractEntities, edgePairs);
   const contractPositions = new Map();
 
-  // Total USD per group, so the group header can show a single TVL number
-  // instead of every child having to be inspected. Mirrors what the
-  // `Has Funds` search mode and the bottom-of-card balance line use.
   const groupTotalUsd = new Map();
   for (const [principalAddr, kids] of groupChildren) {
     let total = 0;
@@ -223,28 +199,19 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
     if (m.address) nameByAddr.set(m.address.toLowerCase(), m.name || m.address);
   }
 
-  // Build group container nodes first — React Flow needs the parent
-  // in the array before its children for stable rendering.
+  // React Flow needs parents before children.
   const nodes = [];
   for (const [principalAddr, kids] of groupChildren) {
     const p = principalByAddr.get(principalAddr);
     if (!p) continue;
-    // Controllers accordion model (primary first, then co-controllers) +
-    // the header height it reserves, so layoutGroupInterior can start the
-    // cards below it and GroupNode can pin the rendered band to the same
-    // number. See buildGroupControllers / groupHeaderHeight.
     const controllers = buildGroupControllers(p, kids, principalList, nameByAddr, chain);
-    // Reserve this group's measured band height so the cards — and everything
-    // ELK packs below — start below it instead of being overlapped. Falls back
-    // to a constant estimate until GroupNode reports the real height.
     const measuredBand = bandHeights[p.address];
     const headerHeight = measuredBand != null ? measuredBand : groupHeaderHeight(controllers.length);
     nodes.push({
       id: p.address,
       type: "group",
       position: { x: 0, y: 0 },
-      // ELK fills these in; the placeholder keeps React Flow happy on
-      // the first render before the async layout resolves.
+      // Placeholder until the async layout resolves.
       style: { width: 400, height: 200 },
       data: {
         principal: p,
@@ -256,7 +223,6 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
     });
   }
 
-  // Contract nodes
   for (let i = 0; i < sorted.length; i++) {
     const m = sorted[i];
     const pos = fallbackPositions[i] || { x: 0, y: 0 };
@@ -269,8 +235,7 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
       data: { machine: m },
     };
     if (groupAddr) {
-      // The principal's original-cased address is what we used as the
-      // group node's id — find it so React Flow's parent lookup matches.
+      // The group node's id is the original-cased address.
       const principalCanonical = principalByAddr.get(groupAddr)?.address || groupAddr;
       node.parentId = principalCanonical;
       node.extent = "parent";
@@ -278,14 +243,9 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
     nodes.push(node);
   }
 
-  // Co-controllers — principals that hold real authority on contracts they
-  // don't primary-own (principal.co_controls) — are no longer rendered as
-  // standalone "guardian" rail nodes. They now live inside the owning group's
-  // Controllers accordion (see buildGroupControllers / GroupNode), which lists
-  // the exact functions each can call per contract instead of an illegible
-  // dot in a rail. A co-controller spanning several groups appears in each.
-  // The permissionless long tail (machine.other_callers) is not rendered at
-  // all; the per-function caller buttons in the detail lanes cover it.
+  // Co-controllers render inside group accordions, not as rail nodes. The
+  // permissionless long tail (other_callers) isn't rendered; per-function
+  // caller buttons cover it.
 
   const edges = [];
   for (const [, group] of byName) {
@@ -306,12 +266,8 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
     }
   }
 
-  // Fund flow / control edges with semantic handle routing. Any edge
-  // whose source is a non-contract principal is silently dropped — the
-  // ownership relationship now lives in the group containment, and the
-  // cross-group principal fanout was the dominant source of canvas
-  // spaghetti. Only contract→contract edges (proxy→impl, controls,
-  // controller, contract-as-principal CGN edges) survive.
+  // Principal-source edges are dropped: containment carries ownership, and the
+  // fanout was the main source of spaghetti.
   const LANE_HANDLES = {
     control: { sourceHandle: "ctrl-out", targetHandle: "ctrl-in" },
     inflow:  { sourceHandle: "value-out", targetHandle: "value-in" },
@@ -339,9 +295,7 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
     });
   }
 
-  // Split intra-group edges out of the aggregation pass — they're
-  // what gives each box its caller→callee hierarchy when rendered
-  // inside the group, and we don't want them bundled away.
+  // Kept out of aggregation: they give each box its caller→callee hierarchy.
   const intraGroupEdgesByGroup = new Map();
   const crossGroupEdges = [];
   for (const e of edges) {
@@ -359,20 +313,9 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
 
   const aggregatedCrossEdges = aggregateEdges(crossGroupEdges, contractToGroup, principalList, sorted);
 
-  // Aggregate intra-group edges the same way we do cross-group ones.
-  // aggregateEdges' endpoint() resolves a contract to its group when
-  // given a populated contractToGroup — which would collapse every
-  // child↔child pair into a same-group self-loop and drop the whole
-  // batch. Handing it an empty map preserves the raw contract
-  // addresses so each (childA, childB) pair collapses to one bundle,
-  // mirroring the outside-the-groups view.
-  //
-  // No additional capability/flow-type filter is applied: upstream FP
-  // gating on `type=principal` / `type=controller` flows already
-  // removed the CGN/CV over-reach that was the dominant intra-group
-  // spaghetti. Filtering further here on a cap whitelist would now
-  // hide legitimate authorization edges whose caps happen to be
-  // source-attribute tags (`upgradeable`, `pause`, `delegatecall`).
+  // An empty group map keeps raw addresses, so child↔child pairs bundle instead
+  // of collapsing to a self-loop. No cap filter: FP gating upstream already
+  // removed the over-reach.
   const NO_GROUP_RESOLVE = new Map();
   const aggregatedIntraByGroup = new Map();
   const intraGroupRendered = [];
@@ -386,20 +329,12 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
       });
     }
   }
-  // Always-visible cross-group connectors. A grouped contract whose
-  // cross-group calls were aggregated into a box→box bundle would otherwise
-  // look unconnected. We add a short stub at each contract that participates in
-  // a bundle, so you can see which contracts reach outside the box while the
-  // bundle still carries the long-haul (no per-contract cross-canvas fanout).
-  // These are ordinary channeled edges that dim/brighten with selection.
-  //   - OUTBOUND (the bundle's source contract): drops to its group's BOTTOM
-  //     edge, the exact point the bundle leaves from. Routed around sibling
-  //     cards (attachObstacles) and landed cleanly via ChanneledStepEdge.
-  //   - INBOUND (the bundle's target contract): drops from just under its
-  //     group's header to the contract's top. The bundle still arrives at the
-  //     box top "as normal"; the stub only draws the part BELOW the header, so
-  //     the header reads as hiding the segment between them (the "invisible
-  //     line through the header" the connection appears to continue along).
+  // Short stubs so grouped contracts with cross-group calls don't look
+  // unconnected; the bundle carries the long haul.
+  // - OUTBOUND: from the source contract down to its group's bottom, where the
+  //     bundle leaves.
+  // - INBOUND: from under the target group's header down to the contract; the
+  //     header appears to hide the rest.
   const contractCanonicalByLc = new Map();
   for (const m of sorted) {
     if (m.address) contractCanonicalByLc.set(m.address.toLowerCase(), m.address);
@@ -417,9 +352,7 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
     for (const s of bundle.data?.samples || []) {
       const fromLc = s.from?.toLowerCase();
       const toLc = s.to?.toLowerCase();
-      // Outbound: source contract → its group's bottom (where the bundle leaves).
-      // The group-membership check also guarantees bundle.source is a group, so
-      // the stub-bottom handle exists.
+      // The membership check also guarantees the stub-bottom handle exists.
       if (fromLc && !outStubbed.has(fromLc) && contractToGroup.get(fromLc) === srcGroupLc) {
         const c = contractCanonicalByLc.get(fromLc);
         if (c) {
@@ -437,9 +370,7 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
           });
         }
       }
-      // Inbound: from under the target group's header down to the target
-      // contract's top. headerHeight tells ChanneledStepEdge where the header
-      // ends so it can start the visible drop there.
+      // headerHeight tells ChanneledStepEdge where the visible drop starts.
       if (toLc && !inStubbed.has(toLc) && contractToGroup.get(toLc) === tgtGroupLc) {
         const c = contractCanonicalByLc.get(toLc);
         const g = groupNodeByAddr.get(tgtGroupLc);
@@ -475,13 +406,9 @@ export function buildGraphLayout(machines, fundFlows, principals, bandHeights = 
 export async function elkLayout(machines, fundFlows, principals, bandHeights = {}, chain = "ethereum") {
   const { nodes: rawNodes, edges: rawEdges } = buildGraphLayout(machines, fundFlows, principals, bandHeights, chain);
 
-  // Split nodes into top-level vs grouped-children. ELK only sees the
-  // top level now: each group is handed to it as a single sized box.
-  // The inside of every group is laid out by layoutGroupInterior
-  // (semantic bands: control / value / interfaces) so position carries
-  // meaning regardless of how the group's children relate to each other
-  // in the call graph. ELK's `layered` algorithm minimised crossings
-  // but ignored role — that's what made dense Safes read as scattered.
+  // ELK only packs top-level boxes; group interiors use semantic bands
+  // (layoutGroupInterior), since ELK's layered layout ignored role and
+  // scattered dense Safes.
   const childByParent = new Map();
   const topLevel = [];
   for (const n of rawNodes) {
@@ -498,16 +425,11 @@ export async function elkLayout(machines, fundFlows, principals, bandHeights = {
     return { width: CHILD_W, height: CHILD_H };
   }
 
-  // Pre-compute every group's interior layout. Doing this before
-  // building elkChildren means the group's overall width/height — which
-  // ELK uses to pack groups against each other — comes from the actual
-  // role-band layout, not from ELK's own compound-layout heuristic.
+  // Before building elkChildren, so group sizes come from the band layout.
   const groupInteriors = new Map();
   for (const n of topLevel) {
     if (n.type !== "group") continue;
     const kids = childByParent.get(n.id) || [];
-    // headerHeight reserves the colored bar + collapsed Controllers
-    // accordion, so the first card lands below it (see groupHeaderHeight).
     groupInteriors.set(n.id, layoutGroupInterior(kids, machines, n.data?.headerHeight));
   }
 
@@ -519,9 +441,7 @@ export async function elkLayout(machines, fundFlows, principals, bandHeights = {
     return { id: n.id, ...dimsFor(n) };
   });
 
-  // ELK only does the outer rectpacking pass over groups + standalone
-  // contracts. No edges fed to ELK; intra-group routing is handled
-  // entirely by ChanneledStepEdge's bundled router downstream.
+  // No edges to ELK; ChanneledStepEdge routes them.
   const elkGraph = {
     id: "root",
     layoutOptions: {
@@ -542,9 +462,7 @@ export async function elkLayout(machines, fundFlows, principals, bandHeights = {
 
     const laidOutNodes = rawNodes.map((n) => {
       if (n.parentId) {
-        // Child positions come from the JS interior layout, relative
-        // to the parent group's origin (React Flow adds the parent
-        // offset automatically via extent="parent").
+        // Relative to the parent group; React Flow adds the offset.
         const interior = groupInteriors.get(n.parentId);
         const pos = interior?.positions?.get(n.id) || n.position;
         return { ...n, position: pos };
@@ -565,9 +483,8 @@ export async function elkLayout(machines, fundFlows, principals, bandHeights = {
     const laneAdjusted = assignEdgeLanes(laidOutNodes, rawEdges);
     return { nodes: laidOutNodes, edges: attachObstacles(laneAdjusted, laidOutNodes) };
   } catch {
-    // Fallback to manual positions if elk fails. Groups still get the
-    // JS-computed interior dims; only the inter-group rectpacking is
-    // lost (groups stack at their fallback positions).
+    // Fallback if ELK fails: groups keep interior dims; only inter-group
+    // packing is lost.
     const laneAdjusted = assignEdgeLanes(rawNodes, rawEdges);
     return { nodes: rawNodes, edges: attachObstacles(laneAdjusted, rawNodes) };
   }

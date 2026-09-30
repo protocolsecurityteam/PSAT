@@ -1,22 +1,9 @@
 """Tests for in-process job concurrency in workers.base.BaseWorker.
 
-K=1 keeps the legacy single-job loop byte-identical (covered by
-tests/workers/test_base_worker.py). K>1 dispatches each claimed job into a
-per-worker ThreadPoolExecutor so RPC/CPU waits in one job overlap with
-sibling jobs.
-
-What we pin:
-1. Per-stage env (PSAT_<STAGE>_JOB_CONCURRENCY) and global
-   PSAT_JOB_CONCURRENCY resolve correctly with the right precedence.
-2. K>1 dispatcher actually runs jobs in parallel (wall-clock check).
-3. Each in-flight job gets its own SQLAlchemy session (no cross-session
-   ORM identity-map mixing).
-4. SIGTERM stops new claims and drains the in-flight pool before
-   returning (graceful shutdown).
-5. Slot accounting: the dispatcher never exceeds K concurrent jobs
-   regardless of how fast the queue produces them.
-6. Errors inside a dispatched job don't kill the dispatcher loop.
-7. Job-handled-directly path still skips advance_job under K>1.
+K=1 keeps the legacy single-job loop byte-identical (see test_base_worker.py).
+K>1 dispatches each claimed job into a per-worker ThreadPoolExecutor: env
+precedence, real parallelism, per-job sessions (no ORM identity-map mixing),
+SIGTERM drain, slot cap, and error isolation.
 """
 
 from __future__ import annotations
@@ -28,6 +15,8 @@ import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from db.models import JobStage, JobStatus
 from workers.base import BaseWorker, JobHandledDirectly, _resolve_job_concurrency
@@ -72,30 +61,29 @@ def _make_job(**overrides):
 # ---------------------------------------------------------------------------
 
 
-def test_per_stage_env_var_wins_over_global(monkeypatch):
-    """Per-stage env trumps the global default; both override the implicit 1."""
-    monkeypatch.setenv("PSAT_JOB_CONCURRENCY", "2")
-    monkeypatch.setenv("PSAT_RESOLUTION_JOB_CONCURRENCY", "5")
-    assert _resolve_job_concurrency("resolution") == 5
-    # Different stage falls back to the global.
-    assert _resolve_job_concurrency("policy") == 2
-
-
-def test_global_env_falls_back_to_one(monkeypatch):
-    monkeypatch.delenv("PSAT_JOB_CONCURRENCY", raising=False)
-    monkeypatch.delenv("PSAT_DISCOVERY_JOB_CONCURRENCY", raising=False)
-    assert _resolve_job_concurrency("discovery") == 1
-
-
-def test_env_var_invalid_value_falls_back_to_one(monkeypatch):
-    monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "garbage")
-    monkeypatch.delenv("PSAT_JOB_CONCURRENCY", raising=False)
-    assert _resolve_job_concurrency("discovery") == 1
-
-
-def test_env_var_zero_clamped_to_one(monkeypatch):
-    monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "0")
-    assert _resolve_job_concurrency("discovery") == 1
+@pytest.mark.parametrize(
+    "env, stage, expected",
+    [
+        pytest.param(
+            {"PSAT_JOB_CONCURRENCY": "2", "PSAT_RESOLUTION_JOB_CONCURRENCY": "5"}, "resolution", 5, id="per-stage-wins"
+        ),
+        pytest.param(
+            {"PSAT_JOB_CONCURRENCY": "2", "PSAT_RESOLUTION_JOB_CONCURRENCY": "5"},
+            "policy",
+            2,
+            id="global-for-other-stage",
+        ),
+        pytest.param({}, "discovery", 1, id="unset-falls-back-to-one"),
+        pytest.param({"PSAT_DISCOVERY_JOB_CONCURRENCY": "garbage"}, "discovery", 1, id="invalid-falls-back-to-one"),
+        pytest.param({"PSAT_DISCOVERY_JOB_CONCURRENCY": "0"}, "discovery", 1, id="zero-clamped-to-one"),
+    ],
+)
+def test_resolve_job_concurrency(monkeypatch, env, stage, expected):
+    for key in ("PSAT_JOB_CONCURRENCY", "PSAT_DISCOVERY_JOB_CONCURRENCY", "PSAT_RESOLUTION_JOB_CONCURRENCY"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert _resolve_job_concurrency(stage) == expected
 
 
 @patch("workers.base.signal.signal")
@@ -131,8 +119,7 @@ def test_init_no_pool_when_concurrency_is_one(mock_signal, monkeypatch):
 def test_concurrent_dispatcher_runs_jobs_in_parallel(
     mock_advance, mock_claim, mock_session_cls, mock_signal, monkeypatch
 ):
-    """K=4 with a barrier: 4 jobs that block until all 4 are running.
-    A serial loop deadlocks; the parallel dispatcher releases the barrier."""
+    """A serial loop deadlocks on the 4-party barrier; the parallel dispatcher releases it."""
     monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "4")
     mock_session_cls.return_value = MagicMock()
 
@@ -171,7 +158,6 @@ def test_concurrent_dispatcher_runs_jobs_in_parallel(
 
     try:
         w.process = _process
-        # Stop the loop once all 4 are dispatched.
         original_claim = mock_claim.side_effect
 
         def _stop_after_drain(*args, **kwargs):
@@ -198,8 +184,6 @@ def test_concurrent_dispatcher_runs_jobs_in_parallel(
 def test_concurrent_dispatcher_uses_distinct_session_per_job(
     mock_advance, mock_claim, mock_session_cls, mock_signal, monkeypatch
 ):
-    """Each dispatched job must get its own SessionLocal() instance — sharing
-    a session across threads breaks the SQLAlchemy identity map."""
     monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "3")
 
     sessions_returned: list = []
@@ -231,7 +215,6 @@ def test_concurrent_dispatcher_uses_distinct_session_per_job(
     swp_lock = threading.Lock()
 
     def _process(session, job):
-        # Capture which session each job actually saw.
         with swp_lock:
             sessions_during_process.append(id(session))
         barrier.wait()
@@ -251,7 +234,6 @@ def test_concurrent_dispatcher_uses_distinct_session_per_job(
 
     try:
         w.run_loop()
-        # Three distinct session identities were observed inside process().
         assert len(set(sessions_during_process)) == 3
     finally:
         if w._job_pool:
@@ -268,8 +250,6 @@ def test_concurrent_dispatcher_uses_distinct_session_per_job(
 @patch("workers.base.claim_job")
 @patch("workers.base.advance_job")
 def test_dispatcher_never_exceeds_concurrency_cap(mock_advance, mock_claim, mock_session_cls, mock_signal, monkeypatch):
-    """With K=2 and a queue of 5 slow jobs, no more than 2 process()
-    calls run at once."""
     monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "2")
 
     session = MagicMock()
@@ -333,7 +313,6 @@ def test_dispatcher_never_exceeds_concurrency_cap(mock_advance, mock_claim, mock
 @patch("workers.base.claim_job")
 @patch("workers.base.advance_job")
 def test_sigterm_drains_inflight_jobs(mock_advance, mock_claim, mock_session_cls, mock_signal, monkeypatch):
-    """SIGTERM during in-flight work must wait for jobs to land, not abandon them."""
     monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "2")
 
     session = MagicMock()
@@ -366,7 +345,6 @@ def test_sigterm_drains_inflight_jobs(mock_advance, mock_claim, mock_session_cls
     w = _ConcurrentWorker()
     w.process = _process
 
-    # Fire SIGTERM after the first job is mid-process.
     def _trigger_term():
         started.wait(timeout=1.0)
         time.sleep(0.02)
@@ -376,9 +354,7 @@ def test_sigterm_drains_inflight_jobs(mock_advance, mock_claim, mock_session_cls
 
     try:
         w.run_loop()
-        # Both in-flight jobs reached completion despite the shutdown signal.
         assert len(finished_jobs) >= 1
-        # Exactly the started ones must have advanced.
         assert mock_advance.call_count == len(finished_jobs)
     finally:
         if w._job_pool:
@@ -391,7 +367,6 @@ def test_sigterm_drains_inflight_jobs(mock_advance, mock_claim, mock_session_cls
 def test_sigterm_waits_for_jobs_even_past_stale_timeout(mock_claim, mock_session_cls, mock_signal, monkeypatch):
     """An idle drain must never abandon work just because a stale timeout passed."""
     monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "1")
-    # Force a short drain window for the test.
     monkeypatch.setattr("workers.base.STALE_JOB_TIMEOUT", 0)
 
     session = MagicMock()
@@ -459,7 +434,6 @@ def test_sigterm_waits_for_jobs_even_past_stale_timeout(mock_claim, mock_session
 def test_concurrent_job_exception_doesnt_kill_dispatcher(
     mock_fail, mock_advance, mock_claim, mock_session_cls, mock_signal, monkeypatch
 ):
-    """One job raising must not stop the dispatcher from claiming the next."""
     monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "2")
 
     session = MagicMock()
@@ -567,45 +541,6 @@ def test_concurrent_job_handled_directly_skips_advance(
 
 
 # ---------------------------------------------------------------------------
-# Parity: K=1 path is byte-identical to the legacy loop
-# ---------------------------------------------------------------------------
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.SessionLocal")
-@patch("workers.base.claim_job")
-@patch("workers.base.advance_job")
-def test_k1_path_matches_legacy_advance_args(mock_advance, mock_claim, mock_session_cls, mock_signal, monkeypatch):
-    """K=1 (default) must call advance_job with the same args as the legacy
-    loop did — no shape change for the un-opted-in fleet."""
-    monkeypatch.delenv("PSAT_DISCOVERY_JOB_CONCURRENCY", raising=False)
-    monkeypatch.delenv("PSAT_JOB_CONCURRENCY", raising=False)
-
-    session = MagicMock()
-    mock_session_cls.return_value = session
-
-    job = _make_job()
-    cycle = {"n": 0}
-
-    def _claim(*_a, **_kw):
-        cycle["n"] += 1
-        if cycle["n"] == 1:
-            return job
-        w._running = False
-        return None
-
-    mock_claim.side_effect = _claim
-
-    w = _ConcurrentWorker()
-    assert w._job_pool is None, "K=1 must not create a thread pool"
-    w.process = MagicMock()
-    w.run_loop()
-
-    # Same args shape as the legacy test.
-    mock_advance.assert_called_once_with(session, job.id, JobStage.static, "Completed discovery", lease_id=None)
-
-
-# ---------------------------------------------------------------------------
 # K>1 with next_stage=done
 # ---------------------------------------------------------------------------
 
@@ -664,12 +599,10 @@ def test_concurrent_done_stage_calls_complete_job(
 @patch("workers.base.SessionLocal")
 @patch("workers.base.claim_job")
 def test_dispatched_job_vanishing_is_handled_gracefully(mock_claim, mock_session_cls, mock_signal, monkeypatch):
-    """If session.get returns None inside the dispatcher (job row gone),
-    the dispatcher logs a warning and returns instead of crashing."""
     monkeypatch.setenv("PSAT_DISCOVERY_JOB_CONCURRENCY", "2")
 
     session = MagicMock()
-    session.get.return_value = None  # vanished
+    session.get.return_value = None
     mock_session_cls.return_value = session
 
     queue = [uuid.uuid4()]

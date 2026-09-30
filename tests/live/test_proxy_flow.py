@@ -48,14 +48,9 @@ def test_implementation_job_completed(usdc_job, live_client: LiveClient):
     impl = (flags.get("implementation") or "").lower()
     assert impl
 
-    # The invariant is "the impl has a completed analysis job somewhere" —
-    # not "this specific parent spawned a new child for it". On a warm
-    # preview DB the static worker logs ``impl <addr> already has job <id>,
-    # skipping`` and reuses the existing impl analysis, so
-    # ``children_of(parent)`` is empty and the helper falls back to a
-    # full ``jobs()`` lookup. If the matched job is still processing, it
-    # polls until terminal; the synchronous-assert version of this test
-    # raced with the impl pipeline finishing.
+    # The invariant is "the impl has a completed analysis job somewhere", not "this parent spawned a child": on a
+    # warm preview DB the static worker reuses the existing impl job, so the helper falls back to a full ``jobs()``
+    # lookup and polls until terminal (a synchronous assert raced the impl pipeline).
     impl_job = _resolve_impl_job(live_client, parent_job_id=usdc_job["job_id"], impl_address=impl)
     assert impl_job, f"No analysis job of any age found for implementation {impl}"
 

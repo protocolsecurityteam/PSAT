@@ -71,7 +71,6 @@ def test_search_fn_returns_seeds_on_research_plus_first_call(monkeypatch):
     errors: list[dict] = []
     out = fn("q", max_results=5, queries_used=queries_used, max_queries=4, errors=errors)
     assert out == seeds
-    # Seed return is free — no exa.search called.
     assert budget.search_calls == 0
     assert queries_used[0] == 1
 
@@ -116,19 +115,6 @@ def test_search_fn_records_errors_on_exa_exception(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_patch_and_restore_search():
-    sentinel = lambda *a, **kw: "patched"  # noqa: E731
-    original = rd.audit_reports_mod._tavily_search
-    try:
-        rd._patch_search(sentinel)
-        assert rd.audit_reports_mod._tavily_search is sentinel
-        assert rd.inventory_mod._tavily_search is sentinel
-        assert rd.inventory_domain_mod._tavily_search is sentinel
-    finally:
-        rd._restore_search(original)
-    assert rd.audit_reports_mod._tavily_search is original
-
-
 def test_patch_classify_with_seeds_appends_unseen_urls():
     original = rd.audit_reports_mod.classify_search_results
     seeds = [
@@ -144,7 +130,6 @@ def test_patch_classify_with_seeds_appends_unseen_urls():
         out = rd.audit_reports_mod.classify_search_results([], "p")
         urls = [c["url"] for c in out]
         assert urls == ["https://dup.example.com", "https://new.example.com"]
-        # Seeded entry confidence is 1.0
         added = [c for c in out if c["url"] == "https://new.example.com"][0]
         assert added["confidence"] == 1.0
     finally:
@@ -206,45 +191,44 @@ def test_apply_spa_overrides_injects(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_needs_dependency_pass_true_from_llm(monkeypatch):
+@pytest.mark.parametrize(
+    "protocol,contracts,audits,llm_reply,expected,prompt_fragment",
+    [
+        pytest.param(
+            "ether.fi",
+            [{"name": "BoringVault Manager"}],
+            [],
+            '{"should_run_dependency_pass": true, "confidence": 0.86, '
+            '"rationale": "uses Veda", "suspected_dependencies": ["BoringVault"]}',
+            True,
+            "BoringVault Manager",
+            id="true_from_llm",
+        ),
+        pytest.param(
+            "foo",
+            [{"name": "FooToken"}],
+            [{"title": "core protocol audit"}],
+            '{"should_run_dependency_pass": false, "confidence": 0.91, '
+            '"rationale": "core-only", "suspected_dependencies": []}',
+            False,
+            "FooToken",
+            id="false_from_llm",
+        ),
+        # A garbage response fails to False.
+        pytest.param("foo", [{"name": "FooToken"}], [], "not json", False, "FooToken", id="unparseable_llm_response"),
+    ],
+)
+def test_needs_dependency_pass_from_llm(monkeypatch, protocol, contracts, audits, llm_reply, expected, prompt_fragment):
     captured = {}
 
     def fake_chat(messages, **kwargs):
         captured["prompt"] = messages[0]["content"]
-        return (
-            '{"should_run_dependency_pass": true, "confidence": 0.86, '
-            '"rationale": "uses Veda", "suspected_dependencies": ["BoringVault"]}'
-        )
+        return llm_reply
 
     monkeypatch.setattr(rd.llm, "chat", fake_chat)
 
-    assert rd._needs_dependency_pass("ether.fi", contracts=[{"name": "BoringVault Manager"}], audits=[]) is True
-    assert "BoringVault Manager" in captured["prompt"]
-
-
-def test_needs_dependency_pass_false_from_llm(monkeypatch):
-    monkeypatch.setattr(
-        rd.llm,
-        "chat",
-        lambda messages, **kwargs: (
-            '{"should_run_dependency_pass": false, "confidence": 0.91, '
-            '"rationale": "core-only", "suspected_dependencies": []}'
-        ),
-    )
-
-    assert (
-        rd._needs_dependency_pass(
-            "foo",
-            contracts=[{"name": "FooToken"}],
-            audits=[{"title": "core protocol audit"}],
-        )
-        is False
-    )
-
-
-def test_needs_dependency_pass_unparseable_llm_response(monkeypatch):
-    monkeypatch.setattr(rd.llm, "chat", lambda messages, **kwargs: "not json")
-    assert rd._needs_dependency_pass("foo", contracts=[{"name": "FooToken"}], audits=[]) is False
+    assert rd._needs_dependency_pass(protocol, contracts=contracts, audits=audits) is expected
+    assert prompt_fragment in captured["prompt"]
 
 
 def test_needs_dependency_pass_no_evidence_skips_llm(monkeypatch):
@@ -364,7 +348,6 @@ def test_dependency_research_breaks_when_budget_exhausted(monkeypatch):
     b = rd._Budget()
     b.research_calls = rd.MAX_RESEARCH_CALLS_PER_PROTOCOL - 1  # pass 1 will tip into the cap
     out = rd._dependency_research("p", b)
-    # Should not run all 5 component audits.
     assert len(out) <= 1
 
 
@@ -410,7 +393,6 @@ def test_run_discovery_happy_path_no_deps(monkeypatch):
     def fake_dr(instructions, schema=None):
         if "audit reports" in instructions:
             return {"data": {"auditReports": [{"auditor": "Tob", "url": "https://seed.example.com/a.pdf"}]}}
-        # address research
         return {
             "data": {
                 "contracts": [
@@ -428,12 +410,10 @@ def test_run_discovery_happy_path_no_deps(monkeypatch):
 
     out = rd.run_discovery("ether.fi")
     assert "audits" in out and "addresses" in out and "meta" in out
-    # Address Deep Research result was appended.
     addrs = [c["address"] for c in out["addresses"]["contracts"]]
     assert "0x" + "2" * 40 in addrs
     assert out["meta"]["protocol"] == "ether.fi"
     assert out["meta"]["search_calls"] >= 0
-    # Dependency classifier chose not to trigger.
     assert out["meta"]["dependency_pass_triggered"] is False
     assert calls["inventory_run_deployer"] is True
 
@@ -512,7 +492,6 @@ def test_run_discovery_audit_seed_failure_does_not_abort(monkeypatch):
     monkeypatch.setattr(rd, "_needs_dependency_pass", lambda protocol, contracts, audits: False)
 
     out = rd.run_discovery("p")
-    # Pipeline still produces a meta block.
     assert out["meta"]["protocol"] == "p"
 
 

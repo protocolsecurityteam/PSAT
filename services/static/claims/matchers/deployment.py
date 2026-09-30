@@ -1,9 +1,6 @@
-"""``contract_deployment`` — the reference matcher.
+"""``contract_deployment``: a reachable ``contract_creation`` sink proves the function deploys a contract.
 
-Deterministic and exact: a ``contract_creation`` sink reachable from a function
-is machine-checkable proof the function deploys a contract. Ships as the
-add-a-module pattern later matcher stages copy; its evidence is a single sink,
-so it needs no contract-level gate.
+The reference matcher.
 """
 
 from __future__ import annotations

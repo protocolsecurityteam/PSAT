@@ -1,4 +1,4 @@
-// Shared payload builders for the vocab test files.
+// Payload builders for the vocab tests.
 
 export function claim(claim_id, tier = "standard_exact") {
   return { claim_id, tier, witness: {} };
@@ -12,11 +12,8 @@ export function flowOut(
 ) {
   const flow = { kind: "low_level_value_call", selector: null, from_is_self: true };
   if (targetKind) flow.target_kind = targetKind;
-  // The producer (`flows.py:_flow_entry`) attaches a verdict only to a SCALAR
-  // `param` destination — a `several` fold NEVER carries one. The helper
-  // mirrors that: the proven-free default applies to scalar params only, so a
-  // fold payload is the mintable no-verdict shape unless a test explicitly
-  // injects a verdict (the defensive fold arms below say so when they do).
+  // Mirrors the producer (`flows.py:_flow_entry`): only scalar params get a
+  // verdict, never a `several` fold.
   const scalarParam = targetKind?.kind === "param";
   const foldParam = Array.isArray(targetKinds) && targetKinds.some((k) => k?.kind === "param");
   const verdict = constraint === undefined ? (scalarParam ? FREE : null) : constraint;
@@ -31,7 +28,6 @@ export function flowOut(
   };
 }
 
-// A behavioral (fork-observed) claim with an `observed` summary.
 export function observedClaim(claim_id, observed) {
   return {
     claim_id,

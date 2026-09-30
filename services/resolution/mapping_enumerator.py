@@ -21,9 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _mainnet_hypersync_url() -> str:
-    """Mainnet HyperSync endpoint from the registry, not a hardcoded
-    literal. The signature default for the enumerators below; callers thread the
-    per-chain URL for non-mainnet scans."""
+    """Mainnet HyperSync endpoint from the registry; the default for the enumerators below."""
     from utils.chains import chain_by_id
 
     url = chain_by_id(1).hypersync_url
@@ -33,16 +31,13 @@ def _mainnet_hypersync_url() -> str:
 
 DEFAULT_HYPERSYNC_URL: str = _mainnet_hypersync_url()
 
-# Pagination bounds (default 60s / 50 pages); without these caps a 2017-deployed contract can wedge a worker for ~80
-# min. Read once at import — bounds aren't expected to change at runtime.
+# Pagination bounds: without them an old contract can wedge a worker for over an hour.
 _TIMEOUT_S = float(os.getenv("PSAT_MAPPING_ENUMERATION_TIMEOUT_S", "60"))
 _MAX_PAGES = int(os.getenv("PSAT_MAPPING_ENUMERATION_MAX_PAGES", "50"))
 
 
 def _cache_ttl_s() -> float:
-    """Read at call time so tests can flip TTL via monkeypatch.setenv
-    without re-importing the module. Default matches the original
-    in-process cache (30 min)."""
+    """Read at call time so tests can monkeypatch the TTL."""
     return float(os.getenv("PSAT_MAPPING_ENUMERATION_CACHE_TTL_S", "1800"))
 
 
@@ -54,14 +49,11 @@ class EnumeratedPrincipal(TypedDict):
 
 
 class EnumerationResult(TypedDict):
-    """Principal list + status; complete vs. truncated scans (silent [] would drop authorized addresses)."""
+    """Principal list plus status, so a truncated scan is distinguishable from a complete one."""
 
     principals: list[EnumeratedPrincipal]
-    # "complete" | "incomplete_timeout" | "incomplete_max_pages" | "error"
-    # | "incomplete_ambiguous_writer_event" (an add/remove-conflicted event was
-    #   dropped: the fold is structurally missing that event's members)
-    # | "incomplete_no_writer_specs" (nothing was observed at all)
-    # | "incomplete_no_hypersync_coverage"
+    # "complete" | "incomplete_timeout" | "incomplete_max_pages" | "error" | "incomplete_ambiguous_writer_event" (a
+    # conflicted event was dropped) | "incomplete_no_writer_specs" | "incomplete_no_hypersync_coverage"
     status: str
     pages_fetched: int
     last_block_scanned: int
@@ -69,12 +61,7 @@ class EnumerationResult(TypedDict):
 
 
 class EnumeratedKeyValue(TypedDict):
-    """One key's latest observed value (D.2). Used by the value-aware
-    fold which replaces the add/remove ``present`` boolean with the
-    raw value of the most recent assignment, so a downstream
-    ``ValuePredicate`` can decide which keys belong in the finite
-    set.
-    """
+    """One key's latest observed value (D.2), for filtering by a downstream ``ValuePredicate``."""
 
     key: str  # 0x-prefixed canonical address (or 0x... hex word for non-address keys)
     mapping_name: str
@@ -84,8 +71,6 @@ class EnumeratedKeyValue(TypedDict):
 
 
 class EnumerationValueResult(TypedDict):
-    """Latest-value-per-key fold + status (mirrors ``EnumerationResult``)."""
-
     entries: list[EnumeratedKeyValue]
     status: str
     pages_fetched: int
@@ -93,11 +78,8 @@ class EnumerationValueResult(TypedDict):
     error: str | None
 
 
-# Process-wide L1 caches keyed on (chain, address, specs_hash) — the same identity
-# db.mapping_enumeration_cache (L2) uses — so the same address on two chains, or with
-# two writer-spec sets, never collides. head_block lives in the value, not the key, so
-# cascade siblings still share a scan. Both caches are size-capped (oldest 25% evicted
-# at the bound); a wall-clock TTL (see _cache_ttl_s) handles staleness on top.
+# Keyed on (chain, address, specs_hash), the same identity as L2 (db.mapping_enumeration_cache). head_block is in the
+# value so cascade siblings share a scan. Size-capped (oldest 25% evicted) plus a TTL.
 _CACHE: dict[tuple[str, str, str], tuple[EnumerationResult, float]] = {}
 _CACHE_LOCK = threading.Lock()
 _CACHE_MAX = 1024
@@ -106,7 +88,6 @@ _VALUE_PRESSURE_NAME = "mapping_enumeration_value"
 
 
 def clear_enumeration_cache() -> None:
-    """Test helper. Drop all cached enumerations (allowlist present-set + value folds)."""
     from utils.memory import reset_cache_pressure_state
 
     with _CACHE_LOCK:
@@ -117,29 +98,21 @@ def clear_enumeration_cache() -> None:
 
 
 def _chain_key(chain: str | None) -> str:
-    """Chain component of the L1 key: the canonical decimal-string chain-id token.
+    """Chain part of the L1 key.
 
-    Callers reach this with either a chain *name* (``"ethereum"``)
-    or ``str(chain_id)`` (``"1"``) for the same contract; ``chain_cache_token``
-    folds both onto one token so the two paths share a cache entry. L2
-    (``db.mapping_enumeration_cache``) normalizes identically, so the in-process
-    and durable layers stay in agreement."""
+    ``chain_cache_token`` folds names ("ethereum") and ids ("1") to one token, matching L2.
+    """
     from utils.chains import chain_cache_token
 
     return chain_cache_token(chain)
 
 
 def _scan_hypersync_url_for_chain(chain: str | int | None) -> str | None:
-    """The HyperSync scan endpoint for *chain*.
+    """The HyperSync endpoint for *chain*.
 
-    ``chain`` is the same name / decimal-id token the cache key uses. A chainless
-    call fails loud (``require_chain`` raises) rather than defaulting the scan to
-    mainnet; a registered chain with no proven HyperSync coverage returns ``None``
-    so the caller reports the scan unavailable instead of scanning the wrong
-    chain. Mainnet resolves to its registry URL — byte-identical to the old
-    ``DEFAULT_HYPERSYNC_URL`` default, so mainnet scans are unchanged.
+    Chainless calls raise; chains without proven coverage return ``None`` so the scan is reported unavailable.
     """
-    from services.resolution.repos.event_logs_hypersync import _hypersync_url_for_chain
+    from services.resolution.hypersync_bound import hypersync_url_for_chain
     from utils.chains import require_chain
 
     if isinstance(chain, int) or (isinstance(chain, str) and chain.strip().isdigit()):
@@ -148,13 +121,11 @@ def _scan_hypersync_url_for_chain(chain: str | int | None) -> str | None:
         info = require_chain(
             chain=chain if isinstance(chain, str) else None, context="mapping enumeration hypersync url"
         )
-    return _hypersync_url_for_chain(info.chain_id)
+    return hypersync_url_for_chain(info.chain_id)
 
 
 def _l1_specs_hash(specs_as_dicts: list[dict[str, Any]]) -> str:
-    """The fingerprint L2 (db.mapping_enumeration_cache) keys on, so L1 distinguishes
-    the same (chain, address, specs) identity L2 does. Falls back to a local stable
-    digest when the DB module isn't importable (CLI/test paths driving L1 alone)."""
+    """The fingerprint L2 keys on, with a local digest fallback when the DB module isn't importable."""
     try:
         from db.mapping_enumeration_cache import specs_fingerprint
 
@@ -165,8 +136,7 @@ def _l1_specs_hash(specs_as_dicts: list[dict[str, Any]]) -> str:
 
 
 def _evict_enumeration_if_needed(cache: dict) -> None:
-    """Drop the oldest 25% of *cache* by insertion time when the bound is reached
-    (caller holds _CACHE_LOCK)."""
+    """Drop the oldest 25% at the bound (caller holds _CACHE_LOCK)."""
     if len(cache) < _CACHE_MAX:
         return
     cutoff = sorted(cache.values(), key=lambda v: v[1])[len(cache) // 4][1]
@@ -175,7 +145,6 @@ def _evict_enumeration_if_needed(cache: dict) -> None:
 
 
 def _store_enumeration(cache: dict, cache_key: tuple[str, str, str], entry: tuple, name: str) -> None:
-    """Bounded insert into an L1 enumeration cache (caller holds _CACHE_LOCK)."""
     from utils.memory import cache_pressure_message
 
     _evict_enumeration_if_needed(cache)
@@ -241,13 +210,7 @@ def _extract_value_word(
     *,
     indexed_positions: list[int] | None = None,
 ) -> str:
-    """Extract the assigned value at ``value_position`` from the log.
-
-    Returns a 0x-prefixed 32-byte hex word (the canonical "uint256
-    slot" form), regardless of whether the value is indexed (topic) or
-    in data. The downstream ``_value_predicate_passes`` interprets the
-    bytes per ``value_type``.
-    """
+    """The assigned value at ``value_position`` as a 0x-prefixed 32-byte word, whether indexed or in data."""
     topics = _topics_from_log(log)
     indexed_positions = sorted(set(indexed_positions or []))
     if value_position in indexed_positions:
@@ -272,10 +235,7 @@ def _extract_value_word(
 def _value_predicate_passes(value_hex: str, predicate: dict[str, Any]) -> bool:
     """Apply a ``ValuePredicate`` to a 32-byte hex word.
 
-    Numeric ops decode as ``int(value_hex, 16)``; address ops compare
-    canonicalized lowercase hex. ``any_nonzero`` matches any nonzero
-    word and ignores ``rhs_values`` (used as a "is this slot ever
-    written" probe).
+    Numeric ops compare as ints, address ops as lowercase hex; ``any_nonzero`` ignores ``rhs_values``.
     """
     if not value_hex.startswith("0x") or len(value_hex) != 66:
         return False
@@ -289,8 +249,6 @@ def _value_predicate_passes(value_hex: str, predicate: dict[str, Any]) -> bool:
         return any(c not in "0" for c in body)
 
     if value_type == "address":
-        # Compare lowercased 20-byte tail. RHS may be the full
-        # checksummed address; normalize both.
         actual = "0x" + value_hex[-40:]
         for r in rhs_raw:
             r_norm = (r or "").lower()
@@ -302,7 +260,6 @@ def _value_predicate_passes(value_hex: str, predicate: dict[str, Any]) -> bool:
                 return True
         return False
 
-    # Numeric. Decode value, optionally apply mask, then compare.
     try:
         actual_int = int(value_hex, 16)
     except ValueError:
@@ -379,15 +336,14 @@ async def enumerate_mapping_allowlist(
     timeout_s: float | None = None,
     max_pages: int | None = None,
 ) -> EnumerationResult:
-    """Replay mapping-writer events into a current-allowlist principal list, surfacing truncation via
-    ``EnumerationResult.status``."""
+    """Replay mapping-writer events into a current allowlist; truncation is reported via
+    ``EnumerationResult.status``.
+    """
     eff_timeout = _TIMEOUT_S if timeout_s is None else timeout_s
     eff_max_pages = _MAX_PAGES if max_pages is None else max_pages
 
     if not writer_specs:
-        # No writer specs means nothing was observed, not that the mapping
-        # provably has no members — "complete" here would publish a vacuous
-        # scan as an exhaustive one.
+        # No specs means nothing was observed; "complete" would publish a vacuous scan as exhaustive.
         return EnumerationResult(
             principals=[],
             status="incomplete_no_writer_specs",
@@ -416,11 +372,7 @@ async def enumerate_mapping_allowlist(
         ambiguous_dropped = True
         del topic0_to_specs[topic0]
     if not topic0_to_specs:
-        # Every writer event was ambiguous: the fold KNOWS it scanned nothing.
-        # Reporting "complete" here published exactly the same value as a real
-        # exhaustive empty scan (observed in production with pages_fetched=0
-        # below the first real log). The consumers already
-        # handle any non-"complete" status as a truncated enumeration.
+        # Every writer event was ambiguous, so nothing was scanned; "complete" would look like a real empty scan.
         return EnumerationResult(
             principals=[],
             status="incomplete_ambiguous_writer_event",
@@ -459,10 +411,7 @@ async def enumerate_mapping_allowlist(
     current_from = from_block
     page_count = 0
     started = time.monotonic()
-    # A fold that dropped an ambiguous writer event is incomplete BY
-    # CONSTRUCTION, whatever the scan does: members written only through the
-    # dropped event are invisible. Timeout/page-cap/error below may overwrite
-    # with their own (also non-"complete") status.
+    # Dropping an ambiguous event makes the fold incomplete regardless of the scan.
     status: str = "incomplete_ambiguous_writer_event" if ambiguous_dropped else "complete"
     error: str | None = None
     while True:
@@ -586,27 +535,14 @@ def enumerate_mapping_allowlist_sync(
     chain: str | None = None,
     **kwargs: Any,
 ) -> EnumerationResult:
-    """Sync wrapper with two-tier TTL cache.
+    """Sync wrapper with a two-tier TTL cache.
 
-    L1 is the in-process module dict — fast, but only covers same-process
-    repeats. L2 is ``db.mapping_enumeration_cache`` — Postgres-backed and
-    cross-process, so the resolution stage and the policy stage of the
-    same job (which run in different worker processes since 9ce6fa3) hit
-    each other's results instead of re-paying the 60s hypersync scan.
+    L1 is in-process; L2 is ``db.mapping_enumeration_cache`` so the resolution and policy stages (different processes)
+    share the expensive scan. Misses write L2 then L1. Incomplete and error results are cached too; callers read
+    ``status``.
 
-    On miss we run the underlying enumeration, then write back to L2
-    first so other processes see it, then to L1. ``incomplete_*`` and
-    ``error`` results are cached at both tiers — re-running them inside
-    the TTL would just hit the same bound; the caller sees the
-    ``status`` field and decides whether to act on partial data. A
-    status that L2 cannot store would break that: the rejected write
-    leaves the prior row standing, so an in-TTL ``complete`` would be
-    served in place of the truncated verdict that superseded it. Adding
-    a status therefore has a schema obligation —
-    ``tests/resolution/test_mapping_enumeration_status_vocabulary.py`` scrapes this
-    module for the vocabulary and round-trips every member through the
-    real column, so an oversized one is a red suite, not a silent
-    republish.
+    Every status must fit L2's column, or a rejected write would leave an older ``complete`` row standing.
+    ``tests/resolution/test_mapping_enumeration_status_vocabulary.py`` round-trips the vocabulary.
     """
     specs_as_dicts = [dict(s) for s in writer_specs]
     cache_key = (_chain_key(chain), contract_address.lower(), _l1_specs_hash(specs_as_dicts))
@@ -668,10 +604,7 @@ def enumerate_mapping_allowlist_sync(
     else:
         specs_hash = None
 
-    # Per-chain scan URL: derive from ``chain`` unless the caller pinned
-    # an explicit URL or injected a client (tests). Mainnet is byte-identical to
-    # the old default; an unknown/missing chain fails loud; a no-coverage chain
-    # returns unavailable rather than silently scanning mainnet.
+    # Derive the scan URL from ``chain`` unless a URL or client is injected; no-coverage chains return unavailable.
     if not kwargs.get("client") and not kwargs.get("hypersync_url"):
         scan_url = _scan_hypersync_url_for_chain(chain)
         if scan_url is None:
@@ -713,16 +646,11 @@ def enumerate_mapping_allowlist_sync(
 
 
 def _db_cache_enabled() -> bool:
-    """Imported lazily so test code that hasn't pulled in the DB module
-    can still drive the in-process path. The env var defaults ON; tests
-    that want the in-process behaviour set ``PSAT_MAPPING_ENUMERATION_DB_CACHE=0``.
+    """Whether the L2 cache is on (``PSAT_MAPPING_ENUMERATION_DB_CACHE``, default on).
+
+    The DB module is imported lazily.
     """
     return os.getenv("PSAT_MAPPING_ENUMERATION_DB_CACHE", "1").lower() in ("1", "true", "yes")
-
-
-# ---------------------------------------------------------------------------
-# D.2 — value-aware fold: latest-value-per-key, filterable by ValuePredicate.
-# ---------------------------------------------------------------------------
 
 
 async def enumerate_mapping_values(
@@ -740,12 +668,9 @@ async def enumerate_mapping_values(
 ) -> EnumerationValueResult:
     """Replay set-style writer events into a latest-value-per-key map.
 
-    Differs from ``enumerate_mapping_allowlist``: that one uses
-    ``direction in {"add","remove"}`` to fold a present-set; this one
-    uses ``direction == "set"`` (or any direction with
-    ``value_position`` populated) to remember the most recent value
-    each key was assigned. Caller (the EventIndexedAdapter D.2 path)
-    then filters by ``ValuePredicate``.
+    Unlike ``enumerate_mapping_allowlist`` (add/remove present-set), this keeps each key's most recent value
+    (``direction == "set"`` or any spec with ``value_position``). The EventIndexedAdapter then filters by
+    ``ValuePredicate``.
     """
     eff_timeout = _TIMEOUT_S if timeout_s is None else timeout_s
     eff_max_pages = _MAX_PAGES if max_pages is None else max_pages
@@ -755,8 +680,7 @@ async def enumerate_mapping_values(
             entries=[], status="complete", pages_fetched=0, last_block_scanned=from_block, error=None
         )
 
-    # Only specs with a known value_position participate; without it
-    # we have no idea which event arg holds the assigned value.
+    # Without value_position we can't find the assigned value.
     eligible = [s for s in writer_specs if s.get("value_position") is not None]
     if not eligible:
         return EnumerationValueResult(
@@ -782,7 +706,7 @@ async def enumerate_mapping_values(
     topic0s = sorted(topic0_to_specs.keys())
     query = _build_query(hypersync_module, contract_address, topic0s, from_block, to_block)
 
-    # state: (mapping_name, key) -> (value_hex, last_block, last_log_index)
+    # (mapping_name, key) -> (value_hex, last_block, last_log_index)
     state: dict[tuple[str, str], tuple[str, int, int]] = {}
     current_from = from_block
     page_count = 0
@@ -862,8 +786,7 @@ async def enumerate_mapping_values(
     )
 
 
-# Separate L1 cache for the value path so a re-run with a different
-# predicate doesn't blow away the present-set cache.
+# Separate from the present-set cache.
 _VALUE_CACHE: dict[tuple[str, str, str], tuple[EnumerationValueResult, float]] = {}
 
 
@@ -875,28 +798,13 @@ def enumerate_mapping_values_sync(
     value_predicate: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> EnumerationValueResult:
-    """Sync wrapper for ``enumerate_mapping_values``.
+    """Sync wrapper for ``enumerate_mapping_values``, L1 cache only.
 
-    L1 (in-process) cache only. L2 / Postgres caching for the value
-    path is deferred — ``MappingEnumerationCache`` is shaped for the
-    add/remove ``EnumerationResult`` and the value-aware fold
-    produces a different shape (``EnumerationValueResult``). Wiring
-    L2 here would require either widening the cache schema or
-    serializing ``EnumerationValueResult`` into the existing
-    columns, so value-aware replay remains an in-process cache path.
-
-    ``chain``, ``value_predicate``, and the dict-converted writer
-    specs are accepted for forward-compatibility — the
-    ``specs_fingerprint`` extension at
-    ``db/mapping_enumeration_cache.py:51`` already accepts a
-    ``value_predicate`` kwarg, so once the L2 schema lands here the
-    fingerprint will key on it. Until then they're pass-through
-    arguments only.
+    L2 is shaped for ``EnumerationResult``, so value-path persistence waits on a schema change (D.3). ``chain``,
+    ``value_predicate`` and the specs are accepted for when it lands.
     """
     specs_as_dicts = [dict(s) for s in writer_specs]
-    # The fold entries are predicate-independent (filter_value_entries applies the
-    # predicate downstream), so the key excludes value_predicate: a re-run with a
-    # different predicate HITs the same scan instead of re-paginating.
+    # Fold entries are predicate-independent, so the key excludes value_predicate.
     cache_key = (_chain_key(chain), contract_address.lower(), _l1_specs_hash(specs_as_dicts))
     now = time.monotonic()
 
@@ -908,7 +816,6 @@ def enumerate_mapping_values_sync(
                 return result
             del _VALUE_CACHE[cache_key]
 
-    # Per-chain scan URL: see ``enumerate_mapping_allowlist_sync``.
     if not kwargs.get("client") and not kwargs.get("hypersync_url"):
         scan_url = _scan_hypersync_url_for_chain(chain)
         if scan_url is None:
@@ -925,9 +832,7 @@ def enumerate_mapping_values_sync(
 
     with _CACHE_LOCK:
         _store_enumeration(_VALUE_CACHE, cache_key, (result, now), _VALUE_PRESSURE_NAME)
-    # L2 / Postgres caching for the value path is intentionally deferred — the L2
-    # schema is keyed on EnumerationResult shape, not EnumerationValueResult, so
-    # persisting requires a schema change we'll do alongside the durable indexer (D.3).
+    # L2 for the value path is deferred until the durable indexer (D.3).
     _ = value_predicate
     return result
 
@@ -936,14 +841,10 @@ def filter_value_entries(
     entries: list[EnumeratedKeyValue],
     predicate: dict[str, Any],
 ) -> list[str]:
-    """Return the keys whose latest value satisfies ``predicate``.
+    """Keys whose latest value satisfies ``predicate``.
 
-    Caller-friendly wrapper around ``_value_predicate_passes`` that
-    takes the entry list as produced by ``enumerate_mapping_values``
-    and emits the matching keys. Empty list means either no events
-    seen or no key passed the predicate; the caller surfaces that as
-    ``finite_set([])`` with quality lower_bound when the underlying
-    scan was incomplete."""
+    Empty means no events or no match; callers mark it lower_bound when the scan was incomplete.
+    """
     out: list[str] = []
     for entry in entries:
         if _value_predicate_passes(entry["value_hex"], predicate):

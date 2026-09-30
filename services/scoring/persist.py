@@ -1,27 +1,12 @@
 """Writing a :class:`ScoreDocument` to ``protocol_scores``, and reading it back.
 
-Two halves of one seam, in one module so the spill can never be written in a
-shape the reader does not resolve. ``protocol_scores`` is insert-only: a fold
-never destroys a row a consumer already read, and the score's movement is free
-history for the Activity timeline.
+Both halves live here so a spill is never written in a shape the reader can't resolve. ``protocol_scores`` is
+insert-only.
 
-The document is inline JSONB, spilling to object storage only above
-:data:`INLINE_DOCUMENT_LIMIT_BYTES`. The table's
-``ck_protocol_scores_document_exactly_one`` makes the two mutually exclusive, so
-a reader is never handed a row carrying both a stale inline copy and a spill —
-which is why the size decision is taken here, once, before the INSERT, rather
-than by a later mutation.
-
-The write ORDER is storage-then-row on purpose. A row committed before its body
-exists names an object a reader would 404 on and would be indistinguishable from
-a genuinely lost body; a body written before a row that never lands is an
-orphaned object, which costs bytes and claims nothing. Orphans are logged with
-their key at both the INSERT and the commit, so they are countable; collecting
-them is not this pass's job.
-
-The document is serialized exactly ONCE, and the inline column stores what came
-back out of that serialization. Two encoders is how the same document becomes
-two different documents.
+The document is inline JSONB, spilling to object storage above :data:`INLINE_DOCUMENT_LIMIT_BYTES`;
+``ck_protocol_scores_document_exactly_one`` makes them exclusive, so the choice is made once before the INSERT. Storage
+is written before the row: a row naming a missing body would look like a lost body, while an orphaned body just costs
+bytes (orphan keys are logged).
 """
 
 from __future__ import annotations
@@ -37,36 +22,26 @@ from services.scoring.schema import ScoreDocument
 
 logger = logging.getLogger(__name__)
 
-# The inline-document spill threshold. Measured on the serialized body, not the Python
-# object, because the bytes are what Postgres stores and what a reader pays for.
+# Measured on the serialized bytes, which is what Postgres stores.
 INLINE_DOCUMENT_LIMIT_BYTES = 1_000_000
 
 
 class ScoreDocumentUnavailable(RuntimeError):
-    """The row names a body that could not be read.
+    """The row names a body that couldn't be read.
 
-    Distinct from "no score row" (which is a 404) and from an inline document:
-    a spilled body that cannot be fetched is not determined, and the read
-    surface must not present it as an empty or a partial document.
+    Distinct from no row (404) and never served as an empty or partial document.
     """
 
 
 def persist_score_document(session: Session, document: ScoreDocument) -> Any:
-    """INSERT one ``protocol_scores`` row for *document*. Does not commit.
+    """INSERT one ``protocol_scores`` row for *document*.
 
-    Returns the ORM row. The caller commits, so the score lands with whatever
-    else that transaction carries (the loop clears the dirty marks it consumed
-    in the same commit).
+    Doesn't commit, so the loop's mark clear lands in the same commit.
     """
     from db.models import ProtocolScore
 
-    # ONE serialization, and the inline column stores what came back out of it.
-    # Two encoders would make the same document two different documents: a
-    # ``default=str`` fallback silently turns a Decimal into a string on the
-    # spilled path while the inline path hands the raw object to the JSONB
-    # serializer, which raises. A value this cannot encode is a producer bug and
-    # must fail the same way in both paths, at persist time, with the document
-    # in hand.
+    # Serialize once and store that result inline too, so both paths fail identically on unencodable values (e.g. a
+    # ``default=str`` fallback would stringify a Decimal only when spilled).
     body = json.dumps(document.document(), sort_keys=True).encode("utf-8")
     payload = json.loads(body)
 
@@ -77,9 +52,7 @@ def persist_score_document(session: Session, document: ScoreDocument) -> Any:
         if storage_key is not None:
             findings = None
         else:
-            # Storage is not configured (local dev, offline tests). Inline is
-            # the honest fallback: JSONB holds it, and refusing to persist would
-            # discard a computed verdict over a deployment detail.
+            # Storage unconfigured (local dev, offline tests): fall back to inline rather than discard the score.
             logger.warning(
                 "protocol score document exceeds the inline limit but object storage is unconfigured; storing inline",
                 extra={"protocol_id": document.protocol_id, "document_bytes": len(body)},
@@ -105,10 +78,7 @@ def persist_score_document(session: Session, document: ScoreDocument) -> Any:
     try:
         session.flush()
     except Exception:
-        # The body is already in the bucket and the row that would have named it
-        # is not going to exist. No GC here, but the key is logged so an orphan
-        # is countable rather than invisible — an unnamed object is otherwise
-        # indistinguishable from one nobody ever wrote.
+        # The row won't exist; log the key so the orphaned body is countable.
         if storage_key:
             logger.warning(
                 "protocol score document orphaned in object storage: row insert failed",
@@ -119,7 +89,6 @@ def persist_score_document(session: Session, document: ScoreDocument) -> Any:
 
 
 def _spill(protocol_id: int, body: bytes) -> str | None:
-    """Write *body* to object storage, returning its key, or ``None`` if unconfigured."""
     from db.storage import JSON_CONTENT_TYPE, get_storage_client, protocol_score_document_key
 
     client = get_storage_client()
@@ -133,10 +102,7 @@ def _spill(protocol_id: int, body: bytes) -> str | None:
 def load_score_document(row: Any) -> dict[str, Any]:
     """The document a ``protocol_scores`` row carries, spill reassembled.
 
-    Raises :class:`ScoreDocumentUnavailable` rather than returning a partial or
-    an empty document when the spilled body cannot be read — an unreadable
-    document is not an empty one, and serving ``{}`` would publish "this
-    protocol has no findings" out of a failed fetch.
+    Raises :class:`ScoreDocumentUnavailable` instead of serving ``{}`` on a failed fetch.
     """
     if row.findings is not None:
         return dict(row.findings)

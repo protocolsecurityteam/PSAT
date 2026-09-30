@@ -1,0 +1,111 @@
+.ref-row {
+  border-top: 1px solid rgba(148, 163, 184, 0.06);
+  padding: 3px 0;
+}
+
+.ref-row:first-child {
+  border-top: none;
+}
+
+.ref-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+/* Gold wash = preview, matching the canvas peek. */
+.ref-link {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  cursor: pointer;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border-radius: 4px;
+}
+
+.ref-link:hover {
+  background: rgba(212, 160, 23, 0.08);
+}
+
+.ref-name {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: #cbd5e1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ref-link:hover .ref-name {
+  color: #e2e8f0;
+}
+
+.ref-tag {
+  color: #64748b;
+  font-weight: 600;
+}
+
+.ref-addr {
+  flex-shrink: 0;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+  color: #475569;
+}
+
+.ref-value {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: #f59e0b;
+}
+
+.ref-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  border-radius: 3px;
+  padding: 0 2px;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.ref-toggle:hover {
+  color: #94a3b8;
+}
+
+.ref-caret {
+  font-size: 9px;
+  color: #475569;
+}
+
+.ref-row.open .ref-caret {
+  color: #94a3b8;
+}
+
+.ref-head:hover .ps-goto-arrow {
+  color: #94a3b8;
+}
+
+.ref-body {
+  padding: 2px 6px 6px;
+}
+
+.ref-body .ps-ctrl-fns {
+  gap: 5px;
+}
+
+/* .ps-ctrl-fnchip is tiny for the canvas accordion; readable size here. */
+.ref-body .ps-ctrl-fnchip {
+  font-size: 11px;
+  padding: 2px 8px;
+}

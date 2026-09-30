@@ -1,24 +1,11 @@
-"""Socket-level pytest guard against external network egress.
+"""Pytest plugin (``-p local_netguard``) that blocks and maps real network egress.
 
-Load with ``-p local_netguard``. Wraps ``socket.getaddrinfo`` (to learn the
-hostname behind each IP) and ``socket.socket.connect`` / ``connect_ex`` (to
-BLOCK connects to globally-routable / public IPs). Loopback, private and
-link-local stay allowed, so Postgres, MinIO and docker networking are untouched;
-only the public internet — where the paid APIs live — is fenced off.
+Wraps ``getaddrinfo`` (to learn hostnames) and ``socket.connect``/``connect_ex`` (to block public IPs). Loopback,
+private and link-local stay allowed. Blocked connects are summarized per host at session end. psycopg2 uses libpq and
+bypasses Python sockets.
 
-On a blocked connect it records ``(test nodeid, hostname, port)`` and, at session
-end, prints a per-host summary with the test files that reached it. A clean run
-(``OK``) means every external call was mocked and nothing reached a real
-endpoint. psycopg2 uses libpq (C) and bypasses Python's socket layer, so the DB
-never trips this; requests/httpx/urllib3/boto3 do, which is the surface we map.
-
-Committed: this is the offline suite's socket-level egress backstop, loaded via
-``-p local_netguard`` by the CI offline job
-(``.github/workflows/_ci-checks.yml``). The optional, untracked local runner
-``run_tests_fast.sh`` also loads it. It complements the in-process guard in
-``tests/conftest.py`` (which fences the ``requests``/``urllib`` wires with clearer
-errors); this one catches anything that bypasses them. A blocked connect fails
-the session, so a leak can't pass silently on a degraded path.
+Used by ``run_tests_fast.sh`` and the CI offline job; complements the ``requests``/``urllib`` guard in
+``tests/conftest.py`` by catching anything that bypasses it. A blocked connect fails the session.
 """
 
 from __future__ import annotations
@@ -92,9 +79,7 @@ def pytest_sessionfinish(session, exitstatus):
     for hp in sorted(by_host):
         for f in sorted(by_host[hp]):
             print(f"[netguard:{tag}] {hp} <= {f}", file=sys.stderr)
-    # Fail the session on any external connect — a test that swallows the blocked
-    # connect on a degraded path still passes, so the per-test result alone won't
-    # catch the leak. Under xdist this runs per-worker (the report above is the
-    # signal there); the CI offline job runs serially, so this gates the build.
+    # A test that swallows the blocked connect still passes, so fail the session. Under xdist this runs per worker; CI
+    # runs serially, so it gates the build.
     if session.exitstatus == 0:
         session.exitstatus = 1

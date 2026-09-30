@@ -1,18 +1,6 @@
-"""Worker-fleet concurrency primitives shared across pipeline stages.
+"""Thread-based fan-out for I/O-bound pipeline stages, preserving the serial version's ordering and error semantics.
 
-The pipeline is dominated by JSON-RPC and Etherscan I/O — the few bits of CPU
-work between requests don't justify processes, but the cumulative RTT cost on
-serial loops is the dominant share of every worker's wall time. These helpers
-give every fan-out site a uniform, threading-only way to stack RTTs while
-keeping the request shape, ordering guarantees, and error semantics identical
-to the sequential version.
-
-``parallel_map`` is the generic per-item fan-out (one task = one item).
-``RpcExecutor`` is the process-wide thread pool every site shares so we don't
-spawn a new pool per call. ``parallel_rpc_calls`` chunks a JSON-RPC batch and
-submits each chunk through the pool — the chunking already exists in
-``rpc_batch_request_with_status``, but it runs serially; here we parallelize
-across chunks so a 2000-call batch finishes in roughly the time of one chunk.
+``RpcExecutor`` is the shared process-wide pool.
 """
 
 from __future__ import annotations
@@ -21,11 +9,10 @@ import contextvars
 import logging
 import os
 import threading
-from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from collections.abc import Callable, Iterable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Any, TypeVar
 
-from services.clients.rpc import MAX_BATCH_SIZE, rpc_batch_request_with_status
 from utils.logging import record_degraded
 
 logger = logging.getLogger(__name__)
@@ -35,7 +22,7 @@ R = TypeVar("R")
 
 
 def _max_fanout() -> int:
-    """Resolve ``PSAT_RPC_FANOUT`` at every call so tests can flip it via monkeypatch."""
+    """Resolved per call so tests can monkeypatch."""
     try:
         value = int(os.getenv("PSAT_RPC_FANOUT", "16"))
     except ValueError:
@@ -44,7 +31,6 @@ def _max_fanout() -> int:
 
 
 def _heartbeat_interval_s() -> float:
-    """Resolve the max wait between job heartbeats while a fan-out is blocked."""
     try:
         value = float(os.getenv("PSAT_PARALLEL_HEARTBEAT_INTERVAL_S", "30"))
     except ValueError:
@@ -60,8 +46,7 @@ def _call_heartbeat(heartbeat: Callable[[], None] | None) -> None:
     except Exception as exc:
         if _is_lease_lost(exc):
             raise
-        # Swallowed-continue: a failed heartbeat must not kill the fan-out, so
-        # this is degraded-but-continuing (WARNING), not a job-failing ERROR.
+        # A failed heartbeat must not kill the fan-out.
         logger.warning(
             "parallel_map: heartbeat raised — continuing",
             extra={"exc_type": type(exc).__name__},
@@ -76,19 +61,10 @@ def parallel_map(
     max_workers: int | None = None,
     heartbeat: Callable[[], None] | None = None,
 ) -> list[tuple[T, R | BaseException]]:
-    """Apply *fn* to each item concurrently and return results in input order.
+    """Apply *fn* concurrently, returning ``(item, result)`` or ``(item, exc)`` in input order.
 
-    Each entry in the returned list is ``(item, result)`` on success or
-    ``(item, exc)`` on per-item failure, so callers can treat parallel
-    failures the same way they'd treat per-item failures in a serial loop.
-
-    *max_workers* falls back to ``PSAT_RPC_FANOUT`` (default 16). When set to 1
-    the function executes sequentially in-thread, which is the parity mode
-    tests use to assert behavioural equivalence with the serial path.
-
-    *heartbeat*, if provided, is called on the submitting thread after task
-    completions and while waiting on long-running fan-out work. DB sessions
-    captured in the closure therefore stay on the worker's thread.
+    ``max_workers=1`` runs serially (the parity mode tests use). *heartbeat* runs on the submitting thread, so captured
+    DB sessions stay on it.
     """
     items_list = list(items)
     if not items_list:
@@ -110,16 +86,10 @@ def parallel_map(
 
     executor = RpcExecutor.get()
     futures: dict[Future[R], int] = {}
-    # Cap concurrency by keeping at most ``workers`` submitted futures at a
-    # time. Do not block during submission: long-running first-wave tasks
-    # must still get heartbeat callbacks while the remaining items wait.
+    # Don't block during submission, so long first-wave tasks still get heartbeats.
 
     def _submit(idx: int, item: T) -> Future[R]:
-        # Per-submission ``copy_context`` is mandatory: a single Context
-        # object cannot be entered by ``Context.run`` concurrently from
-        # two threads. Each worker thread needs its own snapshot of the
-        # caller's contextvars (trace_id, job_id, …) so the bind survives
-        # the fan-out without serializing the pool on a shared context.
+        # A Context can't be entered by two threads at once; each task needs its own copy.
         ctx = contextvars.copy_context()
 
         def _wrapped() -> R:
@@ -168,10 +138,7 @@ def parallel_map(
 
 
 def _is_lease_lost(exc: BaseException) -> bool:
-    """Lazy import of ``db.queue.LeaseLost`` to keep this utility module
-    free of an unconditional ``utils → db`` import. Returns False if the
-    DB layer is unavailable (test/CLI contexts), letting the heartbeat
-    swallow path stay defensive in those environments."""
+    """Lazy so this module doesn't import ``db`` unconditionally; False when the DB layer is unavailable."""
     try:
         from db.queue import LeaseLost
     except Exception:
@@ -179,28 +146,8 @@ def _is_lease_lost(exc: BaseException) -> bool:
     return isinstance(exc, LeaseLost)
 
 
-def unwrap_results(results: Sequence[tuple[T, R | BaseException]]) -> list[R]:
-    """Convenience: flatten ``parallel_map`` output, raising the first exception encountered.
-
-    Use this when the call site has no per-item recovery story and would have
-    raised on the first failure in a serial loop anyway.
-    """
-    out: list[R] = []
-    for item, result in results:
-        if isinstance(result, BaseException):
-            raise result
-        out.append(result)
-    return out
-
-
 class RpcExecutor:
-    """Process-wide ``ThreadPoolExecutor`` shared across every fan-out site.
-
-    Sized from ``PSAT_RPC_FANOUT`` (default 16). Constructed lazily on first
-    access, never shut down — the pool lives for the lifetime of the worker
-    process and threads are reused across jobs so we never pay
-    pthread-creation cost in the hot path.
-    """
+    """Process-wide pool sized from ``PSAT_RPC_FANOUT`` (default 16), created lazily and never shut down."""
 
     _instance: ThreadPoolExecutor | None = None
     _lock = threading.Lock()
@@ -224,7 +171,6 @@ class RpcExecutor:
 
     @classmethod
     def reset_for_tests(cls) -> None:
-        """Drop the singleton so tests that change ``PSAT_RPC_FANOUT`` get a fresh pool."""
         with cls._lock:
             inst, cls._instance = cls._instance, None
         if inst is not None:
@@ -232,62 +178,11 @@ class RpcExecutor:
 
 
 def submit_rpc(fn: Callable[..., R], *args: Any, **kwargs: Any) -> Future[R]:
-    """Module-level shortcut for ``RpcExecutor.submit``."""
     return RpcExecutor.submit(fn, *args, **kwargs)
-
-
-def parallel_rpc_calls(
-    rpc_url: str,
-    calls: list[tuple[str, list[Any]]],
-) -> list[tuple[Any, bool]]:
-    """Drop-in replacement for ``rpc_batch_request_with_status`` that parallelizes across chunks.
-
-    For ``len(calls) <= MAX_BATCH_SIZE`` this just delegates — there is no
-    second chunk to stack. For larger batches each chunk is submitted to the
-    shared executor and the results are reassembled in input order. The
-    return shape (``[(result, had_error)]``) is identical so call sites are
-    drop-in.
-    """
-    if not calls:
-        return []
-    if len(calls) <= MAX_BATCH_SIZE:
-        return rpc_batch_request_with_status(rpc_url, calls)
-
-    chunks: list[tuple[int, list[tuple[str, list[Any]]]]] = []
-    for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
-        chunks.append((chunk_start, calls[chunk_start : chunk_start + MAX_BATCH_SIZE]))
-
-    results: list[tuple[Any, bool]] = [(None, True)] * len(calls)
-    futures: dict[Future[Any], int] = {}
-    for offset, chunk in chunks:
-        # Per-chunk context copy — see ``parallel_map`` above for why a
-        # shared ``Context`` object cannot be concurrently entered.
-        ctx = contextvars.copy_context()
-        futures[RpcExecutor.submit(ctx.run, rpc_batch_request_with_status, rpc_url, chunk)] = offset
-
-    for fut in as_completed(futures):
-        offset = futures[fut]
-        try:
-            chunk_results = fut.result()
-        except Exception as exc:
-            # Swallowed-continue: this chunk's slots keep their (None, True)
-            # error default and the remaining chunks proceed, so it is
-            # degraded-but-continuing (WARNING + exc_type), not a job ERROR.
-            logger.warning(
-                "parallel_rpc_calls: chunk failed wholesale — continuing",
-                extra={"chunk_start": offset, "exc_type": type(exc).__name__},
-            )
-            record_degraded(phase="parallel_rpc_chunk", exc=exc, context={"chunk_start": offset})
-            continue
-        for i, item in enumerate(chunk_results):
-            results[offset + i] = item
-    return results
 
 
 __all__ = [
     "RpcExecutor",
     "parallel_map",
-    "parallel_rpc_calls",
     "submit_rpc",
-    "unwrap_results",
 ]

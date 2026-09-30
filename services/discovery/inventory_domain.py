@@ -1,10 +1,5 @@
-"""Domain selection, page discovery, and shared utilities for contract inventory.
-
-This module provides the infrastructure layer for the inventory discovery pipeline:
-  - Shared constants: regex patterns, blockchain explorer mappings, trust lists
-  - Utility helpers: domain matching, chain inference, address extraction, page fetching
-  - Tavily search with query budget management
-  - LLM-based official domain identification and page selection
+"""Domain selection, page discovery, and shared utilities for the inventory pipeline: constants, helpers, budgeted
+Tavily search, and LLM domain/page selection.
 """
 
 from __future__ import annotations
@@ -28,7 +23,6 @@ from .static_dependencies import normalize_address as _normalize_address
 
 logger = logging.getLogger(__name__)
 
-# -- Constants ---------------------------------------------------------------
 
 ADDRESS_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 URL_RE = re.compile(r"https?://[^\s\"'<>)]+")
@@ -64,10 +58,8 @@ LOW_TRUST_DOMAINS = {
 
 CHAIN_SORT_ORDER = {"ethereum": 0, "arbitrum": 1, "optimism": 2, "polygon": 3, "base": 4, "unknown": 99}
 
-# Etherscan v2 chain IDs for chains the inventory pipeline can discover. The set
-# of discoverable chains is intentionally this fixed list (it bounds the
-# all-chain probe in ``chain_resolver``); the id values come from the canonical
-# registry so they can't drift from the rest of the codebase.
+# Chains the inventory pipeline can discover (bounds ``chain_resolver``'s probe); ids from the canonical registry (inv.
+# 5).
 _INVENTORY_CHAINS = (
     "ethereum",
     "arbitrum",
@@ -85,8 +77,6 @@ CHAIN_IDS: dict[str, int] = {name: chain_by_name(name).chain_id for name in _INV
 
 
 class RateLimiter:
-    """Thread-safe rate limiter enforcing a minimum interval between calls."""
-
     def __init__(self, calls_per_second: float):
         import threading
 
@@ -105,16 +95,8 @@ class RateLimiter:
             self._last_call = time.monotonic()
 
 
-# -- Utility helpers ---------------------------------------------------------
-
-
 def _debug_log(enabled: bool, message: str) -> None:
-    # Route the inventory pipeline's per-step diagnostics through the module
-    # logger at DEBUG so they carry the bound trace context and are queryable
-    # as JSON under the house JsonFormatter. The worker pipeline always calls
-    # with ``enabled=False`` (no stderr), so the production path no longer
-    # leaks plaintext; the legacy stderr line is retained only for the
-    # standalone CLI/dev case (``debug=True``).
+    # Via the module logger so it carries trace context; stderr only for the standalone CLI (``debug=True``).
     logger.debug("%s", message)
     if enabled:
         ts = datetime.now().isoformat(timespec="seconds")
@@ -156,8 +138,7 @@ def _extract_addresses(*values: str) -> set[str]:
 
 def _infer_chain(url: str, text: str) -> str:
     domain = _get_domain(url)
-    # Longest entry first: a subdomain entry (optimistic.etherscan.io) must win
-    # over its parent domain (etherscan.io) regardless of dict order.
+    # Longest first so subdomains beat their parent (optimistic.etherscan.io vs etherscan.io).
     for known, chain in sorted(EXPLORER_CHAINS.items(), key=lambda kv: -len(kv[0])):
         if _domain_matches(domain, known):
             return chain
@@ -184,7 +165,6 @@ def _resolve_chain(inferred: str, requested: str | None) -> tuple[str | None, bo
 
 
 def _fetch_page(url: str, debug: bool = False) -> str | None:
-    """Fetch a page via HTTP and return its text, or None on failure."""
     from utils.egress import UnsafeUrlError, safe_get
 
     try:
@@ -198,9 +178,6 @@ def _fetch_page(url: str, debug: bool = False) -> str | None:
     except _requests.RequestException as exc:
         _debug_log(debug, f"Fetch {url} failed: {exc!r}")
     return None
-
-
-# -- Domain selection & page discovery ---------------------------------------
 
 
 def _maybe_domain(value: str) -> str | None:
@@ -220,10 +197,8 @@ def _tavily_search(
     errors: list[dict],
     debug: bool = False,
 ) -> list[dict]:
-    """Run a single Tavily search, respecting query budget.
-
-    Always uses include_raw_content=False — page content is fetched directly
-    via HTTP where needed, avoiding Tavily's per-result content charges.
+    """One Tavily search within the query budget, without raw content (pages are fetched directly to avoid content
+    charges).
     """
     if queries_used[0] >= max_queries:
         _debug_log(debug, f"Skipping Tavily query (budget exhausted): {query!r}")
@@ -253,15 +228,10 @@ def _llm_select_domain(
     company: str,
     debug: bool = False,
 ) -> tuple[str | None, list[str]]:
-    """Ask the LLM to identify the best domain(s) for finding deployed contract addresses.
-
-    Returns ``(primary_domain, extra_domains)`` where *extra_domains* are
-    secondary docs sites (e.g. gitbook) that should also be searched.
-    """
+    """Ask the LLM for the best domain(s) for contract addresses. Returns ``(primary_domain, extra_domains)``."""
     if not results:
         return None, []
 
-    # Collect unique non-explorer, non-low-trust domains with their URLs/titles
     domain_info: dict[str, list[str]] = defaultdict(list)
     for r in results:
         url = str(r.get("url", "")).strip()
@@ -276,7 +246,7 @@ def _llm_select_domain(
     if not domain_info:
         return None, []
 
-    # Present as numbered choices (more reliable across LLM models)
+    # Numbered choices work more reliably across models.
     sorted_domains = sorted(domain_info.keys(), key=lambda d: -len(domain_info[d]))
     choices = "\n".join(
         f"{i + 1}. {domain} (pages: {', '.join(titles[:2])})"
@@ -313,7 +283,6 @@ def _llm_select_domain(
 
 
 def _domain_candidates_from_results(results: list[dict[str, Any]]) -> list[str]:
-    """Return ordered non-explorer, non-low-trust domains seen in search results."""
     domain_info: dict[str, list[str]] = defaultdict(list)
     for result in results:
         url = str(result.get("url", "")).strip()
@@ -328,7 +297,6 @@ def _domain_candidates_from_results(results: list[dict[str, Any]]) -> list[str]:
 
 
 def _collect_in_domain_pages(results: list[dict[str, Any]], domain: str) -> list[dict[str, str]]:
-    """Collect unique page URLs, titles, and snippets for a domain."""
     seen_urls: set[str] = set()
     page_info: list[dict[str, str]] = []
     for result in results:
@@ -352,7 +320,6 @@ def _llm_select_pages(
     allowed_domains: list[str],
     debug: bool = False,
 ) -> list[str]:
-    """Ask the LLM to choose the most relevant in-domain pages from a candidate list."""
     if not page_info:
         return []
 
@@ -384,7 +351,6 @@ def _llm_select_pages(
 
 
 def _dedupe_results_by_url(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge search results by URL, preferring richer snippets."""
     by_url: dict[str, dict[str, Any]] = {}
     for result in results:
         url = str(result.get("url", "")).strip()
@@ -413,7 +379,6 @@ def _discover_contract_inventory_pages(
     extra_domains: list[str] | None = None,
     debug: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Discover pages that likely contain official multi-contract inventory information."""
     all_domains = [domain] + sorted(set(extra_domains or []) - {domain})
     _debug_log(debug, f"Inventory page discovery on domain(s)={all_domains}")
 
@@ -440,7 +405,6 @@ def _discover_contract_inventory_pages(
     page_info: list[dict[str, str]] = []
     for d in all_domains:
         page_info.extend(_collect_in_domain_pages(combined, d))
-    # Dedupe by URL in case of overlap
     seen: set[str] = set()
     unique_page_info: list[dict[str, str]] = []
     for p in page_info:

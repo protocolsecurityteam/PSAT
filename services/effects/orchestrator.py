@@ -1,28 +1,15 @@
-"""Per-candidate probe planning — the seam between selection and the harness.
+"""Per-candidate probe planning: the seam between selection and the harness.
 
-The effects worker owns the *orchestration* (cache lookup/write with kernel-vs-
-projection scope, the self-audit, verdict persistence, discrepancy routing,
-metrics, fail-forward). It delegates *what to probe for each candidate* to a
-``Prober`` seam so the orchestration is testable end-to-end against stubs with
-recorded transcripts and the production recipe wiring stays swappable.
+The effects worker owns orchestration (cache scoping, self-audit, persistence, discrepancy routing, metrics); it asks a
+``Prober`` what to probe per candidate, so orchestration can be tested with stubs.
 
-A :class:`ProbePlan` is one (effect-class, scope) unit of work for a candidate:
-a ``run`` closure that executes the applicable Tier-1/Tier-2 recipe against the
-injected seams and returns a tiered, transcripted
-:class:`~services.effects.harness.ObservedEffect`. The plan does NOT carry the
-behavioral hash — the worker stamps that from the candidate's resolved hashes so
-kernel/projection cache scoping lives in one place.
+A :class:`ProbePlan` is one (effect class, scope) unit whose ``run`` executes a recipe and returns an
+:class:`~services.effects.harness.ObservedEffect`. The worker stamps the behavioural hash so cache scoping lives in one
+place.
 
-The default prober drives **code-upgrade** (Tier 0 indexed history + a
-current-state check) for proxy candidates, plus every class whose concrete probe
-inputs :mod:`services.effects.calldata` can synthesize from the static facts —
-value-out, supply, authority-change at Tier 1, and freeze/pause at Tier 2 when a
-fork transport is available.
-
-Where the synthesizer returns nothing the prober emits NO plan for that class:
-the recipes already fail closed on thin inputs, but a probe on guessed calldata
-burns a simulation to learn nothing. So the plan set is exactly the set of
-classes with real inputs, and everything else stays ``unknown``.
+The default prober plans code-upgrade (Tier 0 plus a current-state check) for proxies, plus every class
+:mod:`services.effects.calldata` can synthesize inputs for (value-out, supply, authority-change at Tier 1; freeze/pause
+at Tier 2 with a fork). Classes without real inputs get no plan and stay ``unknown``.
 """
 
 from __future__ import annotations
@@ -65,8 +52,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ProbeContext:
-    """Injected seams + per-chain context a prober runs against. Every wire is
-    behind one of these callables so the orchestration is hermetic under test."""
+    """Injected seams and per-chain context, so orchestration is hermetic under test."""
 
     chain_id: int
     block: int
@@ -76,12 +62,9 @@ class ProbeContext:
     transcript_store: TranscriptStore
     call_batch: CallBatch | None = None
     anvil_factory: Callable[[], AnvilTransport] | None = None
-    # Called with the number of upstream requests a probe issued, for the
-    # preflight sizing metric (best-effort; recipes that don't report leave 0).
+    # Upstream request count per probe, for preflight sizing (best-effort).
     on_requests: Callable[[int], None] | None = None
-    # Input-asset seeding seam. Left unset in production: the default is built
-    # from ``simulate`` on first use and memoizes token identity + storage layout
-    # for the WHOLE context, so a job's candidates share one discovery.
+    # Unset in production: built from ``simulate`` on first use and memoized for the whole context.
     seeder: Seeder | None = None
     _seeder_cache: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
@@ -90,17 +73,16 @@ class ProbeContext:
             chain_id=self.chain_id,
             block=self.block,
             hardfork=self.hardfork,
-            # The preflight pins ONE ``eth_blockNumber`` per stage invocation and
-            # every Tier-1 probe simulates at exactly it, so the scope of the pin
-            # is the invocation. A head that could not be pinned is ``0`` (Tier 1
-            # is then disabled) and names no scope, so nothing is published.
+            # The preflight pins one block per invocation and every Tier-1 probe uses it. An unpinnable head is ``0``
+            # (Tier 1 disabled) and publishes nothing.
             block_source=BLOCK_SOURCE_INVOCATION_PIN if self.block > 0 else None,
         )
 
     def effective_seeder(self) -> Seeder | None:
-        """The seeder Tier-1 probes retry through, or ``None`` (⇒ no seeding, the
-        pre-seeding probe verbatim). Requires ``eth_simulateV1``: seeding is a
-        state-override retry of the same block, with no Tier-2 equivalent."""
+        """The seeder Tier-1 probes retry through, or ``None`` (no seeding).
+
+        Needs ``eth_simulateV1``; there's no Tier-2 equivalent.
+        """
         if self.seeder is not None:
             return self.seeder
         if not self.simulate_supported or not input_seeding_enabled():
@@ -114,45 +96,29 @@ class ProbeContext:
 
 @dataclass
 class ProbePlan:
-    """One (effect-class, scope) unit of probe work for a candidate. ``run``
-    executes the recipe (touching the injected seams) and returns the verdict.
-    ``gate_ref`` names the gate *structure* (never an address)."""
+    """One (effect class, scope) unit of probe work. ``gate_ref`` names the gate structure, never an address."""
 
     effect_class: str
     scope: str
     run: Callable[[], ObservedEffect]
     gate_ref: str = ""
-    # Optional per-class hash override; when None the worker uses the candidate's
-    # resolved (kernel_hash, surface_hash). Lets a prober key a class on a
-    # narrower behavioral identity if it ever computes one.
+    # Per-class override; ``None`` uses the candidate's (kernel_hash, surface_hash).
     behavior_hash: str | None = None
 
 
-# A Prober maps a candidate to its probe plans. Injected into the worker
-# (default below); tests substitute a stub returning canned plans.
 Prober = Callable[[Session, Candidate, ProbeContext], list[ProbePlan]]
 
-# Resolves (kernel_hash, surface_hash) for a candidate, or None to skip it.
-# Injected so tests control cache scoping without real bytecode.
+# (kernel_hash, surface_hash) for a candidate, or None to skip.
 HashResolver = Callable[[Session, Candidate], "tuple[str, str] | None"]
 
 
-# ---------------------------------------------------------------------------
-# Default hash resolver — bytecode fallback (sound; under-dedups)
-# ---------------------------------------------------------------------------
-
-
 def make_bytecode_hash_resolver(chain_id: int) -> HashResolver:
-    """Build the default (kernel_hash, surface_hash) resolver for a chain.
+    """Default (kernel_hash, surface_hash) resolver for a chain.
 
-    Uses the bytecode fallback (metadata-stripped whole-runtime-bytecode +
-    selector for the kernel; selectorless for the surface). Sound by construction —
-    it can only *under*-dedup (distinct surfaces sharing a mixin kernel hash apart,
-    costing extra sims), never transfer a verdict wrongly. The resolved-IR primary
-    hash is a dedup optimization requiring live Slither IR and is not
-    on the worker's cheap path; the fallback is always safe. Returns ``None`` when
-    no runtime bytecode is cached for the deployment (the worker skips it,
-    degraded — never guesses)."""
+    Uses metadata-stripped runtime bytecode (+ selector for the kernel). It can only under-dedup, never transfer a
+    verdict wrongly; the resolved-IR hash needs live Slither and isn't on this path. ``None`` when no bytecode is cached
+    (the worker skips, degraded).
+    """
     from services.effects.hashing import bytecode_fallback_hash, contract_surface_hash
 
     def _resolve(session: Session, candidate: Candidate) -> tuple[str, str] | None:
@@ -168,45 +134,21 @@ def make_bytecode_hash_resolver(chain_id: int) -> HashResolver:
 
 
 def _hashable_code_address(session: Session, candidate: Candidate) -> str | None:
-    """The address whose runtime bytecode may key this candidate's verdict, or ``None``.
+    """The address whose bytecode may key this candidate's verdict, or ``None``.
 
-    What makes bytecode hashing safe is the unstated
-    invariant *"a proxy row never carries ``effective_functions``"* — true today (39
-    proxy rows, 0 functions) and asserted by nothing: no constraint, no test, no
-    comment. When it breaks, ``candidate.contract_address`` is a PROXY address and the
-    bytecode at it is the forwarding STUB. The collisions that invariant holds back are
-    real and measured: 16 colliding surface-hash groups over 323 mainnet
-    ``bytecode_cache`` rows, 149 addresses inside a collision, largest group **15
-    distinct implementations behind ONE hash** (``UUPSProxy`` — LiquidityPool, eETH,
-    EtherFiNodesManager, weETH …). A verdict keyed on that hash — a Tier-1 code-upgrade
-    result, or any projection-scope class keyed on the selectorless surface hash — is
-    served to every unrelated implementation behind the same proxy pattern.
+    Bytecode hashing is only safe while proxy rows carry no ``effective_functions`` (true today, but not enforced). If
+    one did, the hashed code would be the forwarding stub, and stubs collide heavily (15 implementations behind one
+    ``UUPSProxy`` hash), serving one verdict to unrelated implementations.
 
-    So a proxy row's OWN bytecode is never hashed. Where the row names an
-    implementation whose bytecode is cached, the hash keys on THAT (the behavior belongs
-    to the code — the same principle ``Candidate.probe_target`` states from the other
-    side: probe the deployment, hash the code). Where it does not, the answer is
-    ``None`` and the worker takes its existing "skip, degraded, never guess" path.
-
-    Not a blanket ``None`` for every proxy row, because the code-upgrade class is
-    planned ONLY for proxy contract rows (``_code_upgrade_plans``), so a blanket
-    refusal would make that class unplannable by construction rather than merely
-    uncached. The implementation redirect keeps the
-    class reachable while still never keying on a stub; the refusal remains for every
-    proxy row that cannot be resolved to cached implementation code. (Local corpus: 0
-    ``code_upgrade`` verdicts exist today, so neither variant changes a realised row —
-    a lower bound, not a proof of harmlessness.)
+    So a proxy's own bytecode is never hashed: use its cached implementation's bytecode, else ``None`` (skip). Not a
+    blanket ``None`` for proxies, since code-upgrade is only planned for proxy rows.
     """
     contract = _contract_row(session, candidate.contract_id)
     if contract is None or not contract.is_proxy:
         return candidate.contract_address
     implementation = (contract.implementation or "").strip().lower()
     if not implementation or implementation in ("0x", "0x" + "0" * 40):
-        # No ``record_degraded`` here on purpose: returning ``None`` lands in the
-        # worker's receiving arm, which records the skip once per candidate up to
-        # a cap. Recording here too would double every entry in an uncapped
-        # artifact, and the dedup race that produces unresolved proxies produces
-        # them in bulk.
+        # No ``record_degraded`` here: the worker records the skip (capped); doing it here too would double entries.
         context = {
             "contract_id": candidate.contract_id,
             "contract_address": candidate.contract_address,
@@ -229,8 +171,9 @@ def _hashable_code_address(session: Session, candidate: Candidate) -> str | None
 
 
 def _contract_row(session: Session, contract_id: int) -> Contract | None:
-    """The candidate's ``contracts`` row, from the batch store when installed (the same
-    source ``_code_upgrade_plans`` reads, so batched and unbatched planning agree)."""
+    """The candidate's ``contracts`` row, from the batch store when installed (same source as
+    ``_code_upgrade_plans``).
+    """
     from services.effects.prefetch import get_prefetch
 
     pf = get_prefetch(session)
@@ -240,9 +183,7 @@ def _contract_row(session: Session, contract_id: int) -> Contract | None:
 
 
 def _runtime_bytecode(session: Session, chain_id: int, address: str) -> str | None:
-    """Fetch a deployment's runtime bytecode from the ``bytecode_cache`` table
-    (keyed ``(chain_id, address)``). DB-only (no wire) so hashing stays off the RPC
-    path; a miss returns ``None`` and the candidate is skipped rather than guessed."""
+    """Runtime bytecode from ``bytecode_cache`` (DB only, no wire); a miss skips the candidate."""
     from db.models import BytecodeCache
     from services.effects.prefetch import get_prefetch
 
@@ -260,18 +201,11 @@ def _runtime_bytecode(session: Session, chain_id: int, address: str) -> str | No
     return row if isinstance(row, str) and row else None
 
 
-# ---------------------------------------------------------------------------
-# Default prober — conservative, code-upgrade Tier-0
-# ---------------------------------------------------------------------------
-
-
 def default_prober(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:
-    """Build probe plans for one candidate: the Tier-0 code-upgrade plan plus one
-    plan per class the synthesizer produced concrete inputs for.
+    """Probe plans for one candidate: Tier-0 code-upgrade plus one plan per synthesizable class.
 
-    A claim-enrolled candidate (``restrict_families`` set) is only re-probed
-    for its value/supply families — the code-upgrade probe is skipped so an
-    already-explained flow/supply function is not re-simulated for upgradeability."""
+    Claim-enrolled candidates (``restrict_families``) skip code-upgrade.
+    """
     allow = candidate.restrict_families
     plans: list[ProbePlan] = []
     if allow is None or EFFECT_CLASS_CODE_UPGRADE in allow:
@@ -280,16 +214,12 @@ def default_prober(session: Session, candidate: Candidate, ctx: ProbeContext) ->
 
 
 def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:
-    """Code-upgrade for proxy candidates: an indexed upgrade (Tier 0 history)
-    discharges a present-tense capability claim only in conjunction with a
-    current-state check. That check is a static/DB read (off the wire)
-    and requires the capability be present NOW — BOTH the impl slot
-    still non-zero AND a resolved, non-renounced upgrade authority. Freezing
-    upgradeability does not zero the impl slot, so impl-non-zero alone would mint a
-    false "upgradeable now" for a proxy whose authority was renounced; requiring a
-    resolved principal closes that. A renounced/unset authority resolves to the
-    zero address / empty set here (predicate_evaluator / solmate_roles), so an
-    empty resolved set WITHHOLDS (fail-closed), never over-claims."""
+    """Code-upgrade for proxies.
+
+    Indexed history proves a present capability only with a current-state check (DB, off the wire): the impl slot is
+    non-zero and a resolved, non-renounced upgrade authority exists. Freezing doesn't zero the slot, so the authority
+    check prevents a false "upgradeable now"; renounced authorities resolve to zero/empty and withhold.
+    """
     from services.effects.prefetch import get_prefetch
 
     pf = get_prefetch(session)
@@ -318,9 +248,7 @@ def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContex
     zero = "0x" + "0" * 40
     impl = (contract.implementation or "").strip().lower()
     current_impl_nonzero = bool(impl) and impl != zero and impl != "0x0"
-    # Current-state check: a resolved, non-renounced upgrade authority must
-    # ALSO be present now. A renounced/unset authority is the zero address / empty
-    # set, so drop those before deciding the capability is live.
+    # Drop zero-address and empty principals before deciding the capability is live.
     resolved_principals = [p for p in candidate.principal_addresses if p and p.strip().lower() != zero]
     current_capability_present = current_impl_nonzero and len(resolved_principals) > 0
     principal = resolved_principals[0] if resolved_principals else None
@@ -353,27 +281,16 @@ def _code_upgrade_plans(session: Session, candidate: Candidate, ctx: ProbeContex
 
 
 def _upgrade_gate_ref(contract: Contract) -> str:
-    """A gate-STRUCTURE descriptor — the proxy pattern, never the admin
-    address. Principal binding happens at read time via ``function_principals``."""
+    """Gate structure (the proxy pattern), never the admin address."""
     return f"proxy:{(contract.proxy_type or 'unknown').lower()}"
 
 
-# ---------------------------------------------------------------------------
-# Synthesized plans — value-out / authority-change / supply (Tier 1) and freeze/pause (Tier 2)
-# ---------------------------------------------------------------------------
-
-
 def _synthesized_plans(session: Session, candidate: Candidate, ctx: ProbeContext) -> list[ProbePlan]:
-    """One plan per class the synthesizer produced inputs for. A class with thin
-    facts yields no plan at all rather than a probe on guessed calldata."""
+    """One plan per class with synthesized inputs; thin facts get no plan."""
     inputs = calldata_synth.synthesize(session, candidate)
     plans: list[ProbePlan] = []
-    # A delayed executor gets the Tier-2 sequence INSTEAD of the Tier-1 probe, not
-    # alongside it. Tier 1 cannot satisfy a ``block.timestamp`` gate at all, so its
-    # row is a revert that reads as "we called it and it failed" while saying
-    # nothing about the function; and both plans carry the same effect class,
-    # scope and gate, so they would stage under one cache key. With no fork
-    # available the Tier-1 plan stands exactly as it does today.
+    # Delayed executors get the Tier-2 sequence instead of Tier 1: Tier 1 can't pass a timestamp gate (its revert says
+    # nothing about F), and both plans would share a cache key. Without a fork, Tier 1 stands.
     timelocked = inputs.timelock is not None and ctx.anvil_factory is not None
     if inputs.value_out is not None and not timelocked:
         plans.append(_value_out_plan(ctx, inputs.value_out))
@@ -383,8 +300,7 @@ def _synthesized_plans(session: Session, candidate: Candidate, ctx: ProbeContext
         plans.append(_supply_plan(ctx, inputs.supply))
     if inputs.authority is not None:
         plans.append(_authority_plan(ctx, candidate, inputs.authority))
-    # Tier 2 needs the fork; with no anvil factory the pause class stays unknown
-    # rather than degrading into a Tier-1 approximation that cannot see sequencing.
+    # Pause needs the fork; without it the class stays unknown.
     if inputs.pause is not None and ctx.anvil_factory is not None:
         plans.append(_pause_plan(ctx, inputs.pause))
     return plans
@@ -452,8 +368,7 @@ def _supply_plan(ctx: ProbeContext, spec: calldata_synth.SupplyPlanInputs) -> Pr
 
 
 def _authority_plan(ctx: ProbeContext, candidate: Candidate, spec: calldata_synth.AuthorityPlanInputs) -> ProbePlan:
-    # Randoms are derived deterministically from (selector, contract) exactly as
-    # the differential probe derives them, so a replay reuses the same identities.
+    # Deterministic randoms from (selector, contract), matching the differential probe, so replays reuse them.
     randoms, _ = select_identities(candidate.selector or "0x00000000", spec.contract_address, principal=spec.principal)
 
     def _run() -> ObservedEffect:
@@ -478,10 +393,8 @@ def _timelock_plan(ctx: ProbeContext, spec: calldata_synth.TimelockPlanInputs) -
         if factory is None:  # pragma: no cover - guarded at plan time
             raise RuntimeError("timelock plan requires an anvil factory")
         transport = factory()
-        # The delay belongs to the CONTRACT: OZ rejects a schedule below
-        # its own ``getMinDelay()``, and the value differs per deployment. An
-        # unreadable delay is not guessed — zero goes to the contract, whose own
-        # check rejects it and whose revert the recipe records verbatim.
+        # The delay is the contract's own (OZ rejects below ``getMinDelay()``). Unreadable goes as zero, which the
+        # contract rejects and the recipe records.
         delay = _uint_call(transport, spec.contract_address, spec.delay_calldata)
         return timelock_execute_recipe(
             transport=transport,
@@ -503,11 +416,8 @@ def _timelock_plan(ctx: ProbeContext, spec: calldata_synth.TimelockPlanInputs) -
 
 
 def _uint_call(transport: AnvilTransport, to: str, data: str) -> int:
-    """A uint read off the fork, or 0 when the call fails or returns nothing.
-    Zero is not a fallback VALUE here — it is an input the contract itself
-    rejects, which is the honest outcome for a delay we could not read."""
-    # The transcript does not exist yet at this point (the recipe mints it), so
-    # the read's failure has nowhere to be published but the log.
+    """A uint read off the fork, or 0 on failure: an input the contract itself rejects, not a guessed value."""
+    # The transcript doesn't exist yet, so only the log can record this.
     try:
         result = transport.call({"to": to, "data": data})
     except Exception as exc:
@@ -555,22 +465,7 @@ def _pause_plan(ctx: ProbeContext, spec: calldata_synth.PausePlanInputs) -> Prob
     return ProbePlan(effect_class=EFFECT_CLASS_FREEZE_PAUSE, scope=SCOPE_PROJECTION, run=_run, gate_ref=spec.gate_ref)
 
 
-# ---------------------------------------------------------------------------
-# Plan-level convenience for a prober that already holds an ObservedEffect
-# (used by tests to inject canned verdicts as one-shot plans).
-# ---------------------------------------------------------------------------
-
-
-def static_plan(effect: ObservedEffect, *, gate_ref: str = "", behavior_hash: str | None = None) -> ProbePlan:
-    """Wrap an already-computed :class:`ObservedEffect` as a ProbePlan whose
-    ``run`` just returns it. Convenience for stub probers."""
-    return ProbePlan(
-        effect_class=effect.effect_class,
-        scope=effect.scope,
-        run=lambda: effect,
-        gate_ref=gate_ref or effect.gate_ref,
-        behavior_hash=behavior_hash,
-    )
+# Convenience for injecting canned verdicts as one-shot plans (tests).
 
 
 __all__ = [
@@ -580,5 +475,4 @@ __all__ = [
     "HashResolver",
     "make_bytecode_hash_resolver",
     "default_prober",
-    "static_plan",
 ]

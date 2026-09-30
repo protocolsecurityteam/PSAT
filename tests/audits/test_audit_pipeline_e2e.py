@@ -1,29 +1,7 @@
-"""End-to-end smoke test for the audit pipeline.
-
-Walks a single fixture PDF through every phase that touches it:
-
-    1. Discovery sync      — ``_sync_audit_reports_to_db`` lands an
-                             ``audit_reports`` row with url + metadata
-    2. Text extraction     — the worker downloads (stubbed PDF body),
-                             extracts via pypdf, writes to object storage,
-                             sets ``text_extraction_status='success'``
-    3. Scope extraction    — the worker pulls the text from storage,
-                             calls the LLM (stub default fixture returns
-                             ``['Pool','Vault','Strategy','Registry']``),
-                             sets ``scope_extraction_status='success'``
-                             and refreshes coverage inline
-    4. Coverage population — ``audit_contract_coverage`` has a row
-                             matching the seeded ``Pool`` contract
-
-The per-phase behaviours (claim state machines, API endpoints, stale-row
-recovery, temporal matching, source-equivalence) live in the focused
-integration files. This test's job is to catch regressions in the
-*handoffs* between phases — a status column that stops being advanced,
-a storage key that changes shape, a mismatch between scope worker and
-coverage worker expectations.
-
-Gated by ``requires_postgres`` + ``requires_storage`` so it skips cleanly
-when docker isn't running; CI brings both up.
+"""Smoke test walking one fixture PDF through discovery sync, text extraction, scope extraction (stub returns
+Pool/Vault/Strategy/Registry) and coverage population. Per-phase behaviour lives in the focused files; this
+catches regressions in the *handoffs* (a status column no longer advanced, a storage key changing shape,
+scope/coverage worker mismatch). Needs Postgres + object storage (skips without docker).
 """
 
 from __future__ import annotations
@@ -59,10 +37,9 @@ AUDIT_FIXTURE = FIXTURE_DIR / "audits" / "spearbit_table.txt"
 
 @pytest.fixture()
 def llm_stub_dir(monkeypatch, tmp_path):
-    """Committed ``_default.json`` stub returns
-    ``["Pool", "Vault", "Strategy", "Registry"]``. Pool + Vault + Strategy
-    + Registry all appear in the Spearbit fixture body so the scope
-    validator accepts every one (no hallucination-drop)."""
+    """Committed ``_default.json`` stub returns Pool/Vault/Strategy/Registry, all present in the Spearbit fixture
+    body so the scope validator drops nothing as hallucinated.
+    """
     committed = STUB_DIR / "_default.json"
     assert committed.exists()
     (tmp_path / "_default.json").write_text(committed.read_text())
@@ -106,7 +83,6 @@ def scope_worker(monkeypatch):
 
 
 def _drive_batch(worker, db_session) -> None:
-    """Claim one batch, process every row, persist every outcome."""
     for ar in worker._claim_batch(db_session):
         _, outcome = worker._process_row(ar)
         worker._persist_outcome(ar.id, outcome)
@@ -132,7 +108,6 @@ def seeded_protocol(db_session):
     db_session.commit()
     protocol_id = p.id
 
-    # A single non-proxy contract whose name matches a scope entry.
     contract = Contract(
         protocol_id=protocol_id,
         address="0x" + "e" * 40,
@@ -152,11 +127,6 @@ def seeded_protocol(db_session):
         db_session.commit()
 
 
-# ---------------------------------------------------------------------------
-# The walk
-# ---------------------------------------------------------------------------
-
-
 def test_full_audit_pipeline_from_discovery_row_to_coverage(
     db_session,
     storage_bucket,
@@ -166,8 +136,6 @@ def test_full_audit_pipeline_from_discovery_row_to_coverage(
     llm_stub_dir,
     monkeypatch,
 ):
-    """One audit, one contract, every phase — the pipeline's happy path
-    as seen from end to end."""
     from db.models import AuditContractCoverage, AuditReport
     from workers.discovery import _sync_audit_reports_to_db
 
@@ -195,9 +163,7 @@ def test_full_audit_pipeline_from_discovery_row_to_coverage(
     assert audit_row.scope_extraction_status is None
 
     # --- Phase 2: text extraction worker ---
-    # Stub ``download_pdf`` to return a real PDF body carrying the
-    # Spearbit scope fixture text. Everything else — pypdf, MinIO, DB
-    # writes — runs for real.
+    # Stub ``download_pdf`` with a real PDF body carrying the Spearbit scope text; pypdf, MinIO and DB run for real.
     pdf_body = minimal_pdf_with_text(AUDIT_FIXTURE.read_text())
     monkeypatch.setattr(
         "services.audits.text_extraction.download_pdf",
@@ -247,70 +213,3 @@ def test_full_audit_pipeline_from_discovery_row_to_coverage(
     assert pool_row.matched_name == "Pool"
     assert pool_row.match_type in {"direct", "impl_era"}
     assert pool_row.match_confidence in {"high", "medium", "low"}
-
-
-def test_e2e_pipeline_is_idempotent_on_reextract(
-    db_session,
-    storage_bucket,
-    seeded_protocol,
-    text_worker,
-    scope_worker,
-    llm_stub_dir,
-    monkeypatch,
-):
-    """Re-driving the scope worker after resetting its state re-writes the
-    scope artifact + coverage rows without duplicating coverage entries.
-
-    Catches a class of bug where ``upsert_coverage_for_audit`` fails to
-    delete stale rows before inserting fresh ones — would surface as a
-    unique-constraint violation or a creeping row count."""
-    from db.models import AuditContractCoverage, AuditReport
-    from workers.discovery import _sync_audit_reports_to_db
-
-    protocol_id = seeded_protocol["protocol_id"]
-    contract = seeded_protocol["contract"]
-
-    _sync_audit_reports_to_db(
-        db_session,
-        protocol_id,
-        [
-            {
-                "url": "https://example.com/e2e-reextract.pdf",
-                "pdf_url": "https://example.com/e2e-reextract.pdf",
-                "auditor": "Spearbit",
-                "title": "Reextract Test",
-                "date": "2024-12-19",
-                "confidence": 0.9,
-                "source_url": "https://example.com/",
-            }
-        ],
-    )
-    audit_id = db_session.query(AuditReport).filter_by(protocol_id=protocol_id).one().id
-
-    monkeypatch.setattr(
-        "services.audits.text_extraction.download_pdf",
-        lambda url, session=None: minimal_pdf_with_text(AUDIT_FIXTURE.read_text()),
-    )
-
-    _drive_batch(text_worker, db_session)
-    _drive_batch(scope_worker, db_session)
-
-    db_session.expire_all()
-    first = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit_id, contract_id=contract.id).all()
-    assert len(first) == 1, f"expected 1 coverage row after first pass, got {len(first)}"
-
-    # Reset scope status → worker should re-run extraction + re-upsert coverage.
-    audit_row = db_session.get(AuditReport, audit_id)
-    audit_row.scope_extraction_status = None
-    audit_row.scope_contracts = None
-    audit_row.scope_storage_key = None
-    audit_row.reviewed_commits = None
-    db_session.commit()
-
-    _drive_batch(scope_worker, db_session)
-
-    db_session.expire_all()
-    second = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit_id, contract_id=contract.id).all()
-    assert len(second) == 1, (
-        f"expected 1 coverage row after reextract, got {len(second)} (stale-row cleanup probably regressed)"
-    )

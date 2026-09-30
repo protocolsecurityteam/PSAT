@@ -1,29 +1,15 @@
-"""Cross-chain authority POSITIVE arm, exercised end-to-end through the real
-resolution/labeling path.
+"""Cross-chain authority POSITIVE arm, end-to-end through the real labeling path.
 
-``tests/resolution/test_cross_chain_authority.py`` covers the recognizer and its wiring by
-monkeypatching the *classifier function*. These tests instead stub only the
-*wire* (``services.resolution.tracking._rpc_request``) — the repo's
-integration-test convention — so the genuine
-``classify_resolved_address_with_status`` runs. That proves two properties the
-unit tests cannot:
+Unlike ``test_cross_chain_authority.py`` (which monkeypatches the classifier), only the
+wire (``services.resolution.tracking._rpc_request``) is stubbed so the genuine
+``classify_resolved_address_with_status`` runs. That proves an aliased/bridge principal is
+recognised BEFORE any RPC, and native Base owners are typed ``eoa``/``contract``, never
+``cross_chain_authority``.
 
-  * the recognizer short-circuits an aliased/bridge principal BEFORE any RPC is
-    issued for it (recognition needs no wire), and
-  * a native Base owner that reaches the real classifier is typed by it
-    (``eoa``/``contract``), never mislabeled ``cross_chain_authority``.
-
-Real-target anchoring (Base mainnet, from docs.base.org "Base Contracts"):
-  L1 ProxyAdminOwner (Ethereum Gnosis Safe): 0x7bB41C3008B3f03FE483B28b8DB90e19Cf07595c
-  → its L2 alias (L1 + 0x1111…1111):         0x8cc51c…cf076a6d   (arithmetic, asserted below)
-  L2CrossDomainMessenger (registry predeploy): 0x4200000000000000000000000000000000000007
-  L2StandardBridge / bridge executor:          0x4200000000000000000000000000000000000010
-
-On Base the L2 ``ProxyAdmin`` is owned by the *aliased* L1 ProxyAdminOwner — the
-default L2 ownership pattern the recognizer labels. The L1 owner Safe is
-placed in the run's known-address scope (a same-address on-chain reference is the
-documented trigger), so the alias resolves; strip it from scope and the label
-must vanish (guarded in ``tests/resolution/test_cross_chain_authority.py``).
+Anchors (docs.base.org "Base Contracts"): L1 ProxyAdminOwner Safe
+0x7bB41C3008B3f03FE483B28b8DB90e19Cf07595c, its L2 alias (+0x1111...1111 mod 2**160,
+asserted below), and predeploys 0x4200...0007 / 0x4200...0010. The L1 Safe must be in the
+run's known-address scope for the alias to resolve; strip it and the label must vanish.
 """
 
 from types import SimpleNamespace
@@ -80,13 +66,12 @@ def _reset_executor():
 
 @pytest.fixture
 def wire(monkeypatch):
-    """Stub the classify wire (``_rpc_request``) — never the classifier. Forces
-    the sequential single-call classify path (batch/Multicall3 off) and records
-    every address ``eth_getCode`` is issued for, so a test can assert which
-    principals reached the wire and which were recognized before it.
+    """Stub the classify wire (``_rpc_request``), never the classifier. Forces the sequential
+    classify path and records every address ``eth_getCode`` is issued for, so tests can
+    assert which principals were recognized before the wire.
 
-    ``eth_getCode`` returns bytecode for ``_CONTRACT_ADDRS`` (→ ``contract``) and
-    ``0x`` otherwise (→ ``eoa``); every ``eth_call`` probe is absent (``0x``)."""
+    ``eth_getCode`` returns bytecode for ``_CONTRACT_ADDRS`` (``contract``), ``0x``
+    otherwise (``eoa``); every ``eth_call`` probe is absent."""
     monkeypatch.setenv("PSAT_RPC_FANOUT", "1")
     monkeypatch.setattr(tracking, "_CLASSIFY_BATCH_ENABLED", False)
     monkeypatch.setattr(tracking, "_CLASSIFY_MULTICALL_ENABLED", False)
@@ -137,9 +122,8 @@ def _base_effective_permissions() -> dict:
 
 
 def _scope_graph() -> dict:
-    """Resolved control graph carrying the target and the L1 owner Safe as an
-    in-scope on-chain reference (so ``_known_addresses_for_scope`` surfaces it,
-    which is what lets the aliased-owner arithmetic resolve)."""
+    """Control graph carrying the target and the L1 owner Safe as an in-scope reference
+    (so ``_known_addresses_for_scope`` surfaces it and the alias resolves)."""
     return {
         "nodes": [
             {
@@ -174,10 +158,7 @@ def _scope_graph() -> dict:
 # --- build_principal_labels, real classify wire ------------------------------
 
 
-def test_base_positive_arm_and_native_true_negative_through_real_classify(wire):
-    """Base run: aliased L1 owner, messenger, and bridge classify as
-    ``cross_chain_authority`` with no RPC; native owners fall through to the
-    real classifier (stubbed wire) and are typed ``eoa``/``contract``."""
+def test_base_positive_arm_native_true_negative_and_no_wire_for_recognized(wire):
     ep = _base_effective_permissions()
     graph = _scope_graph()
     recognizer = make_cross_chain_recognizer(BASE_CHAIN_ID, _known_addresses_for_scope(graph, TARGET))
@@ -191,7 +172,6 @@ def test_base_positive_arm_and_native_true_negative_through_real_classify(wire):
     )
     principals = {p["address"]: p for p in payload["principals"]}
 
-    # Aliased L1 owner: labelled, with the implied L1 address as a hint only.
     aliased = principals[ALIASED_L1_OWNER]
     assert aliased["resolved_type"] == CROSS_CHAIN_AUTHORITY_TYPE
     assert aliased["details"]["role"] == "aliased_l1_owner"
@@ -199,13 +179,11 @@ def test_base_positive_arm_and_native_true_negative_through_real_classify(wire):
     assert aliased["display_name"] == f"Aliased L1 owner ({L1_PROXY_ADMIN_OWNER})"
     assert "cross_chain_authority" in aliased["labels"]
 
-    # Bridge predeploys: labelled from the registry.
     assert principals[BASE_MESSENGER]["resolved_type"] == CROSS_CHAIN_AUTHORITY_TYPE
     assert principals[BASE_MESSENGER]["details"]["role"] == "cross_domain_messenger"
     assert principals[BASE_BRIDGE]["resolved_type"] == CROSS_CHAIN_AUTHORITY_TYPE
     assert principals[BASE_BRIDGE]["details"]["role"] == "bridge_executor"
 
-    # Native owners: typed by the REAL classifier, never cross-chain.
     assert principals[NATIVE_EOA_OWNER]["resolved_type"] == "eoa"
     assert "cross_chain_authority" not in principals[NATIVE_EOA_OWNER]["labels"]
     assert principals[NATIVE_CONTRACT_OWNER]["resolved_type"] == "contract"
@@ -215,36 +193,20 @@ def test_base_positive_arm_and_native_true_negative_through_real_classify(wire):
     # it is classified natively — the hint is a hint, not a control edge.
     assert principals[L1_PROXY_ADMIN_OWNER]["resolved_type"] != CROSS_CHAIN_AUTHORITY_TYPE
 
-
-def test_recognized_principals_never_touch_the_wire(wire):
-    """The recognizer runs before classification, so an aliased/bridge principal
-    issues zero RPCs; only the native owners (and the L1 reference) do."""
-    ep = _base_effective_permissions()
-    graph = _scope_graph()
-    recognizer = make_cross_chain_recognizer(BASE_CHAIN_ID, _known_addresses_for_scope(graph, TARGET))
-
-    build_principal_labels(
-        ep,
-        resolved_control_graph=graph,
-        rpc_url="http://base.rpc.example",
-        classify_cache={},
-        cross_chain_recognizer=recognizer,
-    )
+    # The recognizer runs before classification, so an aliased/bridge principal issues zero RPCs;
+    # only the native owners (and the L1 reference) do.
     probed = set(wire)
-
     assert ALIASED_L1_OWNER not in probed
     assert BASE_MESSENGER not in probed
     assert BASE_BRIDGE not in probed
-    # Native principals + the L1 reference reach the real classifier.
     assert NATIVE_EOA_OWNER in probed
     assert NATIVE_CONTRACT_OWNER in probed
     assert L1_PROXY_ADMIN_OWNER in probed
 
 
 def test_mainnet_run_classifies_everything_through_the_wire(wire):
-    """chain_id=1 → recognizer is None: the Base predeploy / aliased addresses
-    carry no special meaning and are classified by the real wire path, so none
-    is labelled cross-chain and each is probed."""
+    """chain_id=1 -> recognizer is None: Base predeploy / aliased addresses carry no special
+    meaning, so none is labelled cross-chain and each is probed."""
     ep = _base_effective_permissions()
     graph = _scope_graph()
     recognizer = make_cross_chain_recognizer(1, _known_addresses_for_scope(graph, TARGET))
@@ -271,9 +233,8 @@ def test_mainnet_run_classifies_everything_through_the_wire(wire):
 
 
 def test_fp_resolver_labels_bridge_without_wire_and_types_native(wire):
-    """The FunctionPrincipal writer's resolver (policy_worker line ~513): the
-    recognizer wins for the bridge with no RPC; a native contract falls through
-    to the real classifier."""
+    """The FunctionPrincipal resolver (policy_worker ~513): the recognizer wins for the
+    bridge with no RPC; a native contract falls through to the real classifier."""
     recognize = _make_principal_type_resolver({}, "http://base.rpc.example", make_cross_chain_recognizer(BASE_CHAIN_ID))
 
     kind, details = recognize(BASE_BRIDGE)
@@ -297,9 +258,8 @@ def _job(*, chain_id, chain=None, address=TARGET) -> Any:
 
 
 def test_base_job_yields_live_recognizer_mainnet_job_yields_none():
-    """The exact policy_worker derivation: a Base job (first-class chain_id or a
-    request chain name) binds a recognizer; a mainnet job binds None so the
-    classification path is byte-identical to pre-multichain main."""
+    """The policy_worker derivation: a Base job binds a recognizer; a mainnet job binds None
+    so classification is byte-identical to pre-multichain main."""
     base_by_id = _job(chain_id=BASE_CHAIN_ID)
     assert _chain_id_for_job(base_by_id) == BASE_CHAIN_ID
     rec = make_cross_chain_recognizer(_chain_id_for_job(base_by_id), _known_addresses_for_scope({}, TARGET))

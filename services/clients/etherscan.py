@@ -1,8 +1,7 @@
-"""Etherscan API client.
+"""Etherscan client.
 
-All Etherscan calls are routed through :func:`get`, which enforces a
-global rate limit (``ETHERSCAN_RATE_LIMIT`` calls/sec).  Callers do
-**not** need to add their own sleeps or per-module limiters.
+Every call goes through :func:`get`, which enforces the global ``ETHERSCAN_RATE_LIMIT``; callers add no sleeps of their
+own.
 """
 
 import json as _json
@@ -34,7 +33,6 @@ ETHERSCAN_API = "https://api.etherscan.io/v2/api"
 _RATE_LIMIT_RETRIES = 5
 _RATE_LIMIT_BACKOFF = 1.0  # seconds, doubles each retry
 
-# Global Etherscan rate limit — applies to every call through get().
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 ETHERSCAN_RATE_LIMIT = int(os.getenv("ETHERSCAN_RATE_LIMIT", "5"))
 
@@ -44,7 +42,6 @@ _last_call = 0.0
 
 
 def _wait_rate_limit() -> None:
-    """Block until the minimum interval since the last call has elapsed."""
     global _last_call
     with _rate_lock:
         now = time.monotonic()
@@ -62,12 +59,11 @@ def _get_api_key() -> str:
     return key
 
 
-# Two-layer cache: per-process in-memory dict + Postgres-backed cross-process; both default on.
+# Per-process dict + cross-process Postgres, both on by default.
 _CACHE_ENABLED = os.getenv("ETHERSCAN_CACHE", "1").lower() in ("1", "true", "yes")
 _PG_CACHE_ENABLED = os.getenv("ETHERSCAN_PG_CACHE", "1").lower() in ("1", "true", "yes")
 
-# Whitelist of effectively-immutable (module, action) pairs eligible for the Postgres layer; dynamic data (balances,
-# prices, tx history) is excluded so workers don't serve stale state.
+# Only effectively-immutable (module, action) pairs; dynamic data would serve stale state.
 _PG_CACHE_WHITELIST: frozenset[tuple[str, str]] = frozenset(
     {
         ("contract", "getsourcecode"),
@@ -80,16 +76,11 @@ _PG_CACHE_WHITELIST: frozenset[tuple[str, str]] = frozenset(
 def _pg_cache_eligible(module: str, action: str, params: Mapping | None = None) -> bool:
     if (module, action) in _PG_CACHE_WHITELIST:
         return True
-    # A mined tx's internal frames are immutable, so the per-TXHASH form of
-    # txlistinternal is PG-cacheable; the by-address form is living history
-    # and must never be served stale.
+    # A mined tx's internal frames are immutable; the by-address form is living history.
     return (module, action) == ("account", "txlistinternal") and bool(params) and "txhash" in params
 
 
-# Narrower whitelist for the in-memory layer: only the small, immutable contract
-# metadata responses (ABI, creation record) live in process memory. Source is
-# psql-only (multi-MB blobs served by the PG layer); volatile data (balances,
-# prices, tx history, logs) is never held in-process.
+# Only small immutable metadata (ABI, creation record) in process; multi-MB source lives in PG and the source LRU.
 _INMEM_CACHE_WHITELIST: frozenset[tuple[str, str]] = frozenset(
     {
         ("contract", "getabi"),
@@ -103,15 +94,11 @@ def _inmem_cache_eligible(module: str, action: str) -> bool:
 
 
 def _source_cache_eligible(module: str, action: str) -> bool:
-    """``getsourcecode`` only — held in the separate bounded source LRU below, never the
-    small-entry metadata ``_cache`` (256 multi-MB source blobs would be the OOM this avoids)."""
+    """Separate from the metadata ``_cache``: 256 multi-MB source blobs would OOM."""
     return (module, action) == ("contract", "getsourcecode")
 
 
-# Bounded LRU over the whitelisted in-memory responses. Each value carries a
-# monotonic insert time so the oldest quartile is evicted at the cap — the cap
-# is the memory bound. No TTL: the cached actions are immutable, and the cap is
-# kept small because that's the whole point.
+# The cap is the memory bound; no TTL since cached actions are immutable.
 _CACHE_MAX = 256
 _cache: dict[tuple, tuple[dict, float]] = {}
 _cache_lock = threading.Lock()
@@ -122,7 +109,6 @@ def _cache_key(module: str, action: str, chain_id: int, params: dict) -> tuple:
 
 
 def _evict_cache_if_needed() -> None:
-    """Drop the oldest 25% of _cache entries when the bound is reached (caller holds _cache_lock)."""
     if len(_cache) < _CACHE_MAX:
         return
     cutoff = sorted(_cache.values(), key=lambda v: v[1])[len(_cache) // 4][1]
@@ -131,7 +117,6 @@ def _evict_cache_if_needed() -> None:
 
 
 def _log_cache_pressure() -> None:
-    """Log when _cache crosses 50/75/95% of its bound (caller holds _cache_lock)."""
     from utils.memory import cache_pressure_message
 
     msg = cache_pressure_message("etherscan", len(_cache), _CACHE_MAX)
@@ -139,20 +124,14 @@ def _log_cache_pressure() -> None:
         logger.info("[CACHE_PRESSURE] %s", msg)
 
 
-# Separate bounded LRU for getsourcecode. Its responses are multi-MB, so they are kept
-# OUT of the 256-entry metadata _cache (256 source blobs would reintroduce the OOM this
-# module avoids) and were psql-only — but a single analysis run re-reads the same
-# contract's source many times, each a multi-MB Postgres deserialize. This holds them in
-# process so the same source isn't re-fetched within a run; the SMALL cap is the memory
-# bound (worst case cap × blob, a handful of contracts). No TTL — verified source is
-# immutable. Each value carries a monotonic insert time so the oldest quartile evicts.
+# One run re-reads the same source many times (each a multi-MB PG deserialize); the small cap bounds memory. No TTL:
+# verified source is immutable.
 _SOURCE_CACHE_MAX = int(os.getenv("ETHERSCAN_SOURCE_CACHE_MAX", "16"))
 _source_cache: dict[tuple, tuple[dict, float]] = {}
 _source_cache_lock = threading.Lock()
 
 
 def _evict_source_cache_if_needed() -> None:
-    """Drop the oldest 25% of _source_cache entries when the bound is reached (caller holds _source_cache_lock)."""
     if len(_source_cache) < _SOURCE_CACHE_MAX:
         return
     cutoff = sorted(_source_cache.values(), key=lambda v: v[1])[len(_source_cache) // 4][1]
@@ -161,7 +140,6 @@ def _evict_source_cache_if_needed() -> None:
 
 
 def _log_source_cache_pressure() -> None:
-    """Log when _source_cache crosses 50/75/95% of its bound (caller holds _source_cache_lock)."""
     from utils.memory import cache_pressure_message
 
     msg = cache_pressure_message("etherscan_source", len(_source_cache), _SOURCE_CACHE_MAX)
@@ -170,9 +148,7 @@ def _log_source_cache_pressure() -> None:
 
 
 def _source_cache_put(key: tuple, module: str, action: str, response: dict) -> None:
-    """Cache a getsourcecode response in the bounded source LRU, skipping empty/unverified
-    sources (the same ``_is_persistable`` gate the PG layer uses) so a not-yet-verified
-    contract's empty response is never pinned in process."""
+    """Skips empty/unverified sources (same ``_is_persistable`` gate as PG)."""
     if not _is_persistable(module, action, response):
         return
     with _source_cache_lock:
@@ -182,7 +158,6 @@ def _source_cache_put(key: tuple, module: str, action: str, response: dict) -> N
 
 
 def clear_etherscan_cache() -> None:
-    """Clear the process-wide in-memory Etherscan caches (metadata + source). For tests + manual reset."""
     from utils.memory import reset_cache_pressure_state
 
     with _cache_lock:
@@ -194,7 +169,7 @@ def clear_etherscan_cache() -> None:
 
 
 def _params_hash(module: str, action: str, chain_id: int, params: dict) -> str:
-    """SHA-256 of canonical JSON form of (module, action, chain_id, sorted params); fits the VARCHAR(64) PK column."""
+    """Fits the VARCHAR(64) PK."""
     import hashlib
 
     canonical = _json.dumps(
@@ -205,7 +180,7 @@ def _params_hash(module: str, action: str, chain_id: int, params: dict) -> str:
 
 
 def _pg_cache_get(module: str, action: str, chain_id: int, params: dict) -> dict | None:
-    """Postgres read-through; returns None on miss or DB unavailability so CLI usage without a DB still works."""
+    """None on miss or no DB, so CLI use without a DB works."""
     if not _PG_CACHE_ENABLED or not _pg_cache_eligible(module, action, params):
         return None
     try:
@@ -235,8 +210,7 @@ def _pg_cache_get(module: str, action: str, chain_id: int, params: dict) -> dict
 
 
 def _is_persistable(module: str, action: str, response: dict) -> bool:
-    """Skip persisting empty-source ``getsourcecode`` responses (unverified contracts return status=1 with empty
-    SourceCode)."""
+    """Unverified contracts return status=1 with empty SourceCode."""
     if action != "getsourcecode":
         return True
     result = response.get("result")
@@ -250,7 +224,6 @@ def _is_persistable(module: str, action: str, response: dict) -> bool:
 
 
 def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, response: dict) -> None:
-    """Best-effort upsert into etherscan_cache; whitelist-gated and empty-source responses are skipped."""
     if not _PG_CACHE_ENABLED or not _pg_cache_eligible(module, action, params):
         return
     if not _is_persistable(module, action, response):
@@ -283,19 +256,12 @@ def _pg_cache_put(module: str, action: str, chain_id: int, params: dict, respons
         logger.debug("Etherscan PG cache write failed (%s) — keeping in-memory only", exc)
 
 
-# The ``status=0`` shapes that are answers rather than failures: an empty
-# token list (``addresstokenbalance``) and an empty transaction list
-# (``txlist``/``txlistinternal`` for an address or tx with no entries). The
-# conjunction is exact — status, a known message, and an empty LIST result —
-# and every other ``status=0`` shape (rate limits, invalid keys, upstream
-# errors, a message-bearing string result) stays a failure. It is opt-in per
-# call site (:func:`get`'s ``empty_result_ok``) so no other endpoint's error can
-# reach a caller as data.
+# ``status=0`` shapes that are answers (empty token/tx lists): exact status + known message + empty list. Opt-in per
+# call site via ``empty_result_ok`` so no other error can reach a caller as data.
 _EMPTY_RESULT_MESSAGES = frozenset({"No token found", "No transactions found"})
 
 
 def _is_empty_result(data: dict) -> bool:
-    """Whether *data* is exactly an empty-list answer triple."""
     result = data.get("result")
     return (
         str(data.get("status")).strip() == "0"
@@ -308,25 +274,14 @@ def _is_empty_result(data: dict) -> bool:
 def get(
     module: str, action: str, chain_id: int, empty_result_ok: bool = False, cache_empty: bool = False, **params
 ) -> dict:
-    """Etherscan API call with rate-limit retry; reads through in-memory then Postgres cache before the wire.
+    """Etherscan call with rate-limit retry, reading through in-memory then Postgres cache.
 
-    *chain_id* is required: the v2 endpoint is chain-scoped via the
-    ``chainid`` query param, so a call with no chain can no longer silently hit
-    mainnet. Callers thread the job/contract chain explicitly.
+    *chain_id* is required (v2 is chain-scoped).
 
-    ``empty_result_ok`` returns the empty-token-list triple (see
-    ``_is_empty_result``) to the caller instead of raising. It is NOT a
-    relaxation of the error contract: the triple is a distinct answer the
-    endpoint gives, and raising on it made "this address holds no tokens"
-    indistinguishable from a transport failure at the one call site that can
-    tell them apart. The empty answer is persisted only when the
-    (module, action, params) triple is PG-cache-eligible AND the caller passes
-    ``cache_empty=True`` — its attestation that the answer can no longer
-    change. Even an immutable-shaped triple (per-txhash ``txlistinternal``)
-    can be a transient false-empty while Etherscan's trace indexing lags a
-    fresh tx, so only the caller — who knows the tx's age — may freeze it;
-    for dynamic queries an empty list is a statement about one moment, and a
-    cached negative would outlive it. Non-empty answers cache unconditionally.
+    ``empty_result_ok`` returns the empty-list triple instead of raising, so "holds no tokens" is distinguishable from
+    transport failure. An empty answer is cached only when PG-eligible AND ``cache_empty=True``: even per-txhash
+    ``txlistinternal`` can be falsely empty while Etherscan's trace indexing lags, and only the caller knows the tx's
+    age.
     """
     inmem = _CACHE_ENABLED and _inmem_cache_eligible(module, action)
     source_cached = _CACHE_ENABLED and _source_cache_eligible(module, action)
@@ -390,18 +345,14 @@ def get(
             return data
 
         if empty_result_ok and _is_empty_result(data):
-            # Whitelist-gated AND caller-attested: only an immutable triple
-            # (per-txhash internal frames) whose caller vouched the tx is past
-            # Etherscan's trace-indexing lag persists — a lag-empty frozen for
-            # a fresh tx would permanently delete its CREATE frames.
+            # A lag-empty frozen for a fresh tx would permanently delete its CREATE frames.
             if cache_empty:
                 _pg_cache_put(module, action, chain_id, params, data)
             return data
 
         result_str = str(data.get("result", ""))
         if "rate limit" in result_str.lower() and attempt < _RATE_LIMIT_RETRIES:
-            # Per-retry line is per-iteration detail → DEBUG (one summary
-            # WARNING is emitted once on exhaustion below, not per attempt).
+            # Per-attempt detail; one WARNING on exhaustion.
             logger.debug(
                 "Etherscan rate limit hit, retrying",
                 extra={
@@ -418,8 +369,6 @@ def get(
 
         raise RuntimeError(f"Etherscan error: {data.get('message', 'unknown')} - {result_str}")
 
-    # Single WARNING on retry exhaustion — the one degraded summary for a
-    # sustained rate-limit, replacing the per-attempt noise above.
     exhausted = RuntimeError("Etherscan rate limit: max retries exceeded")
     logger.warning(
         "Etherscan rate limit: max retries exceeded",
@@ -430,15 +379,9 @@ def get(
 
 
 def get_contract_creation_block(address: str, *, chain_id: int, rpc_url: str | None = None) -> int | None:
-    """Block in which *address* was deployed, or ``None`` if it can't be
-    determined.
+    """Deployment block for *address*, or ``None``, to seed event cursors at birth.
 
-    Used to seed event-log cursors at the contract's birth instead of block 0,
-    so the indexer never scans the empty pre-deployment range. ``getcontractcreation``
-    is PG-cached (immutable), so this is a one-time cost per address. Prefers the
-    ``blockNumber`` Etherscan v2 returns directly; falls back to resolving the
-    creation ``txHash`` via RPC (through eRPC) when an older response omits it.
-    Best-effort: any failure returns ``None`` and the caller defers enrollment.
+    PG-cached. Falls back to resolving ``txHash`` via RPC when older responses omit ``blockNumber``.
     """
     if not isinstance(address, str) or not address.startswith("0x") or len(address) != 42:
         return None
@@ -476,13 +419,11 @@ def get_contract_creation_block(address: str, *, chain_id: int, rpc_url: str | N
 
 
 def _canonical_abi_type(inp: dict) -> str:
-    """Expand an ABI input type to its canonical form, recursing into tuple components."""
     if inp.get("type") == "tuple":
         components = inp.get("components", [])
         inner = ",".join(_canonical_abi_type(c) for c in components)
         return f"({inner})"
     if inp.get("type", "").startswith("tuple["):
-        # tuple[] or tuple[N] — expand the base tuple and keep the array suffix
         suffix = inp["type"][5:]  # e.g. "[]" or "[3]"
         components = inp.get("components", [])
         inner = ",".join(_canonical_abi_type(c) for c in components)
@@ -491,7 +432,6 @@ def _canonical_abi_type(inp: dict) -> str:
 
 
 def _build_selector_map(abi_json: str) -> dict[str, str]:
-    """Parse an ABI JSON string into a selector → function name mapping."""
     try:
         abi = _json.loads(abi_json)
     except (ValueError, TypeError):
@@ -513,17 +453,9 @@ def parallel_get(
     *,
     heartbeat: Callable[[], None] | None = None,
 ) -> dict[str, object | BaseException]:
-    """Submit Etherscan callables concurrently and return ``{call_id: result_or_exception}``.
+    """Run Etherscan thunks concurrently, returning ``{call_id: result_or_exception}``.
 
-    Each callable is expected to be a thunk over an existing helper (typically
-    ``functools.partial(etherscan.get_contract_name, addr)`` or a lambda over
-    :func:`get`). Submission goes through the shared ``RpcExecutor`` so threads
-    stack request RTTs across siblings, but every wire call still routes
-    through :func:`_wait_rate_limit` — the rate limit is preserved, only the
-    serial dead time between calls is removed.
-
-    Failures are returned in-place rather than raised so the caller can
-    decide which IDs to skip (mirrors :func:`services.concurrency.parallel_map`).
+    Every wire call still passes :func:`_wait_rate_limit`; only serial dead time is removed.
     """
     from services.concurrency import parallel_map
 
@@ -547,17 +479,12 @@ def parallel_get(
 
 
 def get_contract_info(address: str, *, chain_id: int) -> tuple[str | None, dict[str, str]]:
-    """Fetch contract name and selector map in a single Etherscan call.
-
-    Returns (name_or_None, {selector: function_name}).
-    """
+    """``(name_or_None, {selector: function_name})`` from one call."""
     try:
         data = get("contract", "getsourcecode", address=address, chain_id=chain_id)
         result = data["result"][0]
     except Exception as exc:
-        # Errored fetch (network/rate-limit/shape) — distinct from a verified
-        # contract that simply has no name. WARNING so an upstream outage is a
-        # visible breadcrumb instead of silently collapsing to an empty result.
+        # Errored fetch, distinct from a verified contract with no name.
         logger.warning(
             "Etherscan getsourcecode failed",
             extra={"address": address, "exc_type": type(exc).__name__},
@@ -566,22 +493,18 @@ def get_contract_info(address: str, *, chain_id: int) -> tuple[str | None, dict[
         return None, {}
     name = (result.get("ContractName") or "").strip() or None
     if name is None:
-        # Not an error: an unverified contract returns status=1 with empty
-        # source/name. DEBUG keeps it off the WARNING channel the errored
-        # fetch above owns.
+        # Unverified returns status=1 with an empty name; not an error.
         logger.debug("Etherscan: contract unverified (empty name)", extra={"address": address})
     selector_map = _build_selector_map(result.get("ABI", ""))
     return name, selector_map
 
 
 def get_contract_name(address: str, *, chain_id: int) -> str | None:
-    """Return the verified contract name for *address*, or None if unavailable."""
     name, _ = get_contract_info(address, chain_id=chain_id)
     return name
 
 
 def get_source(address: str, *, chain_id: int) -> dict:
-    """Fetch verified source code for a contract address. Returns the first result."""
     data = get("contract", "getsourcecode", address=address, chain_id=chain_id)
     result = data["result"][0]
 
@@ -591,28 +514,16 @@ def get_source(address: str, *, chain_id: int) -> dict:
     return result
 
 
-# ---------------------------------------------------------------------------
-# Token balance queries
-# ---------------------------------------------------------------------------
-
-
 def get_eth_balance(address: str, chain_id: int) -> int:
-    """Return the ETH balance of *address* in wei."""
     data = get("account", "balance", chain_id=chain_id, address=address, tag="latest")
     return int(data["result"])
 
 
 def get_native_price(chain_id: int) -> float:
-    """Return the USD price of *chain_id*'s native gas coin.
+    """USD price of *chain_id*'s native coin.
 
-    Etherscan v2's stats module serves every chain's native-coin price through
-    the same client and key; only the action name varies per chain
-    (:attr:`ChainInfo.native_price_action` — ``"ethprice"`` for most,
-    ``"bnbprice"`` on BSC). The response labels the value with a ``*usd`` key
-    that does NOT name the asset — polygon's POL and BSC's BNB both come back
-    under ``"ethusd"`` — so the price is read from whichever field ends in
-    ``usd`` and the asset it represents is the registry's ``native_asset``,
-    never the response key. Raises if the response carries no ``*usd`` field.
+    Only the action varies (``ChainInfo.native_price_action``). The response key doesn't name the asset (POL and BNB
+    both come back as ``ethusd``), so read any ``*usd`` field; the asset is the registry's ``native_asset``.
     """
     info = chain_by_id(chain_id)
     data = get("stats", info.native_price_action, chain_id=chain_id)
@@ -626,12 +537,7 @@ def get_native_price(chain_id: int) -> float:
 
 
 def get_eth_price(chain_id: int) -> float:
-    """Return the current ETH price in USD.
-
-    Thin wrapper over :func:`get_native_price` for the mainnet-quote call sites
-    that predate the multichain native-price path; on chain 1 (and any ETH-native
-    chain) it is exactly the ETH/USD quote it always was.
-    """
+    """Pre-multichain wrapper; on ETH-native chains it's the ETH/USD quote."""
     return get_native_price(chain_id)
 
 
@@ -639,61 +545,19 @@ _token_balance_lock = threading.Lock()
 _token_balance_last_call = 0.0
 
 
-# Etherscan's ``addresstokenbalance`` page size. ONE page is fetched, so a holder with
-# more assets than this is silently truncated. Locally, counting the LATEST fetch per
-# contract, 15 contracts sit exactly at the cap and they are SPLIT: 7 carry
-# ``protocol_id = 1`` and 8 carry ``protocol_id IS NULL`` (WETH9 ×2, DepositContract,
-# Lido, DAI, USDC, LINK, wstETH). The 7 are inside a scored perimeter, so a capped list
-# does reach consumers — ``planes.ValuePlane.asset_set_truncated`` carries the fact and
-# ``planes.ceiling_for`` refuses those sheets a ceiling under ``asset_list_truncated``;
-# see ``selection._holdings_completeness`` for the effects-side statement. Exported so a
-# consumer can ask whether a holdings count is at the cap
-# (:func:`token_balances_may_be_truncated`) instead of hardcoding 100 in a second place.
+# One page per request. At the cap locally: 15 contracts, 7 inside a scored perimeter;
+# ``ValuePlane.asset_set_truncated`` / ``ceiling_for`` handle that, and ``selection._holdings_completeness`` on the
+# effects side.
 TOKEN_BALANCE_PAGE_SIZE = 100
-
-
-def token_balances_may_be_truncated(rows: "list[dict] | int") -> bool:
-    """Whether a holdings list may be missing assets because it hit the page cap.
-
-    Exactly-at-the-cap is NOT distinguishable from truncated without pagination, so
-    this answers "cannot rule truncation out" — the honest reading. Real pagination is
-    the actual fix and is deliberately not attempted here: it changes the request
-    count per contract against a live rate-limited API, which cannot be validated
-    inside this change's read budget.
-
-    ONE-DIRECTIONAL, and a caller must not invert it. ``True`` is a fact about the
-    page. ``False`` is not "the list is whole": pass it a count that a filter has
-    already thinned (a stored-row count, or ``results`` inside
-    :func:`get_token_balances`) and a full page reads as ``False``. Ask it about the
-    number of entries the ENDPOINT returned, or treat ``False`` as not-determined.
-    """
-    count = rows if isinstance(rows, int) else len(rows)
-    return count >= TOKEN_BALANCE_PAGE_SIZE
 
 
 @dataclass(frozen=True)
 class TokenBalancePage:
-    """An ``addresstokenbalance`` read, with what the ENDPOINT actually said.
+    """An ``addresstokenbalance`` read with what the endpoint said.
 
-    ``rows`` is the filtered holdings list :func:`get_token_balances` returns.
-    ``page_length`` is the RAW entry count BEFORE the ``raw_balance > 0`` filter,
-    summed (deduplicated by token) over EVERY page read — so once paging exists
-    it is a whole-list length and routinely exceeds
-    :data:`TOKEN_BALANCE_PAGE_SIZE`. It is no longer "how long the one page was",
-    and comparing it to the page size no longer answers whether the list was cut
-    off: ``status`` answers that, and only ``status`` does. ``None`` means
-    not_determined (the fetch failed).
-
-    ``status`` exists because ``rows == []`` is three states at once: the fetch
-    failed, the address holds nothing, or the list was cut off. The failure is
-    swallowed one layer down (a ``RuntimeError`` becomes ``[]``), so a caller that
-    only sees the list cannot tell, and a caller that writes rows from it turns a
-    failure into "holds nothing".
-
-    ``pages_read`` is how many pages the endpoint actually answered. ``basis``
-    states what the asset list is a list OF, in the endpoint's own terms — a
-    paged read that ended on a short page is a complete Etherscan list; one that
-    ran out of page budget is a prefix, and says so.
+    ``rows`` are the ``raw_balance > 0`` holdings. ``page_length`` counts raw entries across every page read (so it can
+    exceed the page size); ``None`` = fetch failed. Only ``status`` says whether the list was cut off: ``rows == []``
+    alone is failed, empty or truncated. ``basis`` states whether the list is complete or a prefix.
     """
 
     rows: list[dict]
@@ -703,43 +567,8 @@ class TokenBalancePage:
     basis: str = ""
 
 
-def get_token_balances(address: str, chain_id: int) -> list[dict]:
-    """Return this address's ERC-20 token balances — ONE page, cap
-    :data:`TOKEN_BALANCE_PAGE_SIZE`.
-
-    Uses Etherscan's ``addresstokenbalance`` endpoint. Hardcoded to 1 req/s
-    independent of the global rate limit since this endpoint is heavier.
-
-    Returns a list of dicts with ``token_address``, ``token_name``,
-    ``token_symbol``, ``decimals``, ``balance``, ``price_usd`` and ``usd_value``.
-
-    WHAT AN EMPTY LIST DOES NOT MEAN. It conflates three states — "holds no
-    tokens", "the fetch failed", and (with the cap above) "we saw only the first
-    page". The failure path is now recorded as degraded rather than returning ``[]``
-    in silence, so at least the second is visible in the operational record; a
-    consumer of the STORED rows must still treat absence as unknown, not as zero.
-
-    ``usd_value`` is ``None`` whenever it could not be computed from data Etherscan
-    actually returned — including when ``TokenDivisor`` is missing, because the scale
-    is then a guess and the error mode is a factor of 10^n on a money figure. It is
-    never 0 to mean "unknown": 0 means priced, and the product of the quantity and
-    the quote is zero. Nothing between here and the column rounds it — a sub-cent
-    holding arrives as the figure it is.
-
-    A caller that PERSISTS this list must use :func:`get_token_balances_page`
-    instead: this signature cannot distinguish the empty page from the failed
-    fetch, and writing rows from the latter publishes "holds nothing".
-    """
-    return get_token_balances_page(address, chain_id=chain_id).rows
-
-
 def token_balance_page_budget() -> int:
-    """How many ``addresstokenbalance`` pages one read may spend.
-
-    Raises rather than defaulting on a bad value: a budget of 0 would end every
-    read at the cap and publish "list incomplete" for addresses whose list is a
-    single short page.
-    """
+    """Raises on a bad value: 0 would mark every single-page list incomplete."""
     raw = os.getenv("PSAT_TOKEN_BALANCE_MAX_PAGES", "20")
     try:
         budget = int(raw)
@@ -751,7 +580,6 @@ def token_balance_page_budget() -> int:
 
 
 def _throttle_token_balance_call() -> None:
-    """Hardcoded 1 req/s for this endpoint, applied PER PAGE."""
     global _token_balance_last_call
     with _token_balance_lock:
         now = time.monotonic()
@@ -762,27 +590,15 @@ def _throttle_token_balance_call() -> None:
 
 
 def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
-    """:func:`get_token_balances`, plus what the endpoint said about the list.
+    """ERC-20 balances plus list status.
 
-    Pages until the endpoint answers a SHORT page, which is the only thing that
-    witnesses the end of the list; one page is still one request for the
-    overwhelming majority of addresses, because their first page is short. A
-    read that stops for any other reason — the page budget, a mid-paging
-    failure, an endpoint that re-serves page 1 — keeps ``at_page_cap``: the list
-    in hand is then a prefix, i.e. a LOWER bound, and the status is what stops a
-    consumer publishing it as an at-most.
-
-    ``status`` distinguishes the empty answer from the failed one: the endpoint
-    replies ``status=0 / 'No token found' / []`` for an address holding no
-    tokens, and that triple reaches here as data (see :func:`get`'s
-    ``empty_result_ok``) instead of as a ``RuntimeError``.
+    Pages until a short page, the only witness the list ended (usually page one). Stopping for any other reason keeps
+    ``at_page_cap``: the list is a lower bound. The empty answer arrives as data via ``empty_result_ok``.
     """
     budget = token_balance_page_budget()
     raw_entries: list[dict] = []
     seen_tokens: set[str] = set()
     pages_read = 0
-    # None = the list ended on a short page, i.e. Etherscan's list is complete.
-    # Any string is the reason the list in hand may be a prefix.
     incomplete_because: str | None = None
 
     while pages_read < budget:
@@ -802,8 +618,7 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
 
             if isinstance(exc, RequestBudgetExceeded) and pages_read == 0:
                 raise
-            # NOT silent: the caller writes an empty holdings set from this, which is
-            # indistinguishable downstream from "this contract holds no tokens".
+            # Downstream an empty set is indistinguishable from holding no tokens.
             record_degraded(
                 phase="token_balance_fetch",
                 exc=exc,
@@ -817,8 +632,7 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                 type(exc).__name__,
             )
             if pages_read == 0:
-                # page_length None, not 0: nothing was learned about the list, and a 0
-                # here would read as a proven-empty list.
+                # None, not 0: 0 would read as a proven-empty list.
                 return TokenBalancePage(
                     rows=[],
                     page_length=None,
@@ -826,7 +640,7 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                     pages_read=0,
                     basis="etherscan addresstokenbalance: page 1 failed, nothing observed",
                 )
-            # Pages already in hand are a real observation and stay — as a prefix.
+            # Pages in hand stay, as a prefix.
             incomplete_because = f"page {pages_read + 1} failed"
             break
 
@@ -861,13 +675,10 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
             fresh += 1
 
         if len(page) < TOKEN_BALANCE_PAGE_SIZE:
-            # THE one witness that the list ended: the endpoint had fewer entries
-            # left than it was asked for.
+            # The endpoint had fewer entries left than asked for.
             break
         if fresh == 0:
-            # A full page that repeats what page N-1 already carried means the
-            # endpoint is not honouring ``page`` — paging further would loop, and
-            # the list in hand cannot be shown to be whole.
+            # Endpoint ignores ``page``; paging would loop and the list can't be shown whole.
             incomplete_because = f"page {pages_read} repeated entries already seen; paging not honoured"
             break
     else:
@@ -886,17 +697,8 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
         except (KeyError, TypeError, ValueError):
             incomplete_because = "malformed token quantity/address in provider response"
             continue
-        # A zero ENTRY is dropped rather than persisted, and that is a witness
-        # rule and not a size optimisation. This endpoint answers ``tag=latest``
-        # and its response carries no height, so a zero here is "zero at some
-        # unrecorded moment" — exactly the shape ``balance_reads.native_status_for``
-        # refuses to call a proven zero on the native leg. A stored zero-quantity
-        # row reads as an earned negative to the value plane
-        # (``planes._is_proven_zero_quantity``), so writing one would mint that
-        # negative out of a third-party read that names no block. The proven
-        # zeros this pipeline does publish come from reads AT a named height: the
-        # pinned ``getEthBalance`` for the coin, and the chain-log sweep's
-        # ``balanceOf`` round for the list.
+        # Zero entries are dropped as a witness rule: ``tag=latest`` names no height, and a stored zero reads as an
+        # earned negative (``planes._is_proven_zero_quantity``). Proven zeros come only from reads at a named height.
         if raw_balance > 0:
             raw_divisor = entry.get("TokenDivisor")
             try:
@@ -911,10 +713,8 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                     price_usd = 0.0
             except (TypeError, ValueError):
                 price_usd = 0.0
-            # No money from a guessed scale: with no divisor the USD figure would be
-            # wrong by a factor of 10^n, and scoring weights on that figure. The column is NOT
-            # NULL so the conventional 18 is still stored, but the value fields say
-            # unknown rather than asserting a number derived from the guess.
+            # No divisor means the USD figure would be off by 10^n. The column stores 18 by convention; the value fields
+            # say unknown.
             if decimals is None or price_usd <= 0:
                 usd_value = None
             else:
@@ -933,11 +733,7 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
                     "usd_value": usd_value,
                 }
             )
-    # The completeness question is asked of the RAW entries, never of ``results``.
-    # The loop above drops every zero-balance entry, so a full page with any
-    # zero-balance entry produces fewer results and would read as "not truncated"
-    # — the signal destroyed one line above where it is read. ``returned`` is what
-    # the endpoint actually paged.
+    # Ask of raw entries: dropping zero-balance entries makes a full page look short.
     returned = len(raw_entries)
     if incomplete_because is not None:
         logger.warning(
@@ -961,9 +757,7 @@ def get_token_balances_page(address: str, *, chain_id: int) -> TokenBalancePage:
             f"etherscan addresstokenbalance, {pages_read} page(s) of {TOKEN_BALANCE_PAGE_SIZE}, ended on a short page"
         )
     else:
-        # A proven-empty LIST, as Etherscan's index has it. NOT "this address
-        # holds no tokens" — it is what one third-party index answered, never
-        # a chain-level witness of nothing held.
+        # An empty list per one third-party index, not proof nothing is held.
         status = ASSET_SET_STATUS_RETURNED_EMPTY
         basis = f"etherscan addresstokenbalance, {pages_read} page(s), empty list"
     return TokenBalancePage(

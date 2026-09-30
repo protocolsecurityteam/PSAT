@@ -55,63 +55,35 @@ from utils.secrets import sanitize_string
 
 logger = logging.getLogger("workers.event_log_indexer")
 
-# Process identity for every line this daemon emits. ``BaseWorker`` mints the
-# same shape per process and binds it; the indexer is not a BaseWorker, so its
-# output was the one worker stream in the fleet with no ``worker_id`` to filter
-# or group by — and no way to tell two indexer processes apart.
+# Process identity for every line; the indexer isn't a BaseWorker, so it binds its own.
 WORKER_ID = f"EventLogIndexer-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 DEFAULT_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_INTERVAL_S", "60"))
 DEFAULT_CONFIRMATION_DEPTH = int(os.getenv("PSAT_EVENT_INDEXER_FINALITY_DEPTH", "12"))
 
-# Backfill in bounded windows. A cold cursor's gap to head is ~25M blocks; an
-# unbounded step accumulates every match into one list and inserts it in a
-# single statement. On high-volume authorities (the LayerZero endpoint) that
-# one insert dropped the Neon connection ("SSL connection has been closed
-# unexpectedly"), wedging the cursor at block 0 forever. So: cap the span
-# scanned per step, batch the insert, and let one pass advance across several
-# windows. The span is wide because one window is now ONE eth_getLogs (the
-# fetcher bisects only when an upstream rejects the range): the getLogs fast
-# lane (HyperRPC via eRPC) meters a flat 1000 credits per request — 60/min —
-# regardless of range, so small windows exhaust the lane while scanning almost
-# nothing. Dense bursts are bounded by the upstream's own result cap (50k logs)
-# plus the fetcher's bisect, and the insert stays batched.
+# Scan in bounded windows: an unbounded step once built one huge insert that dropped the Neon connection and wedged the
+# cursor at 0. Windows are wide because each is one eth_getLogs and HyperRPC bills per request regardless of range;
+# dense bursts are bounded by the upstream's 50k cap and the fetcher's bisect.
 DEFAULT_MAX_BLOCK_SPAN = int(os.getenv("PSAT_EVENT_INDEXER_MAX_BLOCK_SPAN", "500000"))
-# Two window caps bound how long a single scan pass runs. The per-group cap
-# stops one high-volume address from consuming a whole pass; the per-pass cap
-# makes scan RETURN promptly even with many cold cursors enrolled, so the fleet
-# heartbeat refreshes and the least-recently-run rotation re-prioritizes every
-# pass instead of once per multi-group (~tens-of-minutes) backfill. Per-group <
-# per-pass so the budget spreads across several addresses each pass; a cold
-# address's gap drains over successive passes, with the durable last_run_at
-# ordering as the rotation offset (no separate persisted cursor index needed).
+# Per-group and per-pass window caps: one busy address can't monopolize a pass, and each pass returns promptly so the
+# heartbeat refreshes and least-recently-run rotation reorders. Cold gaps drain over successive passes.
 DEFAULT_MAX_WINDOWS_PER_CURSOR = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_CURSOR", "50"))
 DEFAULT_MAX_WINDOWS_PER_PASS = int(os.getenv("PSAT_EVENT_INDEXER_MAX_WINDOWS_PER_PASS", "100"))
 DEFAULT_INSERT_BATCH = int(os.getenv("PSAT_EVENT_INDEXER_INSERT_BATCH", "1000"))
-# SQL batches alone do not release the reconciliation row dirtied by the INSERT
-# trigger. Bound commits independently of RPC windows, preserving whole blocks.
+# Commit in bounded batches, whole blocks at a time; the INSERT trigger's reconciliation row isn't released otherwise.
 DEFAULT_WRITE_MAX_ROWS = 5_000
 DEFAULT_WRITE_MAX_BYTES = 4 * 1024 * 1024
-# Monitored contracts that still NEED a cursor, worked per pass when enrolling
-# from tracking plans. Every cursor it mints is a cold backfill from the
-# emitter's deploy block, so the work is spread across passes. Addresses already
-# fully enrolled cost one indexed lookup each and do not consume this budget, so
-# the fleet drains from the front and then settles at zero work per pass.
+# Monitored contracts still needing a cursor, worked per pass (each mints a cold backfill). Fully enrolled addresses
+# cost one lookup and don't count, so the fleet drains and settles at zero.
 DEFAULT_TRACKED_TOPIC_ENROLL_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_TRACKED_TOPIC_LIMIT", "50"))
-# How many active monitored contracts a single pass will look at at all. Purely a
-# memory/latency bound on the scan; it is NOT a work budget, and it must stay
-# comfortably above the fleet size or the tail becomes unreachable again.
+# A memory/latency bound on how many contracts a pass looks at, not a work budget; keep it above the fleet size or the
+# tail is unreachable.
 DEFAULT_TRACKED_TOPIC_SCAN_LIMIT = int(os.getenv("PSAT_EVENT_INDEXER_TRACKED_TOPIC_SCAN_LIMIT", "5000"))
-# Only cold history uses this short pause. Warm groups run on the normal poll
-# interval even when the warm fleet exceeds the historical backfill pass cap.
+# Only cold history uses the short pause; warm groups use the normal interval.
 DEFAULT_BACKFILL_BUSY_INTERVAL_S = float(os.getenv("PSAT_EVENT_INDEXER_BACKFILL_BUSY_INTERVAL_S", "2"))
 
-# Solmate RolesAuthority canCall: the role events to index at the authority so
-# SolmateRolesAuthorityAdapter can fold them. Enrolled directly off the canCall
-# descriptor so the fix works even on predicate_trees materialized before the
-# enumeration-hint pass existed (the bytecode-keyed materialization cache won't
-# carry the hints until rebuilt). Topics computed here to avoid a worker→adapter
-# import dependency.
+# Solmate RolesAuthority role events, enrolled directly from the canCall descriptor so it works on trees materialized
+# before enumeration hints existed. Topics computed here to avoid importing the adapter.
 _SOLMATE_CANCALL_SIGNATURE = "canCall(address,address,bytes4)"
 _SOLMATE_CANCALL_SELECTOR = "0x" + keccak(text=_SOLMATE_CANCALL_SIGNATURE).hex()[:8]
 _SOLMATE_ROLE_TOPICS = [
@@ -124,14 +96,11 @@ _SOLMATE_ROLE_TOPICS = [
 ]
 
 
-# Basis vocabulary lives in ``db/models/balances.py`` with the columns it describes.
-# ``FIRST_INDEXED_BASIS_EXPLICIT`` has no production writer: every enrolment path
-# here witness-grades. It stays in the domain because the distinction between a
-# seed a caller supplied and a bound three reads agreed on is exactly what stops a
-# future caller's seed from being read as a witness.
+# Basis vocabulary lives in ``db/models/balances.py``. ``FIRST_INDEXED_BASIS_EXPLICIT`` has no writer here (all
+# enrolment witness-grades) but stays in the domain so a caller's seed is never read as a witness.
 BASIS_NOT_DETERMINED = CURSOR_BASIS_NOT_DETERMINED
 
-# EIP-7702 delegation indicator: 0xef0100 ‖ 20-byte address = 23 bytes.
+# EIP-7702 delegation indicator: 0xef0100 ‖ 20-byte address (23 bytes).
 _EIP7702_PREFIX = "ef0100"
 _EIP7702_CODE_HEX_LEN = 46
 
@@ -147,9 +116,7 @@ def _is_solmate_cancall_descriptor(descriptor: dict[str, Any]) -> bool:
 
 
 def _is_single_address_param_signature(signature: Any) -> bool:
-    """True for ``name(address)`` — exactly one parameter, of type ``address``.
-    The shape of a delegated role gate's callee (``onlyOperatingMultisig(address)``
-    and siblings), as opposed to Solmate's 3-arg canCall or a multi-arg canCall."""
+    """``name(address)``: the shape of a delegated role gate's callee, as opposed to canCall."""
     if not isinstance(signature, str) or "(" not in signature or not signature.rstrip().endswith(")"):
         return False
     params = signature[signature.index("(") + 1 : signature.rindex(")")]
@@ -157,11 +124,10 @@ def _is_single_address_param_signature(signature: Any) -> bool:
 
 
 def _is_delegated_role_gate_descriptor(descriptor: dict[str, Any]) -> bool:
-    """A caller-keyed external bool check against a single-address-param callee on
-    a delegated authority — ``roleRegistry.onlyX(msg.sender)`` — that is NOT the
-    already-handled Solmate canCall. The registry's own predicate trees compile to
-    zero descriptors (assembly sload/mload operands), so this caller-side outer
-    descriptor is the only enrollment trigger for its RoleSet cursor."""
+    """A caller-keyed external bool check on a single-address callee of a delegated authority
+    (``roleRegistry.onlyX(msg.sender)``), not Solmate canCall. The registry's own trees compile to no descriptors
+    (assembly operands), so this outer descriptor is the only enrollment trigger for its RoleSet cursor.
+    """
     if not isinstance(descriptor, dict) or descriptor.get("kind") != "external_set":
         return False
     if _is_solmate_cancall_descriptor(descriptor):
@@ -176,17 +142,9 @@ _ALL_ROLE_STORE_TOPIC0S = [t.lower() for t in all_topic0s()]
 
 
 def _authority_has_role_store_cursor(session: Session, chain_id: int, authority: str) -> bool:
-    """True iff an EXACTNESS-ELIGIBLE role-store grant/revoke cursor is already
-    enrolled for ``authority``. When one is, standard detection — an
-    ``eth_getCode`` per gate descriptor, ~250/pass at steady state on the paid
-    RPC — can be skipped entirely: the cursor exists and ``enroll_event_cursor``
-    would only no-op.
-
-    The eligibility filter is what keeps that true. A cursor minted from a
-    tracking plan can sit on the same (address, topic0) while being refused by
-    the resolution gate, so counting it here would skip the detection that would
-    have enrolled the attributed cursor — the address would index forever and
-    never resolve.
+    """Whether an exactness-eligible role-store cursor is already enrolled for ``authority``; if so, the
+    per-descriptor ``eth_getCode`` detection can be skipped. Tracking-plan cursors on the same topic don't count,
+    or detection would be skipped and the attributed cursor never enrolled.
     """
     row = session.execute(
         select(IndexedEventCursor.event_address)
@@ -202,23 +160,18 @@ def _authority_has_role_store_cursor(session: Session, chain_id: int, authority:
 def _role_store_topic0s(
     session: Session, authority: str, chain_id: int, cache: dict[tuple[int, str], list[str]]
 ) -> list[str]:
-    """The grant/revoke topic0s to enroll at ``authority``. Detect the standard
-    from the impl bytecode behind the registry proxy; when detection is
-    inconclusive, enroll the UNION of all standards' topic0s — over-enrollment is
-    a cheap empty scan window, a missed cursor kills the recall path. Memoized per
-    ``(chain_id, authority)`` within a pass (mirrors ``seed_cache``) so the ~92
-    functions of a single registry family share one ``resolve_probe_code`` (one
-    ``eth_getCode``) — keyed by chain since the impl bytecode is per-chain."""
+    """Grant/revoke topic0s to enroll at ``authority``, detected from the impl bytecode behind the registry proxy.
+
+    Inconclusive detection enrolls the union (an extra cursor is cheap, a missing one kills recall). Memoized per
+    ``(chain_id, authority)`` per pass.
+    """
     key = (chain_id, authority.lower())
     if key in cache:
         return cache[key]
     try:
         code = resolve_probe_code(session, authority, chain_id)
     except Exception as exc:
-        # Behaviour unchanged and deliberate: no code means no detection, which
-        # enrolls the UNION of all standards — the over-enrolling direction the
-        # docstring above argues for. What was missing is visibility: an RPC
-        # outage read exactly like a contract that declares no known standard.
+        # No code still enrolls the union, as intended; logged so an RPC outage isn't mistaken for no known standard.
         code = None
         logger.warning(
             "role-store probe code unreadable; enrolling the union of all standards",
@@ -242,9 +195,8 @@ def _role_store_topic0s(
 
 
 class LogFetcher(Protocol):
-    # ``window_stats`` is optional on the protocol so a fetcher that predates it
-    # still satisfies it; ``_fetch_window`` passes the accumulator only where the
-    # implementation declares it.
+    # ``window_stats`` is optional so older fetchers still satisfy the protocol; ``_fetch_window`` passes it only where
+    # supported.
     def fetch_logs(
         self,
         *,
@@ -256,9 +208,7 @@ class LogFetcher(Protocol):
 
 
 class StatsAwareLogFetcher(Protocol):
-    """A fetcher that reports what each accepted page returned. Narrower than
-    :class:`LogFetcher`; ``_fetch_window`` checks the real signature before
-    treating a fetcher as one, so this never widens what a caller must provide."""
+    """A fetcher that reports each accepted page. ``_fetch_window`` checks the signature before using it."""
 
     def fetch_logs(
         self,
@@ -291,36 +241,27 @@ class GroupStepResult:
 
 @dataclass(frozen=True)
 class ScanSummary:
-    """What one ``scan_enrolled_events`` pass did, for the fleet heartbeat.
+    """What one ``scan_enrolled_events`` pass did, for the heartbeat.
 
-    ``windows_scanned`` (fetched windows — one shared getLogs per window, summed
-    across all address groups) over ``total_cursors`` reveals the from-0
-    backfill signature: many windows scanned with 0 inserted and
-    ``caught_up_cursors`` < ``total_cursors`` means a cold address is grinding
-    through empty eth_getLogs ranges while the rest sit at head.
+    Many windows with nothing inserted and ``caught_up_cursors`` < ``total_cursors`` is a cold address grinding through
+    empty ranges.
     """
 
     inserted: int = 0
     windows_scanned: int = 0
     caught_up_cursors: int = 0
     total_cursors: int = 0
-    # True when the pass stopped on its per-pass window budget (more cursors were
-    # likely left unserviced) — the backfill loop uses this to re-run sooner.
+    # The pass stopped on its window budget; the loop re-runs sooner.
     budget_exhausted: bool = False
-    # Address groups whose scan raised and was swallowed-and-continued this pass.
-    # Surfaced so the heartbeat can degrade on a total outage (every group failed,
-    # ``windows_scanned == 0``) instead of leaving a per-group traceback storm as
-    # the only evidence.
+    # Groups whose scan raised this pass, so a total outage degrades the heartbeat instead of producing a traceback
+    # storm.
     failed_groups: int = 0
 
 
 def _heartbeat_status_for_pass(status: str, summary: ScanSummary) -> str:
-    """Degrade a non-error pass whose every attempted group failed.
+    """Degrade a pass where every attempted group failed and no window advanced (a total outage).
 
-    ``failed_groups > 0`` with ``windows_scanned == 0`` means no group advanced a
-    single window — a total upstream outage — which is degraded-but-continuing.
-    A partial failure (some groups scanned, one raised) stays ``running``: that's
-    ordinary per-group churn, not a daemon-health signal worth alerting on.
+    Partial failures stay ``running``.
     """
     if status == "running" and summary.failed_groups and summary.windows_scanned == 0:
         return "degraded"
@@ -338,12 +279,10 @@ def enroll_event_cursor(
     first_indexed_block_basis: str | None = None,
     enrollment_basis: str | None = None,
 ) -> bool:
-    """Insert one cursor, ignoring a conflict on an existing row.
+    """Insert one cursor, ignoring conflicts.
 
-    The three provenance arguments all default to "nothing was proven": a caller
-    that does not pass them gets NULL / ``not_determined``, never a witness. That
-    default is the point — ``start_block``'s own ``= 0`` default sits right above
-    them and must NOT be inherited as a claim that the range starts at genesis.
+    The provenance arguments default to "nothing proven"; ``start_block``'s ``= 0`` must never be read as "starts at
+    genesis".
     """
     stmt = (
         pg_insert(IndexedEventCursor)
@@ -372,11 +311,8 @@ def _is_empty_code(code: object) -> bool:
 
 
 def _is_eip7702_delegation(code: object) -> bool:
-    """True for a 0xef0100‖address delegation stub.
-
-    A 7702 account has code without ever having been *deployed*, and the
-    delegation can be set and cleared repeatedly, so the code-appears-at-B
-    transition says nothing about when the account first emitted a log.
+    """A 7702 delegation stub has code without being deployed and can be toggled, so code appearing at a block says
+    nothing about its first log.
     """
     if not isinstance(code, str):
         return False
@@ -391,30 +327,16 @@ def _witness_seed_block(
     *,
     chain_id: int,
 ) -> tuple[int | None, str]:
-    """Grade ``seed`` as a proven lower bound with THREE pinned reads, returning
-    ``(first_indexed_block, basis)``.
+    """Grade ``seed`` as a proven lower bound with three pinned reads; returns ``(first_indexed_block, basis)``.
 
-    ``eth_getCode`` empty at ``seed`` and non-empty at ``seed + 1`` proves that a
-    deployment landed at ``seed + 1``. It does NOT prove that it was the FIRST —
-    an address cleared by a pre-Cancun SELFDESTRUCT is still re-deployable at the
-    same address by CREATE2, and the earlier incarnation's logs are still in the
-    chain. So the pair is a necessary condition, not the witness.
+    Empty code at ``seed`` and code at ``seed + 1`` shows a deployment there, but not the first (a SELFDESTRUCTed
+    address can be redeployed by CREATE2 with earlier logs still on chain). The witness is a third read: a
+    genesis-anchored ``eth_getLogs`` for the address with no topic filter. Zero logs at or below ``seed`` proves nothing
+    was emitted there; any log discards the number (how far back is unknown). The request exceeds the range cap; if that
+    ever stops being allowed it raises and lands on ``not_determined``.
 
-    The witness is the third read: one genesis-anchored ``eth_getLogs`` for the
-    address with NO topic filter. Zero logs at or below ``seed`` is direct
-    evidence that no event of any kind was emitted there, which is exactly the
-    claim ``first_indexed_block`` is cited for. Any log ⇒ a prior incarnation was
-    observed and the number is DISCARDED, not lowered — we do not know how far
-    back it goes. (The request deliberately exceeds the upstream's block-range
-    cap; on this deployment a ``fromBlock: 0x0`` request bypasses that guard, and
-    if it ever stops doing so the call raises and lands on ``not_determined``,
-    which is the safe direction.)
-
-    Every failure path — either code read, the log read, a raise, a timeout, a
-    non-list response, a 7702 delegation stub at ``seed + 1`` — returns
-    ``(None, not_determined)``. The block is dropped along with the basis on
-    purpose: a number that no consumer is allowed to cite is a number no consumer
-    should be able to see.
+    Every failure (either code read, the log read, errors, timeouts, non-list responses, a 7702 stub) returns ``(None,
+    not_determined)``: the block is dropped with the basis.
     """
     addr = address.lower()
     key = (chain_id, addr)
@@ -455,11 +377,8 @@ def _witness_seed_block(
 
 
 def _cursor_exists(session: Session, chain_id: int, event_address: str, topic0: str) -> bool:
-    """Whether this exact cursor is already enrolled.
-
-    Enrollment is conflict-ignoring, so this changes no outcome — it only keeps
-    the three-read witness off addresses that would no-op, which is what makes the
-    probe's steady-state RPC cost zero rather than two calls per address per pass.
+    """Whether this cursor is already enrolled; skips the three-read witness for addresses that would no-op, so
+    steady state costs no RPC.
     """
     return (
         session.execute(
@@ -484,14 +403,10 @@ def _fetch_window(
     to_block: int,
     window_stats: list[FetchWindowStat],
 ) -> list[FetchedEventLog]:
-    """Call ``fetch_logs``, passing the stats accumulator only to fetchers that
-    take one.
+    """Call ``fetch_logs``, passing the stats accumulator only to fetchers that accept it.
 
-    Decided by signature inspection rather than by catching ``TypeError`` around
-    the call: that would also swallow a genuine ``TypeError`` raised deep inside a
-    fetch and silently retry it, turning a real fault into a quiet degraded pass.
-    A fetcher without the parameter leaves ``window_stats`` empty, which
-    ``_fold_window_stats`` reads as "advanced without a record", not as "no logs".
+    Decided by signature, not by catching ``TypeError`` (which would hide real errors). Without it ``window_stats``
+    stays empty, which ``_fold_window_stats`` treats as "advanced without a record".
     """
     key = type(fetcher)
     accepts = _FETCHER_ACCEPTS_WINDOW_STATS.get(key)
@@ -530,20 +445,11 @@ def index_event_group_steps(
 ) -> Iterator[GroupStepResult]:
     """Yield atomic write prefixes of one fetched (chain, address) window.
 
-    The caller MUST commit each yielded prefix before requesting the next.
-    Logs, cursor progress, and trigger invalidation share that transaction.
-    After each commit, re-lock and validate cursors before using retained logs;
-    a concurrent advance/rewind discards the remainder for a fresh scan.
+    The caller must commit each prefix before requesting the next (logs, cursor progress and trigger invalidation share
+    the transaction), then re-lock and validate cursors; a concurrent advance or rewind discards the remainder.
 
-    One ``eth_getLogs`` covers all the group's topic0s (an OR list); results
-    demux back to per-topic cursors. Members advance in lockstep from the group
-    minimum — one that is already ahead of the window keeps its position and
-    only sees logs above it (re-inserts would be conflict-ignored anyway). The
-    upstream budget meters REQUESTS, not block range, so the group costs one
-    request per window instead of one per topic.
-
-    ``target`` is the confirmed head (``head - confirmation_depth``), computed
-    once per pass by the caller rather than re-fetched per step.
+    One ``eth_getLogs`` covers all the group's topic0s (billing is per request), demuxed to per-topic cursors that
+    advance in lockstep from the group minimum. ``target`` is the confirmed head, computed once per pass.
     """
     memo: MutableMapping[tuple[int, int], bytes | None] = block_hash_memo if block_hash_memo is not None else {}
     topic_list = sorted({str(t).lower() for t in topics})
@@ -569,10 +475,8 @@ def index_event_group_steps(
             memo[key] = block_hash_fetcher.block_hash(block)
         return memo[key]
 
-    # Reorg guard. A hash stamp only exists where a cursor previously reached
-    # the confirmed target (mid-backfill windows are final and never stamp), so
-    # this runs once per warm cursor as it re-enters a scan — not per window —
-    # and the memo collapses same-block lookups across the whole pass.
+    # Reorg guard. Hash stamps exist only where a cursor reached the confirmed target, so this runs once per warm cursor
+    # re-entering a scan; the memo dedups lookups.
     rewind_to: int | None = None
     for cursor in cursors:
         last = int(cursor.last_indexed_block or 0)
@@ -581,9 +485,7 @@ def index_event_group_steps(
         observed_hash = _hash_at(last)
         if observed_hash is not None and observed_hash != cursor.last_indexed_block_hash:
             rewind_to = max(0, last - confirmation_depth)
-            # A reorg rewind DELETEs already-indexed logs; without this line the
-            # data loss left no trail. WARNING (degraded-but-continuing): the
-            # indexer re-fetches the rewound range on the next pass.
+            # A rewind deletes indexed logs; log it. The range is re-fetched next pass.
             logger.warning(
                 "event-log reorg detected; rewinding indexed logs before re-scan",
                 extra={
@@ -594,11 +496,8 @@ def index_event_group_steps(
                     "depth": last - rewind_to,
                 },
             )
-            # The delete is address-wide (all topics), so every sibling cursor
-            # above the rewind point must come back with it — otherwise its
-            # already-indexed range would be silently emptied.
-            # Defer the DELETE until all external reads finish: its trigger also
-            # locks the chain reconciliation row.
+            # The delete is address-wide, so sibling cursors above the rewind point rewind too. The DELETE waits until
+            # external reads finish, since its trigger locks the reconciliation row.
             rewind_hash = _hash_at(rewind_to) if rewind_to else None
             for member in cursors:
                 if int(member.last_indexed_block or 0) > rewind_to:
@@ -609,11 +508,8 @@ def index_event_group_steps(
 
     active = [c for c in cursors if int(c.last_indexed_block or 0) < target]
     if not active:
-        # Every member is at (or past) the confirmed head — record that so
-        # resolvers trust the durable index, and re-stamp last_run_at on this
-        # no-fetch visit too: the rotation orders groups least-recently-run
-        # first, so a warm group with a stale timestamp would keep sorting
-        # ahead of cold groups that need windows.
+        # Mark caught-up cursors and re-stamp last_run_at on this no-fetch visit, or stale warm groups keep sorting
+        # ahead of cold ones.
         for cursor in cursors:
             cursor.backfill_complete = True
             cursor.last_run_at = func.now()
@@ -629,10 +525,7 @@ def index_event_group_steps(
 
     start = min(int(c.last_indexed_block or 0) for c in active) + 1
     window_end = min(target, start - 1 + max(1, max_block_span))
-    # Collected per accepted page, so a cursor records how big the pages it
-    # advanced through actually were. A fetcher that predates the accumulator
-    # simply leaves it empty, and an empty record downgrades the cursor rather
-    # than being read as "no logs".
+    # Per accepted page; an empty record from an older fetcher downgrades the cursor rather than meaning "no logs".
     window_stats: list[FetchWindowStat] = []
     logs = _fetch_window(
         fetcher,
@@ -642,8 +535,7 @@ def index_event_group_steps(
         to_block=window_end,
         window_stats=window_stats,
     )
-    # Plan before the first write/trigger lock. Fetch all required stamps here,
-    # too, so neither a final hash read nor a rewind RPC holds that shared lock.
+    # Plan (and fetch all needed hashes) before the first write takes the shared lock.
     for cursor in cursors:
         final_block = max(int(cursor.last_indexed_block or 0), window_end)
         if final_block >= target and (
@@ -687,8 +579,7 @@ def index_event_group_steps(
                 )
                 cursor.last_indexed_block = prefix_end
                 cursor.last_indexed_block_hash = None
-                # Keep the original RPC page's count/cap, even when only a
-                # prefix was committed. A small write is not a small RPC page.
+                # Keep the RPC page's count and cap even if only a prefix was committed.
                 _fold_window_stats(cursor, window_stats)
             cursor.backfill_complete = int(cursor.last_indexed_block or 0) >= target
             if cursor.backfill_complete:
@@ -715,11 +606,9 @@ def _cursor_positions(cursors: Sequence[IndexedEventCursor]) -> list[tuple[str, 
 def _write_prefixes(
     logs: list[FetchedEventLog], window_end: int, *, max_rows: int, max_bytes: int
 ) -> list[tuple[int, int, int]]:
-    """Offsets and inclusive frontiers; never split a block across commits.
+    """Write offsets and inclusive frontiers that never split a block.
 
-    A single oversized block is committed whole, alone, rather than losing
-    events or stalling permanently. These are soft budgets, not a time limit.
-    Bytes conservatively estimate serialized payload, not Python heap size.
+    An oversized single block is committed alone. Soft budgets; bytes estimate serialized size.
     """
     prefixes: list[tuple[int, int, int]] = []
     offset = 0
@@ -761,14 +650,8 @@ def scan_enrolled_events(
     stop_event: Event | None = None,
     scan_mode: Literal["all", "warm", "cold"] = "all",
 ) -> ScanSummary:
-    # Cursors group by (chain, address): every topic0 on one address rides the
-    # same eth_getLogs (an OR list), so the upstream request budget pays once
-    # per window per ADDRESS, not once per topic. Rotation is per group,
-    # least-recently-run first (min over members; a never-run member sorts the
-    # whole group first) — same fairness contract as before, at group
-    # granularity: a single high-volume address can't monopolize successive
-    # passes, and a freshly-enrolled deferred authority warms within a rotation
-    # rather than behind hours of someone else's backfill.
+    # Group cursors by (chain, address) so one eth_getLogs serves every topic on an address. Rotation is
+    # least-recently-run per group, so one busy address can't monopolize passes and new cursors warm within a rotation.
     all_rows = session.execute(
         select(
             IndexedEventCursor.chain_id,
@@ -779,8 +662,7 @@ def scan_enrolled_events(
             IndexedEventCursor.backfill_complete,
         )
     ).all()
-    # Skip zero/invalid-address cursors that predate the enroll-time guard: 0x0 can
-    # never emit logs, so scanning it just burns one RPC round-trip every pass.
+    # Skip zero/invalid addresses from before the enroll-time guard; 0x0 never emits logs.
     rows = [row for row in all_rows if _is_enrollable_event_address(row[1])]
     groups: dict[tuple[int, str], dict[str, Any]] = {}
     for chain_id, event_address, topic0, last_run_at, last_block, complete in rows:
@@ -806,15 +688,11 @@ def scan_enrolled_events(
     caught_up_cursors = 0
     failed_groups = 0
     pass_budget = max(1, max_windows_per_pass)
-    # One confirmed-head target and one block-hash memo per pass: the head is a
-    # per-chain fact, and hash lookups repeat across groups (every cursor
-    # reaching the same target stamps the same block), so neither belongs in
-    # the per-window hot path.
+    # One confirmed-head target and hash memo per pass.
     targets: dict[int, int] = {}
     head_failed_chains: set[int] = set()
     if scan_mode != "all":
-        # Classify an already-backfilled group as cold if it needs more than
-        # one normal window after an outage. The target is fixed for this pass.
+        # A backfilled group needing more than one window after an outage counts as cold.
         for chain_id, _address in groups:
             if chain_id in targets or chain_id in head_failed_chains or chain_id not in head_fetchers:
                 continue
@@ -845,26 +723,17 @@ def scan_enrolled_events(
             )
         }
         if scan_mode == "warm":
-            # One window per warm address, even when the fleet exceeds the cold
-            # backfill budget. Every warm group receives the same target sweep.
+            # At least one window per warm address even when the fleet exceeds the cold budget.
             pass_budget = max(1, len(groups))
             max_windows_per_cursor = 1
     block_hash_memo: dict[tuple[int, int], bytes | None] = {}
-    # Chains whose cursors were skipped this pass for lack of a fetcher — logged
-    # once each. The indexer is deliberately disabled for a chain with
-    # ``hypersync_url is None``, but a chain that silently accretes cursors and
-    # never advances must be visible in the logs, not a black hole.
+    # Chains skipped for lack of a fetcher, logged once each so they aren't silent.
     skipped_chains: set[int] = set()
     for (chain_id, event_address), entry in sorted(groups.items(), key=lambda item: _rotation_key(item)):
         if stop_event is not None and stop_event.is_set():
             break
-        # Global per-pass budget: stop and return once this pass has scanned
-        # pass_budget windows total, even with cold groups still unserviced.
-        # They keep their older last_run_at, so the next pass — re-ordered
-        # least-recently-run first — picks them up: fine-grained round-robin with
-        # no separate persisted offset. Without this, one pass walks every group
-        # to completion (~tens of minutes on a cold subset), the heartbeat can't
-        # refresh, and groups late in the order wait the whole pass.
+        # Stop at the per-pass budget; unserviced groups keep their older last_run_at and go first next pass. Without
+        # this a cold pass runs for tens of minutes and the heartbeat goes stale.
         if windows_scanned >= pass_budget:
             break
         fetcher = fetchers.get(chain_id)
@@ -879,20 +748,14 @@ def scan_enrolled_events(
                     extra={"chain_id": chain_id},
                 )
             continue
-        # Per-chain finality: L2s reorg at different depths, so the
-        # confirmed-head target and every rewind use the registry's depth for THIS
-        # chain, not the fleet-wide default. Registry mainnet value == 12, so
-        # chain 1 is unchanged; the passed-in ``confirmation_depth`` is the
-        # last-resort fallback for a chain absent from the registry.
+        # Per-chain finality depth; mainnet is 12, and the passed-in depth is the fallback for unregistered
+        # chains.
         try:
             chain_confirmation_depth = chain_by_id(chain_id).confirmation_depth
         except UnknownChainError:
             chain_confirmation_depth = confirmation_depth
-        # Walk several windows per group, but cap it (per-group) so one
-        # high-volume address can't consume the whole pass budget, and stop at
-        # the global budget mid-group. Commit complete block prefixes within
-        # each fetched window, releasing trigger locks and keeping partial
-        # progress durable if a later prefix fails.
+        # Several windows per group, capped per group and by the global budget; commit complete block prefixes so
+        # partial progress survives a later failure.
         group_members_at_target = 0
         try:
             if chain_id not in targets:
@@ -930,10 +793,8 @@ def scan_enrolled_events(
         except Exception as exc:
             session.rollback()
             failed_groups += 1
-            # Swallowed-and-continued: the next group still runs and the cursor
-            # resumes next pass. WARNING + exc_type (not logger.exception) — an
-            # outage once emitted 2,172 ERROR tracebacks here; the per-pass
-            # heartbeat carries the aggregate via ``failed_groups`` instead.
+            # Swallowed and continued. WARNING with exc_type, not logger.exception (an outage once produced thousands of
+            # ERROR tracebacks); ``failed_groups`` carries the aggregate.
             logger.warning(
                 "event indexer group scan failed; continuing to next group",
                 extra={
@@ -941,10 +802,7 @@ def scan_enrolled_events(
                     "event_address": event_address,
                     "topics": sorted(entry["topics"]),
                     "exc_type": type(exc).__name__,
-                    # Bounded, sanitized message so a swallowed error is still
-                    # attributable without re-enabling per-window traceback storms.
-                    # sanitize_string scrubs any URL the message carries (an eRPC
-                    # URL, say); the ~200-char cap keeps one line, not a stack.
+                    # Sanitized (URLs scrubbed) and truncated so the error stays attributable.
                     "exc_msg": sanitize_string(str(exc))[:200],
                 },
             )
@@ -969,8 +827,7 @@ def scan_enrolled_events(
             if session.execute(query).first() is not None:
                 pending_at_budget = True
                 break
-        # A chain not visited because the budget ran out may have work. At most
-        # one extra short pass discovers that it is already warm.
+        # A chain skipped for budget may have work; at most one extra short pass checks.
         pending_at_budget |= scan_mode == "all" and any(
             chain not in targets and chain in fetchers and chain in head_fetchers and chain in block_hash_fetchers
             for chain, _address in groups
@@ -989,10 +846,7 @@ _ZERO_ADDRESS = "0x" + "0" * 40
 
 
 def _is_enrollable_event_address(address: object) -> TypeGuard[str]:
-    """True only for a real, non-zero 0x address. A descriptor whose event
-    emitter resolves to None or the zero address (an unset/renounced state var)
-    must be skipped: 0x0 has no creation block, so it would seed at genesis and
-    backfill the whole chain for an address that can never emit logs."""
+    """Only real, non-zero addresses. A zero emitter has no creation block and would backfill the whole chain."""
     return (
         isinstance(address, str)
         and len(address) == 42
@@ -1002,15 +856,11 @@ def _is_enrollable_event_address(address: object) -> TypeGuard[str]:
 
 
 def _seed_block(address: str, cache: dict[tuple[int, str], int | None], *, chain_id: int) -> int | None:
-    """The ``last_indexed_block`` a new cursor should start at: one below the
-    event address's creation block, so the first scan window begins at the
-    deploy block and the ~20M empty pre-deployment blocks are never fetched.
+    """The starting ``last_indexed_block``: one below the creation block, so the empty pre-deployment range is never
+    fetched.
 
-    Returns ``None`` when the creation block can't be determined, so the caller
-    defers enrollment to a later pass (retrying once it resolves) instead of
-    seeding at genesis: a single transient Etherscan failure must never pin a
-    cursor to a full-chain backfill. Cached per pass, keyed by ``(chain_id,
-    address)`` — the same address on two chains has independent creation blocks.
+    ``None`` when the creation block is unknown, deferring enrollment rather than seeding at genesis (one Etherscan
+    failure must never force a full-chain backfill). Cached per pass by ``(chain_id, address)``.
     """
     addr = address.lower()
     key = (chain_id, addr)
@@ -1044,12 +894,7 @@ def _enroll_witnessed(
     pending: set[tuple[int, str]] | None = None,
     progress: Callable[[], None] | None = None,
 ) -> bool:
-    """Seed, witness-grade, and enrol one cursor. True when a row was inserted.
-
-    Keeps the existing defer-instead-of-genesis rule verbatim: an unresolvable
-    creation block inserts NOTHING, so a transient Etherscan failure can never pin
-    a cursor to a full-chain backfill.
-    """
+    """Seed, witness-grade and enrol one cursor; True if inserted. An unresolvable creation block inserts nothing."""
     if _cursor_exists(session, chain_id, address, topic0):
         return False
     if progress is not None:
@@ -1077,7 +922,7 @@ def _enroll_witnessed(
 
 @dataclass
 class EnrollmentCaches:
-    """Share lookups, including failures, within one enrollment pass only."""
+    """Share lookups, including failures, within one enrollment pass."""
 
     seeds: dict[tuple[int, str], int | None] = field(default_factory=dict)
     witnesses: dict[tuple[int, str], tuple[int | None, str]] = field(default_factory=dict)
@@ -1114,19 +959,14 @@ def enroll_from_completed_jobs(
         artifact = get_artifact(session, job.id, "predicate_trees")
         if not isinstance(artifact, dict):
             continue
-        # Stamp each cursor with the job's own chain — the first-class
-        # ``Job.chain_id`` (backfilled for all address-scoped rows by the chain-id migration).
-        # For a not-yet-migrated NULL, derive from the job's own ``request["chain"]``
-        # via the registry rather than a map-wide default, so an address
-        # that lives on another chain is never guessed as mainnet.
+        # Stamp the job's own chain (``Job.chain_id``, else derived from its request), never a default.
         job_chain_id = (
             job.chain_id
             if isinstance(job.chain_id, int)
             else derive_job_chain_id(job.request.get("chain") if isinstance(job.request, dict) else None, job.address)
         )
         if job_chain_id is None:
-            # Address-scoped by the query filter above, so derivation always
-            # yields an id; guard defensively rather than seed a NULL-chain cursor.
+            # Defensive; the query filter guarantees an id.
             continue
         values = _state_var_values_for_job(session, job)
         for descriptor in _descriptors_from_artifact(artifact):
@@ -1137,8 +977,7 @@ def enroll_from_completed_jobs(
                 address = _event_address_for_descriptor(descriptor, hint, job, values)
                 if not _is_enrollable_event_address(address):
                     continue
-                # Creation block not yet known -> nothing is inserted; enroll on a
-                # later pass at the real deploy block rather than from genesis.
+                # Unknown creation block: enrol on a later pass.
                 if _enroll_witnessed(
                     session,
                     chain_id=job_chain_id,
@@ -1152,12 +991,8 @@ def enroll_from_completed_jobs(
                 ):
                     inserted += 1
             if _is_solmate_cancall_descriptor(descriptor):
-                # Resolve the authority strictly from authority_contract — never
-                # the job.address fallback. The RolesAuthority events are emitted
-                # by the authority, not by the protected contract, so enrolling
-                # them at job.address would scan an address that can't emit them.
-                # If the authority isn't resolved yet, skip; a later pass enrolls
-                # it once its ControllerValue is captured.
+                # The authority from ``authority_contract`` only, never job.address (it doesn't emit these events). Skip
+                # until resolved.
                 authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
                 if _is_enrollable_event_address(authority):
                     for topic0 in _SOLMATE_ROLE_TOPICS:
@@ -1174,17 +1009,12 @@ def enroll_from_completed_jobs(
                         ):
                             inserted += 1
             elif _is_delegated_role_gate_descriptor(descriptor):
-                # Enroll the role-store's grant/revoke cursor at the authority
-                # PROXY — the delegatecall emits RoleSet there, so job.address
-                # (the protected contract) would index an address that emits
-                # nothing. Skip if the authority isn't resolved yet; a later pass
-                # enrolls it once its ControllerValue is captured.
+                # Enrol at the authority proxy, where delegatecall emits RoleSet. Skip until resolved.
                 authority = _event_address_for_descriptor(descriptor, {}, job, values, allow_job_fallback=False)
                 if _is_enrollable_event_address(authority) and not _authority_has_role_store_cursor(
                     session, job_chain_id, authority
                 ):
-                    # The fast path accepts any role cursor: commit all topics
-                    # atomically. Caches keep external reads before the first insert.
+                    # Commit all topics atomically; caches keep external reads before the first insert.
                     if progress is not None:
                         progress()
                     for topic0 in _role_store_topic0s(session, authority, job_chain_id, role_store_topic_cache):
@@ -1217,24 +1047,15 @@ def enroll_from_tracked_topics(
     commit: bool = True,
     caches: EnrollmentCaches | None = None,
 ) -> int:
-    """Enrol durable cursors for the topics a monitoring tracking plan already
-    names, which nothing enrolled before.
+    """Enrol cursors for topics a monitoring tracking plan names that nothing else enrolled.
 
-    ``enroll_from_completed_jobs`` reads ONE surface — ``enumeration_hint``
-    records on ``predicate_trees`` — and a hint is only attached to a mapping
-    keyed on the CALLER. A mapping keyed on a function parameter (a transfer
-    denylist keyed on the recipient is the canonical case) therefore gets no
-    hint at any emitter and no cursor anywhere, so its history was never indexed
-    and an absence over it was never observable.
-    ``monitoring_config->tracked_topics`` already lists those topics per emitter,
-    and it is analyzer-derived, so enrolling from it closes the gathering hole.
+    ``enroll_from_completed_jobs`` reads only ``enumeration_hint``s, which exist only for caller-keyed mappings, so
+    parameter-keyed mappings (e.g. a recipient denylist) were never indexed. ``monitoring_config->tracked_topics``
+    already lists those topics.
 
-    What this reads from ``tracked_topics`` is ``topic0`` and nothing else. It
-    does NOT read ``effect_tags.writes[]``: that list is a union over every
-    emitter of a signature, so reading it forward attributes a write to the wrong
-    event. Consequently these cursors carry no variable attribution at all, which
-    is what ``enrollment_basis = tracked_topics_asserted`` records and what the
-    resolution-side gate keys on. Enrolment gathers evidence; it licenses nothing.
+    Only ``topic0`` is read, not ``effect_tags.writes[]`` (a union over emitters that misattributes writes). These
+    cursors therefore carry no variable attribution (``enrollment_basis = tracked_topics_asserted``), which the
+    resolution gate keys on: they gather evidence but license nothing.
     """
     query = (
         select(MonitoredContract.address, MonitoredContract.chain, MonitoredContract.monitoring_config)
@@ -1246,10 +1067,7 @@ def enroll_from_tracked_topics(
         query = query.where(MonitoredContract.id == monitored_id)
     rows = session.execute(query).all()
     if len(rows) == scan_limit:
-        # The scan is truncated, so the tail of the fleet is unreachable this
-        # pass AND every later one — the drain counter would read zero while
-        # those addresses stay permanently unenrolled. Loud, because the
-        # shortfall is otherwise indistinguishable from a drained fleet.
+        # A truncated scan makes the tail unreachable forever while the counter reads zero; warn loudly.
         logger.warning(
             "tracked-topic enrolment scan hit its row limit; fleet tail unreachable",
             extra={"scan_limit": scan_limit, "scanned": len(rows)},
@@ -1260,19 +1078,14 @@ def enroll_from_tracked_topics(
     seed_cache = caches.seeds
     witness_cache = caches.witnesses
     for address, chain, config in rows:
-        # ``limit`` bounds the addresses that still NEED a cursor, not the rows
-        # inspected. Bounding the rows would re-inspect the same head of the
-        # ordering every pass and never reach the tail — the surface would look
-        # like it was draining while ranks past the limit stayed permanently
-        # unenrolled, and which addresses those are would depend on an id
-        # ordering nothing records.
+        # ``limit`` bounds addresses needing work, not rows inspected; bounding rows would re-inspect the same head
+        # forever.
         if worked >= limit:
             break
         if not _is_enrollable_event_address(address):
             continue
         try:
-            # The row's OWN chain through the registry — never a map-wide default,
-            # so an address that lives on another chain is not guessed as mainnet.
+            # The row's own chain via the registry, never a default.
             chain_id = chain_by_name(chain).chain_id
         except (UnknownChainError, TypeError):
             continue
@@ -1291,9 +1104,7 @@ def enroll_from_tracked_topics(
                 continue
             seen.add(topic0.lower())
             wanted.append(topic0)
-        # An address whose every tracked topic already has a cursor is skipped
-        # without spending the budget or a single RPC read, so successive passes
-        # advance through the fleet instead of re-walking its head.
+        # Fully enrolled addresses cost no budget or RPC, so passes advance through the fleet.
         pending_topics = [t for t in wanted if not _cursor_exists(session, chain_id, address, t)]
         if not pending_topics:
             continue
@@ -1317,30 +1128,19 @@ def enroll_from_tracked_topics(
 
 
 def _fold_window_stats(cursor: IndexedEventCursor, stats: list[FetchWindowStat]) -> None:
-    """Record what the pages this cursor just advanced through actually returned.
+    """Record what the pages this cursor advanced through returned.
 
-    ``max_window_log_count`` only ever grows: the question it answers is "did ANY
-    window come back at its cap", so the maximum over the cursor's whole history
-    is the entire answer and a per-window table would store the same verdict in
-    unbounded space.
-
-    The cap that gated those pages is persisted with them. Without it the
-    completeness verdict would depend on an env var the row does not record — a
-    mutable now-fact published without its counterfactual — and raising the cap
-    later would silently re-grade history that was never fetched under it. A cap
-    that is absent, or that disagrees with the one already on the row, collapses
-    the record to ``not_determined`` rather than picking a winner.
+    ``max_window_log_count`` only grows (the question is whether any window hit its cap). The gating cap is stored with
+    it, so the verdict doesn't depend on an unrecorded env var; a missing or disagreeing cap collapses to
+    ``not_determined``.
     """
     if not stats:
-        # The cursor moved without anything recording what came back, so its
-        # window record is no longer continuous and cannot be repaired.
+        # Moved without a record, so the window record is no longer continuous.
         cursor.window_stats_basis = WINDOW_STATS_NOT_DETERMINED
         return
     counts = [stat.returned_log_count for stat in stats if stat.returned_log_count is not None]
     if len(counts) != len(stats):
-        # At least one window came back as something other than a list of logs.
-        # It cannot be counted, so the range it covers cannot be proven whole —
-        # and it is emphatically not a window of zero logs.
+        # A non-list page can't be counted, so the range can't be proven whole (and it isn't zero logs).
         cursor.window_stats_basis = WINDOW_STATS_NOT_DETERMINED
         if not counts:
             return
@@ -1432,14 +1232,8 @@ def _state_var_values_for_job(session: Session, job: Job) -> dict[str, str]:
 
 
 def _job_runtime_address(job: Job) -> str | None:
-    """Address whose events resolution reads for ``job`` — the proxy for a
-    proxy-linked impl job, else ``job.address``.
-
-    Tracks ``capability_resolver``'s ``runtime_addr`` (``request['proxy_address']``
-    when set, else ``job.address``). An impl behind a proxy emits its self-
-    administered role/authority events under the *proxy*; enrolling the cursor at
-    ``job.address`` indexes an address that emits nothing, leaving the proxy —
-    where the fold reads — cold and forcing a per-function HyperSync fallback.
+    """The address resolution reads events from for ``job``: ``request['proxy_address']`` if set, else
+    ``job.address`` (as ``capability_resolver``'s ``runtime_addr``). An impl behind a proxy emits under the proxy.
     """
     request = getattr(job, "request", None)
     if not isinstance(request, dict):
@@ -1477,14 +1271,8 @@ def _event_address_for_descriptor(
 
 
 def _cursor_progress(session: Session) -> tuple[int, int]:
-    """``(caught_up, total)`` enrollable cursors, read straight from the table.
-
-    The fleet heartbeat derives its triad from this rather than the backfill
-    thread's last published ``ScanSummary``: a cold-start scan pass can run for
-    minutes without returning, so the published summary reflects the last
-    *completed* pass (e.g. "3 of 3 caught up") while the table holds far more
-    pending cursors. Reading the table keeps the fleet view honest about an
-    in-progress backfill instead of showing a stale "all caught up".
+    """``(caught_up, total)`` enrollable cursors read from the table, so the heartbeat reflects an in-progress
+    backfill rather than the last completed pass.
     """
     caught_up, total = session.execute(
         select(
@@ -1503,28 +1291,16 @@ def run_event_log_indexer_loop(
     interval: float = DEFAULT_INTERVAL_S,
     stop_event: Event | None = None,
 ) -> None:
-    """Run the durable event-log indexer.
+    """Run the durable event-log indexer as two decoupled jobs.
 
-    The indexer is two decoupled jobs that used to share one serial loop:
+    * Backfill (enroll + scan) on its own thread, each pass bounded by a window budget so busy authorities backfill
+    across passes.
+    * Reconcile + heartbeat every ``interval`` on this loop, so deferred capabilities self-heal promptly and the fleet
+    view stays live regardless of scan duration.
 
-    * **Backfill** (``enroll`` + ``scan``) — throughput-oriented. Each pass is
-      bounded by a per-pass window budget so it returns within ~a minute even on a
-      cold index; a high-volume authority (the LayerZero endpoint) backfills across
-      several budgeted passes instead of one multi-hour grind.
-    * **Reconcile + heartbeat** — fast, latency-sensitive. The reconcile self-heals
-      index-cold capability deferrals the moment their authority's cursor flips
-      ``backfill_complete``; the heartbeat keeps the fleet view live.
-
-    Run serially, a long backfill pass starved both: the reconcile never ran, so
-    completed jobs whose authorities had *already* warmed (committed mid-scan) sat
-    un-reconciled for the whole cold-start window, and the heartbeat went stale.
-    So backfill runs on its own thread and this loop runs reconcile + heartbeat
-    every ``interval`` — reconcile latency is now ``interval`` regardless of how
-    long any scan pass takes. The thread publishes its last scan summary for the
-    heartbeat to fold in.
+    The thread publishes its last scan summary for the heartbeat.
     """
-    # Bound here, not in ``main()``: a new thread starts with an empty
-    # context, so the backfill thread below binds it again for itself.
+    # New threads start with an empty context, so bind here and again in the thread.
     with bind_trace_context(worker_id=WORKER_ID):
         logger.info("starting event log indexer loop interval=%ss", interval)
         stop_event = stop_event or Event()
@@ -1533,8 +1309,7 @@ def run_event_log_indexer_loop(
         published: dict[str, Any] = {"summary": ScanSummary(), "enrolled": 0, "status": "running"}
 
         def backfill_loop() -> None:
-            # Own bind: ``threading.Thread`` does not inherit the parent's
-            # context, so without this every backfill line loses ``worker_id``.
+            # ``threading.Thread`` doesn't inherit context.
             with bind_trace_context(worker_id=WORKER_ID):
                 next_warm_at = 0.0
                 cold_pending = True
@@ -1588,11 +1363,8 @@ def run_event_log_indexer_loop(
                     except Exception:
                         logger.exception("event log indexer backfill pass failed")
                         status = "error"
-                    # One UNCONDITIONAL per-pass INFO carrying the cursor triad. The old
-                    # line was gated on ``enrolled or inserted``, so it went silent during
-                    # exactly the case that needs watching: a cold from-0 backfill grinding
-                    # empty getLogs windows (0 inserted) while the heartbeat says "caught
-                    # up". Emitting every pass makes that throughput stall visible.
+                    # Unconditional per-pass INFO with the cursor triad, so a cold backfill scanning empty windows is
+                    # visible.
                     status = _heartbeat_status_for_pass(status, summary)
                     logger.info(
                         "event log indexer pass complete",
@@ -1612,9 +1384,7 @@ def run_event_log_indexer_loop(
                         published["summary"] = summary
                         published["enrolled"] = enrolled
                         published["status"] = status
-                    # Only unfinished history can use the short catch-up pause.
-                    # Warm heads are sampled on the normal interval even when
-                    # their fleet exceeds the old 100-window backfill cap.
+                    # Only unfinished history uses the short pause.
                     backfill_wait = (
                         min(DEFAULT_BACKFILL_BUSY_INTERVAL_S, max(0.0, next_warm_at - time.monotonic()))
                         if cold_pending
@@ -1646,11 +1416,8 @@ def run_event_log_indexer_loop(
                         )
                 except Exception:
                     logger.exception("deferred-resolution reconcile pass failed")
-                # Read the cursor triad straight from the table, independent of the
-                # backfill thread. A long cold-start scan pass doesn't return for
-                # minutes, so the thread's published summary lags reality ("3 of 3
-                # caught up" while 10 cursors backfill). Isolated try + own session:
-                # a count failure must not blank the rest of the heartbeat.
+                # Read the triad from the table independently of the backfill thread, in its own session so a failure
+                # doesn't blank the heartbeat.
                 caught_up_cursors = 0
                 total_cursors = 0
                 try:
@@ -1662,15 +1429,11 @@ def run_event_log_indexer_loop(
                     summary = published["summary"]
                     enrolled = published["enrolled"]
                     status = published["status"]
-                # The backfill thread catches its own per-pass exceptions, so a dead
-                # thread means a fatal stall — surface it as an indexer error.
+                # The thread catches per-pass errors, so a dead thread is a fatal stall.
                 if not backfill.is_alive() and not stop_event.is_set():
                     status = "error"
                     logger.error("event log indexer backfill thread is not alive; indexing has stalled")
-                # The cursor triad comes from the live table (caught_up/total/pending),
-                # not the last-completed pass, so the fleet view tracks an in-progress
-                # backfill instead of a stale "all caught up". windows_scanned/inserted
-                # stay per-pass activity from the published summary.
+                # Triad from the live table; windows_scanned/inserted from the last summary.
                 record_heartbeat(
                     HEARTBEAT_EVENT_INDEXER,
                     status=status,
@@ -1688,30 +1451,19 @@ def run_event_log_indexer_loop(
                 stop_event.wait(interval)
         finally:
             stop_event.set()
-            # Do not relinquish singleton ownership while a scan can commit.
+            # Don't release the singleton while a scan can commit.
             backfill.join()
 
 
 def _build_indexer_fetchers(
     chains: Sequence[ChainInfo] | None = None,
 ) -> tuple[dict[int, LogFetcher], dict[int, HeadBlockFetcher], dict[int, BlockHashFetcher]]:
-    """Build the per-chain fetcher maps the indexer scan loop dispatches on.
+    """Per-chain fetchers for the scan loop.
 
-    Indexer chain set = registry chains with proven Envio coverage
-    (``hypersync_url is not None``): a chain without it is deliberately
-    indexer-disabled and gets no fetcher (its cursors are then skipped-and-logged
-    by the scan loop).
-
-    Every fetcher — every chain, mainnet included — POSTs plain JSON-RPC through
-    the chain's eRPC route (``require_rpc_url(chain_id=...)``, i.e.
-    ``{ERPC_BASE_URL}/main/evm/{chain_id}``). The indexer is just another eRPC
-    client; chain 1 is not special. Why eRPC and not a direct provider: routing,
-    the per-chain HyperRPC upstreams that make eth_getLogs a $0 read, provider
-    failover, and auth (the eRPC secret header, attached by ``rpc_request``) are
-    all eRPC-deployment config, deliberately NOT in PSAT. The native
-    ``hypersync_url`` (``<chain>.hypersync.xyz``) is the resolution repos' query
-    API and rejects JSON-RPC — here it is only the coverage signal, never a
-    fetcher URL.
+    The chain set is registry chains with ``hypersync_url``; others get no fetcher and their cursors are
+    skipped and logged. Every fetcher posts JSON-RPC through the chain's eRPC route (``require_rpc_url(chain_id=...)``);
+    routing, the HyperRPC upstreams, failover and auth are eRPC config. ``hypersync_url`` is only the coverage signal
+    (it rejects JSON-RPC).
     """
     from services.resolution.repos.event_logs_rpc import (
         RpcBlockHashFetcher,
@@ -1721,8 +1473,7 @@ def _build_indexer_fetchers(
     )
 
     registry_chains = all_chains() if chains is None else chains
-    # The indexer is the only fetcher that persists per-window counts, so it is
-    # the only one that may act on a configured result cap.
+    # Only the indexer persists per-window counts, so only it applies the result cap.
     result_cap = default_result_cap()
     fetchers: dict[int, LogFetcher] = {}
     head_fetchers: dict[int, HeadBlockFetcher] = {}
@@ -1738,19 +1489,13 @@ def _build_indexer_fetchers(
 
 
 def main() -> None:
-    # JsonFormatter on the root logger so every line this daemon emits — and
-    # every ``extra={}`` field it already attaches (windows_scanned, inserted,
-    # exc_type, the cursor triad) — ships as queryable JSON instead of plaintext.
+    # JSON logging so every line and extra is queryable.
     configure_logging()
     stop_event = Event()
 
     def handle_signal(signum, _frame):
-        # The fleet stops as one, so every daemon logs this within the same
-        # second. Without the identity the lines are byte-identical and it is
-        # impossible to tell which process did (or did not) get the signal.
-        # The ``worker_id`` extra deliberately shares a contextvar's name: a
-        # signal landing before the loop binds it would otherwise leave the line
-        # anonymous, and the two can never disagree — both are ``WORKER_ID``.
+        # Every daemon logs this at shutdown; include the identity. The ``worker_id`` extra matches the contextvar name
+        # for signals arriving before the bind.
         logger.info(
             "worker %s received signal %s, shutting down",
             WORKER_ID,

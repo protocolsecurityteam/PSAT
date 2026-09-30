@@ -1,5 +1,3 @@
-"""Shared low-level helpers for JSON-RPC and EVM encoding."""
-
 from __future__ import annotations
 
 import logging
@@ -22,19 +20,15 @@ logger = logging.getLogger(__name__)
 
 JSON_RPC_TIMEOUT_SECONDS = 10
 
-# Maximum calls per JSON-RPC batch (stay under provider limits)
 MAX_BATCH_SIZE = 500
 
 RETRYABLE_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 ERPC_SECRET_HEADER = "X-ERPC-Secret-Token"
-# Name/alias → chain-id map, derived from the canonical registry. Kept
-# as a module constant for the existing ``chain_id_for_chain_name`` lookup.
+# Derived from the registry.
 COMMON_CHAIN_IDS = chain_name_to_id_map()
 
-# Process-wide cache for eth_getCode (bytecode + its keccak); skips caching on RPC error and applies a TTL for safety.
-# Keyed on (chain_id, address) when the chain id is resolvable so RPC-URL aliases
-# for one chain share a slot; falls back to (rpc_url, address) otherwise.
+# Keyed by (chain_id, address) so URL aliases share a slot; RPC errors aren't cached.
 _GETCODE_CACHE: dict[tuple, tuple[str, str, float]] = {}
 _GETCODE_CACHE_LOCK = threading.Lock()
 _GETCODE_CACHE_MAX = 8192
@@ -42,25 +36,18 @@ _GETCODE_CACHE_TTL_S = float(os.getenv("PSAT_GETCODE_CACHE_TTL_S", "1800"))
 
 
 def _getcode_cache_key(rpc_url: str, chain_id_eff: int | None, addr: str) -> tuple:
-    """In-memory getcode key: prefer ``(chain_id, addr)`` so URL aliases for one
-    chain dedup; fall back to ``(rpc_url, addr)`` when the chain id isn't resolvable."""
     return (chain_id_eff, addr) if chain_id_eff is not None else (rpc_url, addr)
 
 
-# Cross-process bytecode cache: layered in-memory → Postgres → wire. Bytecode at
-# a deployed address is effectively immutable, so the PG layer skips the TTL
-# the in-memory layer carries. Disabled flag makes the CLI usable without a DB.
+# Bytecode is immutable, so no TTL in PG. Disable for CLI use without a DB.
 _PG_BYTECODE_CACHE_ENABLED = os.getenv("PSAT_BYTECODE_PG_CACHE", "1").lower() in ("1", "true", "yes")
-# Chain-id memo keyed by RPC URL. Cardinality is naturally a handful (one eRPC
-# base per supported chain), but the cap bounds a caller that mints per-request
-# URLs; oldest insert is FIFO-evicted at the ceiling.
+# Capped with FIFO eviction in case a caller mints per-request URLs.
 _chain_id_cache: dict[str, int] = {}
 _chain_id_cache_lock = threading.Lock()
 _CHAIN_ID_CACHE_MAX = 256
 
 
 def _remember_chain_id(rpc_url: str, chain_id: int) -> None:
-    """Memoize the chain id for *rpc_url*, FIFO-evicting the oldest entry at the cap."""
     with _chain_id_cache_lock:
         if rpc_url not in _chain_id_cache and len(_chain_id_cache) >= _CHAIN_ID_CACHE_MAX:
             _chain_id_cache.pop(next(iter(_chain_id_cache)), None)
@@ -68,7 +55,6 @@ def _remember_chain_id(rpc_url: str, chain_id: int) -> None:
 
 
 def clear_getcode_cache() -> None:
-    """Clear the process-wide eth_getCode cache. For tests + manual reset."""
     from utils.memory import reset_cache_pressure_state
 
     with _GETCODE_CACHE_LOCK:
@@ -79,13 +65,7 @@ def clear_getcode_cache() -> None:
 
 
 def _resolve_chain_id(rpc_url: str, chain_hint: int | None = None) -> int | None:
-    """Return the EIP-155 chain id for *rpc_url*, or None if discovery fails.
-
-    When *chain_hint* is supplied, it wins and is cached for future calls
-    against the same URL. Otherwise we issue one ``eth_chainId`` per URL per
-    process and memoise the result. Any RPC failure returns None so the caller
-    skips the PG layer cleanly — the in-memory dict + wire fetch keep working.
-    """
+    """Chain id for *rpc_url* (a hint wins), memoized per URL. None on failure so the PG layer is skipped cleanly."""
     if chain_hint is not None:
         _remember_chain_id(rpc_url, chain_hint)
         return chain_hint
@@ -94,8 +74,7 @@ def _resolve_chain_id(rpc_url: str, chain_hint: int | None = None) -> int | None
     if cached is not None:
         return cached
     try:
-        # Chain-discovery exemption: this IS the call that discovers the chain id, so it has
-        # no independent chain_id to declare — declaring one would be circular.
+        # Chain-discovery exemption: this call discovers the chain id.
         raw = rpc_request(rpc_url, "eth_chainId", [], retries=0)
     except Exception:
         return None
@@ -110,7 +89,6 @@ def _resolve_chain_id(rpc_url: str, chain_hint: int | None = None) -> int | None
 
 
 def _pg_bytecode_get(chain_id: int, address: str) -> tuple[str, str] | None:
-    """Postgres read-through; returns ``(bytecode, code_keccak)`` or None on miss/DB-unavailable."""
     if not _PG_BYTECODE_CACHE_ENABLED:
         return None
     try:
@@ -139,7 +117,7 @@ def _pg_bytecode_get(chain_id: int, address: str) -> tuple[str, str] | None:
 
 
 def _pg_bytecode_put(chain_id: int, address: str, bytecode: str, code_keccak: str) -> None:
-    """Best-effort upsert into bytecode_cache. DB errors swallowed (in-memory cache is the safety net)."""
+    """DB errors swallowed; the in-memory cache is the safety net."""
     if not _PG_BYTECODE_CACHE_ENABLED:
         return
     try:
@@ -168,7 +146,6 @@ def _pg_bytecode_put(chain_id: int, address: str, bytecode: str, code_keccak: st
 
 
 def _pg_bytecode_get_many(chain_id: int, addresses: list[str]) -> dict[str, tuple[str, str]]:
-    """Batch read for bytecode_cache; returns ``{address_lower: (bytecode, keccak)}``. Empty dict on disable/failure."""
     if not _PG_BYTECODE_CACHE_ENABLED or not addresses:
         return {}
     try:
@@ -194,7 +171,6 @@ def _pg_bytecode_get_many(chain_id: int, addresses: list[str]) -> dict[str, tupl
 
 
 def _pg_bytecode_put_many(chain_id: int, rows: list[tuple[str, str, str]]) -> None:
-    """Batch upsert; *rows* is ``[(address, bytecode, code_keccak), ...]``."""
     if not _PG_BYTECODE_CACHE_ENABLED or not rows:
         return
     try:
@@ -226,7 +202,6 @@ def _pg_bytecode_put_many(chain_id: int, rows: list[tuple[str, str, str]]) -> No
 
 
 def _log_getcode_pressure() -> None:
-    """Log when _GETCODE_CACHE crosses 50/75/95% of its bound (caller holds the lock)."""
     from utils.memory import cache_pressure_message
 
     msg = cache_pressure_message("getcode", len(_GETCODE_CACHE), _GETCODE_CACHE_MAX)
@@ -238,8 +213,7 @@ def _normalized_addr(address: str) -> str:
     return address.lower() if address.startswith("0x") else "0x" + address.lower()
 
 
-# Per-thread requests.Session for TCP/TLS reuse on RPC calls (Session is not thread-safe across calls, hence
-# threading.local()).
+# Session isn't thread-safe.
 _session_local = threading.local()
 
 
@@ -259,7 +233,6 @@ def erpc_url_for_chain_id(
     *,
     base_url: str | None = None,
 ) -> str | None:
-    """Build the configured eRPC URL for an EVM chain id."""
     if chain_id is None:
         return None
     try:
@@ -276,7 +249,6 @@ def erpc_url_for_chain_id(
 
 
 def rpc_url_for_chain_id(chain_id: int | str | None, explicit_rpc_url: str | None = None) -> str | None:
-    """Return an explicit RPC URL when provided, otherwise the configured eRPC URL."""
     if isinstance(explicit_rpc_url, str) and explicit_rpc_url.strip():
         return explicit_rpc_url
     return erpc_url_for_chain_id(chain_id)
@@ -292,12 +264,7 @@ _LOCAL_RPC_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
 
 def is_local_rpc_url(url: str | None) -> bool:
-    """True for a localhost/Anvil RPC URL.
-
-    A local URL is the only explicit override allowed to shadow eRPC (local
-    fork tests). A hosted URL never wins over eRPC — a pinned mainnet provider
-    URL doing exactly that is what let a direct-provider 429 storm through.
-    """
+    """Only local URLs may shadow eRPC: a pinned hosted URL let a direct-provider 429 storm through."""
     if not isinstance(url, str) or not url.strip():
         return False
     try:
@@ -313,22 +280,11 @@ def default_rpc_url(
     chain_id: int | str | None = None,
     chain: str | None = None,
 ) -> str | None:
-    """Resolve the RPC URL PSAT should use for a chain — eRPC only.
+    """eRPC URL for a chain; eRPC is the single front door for rate-limiting, caching and failover.
 
-    eRPC is the single front door for every hosted read, so rate-limiting,
-    caching, and multi-upstream failover live in one place. Resolution:
-
-    1. An explicit URL wins ONLY when it targets a local node (Anvil / test
-       fork). A hosted explicit URL is ignored in favor of eRPC.
-    2. Otherwise build the eRPC route for the resolved chain id. Unknown
-       explicit chain names are not silently mapped to mainnet.
-
-    Returns None when no chain can be resolved (``None`` / empty / the
-    ``"unknown"`` sentinel / an unregistered name) OR ``ERPC_BASE_URL`` is unset,
-    so callers fail loud via :func:`require_rpc_url` instead of silently hitting
-    mainnet or a direct provider. There is intentionally no ``ETH_RPC``,
-    public-node, or silent-mainnet fallback: a chainless call is a plumbing bug,
-    not a mainnet request.
+    An explicit URL wins only if local (Anvil/fork). Returns None for unresolvable chains or unset ``ERPC_BASE_URL`` so
+    callers fail loud via :func:`require_rpc_url`. No mainnet or public-node fallback: a chainless call is a plumbing
+    bug.
     """
     if is_local_rpc_url(explicit_rpc_url):
         return explicit_rpc_url
@@ -354,18 +310,8 @@ def require_rpc_url(
     chain: str | None = None,
     context: str = "RPC URL resolution",
 ) -> str:
-    """:func:`default_rpc_url` that raises instead of returning None.
-
-    Use on pipeline paths where a missing RPC route is a hard configuration
-    error. Two failure modes are reported distinctly (so a raise is not
-    misdiagnosed as an eRPC-config problem when the real fault is a missing
-    chain):
-
-    * no chain / unknown chain → :class:`~utils.chains.UnsupportedChainError`
-      (via :func:`~utils.chains.require_chain`), carrying *context*;
-    * chain resolves but ``ERPC_BASE_URL`` is unset → :class:`RuntimeError`.
-
-    A local (Anvil/test) ``explicit_rpc_url`` still wins without a chain.
+    """:func:`default_rpc_url` that raises: ``UnsupportedChainError`` for a missing/unknown chain, ``RuntimeError``
+    when ``ERPC_BASE_URL`` is unset, so the two aren't confused. A local explicit URL still wins without a chain.
     """
     if explicit_rpc_url and is_local_rpc_url(explicit_rpc_url):
         return explicit_rpc_url
@@ -386,12 +332,9 @@ def require_rpc_url(
 
 @dataclass(frozen=True)
 class ChainContext:
-    """A chain id and the RPC URL resolved for it, bound together.
+    """A chain id bound to its RPC URL, so a caller can't pair one chain's id with another's URL.
 
-    Construct only via :func:`chain_context` — threading one object instead of
-    two loose values is what keeps a caller from pairing chain A's id with
-    chain B's URL (the two are resolved from independent sources today and can
-    disagree silently).
+    Build via :func:`chain_context`.
     """
 
     chain_id: int
@@ -399,13 +342,7 @@ class ChainContext:
 
 
 def chain_context(chain_id: int, *, explicit_rpc_url: str | None = None) -> ChainContext:
-    """Build a :class:`ChainContext` for a registered chain.
-
-    Registry-backed: *chain_id* must resolve via :func:`utils.chains.chain_by_id`
-    (raises ``UnknownChainError`` otherwise) and the URL comes from
-    :func:`require_rpc_url` — eRPC for hosted reads, with a local (Anvil/test)
-    *explicit_rpc_url* allowed to win exactly as it does everywhere else.
-    """
+    """Registry-backed; the URL comes from :func:`require_rpc_url`."""
     info = chain_by_id(chain_id)
     url = require_rpc_url(explicit_rpc_url=explicit_rpc_url, chain_id=info.chain_id)
     return ChainContext(chain_id=info.chain_id, rpc_url=url)
@@ -421,12 +358,8 @@ def _is_configured_erpc_url(rpc_url: str) -> bool:
 
 
 def _erpc_chain_id_from_url(rpc_url: str) -> int | None:
-    """Parse the chain id embedded in a configured-eRPC URL path
-    (``{ERPC_BASE_URL}/main/evm/{id}``).
-
-    Returns None when ``ERPC_BASE_URL`` is unset or the URL is not eRPC-shaped
-    (local Anvil, explicit hosts, a bare/healthcheck eRPC URL) — the runtime
-    guard is then a no-op. Ported from ``refactor/great-purge``.
+    """Chain id in an eRPC path (``{ERPC_BASE_URL}/main/evm/{id}``), or None for non-eRPC URLs (the guard is then a
+    no-op).
     """
     if not isinstance(rpc_url, str):
         return None
@@ -444,18 +377,12 @@ def _erpc_chain_id_from_url(rpc_url: str) -> int | None:
         chain_id = int(suffix)
     except ValueError:
         return None
-    # Reject non-canonical spellings ("01") so the guard never half-matches.
+    # Reject non-canonical spellings ("01").
     return chain_id if str(chain_id) == suffix else None
 
 
 def _assert_url_chain_id(rpc_url: str, chain_id: int | None) -> None:
-    """Runtime guard: when a caller declares *chain_id* and
-    *rpc_url* is a configured-eRPC URL, the chain id embedded in the URL path
-    must match the declared one. Raises :class:`RuntimeError` (with both ids and
-    a sanitized URL) on disagreement — catching every rpc_url/chain_id plumbing
-    mistake at the wire. No-op when *chain_id* is None or the URL isn't
-    eRPC-shaped (local/explicit hosts), so non-eRPC paths are unaffected.
-    """
+    """URL/chain guard: a declared *chain_id* must match the id in an eRPC URL path. No-op for non-eRPC URLs."""
     if chain_id is None:
         return
     url_chain_id = _erpc_chain_id_from_url(rpc_url)
@@ -469,8 +396,76 @@ def _assert_url_chain_id(rpc_url: str, chain_id: int | None) -> None:
     )
 
 
+# ``PSAT_PIN_BLOCKS=1:20850000,8453:...`` pins eRPC reads to a finalized height so eRPC's forever-cache serves repeat
+# runs and results stop drifting. Local URLs are never rewritten.
+PIN_BLOCKS_ENV = "PSAT_PIN_BLOCKS"
+# eRPC labels metrics by User-Agent and collapses "python"/"go/"/"rust" to generic names.
+PINNED_USER_AGENT = "psat-pinned/1"
+_MOVING_BLOCK_TAGS = frozenset({"latest", "pending", "safe", "finalized"})
+_BLOCK_PARAM_INDEX = {
+    "eth_call": 1,
+    "eth_estimateGas": 1,
+    "eth_createAccessList": 1,
+    "eth_simulateV1": 1,
+    "debug_traceCall": 1,
+    "eth_getBalance": 1,
+    "eth_getCode": 1,
+    "eth_getTransactionCount": 1,
+    "eth_getStorageAt": 2,
+    "eth_getProof": 2,
+    "eth_getBlockByNumber": 0,
+}
+
+
+def pinned_block(rpc_url: str) -> int | None:
+    raw = os.getenv(PIN_BLOCKS_ENV, "").strip()
+    if not raw:
+        return None
+    chain_id = _erpc_chain_id_from_url(rpc_url)
+    if chain_id is None:
+        return None
+    for entry in raw.split(","):
+        key, _, value = entry.partition(":")
+        if key.strip() == str(chain_id):
+            return int(value.strip())
+    return None
+
+
+def _is_moving_tag(value: Any) -> bool:
+    return isinstance(value, str) and value in _MOVING_BLOCK_TAGS
+
+
+def pin_params(method: str, params: list[Any], block: int) -> list[Any]:
+    tag = hex(block)
+    if method == "eth_getLogs":
+        if not params or not isinstance(params[0], Mapping) or "blockHash" in params[0]:
+            return params
+        flt = dict(params[0])
+        for key in ("fromBlock", "toBlock"):
+            value = flt.get(key)
+            if value is None or _is_moving_tag(value):
+                flt[key] = tag
+            elif isinstance(value, str) and value.startswith("0x") and int(value, 16) > block:
+                flt[key] = tag
+        return [flt, *params[1:]]
+    index = _BLOCK_PARAM_INDEX.get(method)
+    if index is None:
+        return params
+    if len(params) == index:
+        return [*params, tag]
+    if len(params) > index and _is_moving_tag(params[index]):
+        return [*params[:index], tag, *params[index + 1 :]]
+    return params
+
+
+def _pin_calls(rpc_url: str, calls: list[tuple[str, list[Any]]]) -> list[tuple[str, list[Any]]]:
+    block = pinned_block(rpc_url)
+    if block is None:
+        return calls
+    return [(method, pin_params(method, params, block)) for method, params in calls]
+
+
 def rpc_headers(rpc_url: str, extra_headers: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Return JSON-RPC headers, adding eRPC auth only for configured eRPC URLs."""
     headers = {"Content-Type": "application/json"}
     if _is_configured_erpc_url(rpc_url):
         secret = os.getenv("ERPC_SECRET")
@@ -478,23 +473,20 @@ def rpc_headers(rpc_url: str, extra_headers: Mapping[str, str] | None = None) ->
             headers[ERPC_SECRET_HEADER] = secret
     if extra_headers:
         headers.update({str(key): str(value) for key, value in extra_headers.items()})
+    if os.getenv(PIN_BLOCKS_ENV) and _is_configured_erpc_url(rpc_url):
+        headers["User-Agent"] = PINNED_USER_AGENT
     return headers
 
 
 def normalize_address(address: str) -> str:
-    """Normalize an Ethereum address to lowercase with a single 0x prefix."""
     return "0x" + address.lower().replace("0x", "", 1)
 
 
 class RpcClientTimeout(RuntimeError):
-    """This process stopped waiting. The upstream answered neither way.
+    """This process stopped waiting; the upstream answered neither way.
 
-    Distinct from the ``RuntimeError`` raised for an upstream error response
-    because the two license different responses: a reject is a fact about the
-    QUERY (narrow it), while a timeout is a fact about how long this caller
-    waited and witnesses nothing about whether the same query would succeed.
-    Subclasses ``RuntimeError`` so every existing ``except RuntimeError`` call
-    site keeps its behaviour unchanged.
+    A reject says narrow the query; a timeout says nothing about it. Subclasses ``RuntimeError`` so existing handlers
+    still catch it.
     """
 
 
@@ -509,23 +501,18 @@ def rpc_request(
     timeout: float | None = None,
     before_retry: Callable[[], None] | None = None,
 ) -> Any:
-    """One JSON-RPC call. ``timeout`` overrides :data:`JSON_RPC_TIMEOUT_SECONDS`.
+    """One JSON-RPC call.
 
-    The override exists because the module default is sized for the hot
-    per-address reads, and a read whose honest service time exceeds it comes
-    back as a ``requests.Timeout``. A caller whose query is legitimately slow (a
-    wide multi-address ``eth_getLogs``) passes its own ceiling so a long answer
-    stays an answer instead of arriving as a failure.
-
-    Transport failures raise ``RuntimeError``; the timeout subset raises
-    :class:`RpcClientTimeout`, so a caller can tell "we stopped waiting" apart
-    from "the upstream refused" instead of treating a slow window as a rejected
-    one.
-
-    ``before_retry`` lets a budgeted caller charge transport retries as well as
-    its initial call. An exception from it cancels before another HTTP attempt.
+    ``timeout`` lets legitimately slow queries (wide ``eth_getLogs``) exceed the hot-path default. Transport failures
+    raise ``RuntimeError``; timeouts raise :class:`RpcClientTimeout`. ``before_retry`` lets budgeted callers charge
+    retries; raising cancels the next attempt.
     """
     _assert_url_chain_id(rpc_url, chain_id)
+    block = pinned_block(rpc_url)
+    if block is not None:
+        if method == "eth_blockNumber":
+            return hex(block)
+        params = pin_params(method, params, block)
     session = _get_session()
     effective_timeout = JSON_RPC_TIMEOUT_SECONDS if timeout is None else timeout
     for attempt in range(retries + 1):
@@ -553,8 +540,7 @@ def rpc_request(
             payload = response.json()
             if payload.get("error"):
                 raise RuntimeError(str(payload["error"]))
-            # Per-call DEBUG — hot path, so never above DEBUG. Facts in extra
-            # so a single RPC can be correlated by method under a bound trace.
+            # Hot path: never above DEBUG.
             logger.debug("rpc call", extra={"method": method, "attempt": attempt})
             return payload.get("result")
         except (requests.ConnectionError, requests.Timeout, OSError) as exc:
@@ -564,8 +550,7 @@ def rpc_request(
             from utils.secrets import sanitize_string, sanitize_url
 
             detail = f"RPC request failed for {sanitize_url(rpc_url)}: {sanitize_string(str(exc))}"
-            # ``requests.Timeout`` covers connect and read timeouts alike; both
-            # are this client's ceiling, not an upstream verdict on the query.
+            # Connect and read timeouts are our ceiling, not the upstream's verdict.
             if isinstance(exc, requests.Timeout):
                 raise RpcClientTimeout(detail) from exc
             raise RuntimeError(detail) from exc
@@ -574,78 +559,19 @@ def rpc_request(
     raise RuntimeError(f"RPC request failed for {sanitize_url(rpc_url)}: all {retries + 1} attempts exhausted")
 
 
-def get_transaction_receipt(
-    rpc_url: str,
-    tx_hash: str,
-    *,
-    chain_id: int | None = None,
-    retries: int = 1,
-    timeout: float | None = None,
-) -> dict | None:
-    """One ``eth_getTransactionReceipt``. The receipt dict, or ``None``.
-
-    ``None`` IS NOT AN EMPTY LOG SET, and a caller that reads it as one is
-    wrong. It means the receipt could not be read — transport failure, an
-    upstream error, a pending or pruned transaction, a payload that was not a
-    receipt — and every one of those leaves the transaction's log set unknown.
-    Counting it as zero logs would turn an unread receipt into a measurement,
-    so a caller must carry it as not_determined all the way to whatever it
-    publishes.
-
-    Reorg note: this method takes no block parameter, so unlike most chain reads
-    it cannot be pinned by parameter. The receipt carries ``blockHash`` and
-    ``blockNumber``, so a caller that stores either can DETECT a reorg later
-    rather than having to trust this observation.
-    """
-    try:
-        receipt = rpc_request(
-            rpc_url,
-            "eth_getTransactionReceipt",
-            [tx_hash],
-            retries=retries,
-            chain_id=chain_id,
-            timeout=timeout,
-        )
-    except Exception as exc:
-        # Stays DEBUG: this is a per-call hot path, and an unread receipt is a
-        # not_determined the CALLER must count — the disposition cycle folds
-        # these into its per-cycle summary (``receipts_unreadable``).
-        logger.debug(
-            "receipt fetch failed",
-            extra={"tx_hash": tx_hash, "chain_id": chain_id, "exc_type": type(exc).__name__, "error": str(exc)},
-        )
-        return None
-    return receipt if isinstance(receipt, dict) else None
-
-
 def get_code(rpc_url: str, address: str, *, chain_id: int | None = None) -> str:
-    """Fetch deployed EVM bytecode at an address via eth_getCode.
+    """eth_getCode, cached (TTL ``PSAT_GETCODE_CACHE_TTL_S``).
 
-    Process-wide cached (TTL ``PSAT_GETCODE_CACHE_TTL_S``, default 30 min)
-    so repeated probes of the same address across stages and jobs hit
-    the cache instead of the wire. RPC errors are NOT cached — they
-    propagate as ``RuntimeError`` so callers can decide retry behavior.
-    Pass *chain_id* to skip the one-time ``eth_chainId`` discovery used by
-    the cross-process Postgres cache layer.
+    Errors aren't cached. Pass *chain_id* to skip ``eth_chainId`` discovery.
     """
     code, _keccak = get_code_with_keccak(rpc_url, address, chain_id=chain_id)
     return code
 
 
 def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int | None = None) -> tuple[str, str]:
-    """Return ``(bytecode_hex, keccak_hex)`` cached together so downstream content-addressed lookups get the keccak for
-    free.
-
-    Cache layering: in-memory dict (TTL'd, keyed on ``(chain_id, address)`` when
-    resolvable) → Postgres ``bytecode_cache`` (no TTL — bytecode is immutable per
-    ``(chain_id, address)``) → wire fetch. Pass *chain_id* explicitly to skip the
-    one-time ``eth_chainId`` lookup.
-    """
+    """``(bytecode_hex, keccak_hex)``: in-memory (TTL) -> Postgres (no TTL) -> wire."""
     addr = _normalized_addr(address)
     now = time.monotonic()
-    # Resolve the chain id up front (cheap when passed or already memoised) so the
-    # in-memory and PG layers share a key. Skipped when the PG layer is off, where
-    # the key falls back to the RPC URL exactly as before.
     chain_id_eff = _resolve_chain_id(rpc_url, chain_id) if _PG_BYTECODE_CACHE_ENABLED else None
     key = _getcode_cache_key(rpc_url, chain_id_eff, addr)
     with _GETCODE_CACHE_LOCK:
@@ -654,10 +580,8 @@ def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int | None = N
             code, keccak_hex, inserted_at = cached
             if now - inserted_at < _GETCODE_CACHE_TTL_S:
                 return code, keccak_hex
-            # TTL expired; fall through to re-fetch.
             del _GETCODE_CACHE[key]
 
-    # PG cache: cross-process layer; only consulted when we can resolve a chain id.
     if chain_id_eff is not None:
         pg_hit = _pg_bytecode_get(chain_id_eff, addr)
         if pg_hit is not None:
@@ -668,12 +592,11 @@ def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int | None = N
                 _log_getcode_pressure()
             return code, keccak_hex
 
-    # RPC outside the lock so concurrent misses for different addresses don't serialize.
-    # Declare the caller's chain_id (never chain_id_eff, which may be discovered FROM
-    # the URL — that would make the URL-to-chain guard a tautology).
+    # Outside the lock so misses don't serialize. Declare the caller's chain_id, never the URL-derived one, or the
+    # URL/chain guard is a tautology.
     raw = rpc_request(rpc_url, "eth_getCode", [address, "latest"], chain_id=chain_id)
     code = raw if isinstance(raw, str) and raw.startswith("0x") else "0x"
-    # Normalize "0x0" → "0x" so bytes.fromhex doesn't raise on odd-length hex.
+    # ``bytes.fromhex`` raises on odd-length hex.
     if code in {"0x", "0x0"}:
         code = "0x"
     code_bytes = bytes.fromhex(code[2:]) if len(code) > 2 else b""
@@ -689,7 +612,6 @@ def get_code_with_keccak(rpc_url: str, address: str, *, chain_id: int | None = N
 
 
 def _evict_getcode_if_needed() -> None:
-    """Drop the oldest 25% of _GETCODE_CACHE entries when the bound is reached (caller holds _GETCODE_CACHE_LOCK)."""
     if len(_GETCODE_CACHE) < _GETCODE_CACHE_MAX:
         return
     cutoff = sorted(_GETCODE_CACHE.values(), key=lambda v: v[2])[len(_GETCODE_CACHE) // 4][2]
@@ -698,11 +620,7 @@ def _evict_getcode_if_needed() -> None:
 
 
 def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None = None) -> dict[str, str]:
-    """Cache-aware batched eth_getCode; errored slots are omitted from the returned ``{address: bytecode}`` map.
-
-    Cache layering matches :func:`get_code_with_keccak`: in-memory → Postgres
-    ``bytecode_cache`` (one bulk SELECT for the misses) → wire batch.
-    """
+    """Cache-aware batched eth_getCode; errored slots are omitted. Same layering as :func:`get_code_with_keccak`."""
     if not addresses:
         return {}
 
@@ -710,8 +628,6 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
     now = time.monotonic()
     out: dict[str, str] = {}
 
-    # Resolve the chain id up front so the in-memory key matches the PG layer and
-    # dedups RPC-URL aliases; falls back to the URL when unresolvable / PG off.
     chain_id_eff = _resolve_chain_id(rpc_url, chain_id) if _PG_BYTECODE_CACHE_ENABLED else None
 
     to_fetch: list[str] = []
@@ -728,8 +644,7 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
     if not to_fetch:
         return out
 
-    # PG layer: bulk SELECT for the in-memory misses; promote hits into the
-    # in-memory cache so a later same-process call short-circuits.
+    # Promote PG hits into memory.
     if chain_id_eff is not None and to_fetch:
         pg_hits = _pg_bytecode_get_many(chain_id_eff, to_fetch)
         if pg_hits:
@@ -749,8 +664,7 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
         return out
 
     calls: list[tuple[str, list[Any]]] = [("eth_getCode", [addr, "latest"]) for addr in to_fetch]
-    # Declare the caller's chain_id (not chain_id_eff, which may be discovered
-    # FROM the URL — that would make the URL-to-chain guard a tautology).
+    # The caller's chain_id, not the URL-derived one.
     raw_results = rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id)
     pg_writes: list[tuple[str, str, str]] = []
     with _GETCODE_CACHE_LOCK:
@@ -758,15 +672,12 @@ def get_code_batch(rpc_url: str, addresses: list[str], *, chain_id: int | None =
             if had_error:
                 continue  # caller treats absence as missing/error
             code = raw if isinstance(raw, str) and raw.startswith("0x") else "0x"
-            # Normalize "0x0" → "0x" so bytes.fromhex doesn't raise on
-            # odd-length hex (some providers return "0x0" for EOAs).
+            # ``bytes.fromhex`` raises on odd-length hex; some providers return "0x0" for EOAs.
             if code in {"0x", "0x0"}:
                 code = "0x"
             code_bytes = bytes.fromhex(code[2:]) if len(code) > 2 else b""
             keccak_hex = "0x" + keccak(code_bytes).hex()
-            # Honour the cache bound — codex iter-5 P2: batch path was
-            # bypassing eviction, letting long-lived workers exceed
-            # _GETCODE_CACHE_MAX with full bytecode payloads.
+            # The batch path used to bypass eviction.
             _evict_getcode_if_needed()
             _GETCODE_CACHE[_getcode_cache_key(rpc_url, chain_id_eff, addr)] = (code, keccak_hex, now)
             _log_getcode_pressure()
@@ -784,11 +695,11 @@ def rpc_batch_request(
     *,
     chain_id: int | None = None,
 ) -> list[Any]:
-    """Send a JSON-RPC batch and return results in call order; per-call errors yield ``None``."""
     if not calls:
         return []
 
     _assert_url_chain_id(rpc_url, chain_id)
+    calls = _pin_calls(rpc_url, calls)
 
     results: list[Any] = [None] * len(calls)
 
@@ -833,27 +744,21 @@ def rpc_batch_request_classified(
     *,
     chain_id: int | None = None,
 ) -> list[tuple[Any, str]]:
-    """Batch JSON-RPC where every slot reports HOW it ended, keeping the
-    two failure shapes apart. Returns ``(result, status)`` per call:
+    """Batch JSON-RPC with a ``(result, status)`` per call:
 
-      * ``"ok"`` — the node answered this call with a result.
-      * ``"error"`` — the node answered this call with a per-call
-        JSON-RPC error (e.g. a revert): an observed, earned negative.
-      * ``"transport"`` — the batch round-trip for this slot never got a
-        usable answer (HTTP/connection failure, unusable payload shape,
-        or a response that skipped this id). The call's outcome was
-        never observed; liveness is unknown.
+      * ``"ok"`` — answered with a result.
+      * ``"error"`` — per-call JSON-RPC error (e.g. revert): an observed negative.
+      * ``"transport"`` — no usable answer for this slot; outcome unobserved.
 
-    Never raises for wire failures; ``result`` is ``None`` for both
-    non-``ok`` statuses.
+    Never raises for wire failures.
     """
     if not calls:
         return []
 
     _assert_url_chain_id(rpc_url, chain_id)
+    calls = _pin_calls(rpc_url, calls)
 
-    # Default to "transport" so any slot the wire never answers stays
-    # marked unobserved rather than inheriting an earned-looking error.
+    # Unanswered slots stay unobserved rather than looking like an earned error.
     results: list[tuple[Any, str]] = [(None, "transport")] * len(calls)
 
     for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
@@ -873,9 +778,6 @@ def rpc_batch_request_classified(
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
-            # Whole-chunk failure — leave defaults as (None, "transport").
-            # Degraded-but-continuing, so WARNING (not ERROR) with the
-            # chunk offset for correlation.
             logger.warning(
                 "rpc batch chunk failed wholesale — slots flagged transient",
                 extra={"chunk_start": chunk_start, "chunk_size": len(chunk), "exc_type": type(exc).__name__},
@@ -886,9 +788,7 @@ def rpc_batch_request_classified(
         if isinstance(payload, dict):
             payload = [payload]
         if not isinstance(payload, list):
-            # Unexpected shape (some providers refuse batches with a
-            # non-list error object) — every slot in this chunk stays
-            # "transport": nothing per-call was observed.
+            # Some providers refuse batches with a non-list error; nothing per-call was observed.
             continue
 
         for item in payload:
@@ -912,14 +812,9 @@ def rpc_batch_request_with_status(
     *,
     chain_id: int | None = None,
 ) -> list[tuple[Any, bool]]:
-    """Like ``rpc_batch_request`` but returns ``(result, had_error)`` so callers can distinguish RPC failure from a
-    legitimate ``None`` result.
+    """``(result, had_error)``, collapsing error and transport.
 
-    Collapses ``rpc_batch_request_classified``'s per-call ``"error"`` and
-    wholesale ``"transport"`` outcomes into a single ``had_error=True`` —
-    conservative for callers that only need "don't trust/cache this slot".
-    Callers that must tell an observed revert from an unobserved outcome
-    (e.g. anything publishing a negative) use the classified form directly.
+    Anything publishing a negative must use the classified form.
     """
     return [
         (result, status != "ok")
@@ -928,15 +823,11 @@ def rpc_batch_request_with_status(
 
 
 class EthCallResult(NamedTuple):
-    """One ``eth_call`` outcome, preserving revert DATA (unlike
-    ``rpc_batch_request_with_status``, which collapses any error to a bare
-    ``had_error`` flag and discards the bytes).
+    """One ``eth_call`` outcome, preserving revert data:
 
-      * success            → ``(True,  return_hex, None, None)``
-      * revert WITH data   → ``(False, "0x", revert_hex, message)`` — the revert
-        bytes a differential probe decodes to attribute WHICH gate fired
-      * revert/err NO data → ``(False, "0x", None, message)`` — OOG, transport, or
-        a node that omits ``error.data``: indeterminate, never attributable
+    * success            → ``(True,  return_hex, None, None)``
+    * revert WITH data   → ``(False, "0x", revert_hex, message)`` — attributes which gate fired
+    * revert/err NO data → ``(False, "0x", None, message)`` — indeterminate
     """
 
     success: bool
@@ -946,13 +837,10 @@ class EthCallResult(NamedTuple):
 
 
 def _extract_revert_data(data: Any) -> str | None:
-    """Pull raw revert-return hex from a JSON-RPC error ``data`` field. Nodes vary:
-    geth/erigon give a bare ``0x..`` hex string; some providers prefix it
-    (``"Reverted 0x.."``) or nest it (``{"data": "0x.."}``). Returns the
-    ``0x``-prefixed bytes (``"0x"`` for an empty/bare revert — a real, comparable
-    gate), or None when the node gave no decodable payload (a plain
-    ``"execution reverted"`` with no data, OOG) — which a probe treats as
-    indeterminate, never as an attributable gate."""
+    """Revert hex from an error ``data`` field (bare, prefixed or nested by node).
+
+    ``"0x"`` for a bare revert (a real gate); None when nothing decodable (indeterminate).
+    """
     if isinstance(data, str):
         s = data.strip()
         if s.startswith("0x"):
@@ -990,23 +878,18 @@ def eth_call_batch(
     headers: Mapping[str, str] | None = None,
     chain_id: int | None = None,
 ) -> list[EthCallResult]:
-    """Batch N read-only ``eth_call``s — each its own ``{from?, to, data}`` — in one
-    JSON-RPC array request at a single ``block_tag``, returning a per-call
-    :class:`EthCallResult` that PRESERVES revert data (aligned 1:1 with ``calls``).
+    """Batch ``eth_call``s with per-call ``from`` at one ``block_tag``, preserving revert data.
 
-    Each call varies ``msg.sender`` of the TARGET via its own ``from`` field, which
-    is exactly why a differential caller probe CANNOT use Multicall3: ``aggregate3``
-    makes every sub-call's ``msg.sender`` the Multicall3 contract, erasing the
-    ``from`` the probe must discriminate on. A JSON-RPC array batch keeps per-call
-    ``from`` while still giving one round trip at one block — the same-block,
-    same-node consistency the probe's cross-checks require, without the msg.sender
-    rewrite. On a whole-chunk transport failure every slot in the chunk is flagged
-    ``success=False`` with no revert data (transient → caller withholds, never
-    upgrades)."""
+    Not Multicall3: ``aggregate3`` makes Multicall3 the ``msg.sender``, erasing the ``from`` a differential probe needs.
+    A chunk transport failure flags every slot unsuccessful with no data.
+    """
     if not calls:
         return []
 
     _assert_url_chain_id(rpc_url, chain_id)
+    block = pinned_block(rpc_url)
+    if block is not None and _is_moving_tag(block_tag):
+        block_tag = hex(block)
     results: list[EthCallResult] = [EthCallResult(False, "0x", None, "no_response")] * len(calls)
     for chunk_start in range(0, len(calls), MAX_BATCH_SIZE):
         chunk = calls[chunk_start : chunk_start + MAX_BATCH_SIZE]
@@ -1027,9 +910,6 @@ def eth_call_batch(
             from utils.secrets import sanitize_string
 
             msg = f"transport: {sanitize_string(str(exc))}"
-            # Whole-chunk transport failure — every slot flagged success=False
-            # with no revert data (caller withholds, never upgrades). Degraded
-            # but continuing, so WARNING + the chunk offset for correlation.
             logger.warning(
                 "eth_call batch chunk failed wholesale — slots flagged transient",
                 extra={"chunk_start": chunk_start, "chunk_size": len(chunk), "exc_type": type(exc).__name__},
@@ -1054,11 +934,8 @@ def eth_call_batch(
     return results
 
 
-# Multicall3 is deployed at the same address on every chain PSAT supports.
 MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11"
-# Default sub-calls per aggregate3 eth_call. Each aggregate3 is ONE billable
-# eth_call regardless of width; the cap only bounds per-call gas so a huge fan-out
-# can't trip a node's eth_call gas ceiling (it would revert the whole batch).
+# Each aggregate3 is one billable call; the cap only keeps gas under node ceilings.
 _MULTICALL3_CHUNK = int(os.getenv("PSAT_MULTICALL3_CHUNK", "100"))
 
 
@@ -1071,26 +948,19 @@ def multicall3_aggregate3(
     headers: Mapping[str, str] | None = None,
     chain_id: int | None = None,
 ) -> list[tuple[bool, str]]:
-    """Collapse N read-only ``eth_call``s into one billable call (per chunk) via Multicall3 ``aggregate3``.
+    """N read-only ``eth_call``s as one billable call per chunk via ``aggregate3``.
 
-    ``calls`` is ``[(target_address, calldata_hex), ...]``. Returns ``[(success, return_data_hex), ...]``
-    aligned 1:1 with ``calls`` — ``success=False`` (``allowFailure=true``) for a reverting sub-call, so the
-    caller maps it exactly as it would a per-call revert. ``return_data_hex`` is the raw return bytes of the
-    sub-call, byte-identical to what a direct ``eth_call`` at the same block would yield.
+    Returns ``[(success, return_data_hex)]``, byte-identical to direct calls. Raises on transport or malformed responses
+    so callers fall back to per-call reads.
 
-    Raises ``RuntimeError`` on transport failure or a malformed / wrong-length response, so callers can fall
-    back to per-call reads with **identical** decode semantics. JSON-RPC array batching does NOT reduce
-    upstream call count (each sub-call is billed); aggregate3 does (one eth_call).
-
-    Only valid for caller-independent ``view``/``pure`` reads: Multicall3 becomes ``msg.sender``, so never
-    route a call whose result depends on the caller through this.
+    Only for caller-independent reads: Multicall3 becomes ``msg.sender``.
     """
     if not calls:
         return []
     from eth_abi.abi import decode as _abi_decode
     from eth_abi.abi import encode as _abi_encode
 
-    # Derived (not hard-coded) so a typo can never mint wrong calldata: aggregate3((address,bool,bytes)[]).
+    # Derived so a typo can't mint wrong calldata.
     agg3_selector = selector("aggregate3((address,bool,bytes)[])")
     size = chunk_size or _MULTICALL3_CHUNK
     results: list[tuple[bool, str]] = []
@@ -1118,11 +988,8 @@ def multicall3_aggregate3(
 
 
 def parse_address_result(raw: Any) -> str | None:
-    """Extract a valid address from a raw ``eth_getStorageAt`` / ``eth_call`` result.
-
-    Returns None for empty, zero-address, too-short, or revert-like responses.
-    A valid ABI-encoded address is at least 66 chars (``0x`` + 64 hex digits).
-    Shorter responses are reverts, error selectors, or empty returns.
+    """Address from an ``eth_getStorageAt`` / ``eth_call`` result, or None for empty, zero, short (<66 chars) or
+    revert-like responses.
     """
     if not raw or not isinstance(raw, str) or len(raw) < 66:
         return None
@@ -1139,18 +1006,12 @@ def selector(signature: str) -> str:
 
 
 def encode_address_word(address: str) -> str:
-    """ABI-encode an address as one 32-byte word (64 hex chars, NO ``0x`` prefix),
-    for concatenation into ``eth_call`` calldata. Shared by the external-check
-    materializer and the differential probe so the encoding can't drift between
-    them."""
+    """One 32-byte word, no ``0x``; shared so encodings can't drift."""
     return address.lower().removeprefix("0x").rjust(64, "0")
 
 
 def decode_bool_word(raw: Any) -> bool:
-    """Decode an ABI ``bool`` return word: True iff the trailing 32-byte word is
-    non-zero. Anything too short / non-hex / unparseable is False (a revert or
-    empty return is not a truthy answer). Shared with the external-check
-    materializer."""
+    """Too short or unparseable is False: a revert isn't truthy."""
     if not isinstance(raw, str) or not raw.startswith("0x") or len(raw) < 66:
         return False
     try:

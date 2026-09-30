@@ -1,33 +1,13 @@
-"""Plane-disagreement routing — two directions with asymmetric severity.
+"""plane-disagreement routing, two directions with different severity.
 
-The two directions are NOT the same kind of signal, and they route to
-different surfaces accordingly:
+* Direction 1, static-positive / simulation-negative: a matcher bug or probe-soundness hole. Routed to the warning
+channel (``utils.logging.record_degraded`` → ``stage_errors``) with the recipe's
+:class:`~services.effects.harness.Discrepancy`; the verdict stays ``unknown`` (a non-observation never refutes). Rare.
+* Direction 2, static-silent / simulation-positive: the witness stands; a candidate new static idiom. Every proven
+verdict on a blank function is one, so it's an INFO log, not a degraded ``StageError``.
 
-* **direction 1 — static-positive / simulation-negative** (a static fact
-  predicted the effect, the transition was not observed): a candidate matcher
-  bug or probe-soundness hole, i.e. a *genuine degradation*. Routed into the
-  warning channel (``utils.logging.record_degraded`` → the per-job
-  ``stage_errors`` artifact, severity ``degraded``, surfaced on the /monitor job
-  drill-in) with the recipe-attached :class:`~services.effects.harness.Discrepancy`.
-  The verdict stays on the penalty side at a LOWERED confidence tier
-  (``unknown``) — the non-observation never refutes the claim. This
-  is rare (a static prediction that simulation contradicts).
-
-* **direction 2 — static-silent / simulation-positive** (a blank function, the
-  transition WAS observed): the simulation witness stands (persisted verdict); a
-  candidate new static idiom is an **informational vocabulary-growth signal, not
-  a degradation**. Because selection returns ONLY blank-claim functions, every
-  proven verdict is a direction-2 event — a fully healthy run produces dozens to
-  hundreds of these, so filing them as ``degraded`` would make /monitor advertise
-  errors on a healthy job. Direction 2 therefore emits an INFO log (harvestable
-  from logs for offline idiom mining) and files NO degraded ``StageError``.
-
-Both carry **closing-rule bookkeeping** — a discrepancy is resolved ONLY by a
-matcher fix, a probe-soundness fix, or a higher-tier witness; it is never
-auto-dropped and never silently kept.
-
-``record_degraded`` is a no-op outside a worker's job context, so services and
-tests import this freely; inside the effects worker it accumulates onto the job.
+Discrepancies close only via a matcher fix, a probe-soundness fix, or a higher-tier witness. ``record_degraded`` is a
+no-op outside a worker job.
 """
 
 from __future__ import annotations
@@ -40,23 +20,15 @@ from utils.logging import record_degraded
 
 logger = logging.getLogger("services.effects.discrepancies")
 
-# Direction-2 discrepancy kind: a witnessed effect on a static-silent function,
-# i.e. a candidate new static idiom.
+# Direction 2: a witnessed effect on a static-silent function.
 NEW_IDIOM_KIND = "static_silent_sim_positive_new_idiom"
 
-# Direction-3 discrepancy kind: the AUTHORITY plane. Effects is the only
-# stage that executes a call AS a resolved principal, so it alone can falsify
-# authority resolution — and until now it discarded that signal.
+# Direction 3, the authority plane: only effects calls as a resolved principal, so only it can falsify authority
+# resolution.
 AUTHORITY_CONTRADICTION_KIND = "authority_exact_member_gate_rejected"
 
-# Canonical, PUBLISHED gate-rejection error selectors (OpenZeppelin v5). Both name
-# the REJECTED CALLER in their ABI payload, so a revert carrying one is
-# unambiguously "this caller is not authorized" — never a state precondition
-# ("operation is not ready" is a state error, not one of these). SELECTORS
-# ONLY: an ``Error(string)`` "...is missing role..." decoded as text, or a
-# protocol-local ``Unauthorized()`` matched by name, is the substring heuristic
-# that produced two false positives in this investigation and stays
-# out. A published standard selector is a proven fact; a revert-string is not.
+# OpenZeppelin v5 gate-rejection selectors, which name the rejected caller. Selectors only: revert-string or name
+# matching produced false positives.
 _GATE_REJECTION_SELECTORS = frozenset(
     {
         "0xe2517d3f",  # AccessControlUnauthorizedAccount(address,bytes32)
@@ -64,13 +36,11 @@ _GATE_REJECTION_SELECTORS = frozenset(
     }
 )
 
-# The only three ways a discrepancy is ever closed (never auto-dropped).
 _CLOSING_RULE = "matcher_fix | probe_soundness_fix | higher_tier_witness"
 
 
 def _gate_rejection_selector(revert_data: Any) -> str | None:
-    """The canonical gate-rejection selector a revert carries, or ``None``. Keys on
-    the 4-byte selector ALONE — never on a decoded revert string."""
+    """The canonical gate-rejection selector a revert carries, or ``None``; never a decoded string."""
     if not isinstance(revert_data, str) or len(revert_data) < 10:
         return None
     sel = revert_data[:10].lower()
@@ -87,25 +57,17 @@ def authority_contradiction(
     tier: str | None,
     transcript_ptr: str | None,
 ) -> bool:
-    """The third direction, on the AUTHORITY plane. Files a degraded
-    ``StageError`` (direction-1 severity, D3) when ALL hold:
+    """The third direction on the authority plane. Files a degraded ``StageError`` when:
 
-    1. the resolved principal came from a ``capability_expr`` the resolver marked
-       an EXACT ``finite_set`` — it claims to have enumerated exactly who may call
-       F, and it named this principal;
-    2. the probe — run AS that principal — was rejected with a CANONICAL, published
-       gate-rejection selector (:data:`_GATE_REJECTION_SELECTORS`, selectors only);
-    3. no override could account for it — always true here: seeding writes token
-       balances only, never roles or gate flags, so the rejection is not an
-       artefact of the probe's own state manipulation.
+    1. the principal came from an exact ``finite_set`` capability that named it;
+    2. the probe as that principal was rejected with a canonical gate selector (:data:`_GATE_REJECTION_SELECTORS`);
+    3. no override explains it (seeding never writes roles or gate flags).
 
-    Then the enumeration named the WRONG holder — a resolution defect effects is
-    uniquely placed to catch, filed rather than discarded. Restricted to the
-    value/supply classes, whose every probe call is issued as the acting principal;
-    ``authority_change`` deliberately rejects RANDOM identities at the same gate, so
-    a gate-rejection revert there is the expected behaviour, not a contradiction.
+    Then the enumeration named the wrong holder. Only for value/supply classes; ``authority_change`` rejects random
+    identities by design.
 
-    Returns whether a discrepancy was filed."""
+    Returns whether a discrepancy was filed.
+    """
     if not membership_exact:
         return False
     if effect_class not in ("value_out", "supply"):
@@ -138,9 +100,7 @@ def authority_contradiction(
 
 
 class PlaneDisagreement(RuntimeError):
-    """Carrier passed to ``record_degraded`` for a discrepancy. Type-only
-    signalling — the message/context hold the detail, mirroring how
-    ``policy_worker`` constructs a bespoke ``RuntimeError`` for the channel."""
+    """Carrier for ``record_degraded``; the message and context hold the detail."""
 
 
 def route_discrepancy(
@@ -150,9 +110,7 @@ def route_discrepancy(
     selector: str | None,
     tier: str | None = None,
 ) -> None:
-    """Route a recipe-attached discrepancy (direction 1 / static under-
-    prediction) into the warning channel with the discrepancy attached and the
-    closing rule recorded."""
+    """Route a direction-1 discrepancy to the warning channel with the closing rule."""
     context: dict[str, Any] = {
         "discrepancy_kind": disc.kind,
         "effect_class": disc.effect_class,
@@ -176,12 +134,9 @@ def file_new_idiom_candidate(
     contract_address: str,
     selector: str | None,
 ) -> None:
-    """Direction 2: a witnessed effect on a static-silent (blank) function.
-    The witness itself is persisted by the caller; this emits an INFO-level
-    vocabulary-growth signal (NOT a degraded ``StageError``) so the static
-    vocabulary can grow from evidence harvested off the logs. Every proven
-    verdict is a direction-2 event, so filing these as degraded would flood a
-    healthy job's ``stage_errors`` — this is a benign metric, not a failure."""
+    """Direction 2: emit an INFO vocabulary-growth signal (not a degraded ``StageError``) for a witnessed effect
+    on a blank function; the caller persists the witness.
+    """
     context: dict[str, Any] = {
         "discrepancy_kind": NEW_IDIOM_KIND,
         "effect_class": effect.effect_class,

@@ -1,5 +1,3 @@
-"""Analysis listing, detail, and artifact endpoints."""
-
 from __future__ import annotations
 
 import logging
@@ -24,13 +22,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Artifact names the consumer frontend fetches via ``/artifact/``. Any other
-# name is operator/internal and gated behind a valid admin key. Compared
-# against the requested name after extension-stripping and lower-casing.
+# Artifacts the consumer frontend fetches; any other name requires the admin key. Compared after extension-stripping and
+# lowercasing.
 _CONSUMER_SAFE_ARTIFACTS = frozenset({"upgrade_history", "dependencies", "dependency_graph_viz", "policy_state"})
 
-# Internal/operator artifacts excluded from the public ``/api/analyses``
-# listing so their existence isn't enumerable to anonymous callers.
+# Hidden from the public listing so their existence isn't enumerable.
 _INTERNAL_ARTIFACT_NAMES = frozenset({"stage_errors", "stage_timings", "predicate_trees", "control_tracking_plan"})
 
 
@@ -39,30 +35,17 @@ def _is_internal_artifact_name(name: str) -> bool:
     return n in _INTERNAL_ARTIFACT_NAMES or n.startswith("stage_timing_") or n.endswith("error") or n.endswith("plan")
 
 
-# The sub-phase ``workers/static_worker`` records when the upgrade-history build
-# raised and was swallowed (both the parallel and the finalize call sites).
+# Recorded by ``workers/static_worker`` when the upgrade-history build raised and was swallowed.
 _UPGRADE_HISTORY_PHASE = "dependency_upgrade_history"
 
 
 def _upgrade_history_stage_raised(session: Any, job: Job) -> str | None:
-    """Whether this job's upgrade-history sub-phase recorded a degraded failure.
-
-    Returns a reason string when the answer is "yes, or we could not find out",
-    and ``None`` only when the ``stage_errors`` record was read and carries no
-    such entry. A job with no ``stage_errors`` artifact recorded no degraded
-    errors at all, which IS an answer; a body the bucket could not produce is not.
-
-    Realised on the local corpus: **0** jobs carry this phase — the honest
-    lower-bound statement, not a firing proof. The mechanism is demonstrably live
-    on the same 123 ``stage_errors`` artifacts through sibling phases
-    (``controller_read`` 1,401 entries, ``dependency_dynamic`` 12), so what is
-    unrealised is this phase's failure, not the read.
+    """A reason when the phase failed or we couldn't find out; ``None`` only when ``stage_errors`` was read and has
+    no such entry (a missing artifact means no degraded errors, which is an answer).
     """
     try:
         body = deps.get_artifact(session, job.id, "stage_errors")
     except (StorageKeyMissing, StorageContentAbsent):
-        # The bucket was asked and says it holds no such object: no degraded
-        # record exists for this job.
         return None
     except Exception as exc:  # storage down, undeserializable, key never recorded
         logger.error("stage_errors for job %s unreadable: %s", job.id, exc, extra={"exc_type": type(exc).__name__})
@@ -79,28 +62,13 @@ def _upgrade_history_stage_raised(session: Any, job: Job) -> str | None:
 
 
 def _upgrade_history_absence_reason(session: Any, job: Job, contract: Contract | None) -> str | None:
-    """Why a missing ``upgrade_history`` is NOT determined, or ``None`` if absence
-    is proven.
+    """Why a missing ``upgrade_history`` is not determined, or ``None`` if absence is proven.
 
-    Absence is proven for exactly one shape: a Contract row that says
-    self-consistently that the target is not a proxy, with the upgrade-history
-    stage recording no failure. A non-proxy has no upgrade history by
-    construction, so there is nothing the missing artifact could be hiding.
+    Proven only for a self-consistent non-proxy row whose stage recorded no failure. Open otherwise: no Contract row;
+    ``is_proxy`` true; or ``is_proxy`` false with ``proxy_type``/``implementation`` set (``0x3c55986c…`` is exactly that
+    and has 14 ``Upgraded`` logs).
 
-    Everything else keeps the question open:
-
-    * **no Contract row** — nothing here knows whether the target is a proxy.
-    * **``is_proxy`` true** — the artifact SHOULD have existed and does not.
-    * **``is_proxy`` false while ``proxy_type`` or ``implementation`` is set** —
-      the row contradicts itself, so its proxyhood is not evidence either way.
-      A real counterexample: ``0x3c55986c…`` is ``is_proxy=False`` with
-      ``proxy_type='beacon'`` yet has 14 ``Upgraded(address)`` logs at or before
-      block 25619159, so reading it as a proven non-proxy denies a real history.
-
-    What it cannot see, stated rather than implied: a real proxy the classifier
-    missed entirely (``is_proxy`` false, ``proxy_type`` and ``implementation``
-    both NULL) reads as a proven non-proxy here. Splitting that needs a
-    proxy-detection verdict the ``contracts`` row does not carry.
+    Blind spot: a proxy the classifier missed entirely reads as proven non-proxy.
     """
     if contract is None:
         return "no contract row for this job: whether the target is a proxy was never recorded"
@@ -117,10 +85,7 @@ def _upgrade_history_absence_reason(session: Any, job: Job, contract: Contract |
 
 @router.get("/api/analyses", response_model=None)
 def analyses(response: Response) -> list[AnalysisListEntry]:
-    """List completed analyses with their available artifacts."""
-    # Read-mostly listing — let the browser reuse it across navigations.
-    # Short max-age + SWR keeps freshness while letting back/forward and
-    # rapid re-renders avoid a network round-trip for the multi-MB payload.
+    # Multi-MB payload; SWR lets back/forward reuse it.
     response.headers["Cache-Control"] = "private, max-age=15, stale-while-revalidate=60"
     with deps.SessionLocal() as session:
         stmt = (
@@ -131,24 +96,14 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
         jobs = session.execute(stmt).scalars().all()
 
         jobs_by_id = {str(job.id): job for job in jobs}
-        # Keyed by (coalesced-chain, address) so a CREATE2 twin's per-chain
-        # jobs stay distinct: the same address on ethereum and base
-        # is two entities, and impl-hiding must find the impl on the proxy's
-        # own chain — an impl completed only on the other chain must not
-        # un-hide this chain's proxy.
+        # (chain, address) keys keep CREATE2 twins distinct, so an impl completed only on another chain doesn't un-hide
+        # this chain's proxy.
         jobs_by_key: dict[tuple[str, str], Job] = {}
         for job in jobs:
             if job.address:
                 jobs_by_key.setdefault((_coalesce_chain(_job_chain_name(job)), job.address.lower()), job)
 
-        # Rank scores, chains, name, proxy_type, implementation come from
-        # the ``contracts`` table. is_proxy comes from Job (denormalized via
-        # store_artifact). Pulling all of these from columns lets us skip
-        # the per-job ``contract_flags`` storage GET entirely — at 25ms
-        # production RTT × N jobs, that GET batch was the dominant cost
-        # of this endpoint after the parallel-fanout commit. Keyed by
-        # (coalesced-chain, address) so each job pairs with its own chain's
-        # Contract row rather than an arbitrary twin's.
+        # Everything comes from columns to skip the per-job ``contract_flags`` storage GET, formerly the dominant cost.
         contracts_by_key: dict[tuple[str, str], Contract] = {}
         addresses_from_jobs = list({addr for (_chain, addr) in jobs_by_key})
         if addresses_from_jobs:
@@ -158,14 +113,7 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
                     contracts_by_key.setdefault((_coalesce_chain(c.chain), addr_lower), c)
 
         job_ids = [job.id for job in jobs]
-        # Earlier code fetched every job's ``contract_analysis`` artifact body
-        # from object storage just to read ``subject.name`` and ``summary``.
-        # Both were redundant: ``contract_name`` is on the prefetched
-        # ``Contract`` row and ``summary`` is never consumed by the frontend
-        # listing (it's a detail-page field). Reading just artifact NAMES
-        # (no body) keeps the available_artifacts list populated without
-        # the per-job HTTP round-trip — the dominant cost of this endpoint
-        # at production scale.
+        # Artifact names only; fetching each ``contract_analysis`` body just for name/summary was the dominant cost.
         artifact_names_by_job: dict[Any, list[str]] = {}
         if job_ids:
             for row in session.execute(
@@ -213,21 +161,14 @@ def analyses(response: Response) -> list[AnalysisListEntry]:
             ),
         }
 
-        # Hide proxy entries until the impl is completed — otherwise the
-        # listing renders a half-populated card that mutates once the impl
-        # lands. ``jobs_by_key`` only carries completed jobs.
+        # Hide proxies until the impl completes, or the card mutates when it lands.
         contract_name_source = contract
         if entry["is_proxy"] and entry["implementation_address"]:
             impl_addr_lower = entry["implementation_address"].lower()
             impl_job = jobs_by_key.get((job_chain_key, impl_addr_lower))
             if impl_job is None:
                 continue
-            # Always prefer the impl's name over the proxy shell's. Proxy
-            # rows usually carry a generic name like "UUPSProxy" or
-            # "TransparentUpgradeableProxy"; the impl's name is the one
-            # the user actually recognises (e.g. "WithdrawRequestNFT").
-            # Fall back to the proxy's name if the impl Contract row is
-            # missing or unnamed.
+            # The impl's name ("WithdrawRequestNFT") over the proxy shell's ("UUPSProxy").
             impl_contract = contracts_by_key.get((job_chain_key, impl_addr_lower))
             if impl_contract is not None and impl_contract.contract_name:
                 contract_name_source = impl_contract
@@ -246,34 +187,18 @@ def analysis_artifact(
     chain: str | None = Query(default=None),
     x_psat_admin_key: str | None = Header(default=None),
 ):
-    """Get a specific artifact for an analysis.
+    """Get one artifact for an analysis.
 
-    Storage-backed artifacts are fetched from object storage transparently;
-    inline (legacy) artifacts are served from Postgres. Either way, the body
-    is returned directly to the client.
+    Non-consumer-safe names need the admin key, checked before any lookup so there's no existence signal.
 
-    Only the consumer-safe artifacts are public; any other name requires a
-    valid admin key, enforced before any lookup so an unauthorized name yields
-    no existence signal and no storage I/O.
+    The SPA renders absence as a fact about the contract, so three answers:
 
-    **Three answers, because this is the boundary the SPA reads.** This handler
-    is the artifact path for ``EntityActivity`` (upgrade_history) and the
-    dependency lane (dependency_graph_viz), and both render a body's absence as
-    a statement about the contract:
+      200  present (including upgrade_history synthesized from UpgradeEvent rows).
+      404  proven absent.
+      503  not determined (``X-PSAT-Artifact-State: not_determined``).
 
-      200  the body, proven present (including the upgrade_history synthesis
-           below, which is a real payload rebuilt from UpgradeEvent rows).
-      404  proven absent — no artifact row, the bucket answered "no object at
-           any candidate", or the row records no key at all.
-      503  not determined — storage was unreachable, unconfigured, or failed in
-           a way we cannot interpret. ``X-PSAT-Artifact-State: not_determined``
-           and a JSON body naming the artifact, so a caller need not parse prose.
-
-    Returning 404 for the third case is the defect this endpoint had: a bucket
-    outage and an artifact the job never produced were byte-identical answers,
-    and the consumer turned that into "no upgrades on this proxy".
+    A 404 for storage outages once rendered as "no upgrades on this proxy".
     """
-    # Strip .json/.txt extension for artifact lookup.
     lookup_name = artifact_name
     if artifact_name.endswith(".json"):
         lookup_name = artifact_name[:-5]
@@ -284,7 +209,6 @@ def analysis_artifact(
         deps.require_admin_key(request, x_psat_admin_key)
 
     with deps.SessionLocal() as session:
-        # Find job by name or id or address
         stmt = select(Job).where(Job.name == run_name).order_by(Job.updated_at.desc()).limit(1)
         job = session.execute(stmt).scalar_one_or_none()
         if job is None:
@@ -293,10 +217,7 @@ def analysis_artifact(
             except Exception:
                 session.rollback()
         if job is None:
-            # ``run_name`` is an address here. Two chains can share an address, so
-            # chain-qualify by Job.chain_id when a chain is supplied;
-            # absent a chain we keep the mainnet-preserving address-only lookup
-            # (every prod row is chain 1 today, so output is unchanged).
+            # Chain-qualify when a chain is supplied; without one keep the address-only lookup.
             stmt = (
                 select(Job)
                 .where(
@@ -323,30 +244,18 @@ def analysis_artifact(
             if artifact is None:
                 artifact = deps.get_artifact(session, job.id, artifact_name)
         except (StorageKeyMissing, StorageContentAbsent) as exc:
-            # The bucket was asked about every candidate key and answered "no
-            # object here". Determined: this job has no body for that name.
             logger.warning("artifact %s for job %s is absent: %s", lookup_name, job.id, exc)
         except StorageKeyAbsent as exc:
-            # The row records no key and holds no inline body, so the bucket was
-            # never asked — the third state, not the second. Published as
-            # not-determined for the same reason ``db.storage.StorageKeyAbsent``
-            # names it separately: answering 404 here is byte-identical to a job
-            # that never produced the artifact, and no consumer can tell them
-            # apart from the response.
+            # The row records no key, so the bucket was never asked: not-determined, not absent (see
+            # ``db.storage.StorageKeyAbsent``).
             not_determined = "Artifact key not recorded"
             logger.error("artifact %s for job %s not determined: %s", lookup_name, job.id, exc)
         except Exception as exc:
-            # Everything else — StorageUnavailable, StorageContentNotDetermined,
-            # a deserialize failure, an unconfigured backend — means we did not
-            # find out. Fall through to the synthesis fallback, which may still
-            # produce the body from a different source; if it does not, this is
-            # published as its own answer rather than as absence.
+            # We didn't find out; the synthesis fallback may still produce the body.
             not_determined = "Artifact read did not complete"
             logger.error("artifact %s for job %s not determined: %s", lookup_name, job.id, exc)
 
-        # upgrade_history is reproducible from UpgradeEvent rows. When the
-        # stored artifact is gone or storage is down, regenerate from the
-        # relational source so the per-proxy detail view stays usable.
+        # Reproducible from UpgradeEvent rows when the artifact is gone or storage is down.
         if artifact is None and lookup_name == "upgrade_history":
             from services.discovery.upgrade_history import synthesize_from_events
 
@@ -354,22 +263,12 @@ def analysis_artifact(
             if contract is not None:
                 artifact = synthesize_from_events(session, contract)
             if artifact is None and not_determined is None:
-                # The writer stores no upgrade_history row in two
-                # indistinguishable cases — the stage found no proxies, and the
-                # stage RAISED (``uh_pre = None``, logged via
-                # ``record_degraded(phase="dependency_upgrade_history")``) — and a
-                # 404 here is consumed by the SPA as proven absence ("No activity
-                # before the line."). Falsified on real data: the beacon proxy at
-                # ``0x3c55986c…`` has 0 rows, 0 UpgradeEvents, and 14
-                # ``Upgraded(address)`` logs at or before block 25619159.
+                # No row is written both when the stage found no proxies and when it raised, and the SPA reads 404 as
+                # proven absence. Falsified by the beacon proxy at ``0x3c55986c…``.
                 not_determined = _upgrade_history_absence_reason(session, job, contract)
 
         if artifact is None and not_determined is not None:
-            # 503, not 404: whether this job produced the artifact is unknown.
-            # The header lets a consumer branch without parsing the body, and the
-            # body names the artifact so the reason survives into a log or a UI
-            # string. Retry-After is the honest hint — this is the one state that
-            # can change on its own.
+            # 503, not 404: unknown. Retry-After because this state can change on its own.
             return JSONResponse(
                 status_code=503,
                 headers={"X-PSAT-Artifact-State": "not_determined", "Retry-After": "30"},
@@ -390,7 +289,6 @@ def analysis_artifact(
 
 @router.get("/api/analyses/{run_name:path}")
 def analysis_detail(run_name: str) -> dict:
-    """Get analysis detail by job name (run_name) or job_id."""
     with deps.SessionLocal() as session:
         payload = build_analysis_detail(session, run_name)
         if payload is None:

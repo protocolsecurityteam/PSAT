@@ -1,24 +1,8 @@
-"""Cross-contract policy-derived claims (Plane-1 policy tier).
-
-Some claims about a contract are only provable once a sibling's facts are in
-hand — evidence that does not exist at single-contract static time:
-
-1. **value-flow propagation** — a body call the caller resolves at runtime lands
-   on a token/vault selector the callee proved carries a ``flow.*``/``supply.*``
-   claim;
-2. **transfer_policy.configure** — a setter here writes an allow/deny mapping and
-   a sibling routes its runtime transfer hook back to this contract;
-3. **beacon upgrade** — the caller invokes an ``upgradeTo`` the callee proved is
-   an ``upgrade.implementation``;
-4. **provenance upgrade** — the classifier confirms this deployment's live
-   EIP-1967 implementation slot, so an upgrade selector here governs a real
-   proxy.
-
-Each is minted as a ``policy_derived`` claim through the registry. This replaces
-the former propagate-every-effect-label rule: a control-plane claim never rides
-across a call boundary (only the four typed derivations here do), and the
-emitted objects are claims, not legacy label strings — so a mislabel on one
-deployment can no longer contaminate the functions of another.
+"""Cross-contract ``policy_derived`` claims that need a sibling's facts: a resolved body call inheriting the callee's
+proven ``flow.*``/``supply.*`` claims; ``transfer_policy.configure`` for a setter writing an allow/deny map a
+sibling's transfer hook routes back to; a beacon ``upgradeTo`` on a proven ``upgrade.implementation``; and an
+upgrade selector on a deployment whose EIP-1967 slot the classifier confirmed. Control-plane claims never cross a
+call boundary otherwise.
 """
 
 from __future__ import annotations
@@ -48,15 +32,12 @@ TRANSFER_POLICY_CONFIGURE = "transfer_policy.configure"
 UPGRADE_IMPLEMENTATION = "upgrade.implementation"
 CALLEE_POINTER_ROTATE = "callee_pointer.rotate"
 
-# proxy_type values whose implementation the classifier reads from a storage
-# slot (the "confirms the linked slot" evidence for the provenance upgrade).
+# Proxy types whose implementation the classifier reads from a storage slot.
 _SLOT_CONFIRMED_PROXY_TYPES = frozenset({"eip1967", "eip1822", "beacon_proxy", "oz_legacy"})
 
 
 def _no_static_gate(_ctx: Any) -> bool:
-    # A policy-tier claim has no single-contract evidence, so the static
-    # build_claims pass must never mint it; it is registered only so emit_claim
-    # can mint it at the policy stage (the registry stays the sole id source).
+    # Policy-tier claims have no single-contract evidence; registered only so the policy stage can mint them.
     return False
 
 
@@ -78,16 +59,14 @@ if not is_registered(TRANSFER_POLICY_CONFIGURE):
 
 
 def _compute_selector(signature: str) -> str | None:
-    """The 4-byte selector for a canonical ABI signature (fallback when the
-    callee's effect record did not record one)."""
+    """Selector of a canonical signature (when the callee record lacks one)."""
     if not signature or "(" not in signature or not signature.endswith(")"):
         return None
     return "0x" + keccak(text=signature).hex()[:8]
 
 
 def _var_to_address(controller_values: Any) -> dict[str, str]:
-    """``{state-var name (lowered) -> resolved on-chain address}`` from a
-    control snapshot's ``controller_values``."""
+    """``{state var (lowered): resolved address}`` from a control snapshot's ``controller_values``."""
     out: dict[str, str] = {}
     if not isinstance(controller_values, dict):
         return out
@@ -109,12 +88,7 @@ def _is_flow_family(claim_id: str) -> bool:
 
 
 def _propagatable(claim: Any) -> bool:
-    """A callee claim eligible to ride across a resolved call boundary.
-
-    Only standard_exact value-flow/supply claims (derivation 1) and the beacon
-    ``upgrade.implementation`` (derivation 3) qualify. A structural/policy-tier
-    callee claim is not strong enough to carry, and no control-plane claim other
-    than the explicit beacon upgrade ever propagates."""
+    """Only standard_exact flow/supply claims and the beacon ``upgrade.implementation`` may cross a call boundary."""
     if not isinstance(claim, dict) or claim.get("tier") != "standard_exact":
         return False
     claim_id = claim.get("claim_id")
@@ -126,11 +100,7 @@ def _propagatable(claim: Any) -> bool:
 def build_callee_claim_map(
     effects_by_address: dict[str, dict[str, Any]] | None,
 ) -> dict[str, dict[str, list[Claim]]]:
-    """``{callee_address -> {selector -> [propagatable claims]}}`` from siblings.
-
-    Reads the ``claims`` list the static plane attached to each sibling
-    ``effects`` record, keeping only the standard-tier flow/supply/upgrade
-    claims a caller may inherit."""
+    """``{callee_address: {selector: [propagatable claims]}}`` from siblings' effects records."""
     discover()  # the policy process may not have run build_claims; register the matchers
     callee_map: dict[str, dict[str, list[Claim]]] = {}
     for address, effects_artifact in (effects_by_address or {}).items():
@@ -143,18 +113,9 @@ def build_callee_claim_map(
             claims = [c for c in (fn_record.get("claims") or []) if _propagatable(c)]
             if not claims:
                 continue
-            # Join keys, canonical first. The caller's sink records the
-            # CANONICAL dispatch selector (its ``_callee_signature`` lowers
-            # interface/enum/struct params), while the record's own
-            # ``selector`` is keccak of the DECLARED signature — not a real
-            # selector when a parameter is user-typed, which made every such
-            # callee invisible to this join (AssetRecovery
-            # ``sweepTo(IERC20,address,uint256)`` keyed 0x38541c00, sink says
-            # 0x0aeef8c8). ``abi_selector`` is the canonical value stamped by
-            # ``attach_claims_to_effects``; its ABSENCE (older artifact,
-            # unlowerable signature) is not-determined, so the declared-form
-            # key is kept as the fallback that preserves the elementary-
-            # signature joins those artifacts still support.
+            # The caller's sink records the canonical selector; the record's own ``selector`` hashes the declared
+            # signature (``sweepTo(IERC20,...)`` keyed wrong). Use the stamped ``abi_selector`` first; the declared form
+            # stays as a fallback for artifacts without it.
             keys: set[str] = set()
             abi_selector = fn_record.get("abi_selector")
             if isinstance(abi_selector, str) and abi_selector.startswith("0x"):
@@ -175,9 +136,7 @@ def build_callee_claim_map(
 
 
 def _body_external_calls(target_effects: Any) -> dict[str, list[dict[str, Any]]]:
-    """Per-function body-origin ``external_call`` sinks that carry a
-    ``var.method`` target and a selector. Guard-origin calls are excluded — a
-    permission check is not a value flow."""
+    """Body-origin ``external_call`` sinks with a ``var.method`` target and selector; guard calls aren't value flows."""
     functions = target_effects.get("functions") if isinstance(target_effects, dict) else None
     if not isinstance(functions, dict):
         return {}
@@ -206,9 +165,9 @@ def _derive_value_flow_claims(
     controller_values: Any,
     callee_claim_map: dict[str, dict[str, list[Claim]]],
 ) -> dict[str, list[Claim]]:
-    """Derivations 1 (value flow) + 3 (beacon upgrade): a body call resolved via
-    ``controller_values`` inherits the callee's propagatable standard-tier claims
-    at ``policy_derived``."""
+    """Value flow and beacon upgrade: a body call resolved via ``controller_values`` inherits the callee's
+    propagatable claims.
+    """
     var_to_address = _var_to_address(controller_values)
     enriched: dict[str, list[Claim]] = {}
     for fn_sig, sinks in _body_external_calls(target_effects).items():
@@ -247,8 +206,7 @@ def _derive_value_flow_claims(
 
 
 def _is_bool_mapping(declared_type: Any) -> bool:
-    """A ``mapping(... => bool)`` allow/deny list — the transfer-gating set shape.
-    Nested maps keying to a bool leaf still qualify."""
+    """A ``mapping(... => bool)`` allow/deny list (nested maps to bool count)."""
     if not isinstance(declared_type, str):
         return False
     normalized = declared_type.replace(" ", "")
@@ -259,16 +217,10 @@ def _derive_transfer_policy_claims(
     target_effects: Any,
     sibling_transfer_hooks: list[dict[str, str]] | None,
 ) -> dict[str, list[Claim]]:
-    """Derivation 2 (``transfer_policy.configure``).
-
-    ``sibling_transfer_hooks`` are the siblings whose runtime transfer-hook
-    pointer resolves to THIS contract. When such a link exists, a function here
-    that writes a normal-hygiene ``address => bool`` allow/deny mapping is
-    configuring that sibling's transfer gating.
-
-    The written set-var is used as evidence of hook policy: the
-    engine records writes, not reads, so the discriminating evidence is the
-    sibling→here hook link plus the allow/deny map shape."""
+    """``transfer_policy.configure``: when a sibling's transfer-hook pointer resolves here, a function writing a
+    normal-hygiene ``address => bool`` map configures that sibling's gating (the hook link stands in for proving
+    the hook reads it).
+    """
     if not sibling_transfer_hooks:
         return {}
     functions = target_effects.get("functions") if isinstance(target_effects, dict) else None
@@ -312,13 +264,9 @@ def _derive_provenance_upgrade_claims(
     target_effects: Any,
     proxy_provenance: dict[str, str] | None,
 ) -> dict[str, list[Claim]]:
-    """Derivation 4 (upgrade provenance).
-
-    When the classifier confirms this deployment's EIP-1967 implementation slot,
-    a function carrying a canonical upgrade selector governs a live proxy. The
-    per-function precedence rule keeps a static standard_exact ``upgrade.*`` claim
-    if one already exists — this surfaces only the upgrade entries static could
-    not gate on its own."""
+    """When the classifier confirms this deployment's EIP-1967 slot, upgrade-selector functions govern a live proxy;
+    existing standard_exact upgrade claims win.
+    """
     if not proxy_provenance:
         return {}
     functions = target_effects.get("functions") if isinstance(target_effects, dict) else None
@@ -347,8 +295,7 @@ def _derive_provenance_upgrade_claims(
 
 
 def _callee_pointer_vars(effects_artifact: Any) -> set[str]:
-    """State-var names a contract treats as a runtime code pointer, per its
-    ``callee_pointer.rotate`` claim witnesses."""
+    """State vars used as runtime code pointers, from ``callee_pointer.rotate`` witnesses."""
     out: set[str] = set()
     functions = effects_artifact.get("functions") if isinstance(effects_artifact, dict) else None
     if not isinstance(functions, dict):
@@ -373,12 +320,7 @@ def sibling_transfer_hook_links(
     sibling_effects_by_address: dict[str, dict[str, Any]],
     sibling_snapshots_by_address: dict[str, dict[str, Any]],
 ) -> list[dict[str, str]]:
-    """Siblings whose runtime transfer-hook pointer resolves to ``target_address``.
-
-    A sibling's ``callee_pointer.rotate`` claim names the state var it invokes as
-    a runtime hook; when that var's resolved controller value equals this
-    contract, the sibling routes transfers through us — the ``Teller`` hook that
-    ``BoringVault`` points at."""
+    """Siblings whose transfer-hook pointer resolves to ``target_address`` (the Teller hook BoringVault points at)."""
     target = (target_address or "").lower()
     if not target:
         return []
@@ -401,9 +343,7 @@ def proxy_provenance_from_classifications(
     deployment_address: str,
     classifications_artifact: Any,
 ) -> dict[str, str] | None:
-    """The classifier's confirmation that ``deployment_address`` is a live proxy
-    whose implementation it read from a storage slot. Returns ``None`` when the
-    deployment is not a slot-confirmed proxy."""
+    """The classifier's confirmation that ``deployment_address`` is a slot-confirmed proxy, or ``None``."""
     if not deployment_address:
         return None
     classifications = (
@@ -435,11 +375,7 @@ def derive_cross_contract_claims(
     sibling_transfer_hooks: list[dict[str, str]] | None = None,
     proxy_provenance: dict[str, str] | None = None,
 ) -> dict[str, list[Claim]]:
-    """Run the four policy-tier derivations and merge their claims per function.
-
-    Returns ``{function_signature -> [policy_derived claims]}`` for functions that
-    gained at least one; the policy stage merges these onto each function's
-    existing claim list (precedence-resolved)."""
+    """Run the four derivations: ``{function_signature: [policy_derived claims]}`` for functions that gained any."""
     discover()  # ensure flow/supply/upgrade ids are registered before emit_claim
     merged: dict[str, list[Claim]] = {}
     for derivation in (

@@ -15,13 +15,8 @@ from ..revert_detect import RevertGate
 from ..slither_compat import Index, Member, SolidityCall
 from .operands import _operand_for_value
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _binary_op(bt: Any) -> str:
-    """Map Slither BinaryType → leaf operator string."""
     if bt is None:
         return "unknown"
     name = getattr(bt, "name", str(bt)).upper()
@@ -38,8 +33,7 @@ def _binary_op(bt: Any) -> str:
 
 
 def _apply_polarity(operator: str, polarity: str) -> LeafOperator:
-    """If polarity is allowed_when_false (if-revert), invert the
-    operator. The inversion table: eq↔ne, lt↔gte, lte↔gt."""
+    """Invert the operator for if-revert polarity (eq/ne, lt/gte, lte/gt)."""
     if polarity == "allowed_when_true":
         return operator  # pyright: ignore[reportReturnType]
     inv = {"eq": "ne", "ne": "eq", "lt": "gte", "gte": "lt", "lte": "gt", "gt": "lte"}
@@ -93,35 +87,25 @@ def _gate_references_caller(gate: RevertGate) -> bool:
 
 
 def _find_defining_ir(value: Any, node: Any, function: Any) -> Any | None:
-    """Find the IR opcode whose lvalue equals ``value``. Looks in
-    the gate's home node first, then walks back through the
-    function's nodes AND each modifier's nodes (gates inside
-    modifier bodies still admit the function and need their own
-    operand resolution)."""
+    """The IR whose lvalue is ``value``: search the gate's own container (function or modifier) outward from the gate
+    node, then every container.
+    """
     name = getattr(value, "name", None)
     if name is None:
         return None
-    # Build the search node list: start from the gate's node and walk
-    # backward through whichever container (function or modifier) it
-    # lives in. If we don't find the defining IR there, fall back to
-    # scanning all containers' nodes in reverse.
     containers = [function]
     containers.extend(getattr(function, "modifiers", []) or [])
-    # Prefer the container the gate lives in.
     if node is not None:
         for c in containers:
             cnodes = list(getattr(c, "nodes", []) or [])
             if node in cnodes:
                 idx = cnodes.index(node)
-                # Search backward from gate, then forward, then other
-                # containers.
                 ordered = cnodes[idx::-1] + cnodes[idx + 1 :]
                 for n in ordered:
                     found = _scan_node_for_lvalue(n, name)
                     if found is not None:
                         return found
                 break
-    # Fallback: scan all containers.
     for c in containers:
         for n in reversed(list(getattr(c, "nodes", []) or [])):
             found = _scan_node_for_lvalue(n, name)
@@ -139,19 +123,10 @@ def _scan_node_for_lvalue(node: Any, name: str) -> Any | None:
 
 
 def _reconstruct_index_chain(ir: Any, prov: ProvenanceMap, function: Any | None = None) -> list[Operand]:
-    """Walk an Index IR's variable_left chain to assemble all keys
-    (outer → inner). For an N-level mapping like ``map[a][b][c]``,
-    Slither emits N nested Index IRs, each whose variable_left is
-    the previous Index's lvalue. We walk back through the function
-    to collect each key in source order.
+    """All keys of an N-level ``map[a][b][c]`` Index chain in source order.
 
-    Per codex round-7 review (F4 fix): when a key dimension is the
-    result of ``keccak256(abi.encode(a, b, ...))``, we unwrap the
-    hash inputs into separate operand entries instead of recording
-    a single ``computed`` source. This treats hashed-key membership
-    as a symbolic tuple key — preserving every component (role,
-    domain separator, msg.sender, etc.) so the writer-gate / auth
-    classifier sees them all, not just the collapsed hash output.
+    A ``keccak256(abi.encode(a, b, ...))`` key is unwrapped into its components, so hashed-key membership keeps every
+    part (role, domain, ``msg.sender``) visible to the auth classifier.
     """
     keys: list[list[Operand]] = []  # per-dimension list of operands
     visited: set[str] = set()
@@ -164,11 +139,7 @@ def _reconstruct_index_chain(ir: Any, prov: ProvenanceMap, function: Any | None 
             break  # cycle guard
         if left_name is not None:
             visited.add(left_name)
-        # If the left is itself the lvalue of an outer Index, find
-        # that IR and continue the walk. Also bridge struct-field
-        # accesses (``map[k].field[m]`` shape):
-        # the outer Index's left points at a Member whose variable_left
-        # is itself an Index — continue from that inner Index.
+        # Follow outer Index lvalues, bridging ``map[k].field[m]`` through the Member.
         if function is None:
             break
         defining = _find_defining_ir(left, None, function)
@@ -184,9 +155,7 @@ def _reconstruct_index_chain(ir: Any, prov: ProvenanceMap, function: Any | None 
         if not isinstance(defining, Index):
             break
         current = defining
-    # Flatten: each Index dimension contributes one or more operands.
-    # Hashed-key dimensions expand to N operands; plain keys stay as
-    # a single operand. The result is the full symbolic tuple key.
+    # Hashed keys expand to several operands; plain keys stay one.
     flat: list[Operand] = []
     for dim in keys:
         flat.extend(dim)
@@ -194,14 +163,8 @@ def _reconstruct_index_chain(ir: Any, prov: ProvenanceMap, function: Any | None 
 
 
 def _expand_key_operand(value: Any, prov: ProvenanceMap, function: Any | None = None) -> list[Operand]:
-    """If ``value`` is a hash result (keccak256 of abi.encode of N
-    args), return one Operand per ultimate input. Otherwise return
-    a single-element list with the value's standard operand.
-
-    The unwrap chain handles common nested forms:
-      - keccak256(bytes)
-      - abi.encode(...) / abi.encodePacked(...) / abi.encodeWithSelector(...)
-      - keccak256(abi.encode(a, b, c)) → walks both calls
+    """One operand per ultimate input when ``value`` is ``keccak256``/``abi.encode*`` of arguments (recursively),
+    else the value's own operand.
     """
     if function is None:
         return [_operand_for_value(value, prov)]
@@ -212,24 +175,16 @@ def _expand_key_operand(value: Any, prov: ProvenanceMap, function: Any | None = 
     if not _is_hash_or_encode_call(fn_name):
         return [_operand_for_value(value, prov)]
 
-    # Walk into the hash/encode arguments. Each argument may itself
-    # be a hash/encode lvalue (chained) — recurse.
     out: list[Operand] = []
     for arg in getattr(defining, "arguments", []) or []:
         out.extend(_expand_key_operand(arg, prov, function))
     if not out:
-        # Defensive: hash with no resolvable args → fall back.
         return [_operand_for_value(value, prov)]
     return out
 
 
 def _is_hash_or_encode_call(fn_name: str) -> bool:
-    """Recognize Solidity hashing + abi-encoding functions whose
-    arguments form the components of a symbolic tuple key. Detection
-    is by canonical signature, not identifier name — the function
-    name here is the Solidity built-in's signature (e.g.,
-    ``keccak256(bytes)``), which is structural metadata, not a
-    user-chosen identifier."""
+    """Solidity hashing/encoding builtins, matched by their canonical signature (structural, not a user identifier)."""
     if not fn_name:
         return False
     return (
@@ -246,10 +201,7 @@ def _is_hash_or_encode_call(fn_name: str) -> bool:
 
 
 def _find_index_base(ir: Any, function: Any | None = None) -> Any | None:
-    """Walk back through chained Index IRs to the underlying storage
-    variable (StateVariable). Returns the variable_left of the
-    outermost Index in the chain.
-    """
+    """The storage variable at the bottom of an Index chain."""
     current = ir
     visited: set[str] = set()
     while isinstance(current, Index):
@@ -262,10 +214,8 @@ def _find_index_base(ir: Any, function: Any | None = None) -> Any | None:
         if function is None:
             return left
         defining = _find_defining_ir(left, None, function)
-        # When the chain bottoms out through a ``Member`` access on a storage
-        # struct reached via a pointer (ERC-7201 namespaced storage), ``left``
-        # is a synthetic ref; the field being accessed (``_roles``) is the
-        # logical storage variable. Prefer that field over the ref.
+        # Through an ERC-7201 namespaced struct pointer, the accessed field (``_roles``) is the logical storage
+        # variable, not the synthetic ref.
         member_field = None
         while isinstance(defining, Member):
             if member_field is None:
@@ -284,12 +234,8 @@ def _find_index_base(ir: Any, function: Any | None = None) -> Any | None:
 
 
 def _value_type_of_index_ir(ir: Any) -> str:
-    """Best-effort solidity type of the value produced by ``map[k]``.
-
-    Used by ``ValuePredicate`` so downstream backends know how to
-    decode the assigned value (event topic / calldata word). Falls
-    back to ``"uint256"`` when the IR doesn't expose a usable type —
-    callers must treat ``value_type`` as advisory, not authoritative.
+    """Best-effort Solidity type of ``map[k]``'s value for ``ValuePredicate`` decoding; defaults to ``uint256``, so
+    advisory only.
     """
     lvalue = getattr(ir, "lvalue", None)
     type_obj = getattr(lvalue, "type", None) if lvalue is not None else None

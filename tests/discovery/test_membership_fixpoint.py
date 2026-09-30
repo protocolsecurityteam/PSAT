@@ -1,10 +1,8 @@
 """Stratified fixpoint cascade + gate-side W2/W3 enforcement.
 
-Covers: multi-round promotion chains (W2 → deployer Class B → W4 sibling),
-revocation cascade to quiescence, confluence across arrival orders,
-termination on cyclic pointers, the overreach regression fixtures
-(Lido/EigenLayer/USDC/WETH9 shapes + the shared-operator two-hop kill),
-fact-delta targeting per hook, and the W5 human-assertion flow.
+Multi-round promotion chains, revocation cascade to quiescence, confluence across arrival orders, termination on
+cyclic pointers, the overreach regression fixtures (Lido/EigenLayer/USDC/WETH9 shapes + the shared-operator
+two-hop kill), fact-delta targeting per hook, and the W5 human-assertion flow.
 """
 
 from __future__ import annotations
@@ -337,8 +335,6 @@ def _settled_state(session, rows: dict[str, Contract], protocol: Protocol) -> di
 
 
 def test_fixpoint_confluent_across_arrival_orders(db_session):
-    """Same stored evidence, two event orders → the same settled membership
-    and witness sets."""
     p1, u1 = _confluence_universe(db_session, 0x400)
     gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(u1["y"].id,)))
     gate.evaluate(db_session, gate.FactsDelta(new_member_contract_ids=(u1["m"].id,)))
@@ -370,7 +366,6 @@ def test_fixpoint_terminates_on_cyclic_pointers(db_session):
     db_session.commit()
 
     assert set(result.promoted_contract_ids) == {p1.id, c2.id}
-    # A second pass over the settled state changes nothing.
     again = gate.evaluate(db_session, gate.FactsDelta(recheck_contract_ids=(p1.id, c2.id)))
     assert again.promoted_contract_ids == () and again.demoted_contract_ids == ()
 
@@ -541,7 +536,6 @@ def test_resolution_hook_promotes_controller_of_member(db_session):
     _code_fact(db_session, controller.address)
     unrelated = _contract(db_session, _addr(0x802), nominated_protocol_id=protocol.id)
     _code_fact(db_session, unrelated.address)
-    # The stage's commit wrote this CV row; the hook receives the snapshot.
     _owner_edge(db_session, member, controller.address)
 
     _membership_gate_controller_hook(
@@ -552,7 +546,6 @@ def test_resolution_hook_promotes_controller_of_member(db_session):
 
     assert controller.protocol_id == protocol.id
     assert _active_rules(db_session, controller) == {"w1_code", "w3_control"}
-    # Delta targeting: the unrelated candidate is untouched.
     assert unrelated.protocol_id is None
     assert _active_rules(db_session, unrelated) == set()
 
@@ -579,7 +572,6 @@ def test_resolution_hook_removed_controller_revokes_class_a_row(db_session):
     assert registry.trust_class == "A"
     db_session.commit()
 
-    # Re-resolution: the stage rewrites the snapshot, replacing the EOA.
     db_session.delete(cv)
     db_session.add(
         ControllerValue(
@@ -643,7 +635,6 @@ def test_w5_assertion_candidate_until_w1_then_member(db_session):
     gate.nominate(db_session, contract=row, protocol_id=protocol.id, source_tag="", human_assertion=assertion)
     db_session.flush()
 
-    # Assertion recorded, promotion withheld: W1 is still a precondition.
     assert row.nominated_protocol_id == protocol.id
     assert row.protocol_id is None
     assert _active_rules(db_session, row) == {"w5_human"}
@@ -839,7 +830,6 @@ def test_fresh_foreign_enumeration_revokes_class_b_and_blocks_w4(db_session):
     assert registry.revocation_reason == "foreign_or_unknown_creations"
     assert lineage_only.protocol_id is None
     assert lineage_only.id in result.demoted_contract_ids
-    # The disqualifying verdict blocks any W4 admission in the same run.
     assert sibling.protocol_id is None
     assert sibling.id not in result.promoted_contract_ids
     assert _active_rules(db_session, sibling) == set()
@@ -881,7 +871,6 @@ def test_collision_revokes_other_protocols_standing_row(db_session):
     assert registry_p.revocation_reason == "cross_protocol_collision"
     assert lineage_p.protocol_id is None
     assert lineage_p.id in result.demoted_contract_ids
-    # Q registers nothing and admits nothing off the collided EOA.
     assert candidate_q.protocol_id is None
     assert db_session.query(ProtocolDeployer).filter_by(protocol_id=protocol_q.id, address=deployer).count() == 0
 

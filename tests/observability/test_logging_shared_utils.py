@@ -1,10 +1,9 @@
-"""Logging/observability locks for the shared low-level I/O utils.
+"""Logging locks for the shared low-level I/O utils.
 
-Covers the swallow sites in ``services.clients.rpc`` / ``utils.llm`` / ``services.clients.etherscan`` /
-``services.concurrency`` that used to emit nothing (or an ERROR traceback) on a
-degraded-but-continuing failure. Each test stubs the wire — no live network/RPC —
-and asserts the new observable behaviour: a WARNING with facts in ``extra``, the
-paired ``record_degraded`` entry, and the LLM completion INFO + ``llm_calls`` metric.
+Covers swallow sites in ``services.clients.rpc`` / ``utils.llm`` / ``services.clients.etherscan`` /
+``services.concurrency`` that emitted nothing (or an ERROR traceback) on degraded-but-continuing
+failures. The wire is stubbed; asserts a WARNING with facts in ``extra``, the paired
+``record_degraded``, and the LLM completion INFO + ``llm_calls`` metric.
 """
 
 from __future__ import annotations
@@ -149,8 +148,7 @@ def test_etherscan_get_contract_info_errored_fetch_warns_and_degrades(monkeypatc
 
 
 def test_parallel_map_heartbeat_failure_demoted_to_warning_with_exc_type(caplog):
-    """A raising heartbeat is swallowed-and-continued, so it must be a WARNING
-    carrying exc_type — never an ERROR traceback."""
+    """A raising heartbeat is swallowed-and-continued, so a WARNING with exc_type, not an ERROR traceback."""
 
     def _bad_heartbeat() -> None:
         raise ValueError("heartbeat boom")

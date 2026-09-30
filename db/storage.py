@@ -23,24 +23,17 @@ DEFAULT_PRESIGN_TTL = 300
 _VALID_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
-class StorageError(RuntimeError):
-    """Base class for storage failures."""
+class StorageError(RuntimeError): ...
 
 
 class StorageUnavailable(StorageError):
-    """Storage backend is unreachable or misconfigured."""
+    """Storage backend unreachable or misconfigured."""
 
 
 class StorageKeyMissing(StorageError):
-    """A key was requested and the bucket holds no object at it.
-
-    This is *proven-absent for that key* — the second of the three states, never
-    "we had no key to try", which is the third and is ``StorageKeyAbsent``. Every
-    consumer must keep them apart: ``routers.analyses`` answers 404 for this one
-    and 503 for that one, and ``workers.retry_policy`` calls this one terminal
-    and that one transient. ``tried`` lists
-    every candidate key actually requested (see ``storage_key_candidates``) so
-    a reader can tell a one-shot miss from an exhausted fallback.
+    """The bucket holds no object at the requested key: proven absent, unlike ``StorageKeyAbsent`` (no key to ask
+    about). ``routers.analyses`` answers 404 for this and 503 for that; ``workers.retry_policy`` treats this as
+    terminal and that as transient. ``tried`` lists every candidate key requested (``storage_key_candidates``).
     """
 
     def __init__(self, key: str, tried: list[str] | None = None) -> None:
@@ -50,57 +43,28 @@ class StorageKeyMissing(StorageError):
 
 
 class StorageKeyAbsent(StorageError):
-    """The row records no storage key at all — nothing was ever requested.
+    """The row records no storage key, so nothing was requested and existence is not determined.
 
-    Distinct from ``StorageKeyMissing``: that one means the bucket was asked
-    and answered "not here"; this one means we never had an address to ask
-    about, so the content's existence is *not determined*. Collapsing the two
-    is what let 8,256 unreadable rows read as empty.
+    Collapsing this with ``StorageKeyMissing`` once made thousands of unreadable rows read as empty.
 
-    Because it is the third state, its consumers must treat it as one:
-    ``routers.analyses`` answers 503 with ``X-PSAT-Artifact-State:
-    not_determined`` (never a 404, which is byte-identical to an artifact the
-    job never produced), ``workers.retry_policy`` classifies it transient (only
-    a re-run can turn it into a fact), and ``db.queue.get_all_artifacts`` puts
-    the row in its ``not_determined`` shortfall map rather than omitting it.
+    ``routers.analyses`` answers 503 with ``X-PSAT-Artifact-State: not_determined`` (never 404),
+    ``workers.retry_policy`` treats it as transient, and ``db.queue.get_all_artifacts`` reports it in
+    ``not_determined``.
 
-    **Realisation, stated honestly.** Reachable by construction and covered by
-    tests, *not* yet realised on a real row: ``store_artifact`` with no payload
-    under an unconfigured backend writes ``storage_key`` NULL beside a NULL
-    inline body, and ``_artifact_row_to_value`` raises this for exactly that
-    row. In the working DB today that shape occurs 0/5770 times in
-    ``artifacts`` and 0/2261 times in ``source_files``. That is a lower bound
-    on prevalence — one protocol, largely one pipeline run — never a proof the
-    class is dead. It is specifically *not* the 21 keyless
-    ``contract_materializations`` blob-key cells: those are read through
-    ``db.contract_materializations._hydrate``, which returns the inline column
-    before any key is requested, so they never reach this class.
+    Reachable (``store_artifact`` with no payload and no storage backend) and tested, though no current row has this
+    shape. Keyless ``contract_materializations`` cells don't reach it (``_hydrate`` reads inline first).
     """
 
 
 class StorageContentIncomplete(StorageError):
-    """A collection read could not return a body for every row it was asked about.
+    """A collection read couldn't return a body for every row.
 
-    Raised instead of returning a short collection, because a short collection
-    is byte-identical to "those rows do not exist" — the exact substitution this
-    whole item exists to remove. ``values`` carries what *did* read so a caller
-    that can legitimately degrade (an API handler rendering a partial page) can
-    do so explicitly and publish the shortfall beside it; a caller that cannot
-    (a pipeline stage seeding a witness) simply lets it propagate.
+    Raised instead of returning a short collection, which would look like the rows don't exist. ``values`` has what did
+    read, for callers that can degrade explicitly.
 
-    The shortfall is carried in **two** maps, never one, because the reason a
-    body is missing decides what may be done about it:
-
-      * ``proven_absent`` — the bucket was asked about every candidate key and
-        holds none of them. Determined; a retry re-asks an answered question.
-      * ``not_determined`` — the bucket could not be asked, or could not be
-        understood. A retry is the only thing that can turn it into a fact.
-
-    Both map the row's identity (artifact name, source path, materialization
-    column) to the detail. The *type* of the exception carries the same split
-    for consumers that only get to see the type — see the two subclasses; a
-    single class with the cause buried in prose is what let a lost object and an
-    unreachable bucket share one retry verdict.
+    The shortfall is split: ``proven_absent`` (the bucket answered for every candidate; retrying won't help) and
+    ``not_determined`` (couldn't ask or parse; only a retry can resolve it). The subclasses carry the same split in the
+    type, for consumers that only see the type.
     """
 
     def __init__(
@@ -118,24 +82,13 @@ class StorageContentIncomplete(StorageError):
 
 
 class StorageContentAbsent(StorageContentIncomplete):
-    """Every body this read fell short on was proven absent at every candidate.
-
-    The bucket answered. It is a real inconsistency — a row asserts a key the
-    bucket does not honour — but it is *determined*, so it is terminal for
-    ``workers.retry_policy`` exactly as the single-key ``StorageKeyMissing`` is.
-    Not a subclass of ``StorageContentNotDetermined``: a consumer that catches
-    "we could not find out" must not silently absorb "we found out, and it is
-    gone".
+    """Every shortfall was proven absent: determined, so terminal for ``workers.retry_policy``, like
+    ``StorageKeyMissing``. Deliberately not a subclass of ``StorageContentNotDetermined``.
     """
 
 
 class StorageContentNotDetermined(StorageContentIncomplete):
-    """At least one body's existence could not be established.
-
-    The bucket was unreachable, unconfigured, or answered something we could not
-    parse. Transient for ``workers.retry_policy``: a stage that re-runs is the
-    only thing that can turn this into a fact.
-    """
+    """At least one body's existence couldn't be established (unreachable, unconfigured, unparseable). Transient."""
 
 
 def content_shortfall(
@@ -145,13 +98,7 @@ def content_shortfall(
     proven_absent: dict[str, str] | None = None,
     not_determined: dict[str, str] | None = None,
 ) -> StorageContentIncomplete:
-    """Build the shortfall exception whose *type* matches the shortfall's cause.
-
-    One unanswered question outranks any number of answered ones: if anything is
-    not-determined the whole read is not-determined, because a retry might still
-    complete it. Only when every shortfall is a proven absence is the read as
-    determined as it will ever get.
-    """
+    """The shortfall exception matching its cause: any not-determined entry makes the whole read not-determined."""
     if not_determined:
         return StorageContentNotDetermined(
             message, values=values, proven_absent=proven_absent, not_determined=not_determined
@@ -161,12 +108,8 @@ def content_shortfall(
 
 @dataclass(frozen=True)
 class BlobRead:
-    """One key's outcome in a batch fetch, with the three states kept apart.
-
-    ``body`` set — read. ``error`` a ``StorageKeyMissing`` — the bucket was
-    asked about every candidate key and holds none of them (proven-absent).
-    ``error`` anything else — the bucket could not be asked, so the content is
-    *not determined* and must never be rendered as absence.
+    """One key's outcome in a batch fetch: ``body`` (read), ``StorageKeyMissing`` (proven absent at every candidate),
+    or another error (not determined; never render as absence).
     """
 
     body: bytes | None = None
@@ -197,43 +140,31 @@ _KEY_ROOTS = frozenset(
     }
 )
 
-# A preview environment scopes the shared bucket with ``pr-<n>/`` (_key_prefix).
+# Preview environments scope the shared bucket with ``pr-<n>/``.
 _PREVIEW_PREFIX_RE = re.compile(r"^pr-\d+$")
 
 
 def _safe_name(name: str) -> str:
-    """Reject artifact names with path separators or control characters."""
     if not _VALID_NAME_RE.match(name):
         raise ValueError(f"Unsafe artifact name for storage key: {name!r}")
     return name
 
 
 def _key_prefix() -> str:
-    """Optional prefix for every storage key. Used to scope PR-preview envs to
-    a shared bucket (e.g. ``pr-123/``) so teardown can wipe one prefix cleanly.
+    """Optional key prefix scoping preview envs in a shared bucket (e.g.
 
-    Normalized to an empty string or a single trailing slash.
+    ``pr-123/``), normalized to empty or a single trailing slash.
     """
     prefix = os.environ.get("ARTIFACT_STORAGE_PREFIX", "").strip().strip("/")
     return f"{prefix}/" if prefix else ""
 
 
 def storage_key_candidates(key: str) -> list[str]:
-    """Every bucket key a DB-recorded ``key`` may legitimately resolve to.
+    """Every bucket key a DB-recorded ``key`` may resolve to.
 
-    Keys are recorded in Postgres verbatim, including the writing environment's
-    ``ARTIFACT_STORAGE_PREFIX``. Reading those rows from an environment with a
-    different prefix (a preview DB restored locally, prod reading a preview
-    row) addresses an object that was never written there. The bytes are at the
-    same path with the foreign scope removed, so the read path tries that too.
-
-    Stripping is deliberately narrow: only a leading segment that is *not*
-    itself one of this codebase's bucket namespaces and that looks like an
-    environment scope is removable. ``audits/text/183.txt`` therefore yields
-    exactly one candidate — an absent audit object stays absent instead of
-    being explained away by a fallback.
-
-    This is a read-path normalisation. DB values are never rewritten.
+    Keys include the writing environment's ``ARTIFACT_STORAGE_PREFIX``, so reading another environment's rows also tries
+    the key with that scope stripped. Only a leading segment that looks like an environment scope (not one of our
+    namespaces) is removable, so a genuinely absent object stays absent. Read-path only; DB values aren't rewritten.
     """
     if not key:
         return []
@@ -249,30 +180,25 @@ def storage_key_candidates(key: str) -> list[str]:
 
 
 def artifact_key(job_id: UUID | str, name: str) -> str:
-    """Deterministic S3 key for an artifact body."""
     return f"{_key_prefix()}artifacts/{job_id}/{_safe_name(name)}"
 
 
 def source_file_key(job_id: UUID | str, path: str) -> str:
-    """Deterministic S3 key for a source file (path is hashed to avoid unsafe chars)."""
+    """Deterministic key for a source file (path hashed to avoid unsafe characters)."""
     digest = hashlib.sha1(path.encode("utf-8")).hexdigest()
     return f"{_key_prefix()}source_files/{job_id}/{digest}"
 
 
 def protocol_score_document_key(protocol_id: int, token: str) -> str:
-    """S3 key for a spilled ``protocol_scores`` document body.
+    """Key for a spilled ``protocol_scores`` document.
 
-    ``token`` distinguishes two scores of the same protocol; it is minted per
-    row rather than derived from ``computed_at`` because two folds inside one
-    clock tick are reachable on the dirty-mark path, and a key collision there
-    would have the newer row's ``storage_key`` addressing the older body. The
-    key is not part of the replay contract — the document is.
+    ``token`` is minted per row because two folds can share a ``computed_at`` tick, and a collision would point the
+    newer row at the older body.
     """
     return f"{_key_prefix()}protocol_scores/{int(protocol_id)}/{_safe_name(token)}.json"
 
 
 def serialize_artifact(data: Any | None, text_data: str | None) -> tuple[bytes, str]:
-    """Encode an artifact payload to (bytes, content_type)."""
     if data is not None:
         body = json.dumps(data, default=str).encode("utf-8")
         return body, JSON_CONTENT_TYPE
@@ -282,7 +208,6 @@ def serialize_artifact(data: Any | None, text_data: str | None) -> tuple[bytes, 
 
 
 def deserialize_artifact(body: bytes, content_type: str | None) -> dict | list | str:
-    """Decode bytes from storage back to a Python value."""
     if content_type and content_type.startswith("application/json"):
         return json.loads(body.decode("utf-8"))
     return body.decode("utf-8")
@@ -318,22 +243,13 @@ class StorageClient:
             config=Config(
                 signature_version="s3v4",
                 s3={"addressing_style": "path"},
-                # Tigris TLS handshake p99 to fly.storage.tigris.dev exceeds
-                # 2s under concurrent load (observed: terminal
-                # StorageUnavailable on KING Distributor impl in psat-pr-65,
-                # ssl.do_handshake timing out). 10s covers tail latency.
+                # Tigris TLS handshakes exceed 2s at p99 under load.
                 connect_timeout=10,
                 read_timeout=5,
-                # max_attempts=1 disabled botocore's built-in retry, so a
-                # single transient handshake/read timeout terminally killed
-                # the worker job (no next_attempt_at). Standard mode retries
-                # ReadTimeoutError / ConnectTimeoutError with exponential
-                # backoff before we surface StorageUnavailable.
+                # Botocore's standard retry for transient timeouts, before surfacing StorageUnavailable.
                 retries={"max_attempts": 3, "mode": "standard"},
-                # boto3 default is 10 — too small for our get_many fan-out
-                # (16 threads) plus concurrent put/get from the worker job
-                # pool. Under load urllib3 was discarding and reopening
-                # connections on every spillover, churning the Tigris pool.
+                # The default 10 is too small for the get_many fan-out plus concurrent worker I/O and caused connection
+                # churn.
                 max_pool_connections=64,
             ),
         )
@@ -375,11 +291,9 @@ class StorageClient:
         return response["Body"].read()
 
     def get(self, key: str) -> bytes:
-        """Fetch a key, trying every candidate from ``storage_key_candidates``.
+        """Fetch a key via ``storage_key_candidates``.
 
-        A transport failure on any candidate propagates immediately — only a
-        genuine 404 advances to the next one, so an unreachable bucket can
-        never be reported as an absent object.
+        Transport failures propagate immediately; only a 404 moves to the next candidate.
         """
         if not key:
             raise StorageKeyAbsent("storage read requested with no key")
@@ -392,17 +306,9 @@ class StorageClient:
         raise StorageKeyMissing(key, candidates)
 
     def get_many_results(self, keys: list[str]) -> dict[str, BlobRead]:
-        """Fetch multiple keys concurrently, keeping each key's outcome apart.
+        """Fetch keys concurrently, returning a ``BlobRead`` per key (read, proven absent, or not determined).
 
-        Every unique input key maps to a ``BlobRead`` that answers *which* of
-        the three states this key is in — read, proven-absent at every
-        candidate, or not determined because the transport failed. ``get_many``
-        below flattens all three to ``bytes | None`` for callers whose degrade
-        is genuinely cause-independent; anything that publishes the result as
-        evidence must use this one.
-
-        The boto3 S3 client is documented as thread-safe, so a small fixed
-        pool gives effectively-parallel HTTP round-trips.
+        Anything publishing results as evidence must use this rather than ``get_many``. The boto3 client is thread-safe.
         """
         if not keys:
             return {}
@@ -412,18 +318,14 @@ class StorageClient:
             try:
                 return k, BlobRead(body=self.get(k))
             except StorageKeyMissing as exc:
-                # A missing object is a real inconsistency: the DB row asserts a
-                # key the bucket does not honour. Never silent — 8,256 rows read
-                # as empty for months behind this.
+                # A missing object means the DB row asserts a key the bucket doesn't have; never silent.
                 logger.error("get_many: %s", exc)
                 return k, BlobRead(error=exc)
             except StorageError as exc:
                 logger.warning("get_many: transport error fetching %s: %s", k, exc)
                 return k, BlobRead(error=exc)
 
-        # Per-key context copy keeps trace_id/job_id bindings from the
-        # caller (e.g. the API handler or worker) visible to each
-        # concurrent boto call's log lines.
+        # Copy the context per key so trace/job ids reach each call's logs.
         def _fetch_with_ctx(k: str) -> tuple[str, BlobRead]:
             ctx = contextvars.copy_context()
             return ctx.run(_fetch, k)
@@ -432,14 +334,10 @@ class StorageClient:
             return dict(ex.map(_fetch_with_ctx, unique))
 
     def get_many(self, keys: list[str]) -> dict[str, bytes | None]:
-        """``get_many_results`` with the cause discarded: bytes, or ``None`` for
-        both "no object" and "could not ask".
+        """``get_many_results`` with the cause discarded (``None`` for both absent and unreachable).
 
-        Only for callers whose degrade does not depend on the cause and does not
-        publish absence — ``/stage_timings`` (telemetry) and effects selection
-        (a ``None`` there means "re-sweep this contract", the conservative
-        direction). Anything that renders or persists the result as a statement
-        about the subject must call ``get_many_results``.
+        Only for callers whose fallback doesn't depend on the cause or publish absence (``/stage_timings``, effects
+        selection re-sweeps).
         """
         return {k: r.body for k, r in self.get_many_results(keys).items()}
 
@@ -449,8 +347,7 @@ class StorageClient:
         candidates = storage_key_candidates(key)
         target = candidates[0] if candidates else key
         if len(candidates) > 1:
-            # A presigned URL for a key with no object is a 404 the caller only
-            # discovers after handing it out. Resolve here instead.
+            # Resolve the candidate here rather than hand out a presigned URL that 404s.
             for candidate in candidates:
                 try:
                     self._client.head_object(Bucket=self.bucket, Key=candidate)
@@ -476,7 +373,6 @@ class StorageClient:
             raise StorageUnavailable(f"delete failed for {key}: {exc}") from exc
 
     def copy(self, src_key: str, dst_key: str) -> None:
-        """Server-side copy within the same bucket (no egress)."""
         from botocore.exceptions import BotoCoreError, ClientError
 
         candidates = storage_key_candidates(src_key)
@@ -500,7 +396,6 @@ class StorageClient:
         raise StorageKeyMissing(src_key, candidates) from last
 
     def ensure_bucket(self) -> None:
-        """Create the bucket if it does not exist. Used by the test harness."""
         from botocore.exceptions import ClientError
 
         try:
@@ -509,7 +404,6 @@ class StorageClient:
             self._client.create_bucket(Bucket=self.bucket)
 
     def health_check(self) -> None:
-        """Verify the bucket is reachable. Raises StorageUnavailable on failure."""
         from botocore.exceptions import BotoCoreError, ClientError
 
         try:
@@ -529,12 +423,7 @@ def _read_env() -> tuple[str | None, str | None, str | None, str | None]:
 
 @functools.lru_cache(maxsize=1)
 def get_storage_client() -> StorageClient | None:
-    """Return a StorageClient if ARTIFACT_STORAGE_* env vars are set, else None.
-
-    Returning None is the explicit "no object storage configured" signal —
-    callers fall back to inline Postgres storage. This keeps local development
-    and unit tests usable without a running minio container.
-    """
+    """A StorageClient if ``ARTIFACT_STORAGE_*`` is set, else None (callers use inline Postgres storage)."""
     endpoint, bucket, access_key, secret_key = _read_env()
     if not (endpoint and bucket and access_key and secret_key):
         logger.info("ARTIFACT_STORAGE_* env vars not all set — artifact bodies will be stored inline in Postgres")
@@ -543,5 +432,5 @@ def get_storage_client() -> StorageClient | None:
 
 
 def reset_client_cache() -> None:
-    """Drop the cached client so a subsequent call re-reads env. For tests."""
+    """Drop the cached client so env is re-read (tests)."""
     get_storage_client.cache_clear()

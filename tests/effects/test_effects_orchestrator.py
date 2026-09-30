@@ -1,20 +1,16 @@
 """Tier-0 code-upgrade current-state check.
 
-An indexed UpgradeEvent proves only PAST capability; a present-tense "upgradeable
-now" claim requires the current capability be present NOW — impl slot still
-non-zero AND a resolved, non-renounced upgrade authority. A proxy that was
-upgraded historically but has since renounced its upgrade authority (impl slot
-stays non-zero — freezing does not zero it) must NOT mint a proven verdict.
-
-Off the wire: the current check is a static/DB read; these tests drive
-``_code_upgrade_plans`` against a stubbed session (a proxy Contract row + an
-UpgradeEvent) and execute the returned plan's ``run`` — no anvil, no RPC.
+An indexed UpgradeEvent proves only PAST capability; a present-tense claim also needs a non-zero
+impl slot AND a resolved, non-renounced upgrade authority (freezing does not zero the slot).
+Drives ``_code_upgrade_plans`` against a stubbed session; no anvil, no RPC.
 """
 
 from __future__ import annotations
 
 from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
 
 from db.models import Contract
 from services.effects.config import (
@@ -72,8 +68,7 @@ def _candidate(principals: tuple[str, ...]) -> Candidate:
 
 
 def _ctx() -> ProbeContext:
-    # simulate is never touched on the Tier-0 path (it returns before any sim);
-    # a MagicMock that would raise if called guards that invariant.
+    # A MagicMock that raises if called: simulate must never be touched on the Tier-0 path.
     return ProbeContext(
         chain_id=1,
         block=21_000_000,
@@ -93,27 +88,24 @@ def _run_plan(principals: tuple[str, ...]):
 
 
 def test_impl_nonzero_with_resolved_principal_is_proven_now():
-    """impl non-zero + a resolved non-zero upgrade authority ⇒ present-tense
-    capability proven (current-state check passed)."""
     eff = _run_plan((PRINCIPAL,))
     assert eff.verdict == VERDICT_PROVEN
     assert eff.reason == "indexed_upgrade_plus_current_state"
     assert eff.concrete["current_check_passed"] is True
 
 
-def test_impl_nonzero_without_principals_is_unknown_not_proven():
-    """The bug being fixed: a historically-upgraded proxy with NO resolved
-    upgrade authority (renounced/frozen) must WITHHOLD — unknown, never proven."""
-    eff = _run_plan(())
-    assert eff.verdict == VERDICT_UNKNOWN
-    assert eff.reason == "historical_only_current_check_failed"
-    assert eff.concrete["current_check_passed"] is False
-
-
-def test_impl_nonzero_with_zero_address_principal_is_unknown():
-    """A renounced authority resolves to the zero address — treated as no
-    authority, so the current-state check fails ⇒ unknown, not proven."""
-    eff = _run_plan((ZERO,))
+# A historically-upgraded proxy with NO resolved upgrade authority (renounced/frozen) must
+# WITHHOLD: unknown, never proven. A renounced authority resolves to the zero address, which
+# counts as no authority.
+@pytest.mark.parametrize(
+    "principals",
+    [
+        pytest.param((), id="without-principals"),
+        pytest.param((ZERO,), id="zero-address-principal"),
+    ],
+)
+def test_impl_nonzero_without_a_live_authority_is_unknown_not_proven(principals):
+    eff = _run_plan(principals)
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "historical_only_current_check_failed"
     assert eff.concrete["current_check_passed"] is False

@@ -1,5 +1,7 @@
 """Tests for services.discovery.dependency_graph_builder."""
 
+import pytest
+
 from services.discovery.dependency_graph_builder import build_dependency_visualization
 
 TARGET = "0x1111111111111111111111111111111111111111"
@@ -28,7 +30,6 @@ def _unified(
 
 
 def test_basic_nodes_and_static_ref_edges():
-    """Deps without dynamic edges get STATIC_REF edges from target."""
     deps = {
         DEP_A: {"type": "regular", "source": ["static"]},
         DEP_B: {"type": "regular", "source": ["static"]},
@@ -46,7 +47,6 @@ def test_basic_nodes_and_static_ref_edges():
 
 
 def test_dynamic_edges_suppress_static_ref():
-    """Deps already in the dependency_graph don't get a STATIC_REF edge."""
     deps = {DEP_A: {"type": "regular", "source": ["dynamic"]}}
     graph = {
         f"{TARGET}|{DEP_A}": [
@@ -60,7 +60,6 @@ def test_dynamic_edges_suppress_static_ref():
 
 
 def test_proxy_delegates_to_edge():
-    """Proxy deps with a nested implementation get a DELEGATES_TO edge."""
     deps = {
         DEP_A: {
             "type": "proxy",
@@ -76,7 +75,6 @@ def test_proxy_delegates_to_edge():
     graph = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}
     result = build_dependency_visualization(_unified(deps=deps, graph=graph))
 
-    # 3 nodes: target + proxy + nested implementation
     assert len(result["nodes"]) == 3
 
     ops = {(e["from"], e["to"], e["op"]) for e in result["edges"]}
@@ -86,58 +84,73 @@ def test_proxy_delegates_to_edge():
     assert not any(e["op"] == "STATIC_REF" and e["to"] == f"addr:{IMPL}" for e in result["edges"])
 
 
-def test_classification_only_no_static_ref():
-    """Deps with source=['classification'] and no dynamic edge get no STATIC_REF."""
-    deps = {
-        DEP_A: {
-            "type": "proxy",
-            "source": ["dynamic"],
-            "implementation": {
-                "address": IMPL,
-                "type": "implementation",
-                "source": ["classification"],
-            },
+_PROXY_GRAPH = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}
+_NESTED_IMPL_DEPS = {
+    DEP_A: {
+        "type": "proxy",
+        "proxy_type": "eip1967",
+        "source": ["dynamic"],
+        "contract_name": "TransparentProxy",
+        "implementation": {
+            "address": IMPL,
+            "type": "implementation",
+            "source": ["classification"],
+            "contract_name": "TokenV2",
         },
-    }
-    graph = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}
-    result = build_dependency_visualization(_unified(deps=deps, graph=graph))
-
-    impl_edges = [e for e in result["edges"] if e["to"] == f"addr:{IMPL}"]
-    assert len(impl_edges) == 1
-    assert impl_edges[0]["op"] == "DELEGATES_TO"
+    },
+}
 
 
-def test_contract_name_used_as_label():
-    """When contract_name is present it becomes the node label."""
-    deps = {DEP_A: {"type": "regular", "source": ["dynamic"], "contract_name": "WETH9"}}
-    graph = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}
-    result = build_dependency_visualization(_unified(deps=deps, graph=graph))
+@pytest.mark.parametrize(
+    ("unified_kwargs", "build_kwargs", "expected"),
+    [
+        pytest.param(
+            {
+                "deps": {DEP_A: {"type": "regular", "source": ["dynamic"], "contract_name": "WETH9"}},
+                "graph": _PROXY_GRAPH,
+            },
+            {},
+            [(DEP_A, "label", "WETH9")],
+            id="contract_name_used_as_label",
+        ),
+        pytest.param(
+            {"deps": {DEP_A: {"type": "regular", "source": ["static"]}}},
+            {},
+            [(DEP_A, "label", f"{DEP_A[:6]}...{DEP_A[-4:]}")],
+            id="contract_name_fallback_to_short_address",
+        ),
+        pytest.param(
+            {
+                "deps": {DEP_A: {"type": "regular", "source": ["static"]}},
+                "target_cls": {"type": "proxy", "proxy_type": "eip1967"},
+            },
+            {},
+            [(TARGET, "type", "proxy")],
+            id="target_classification_in_node",
+        ),
+        pytest.param(
+            {"deps": _NESTED_IMPL_DEPS, "graph": _PROXY_GRAPH},
+            {},
+            [(DEP_A, "label", "TransparentProxy"), (IMPL, "label", "TokenV2")],
+            id="nested_implementation_label",
+        ),
+        pytest.param(
+            {"deps": {DEP_A: {"type": "regular", "source": ["static"]}}},
+            {"target_label": "LiquidityPool"},
+            [(TARGET, "label", "LiquidityPool")],
+            id="target_label_from_caller",
+        ),
+    ],
+)
+def test_node_fields(unified_kwargs, build_kwargs, expected):
+    result = build_dependency_visualization(_unified(**unified_kwargs), **build_kwargs)
 
-    dep_node = next(n for n in result["nodes"] if n["address"] == DEP_A)
-    assert dep_node["label"] == "WETH9"
-
-
-def test_contract_name_fallback_to_short_address():
-    """Without contract_name the label falls back to shortened address."""
-    deps = {DEP_A: {"type": "regular", "source": ["static"]}}
-    result = build_dependency_visualization(_unified(deps=deps))
-
-    dep_node = next(n for n in result["nodes"] if n["address"] == DEP_A)
-    assert dep_node["label"] == f"{DEP_A[:6]}...{DEP_A[-4:]}"
-
-
-def test_target_classification_in_node():
-    """Target classification type is reflected in the target node."""
-    deps = {DEP_A: {"type": "regular", "source": ["static"]}}
-    target_cls = {"type": "proxy", "proxy_type": "eip1967"}
-    result = build_dependency_visualization(_unified(deps=deps, target_cls=target_cls))
-
-    target_node = next(n for n in result["nodes"] if n["is_target"])
-    assert target_node["type"] == "proxy"
+    for address, key, value in expected:
+        node = next(n for n in result["nodes"] if n["address"] == address)
+        assert node[key] == value
 
 
 def test_metadata_populated():
-    """Metadata includes network, transactions, trace info, and derived discovered addresses."""
     deps = {
         DEP_A: {
             "type": "proxy",
@@ -156,25 +169,20 @@ def test_metadata_populated():
     assert result["metadata"]["target"] == TARGET
     assert result["metadata"]["network"] == "ethereum"
     assert result["metadata"]["trace_methods"] == ["debug_traceTransaction"]
-    # discovered_addresses derived from classification sources
     assert result["metadata"]["discovered_addresses"] == [IMPL]
 
 
-def test_empty_dependencies():
-    """No dependencies produces empty graph."""
-    result = build_dependency_visualization(_unified())
+@pytest.mark.parametrize(
+    "unified",
+    [pytest.param(_unified(), id="empty_dependencies"), pytest.param({}, id="missing_unified")],
+)
+def test_empty_inputs_return_no_nodes(unified):
+    result = build_dependency_visualization(unified)
     assert result["nodes"] == []
     assert result["edges"] == []
 
 
-def test_missing_unified_returns_empty():
-    """Missing / empty unified payload produces empty graph."""
-    result = build_dependency_visualization({})
-    assert result["nodes"] == []
-
-
 def test_beacon_edge():
-    """Proxy deps with a beacon get a BEACON edge."""
     beacon = "0xdddddddddddddddddddddddddddddddddddddd"
     deps = {
         DEP_A: {
@@ -193,7 +201,6 @@ def test_beacon_edge():
 
 
 def test_edges_skip_unknown_node_ids():
-    """Edges referencing addresses not in nodes are dropped."""
     unknown = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     deps = {DEP_A: {"type": "regular", "source": ["dynamic"]}}
     graph = {
@@ -203,37 +210,3 @@ def test_edges_skip_unknown_node_ids():
     result = build_dependency_visualization(_unified(deps=deps, graph=graph))
 
     assert all(e["to"] != f"addr:{unknown}" for e in result["edges"])
-
-
-def test_nested_implementation_label():
-    """Nested implementation contract_name is used as its node label."""
-    deps = {
-        DEP_A: {
-            "type": "proxy",
-            "proxy_type": "eip1967",
-            "source": ["dynamic"],
-            "contract_name": "TransparentProxy",
-            "implementation": {
-                "address": IMPL,
-                "type": "implementation",
-                "source": ["classification"],
-                "contract_name": "TokenV2",
-            },
-        },
-    }
-    graph = {f"{TARGET}|{DEP_A}": [{"op": "CALL", "provenance": []}]}
-    result = build_dependency_visualization(_unified(deps=deps, graph=graph))
-
-    proxy_node = next(n for n in result["nodes"] if n["address"] == DEP_A)
-    impl_node = next(n for n in result["nodes"] if n["address"] == IMPL)
-    assert proxy_node["label"] == "TransparentProxy"
-    assert impl_node["label"] == "TokenV2"
-
-
-def test_target_label_from_caller():
-    """Callers (workers) supply target_label explicitly."""
-    deps = {DEP_A: {"type": "regular", "source": ["static"]}}
-    result = build_dependency_visualization(_unified(deps=deps), target_label="LiquidityPool")
-
-    target_node = next(n for n in result["nodes"] if n["is_target"])
-    assert target_node["label"] == "LiquidityPool"

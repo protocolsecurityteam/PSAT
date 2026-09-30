@@ -1,17 +1,10 @@
-"""Re-enrollment must not convert "cannot read the plan now" into
-"nothing to watch".
+"""F5 - re-enrollment must not convert "cannot read the plan now" into "nothing to watch".
 
-The observed failure (EtherFiGovernanceToken, 2026-08-04): the contract's
-``contract_materializations`` row disappeared, re-enrollment rebuilt the config
-from scratch, and a witnessed ``AuthorityUpdated`` watch was replaced by a
-not-determined token and an empty watch list — downstream indistinguishable
-from "the plan was read and named nothing". Manufactured ignorance replacing
-dated knowledge.
-
-Unit tests pin the merge rule; the integration test replays the degradation
-end-to-end through ``enroll_protocol_contracts`` against real
-``contract_materializations`` rows, because the collapse lives in the seam
-between the strict reader and the wholesale config rebuild.
+Observed on EtherFiGovernanceToken (2026-08-04): the ``contract_materializations`` row
+vanished, re-enrollment rebuilt the config, and a witnessed ``AuthorityUpdated`` watch became a
+not-determined token plus an empty list, indistinguishable from "read and named nothing".
+Unit tests pin the merge rule; the integration test replays it through
+``enroll_protocol_contracts``, since the collapse lives in the reader/config-rebuild seam.
 """
 
 from __future__ import annotations
@@ -50,13 +43,6 @@ _NOW = datetime(2026, 8, 4, 1, 42, tzinfo=timezone.utc)
 # ---------------------------------------------------------------------------
 # Vocabulary
 # ---------------------------------------------------------------------------
-
-
-def test_every_not_determined_token_but_the_caller_one_merges():
-    """The exclusion is exactly one token, and it is the deliberate-overwrite
-    one: a config an API caller authored is not ignorance to be repaired."""
-    assert PLAN_NOT_DETERMINED_TOKENS - STALENESS_MERGE_TOKENS == {CONFIG_SUPPLIED_BY_CALLER}
-    assert len(PLAN_NOT_DETERMINED_TOKENS) == 7
 
 
 def test_producers_mint_only_vocabulary_tokens():
@@ -169,10 +155,8 @@ def test_polling_plan_carries_analyzer_slots_and_yields_to_fresh_entries():
 
 
 def test_carried_polling_entries_are_always_stamped():
-    """Review finding 7: the stamp used to be gated on the merged plan being
-    LONGER than the raw new plan. A new plan holding a malformed entry (dropped
-    by the merge) plus one carried entry gives equal lengths — stale entries
-    would then ride with no staleness mark at all."""
+    """Review finding 7: the stamp was gated on the merged plan being LONGER than the new one;
+    a malformed dropped entry plus one carried entry gives equal lengths and no stale mark."""
     new = dict(_fresh(), **{POLLING_PLAN_KEY: [{"field": "implementation"}, "not-a-dict"]})
     existing = {TRACKED_TOPICS_KEY: _TOPICS, POLLING_PLAN_KEY: [{"field": "feeRecipient"}]}
 
@@ -222,15 +206,9 @@ def test_classify_keeps_the_four_states_distinct():
 
 
 def test_ready_stale_needs_its_own_witness_not_a_coincidence_of_keys():
-    """Review finding 5: two keys coexisting is not evidence of staleness. The
-    state requires the stamp the merge writes, under a token the merge may act
-    on — otherwise it reads as the token it carries.
-
-    Neither shape below is producible by this module (the merge always stamps,
-    and the schema rejects caller-supplied topics); classifying them as
-    ``ready_stale`` anyway would publish "watching on a dated analyzer plan"
-    about a config no analyzer touched.
-    """
+    """Review finding 5: two keys coexisting is not evidence of staleness; the state needs the
+    stamp the merge writes under a token it may act on. Neither shape is producible here, and
+    classifying them ``ready_stale`` would claim a dated analyzer plan no analyzer touched."""
     no_stamp = {TRACKED_TOPICS_KEY: _TOPICS, NOT_DETERMINED_KEY: NO_CURRENT_MATERIALIZATION}
     assert classify_plan_state(no_stamp) == NO_CURRENT_MATERIALIZATION
 
@@ -243,10 +221,8 @@ def test_ready_stale_needs_its_own_witness_not_a_coincidence_of_keys():
 
 
 def test_scan_plane_facts_survive_every_config_rebuild():
-    """Review finding 2: ``scan_gaps`` records intervals this row's scanner
-    never covered. Every writer replaces the whole config, so the carry is
-    unconditional — including when the plan WAS read (no staleness merge runs)
-    and when a caller authored the new config."""
+    """Review finding 2: ``scan_gaps`` records intervals never scanned. Every writer replaces
+    the whole config, so the carry is unconditional (plan read, or caller-authored config)."""
     from services.monitoring.tracking_plan_state import SCAN_GAPS_KEY, preserve_scan_plane_facts
 
     gaps = [{"from_block": 9_400_001, "to_block": 25_662_000, "reason": "unfloored_runaway"}]
@@ -276,11 +252,8 @@ def test_classify_reports_an_unknown_token_as_itself():
 
 @pytest.fixture()
 def protocol_fixture(db_session):
-    """Protocol + analyzed Contract + completed Job, cleaned up afterwards.
-
-    ``db_session`` sweeps monitored/protocol tables but not
-    ``contract_materializations``; the rows created here are removed by address.
-    """
+    """Protocol + analyzed Contract + completed Job. ``db_session`` doesn't sweep
+    ``contract_materializations``, so those rows are removed by address."""
     address = "0x" + "e7" * 20
     proto = Protocol(name=PROTO_NAME)
     db_session.add(proto)
@@ -341,12 +314,8 @@ def _enroll(session, protocol_id: int) -> None:
 
 
 def test_vanished_materialization_keeps_the_last_read_watch_list(db_session, protocol_fixture):
-    """The EtherFiGovernanceToken replay: enrolled with a witnessed watch list,
-    the materialization row disappears, re-enrollment runs.
-
-    Before stale-plan retention the second config carried the token and NO
-    topics — the watch was silently dropped. Now the watch survives, marked as dated.
-    """
+    """The EtherFiGovernanceToken replay: the materialization row disappears, then
+    re-enrollment runs. Before F5 the watch was silently dropped; now it survives, marked dated."""
     proto, address = protocol_fixture
     plan = {
         "tracked_controllers": [

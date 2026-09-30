@@ -1,17 +1,14 @@
 """G5: a library-wrapped or double-cast token receiver must resolve to the state
 variable it aliases, not to the Slither temporary that carries the cast.
 
-A pull written the real-world way — ``IERC20(address(underlying)).safeTransferFrom(...)``,
-a DOUBLE cast through a library — binds the receiver to a temporary whose name is
-``TMP_n``. Emitting ``TMP_n`` as the sink head makes every downstream consumer that
-derives a getter from it (``input_token_hints``, the cross-contract join, the
-persisted ``effect_targets`` display) fabricate ``TMP_n()``, which seeds nothing
-and can seed the WRONG token. These tests compile the shape and drive production
-``build_effects`` — the only fakes are none; the solc compile is real.
+A pull like ``IERC20(address(underlying)).safeTransferFrom(...)`` binds the receiver
+to ``TMP_n``. Emitting that as the sink head makes every consumer that derives a
+getter from it (``input_token_hints``, the cross-contract join, ``effect_targets``)
+fabricate ``TMP_n()``, which seeds nothing or the WRONG token. The solc compile and
+``build_effects`` are real.
 
-Protocol-agnostic by construction: the fixture models the *shape* (a
-library-wrapped pull, a cast of a state var / a parameter / a mapping element),
-never a named protocol's layout.
+Protocol-agnostic: the fixture models the *shape* (library-wrapped pull,
+cast of a state var / parameter / mapping element), never a named protocol.
 """
 
 from __future__ import annotations
@@ -116,26 +113,20 @@ def effects(compiled):
 # --- seam 1: the sink head is the state var, not a temporary ---------------
 
 
-def test_state_var_head_resolved_through_double_cast(effects):
-    heads = _ext_heads(effects["functions"]["deposit(uint256)"])
-    # The library-wrapped pull now names the state var it aliases.
-    assert "underlying.safeTransferFrom" in heads, heads
-    # ... and no external-call head is left as a raw Slither temporary.
+@pytest.mark.parametrize(
+    "signature,resolved_head",
+    [
+        pytest.param("deposit(uint256)", "underlying.safeTransferFrom", id="state_var_double_cast"),
+        pytest.param("depositDirect(uint256)", "underlying.transferFrom", id="direct_high_level_call"),
+        # Resolves to the parameter name, not a temporary (a parameter names no
+        # getter, which the hint layer enforces separately).
+        pytest.param("depositParam(address,uint256)", "token.safeTransferFrom", id="parameter_cast"),
+    ],
+)
+def test_head_resolved_through_cast(effects, signature, resolved_head):
+    heads = _ext_heads(effects["functions"][signature])
+    assert resolved_head in heads, heads
     assert not any(h.split(".")[0].startswith(("TMP_", "REF_", "TUPLE_")) for h in heads), heads
-
-
-def test_direct_high_level_call_head_resolved(effects):
-    heads = _ext_heads(effects["functions"]["depositDirect(uint256)"])
-    assert "underlying.transferFrom" in heads, heads
-    assert not any(h.split(".")[0].startswith("TMP_") for h in heads), heads
-
-
-def test_parameter_cast_head_is_the_parameter(effects):
-    heads = _ext_heads(effects["functions"]["depositParam(address,uint256)"])
-    # Resolves to the parameter name, not a temporary (a parameter names no
-    # getter, which the hint layer enforces separately).
-    assert "token.safeTransferFrom" in heads, heads
-    assert not any(h.split(".")[0].startswith("TMP_") for h in heads), heads
 
 
 def test_mapping_element_is_not_resolved_to_a_getter(effects):

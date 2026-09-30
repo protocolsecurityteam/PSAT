@@ -1,22 +1,11 @@
 """Cross-chain authority recognition: labels without cross-chain control edges.
 
-L2 deployments overwhelmingly hand ownership to an *aliased* L1 address or to an
-OP-stack bridge predeploy. Left alone those principals classify as anonymous
-EOAs / generic contracts, obscuring the bridge authority. This module recognises
-them from data already on hand: the chain's registry constants
-(``ChainInfo.bridge_executors`` /
-``cross_domain_messengers``) and the run's own set of known addresses. No
-cross-chain RPC, no probing, no control edge — the recognition attaches a
-*label* (``resolved_type == "cross_chain_authority"``) and, for an aliased
-owner, the implied L1 address as a non-authoritative hint.
+L2 deployments often hand ownership to an aliased L1 address or an OP-stack bridge predeploy, which would otherwise
+classify as anonymous EOAs or contracts. Recognition uses the chain registry (``ChainInfo.bridge_executors`` /
+``cross_domain_messengers``) and the run's known addresses, with no RPC. It attaches a label (``resolved_type ==
+"cross_chain_authority"``) and, for aliased owners, the implied L1 address as a hint, never a control edge.
 
-v1 is chain-as-island: the implied L1 address is a hint only, never a
-control edge. Modeling real cross-chain edges is a later phase.
-
-Chain scoping: recognition is a no-op on any chain whose registry entry carries
-no bridge constants (today every chain except Base). Mainnet is therefore
-provably untouched — the recognizer factory returns ``None`` for it and no
-per-address work runs.
+A no-op on chains without bridge constants (all but Base today), so mainnet is untouched.
 """
 
 from __future__ import annotations
@@ -25,12 +14,9 @@ from collections.abc import Callable, Iterable
 
 from utils.chains import ChainInfo, UnknownChainError, chain_by_id
 
-# The principal classification value this module mints, sitting beside the
-# existing kinds ("eoa", "safe", "timelock", "proxy_admin", "contract", ...).
 CROSS_CHAIN_AUTHORITY_TYPE = "cross_chain_authority"
 
-# Both OP-stack (Base) and Arbitrum apply this offset to an L1-contract sender
-# when it appears on the L2: ``L2_alias = (L1_address + OFFSET) mod 2**160``.
+# OP-stack and Arbitrum alias L1 senders as ``(L1_address + OFFSET) mod 2**160``.
 L1_TO_L2_ALIAS_OFFSET = 0x1111000000000000000000000000000000001111
 _ADDRESS_SPACE = 1 << 160
 
@@ -49,13 +35,10 @@ def _normalize(address: str | None) -> str | None:
 
 
 def undo_l1_to_l2_alias(l2_address: str | None) -> str | None:
-    """The L1 address implied by an aliased L2 address (``L2 - OFFSET mod
-    2**160``), or ``None`` if *l2_address* is not a well-formed hex address.
+    """The L1 address implied by an aliased L2 address, or ``None`` if malformed.
 
-    The transform is not on its own evidence that *l2_address* is an alias — any
-    address minus the offset is *some* address. It is only meaningful when the
-    result is a member of the run's known-address set (see
-    :func:`classify_cross_chain_authority`)."""
+    Only meaningful when the result is a known address (see :func:`classify_cross_chain_authority`).
+    """
     norm = _normalize(l2_address)
     if norm is None:
         return None
@@ -71,15 +54,9 @@ def classify_cross_chain_authority(
 ) -> tuple[str, dict[str, object]] | None:
     """Recognise *address* as a cross-chain authority on *chain_info*'s chain.
 
-    Returns ``(CROSS_CHAIN_AUTHORITY_TYPE, details)`` where ``details.role`` is
-    one of ``"cross_domain_messenger"``, ``"bridge_executor"``,
-    ``"aliased_l1_owner"`` — or ``None`` when *address* is not a recognised
-    cross-chain authority. Recognition is skipped entirely on a chain with no
-    bridge constants, so a mainnet caller always gets ``None``.
-
-    ``known_addresses`` is this run's resolution scope: the aliased-owner case
-    fires only when the implied L1 address (``address - OFFSET``) is a member of
-    it, which is what keeps the arithmetic from labelling arbitrary addresses.
+    Returns ``(CROSS_CHAIN_AUTHORITY_TYPE, details)`` with ``details.role`` one of ``"cross_domain_messenger"``,
+    ``"bridge_executor"``, ``"aliased_l1_owner"``, or ``None``. The aliased case fires only when the implied L1 address
+    is in ``known_addresses``.
     """
     if not (chain_info.bridge_executors or chain_info.cross_domain_messengers):
         return None
@@ -99,8 +76,7 @@ def classify_cross_chain_authority(
             return CROSS_CHAIN_AUTHORITY_TYPE, {
                 "address": norm,
                 "role": "aliased_l1_owner",
-                # Hint only: the L1 principal this alias stands in for.
-                # NOT a control edge — v1 is chain-as-island.
+                # Hint only, not a control edge.
                 "implied_l1_address": implied,
             }
     return None
@@ -110,13 +86,8 @@ def make_cross_chain_recognizer(
     chain_id: int | None,
     known_addresses: Iterable[str] = (),
 ) -> Callable[[str], tuple[str, dict[str, object]] | None] | None:
-    """Bind a single-argument ``address -> (resolved_type, details) | None``
-    recognizer to a chain and its run scope, or return ``None`` when the chain
-    has no bridge constants (mainnet and every not-yet-enabled chain).
-
-    Returning ``None`` — rather than a recognizer that always misses — is the
-    signal callers use to keep their mainnet path byte-identical: they only wire
-    a recognizer in when one exists.
+    """A recognizer bound to a chain and run scope, or ``None`` when the chain has no bridge constants, so callers
+    keep the mainnet path unchanged.
     """
     try:
         info = chain_by_id(int(chain_id))  # pyright: ignore[reportArgumentType]

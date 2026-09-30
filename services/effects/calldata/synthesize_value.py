@@ -49,30 +49,16 @@ from .trees import _gate_ref
 
 logger = logging.getLogger("services.effects.calldata")
 
-# ---------------------------------------------------------------------------
-# value-out / supply
-# ---------------------------------------------------------------------------
 
 _SUPPLY_DIRECTIONS = frozenset({"mint", "burn"})
-# Directions the SUPPLY plan reads its lattice facts through, which are not the
-# directions that make the class applicable. ``mint``/``burn`` is a legacy
-# ``semantic_control`` vocabulary the effects artifact never emits as a flow
-# DIRECTION — measured over the 80 frozen artifacts, every non-guard flow is
-# ``out`` (97), ``value_router`` (38) or ``in`` (33), and none is mint/burn — so
-# filtering the lattice by it rejected every flow and left the whole class with no
-# amount index, no taint index and no lattice recipient, running on the name
-# vocabulary alone. A mint/burn function's own value movement is recorded by the
-# lattice as the inbound pull it takes (``in``) or the outbound payout it makes
-# (``out``); that is where its quantity and its recipient live. Applicability is
-# still decided by :data:`_SUPPLY_DIRECTIONS`, which is read off ``effect_labels``
-# — those DO carry mint/burn.
+# The supply plan reads lattice facts through ``in``/``out``: artifacts never emit mint/burn as flow directions, so
+# filtering by them left no amount, taint or recipient. Applicability still uses :data:`_SUPPLY_DIRECTIONS` from
+# ``effect_labels``.
 _SUPPLY_LATTICE_DIRECTIONS = frozenset({"in", "out"})
 
 
 @dataclass(frozen=True)
 class _ProbeInputs:
-    """What the value-out and supply synthesizers both need out of one pass."""
-
     calldata: str
     taint_param_reaches_sink: bool
     sentinel_calldata: str | None
@@ -82,15 +68,10 @@ class _ProbeInputs:
 
 
 def _sentinel_param_name(fn: "FunctionFacts", types: Sequence[str], index: int) -> str | None:
-    """The declared name of slot ``index``, or ``None`` when it has none.
+    """The declared name of slot ``index``, or ``None``.
 
-    The sentinel proof is a proof about ONE parameter, and the prober is the only
-    thing that can state WHICH — a consumer joining on it (``distill
-    ._fork_caller_arbitrary_param``) has no other way to tell a sentinel that rode
-    the call target from one that rode an executor payload. A slot the static
-    plane never named is published as nothing rather than as a positional token:
-    ``arg3`` is not a name anything else in the pipeline speaks, so a join on it
-    would be a join on this function's own invention.
+    The sentinel proof is about one parameter, and consumers (``distill._fork_caller_arbitrary_param``) need to know
+    which. An unnamed slot publishes nothing rather than a positional ``arg3`` nothing else speaks.
     """
     names = _declared_param_names(fn, len(types))
     if not (0 <= index < len(names)):
@@ -101,7 +82,6 @@ def _sentinel_param_name(fn: "FunctionFacts", types: Sequence[str], index: int) 
 def _value_probe_inputs(
     fn: FunctionFacts, principal: str, directions: frozenset[str], held_tokens: Sequence[str] = ()
 ) -> _ProbeInputs | None:
-    """The probe inputs shared by the value-out and supply synthesizers."""
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return None
@@ -116,22 +96,14 @@ def _value_probe_inputs(
     sentinel_calldata = None
     sentinel_param = None
     if executor is not None and executor.values:
-        # The executor owns its own sentinel variant, and it supersedes the taint
-        # slot: what the caller redirects here is the DESTINATION INSIDE the
-        # payload, so the sentinel has to be written there. A sentinel in the
-        # target slot would only prove the executor can call the sentinel, which
-        # is not the same claim as the funds landing on it.
+        # An executor's sentinel goes inside the payload (the redirected destination), superseding the taint slot.
         sentinel_exec = executor_call(fn, types, held_tokens=held_tokens, recipient=SENTINEL_ADDRESS)
         if sentinel_exec is not None and sentinel_exec.values:
             sentinel_subs = _arg_values(
                 types, identity=principal, amount=ARG_AMOUNT, integer_roles=roles, executor=sentinel_exec
             ).substitutions
             sentinel_calldata = encode_calldata(fn.selector, fn.canonical_signature, substitutions=sentinel_subs)
-            # The PAYLOAD slot, and saying so is the whole point of the field: an
-            # executor's sentinel rides the inner call inside the payload while
-            # the outer target keeps whatever the base probe passed, so a
-            # consumer that read this proof as being about the call target would
-            # be reading it about a parameter the sentinel never touched.
+            # The payload slot: the outer target keeps the base probe's value.
             sentinel_param = _sentinel_param_name(fn, types, sentinel_exec.slots[1])
     elif taint_idx is not None:
         sentinel_subs = dict(base.substitutions)
@@ -145,19 +117,16 @@ def _value_probe_inputs(
         sentinel_calldata=sentinel_calldata,
         token_param_indexes=tokens,
         inputs_vacuous=bool(base.vacuous),
-        # Never survives a calldata that failed to encode: the field names the
-        # subject of a sentinel probe, so it is only set beside the calldata that
-        # actually carries the sentinel.
+        # Only set beside calldata that actually carries the sentinel.
         sentinel_param=sentinel_param if sentinel_calldata else None,
     )
 
 
 def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPlanInputs | None:
-    """Applicable when static says the function moves value OUT. A gated
-    function needs a resolved principal — a probe from the zero address only ever
-    proves that the gate rejected it — but a PUBLIC function has no principal to
-    resolve, so it is probed from :data:`NEUTRAL_CALLER`, an arbitrary non-zero
-    identity that is a valid, productive probe of a permissionless mover."""
+    """Applicable when static says F moves value out.
+
+    Gated functions need a resolved principal; public ones are probed from :data:`NEUTRAL_CALLER`.
+    """
     if not _flow_directions(fn) & _OUT_DIRECTIONS:
         return None
     principal = candidate.principal_addresses[0] if candidate.principal_addresses else None
@@ -192,15 +161,13 @@ def synthesize_value_out(candidate: Candidate, fn: FunctionFacts) -> ValueOutPla
         native_payout=has_native_payout(fn),
         static_shape=static_destination_shape(fn, frozenset(_OUT_DIRECTIONS)),
         inputs_vacuous=built.inputs_vacuous,
-        # Measured holdings only — the seed derives its token from what
-        # the deployment provably holds, never a hardcoded asset.
+        # Measured holdings only, never a hardcoded asset.
         contract_holdings=tuple(candidate.input_token_addresses),
         sentinel_param=built.sentinel_param,
     )
 
 
 def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInputs | None:
-    """Applicable when static says the function mints or burns."""
     labels = {str(lbl) for lbl in (fn.effect_info.get("effect_labels") or [])}
     if not (_flow_directions(fn) & _SUPPLY_DIRECTIONS or labels & _SUPPLY_DIRECTIONS):
         return None
@@ -218,9 +185,7 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
         fn, principal, _SUPPLY_LATTICE_DIRECTIONS, candidate.input_token_addresses
     )
     return SupplyPlanInputs(
-        # The candidate's own probe target. A candidate that is not an ERC-20
-        # simply fails the pre-read and lands ``unknown`` — that is the honest
-        # answer, not an error to engineer around.
+        # A non-ERC-20 target fails the pre-read and lands ``unknown``.
         token_address=candidate.probe_target,
         principal=principal,
         mint_calldata=calldata,
@@ -239,23 +204,16 @@ def synthesize_supply(candidate: Candidate, fn: FunctionFacts) -> SupplyPlanInpu
     )
 
 
-# The zero-arg getter for a delayed executor's own minimum delay. A canonical
-# signature, not a name guess, and the value is READ rather than assumed: OZ
-# rejects a schedule below it, and it is per-deployment (measured 432000s and
-# 864000s on the two mainnet timelocks this corpus carries).
+# A delayed executor's own minimum delay, read not assumed (per deployment; OZ rejects below it).
 _MIN_DELAY_SIGNATURE = "getMinDelay()"
-# ERC-20 balanceOf(address) — the published standard, used to read the witness.
 _ERC20_BALANCE_OF_SIGNATURE = "balanceOf(address)"
 
 
 def _schedule_sibling(facts: ContractFacts, fn: FunctionFacts, types: Sequence[str]) -> tuple[str, str] | None:
-    """``(selector, signature)`` of the function that SCHEDULES what ``fn``
-    executes, or ``None``.
+    """``(selector, signature)`` of the function scheduling what ``fn`` executes, or ``None``.
 
-    Found by ABI shape rather than by name: the scheduling half of a delayed
-    executor takes the executed tuple plus a trailing ``uint256`` delay. Both
-    arities fall out of the same rule, and a contract exposing two such siblings
-    yields nothing rather than a pick."""
+    Found by ABI shape (the executed tuple plus a trailing ``uint256`` delay); two matches yield nothing.
+    """
     wanted = [t.strip() for t in types] + ["uint256"]
     found: list[tuple[str, str]] = []
     for name in facts.effects:
@@ -272,15 +230,11 @@ def _schedule_sibling(facts: ContractFacts, fn: FunctionFacts, types: Sequence[s
 
 
 def _dual_role_principal(session: Session, candidate: Candidate, schedule_selector: str) -> str | None:
-    """The address that can drive BOTH halves of the sequence.
+    """The address that can drive both halves (OZ ``PROPOSER_ROLE`` and ``EXECUTOR_ROLE``).
 
-    Scheduling and executing are separately gated (OZ's ``PROPOSER_ROLE`` and
-    ``EXECUTOR_ROLE``), so the probe needs a principal the resolution plane put
-    behind both. Preferring the intersection is what keeps this honest: the
-    alternative — writing the role into storage so the gate passes — is exactly
-    what a probe may not do, because it would revert on the gate, not on a missing
-    asset. When the two do not intersect we still probe as the executor and let
-    the contract reject the schedule, which the recipe records verbatim."""
+    Seeding the role would be the forbidden move. With no intersection, probe as the executor and let the schedule's
+    revert be recorded.
+    """
     principals = [p.lower() for p in candidate.principal_addresses if isinstance(p, str) and p]
     scheduler = _principals_by_selector(session, candidate.contract_id).get(schedule_selector.lower())
     if scheduler and scheduler.lower() in principals:
@@ -289,26 +243,22 @@ def _dual_role_principal(session: Session, candidate: Candidate, schedule_select
 
 
 def _probe_salt(candidate: Candidate) -> bytes:
-    """A deterministic per-(function, contract) operation salt, derived exactly as
-    the differential probe derives its identities so a replay reuses it. Its only
-    job is to keep the probe's operation distinct from one the timelock already
-    has pending — a collision would revert the schedule for a reason that has
-    nothing to do with the capability under test."""
+    """Deterministic per-(function, contract) salt, as the differential probe derives identities, so the op doesn't
+    collide with one already pending.
+    """
     return keccak(text=f"timelock-probe:{candidate.selector or ''}:{candidate.contract_address}")
 
 
 def synthesize_timelock(
     session: Session, candidate: Candidate, facts: ContractFacts, fn: FunctionFacts
 ) -> TimelockPlanInputs | None:
-    """Applicable when F is a proven arbitrary-call executor whose contract
-    also exposes the scheduling half and its own minimum delay.
+    """Applicable when F is a proven arbitrary-call executor whose contract also exposes the scheduling half and a
+    minimum delay.
 
-    The operation scheduled is an ERC-20 transfer to the sentinel of an asset the
-    timelock PROVABLY holds. Where it holds nothing — the normal case, since a
-    timelock holds authority rather than funds — the operation is a bare call to
-    the sentinel: still an operation the proposer chose, which proves the delayed
-    execution path runs, while the value question is answered honestly by the
-    recipe as "there was no asset to witness" rather than as "moved nothing"."""
+    Schedules an ERC-20 transfer to the sentinel of an asset the timelock provably holds. Timelocks usually hold
+    nothing, so then it's a bare call to the sentinel: it still proves the delayed path runs, and the recipe reports "no
+    asset to witness".
+    """
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return None
@@ -326,8 +276,7 @@ def synthesize_timelock(
         return None
     principal = _dual_role_principal(session, candidate, schedule_selector)
     if not principal:
-        # A probe from an address behind neither role only ever proves the gate
-        # rejected it — the same rule the value-out plan applies.
+        # A principal behind neither role only proves the gate rejected it.
         return None
 
     destination, payload = executor.slots
@@ -345,9 +294,7 @@ def synthesize_timelock(
         elif idx == salt_index:
             value = _probe_salt(candidate)
         else:
-            # Everything else takes the encoder's own zero: the per-call native
-            # value the timelock does not hold, and the predecessor that OZ reads
-            # as "this operation depends on nothing".
+            # The rest take zero: native value the timelock lacks, and a predecessor meaning "depends on nothing".
             try:
                 value = _default_value_for_type(shape[0] if shape else type_str)
             except Exception:
@@ -381,44 +328,31 @@ def synthesize_timelock(
         sentinel_address=SENTINEL_ADDRESS,
         witness_token=witness_token if isinstance(witness_token, str) else None,
         witness_calldata=witness_calldata,
-        # Gas only: an impersonated proposer that cannot pay would revert the
-        # schedule for a reason that is the harness's, not the contract's.
+        # Gas only, so the schedule can't revert for a harness reason.
         fixtures=(ForkFixture(kind="set_balance", address=principal, value=hex(FIXTURE_BALANCE_WEI)),),
     )
 
 
 def _token_arg_candidates(candidate: Candidate, token_params: Sequence[int]) -> tuple[str, ...]:
-    """Assets the acting deployment PROVABLY holds, offered only to a function
-    that actually has a token parameter.
+    """Assets the deployment provably holds, offered only to functions with a token parameter.
 
-    They exist because a caller-supplied token slot has no getter behind it: the
-    identity has to come from somewhere, and the only honest "somewhere" is real
-    on-chain state. ``contract_balances`` is a measurement of this deployment at
-    this block, ordered by USD, and :func:`selection.select_candidates` keeps only
-    the PRICED entries — an unpriced holding is usually an airdropped spam token,
-    and a mint witnessed against one would read as backed while being worthless.
-
-    A candidate that the function does not accept can only make the call revert.
-    It can never invent a witness: backing is counted from Transfers the
-    execution EMITTED, and writing an address into calldata emits nothing."""
+    From ``contract_balances``, priced only (:func:`selection.select_candidates`), since an unpriced spam token would
+    make a mint look backed. A rejected candidate only reverts; backing comes from emitted Transfers.
+    """
     return tuple(candidate.input_token_addresses) if token_params else ()
 
 
 def _seeded_probe_calldata(
     fn: FunctionFacts, principal: str, directions: frozenset[str], held_tokens: Sequence[str] = ()
 ) -> tuple[dict[int, str], dict[int, str]]:
-    """``(base, sentinel)`` whole-unit calldata for the seeded retry, keyed by
-    token decimals. Empty dicts when the signature will not encode — the probe
-    then simply never retries."""
+    """``(base, sentinel)`` whole-unit retry calldata by decimals; empty when the signature won't encode."""
     types = _parse_arg_types(fn.canonical_signature)
     if types is None:
         return {}, {}
     executor = executor_call(fn, types, held_tokens=held_tokens, recipient=principal)
     base = seeded_calldata(fn, principal, directions=directions, executor=executor)
     if executor is not None and executor.values:
-        # The retry has to keep the synthesized inner call. Falling back to the
-        # plain vector here would re-send the empty payload whenever the first
-        # probe reverted, and the verdict is read off whichever call executed.
+        # Keep the synthesized inner call on the retry, or it resends the empty payload.
         sentinel_exec = executor_call(fn, types, held_tokens=held_tokens, recipient=SENTINEL_ADDRESS)
         return base, seeded_calldata(fn, principal, directions=directions, executor=sentinel_exec)
     taint_idx = _taint_index(fn, types, directions)

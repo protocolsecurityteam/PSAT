@@ -1,20 +1,10 @@
-"""Observability contract for the ``SelectionWorker``.
+"""Observability contract for the ``SelectionWorker`` (logging backlog #16-selection).
 
-Locks in the logging/metrics behaviour added under logging backlog
-#16-selection:
-
-* per-stage progress counts reach ``record_stage_metric`` —
-  ``candidates`` / ``eligible`` / ``dropped`` plus the activity split
-  (``activity_fetched`` / ``activity_neutral``), which distinguishes a
-  ranking made on real on-chain data from one collapsed to the neutral
-  0.5 fallback when Etherscan is unavailable;
-* selection facts (address, rank_score, reason) live in ``extra={}`` as
-  queryable JSON fields, not interpolated into the ``%s`` message text;
-* exactly one INFO ``"Selection complete"`` summary describes what was
-  selected and why (``outcome`` / ``queued_count`` / ``selected``).
-
-Offline: the only wire (Etherscan activity fetch) is stubbed; everything
-else runs against the real worker + a real Postgres session.
+Per-stage counts reach ``record_stage_metric`` (``candidates`` / ``eligible`` / ``dropped`` and
+``activity_fetched`` / ``activity_neutral``, which separates a ranking on real on-chain data from one
+collapsed to the neutral 0.5 when Etherscan is unavailable); selection facts live in ``extra={}``;
+exactly one INFO ``"Selection complete"`` summary. Only the Etherscan fetch is stubbed; the rest
+runs against the real worker and a real Postgres session.
 """
 
 from __future__ import annotations
@@ -39,10 +29,9 @@ _ACTIVITY_TIMES: dict[str, float] = {}
 
 @pytest.fixture(autouse=True)
 def _stub_activity_fetch(monkeypatch):
-    """Stub the only wire: ``services.discovery.activity.etherscan.get``.
+    """Stub the only wire, ``services.discovery.activity.etherscan.get``.
 
-    Keeps the real scoring/ranking math in the loop but removes network
-    traffic. An address absent from ``_ACTIVITY_TIMES`` returns an empty
+    Keeps the real ranking math; an address absent from ``_ACTIVITY_TIMES`` returns an empty
     result, driving the neutral-score path.
     """
     from services.discovery import activity as activity_module
@@ -111,9 +100,8 @@ def _seed(db_session):
 def selection_pass(db_session, worker, caplog):
     """Run one selection pass and hand back everything it emitted.
 
-    Three independent contracts are asserted below — the stage metrics, the
-    summary line, and the facts-in-``extra`` rule — and they used to share one
-    169-line test, so a break in any of them showed up as the same red line.
+    The metrics, summary line and facts-in-``extra`` rule are asserted separately; they used to
+    share one 169-line test, so any break showed as the same red line.
     """
     from types import SimpleNamespace
 
@@ -133,9 +121,8 @@ def selection_pass(db_session, worker, caplog):
                     worker.process(db_session, job)
     finally:
         stage_metrics_var.reset(token)
-        # db_session teardown clears Contract/Protocol but not Job; drop the
-        # selection job + its analysis children so they don't leak into the
-        # shared DB and perturb other selection tests in the full suite.
+        # db_session teardown clears Contract/Protocol but not Job; drop the selection job and
+        # its analysis children so they don't perturb other selection tests.
         db_session.rollback()
         db_session.query(Job).filter(Job.request["protocol_id"].as_integer() == protocol_id).delete(
             synchronize_session=False
@@ -148,7 +135,6 @@ def selection_pass(db_session, worker, caplog):
 
 @requires_postgres
 def test_selection_reports_progress_counts_as_stage_metrics(selection_pass):
-    # Per-stage progress counts reach the monitor UI via record_stage_metric.
     metrics = selection_pass.metrics
     assert metrics["candidates"] == 3
     assert metrics["eligible"] == 2
@@ -162,7 +148,6 @@ def test_selection_reports_progress_counts_as_stage_metrics(selection_pass):
 
 @requires_postgres
 def test_selection_emits_exactly_one_summary_line(selection_pass):
-    # Exactly one INFO summary describing what was selected and why.
     summaries = [r for r in selection_pass.records if r.getMessage() == "Selection complete"]
     assert len(summaries) == 1
     summary = summaries[0]
@@ -174,7 +159,6 @@ def test_selection_emits_exactly_one_summary_line(selection_pass):
 
 @requires_postgres
 def test_selection_facts_live_in_extra_not_in_the_message(selection_pass):
-    # Facts live in extra={}, not interpolated into the message string.
     queued = [r for r in selection_pass.records if r.getMessage() == "Queued analysis child for candidate"]
     assert len(queued) == 2
     for rec in queued:

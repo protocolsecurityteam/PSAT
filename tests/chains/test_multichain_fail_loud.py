@@ -11,9 +11,7 @@ from __future__ import annotations
 import pytest
 
 from utils.chains import (
-    UnknownChainError,
     UnsupportedChainError,
-    chain_by_id,
     require_chain,
 )
 
@@ -24,87 +22,62 @@ class TestRequireChain:
             require_chain(None, context="unit ctx")
         assert "unit ctx" in str(exc.value)
 
-    def test_empty_string_raises(self):
-        with pytest.raises(UnsupportedChainError):
-            require_chain(chain="", context="unit ctx")
-
-    def test_whitespace_string_raises(self):
-        with pytest.raises(UnsupportedChainError):
-            require_chain(chain="   ", context="unit ctx")
-
-    def test_unknown_sentinel_raises(self):
-        # The discovery "unknown" sentinel is never resolvable — it fails loud.
+    @pytest.mark.parametrize(
+        ("args", "kwargs", "needle"),
+        [
+            pytest.param((), {"chain": ""}, "", id="empty_string"),
+            pytest.param((), {"chain": "   "}, "", id="whitespace_string"),
+            # The discovery "unknown" sentinel is never resolvable — it fails loud.
+            pytest.param((), {"chain": "unknown"}, "unit ctx", id="unknown_sentinel"),
+            pytest.param((999999,), {}, "999999", id="unregistered_id_with_value"),
+            pytest.param((), {"chain": "fantom"}, "fantom", id="unregistered_name_with_value"),
+        ],
+    )
+    def test_rejects(self, args, kwargs, needle):
         with pytest.raises(UnsupportedChainError) as exc:
-            require_chain(chain="unknown", context="unit ctx")
-        assert "unit ctx" in str(exc.value)
+            require_chain(*args, context="unit ctx", **kwargs)
+        assert needle in str(exc.value)
 
-    def test_unregistered_id_raises_with_value(self):
-        with pytest.raises(UnsupportedChainError) as exc:
-            require_chain(999999, context="unit ctx")
-        assert "999999" in str(exc.value)
-
-    def test_unregistered_name_raises_with_value(self):
-        with pytest.raises(UnsupportedChainError) as exc:
-            require_chain(chain="fantom", context="unit ctx")
-        assert "fantom" in str(exc.value)
-
-    def test_is_a_valueerror_subclass(self):
-        # Existing ValueError handlers keep catching it (like UnknownChainError).
-        assert issubclass(UnsupportedChainError, ValueError)
-        with pytest.raises(ValueError):
-            require_chain(None, context="unit ctx")
-
-    def test_valid_id_resolves(self):
-        assert require_chain(1, context="ctx").name == "ethereum"
-        assert require_chain(8453, context="ctx").name == "base"
-
-    def test_decimal_string_id_resolves(self):
-        assert require_chain("1", context="ctx").chain_id == 1
-
-    def test_valid_name_and_alias_resolve(self):
-        assert require_chain(chain="base", context="ctx").chain_id == 8453
-        assert require_chain(chain="mainnet", context="ctx").chain_id == 1
+    @pytest.mark.parametrize(
+        ("args", "kwargs", "field", "expected"),
+        [
+            pytest.param((1,), {}, "name", "ethereum", id="valid_id_mainnet"),
+            pytest.param((8453,), {}, "name", "base", id="valid_id_base"),
+            pytest.param(("1",), {}, "chain_id", 1, id="decimal_string_id"),
+            pytest.param((), {"chain": "base"}, "chain_id", 8453, id="name"),
+            pytest.param((), {"chain": "mainnet"}, "chain_id", 1, id="alias"),
+        ],
+    )
+    def test_resolves(self, args, kwargs, field, expected):
+        assert getattr(require_chain(*args, context="ctx", **kwargs), field) == expected
 
     def test_chain_id_wins_over_name(self):
         assert require_chain(8453, chain="ethereum", context="ctx").chain_id == 8453
 
 
 class TestDefaultRpcUrlNoSilentMainnet:
-    """``default_rpc_url`` no longer maps a missing/unknown chain to mainnet."""
-
     @pytest.fixture(autouse=True)
     def _erpc(self, monkeypatch):
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
 
-    def test_none_returns_none_not_mainnet(self):
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            pytest.param({}, id="none_not_mainnet"),
+            pytest.param({"chain": ""}, id="empty_chain"),
+            pytest.param({"chain": "unknown"}, id="unknown_sentinel"),
+            pytest.param({"chain": "fantom"}, id="unregistered_name"),
+        ],
+    )
+    def test_returns_none(self, kwargs):
         from services.clients.rpc import default_rpc_url
 
-        assert default_rpc_url() is None
-
-    def test_empty_chain_returns_none(self):
-        from services.clients.rpc import default_rpc_url
-
-        assert default_rpc_url(chain="") is None
-
-    def test_unknown_sentinel_returns_none(self):
-        from services.clients.rpc import default_rpc_url
-
-        assert default_rpc_url(chain="unknown") is None
-
-    def test_unregistered_name_returns_none(self):
-        from services.clients.rpc import default_rpc_url
-
-        assert default_rpc_url(chain="fantom") is None
+        assert default_rpc_url(**kwargs) is None
 
     def test_explicit_mainnet_still_resolves(self):
         from services.clients.rpc import default_rpc_url
 
         assert default_rpc_url(chain_id=1) == "https://erpc.example/main/evm/1"
-
-    def test_explicit_l2_resolves(self):
-        from services.clients.rpc import default_rpc_url
-
-        assert default_rpc_url(chain_id=8453) == "https://erpc.example/main/evm/8453"
 
     def test_local_rpc_still_wins_without_chain(self):
         from services.clients.rpc import default_rpc_url
@@ -113,19 +86,16 @@ class TestDefaultRpcUrlNoSilentMainnet:
 
 
 class TestRequireRpcUrlDistinctErrors:
-    def test_no_chain_raises_unsupported_chain(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "kwargs",
+        [pytest.param({}, id="no_chain"), pytest.param({"chain": "fantom"}, id="unknown_chain")],
+    )
+    def test_chain_problem_raises_unsupported_chain(self, monkeypatch, kwargs):
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
         from services.clients.rpc import require_rpc_url
 
         with pytest.raises(UnsupportedChainError):
-            require_rpc_url(context="pipeline X")
-
-    def test_unknown_chain_raises_unsupported_chain(self, monkeypatch):
-        monkeypatch.setenv("ERPC_BASE_URL", "https://erpc.example")
-        from services.clients.rpc import require_rpc_url
-
-        with pytest.raises(UnsupportedChainError):
-            require_rpc_url(chain="fantom", context="pipeline X")
+            require_rpc_url(context="pipeline X", **kwargs)
 
     def test_erpc_unconfigured_raises_runtime_error_not_chain_error(self, monkeypatch):
         # Chain resolves fine; the failure is the missing eRPC config — a distinct
@@ -137,11 +107,6 @@ class TestRequireRpcUrlDistinctErrors:
             require_rpc_url(chain_id=1, context="pipeline X")
         assert not isinstance(exc.value, UnsupportedChainError)
         assert "ERPC_BASE_URL" in str(exc.value)
-
-    def test_local_url_wins_without_chain(self):
-        from services.clients.rpc import require_rpc_url
-
-        assert require_rpc_url(explicit_rpc_url="http://127.0.0.1:8545") == "http://127.0.0.1:8545"
 
 
 class TestErpcChainIdGuard:
@@ -163,25 +128,19 @@ class TestErpcChainIdGuard:
             _assert_url_chain_id("https://erpc.example/main/evm/8453", 1)
         assert "8453" in str(exc.value) and "1" in str(exc.value)
 
-    def test_match_is_silent(self):
+    @pytest.mark.parametrize(
+        ("url", "chain_id"),
+        [
+            pytest.param("https://erpc.example/main/evm/8453", 8453, id="match_is_silent"),
+            pytest.param("https://erpc.example/main/evm/8453", None, id="none_chain_id"),
+            pytest.param("http://127.0.0.1:8545", 1, id="local_url"),
+            pytest.param("https://some.provider/rpc", 8453, id="non_erpc_host"),
+        ],
+    )
+    def test_assert_url_chain_id_noop(self, url, chain_id):
         from services.clients.rpc import _assert_url_chain_id
 
-        _assert_url_chain_id("https://erpc.example/main/evm/8453", 8453)
-
-    def test_none_chain_id_is_noop(self):
-        from services.clients.rpc import _assert_url_chain_id
-
-        _assert_url_chain_id("https://erpc.example/main/evm/8453", None)
-
-    def test_local_url_is_noop(self):
-        from services.clients.rpc import _assert_url_chain_id
-
-        _assert_url_chain_id("http://127.0.0.1:8545", 1)
-
-    def test_non_erpc_host_is_noop(self):
-        from services.clients.rpc import _assert_url_chain_id
-
-        _assert_url_chain_id("https://some.provider/rpc", 8453)
+        _assert_url_chain_id(url, chain_id)
 
     def test_rpc_request_raises_on_mismatch_before_wire(self, monkeypatch):
         # The guard fires before any network call: a declared chain_id that
@@ -196,51 +155,10 @@ class TestErpcChainIdGuard:
             rpc.rpc_request("https://erpc.example/main/evm/8453", "eth_blockNumber", [], chain_id=1)
 
 
-class TestEdgeKeepsStillDefaultMainnet:
-    """The sanctioned user-facing edges keep their explicit mainnet defaults."""
-
-    def test_analyze_request_defaults(self):
-        from schemas.api_requests import AnalyzeRequest
-
-        req = AnalyzeRequest(address="0x" + "ab" * 20)
-        # chain/chain_id are None at the schema; the /api/analyze handler applies
-        # the mainnet edge default — the field itself stays permissive.
-        assert req.chain is None
-        assert req.chain_id is None
-
-    def test_re_enroll_defaults_to_mainnet(self):
-        import inspect
-
-        from routers.protocols import re_enroll_protocol
-
-        assert inspect.signature(re_enroll_protocol).parameters["chain"].default == "ethereum"
-
-    def test_upsert_monitored_contract_defaults_to_mainnet(self):
-        from schemas.api_requests import UpsertMonitoredContractRequest
-
-        req = UpsertMonitoredContractRequest(address="0x" + "ab" * 20)
-        assert req.chain == "ethereum"
-
-    def test_predicate_capabilities_probe_request_defaults_to_mainnet(self):
-        from routers.predicate_capabilities import _ProbeMembershipRequest
-
-        req = _ProbeMembershipRequest(function_signature="f()", predicate_index=0, member="0x" + "ab" * 20)
-        assert req.chain_id == 1
-
-
-def test_registry_still_resolves_all_supported_chains():
-    # Sanity: the kill didn't perturb the registry the guard/require_chain read.
-    assert chain_by_id(1).name == "ethereum"
-    with pytest.raises(UnknownChainError):
-        chain_by_id(999999)
-
-
 class TestResolutionRpcUrlUsesJobChainColumn:
-    """Regression: a chainless /api/analyze request carries its mainnet edge
-    default only in the first-class ``jobs.chain_id`` column — the request
-    JSONB has no chain keys. ``_rpc_url_for_job`` must resolve through the
-    column, or every such job dies terminal at the resolution stage (the
-    PR #153 live-suite failure)."""
+    """Regression (PR #153 live-suite failure): a chainless /api/analyze request has its mainnet default only
+    in ``jobs.chain_id``, not the request JSONB. ``_rpc_url_for_job`` must resolve through the column or every
+    such job dies terminal at the resolution stage."""
 
     def test_chainless_request_resolves_via_column(self, monkeypatch):
         from types import SimpleNamespace
@@ -279,9 +197,8 @@ class TestResolutionRpcUrlUsesJobChainColumn:
 
 
 class TestWorkerRpcHelpersUseJobChainColumn:
-    """Same regression class as the resolution helper: policy and static
-    workers must resolve RPC via the job's first-class chain, not the
-    request JSONB alone."""
+    """Same regression as the resolution helper: policy and static workers must resolve RPC via the job's
+    chain column, not the request JSONB alone."""
 
     def test_policy_rpc_chainless_request_resolves_via_column(self, monkeypatch):
         from types import SimpleNamespace

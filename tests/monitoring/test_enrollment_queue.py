@@ -1,9 +1,8 @@
 """Integration tests for the dirty-queue enrollment reconciler.
 
-Real Postgres + the real ``enroll_protocol_contracts`` production stack; the
-only thing stubbed is the RPC wire (``eth_blockNumber``). Covers the queue
-mark/claim/drain lifecycle, lease exclusivity + expiry, the ``dirty_at``-guarded
-delete, poisoned-protocol backoff, the K-sweep, and each of the four call sites.
+Real Postgres + the real ``enroll_protocol_contracts`` stack; only the RPC wire (``eth_blockNumber``) is stubbed.
+Covers mark/claim/drain, lease exclusivity + expiry, the ``dirty_at``-guarded delete, poisoned-protocol backoff,
+the K-sweep, and the four call sites.
 """
 
 from __future__ import annotations
@@ -114,9 +113,8 @@ def _make_protocol(session: Session, suffix: str = "") -> Protocol:
 
 
 def _seed_protocol_with_controller(session: Session) -> Protocol:
-    """Seed the canonical pipeline shape so ``controllers_for_protocol`` surfaces
-    CONTROLLER_ADDR as a governing Safe: a protocol contract with a completed
-    job, a CGN labeling the Safe, and an FP granting it call authority."""
+    """Seed the canonical pipeline shape so ``controllers_for_protocol`` surfaces CONTROLLER_ADDR as a governing Safe
+    (completed job, a CGN labeling the Safe, an FP granting call authority)."""
     proto = _make_protocol(session, "ctrl")
     vault = Contract(
         address=VAULT_ADDR.lower(),
@@ -148,8 +146,7 @@ def _seed_protocol_with_controller(session: Session) -> Protocol:
 
 @pytest.fixture()
 def wired_drain(monkeypatch):
-    """Point the drain's internal ``SessionLocal`` at the test DB and stub the
-    RPC wire so ``drain_enrollment_queue`` runs fully offline."""
+    """Point the drain's ``SessionLocal`` at the test DB and stub the RPC wire so the drain runs offline."""
     engine = _engine()
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     monkeypatch.setattr(reconciler, "SessionLocal", factory)
@@ -343,11 +340,6 @@ def test_untouched_monitoring_rows_cannot_keep_enrollment_retrying(qsession, wir
     assert qsession.get(MonitoringEnrollmentQueue, proto.id) is None
 
 
-# ---------------------------------------------------------------------------
-# mark -> drain -> controllers enrolled
-# ---------------------------------------------------------------------------
-
-
 def test_mark_then_drain_enrolls_controllers(qsession, wired_drain):
     proto = _seed_protocol_with_controller(qsession)
     mark_enrollment_dirty(qsession, proto.id, "policy_complete")
@@ -381,9 +373,8 @@ def test_mark_then_drain_enrolls_controllers(qsession, wired_drain):
 
 
 def test_lock_skipped_fastpath_converges_via_drain(qsession, wired_drain):
-    """e2e: when the fast-path enroll skips (a sibling holds the advisory lock),
-    its mark-dirty-on-skip enqueues the protocol, and the reconciler drain
-    enrolls the contract the holder's snapshot could have missed."""
+    """e2e: a fast-path skip (sibling holds the advisory lock) enqueues the protocol via mark-dirty-on-skip, and the
+    drain enrolls what the holder's snapshot missed."""
     from services.monitoring.enrollment import maybe_enroll_protocol
 
     proto = _seed_protocol_with_controller(qsession)
@@ -431,11 +422,6 @@ def test_lock_skipped_fastpath_converges_via_drain(qsession, wired_drain):
     # The vault contract the skipped fast path missed is now enrolled.
     addrs = {mc.address for mc in enrolled}
     assert VAULT_ADDR.lower() in addrs
-
-
-# ---------------------------------------------------------------------------
-# Lease exclusivity + expiry
-# ---------------------------------------------------------------------------
 
 
 def test_concurrent_drain_exclusivity(qsession):
@@ -492,11 +478,6 @@ def test_lease_expiry_mid_build_steal(qsession):
         engine_b.dispose()
 
 
-# ---------------------------------------------------------------------------
-# dirty_at-guarded delete keeps a row re-dirtied during the build
-# ---------------------------------------------------------------------------
-
-
 def test_redirty_during_build_survives_success_delete(qsession):
     proto = _make_protocol(qsession)
     mark_enrollment_dirty(qsession, proto.id, "manual")
@@ -525,11 +506,6 @@ def test_redirty_during_build_survives_success_delete(qsession):
 # covered end-to-end by ``test_mark_then_drain_enrolls_controllers`` (queue row
 # consumed, ``last_enrollment_reconcile_at`` stamped); the re-dirtied branch is
 # ``test_redirty_during_build_survives_success_delete`` above.
-
-
-# ---------------------------------------------------------------------------
-# Poisoned-protocol backoff
-# ---------------------------------------------------------------------------
 
 
 def test_poisoned_protocol_backoff_pushes_dirty_at_forward(qsession):
@@ -619,11 +595,6 @@ def test_failure_cannot_release_a_reclaimed_lease(qsession):
     assert row.attempts == 0 and row.dirty_at == current_claim.dirty_at
 
 
-# ---------------------------------------------------------------------------
-# K-sweep enqueues the oldest, NULLS FIRST
-# ---------------------------------------------------------------------------
-
-
 def test_sweep_enqueues_k_oldest_nulls_first(qsession):
     never = _make_protocol(qsession, "sweep_never")  # last_enrollment_reconcile_at NULL
     old = _make_protocol(qsession, "sweep_old")
@@ -657,7 +628,6 @@ def test_sweep_enqueues_k_oldest_nulls_first(qsession):
 
 
 def test_unchanged_protocol_stays_idle_until_repair_due(qsession, wired_drain, monkeypatch):
-    """Real enrollment runs once, not on every idle tick; daily repair remains."""
     from unittest.mock import Mock
 
     proto = _seed_protocol_with_controller(qsession)
@@ -722,7 +692,6 @@ def test_repair_age_configuration_and_disabled_sweep(qsession, monkeypatch):
 
 
 def test_sweep_preserves_notification_inserted_after_selection(qsession, monkeypatch):
-    """A concurrent producer must not lose its delayed notification to sweep."""
     proto = _make_protocol(qsession, "sweep_race")
     qsession.execute(
         text("UPDATE protocols SET last_enrollment_reconcile_at = NOW() WHERE id != :pid"), {"pid": proto.id}
@@ -754,7 +723,6 @@ def test_sweep_preserves_notification_inserted_after_selection(qsession, monkeyp
 
 
 def test_final_completion_rearms_enrollment_after_early_drain(qsession, wired_drain):
-    """Policy's mark can drain before the first job is completed/visible."""
     from db.queue import complete_job
 
     proto = _seed_protocol_with_controller(qsession)
@@ -829,11 +797,6 @@ def test_unscoped_completion_does_not_enqueue(qsession, has_address, has_protoco
 # a raw ``order_by`` re-assertion here would only re-test SQLAlchemy.
 
 
-# ---------------------------------------------------------------------------
-# Call sites
-# ---------------------------------------------------------------------------
-
-
 def test_policy_worker_marks_dirty(qsession, monkeypatch):
     from workers.policy_worker import PolicyWorker
 
@@ -887,9 +850,8 @@ def test_policy_worker_marks_dirty(qsession, monkeypatch):
 
 
 def test_discovery_gate_promotion_marks_dirty(qsession, monkeypatch):
-    """The fetch path routes membership through the gate: a candidate whose
-    witnesses already satisfy W1 + an admitting rule is promoted during intake,
-    and the PROMOTION (not the worker) marks the enrollment queue dirty."""
+    """Membership goes through the gate: a candidate already satisfying W1 + an admitting rule is promoted during
+    intake, and the PROMOTION (not the worker) marks the queue dirty."""
     from db.models import WITNESS_RULE_W1_CODE, WITNESS_RULE_W2_STRUCTURAL, ContractProbeAttempt
     from services.discovery import membership_gate as gate
     from workers.discovery import DiscoveryWorker
@@ -1034,11 +996,6 @@ def test_add_audit_route_marks_dirty(api_client, db_session):
         db_session.commit()
 
 
-# ---------------------------------------------------------------------------
-# Failure path in the full drain (poisoned protocol doesn't abort the drain)
-# ---------------------------------------------------------------------------
-
-
 # The drain-level failure path (drain returns ``{"drained":0,"failed":1}``,
 # attempts bumped, lease cleared) and the sweep's skip-already-queued branch
 # (``dirty_at`` and ``reason`` preserved for a backed-off row) are both asserted
@@ -1047,9 +1004,8 @@ def test_add_audit_route_marks_dirty(api_client, db_session):
 
 
 def test_poisoned_protocol_not_redrained_each_tick(qsession, wired_drain, monkeypatch):
-    """Integrated loop behaviour: after a build fails and backs the row off, the
-    next tick's sweep must NOT pull ``dirty_at`` back to now(), so the poisoned
-    protocol is not re-claimed and re-built every tick."""
+    """After a build fails and backs the row off, the next sweep must NOT pull ``dirty_at`` back to now(), or the
+    poisoned protocol is rebuilt every tick."""
     proto = _seed_protocol_with_controller(qsession)
     mark_enrollment_dirty(qsession, proto.id, "policy_complete")
     qsession.commit()
@@ -1092,11 +1048,6 @@ def test_poisoned_protocol_not_redrained_each_tick(qsession, wired_drain, monkey
         {"pid": proto.id},
     ).scalar_one()
     assert still_due == 0
-
-
-# ---------------------------------------------------------------------------
-# Reconciler loop: one tick = sweep + drain + heartbeat
-# ---------------------------------------------------------------------------
 
 
 def test_run_loop_single_tick_sweeps_drains_and_heartbeats(monkeypatch):

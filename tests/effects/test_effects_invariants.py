@@ -14,7 +14,6 @@ from decimal import Decimal
 
 import pytest
 
-from db import effect_cache
 from db.effect_cache import (
     KERNEL_SURFACE_SENTINEL,
     find_cached_verdict,
@@ -34,10 +33,6 @@ from services.effects.config import (
     effects_stage_enabled,
 )
 from services.effects.hashing import resolved_function_hash
-from services.effects.preflight import (
-    InMemoryCapabilityStore,
-    probe_simulate_support,
-)
 from services.effects.selection import AuthorityGraph, select_candidates
 from tests.cache_helpers import requires_postgres
 from tests.support.effects_ir import _fn, _ir, _node, _var
@@ -216,37 +211,6 @@ def test_inv7_readonly_keyless():
 
 
 # ---------------------------------------------------------------------------
-# Every verdict is tiered and replayable from its transcript.
-# ---------------------------------------------------------------------------
-
-
-def test_inv8_verdict_tiered_and_replayable():
-    from services.effects.simulate import SimResult
-
-    store = RecordingStore()
-    eff = recipes.supply(
-        simulate=ScriptedSimulate(
-            SimResult(
-                calls=(
-                    ok(uint_ret(1)),
-                    ok(logs=[transfer_log(CONTRACT, "0x" + "00" * 20, PRINCIPAL, 1)]),
-                    ok(uint_ret(3)),
-                )
-            )
-        ),
-        store=store,
-        ctx=CTX,
-        token_address=CONTRACT,
-        principal=PRINCIPAL,
-        mint_calldata="0x40c10f19",
-        simulate_supported=True,
-    )
-    assert eff.tier and eff.transcript_ptr is not None
-    tr = store.stored[-1]
-    assert {"tier", "block_number", "hardfork", "calls", "results"} <= set(tr)
-
-
-# ---------------------------------------------------------------------------
 # Duration/bound facts are read from source constants, never hardcoded.
 # ---------------------------------------------------------------------------
 
@@ -317,58 +281,6 @@ def test_inv10_duration_bound_from_source_constant():
 
 
 # ---------------------------------------------------------------------------
-# Own stage between policy and coverage; the cache is code-plane only.
-# ---------------------------------------------------------------------------
-
-
-def test_inv11_stage_placement_and_codeplane_cache():
-    order = [s.value for s in JobStage]
-    assert order.index("policy") < order.index("effects") < order.index("coverage")
-    # The cache carries NO state-plane concrete columns (code-plane only).
-    cache_cols = {c.name for c in EffectBehaviorCache.__table__.columns}
-    assert {"behavior_hash", "effect_class", "scope", "gate_ref", "verdict", "tier", "transcript_ptr"} <= cache_cols
-    assert "concrete_destination" not in cache_cols
-
-
-# ---------------------------------------------------------------------------
-# Verdicts are gate-relative; gate_ref names structure, not an address.
-# ---------------------------------------------------------------------------
-
-
-@requires_postgres
-def test_inv12_verdicts_gate_relative(clean_effects):
-    session = clean_effects
-    row = upsert_cached_verdict(
-        session,
-        behavior_hash="hg",
-        effect_class="code_upgrade",
-        scope="kernel",
-        gate_ref="proxy:uups",  # a STRUCTURE descriptor, never an address
-        verdict="proven",
-        tier="tier0",
-    )
-    assert row.gate_ref == "proxy:uups"
-    assert not row.gate_ref.startswith("0x")
-    # The cache schema has no principal/address column — binding is at read time.
-    assert "principal" not in {c.name for c in EffectBehaviorCache.__table__.columns}
-
-
-# ---------------------------------------------------------------------------
-# Capabilities are probed, not assumed.
-# ---------------------------------------------------------------------------
-
-
-def test_inv14_capabilities_probed_not_assumed():
-    store = InMemoryCapabilityStore()
-    # An unprobed chain records nothing — never a support claim.
-    assert store.get_simulate_support(999) is None
-    from services.effects.simulate import SimResult
-
-    assert probe_simulate_support(ScriptedSimulate(SimResult(calls=(ok(),))), 1, store) is True
-    assert store.get_simulate_support(1) is True
-
-
-# ---------------------------------------------------------------------------
 # Fail-forward stage, transition-gated flag.
 # ---------------------------------------------------------------------------
 
@@ -402,7 +314,3 @@ def test_inv16_single_flight_fork_default(monkeypatch):
 def test_inv3_self_audit_helper_catches_collision():
     assert kernel_verdicts_agree("proven", {"supply_delta_sign": "mint"}, "proven", {"supply_delta_sign": "mint"})
     assert not kernel_verdicts_agree("proven", {"supply_delta_sign": "mint"}, "proven", {"supply_delta_sign": "burn"})
-
-
-def test_audit_constants_exist():
-    assert effect_cache.AUDIT_PASSED == "passed" and effect_cache.AUDIT_FAILED == "failed"

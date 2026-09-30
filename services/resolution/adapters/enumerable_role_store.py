@@ -1,32 +1,14 @@
-"""Enumerable role-store adapter — resolves a delegated ``registry.onlyX(msg.sender)``
-gate to its real controllers.
+"""Enumerable role-store adapter: resolves a delegated ``registry.onlyX(msg.sender)`` gate to its controllers without
+parsing role names.
 
-The caller's outer leaf is an ``external_set`` check against a single-address-param
-callee on a role registry (``roleRegistry.onlyOperatingMultisig(msg.sender)`` and
-its 9 etherfi siblings). This adapter recovers the concrete controller set for that
-gate by three cooperating reads, none of which parses a role name (dissolved role
-identity, pinned-chain resolution):
+1. Fold the standard's grant/revoke events at the authority proxy into a candidate universe (every current role holder),
+plus the registry's own owner/admin values for hybrid gates. The durable index drives cold/warm lifecycle.
+2. Probe the gate at a pinned block: a negative control that must revert, then each candidate. The gate is its own
+ground truth, so false positives are impossible.
+3. Optionally cross-check the enumerable getter; a mismatch declines.
 
-  1. **Fold** the standard's indexed grant/revoke events at the authority PROXY into
-     a *candidate universe* — every address currently holding ANY role — union the
-     registry's own address-typed controller values (owner/admin; the hybrid-gate
-     mitigation). The durable index is primary and drives the cold/warm lifecycle.
-  2. **Probe** the gate itself at the pinned block: a negative control
-     (``onlyX(CONTROL)``) that MUST revert (else the gate is not an allowlist), then
-     each candidate (``onlyX(candidate)``) — survivors are exactly who the on-chain
-     gate passes. The gate is its own ground truth, so false positives are
-     structurally impossible; a candidate is asserted a member only if the
-     real gate passes it.
-  3. Optionally **cross-check** the standard's enumerable getter as a consistency
-     alarm (default off): a mismatch DECLINES loudly rather than emitting a set the
-     getter contradicts.
-
-Every transport failure in the probe is treated as *indeterminate*, never as a
-membership failure: a wire error declines to a settled ``probe_unavailable``
-external check, it never classifies a candidate. Cold index → deferral that
-self-heals via ``deferred_reconciler`` (mirrors the Solmate adapter); warm-with-no-
-events → settled unconfirmed (we can't confirm the store speaks the standard we
-model). The single place a new standard is recognized is
+Probe transport failures are indeterminate and decline to ``probe_unavailable``. Cold index defers via
+``deferred_reconciler``; warm with no events settles unconfirmed. New standards are recognized only in
 ``role_store_standards.py``.
 """
 
@@ -57,21 +39,14 @@ from . import EvaluationContext
 logger = logging.getLogger(__name__)
 
 _ZERO_ADDRESS = "0x" + "0" * 40
-# A structurally-non-member address for the negative control: a gate that passes
-# THIS is not an allowlist (it passes everyone), so the enumeration is declined. A
-# fixed sentinel with no plausible role grant; never itself reported as a member.
+# A gate that passes this isn't an allowlist; never reported as a member.
 _NEGATIVE_CONTROL_ADDR = "0x" + "de1e7e" + "00" * 17
 
 
 _MATCH_SCORE = 90
 
 
-# Settled (non-deferring) adapter declines worth a metric — the persisted row's
-# basis is superseded by the refine-only guard downstream, so the adapter is the only
-# site where these are observable. A running count per reason (record_stage_metric
-# folds it into the policy stage's timing artifact) surfaces a store the adapter
-# recognized-but-couldn't-fold (negative control), a fold/getter disagreement, or a
-# probe-transport blip, distinct from an ordinary cold-index deferral.
+# Settled declines are only observable here (the persisted basis is superseded downstream), so count them per reason.
 _ADAPTER_DECLINE_REASONS = {
     "negative_control_passed",
     "role_fold_getter_mismatch",
@@ -87,14 +62,13 @@ def _getter_crosscheck_enabled() -> bool:
 
 
 class EnumerableRoleStoreAdapter:
-    """Resolves a delegated single-address-param role gate into its concrete
-    controller set by folding the role-store standard's events and confirming each
-    candidate against the live gate."""
+    """Resolves a delegated single-address-param role gate by folding role events and confirming each candidate
+    against the live gate.
+    """
 
     @classmethod
     def matches(cls, descriptor: dict, ctx: EvaluationContext) -> int:
-        # Cheap structural gate first — only touch the wire (standard detection)
-        # once the descriptor is shaped like a delegated single-address role gate.
+        # Structural check before any wire call.
         if not isinstance(descriptor, dict) or descriptor.get("kind") != "external_set":
             return 0
         if not _is_single_address_param_signature(descriptor.get("callee_signature")):
@@ -133,10 +107,8 @@ class EnumerableRoleStoreAdapter:
             return _check_only(authority, callee_selector, ["standard_undetected"])
 
         topic0s = list(standard.topic0s())
-        # Cold durable index: no warm cursor yet. Defer (mirror Solmate) so the
-        # reconciler re-resolves exactly once the RoleSet backfill reaches head —
-        # a live probe now would freeze a non-self-healing lower bound. Checked
-        # before pinning a height so a cold index self-heals even without an RPC.
+        # Cold index: defer so the reconciler re-resolves after backfill; a live probe now would freeze a lower bound.
+        # Checked before pinning so it works without RPC.
         try:
             cursor_block = min_indexed(chain_id=ctx.chain_id, event_address=authority, topic0s=topic0s)
         except Exception:
@@ -147,12 +119,8 @@ class EnumerableRoleStoreAdapter:
         rpc_url = ctx.rpc_url
         if not rpc_url:
             return _check_only(authority, callee_selector, ["no_rpc_for_probe"])
-        # Pin ONE height for the fold read, the gate probe, AND the trace frontier so
-        # the enumeration is offline-reproducible and the drift arm has a
-        # fixed frontier to compare a later indexed row against. The resolver usually
-        # pins the whole pass (ctx.block); an unpinned pass (a transient blocknum-read
-        # failure upstream) re-reads head once here, and a failed read settles to
-        # probe_unavailable rather than reading the three consumers at three heights.
+        # One height for fold, probe and trace frontier, so the result is reproducible and drift detection has a fixed
+        # frontier. An unpinned pass reads head once; failure settles to probe_unavailable.
         pinned_block = _pin_probe_block(ctx, rpc_url)
         if pinned_block is None:
             return _check_only(authority, callee_selector, ["probe_unavailable"])
@@ -162,18 +130,14 @@ class EnumerableRoleStoreAdapter:
         except Exception:
             return _check_only(authority, callee_selector, ["event_log_backend_error"])
         if not rows:
-            # Warm cursor, zero role events: we cannot confirm the store actually
-            # speaks the standard we'd fold, so an exact-empty set would be a false
-            # "nobody". Settle to a probe (mirror Solmate's unconfirmed arm).
+            # Warm with no role events: can't confirm the store speaks this standard, so exact-empty would be a false
+            # "nobody".
             return _check_only(authority, callee_selector, ["authority_unconfirmed_no_role_events"])
 
         active_holders = _fold_active_holders(rows)
         registry_context = _registry_controller_context(ctx, authority)
         if registry_context is None:
-            # A DB error while resolving the registry's own controllers is NOT
-            # "no candidates" (R1): a shrunken candidate universe silently
-            # shrinks the survivor set, which is the false-empty shape this
-            # adapter must never produce. Settle to the gated probe.
+            # A DB error isn't "no candidates" (R1): a shrunken universe would shrink the survivors.
             return _check_only(authority, callee_selector, ["registry_context_error"])
         controller_addrs, role_labels = registry_context
         candidates = sorted(active_holders | controller_addrs)
@@ -187,27 +151,17 @@ class EnumerableRoleStoreAdapter:
             memo=_pass_memo(ctx),
         )
         if probe.transport_failed:
-            # A wire failure is indeterminate, NOT a membership failure: never
-            # classify a candidate on transport error — settle to a probe.
+            # Transport failure is indeterminate, not non-membership.
             return _check_only(authority, callee_selector, ["probe_unavailable"])
         if probe.control_passed:
-            # The gate passed a random control address: it is not an allowlist
-            # (open, or a shape this adapter mis-modeled). Decline to the guard.
+            # The gate passed a random address: not an allowlist.
             return _check_only(authority, callee_selector, ["negative_control_passed"])
 
         members = sorted(probe.survivors)
         if not members and candidates:
-            # Every candidate failed the real gate. If this gate were the pure
-            # role-allowlist the adapter models, its admitted set would be a
-            # subset of the candidate universe — zero survivors over a
-            # NON-empty universe means either the gate's one role is currently
-            # unheld or the gate admits callers outside the model (a hybrid /
-            # non-role gate, e.g. ``msg.sender == liquidityPool``). The two are
-            # indistinguishable here (role identity is dissolved by design), so
-            # an ``exact`` "provably nobody" would be unwitnessed — decline.
-            # An empty CANDIDATE universe (complete fold, all holders revoked,
-            # no registry controllers) stays the exact-empty arm below: there
-            # the emptiness is witnessed by the complete durable fold.
+            # Zero survivors over a non-empty universe means either an unheld role or a gate admitting non-role callers
+            # (e.g. ``msg.sender == liquidityPool``); indistinguishable, so decline. An empty universe from a complete
+            # fold stays exact-empty below.
             return _check_only(authority, callee_selector, ["no_candidate_passed_gate"])
 
         if _getter_crosscheck_enabled() and standard.enumerable_getter is not None:
@@ -229,10 +183,8 @@ class EnumerableRoleStoreAdapter:
                 "standard": standard.name,
                 "callee_selector": callee_selector,
                 "probe_block": pinned_block,
-                # The height the fold covers (the least-advanced backfilled cursor):
-                # the role-drift arm re-resolves when a grant/revoke is later indexed
-                # PAST this frontier. Not probe_block — a grant in (frontier, probe]
-                # would otherwise be missed.
+                # The fold's coverage height (least-advanced cursor), for re-resolving when a later grant/revoke is
+                # indexed. Not probe_block, which could miss grants between the two.
                 "fold_frontier": cursor_block,
                 "candidate_count": len(candidates),
                 "candidates_from_events": sorted(active_holders),
@@ -260,11 +212,6 @@ class EnumerableRoleStoreAdapter:
         )
 
 
-# ---------------------------------------------------------------------------
-# Probe
-# ---------------------------------------------------------------------------
-
-
 class _ProbeResult:
     __slots__ = ("survivors", "control_passed", "transport_failed")
 
@@ -283,20 +230,14 @@ def _probe_gate(
     block: int | None,
     memo: dict[Any, Any],
 ) -> _ProbeResult:
-    """Confirm which candidates the gate passes at ``block``, plus the negative
-    control. One Multicall3 ``aggregate3`` (the ``onlyX(addr)`` reads are
-    caller-independent — the address is an argument, not ``msg.sender`` — so
-    Multicall3 rewriting the sender is harmless). Memoized per
-    ``(authority, selector, block)`` so the 92 same-family functions share one
-    probe. A whole-call transport failure raises and is reported as
-    ``transport_failed`` (indeterminate), distinct from a per-candidate revert
-    (non-member)."""
+    """Which candidates the gate passes at ``block``, plus the negative control, in one Multicall3 (the address is an
+    argument, so sender rewriting is harmless). Memoized per ``(authority, selector, block)`` for the whole
+    function family. A whole-call failure is ``transport_failed``, distinct from a per-candidate revert.
+    """
     key = ("role_store_probe", authority, callee_selector, block)
     cached = memo.get(key)
     if isinstance(cached, _ProbeResult):
-        # The control result is stable per (authority, selector, block); only the
-        # survivor filter depends on the candidate list, which is authority-scoped
-        # and identical across a family, so a cached probe applies verbatim.
+        # Stable per (authority, selector, block), and the candidate list is identical across the family.
         return cached
 
     calls: list[tuple[str, str]] = [(authority, callee_selector + encode_address_word(_NEGATIVE_CONTROL_ADDR))]
@@ -305,9 +246,7 @@ def _probe_gate(
     try:
         results = multicall3_aggregate3(rpc_url, calls, block_tag=block_tag)
     except Exception:
-        # Do NOT memoize a transport failure: a single blip would otherwise settle
-        # the whole same-(authority, selector, block) family to probe_unavailable
-        # for the pass. Successes are memoized below; a failure re-probes next time.
+        # Not memoized, so one blip doesn't settle the whole family.
         return _ProbeResult(set(), control_passed=False, transport_failed=True)
     if len(results) != len(calls):
         return _ProbeResult(set(), control_passed=False, transport_failed=True)
@@ -328,11 +267,10 @@ def _getter_crosscheck(
     fold_holders: set[str],
     block: int | None,
 ) -> bool:
-    """True on a mismatch between the event fold and the standard's enumerable
-    getter (a consistency alarm). Walk ``count(role)`` then ``at(role, i)`` for each
-    active role; compare the getter's holder set to the fold's. A transport failure
-    is treated as NO alarm (indeterminate — the probe already confirmed members;
-    the getter is only a secondary check)."""
+    """True when the event fold and the enumerable getter disagree (``count``/``at`` per active role).
+
+    Transport failure counts as no alarm.
+    """
     block_tag = hex(block) if isinstance(block, int) else "latest"
     getter_holders: set[str] = set()
     try:
@@ -360,16 +298,10 @@ def _getter_crosscheck(
     return getter_holders != fold_holders
 
 
-# ---------------------------------------------------------------------------
-# Fold
-# ---------------------------------------------------------------------------
-
-
 def _fold_active_holders(rows: Any) -> set[str]:
-    """Fold indexed grant/revoke rows (in log order) into the set of addresses
-    currently holding ANY role — the event-side candidate universe. Last-write-wins
-    per (holder, role); OZ grant/revoke polarity and Solady's active topic are both
-    read from the row's ``spec_by_topic0`` entry."""
+    """Fold grant/revoke rows (log order) into the set of current holders of any role, last-write-wins per (holder,
+    role).
+    """
     specs = spec_by_topic0()
     state: dict[tuple[str, str], bool] = {}
     for row in rows:
@@ -407,29 +339,15 @@ def _active_roles(rows: Any) -> set[str]:
     return roles
 
 
-# ---------------------------------------------------------------------------
-# Registry controller-value context (hybrid-gate mitigation + display labels)
-# ---------------------------------------------------------------------------
-
-
 def _registry_controller_context(ctx: EvaluationContext, authority: str) -> tuple[set[str], dict[str, str]] | None:
-    """The registry's own address-typed controller values (owner/admin — union'd
-    into the candidate universe so a hybrid ``onlyX`` that also passes an owner is
-    reachable), plus a role-hash → NAME map inverted from the registry's
-    ``role_identifier`` rows for DISPLAY labels only (join on value; never a name
-    transform).
+    """The registry's address-typed controller values (unioned into candidates for hybrid gates) plus a role-hash →
+    name map for display only.
 
-    Chain-scoped: ``contracts`` rows are keyed ``(address, chain)`` and a bare
-    lower(address) read would resolve a second-chain registry authority to the
-    ETHEREUM contract's implementation and controller values — cross-chain twin
-    aliasing inside the caller-set computation. ``ctx.chain_id`` resolves through
-    the canonical registry; NULL ``contracts.chain`` is legacy-mainnet by
-    convention (same coalesce as ``services.discovery.upgrade_history``).
+    Chain-scoped: a bare address lookup could resolve another chain's registry to the Ethereum row. NULL
+    ``contracts.chain`` means mainnet (as in ``services.discovery.upgrade_history``).
 
-    Returns ``None`` on any resolution error (unknown chain, DB failure): an
-    error is NOT an empty candidate set (R1) — the caller declines instead of
-    probing a silently-shrunken universe. A bare ctx with no session returns
-    empties (structural: there is no registry context to read)."""
+    Returns ``None`` on any error (R1: not an empty set). A ctx with no session returns empties.
+    """
     session = getattr(ctx, "session", None)
     if session is None:
         return set(), {}
@@ -444,8 +362,7 @@ def _registry_controller_context(ctx: EvaluationContext, authority: str) -> tupl
         def _chain_scoped(address_predicate: Any) -> Any:
             return address_predicate & (func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_name)
 
-        # Controller values may sit on the proxy row or the impl row (with the
-        # proxy as deployment_address); accept either address as the registry.
+        # Values may sit on the proxy row or the impl row.
         impl_row = session.execute(
             select(Contract.implementation).where(_chain_scoped(func.lower(Contract.address) == authority)).limit(1)
         ).first()
@@ -472,18 +389,9 @@ def _registry_controller_context(ctx: EvaluationContext, authority: str) -> tupl
     return controller_addrs, role_labels
 
 
-# ---------------------------------------------------------------------------
-# Decline
-# ---------------------------------------------------------------------------
-
-
 def _check_only(authority: str | None, callee_selector: str | None, basis: list[str]) -> CapabilityExpr:
     extra: dict[str, Any] = {"basis": basis, "adapter": TRACE_STEP_ENUMERABLE_ROLE_STORE}
-    # Only the cold-index basis is *waiting on the durable index*; mark it so the
-    # deferred-resolution reconciler re-resolves once the RoleSet backfill reaches
-    # head. Every other basis is a settled answer (unresolved context, a warm store
-    # with no role events, a passed negative control, a wire failure), so it is NOT
-    # marked — marking would spin the reconciler forever.
+    # Only the cold-index basis waits on the index; marking settled answers would spin the reconciler forever.
     if "no_index_cursor" in basis:
         extra["deferred_pending_index"] = True
     for reason in basis:
@@ -504,14 +412,8 @@ def _check_only(authority: str | None, callee_selector: str | None, basis: list[
     )
 
 
-# ---------------------------------------------------------------------------
-# Descriptor / standard resolution
-# ---------------------------------------------------------------------------
-
-
 def _detect_standard(authority: str, ctx: EvaluationContext) -> RoleStoreStandard | None:
-    """The role-store standard behind ``authority`` (proxy-hop aware), memoized per
-    authority across the resolution pass so 250 gated functions share one detection."""
+    """The role-store standard behind ``authority`` (proxy-aware), memoized per pass."""
     memo = _pass_memo(ctx)
     key = ("role_store_standard", authority)
     if key in memo:
@@ -526,12 +428,11 @@ def _detect_standard(authority: str, ctx: EvaluationContext) -> RoleStoreStandar
 
 
 def _pin_probe_block(ctx: EvaluationContext, rpc_url: str) -> int | None:
-    """One concrete height for the whole enumeration. A resolver that already pinned
-    the pass (``ctx.block`` is an int) is honored verbatim; an unpinned pass reads
-    ``eth_blockNumber`` once, memoized per chain in ``live_read_memo`` so a family of
-    gated functions shares the read. ``None`` (a failed read) makes the caller settle
-    to ``probe_unavailable`` — the fail-closed direction, never a fold/probe/
-    trace read at three different heights."""
+    """One height for the whole enumeration: ``ctx.block`` if pinned, else one memoized ``eth_blockNumber`` per
+    chain.
+
+    ``None`` settles to ``probe_unavailable``.
+    """
     if isinstance(ctx.block, int):
         return ctx.block
     memo = _pass_memo(ctx)
@@ -549,10 +450,7 @@ def _pin_probe_block(ctx: EvaluationContext, rpc_url: str) -> int | None:
 
 
 def _pass_memo(ctx: EvaluationContext) -> dict[Any, Any]:
-    """The pass-scoped memo the resolver threads onto every function's ctx
-    (``live_read_memo``): a within-pass dedup, discarded with the frame, never a
-    cross-run cache. Absent (a bare ctx) → a throwaway dict so callers are
-    uniform."""
+    """The pass-scoped ``live_read_memo``, or a throwaway dict for a bare ctx."""
     meta = getattr(ctx, "meta", None)
     if isinstance(meta, dict):
         memo = meta.get("live_read_memo")
@@ -573,9 +471,7 @@ def _resolve_authority_address(descriptor: dict, ctx: EvaluationContext) -> str 
         if _is_nonzero_address(value):
             return value.lower()
     if source.get("source") == "self_address":
-        # A1 Part A: a SELF-gate descriptor (the un-lowerable role gate lives
-        # on the analyzed contract itself — RoleRegistry.onlyUpgradeTimelock).
-        # Resolve to the analyzed deployment so the probe hits real storage.
+        # A1 Part A: self-gate descriptor (e.g. RoleRegistry.onlyUpgradeTimelock); probe the analysed deployment.
         value = ctx.contract_address
         if _is_nonzero_address(value):
             return value.lower()
@@ -602,11 +498,6 @@ def _is_single_address_param_signature(signature: Any) -> bool:
 def _has_caller_key_source(descriptor: dict) -> bool:
     keys = descriptor.get("key_sources") or []
     return any(isinstance(k, dict) and k.get("source") in _CALLER_SOURCES for k in keys)
-
-
-# ---------------------------------------------------------------------------
-# Word helpers
-# ---------------------------------------------------------------------------
 
 
 def _topic_address(topics: list[Any], index: int) -> str | None:

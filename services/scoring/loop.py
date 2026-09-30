@@ -1,38 +1,17 @@
 """The protocol-score loop: the sixth supervised thread in ``protocol_monitor``.
 
-The grade is a whole-protocol fold and cannot live in the effects worker:
-effects runs single-flight behind a process-global anvil, the
-perimeter is not settled at any per-job instant, and audit coverage settles
-*after* effects. So the fold runs here, off the critical path, on a dirty-mark
-with a staleness sweep behind it.
+The fold can't live in the effects worker (single-flight anvil, unsettled perimeter, audit coverage settles later), so
+it runs here on dirty marks with a staleness sweep.
 
-**Perimeter — compute and stamp, never defer (ruled).** A protocol with queued
-or processing jobs is scored anyway and the document carries
-``perimeter_state = unsettled``; a mid-run score is a real fact about a partial
-perimeter, and witness discipline says publish it labelled rather than suppress
-it. Deferring would leave the endpoint empty for hours on a long run. The state
-is decided inside the fold (``services.scoring.planes.perimeter_state``) because
-it must be read in the same transaction as the population it describes — this
-module persists it verbatim and never re-derives it.
+Perimeter: protocols with in-flight jobs are scored anyway and stamped ``perimeter_state = unsettled`` rather than
+deferred. The state is decided in the fold (``services.scoring.planes.perimeter_state``) in the same transaction as the
+population.
 
-**Clearing a mark is token-scoped, not time-scoped.** The loop deletes the queue
-row only while its ``dirty_at`` still EQUALS the value read at selection, so a
-mark that arrives during the fold survives and re-fires. An instant comparison
-would not do: ``now()`` is ``transaction_timestamp()`` and the effects stage is
-ONE long transaction, so its mark is stamped minutes before the data it
-describes becomes visible — a ``dirty_at <= read_at`` clear would delete marks
-for writes the fold never saw. Losing an invalidation with no trace is the one
-failure mode a dirty-flag design has, and equality is immune to clock semantics
-rather than merely careful about them.
+Marks are cleared by token equality on ``dirty_at``, not by time: ``now()`` is transaction start and the effects stage
+is one long transaction, so a ``<=`` clear would delete marks for data the fold never saw.
 
-**A failing protocol backs off.** Marks survive a failed fold on purpose and
-dirty rows sort first, so without ``attempts``/``last_failed_at`` a pass-budget
-of poison protocols would hold the loop forever and the staleness sweep — the
-only cover for invalidation events that carry no mark — would never run.
-The accepted cost is stated rather than hidden: a TRANSIENT fold failure delays
-a real invalidation by that protocol's current backoff, up to
-``DEFAULT_RETRY_BACKOFF_CAP_S`` — deliberately set to the staleness ceiling, so
-the worst case is no worse than a protocol nobody marked at all.
+Failing protocols back off exponentially, otherwise poison rows would hold the pass and starve the sweep. The cap equals
+the staleness ceiling, so a transient failure delays at worst like an unmarked protocol.
 """
 
 from __future__ import annotations
@@ -52,7 +31,6 @@ from sqlalchemy.orm import Session
 from db.queue import HEARTBEAT_PROTOCOL_SCORE, record_heartbeat
 from services.monitoring import emit_monitor_cycle
 from services.scoring.dirty import SCORE_DIRTY_STALENESS_SWEEP
-from services.scoring.distill import ProtocolUniverse
 from services.scoring.fold import compute_protocol_score
 from services.scoring.persist import persist_score_document
 from services.scoring.schema import ScoreDocument
@@ -62,23 +40,14 @@ from utils.scoring_status import SCORE_TRIGGER_DIRTY_LOOP, SCORE_TRIGGER_STALENE
 logger = logging.getLogger(__name__)
 
 DEFAULT_SCORE_INTERVAL = int(os.getenv("PSAT_SCORE_INTERVAL", "300"))
-# Protocols folded per pass. The fold is seconds at this corpus, but it is N
-# queries against planes other loops are also reading, so the pass is bounded
-# rather than draining the whole queue at once.
+# Bounded per pass since the fold queries planes other loops also read.
 DEFAULT_PROTOCOLS_PER_PASS = int(os.getenv("PSAT_SCORE_PROTOCOLS_PER_PASS", "10"))
-# How long a score may stand before the sweep re-folds it regardless of marks.
-# The backstop for the write sites that carry no mark (hourly
-# balance rows, TVL snapshots, upgrade indexing) — every one of them moves a
-# scored number without touching a marking path.
+# Backstop for write sites that carry no mark (hourly balances, TVL snapshots, upgrade indexing).
 DEFAULT_MAX_SCORE_AGE_S = int(os.getenv("PSAT_SCORE_MAX_AGE_S", "21600"))
-# Poison backoff: a failed protocol waits ``base * 2**attempts``, capped. Marks
-# survive a failed fold on purpose, and dirty rows sort ahead of stale ones, so
-# without this a full pass-budget of permanently-failing protocols would hold
-# the loop forever and the sweep would never reach anything.
+# ``base * 2**attempts``, capped; see the module docstring for why.
 DEFAULT_RETRY_BACKOFF_S = int(os.getenv("PSAT_SCORE_RETRY_BACKOFF_S", "300"))
 DEFAULT_RETRY_BACKOFF_CAP_S = int(os.getenv("PSAT_SCORE_RETRY_BACKOFF_CAP_S", "21600"))
-# Consecutive failures after which the protocol is called out by name. Backing
-# off silently forever would turn a broken fold into an invisible one.
+# Consecutive failures before the protocol is named in logs, so a broken fold doesn't back off invisibly.
 DEFAULT_POISON_WARN_AFTER = int(os.getenv("PSAT_SCORE_POISON_WARN_AFTER", "5"))
 
 
@@ -86,11 +55,8 @@ DEFAULT_POISON_WARN_AFTER = int(os.getenv("PSAT_SCORE_POISON_WARN_AFTER", "5"))
 class DueProtocol:
     """One protocol selected for a fold, and why.
 
-    ``dirty_at`` is the queue row's value AT SELECTION and is the token the
-    clear compares against — carried on the selection rather than re-read at
-    clear time, because re-reading would pick up a mark that landed during the
-    fold and delete it as though this fold had covered it. ``None`` on the
-    staleness arm: no mark was consumed, so there is nothing to clear.
+    ``dirty_at`` is captured at selection as the clearing token; re-reading at clear time would delete a mark that
+    landed mid-fold. ``None`` on the staleness arm.
     """
 
     protocol_id: int
@@ -113,10 +79,7 @@ class PassCounters:
 def _retry_ready(backoff_base_s: int, backoff_cap_s: int) -> Any:
     """SQL predicate: this queue row's backoff has elapsed (or it never failed).
 
-    ``base * 2**attempts``, capped. Exponential rather than fixed so a protocol
-    that is broken rather than merely unlucky stops competing for pass slots
-    quickly, and capped so it never stops being retried altogether — a fold that
-    starts working again must be able to prove it.
+    Capped so a recovered fold is eventually retried.
     """
     from db.models import ProtocolScoreQueue
 
@@ -141,22 +104,9 @@ def select_due_protocols(
 ) -> list[DueProtocol]:
     """Dirty protocols first, then the stalest scores, ``NULLS FIRST``.
 
-    Two orderings on purpose, in this order: a dirty mark is a *witnessed*
-    change to a scored input, while staleness is only the possibility of one.
-    Serving the witnessed work first is what keeps a busy protocol's score
-    fresh when the pass budget binds. Both queries carry a total ORDER BY so a
-    pass is reproducible.
-
-    A protocol already selected as dirty is excluded from the staleness arm —
-    without that it would take two of the pass's slots and fold twice.
-
-    A protocol still inside its failure backoff is not selected by EITHER arm.
-    The dirty filter is in SQL rather than in Python because the point is to
-    free the pass SLOT, not merely to skip the fold — filtering after the
-    ``LIMIT`` would let poison rows keep consuming the budget they were backed
-    off from. The staleness arm honours the same predicate because a protocol
-    whose fold raises has no score row, so it is permanently stale: without it a
-    poison protocol would simply re-enter through the other door.
+    Dirty marks are witnessed changes, so they're served first; both queries are totally ordered. Protocols already
+    selected as dirty are excluded from the staleness arm. Protocols in backoff are excluded from both, in SQL so they
+    don't consume ``LIMIT`` slots; a failing protocol has no score row and would otherwise re-enter via staleness.
     """
     from db.models import Protocol, ProtocolScoreLatest, ProtocolScoreQueue
 
@@ -182,9 +132,7 @@ def select_due_protocols(
         .outerjoin(ProtocolScoreLatest, ProtocolScoreLatest.protocol_id == Protocol.id)
         .outerjoin(ProtocolScoreQueue, ProtocolScoreQueue.protocol_id == Protocol.id)
         .where(
-            # NULLS FIRST as an ordering is not enough on its own: a protocol
-            # that has never been scored must also PASS the age filter, and
-            # ``computed_at < cutoff`` is false for NULL.
+            # Never-scored protocols must also pass the age filter; ``< cutoff`` is false for NULL.
             (ProtocolScoreLatest.computed_at.is_(None)) | (ProtocolScoreLatest.computed_at < cutoff)
         )
         .where(or_(ProtocolScoreQueue.protocol_id.is_(None), retry_ready))
@@ -201,19 +149,10 @@ def select_due_protocols(
 
 
 def _clear_mark(session: Session, due: DueProtocol) -> int:
-    """Delete the exact queue row this fold consumed. Nothing else.
+    """Delete the exact queue row this fold consumed, matched on ``(protocol_id, dirty_at)`` by equality.
 
-    Matched on ``(protocol_id, dirty_at)`` by EQUALITY, against the value read
-    at selection. Any mark that landed since — including one whose data this
-    fold could not have seen — has a different ``dirty_at`` and is left alone.
-
-    An instant-based ``dirty_at <= read_at`` cannot do this: ``now()`` is
-    ``transaction_timestamp()``, and the end-of-effects mark is stamped at its
-    job transaction's START, minutes before that transaction commits and makes
-    the data visible. A loop that captured its own ``now()`` in between would
-    delete a mark strictly newer than everything it read.
-
-    Returns 0 on the staleness arm, which consumed no mark to begin with.
+    A ``<=`` comparison would delete marks stamped at a long transaction's start but committed after the fold's read.
+    Returns 0 on the staleness arm.
     """
     from db.models import ProtocolScoreQueue
 
@@ -230,11 +169,8 @@ def _clear_mark(session: Session, due: DueProtocol) -> int:
 
 
 def _reset_backoff(session: Session, protocol_id: int) -> None:
-    """Clear the failure state of a queue row that outlived a SUCCESSFUL fold.
-
-    A no-op unless the row was actually carrying failures. Without it a protocol
-    that failed, then started folding again, would keep serving its old backoff
-    — and a fold that has begun working must be able to prove it.
+    """Clear the failure state of a queue row that outlived a successful fold, so a recovered protocol doesn't keep
+    its old backoff.
     """
     from db.models import ProtocolScoreQueue
 
@@ -247,15 +183,8 @@ def _reset_backoff(session: Session, protocol_id: int) -> None:
 def _record_failure(session: Session, due: DueProtocol, *, warn_after: int) -> None:
     """Arm the backoff for a protocol whose fold raised. Commits its own write.
 
-    UPSERTS rather than updating: a protocol selected by the staleness arm has
-    no queue row, and a failed fold leaves it with no score row either — so it
-    is permanently stale and would be re-selected on every pass forever. The row
-    minted here is the only place that failure can be remembered. It is an
-    honest mark besides: the protocol does still need a fold.
-
-    Runs after the caller rolled the failed fold back, so it needs its own
-    commit — and it must not raise into the pass, because the whole point is
-    that the pass continues.
+    Upserts because a staleness-selected protocol has no queue row and, having failed, no score row; this row is the
+    only place to remember the failure. Runs after the caller's rollback and must not raise.
     """
     from db.models import ProtocolScoreQueue
 
@@ -264,18 +193,13 @@ def _record_failure(session: Session, due: DueProtocol, *, warn_after: int) -> N
             pg_insert(ProtocolScoreQueue)
             .values(
                 protocol_id=due.protocol_id,
-                # One vocabulary for the column: a row minted by a staleness
-                # failure names itself from the same register the mark sites use.
                 reason=due.reason or SCORE_DIRTY_STALENESS_SWEEP,
                 attempts=1,
                 last_failed_at=func.clock_timestamp(),
             )
             .on_conflict_do_update(
                 index_elements=["protocol_id"],
-                # ``dirty_at`` is deliberately untouched: it is the clearing
-                # token and the sweep's cursor, and bumping it on a FAILURE
-                # would move a protocol that achieved nothing to the back of a
-                # queue ordered by when its work arrived.
+                # ``dirty_at`` is untouched: it's the clearing token and queue order.
                 set_={
                     "attempts": ProtocolScoreQueue.attempts + 1,
                     "last_failed_at": func.clock_timestamp(),
@@ -308,27 +232,17 @@ def _confidence_detail(document: ScoreDocument) -> dict[str, Any]:
 
 
 def _int(value: Any) -> int | None:
-    """*value* as an int, or ``None`` where it is not one. Never raises.
-
-    Every arithmetic input to the summary goes through here. A blob key whose
-    payload is not a number is a question this line cannot answer, and neither
-    raising out of a fold that succeeded nor coercing it to a zero is an answer.
-    """
+    """*value* as an int, or ``None``. Never raises, and never coerces a non-number to zero."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return int(value)
 
 
 def _flow_pricing(confidence: dict[str, Any]) -> tuple[int | None, int | None]:
-    """The ``[decidable, seen]`` pairs, summed — or ``None`` where they are not.
+    """The ``[decidable, seen]`` pairs, summed, or ``None``.
 
-    Three outcomes, kept apart. An ABSENT census is ``None``: publishing a zero
-    for a block the document never carried is exactly the fallback-as-fact this
-    line exists to make visible. A census that is present and empty is a real
-    zero — the fold publishes only entities with a seen count, so no entry means
-    no flow claim was scored. A census carrying a pair this reader cannot add is
-    ``None`` too: a short sum presented as a whole one would read as a pricing
-    regression that never happened.
+    An absent census is ``None``, not zero. Present and empty is a real zero. Any unreadable pair also gives ``None`` so
+    a partial sum isn't mistaken for a regression.
     """
     pricing = confidence.get("flow_pricing_decidable")
     if not isinstance(pricing, dict):
@@ -345,18 +259,11 @@ def _flow_pricing(confidence: dict[str, Any]) -> tuple[int | None, int | None]:
     return decidable, seen
 
 
-def document_summary(document: ScoreDocument, universe: ProtocolUniverse | None) -> dict[str, Any]:
-    """The fields the one summary INFO carries, all read off the finished document.
+def document_summary(document: ScoreDocument) -> dict[str, Any]:
+    """The fields the one summary INFO carries, read off the finished document.
 
-    Nothing is recomputed here: the fold's own counters are the record, and a
-    number this loop derived a second way would be a second answer to a question
-    the document already answered.
-
-    TOTAL over every document shape, and deliberately so: it is called from the
-    loop (where a raise would arm the backoff for a protocol that succeeded) and
-    from the offline CLI (where it would fail a score that computed). A field it
-    cannot read is published as ``None`` — the same third state the rest of this
-    system keeps — and never as a zero standing in for an unasked question.
+    Nothing is recomputed. Total over every document shape, since a raise would arm backoff for a successful fold (loop)
+    or fail a computed score (CLI); unreadable fields publish ``None``.
     """
     population = document.provenance.get("population")
     population = population if isinstance(population, dict) else {}
@@ -366,8 +273,7 @@ def document_summary(document: ScoreDocument, universe: ProtocolUniverse | None)
 
     warnings_by_kind: dict[str, int] = {}
     for warning in document.warnings:
-        # A warning that names no kind is bucketed as unknown; ``str(None)``
-        # would publish the literal "None" as though it were a vocabulary member.
+        # ``str(None)`` would publish "None" as a vocabulary member.
         raw_kind = warning.get("kind") if isinstance(warning, dict) else None
         kind = str(raw_kind) if isinstance(raw_kind, str) and raw_kind else "unknown"
         warnings_by_kind[kind] = warnings_by_kind.get(kind, 0) + 1
@@ -378,8 +284,7 @@ def document_summary(document: ScoreDocument, universe: ProtocolUniverse | None)
         if isinstance(finding, dict) and isinstance(finding.get("undetermined_instances") or [], (list, tuple))
     )
 
-    # ``flow_pricing_decidable`` is per entity ``[decidable, seen]``; the pair is
-    # what makes a pricing regression a visible step change between two folds.
+    # Per-entity ``[decidable, seen]``, so a pricing regression shows as a step change between folds.
     priced_decidable, priced_seen = _flow_pricing(confidence)
 
     faults = document.execution_evidence_faults
@@ -408,13 +313,8 @@ def document_summary(document: ScoreDocument, universe: ProtocolUniverse | None)
         "flow_pricing_decidable": priced_decidable,
         "flow_pricing_seen": priced_seen,
         "tracked_total_usd": coverage.get("tracked_total_usd"),
-        # ``None`` is the fail-closed universe and disposes nothing; the count is
-        # what separates it from a universe that is merely small.
-        "universe_addresses": len(universe.addresses) if universe is not None else None,
-        # An absent census is the earned zero at this model version (see
-        # ``ScoreDocument.execution_evidence_faults``), and this document was just
-        # folded by this build — so the census provably ran. A census PRESENT
-        # with an unreadable count is not that zero and publishes ``None``.
+        # Absent is the earned zero for this model version (see ``ScoreDocument.execution_evidence_faults``); present
+        # but unreadable is ``None``.
         "execution_records_faulted": _int(faults.get("records_faulted")) if isinstance(faults, dict) else 0,
     }
 
@@ -422,27 +322,21 @@ def document_summary(document: ScoreDocument, universe: ProtocolUniverse | None)
 def score_protocol(session: Session, due: DueProtocol) -> Any:
     """Fold, persist, and clear the mark this fold consumed. Commits.
 
-    ``computed_at`` comes from the DATABASE clock, not the process clock: it is
-    what ``protocol_scores_latest`` orders on, and two writers on skewed hosts
-    would otherwise be able to order a stale fold ahead of a fresh one. The fold
-    bans wall-clock reads internally, so the one timestamp it cannot derive is
-    supplied here.
+    ``computed_at`` uses the database clock because ``protocol_scores_latest`` orders on it and hosts may skew; the fold
+    itself bans wall-clock reads.
     """
     computed_at = session.execute(select(func.clock_timestamp())).scalar_one()
     durations: dict[str, int] = {}
-    universe = None  # Delivery classification no longer participates in scoring.
     with log_timed_phase(logger, "fold", durations_ms=durations, protocol_id=due.protocol_id):
         document = compute_protocol_score(
             session,
             due.protocol_id,
             trigger=due.trigger,
             computed_at=computed_at,
-            universe=universe,
         )
     faults = document.execution_evidence_faults
     if faults is not None:
-        # The census moves the grade — a store that stops answering looks exactly
-        # like a code regression — and it lives only in the document.
+        # The census moves the grade and lives only in the document, and a failing store looks like a code regression.
         logger.warning(
             "protocol score execution evidence faulted for %s of %s records",
             faults.get("records_faulted"),
@@ -461,26 +355,19 @@ def score_protocol(session: Session, due: DueProtocol) -> Any:
         row = persist_score_document(session, document)
     cleared = _clear_mark(session, due)
     if not cleared:
-        # A mark still standing after a SUCCESSFUL fold — either one that
-        # arrived mid-fold, or one this protocol was carrying from the staleness
-        # arm. Either way it must not inherit the attempt count of the failures
-        # that preceded this success.
+        # A mark remaining after success must not inherit the failure count.
         _reset_backoff(session, due.protocol_id)
     try:
         session.commit()
     except Exception:
-        # The other half of the orphan accounting in ``persist``: a spilled body
-        # whose row never commits is an object nothing names.
+        # The other half of ``persist``'s orphan accounting.
         if row.storage_key:
             logger.warning(
                 "protocol score document orphaned in object storage: commit failed",
                 extra={"protocol_id": due.protocol_id, "storage_key": row.storage_key},
             )
         raise
-    # Both lines are emitted AFTER the commit, so the score is already durable.
-    # A summary that raised would be caught by the pass as a fold failure and
-    # would arm the backoff for a protocol that succeeded — reporting is not
-    # allowed to unmake work.
+    # After the commit: a raising summary would arm backoff for a protocol that succeeded.
     try:
         logger.info(
             "protocol score written",
@@ -496,9 +383,7 @@ def score_protocol(session: Session, due: DueProtocol) -> Any:
                 "duration_ms_total": sum(durations.values()),
             },
         )
-        # The index over the documents: a pricing regression is a step change
-        # between two of these lines rather than a document diff nobody runs.
-        logger.info("score document summary", extra=document_summary(document, universe))
+        logger.info("score document summary", extra=document_summary(document))
     except Exception:
         logger.warning("score summary emit failed", exc_info=True, extra={"protocol_id": due.protocol_id})
     return row
@@ -513,7 +398,6 @@ def score_due_protocols(
     backoff_base_s: int = DEFAULT_RETRY_BACKOFF_S,
     backoff_cap_s: int = DEFAULT_RETRY_BACKOFF_CAP_S,
 ) -> PassCounters:
-    """One pass: select, fold each, emit exactly one cycle summary."""
     started = time.monotonic()
     counters = PassCounters()
     due = select_due_protocols(
@@ -532,11 +416,7 @@ def score_due_protocols(
             score_protocol(session, item)
             counters.scored += 1
         except Exception as exc:
-            # One protocol's fold failing is not evidence about any other, and
-            # its mark deliberately stays: an unscored protocol must re-select
-            # next pass rather than be silently dropped from the queue. What it
-            # does NOT keep is its place at the front — the backoff is what
-            # stops a poison row from holding a pass slot forever.
+            # The mark stays so the protocol re-selects next pass; backoff keeps it from holding the slot.
             session.rollback()
             _record_failure(session, item, warn_after=warn_after)
             counters.failures += 1
@@ -551,8 +431,7 @@ def score_due_protocols(
         HEARTBEAT_PROTOCOL_SCORE,
         started=started,
         contracts_scanned=counters.considered,
-        # A fold reads planes, not a block range; 0 under-claims rather than
-        # inventing a span.
+        # A fold reads planes, not blocks; 0 under-claims.
         blocks_scanned=0,
         events_found=counters.scored,
         partial=counters.failures > 0,
@@ -569,7 +448,6 @@ def score_due_protocols(
 
 
 def run_score_loop(interval: float = DEFAULT_SCORE_INTERVAL, stop_event: Event | None = None) -> None:
-    """Run the protocol-score fold until *stop_event* is set."""
     from db.models import SessionLocal
 
     stop_event = stop_event or Event()
@@ -584,8 +462,7 @@ def run_score_loop(interval: float = DEFAULT_SCORE_INTERVAL, stop_event: Event |
                 exc_info=True,
                 extra={"exc_type": type(exc).__name__},
             )
-            # The pass raised before it could emit its own summary — still beat,
-            # so a wedged loop is visible on /api/fleet rather than silent.
+            # Still beat so a wedged loop shows on /api/fleet.
             record_heartbeat(
                 HEARTBEAT_PROTOCOL_SCORE,
                 status="degraded",

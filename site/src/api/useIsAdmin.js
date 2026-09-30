@@ -2,10 +2,7 @@ import { useSyncExternalStore } from "react";
 
 import { getAdminKey } from "./client.js";
 
-// Reactive "an admin key is present" flag for gating operator UI.
-// setAdminKey() dispatches 'psat:adminkey' for same-tab login/logout;
-// 'storage' covers changes made in another tab. Subscribers re-render
-// the instant the key appears or clears.
+// 'psat:adminkey' covers same-tab changes; 'storage' covers other tabs.
 function subscribe(callback) {
   window.addEventListener("psat:adminkey", callback);
   window.addEventListener("storage", callback);

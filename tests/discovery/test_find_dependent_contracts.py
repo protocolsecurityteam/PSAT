@@ -13,26 +13,21 @@ pytestmark = pytest.mark.usefixtures("_stub_rpc_bytecode")
 
 
 def test_normalize_address_and_extract_push20():
-    # normalize_address: strips prefix, lowercases
     assert fdc.normalize_address("0xAbCd" + "0" * 36) == "0xabcd" + "0" * 36
     assert fdc.normalize_address("AbCd" + "0" * 36) == "0xabcd" + "0" * 36
 
-    # has_deployed_code
     assert fdc.has_deployed_code("0x60016000") is True
     assert fdc.has_deployed_code("0x") is False
     assert fdc.has_deployed_code("0x0") is False
 
-    # extract_push20_addresses: empty / no PUSH20
     assert fdc.extract_push20_addresses("0x") == set()
     assert fdc.extract_push20_addresses("0x6001") == set()
 
-    # extract_push20_addresses: single embedded address
     addr = "aabbccddee11223344556677889900aabbccddee"
     bytecode = "0x73" + addr + "60"  # PUSH20 <addr> PUSH1
     result = fdc.extract_push20_addresses(bytecode)
     assert "0x" + addr in result
 
-    # extract_push20_addresses: filters zero address
     zero_addr = "0" * 40
     bytecode = "0x73" + zero_addr + "73" + addr + "00"
     result = fdc.extract_push20_addresses(bytecode)
@@ -46,13 +41,11 @@ def test_normalize_address_and_extract_push20():
     result = fdc.extract_push20_addresses(bytecode)
     assert result == set()
 
-    # extract_push20_addresses: multiple addresses
     addr2 = "1122334455667788990011223344556677889900"
     bytecode = "0x73" + addr + "73" + addr2 + "00"
     result = fdc.extract_push20_addresses(bytecode)
     assert result == {"0x" + addr, "0x" + addr2}
 
-    # extract_push20_addresses: odd-length hex returns empty
     assert fdc.extract_push20_addresses("0x600") == set()
 
 
@@ -61,7 +54,6 @@ def test_normalize_address_and_extract_push20():
 # ---------------------------------------------------------------------------
 
 
-# Verifies find_dependencies raises when no RPC is available.
 def test_find_dependencies_raises_without_rpc(monkeypatch):
     monkeypatch.delenv("ETH_RPC", raising=False)
     monkeypatch.delenv("ERPC_BASE_URL", raising=False)
@@ -71,8 +63,6 @@ def test_find_dependencies_raises_without_rpc(monkeypatch):
         fdc.find_dependencies("0x1111111111111111111111111111111111111111")
 
 
-# Verifies find_dependencies uses the explicitly provided RPC URL and
-# does not echo it into the returned artifact body.
 def test_find_dependencies_uses_explicit_rpc(monkeypatch):
     monkeypatch.setattr(fdc, "load_dotenv", lambda _path: None)
     captured: dict[str, str] = {}
@@ -92,7 +82,6 @@ def test_find_dependencies_uses_explicit_rpc(monkeypatch):
     assert "rpc" not in out, "rpc URL must not be echoed back in the artifact body"
 
 
-# Verifies find_dependencies falls back to the eRPC route when no explicit RPC is given.
 def test_find_dependencies_uses_erpc_when_no_explicit(monkeypatch):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
     monkeypatch.delenv("ETH_RPC", raising=False)
@@ -116,14 +105,12 @@ def test_find_dependencies_uses_erpc_when_no_explicit(monkeypatch):
 
 
 def test_discover_dependencies_bfs_mocked(monkeypatch):
-    """BFS discovers transitive deps, handles back-references, and excludes EOAs."""
     root = "0x1111111111111111111111111111111111111111"
     dep_a = "0x2222222222222222222222222222222222222222"
     dep_b = "0x3333333333333333333333333333333333333333"
     dep_c = "0x4444444444444444444444444444444444444444"
 
     def _bc(*addrs: str) -> str:
-        """Build minimal bytecode with PUSH20 for each address."""
         return "0x" + "".join("73" + a[2:] for a in addrs) + "00"
 
     code_map = {
@@ -143,7 +130,6 @@ def test_discover_dependencies_bfs_mocked(monkeypatch):
 
 
 def test_discover_dependencies_raises_on_empty_root(monkeypatch):
-    """discover_dependencies raises if root has no deployed bytecode."""
     monkeypatch.setattr(fdc, "get_code", lambda _rpc, _addr, chain_id=None: "0x")
     with pytest.raises(RuntimeError, match="no deployed bytecode"):
         fdc.discover_dependencies("https://rpc.example", "0x" + "11" * 20)

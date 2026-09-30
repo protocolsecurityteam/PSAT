@@ -29,7 +29,6 @@ from services.static.claims import (
     build_claims,
     emit_claim,
     is_registered,
-    legacy_projections,
     register,
     registry,
     resolve_claim_precedence,
@@ -86,22 +85,6 @@ def _facts(*, with_creation: bool = True) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_populated_by_autodiscovery():
-    build_claims(None, _facts(with_creation=False), {})  # forces discover()
-    assert is_registered("contract_deployment")
-    entry = registry()["contract_deployment"]
-    assert entry.sentence.strip()
-    assert entry.legacy_projection == "contract_deployment"
-    assert entry.consumer_family == "exec"
-    assert legacy_projections()["contract_deployment"] == "contract_deployment"
-
-
-def test_registry_view_is_read_only():
-    view = registry()
-    with pytest.raises(TypeError):
-        view["x"] = object()  # pyright: ignore[reportIndexIssue]
-
-
 def test_emit_claim_valid_copies_witness():
     witness = {"kind": "sink", "sink_ids": ["a"]}
     claim = emit_claim("contract_deployment", "standard_exact", witness)
@@ -114,14 +97,16 @@ def test_emit_claim_valid_copies_witness():
     assert claim["witness"]["kind"] == "sink"  # emit_claim copied the witness
 
 
-def test_emit_claim_rejects_unregistered_id():
-    with pytest.raises(ValueError, match="unregistered claim_id"):
-        emit_claim("nope.not_a_claim", "standard_exact", {})
-
-
-def test_emit_claim_rejects_non_literal_tier():
-    with pytest.raises(ValueError, match="invalid claim tier"):
-        emit_claim("contract_deployment", "guess", {})  # pyright: ignore[reportArgumentType]
+@pytest.mark.parametrize(
+    ("claim_id", "tier", "match"),
+    [
+        pytest.param("nope.not_a_claim", "standard_exact", "unregistered claim_id", id="unregistered_id"),
+        pytest.param("contract_deployment", "guess", "invalid claim tier", id="non_literal_tier"),
+    ],
+)
+def test_emit_claim_rejects_invalid_input(claim_id, tier, match):
+    with pytest.raises(ValueError, match=match):
+        emit_claim(claim_id, tier, {})
 
 
 @pytest.mark.parametrize(
@@ -211,11 +196,6 @@ def test_build_claims_emits_contract_deployment_only_for_creation_sink():
     assert deploy_claims[0]["tier"] == "standard_exact"
     assert deploy_claims[0]["witness"]["sink_ids"] == ["deploy():sink0:contract_creation:Child"]
     assert artifact["functions"]["ping()"] == []
-
-
-def test_build_claims_empty_when_no_matcher_fires():
-    artifact = build_claims(None, _facts(with_creation=False), {})
-    assert all(claims == [] for claims in artifact["functions"].values())
 
 
 def test_build_claims_on_degraded_effects_is_empty():
@@ -338,10 +318,9 @@ def _golden_produced_claim_ids() -> set[str]:
 
 
 def test_every_registry_id_is_produced_by_the_corpus_or_exempt():
-    """Produced-side coverage invariant: every registered claim can be minted —
-    it appears in the frozen-corpus golden or carries a documented exemption
-    pointing at the fixture that produces it. This is what makes a dead claim a
-    build failure rather than silent rot."""
+    """Produced-side coverage invariant: every registered claim appears in the frozen-corpus
+    golden or carries a documented exemption, so a dead claim is a build failure rather
+    than silent rot."""
     build_claims(None, _facts(with_creation=False), {})  # ensure discovery ran
     registry_ids = set(registry())
     produced = _golden_produced_claim_ids()

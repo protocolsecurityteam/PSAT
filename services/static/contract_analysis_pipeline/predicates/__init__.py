@@ -1,25 +1,8 @@
-"""Predicate builder — produces a ``PredicateTree`` per function.
+"""Predicate builder: a ``PredicateTree`` per function.
 
-For each function:
-  1. Run ``RevertDetector`` to find all gated revert paths.
-  2. Run ``ProvenanceEngine`` to classify every SSA value's source(s).
-  3. For each RevertGate, walk the condition value's defining IR back
-     to its structural shape (Binary equality, Index membership, Unary
-     negation, HighLevelCall returning bool, ecrecover comparison) and
-     emit a ``LeafPredicate`` with kind + operator + operands.
-  4. Apply polarity normalization: ``if (R) revert`` becomes the leaf
-     for the allowed condition (NOT R), with the NOT pushed into the
-     leaf's operator (no NOT survives in the tree).
-  5. Combine leaves into a tree: multiple sequential gates AND at the
-     root.
-
-This module is the main user of ``ProvenanceEngine`` + ``RevertDetector``
-and the producer of the semantic ``predicate_tree`` artifact field.
-
-Scope of this initial cut: equality / membership leaves with the
-caller_authority detection rules from v6 round-5 #1. external_bool /
-signature_auth / comparison / unsupported leaves are added in
-follow-ups (this commit lays the scaffold + the two most common kinds).
+RevertDetector finds gated revert paths, ProvenanceEngine classifies SSA values, and each gate's condition is walked
+back to its structural shape (equality, membership, negation, bool-returning call, ecrecover) to emit a leaf. Polarity
+is normalized so ``if (R) revert`` yields the allowed condition (no NOT survives); sequential gates AND at the root.
 """
 
 from __future__ import annotations

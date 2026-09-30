@@ -1,11 +1,6 @@
-"""Shared Plane-0 fact readers for the behavior-family matchers.
+"""Shared fact readers for the behavior matchers (registers no claims).
 
-Underscore-prefixed so matcher auto-discovery skips it — it registers no
-claims. Everything here reads the tolerant :class:`ClaimContext` view (effects
-facts + predicate trees + the Slither subject) and, where a signal only exists
-in IR, the ``contract`` object. Per-contract derivations that several triggers
-share (pause targets, address-pointer writers) are memoized against the context
-instance so a full ``build_claims`` pass computes them once.
+Per-contract derivations are memoized per ``ClaimContext`` so a ``build_claims`` pass computes them once.
 """
 
 from __future__ import annotations
@@ -23,16 +18,10 @@ from utils.scoring_status import (
 from ...contract_analysis_pipeline.record_ordering import W2_BASIS_CLEAR_DOMINATES_CALLS
 from ..context import ClaimContext, abi_selector, selector_of
 
-# Per-context memo tables (keyed by the ClaimContext instance, which lives only
-# for one contract's build_claims pass).
+# Keyed by the per-contract ClaimContext.
 _PAUSE_TARGETS: WeakKeyDictionary[ClaimContext, set[tuple[str, str | None]]] = WeakKeyDictionary()
 _MANDATORY_READS: WeakKeyDictionary[ClaimContext, set[tuple[str, str | None]]] = WeakKeyDictionary()
 _TOTAL_SUPPLY_VARS: WeakKeyDictionary[ClaimContext, set[str]] = WeakKeyDictionary()
-
-
-# ---------------------------------------------------------------------------
-# Predicate-tree readers
-# ---------------------------------------------------------------------------
 
 
 def _iter_leaves(tree: Any) -> Any:
@@ -52,23 +41,19 @@ def tree_has_role(tree: Any, roles: tuple[str, ...]) -> bool:
 
 
 def tree_is_authority_gated(tree: Any) -> bool:
-    """The function's guard depends on the caller's identity/authority."""
     return tree_has_role(tree, ("caller_authority", "delegated_authority"))
 
 
 def tree_is_one_shot(tree: Any) -> bool:
-    """An initializer latch (``initializer``/``reinitializer``) — writes here
-    are a one-time set, never a recurring toggle."""
+    """An initializer latch: writes are one-time sets, never a toggle."""
     return tree_has_role(tree, ("one_shot",))
 
 
 def _mandatory_operands(tree: Any) -> set[tuple[str, str | None]]:
-    """State-var operands read on a *mandatory* gate path — every ancestor is a
-    conjunction (``AND``), so the operand's value can force a revert with no
-    ``OR`` escape. This is the structural separator between a real pause gate
-    (``if (paused) revert`` at the top level) and a mode selector under a branch
-    (``if (executorRequired) require(sig)`` — reachable via an ``OR`` in the
-    tree)."""
+    """State-var operands on a mandatory gate path (only ``AND`` ancestors, so the value can force a revert with no
+    ``OR`` escape). Separates a real pause gate from a mode selector under a branch (``if (executorRequired)
+    require(sig)``).
+    """
     out: set[tuple[str, str | None]] = set()
 
     def walk(node: Any, mandatory: bool) -> None:
@@ -99,8 +84,7 @@ def _mandatory_operands(tree: Any) -> set[tuple[str, str | None]]:
 
 
 def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
-    """Every ``(var, member)`` pair read as a mandatory revert gate anywhere in
-    the contract's predicate trees (cached per contract)."""
+    """Every ``(var, member)`` read as a mandatory revert gate in the contract (cached)."""
     cached = _MANDATORY_READS.get(ctx)
     if cached is not None:
         return cached
@@ -113,123 +97,38 @@ def mandatory_gate_reads(ctx: ClaimContext) -> set[tuple[str, str | None]]:
     return reads
 
 
-# ---------------------------------------------------------------------------
-# Parameter destination constraints
-# ---------------------------------------------------------------------------
+# Parameter destination constraints: does a mandatory revert gate reference each ABI parameter between entry and sink?
+# Three states:
 #
-# Answers, per ABI parameter: *does a mandatory revert gate reference this
-# parameter between entry and sink?* — three states:
+# ``constrained``: a mandatory leaf ties the parameter to something the caller doesn't control; the verdict names the
+# guard. ``unconstrained_proven``: the tree exists, no mandatory leaf pins or opaquely touches the parameter, and every
+# mandatory leaf's operand account is checkably complete; a leaf's silence is only evidence when its account is
+# trustworthy. ``not_determined``: everything else.
 #
-#   ``constrained``           a mandatory leaf references the parameter against
-#                             something outside the caller's control, and the
-#                             verdict names which guard and where.
-#   ``unconstrained_proven``  the predicate tree is present, NO mandatory leaf
-#                             pins or opaquely touches the parameter, AND the
-#                             projection was checkable: every mandatory leaf's
-#                             operand account is complete as far as this walk
-#                             can verify. A leaf's SILENCE about a parameter is
-#                             only evidence when the account of what it reads is
-#                             itself trustworthy — the governing rule cuts here
-#                             hardest, because this state is a published proof
-#                             of absence.
-#   ``not_determined``        the analysis did not settle it: no tree, an
-#                             unsupported/opaque mandatory leaf, a
-#                             parameter-referencing leaf whose semantics this
-#                             walk cannot classify, or a leaf whose operand
-#                             projection is demonstrably or possibly incomplete.
+# Completeness checks (each guards a measured over-claim): a leaf whose ``expression`` names a parameter its operands
+# don't carry blocks that parameter; a non-membership leaf reading a keyed collection without its key blocks every
+# parameter; a record without ``parameter_names`` can't be checked, so proves nothing. Leaf ``confidence`` grades the
+# authority classification, not the operand account, so it isn't consulted.
 #
-# Three projection-completeness checks guard the ``unconstrained_proven`` state
-# (each one is a real, measured lossiness of the leaf projection — reading its
-# silence as proof demonstrably over-claims on production rows):
+# Proven OZ timelock ``execute`` and Safe ``execTransaction`` entries commit every parameter by the standard's shape
+# (shared with ``exec.arbitrary`` so the witnesses agree). Safe module-exec entries don't: their gate allowlists the
+# caller only.
 #
-#   * A leaf whose ``expression`` names a declared parameter the leaf's operands
-#     do not account for (CumulativeMerkleDrop.claim's ``! verify(account, …)``
-#     projected only ``expectedMerkleRoot``) blocks that parameter.
-#   * A non-membership leaf reading a keyed collection (mapping/array state var)
-#     with no account of the KEY (EtherFiTimelock's ``isOperationReady(id)``
-#     folds ``_timestamps[id]`` to the bare mapping — ``id`` is parameter-derived
-#     and invisible) blocks every parameter: the dropped key can be any of them.
-#   * A function record with no ``parameter_names`` list cannot be
-#     expression-checked at all, so nothing about it may be called proven.
+# A mandatory leaf that is the revert surface of the call carrying the described effect is transparent
+# (``safeTransfer(_to, bal)`` reverting constrains nothing). The join is against the facts, matching selector or bare
+# callee name (declared signatures with interface params hash differently). View/pure external callees are real
+# preconditions; other effectful callees stay unresolved.
 #
-# ``confidence`` on the leaf is deliberately NOT consulted: it grades the
-# authority classification, not the operand account — the same lossy
-# ``isOperationReady(id)`` fold carries ``low`` on its business half and
-# ``high`` on its time half, so it cannot discriminate a complete projection
-# from a lossy one in either direction.
-#
-# Standard-gate pre-pass: on a proven OZ TimelockController execute entry every
-# ABI parameter is re-hashed into the operation id a mandatory gate requires
-# scheduled, and on a proven Safe ``execTransaction`` every parameter rides
-# under the owners' signature threshold. Those commitments come from the
-# STANDARD's shape (the same gates ``exec.arbitrary`` uses), not from the tree
-# walk — and routing them through here means the flow witness and the exec
-# witness publish the SAME verdict for the same parameter instead of
-# contradicting each other. Safe's module-exec entries
-# (``execTransactionFromModule*``) are deliberately NOT in the pre-pass: their
-# standard gate is ``modules[msg.sender] != address(0)`` — an allowlist on the
-# CALLER. No signature commits ``to``; an enabled module calls any target with
-# any calldata, so the standard commits nothing about any parameter and the
-# ordinary tree walk answers instead (publishing ``pins: True`` there would be a
-# proof fabricated from the standard's shape).
-#
-# The tightened rule: a mandatory leaf constrains a
-# parameter only if it is NOT the function's own effect sink. The sink's own
-# revert surface mentions its destination argument vacuously —
-# ``safeTransfer(_to, bal)`` reverting on failure is not a constraint on
-# ``_to``, and neither is ``target.call(data)`` reverting on ``!ok`` — so a
-# leaf that IS the revert surface of the call carrying the described effect is
-# transparent. Without it ``sweepDust`` — the positive control — classifies as
-# constrained, which is a false positive.
-#
-# The join is against the FACTS (``value_flows`` selectors and
-# ``_facts.body_sinks``), never against a claim witness's ``sink_ids``, which is
-# empty on ``value_router``. It matches a selector OR the callee's bare name,
-# because a predicate leaf records the DECLARED signature
-# (``exit(address,IERC20,uint256,…)``) whose hash is not the selector the sink
-# recorded — there is no selector to compare on exactly that shape.
-#
-# ``external_call_revert`` leaves are NOT blanket-excluded. Two independent
-# discriminators keep the genuine ones: a **view/pure** callee moves nothing, so
-# its revert surface is a real precondition (``forwardExternalCall``'s
-# ``deployedEtherFiNodes(...)``), and an effectful callee that is NOT one of
-# this function's effect sinks is left unresolved rather than assumed away.
-#
-# ``derived_from`` (the commitment provenance) is consumed but NOT treated as
-# ground truth: it is flow-insensitive, so a local reassignment misbinds the
-# origin — it can OMIT a genuinely committed parameter and PUBLISH one that only
-# reaches the name on another branch. Two bounds follow:
-#   * positive direction: a ``derived_from`` binding may prove ``constrained``
-#     (the guard is real), but never ``pins: True`` — the verdict carries
-#     ``pins: None`` and ``binding: "derived_from"``, because a flow-insensitive
-#     union cannot prove the guard confines THIS parameter on every path, and
-#     ``pins`` is the one field allowed to soften the caller-chosen reading;
-#   * negative direction: a parameter's ABSENCE from every ``derived_from``
-#     proves nothing, so any mandatory leaf carrying a computed operand blocks
-#     ``unconstrained_proven`` for every parameter it does not positively
-#     constrain (they land on ``not_determined``).
+# ``derived_from`` is flow-insensitive: a binding through it may prove ``constrained`` but never ``pins: True``, and
+# absence from it proves nothing, so computed operands block ``unconstrained_proven``.
 
 _MEMBERSHIP_SET_KINDS = frozenset({"mapping_membership", "array_contains", "external_set"})
 _EXTERNAL_GATE_KINDS = frozenset({"external_call_revert", "try_catch_revert"})
 
-# Whether each guard kind PINS the destination — the three-state answer a
-# ``constrained`` verdict carries as ``pins`` (a consumer must be able to
-# tell proven-pins from proven-does-not-pin from not-determined, because only
-# the first may soften the caller-chosen / theft-shaped reading downstream):
-#
-#   True   the guard confines the parameter to a set the caller did not write
-#          (an allowlist, a hash/signature commitment, equality vs storage).
-#   False  the guard provably does NOT pin: a denylist excludes a set and
-#          leaves the rest of the address space freely chosen; an ordering
-#          bound never confines an identity.
-#   None   the guard is real but its set semantics are another contract's
-#          (``external_call_revert``): a ``nonBlacklisted(addr)`` blacklist and
-#          a ``deployedEtherFiNodes(addr)`` allowlist present the identical
-#          revert-surface shape here, so whether it pins is NOT determined —
-#          and on the local artifacts every ``constrained`` flow row (4/4,
-#          EtherFiRedemptionManager.redeem*) is this kind and is in fact a
-#          blacklist. Publishing those as if they pinned dropped the
-#          caller-chosen signal on all four.
+# Whether a guard kind pins the parameter (only a proven pin may soften the caller-chosen reading): True confines it to
+# a set the caller didn't write (allowlist, commitment, equality vs storage); False provably doesn't (denylist, ordering
+# bound); None when the set semantics belong to another contract (``external_call_revert``: a blacklist and an allowlist
+# look identical here, and the ones observed were blacklists).
 _GUARD_PINS: dict[str, bool | None] = {
     "mapping_allowlist": True,
     "hash_commitment": True,
@@ -241,27 +140,10 @@ _GUARD_PINS: dict[str, bool | None] = {
     "external_call_revert": None,
 }
 
-# An ``unsupported`` leaf publishes ``operands: []`` and ``parameter_indices:
-# []`` unconditionally (``predicates._unsupported_leaf``), so its silence about
-# parameters is a construction artifact and it must normally block the
-# unconstrained proof. Two reason classes are exceptions **because of what the
-# gate's inputs structurally are**, not because they look harmless:
-#
-#   ``solidity_call_abi.decode()…``  gates on a CALL'S RETURNDATA. Its input is
-#       the callee's output; the constraint it expresses is that callee's
-#       revert surface, which the sibling ``external_bool`` leaf already carries
-#       WITH the callee identity and the parameters. (SafeERC20's
-#       ``_callOptionalReturn`` emits exactly this pair.)
-#   ``solidity_call_tload(…)`` / ``solidity_call_sload(…)``  gates on a storage
-#       slot read; its input is a slot literal.
-#
-# Neither can reach an ABI parameter, so neither blocks. Every other reason —
-# ``opaque_try_catch`` above all, whose expression routinely carries parameters
-# (``depositAsset.permit(msg.sender, vault, depositAmount, …)``) — keeps
-# blocking, and an unrecognised reason blocks by default (fail toward
-# ``not_determined``). Census over every mandatory unsupported leaf in the local
-# artifacts: tload 68, opaque_try_catch 60, abi.decode 31 — no other reason
-# exists there, and a new one arriving under-claims rather than over-claims.
+# An ``unsupported`` leaf always publishes empty operands, so its silence normally blocks the proof. Exceptions, by what
+# the gate's input structurally is: ``abi.decode`` gates on call returndata (the sibling ``external_bool`` leaf carries
+# the callee and parameters, as in SafeERC20), and ``tload``/``sload`` gate on a slot literal. Everything else, notably
+# ``opaque_try_catch`` and unknown reasons, keeps blocking.
 _NON_PARAMETRIC_UNSUPPORTED_PREFIXES = (
     "solidity_call_abi.decode()",
     "solidity_call_tload(",
@@ -285,11 +167,9 @@ _IDENTIFIER_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 
 
 def _declared_param_indices(ctx: ClaimContext, function: str) -> dict[str, int] | None:
-    """``{parameter_name: abi_index}`` from the effect record's
-    ``parameter_names``, or ``None`` when the record does not carry the list
-    (every function in the local corpus does — 2,415/2,415 — so ``None`` is the
-    stale-artifact shape). Without it the expression cross-check below cannot
-    run, and an uncheckable projection never supports a proof of absence."""
+    """``{parameter_name: abi_index}`` from the record's ``parameter_names``, or ``None`` on stale artifacts (then
+    nothing can be proven absent).
+    """
     record = ctx.effect_record(function)
     names = record.get("parameter_names")
     if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
@@ -298,14 +178,11 @@ def _declared_param_indices(ctx: ClaimContext, function: str) -> dict[str, int] 
 
 
 def _unaccounted_param_mentions(leaf: dict[str, Any], name_indices: dict[str, int], accounted: set[int]) -> set[int]:
-    """Parameter indices the leaf's rendered ``expression`` names but its
-    operand account does not carry. The expression is the builder's own record
-    of what the gate textually touches; a parameter present there and absent
-    from the operands is the projection dropping a reference
-    (``! verify(account, …)`` carrying only ``expectedMerkleRoot``), and that
-    silence must not become a proof. Free text in revert strings can collide
-    with a parameter name — that costs an under-claim (``not_determined``),
-    never an over-claim."""
+    """Parameter indices the leaf's expression names but its operands don't carry: the projection dropped a
+    reference.
+
+    Revert-string collisions only cost an under-claim.
+    """
     expression = leaf.get("expression")
     if not isinstance(expression, str) or not expression or not name_indices:
         return set()
@@ -318,11 +195,9 @@ def _unaccounted_param_mentions(leaf: dict[str, Any], name_indices: dict[str, in
 
 
 def keyed_collection_vars(ctx: ClaimContext) -> frozenset[str]:
-    """State variables declared as keyed collections (mappings / arrays),
-    learned from the ``declared_type`` the state-write facts record anywhere in
-    the contract (cached per contract). Used to spot a leaf that folded an
-    ELEMENT read down to the bare collection variable — the key is gone, and
-    with it any account of which parameter selects the gating cell."""
+    """State variables declared as mappings or arrays (cached), to spot a leaf that folded an element read down to
+    the bare collection.
+    """
     cached = _KEYED_COLLECTIONS.get(ctx)
     if cached is not None:
         return cached
@@ -343,13 +218,9 @@ def keyed_collection_vars(ctx: ClaimContext) -> frozenset[str]:
 
 
 def _reads_keyed_collection_without_key(leaf: dict[str, Any], collections: frozenset[str]) -> bool:
-    """True when a non-membership leaf carries a mapping/array state variable as
-    a bare operand. Solidity cannot compare a collection itself, so the operand
-    is an element read whose key the projection dropped
-    (``_timestamps[id] > _DONE_TIMESTAMP`` recorded as ``_timestamps`` vs
-    ``_DONE_TIMESTAMP``); the dropped key may be derived from any parameter. A
-    membership leaf accounts its keys in ``set_descriptor.key_sources`` and an
-    array ``length`` read has no element key, so both pass."""
+    """True when a non-membership leaf carries a mapping/array as a bare operand: an element read whose key (possibly
+    parameter-derived) was dropped. Membership leaves and ``length`` reads account for their keys.
+    """
     if not collections:
         return False
     if leaf.get("kind") == "membership" and isinstance(leaf.get("set_descriptor"), dict):
@@ -367,25 +238,12 @@ def _reads_keyed_collection_without_key(leaf: dict[str, Any], collections: froze
 
 
 def standard_destination_commitment(ctx: ClaimContext, function: str) -> dict[str, Any] | None:
-    """The standard-gate constraint verdict covering EVERY ABI parameter of a
-    proven standard exec entry, or ``None`` where the function is not one.
+    """The standard-gate verdict covering every ABI parameter of a proven standard exec entry, or ``None``.
 
-    OZ TimelockController ``execute``/``executeBatch`` re-derive
-    ``hashOperation(target, value, payload, predecessor, salt)`` and require the
-    operation scheduled-and-ready — a hash commitment over the full parameter
-    list. Safe ``execTransaction`` checks the owners' signatures over the
-    transaction — a signature witness over the full parameter list. These are
-    the same contract-shape gates ``exec.arbitrary`` proves its standard tier
-    with; publishing the flow verdict from the same source keeps the two
-    witnesses on one function from ever contradicting each other.
-
-    Safe's module-exec entries (``execTransactionFromModule`` /
-    ``...ReturnData``) get NO commitment here, although they sit in
-    ``SAFE_EXEC_SELECTORS`` and earn ``exec.arbitrary`` at the standard tier:
-    their gate is ``modules[msg.sender] != address(0)`` — an allowlist on the
-    CALLER that says nothing about the destination. An enabled module calls any
-    target with any calldata; the destination answer must come from the
-    mandatory-gate tree walk, which sees exactly that caller-keyed gate."""
+    OZ timelock ``execute``/``executeBatch`` require ``hashOperation(...)`` scheduled and ready (a hash commitment);
+    Safe ``execTransaction`` checks owners' signatures. Module-exec entries get nothing: their gate only allowlists the
+    caller, so the tree walk answers.
+    """
     from ._gates import SAFE_EXEC_TRANSACTION, TIMELOCK_EXECUTE_SELECTORS, is_oz_timelock_gate, is_safe_gate
 
     selector = ctx.canonical_selector(function)
@@ -399,18 +257,9 @@ def standard_destination_commitment(ctx: ClaimContext, function: str) -> dict[st
 def _operand_param_indices(operand: Any) -> tuple[set[int], set[int], bool]:
     """``(direct, derived, opaque)`` parameter references of one operand.
 
-    ``direct`` — the operand IS the parameter. ``derived`` — the operand is a
-    computed value whose ``derived_from`` provenance includes the parameter
-    (flow-insensitive). ``opaque`` — the operand can involve a
-    parameter without saying so.
-
-    Every ``computed`` operand is opaque, including one whose ``derived_from``
-    resolves entirely to parameter/state/constant origins. ``derived_from`` is
-    flow-insensitive: it can OMIT an origin that genuinely feeds
-    the value (Teller ``depositAsset``) while publishing one that only reaches
-    the name on another branch. A list that LOOKS complete therefore proves
-    nothing in the negative direction — it contributes positive ``derived``
-    bindings and nothing else."""
+    Every ``computed`` operand is opaque: ``derived_from`` is flow-insensitive and can omit a real origin, so it only
+    ever adds positive ``derived`` bindings.
+    """
     direct: set[int] = set()
     derived: set[int] = set()
     opaque = False
@@ -438,10 +287,7 @@ def _operand_param_indices(operand: Any) -> tuple[set[int], set[int], bool]:
 
 
 def _leaf_param_refs(leaf: dict[str, Any]) -> tuple[set[int], set[int], bool]:
-    """All parameter references of a leaf: operands, ``set_descriptor``
-    key sources, and the leaf's own ``parameter_indices`` list (which the
-    builder populates from provenance the operand projection may have
-    dropped)."""
+    """Parameter references of a leaf: operands, ``set_descriptor`` key sources, and ``parameter_indices``."""
     direct: set[int] = set()
     derived: set[int] = set()
     opaque = leaf.get("kind") == "unsupported" and _unsupported_leaf_is_parametric(leaf)
@@ -468,10 +314,9 @@ def _leaf_callee_selector(leaf: dict[str, Any]) -> str | None:
 
 
 def _leaf_callee_name(leaf: dict[str, Any]) -> str | None:
-    """The bare callee name of a leaf's signature. The selector is preferred
-    wherever it exists; this is the fallback for a DECLARED signature carrying
-    an interface-typed parameter (``exit(address,IERC20,…)``), whose hash is not
-    the selector the sink recorded and so can never join on one."""
+    """Bare callee name, the fallback join when a declared signature's interface params make its hash differ from the
+    sink's selector.
+    """
     signature = leaf.get("callee_signature")
     if not isinstance(signature, str) or "(" not in signature:
         return None
@@ -480,9 +325,9 @@ def _leaf_callee_name(leaf: dict[str, Any]) -> str | None:
 
 
 def _is_external_callee_leaf(leaf: dict[str, Any]) -> bool:
-    """A leaf whose truth is (or includes) another contract's answer: a
-    result-checked external bool, a signature check, or a statement call whose
-    entire revert surface gates the path."""
+    """A leaf whose truth includes another contract's answer (checked external bool, signature check, or statement
+    call).
+    """
     if leaf.get("kind") in ("external_bool", "signature_auth"):
         return True
     if leaf.get("gate_kind") in _EXTERNAL_GATE_KINDS:
@@ -491,35 +336,16 @@ def _is_external_callee_leaf(leaf: dict[str, Any]) -> bool:
 
 
 def effect_sink_identities(ctx: ClaimContext, function: str, *, mode: str) -> tuple[set[str], set[str]]:
-    """``(selectors, bare callee names)`` of the calls that CARRY the effect a
-    claim is describing — the transparency set for the tightened rule.
+    """``(selectors, bare callee names)`` of the calls carrying the effect a claim describes; their leaves are
+    transparent.
 
-    ``mode="value_flow"`` names the moves in ``value_flows`` plus, on a
-    ``value_router`` flow, its recorded ``router_ops`` — the specific call(s)
-    the producer's walk crossed to find the move. The routed flow's own
-    selector belongs to the CALLEE's inner transfer, so the router call's
-    identity must be carried explicitly; transparency is earned per op, never
-    granted to every body call (a nonview destination guard beside the router —
-    ``guard.checkDestination(to)`` before ``vault.exit(to, …)`` — is NOT the
-    op carrying the move, and its leaf must block the negative proof instead
-    of being swallowed). A routed flow with no recorded ``router_ops`` (an
-    artifact produced before the field existed) makes nothing extra
-    transparent: its router leaf then blocks, i.e. the function falls to
-    ``not_determined`` — the failure direction over-claims nothing and can
-    never mint ``unconstrained_proven``.
+    ``value_flow``: the moves in ``value_flows`` plus a routed flow's ``router_ops``. Transparency is per op: a
+    destination guard beside the router must still block. No ``router_ops`` makes nothing extra transparent (falls to
+    ``not_determined``).
 
-    ``mode="external_call"`` names only the body calls whose destination is
-    PROVEN parameter-rooted in IR (:func:`_taint.proven_param_destination_call_identities`).
-    For a claim whose effect IS an external call (``exec.arbitrary``), the
-    described call's own revert surface is vacuous about the caller's choice —
-    but that vacuousness is a property of the call's destination, not of being
-    a body call. A nonview callee with a fixed or unresolved receiver (a
-    Safe/Zodiac transaction guard vetting ``(target, data)``) stays OUTSIDE
-    this set, so its mandatory leaf blocks the negative proof below instead of
-    being swallowed; without it a guarded function and an open one published
-    the same ``unconstrained_proven``. Without a Slither subject nothing is
-    provable and the set is empty — every effectful-callee leaf then blocks,
-    which under-claims and never proves."""
+    ``external_call``: only body calls whose destination is proven parameter-rooted. A guard with a fixed receiver (a
+    Safe transaction guard) stays outside, so it blocks. Without a Slither subject the set is empty (under-claims).
+    """
     if mode == "external_call":
         from . import _taint
 
@@ -546,18 +372,14 @@ def effect_sink_identities(ctx: ClaimContext, function: str, *, mode: str) -> tu
 
 
 def _classify_constraining_leaf(leaf: dict[str, Any], via_derived: bool) -> str | None:
-    """The guard kind a mandatory leaf pins a referenced parameter with, or
-    ``None`` when the leaf pins nothing (a zero-address check, a compare whose
-    only other operand is a constant). Callers have already handled the
-    external-callee exclusion, so this only reads the leaf's own structure."""
+    """The guard kind a mandatory leaf pins a referenced parameter with, or ``None`` (zero-address check, compare
+    against a constant).
+    """
     kind = leaf.get("kind")
     operator = leaf.get("operator")
     descriptor = leaf.get("set_descriptor")
     if kind == "membership" and isinstance(descriptor, dict) and descriptor.get("kind") in _MEMBERSHIP_SET_KINDS:
-        # The polarity-folded leaf records the ALLOWED form: truthy membership
-        # is an allowlist; falsy is a denylist — recorded as a guard, but a
-        # denylist excludes a set without pinning the destination, and the
-        # consumer must keep treating it as caller-chosen.
+        # Leaves record the allowed form: truthy membership is an allowlist, falsy a denylist (which doesn't pin).
         return "denylist" if operator in ("falsy", "ne") else "mapping_allowlist"
     if kind == "signature_auth":
         return "signature_witness"
@@ -565,7 +387,6 @@ def _classify_constraining_leaf(leaf: dict[str, Any], via_derived: bool) -> str 
         return "external_call_revert"
     if kind in ("equality", "comparison"):
         if operator in ("ne", "falsy"):
-            # Allowed form "!= x" excludes one value; it pins nothing.
             return None
         if via_derived:
             return "hash_commitment"
@@ -600,17 +421,11 @@ def _mandatory_leaves_with_paths(tree: Any) -> list[tuple[dict[str, Any], list[i
 
 
 def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_flow") -> dict[int, dict[str, Any]]:
-    """Per-parameter-index constraint verdicts for ``function`` (memoized).
+    """Per-parameter constraint verdicts for ``function`` (memoized), ``{index: {state, guard, binding,
+    leaf_path}}``.
 
-    ``mode`` selects which calls carry the described effect and are therefore
-    transparent — see :func:`effect_sink_identities`.
-
-    Returns ``{parameter_index: verdict}`` where each verdict is a witness
-    fragment ``{"state": ..., "guard": ..., "binding": ..., "leaf_path": ...}``.
-    The pseudo-index ``-1`` carries the function-wide default for indices with
-    no verdict of their own; callers use :func:`param_constraint`, which folds
-    it in (``unconstrained_proven`` under a clean tree, ``not_determined``
-    otherwise)."""
+    Index ``-1`` is the function-wide default; use :func:`param_constraint`, which folds it in.
+    """
     memo = _PARAM_CONSTRAINTS.setdefault(ctx, {})
     cached = memo.get((function, mode))
     if cached is not None:
@@ -620,17 +435,14 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
 
     standard = standard_destination_commitment(ctx, function)
     if standard is not None:
-        # The standard's own gate commits every parameter; the tree walk below
-        # could only re-derive a weaker answer from a lossier projection.
+        # The standard commits every parameter; the tree walk could only be weaker.
         verdicts[-1] = standard
         memo[(function, mode)] = verdicts
         return verdicts
 
     tree = ctx.predicate_tree(function)
     if tree is None:
-        # No tree at all: nothing is settled for any parameter. A missing tree
-        # is NOT proof that no gate exists — reading it as "unconstrained" is
-        # exactly the over-claim this state exists to prevent.
+        # No tree: nothing is settled. A missing tree is not proof that no gate exists.
         verdicts[-1] = {"state": "not_determined"}
         memo[(function, mode)] = verdicts
         return verdicts
@@ -640,9 +452,7 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
     collections = keyed_collection_vars(ctx)
 
     blocked: set[int] = set()
-    # A record with no parameter_names list (a pre-enrichment artifact) cannot
-    # be expression-checked, so the completeness of no leaf's account is
-    # verifiable: positives below still mint, but no silence becomes a proof.
+    # Without ``parameter_names`` no leaf's account is checkable: positives still mint, silence proves nothing.
     blocked_all = name_indices is None
     for leaf, path in _mandatory_leaves_with_paths(tree):
         direct, derived, opaque = _leaf_param_refs(leaf)
@@ -657,30 +467,19 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
                     name is not None and name in effect_names
                 )
                 if carries_effect:
-                    # The described effect's own revert surface: mentioning its
-                    # destination argument is vacuous. Fully transparent.
+                    # The described effect's own revert surface: transparent.
                     continue
-                # An effectful callee that is NOT proven to be the described
-                # effect's own call: its revert surface may or may not restrict
-                # the referenced parameters, and nothing here can say which.
-                # Same answer whether the mutability was stamped ``nonview`` or
-                # not stamped at all (an older tree) — neither is evaluable.
+                # An effectful callee not proven to be the described call: unevaluable, whether stamped ``nonview`` or
+                # unstamped.
                 blocked |= direct | derived | mentioned
                 if opaque or keyed_read:
                     blocked_all = True
                 continue
-            # view/pure callee: it moves nothing, so its revert surface is a
-            # genuine precondition — falls through to classification below.
-        # Projection-completeness blocks (see the module comment above): a
-        # parameter the expression names without an operand, and a keyed
-        # collection read whose key the fold dropped, are both the leaf
-        # touching something its account does not carry.
+            # View/pure callees are genuine preconditions and fall through to classification. Parameters named without
+            # an operand, and dropped collection keys, block.
         blocked |= mentioned
         if opaque or keyed_read:
-            # An unsupported leaf / undetermined computed provenance / dropped
-            # collection key may reference any parameter without saying so: it
-            # can never prove a constraint, and it blocks the unconstrained
-            # proof for everyone.
+            # Can reference any parameter silently: blocks the unconstrained proof for all.
             blocked_all = True
         for index in sorted(direct | derived):
             via_derived = index in derived and index not in direct
@@ -694,13 +493,8 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
             verdict: dict[str, Any] = {
                 "state": "constrained",
                 "guard": guard,
-                # Three-state by construction: an unmapped guard kind must not
-                # read as pinning, so absence from the map is None, not False.
-                # A ``derived_from`` binding caps ``pins`` at None regardless of
-                # the guard: the binding is flow-insensitive, so the
-                # guard's set semantics are proven but WHICH parameter it
-                # confines is not — only a proven pin may soften the
-                # caller-chosen reading downstream.
+                # Unmapped guard kinds are None, not False. A ``derived_from`` binding caps ``pins`` at None: which
+                # parameter the guard confines isn't proven.
                 "pins": None if binding == "derived_from" else _GUARD_PINS.get(guard),
                 "binding": binding,
                 "leaf_path": list(path),
@@ -718,12 +512,9 @@ def param_constraints(ctx: ClaimContext, function: str, *, mode: str = "value_fl
 def param_constraint(
     ctx: ClaimContext, function: str, index: int | None, *, mode: str = "value_flow"
 ) -> dict[str, Any]:
-    """The three-state constraint verdict for one parameter index.
-
-    ``index=None`` (the caller could not resolve which parameter) is
-    ``not_determined`` by construction. An index with no recorded verdict
-    inherits the function-wide default: ``unconstrained_proven`` when the tree
-    was present and free of opaque mandatory leaves, else ``not_determined``."""
+    """Three-state verdict for one parameter index; ``None`` index is ``not_determined``, unknown indices inherit the
+    function-wide default.
+    """
     if index is None or not isinstance(index, int):
         return {"state": "not_determined"}
     verdicts = param_constraints(ctx, function, mode=mode)
@@ -736,25 +527,10 @@ def param_constraint(
     return {"state": "unconstrained_proven"}
 
 
-# ---------------------------------------------------------------------------
-# Self-service payout — the W1 amount-record join and the W1 ∧ W2 witness
-# ---------------------------------------------------------------------------
-#
-# A payout is "self-service" when the paid amount is read out of a storage cell
-# the caller is PROVEN to own (W1) AND that cell is cleared before any external
-# call in the function, or a verified reentrancy guard stands in for that order
-# (W2). Every state traces to a witness; a refusal carries the reason it fell
-# short and is never a bare bool. Two separate producer walks meet here — the
-# amount side (``effects/origins.py`` publishes ``amount_record_*`` on the flow)
-# and the guard side (``predicates/operands.py`` stamps ``element_*`` on the leaf
-# operand). Both name the base off Slither's ``StateVariable.canonical_name`` (the DECLARING
-# contract, so an inherited var reads the same on both sides), so the join
-# compares canonical names and refuses on any disagreement rather than guessing.
-#
-# ``unconstrained_proven`` is deliberately never minted for W1: proving the
-# caller does NOT own the cell is an absence proof, and reading a missing
-# owner-guard as "not owned" is exactly the over-claim discipline forbids. W1 is
-# ``constrained`` (proven owned) or ``not_determined``.
+# Self-service payout: the amount is read from a storage cell the caller is proven to own (W1) and that cell is cleared
+# before any external call, or a verified reentrancy guard covers it (W2). The amount side (effects ``amount_record_*``)
+# and guard side (predicates ``element_*``) both name the base by ``StateVariable.canonical_name``, so the join refuses
+# on disagreement. W1 is never ``unconstrained_proven``: not owning a cell is an absence proof.
 
 _W1_KEYED_BY_CALLER = "keyed_by_caller"
 _W1_OWNER_GUARDED_RECORD = "owner_guarded_record"
@@ -765,15 +541,11 @@ _W1_RECORD_MISMATCH = "record_mismatch"
 _W1_KEY_INDEX_DISAGREEMENT = "key_index_disagreement"
 _W1_GUARD_NOT_MANDATORY = "guard_not_mandatory"
 
-# W2 bases: U3's basis is imported from its producer so the payload names one
-# vocabulary; U4's ``verified_guard`` is normalized here.
 _W2_VERIFIED_GUARD = "verified_guard"
 
 _W2_GUARD_FUNCTION_NOT_ANALYZED = "function_not_analyzed"
 
-# The full closed vocabulary the fact publishes, for the reviewer and for a
-# consumer that wants to assert it never sees an unlisted token. W1 reasons,
-# U3's ordering reasons, U4's guard reasons, and the two positive states.
+# The closed vocabulary the fact publishes: W1 reasons, ordering and guard refusals, and the two positive states.
 SELF_SERVICE_REFUSAL_REASONS = frozenset(
     {
         _W1_AMOUNT_ROOT_NOT_CLASSIFIABLE,
@@ -781,7 +553,6 @@ SELF_SERVICE_REFUSAL_REASONS = frozenset(
         _W1_RECORD_MISMATCH,
         _W1_KEY_INDEX_DISAGREEMENT,
         _W1_GUARD_NOT_MANDATORY,
-        # U3 (record_ordering) — W2 ordering refusals.
         "clearing_write_does_not_dominate_calls",
         "no_clearing_write",
         "assembly_state_access",
@@ -789,13 +560,11 @@ SELF_SERVICE_REFUSAL_REASONS = frozenset(
         "loop_nesting_mismatch",
         "call_enumeration_incomplete",
         "record_not_resolvable",
-        # U4 (verified guard) — W2 guard refusals.
         "guard_modifier_not_applied",
         "no_verified_guard_modifier",
         "ambiguous_function_declaration",
         _W2_GUARD_FUNCTION_NOT_ANALYZED,
-        # burn variant, registered for forward compatibility —
-        # the shipped producers publish no burn record for this join to read.
+        # Burn variant, registered ahead of any producer.
         "amount_is_external_conversion_of_burn",
     }
 )
@@ -805,10 +574,10 @@ _VERIFIED_GUARD_VERDICTS: WeakKeyDictionary[ClaimContext, dict[str, Any]] = Weak
 
 
 def _verified_guard_verdicts(ctx: ClaimContext) -> dict[str, Any]:
-    """U4's per-function verified-guard verdicts for this contract, memoized per
-    context. A context with no live Slither contract yields an empty map, so the
-    lookup below returns an explicit ``function_not_analyzed`` refusal rather
-    than inferring a guard from a missing row."""
+    """Verified-guard verdicts per function (memoized).
+
+    Without a Slither contract the map is empty, so lookups refuse with ``function_not_analyzed``.
+    """
     cached = _VERIFIED_GUARD_VERDICTS.get(ctx)
     if cached is not None:
         return cached
@@ -827,14 +596,12 @@ def _verified_guard_verdicts(ctx: ClaimContext) -> dict[str, Any]:
 def _owner_guarded_record_constraint(
     ctx: ClaimContext, function: str, flow: dict[str, Any], record: str
 ) -> dict[str, Any]:
-    """W1 via an ownership guard: a mandatory ``caller_authority`` leaf that
-    reads the SAME record against ``msg.sender``.
+    """W1 via an ownership guard: a mandatory ``caller_authority`` leaf reading the same record against
+    ``msg.sender``.
 
-    A guard leaf names exactly one key level (U1 refuses multi-level element
-    reads), so it can vouch only for a single-level record, and only when the
-    amount side pinned that level to an entry slot: a ``param`` kind whose index
-    the cross-site fold stripped is a disagreement, never a proof, so the index
-    must be present AND equal, never ``kind == param`` alone."""
+    A guard names one key level, so it only vouches for a single-level record whose amount-side index is present and
+    equal.
+    """
     key_indexes = flow.get("amount_record_key_param_indexes")
     single_index = (
         key_indexes[0]
@@ -854,17 +621,14 @@ def _owner_guarded_record_constraint(
             for op in operands:
                 if "element_base_variable" not in op:
                     continue
-                # Canonical comparison: both sides derive the base from
-                # ``StateVariable.canonical_name``, so a bare-name match would be
-                # the silent-zero the two-walk split threatens.
+                # Both sides use canonical names; a bare-name match would silently fail.
                 if op.get("element_base_variable") != record:
                     saw_base_mismatch = True
                     continue
                 idx = op.get("element_key_param_index")
                 if single_index is not None and isinstance(idx, int) and idx == single_index:
                     return {"state": "constrained", "basis": _W1_OWNER_GUARDED_RECORD, "record": record}
-                # Same base, but the guard reads a different cell (a different
-                # key slot) or the amount side pinned no single slot to align to.
+                # Same base, different cell (or no single amount slot to align to).
                 saw_key_mismatch = True
     if saw_key_mismatch:
         reason = _W1_KEY_INDEX_DISAGREEMENT
@@ -876,12 +640,9 @@ def _owner_guarded_record_constraint(
 
 
 def amount_record_constraint(ctx: ClaimContext, function: str, flow: dict[str, Any]) -> dict[str, Any]:
-    """W1: is the flow's AMOUNT read out of a storage record the caller is proven
-    to own? Three-state, shaped on :func:`param_constraint`.
-
-    ``constrained`` carries the basis and the canonical record; anything short of
-    a full proof is ``not_determined`` with the reason it fell short. See the
-    module comment for why ``unconstrained_proven`` is never minted."""
+    """W1: is the flow's amount read from a record the caller is proven to own? ``constrained`` carries the basis and
+    record; anything less is ``not_determined`` with the reason.
+    """
     record = flow.get("amount_record_variable")
     if not isinstance(record, str) or not record:
         variables = flow.get("amount_record_variables")
@@ -893,12 +654,8 @@ def amount_record_constraint(ctx: ClaimContext, function: str, flow: dict[str, A
         return {"state": "not_determined", "reason": reason}
 
     key_kinds = flow.get("amount_record_key_kinds")
-    # keyed_by_caller: a level of the cell's own key IS the caller's address, so
-    # the cell is the caller's with no guard leaf needed. ``msg_sender`` is an
-    # EARNED origin (proven, not a name fallback), and the folded kinds are
-    # published only where every contributing site agreed — so its presence is
-    # itself the proof, even if another level is a caller-chosen param: the
-    # caller can only ever reach cells under their own address at that level.
+    # ``keyed_by_caller``: a key level of the cell is ``msg_sender`` (an earned origin, published only when every site
+    # agreed), so the caller can only reach cells under their own address.
     if isinstance(key_kinds, list) and "msg_sender" in key_kinds:
         return {"state": "constrained", "basis": _W1_KEYED_BY_CALLER, "record": record}
 
@@ -906,15 +663,11 @@ def amount_record_constraint(ctx: ClaimContext, function: str, flow: dict[str, A
 
 
 def self_service_payout(ctx: ClaimContext, function: str, flow: dict[str, Any]) -> dict[str, Any]:
-    """W1 ∧ W2: the paid amount is read from a cell the caller owns (W1) AND that
-    cell is cleared before any external call, or a verified reentrancy guard
-    stands in for that order (W2). Three-state; proven only on the full
-    conjunction, and every refusal names the conjunct that failed.
+    """W1 and W2, three-state, proven only on the full conjunction; refusals name the failed conjunct.
 
-    W2 is satisfied by EITHER U3's ordering proof (``record_ordering`` on the
-    flow) OR U4's verified guard — distinct proofs with distinct residuals, so
-    the basis names which one. When both refuse, the ordering reason wins: it
-    names WHY the code order is unsafe, the security-relevant fact."""
+    W2 is either the ordering proof or a verified guard, and the basis says which. When both refuse, the ordering reason
+    wins (it explains why the code order is unsafe).
+    """
     w1 = amount_record_constraint(ctx, function, flow)
     if w1.get("state") != "constrained":
         return {"state": "not_determined", "reason": w1.get("reason", _W1_AMOUNT_ROOT_NOT_CLASSIFIABLE)}
@@ -943,15 +696,9 @@ def self_service_payout(ctx: ClaimContext, function: str, flow: dict[str, Any]) 
         "w1_basis": w1["basis"],
         "w2_basis": w2_basis,
         "record": w1["record"],
-        # The two G7 disclosures ride every proof; the loop residual rides only a
-        # per-iteration ordering proof (U3's ``cross_iteration_ordering_not_proven``).
+        # Both disclosures ride every proof; the loop residual only a per-iteration ordering proof.
         "disclosures": [SELF_SERVICE_DISCLOSE_UPGRADE, SELF_SERVICE_DISCLOSE_SIBLING, *disclosures],
     }
-
-
-# ---------------------------------------------------------------------------
-# State-write facts
-# ---------------------------------------------------------------------------
 
 
 def state_writes(ctx: ClaimContext, function: str, *, body_only: bool = True) -> list[dict[str, Any]]:
@@ -966,20 +713,11 @@ def state_writes(ctx: ClaimContext, function: str, *, body_only: bool = True) ->
 
 
 def bool_write_targets(ctx: ClaimContext, function: str) -> set[tuple[str, str | None]]:
-    """``(var, member)`` pairs this function writes as a latch flag in its body.
-
-    Two shapes qualify. A plain ``bool`` state variable is the classic form. An
-    ERC-7201 *namespaced* flag is the modern one: the struct lives at a
-    keccak-derived slot reached through assembly, so Plane 0 records a write to
-    the ``bytes32`` slot pseudo-variable (``hygiene_class ==
-    "storage_location_pseudo"``) with no member path — the declared type is
-    ``bytes32``, never ``bool``, and a bool-only filter cannot see it at all.
-    That blind spot is what left ``pause``/``unpause`` unlabelled across the
-    OZ-v5 / etherfi money contracts.
-
-    A pseudo-slot write only becomes a pause target if some function reads the
-    same slot as a mandatory revert gate (``pause_targets``), so admitting the
-    shape here widens the candidate set without weakening the gate evidence."""
+    """``(var, member)`` pairs this function writes as a latch flag: plain ``bool`` variables, and ERC-7201
+    namespaced flags, recorded as writes to the ``bytes32`` slot pseudo-variable with no member path (a bool-only
+    filter missed every OZ-v5 pause). A pseudo-slot only becomes a pause target if a mandatory gate reads the same
+    slot.
+    """
     out: set[tuple[str, str | None]] = set()
     for write in state_writes(ctx, function):
         declared = write.get("declared_type")
@@ -992,13 +730,11 @@ def bool_write_targets(ctx: ClaimContext, function: str) -> set[tuple[str, str |
 
 
 def namespaced_write_vars(ctx: ClaimContext, function: str) -> set[str]:
-    """Slot pseudo-variables this function writes (ERC-7201 namespaced storage).
+    """Namespaced slot pseudo-variables this function writes.
 
-    A namespaced slot aggregates every field of its struct, so "this function
-    writes a slot that some gate reads" is far weaker evidence than the same
-    statement about a plain ``bool``: an owner change writes the very slot the
-    owner gate reads. Callers use this to demand stronger evidence — see the
-    definite-polarity requirement in the pause matcher."""
+    A slot aggregates a whole struct (an owner change writes the slot the owner gate reads), so callers demand stronger
+    evidence for these.
+    """
     return {
         str(write["var"])
         for write in state_writes(ctx, function)
@@ -1021,23 +757,15 @@ def body_sinks(ctx: ClaimContext, function: str) -> list[dict[str, Any]]:
     return [s for s in ctx.sinks(function) if s.get("origin") != "guard"]
 
 
-# ---------------------------------------------------------------------------
-# Contract-shape helpers
-# ---------------------------------------------------------------------------
-
-
 _ADDRESS_ELEMENTARY = frozenset({"address", "address payable"})
 
 
 def is_scalar_pointer(variable: Any) -> bool:
-    """True when the Slither variable is stored as a callable 20-byte pointer: an
-    elementary ``address``/``address payable``, or a contract/interface reference
-    (an ``IBeforeTransferHook`` field holds that contract's address). A mapping,
-    array, struct, enum, or user-defined value type is not.
+    """True when the variable holds a callable 20-byte pointer (``address`` or a contract/interface type).
 
-    Decided on the resolved ``Type`` object rather than the rendered declaration,
-    so a struct or enum field cannot pass for a code pointer — the tag this feeds
-    (``callee_pointer.rotate``) grants its principal the admin capability."""
+    Decided on the resolved type so a struct or enum can't pass: this feeds ``callee_pointer.rotate``, which grants
+    admin capability.
+    """
     try:
         from slither.core.declarations.contract import Contract
         from slither.core.solidity_types.elementary_type import ElementaryType
@@ -1075,12 +803,9 @@ def written_state_variables(function: Any) -> list[Any]:
 
 
 def contract_function(ctx: ClaimContext, signature: str) -> Any | None:
-    """The Slither function object for an effects full-name signature.
-
-    Two functions can share a full-name — a concrete body and an inherited
-    interface re-declaration (0 nodes). Prefer the implemented body so IR reads
-    (polarity, supply sign, use-links) see the real code, mirroring the effects
-    builder's own tie-break."""
+    """The Slither function for an effects full-name, preferring the implemented body over an inherited 0-node
+    interface re-declaration (the effects builder's tie-break).
+    """
     best = None
     for fn in getattr(ctx.contract, "functions", []) or []:
         full = getattr(fn, "full_name", None) or getattr(fn, "name", None)
@@ -1096,7 +821,6 @@ def _fn_prefers(new_fn: Any, old_fn: Any) -> bool:
     old_impl = bool(getattr(old_fn, "is_implemented", False)) and bool(getattr(old_fn, "nodes", None))
     if new_impl != old_impl:
         return new_impl
-    # A base function shadowed by a most-derived override is not the entry point.
     new_shadow = bool(getattr(new_fn, "is_shadowed", False))
     old_shadow = bool(getattr(old_fn, "is_shadowed", False))
     if new_shadow != old_shadow:
@@ -1105,8 +829,7 @@ def _fn_prefers(new_fn: Any, old_fn: Any) -> bool:
 
 
 def contract_functions(ctx: ClaimContext, signature: str) -> list[Any]:
-    """Every Slither function object with this full-name (both a most-derived
-    override and its shadowed base), for evidence that may live on either."""
+    """Every function object with this full-name (override and shadowed base)."""
     return [
         fn
         for fn in getattr(ctx.contract, "functions", []) or []
@@ -1114,20 +837,12 @@ def contract_functions(ctx: ClaimContext, signature: str) -> list[Any]:
     ]
 
 
-# ---------------------------------------------------------------------------
-# Pause derivation (facts + trees; the PauseAnalyzer idiom with its four fixes)
-# ---------------------------------------------------------------------------
-
-
 def pause_targets(ctx: ClaimContext) -> set[tuple[str, str | None]]:
-    """``(var, member)`` bool flags that gate the contract's own entry points.
+    """``(var, member)`` bool flags written in some function body and read as a mandatory revert gate by another.
 
-    A target is a ``bool`` written in some function body that is also read as a
-    *mandatory* revert gate by another function (``mandatory_gate_reads``). The
-    member-path facts recover struct-member pauses (Accountant ``state.isPaused``)
-    and inherited-private pauses (EtherFiNodesManager ``_paused``) that the
-    scalar ``state_variables`` view misses, while the mandatory-gate structure
-    keeps a branch-mode selector (OneSig ``executorRequired``) out."""
+    Member-path facts recover struct-member and inherited-private pauses; the mandatory structure excludes branch-mode
+    selectors.
+    """
     cached = _PAUSE_TARGETS.get(ctx)
     if cached is not None:
         return cached
@@ -1144,37 +859,25 @@ def _pair_is_gate_read(pair: tuple[str, str | None], gate_reads: set[tuple[str, 
     var, member = pair
     if pair in gate_reads:
         return True
-    # A scalar bool read (member None) still matches a var-granular write.
     if member is not None and (var, None) in gate_reads:
         return True
-    # ...and the mirror image, which is the namespaced case: the WRITE is
-    # recorded against the slot pseudo-variable with no member path
-    # (`PAUSABLE_STORAGE_SLOT`), while the guard READ resolves through the
-    # struct and carries one (`["paused"]`). Requiring the member paths to agree
-    # would reject every ERC-7201 latch, so a memberless write matches any read
-    # of the same variable.
+    # Namespaced case: the write is on the slot with no member while the guard read carries one (``["paused"]``), so a
+    # memberless write matches any read of the variable.
     return member is None and any(read_var == var for read_var, _read_member in gate_reads)
 
 
 def function_pause_targets(ctx: ClaimContext, function: str) -> set[tuple[str, str | None]]:
-    """The contract's pause targets that ``function`` writes in its body."""
     return bool_write_targets(ctx, function) & pause_targets(ctx)
 
 
 def toggle_polarity(function: Any, var: str, member: str | None, *, alias_members: frozenset[str] = frozenset()) -> str:
-    """``"set"`` (writes the flag true), ``"unset"`` (writes it false), or
-    ``"both"`` (parameter-driven / branch-dependent). Member writes are paired
-    through their ``Member`` reference the way the effects builder pairs them.
-    Walks internal callees so an OZ ``_pause()``/``_unpause()`` indirection is
-    attributed to the entry point.
+    """``"set"``, ``"unset"``, or ``"both"`` (parameter- or branch-dependent).
 
-    ``alias_members`` handles the ERC-7201 namespaced latch, where the write is
-    attributed to the slot pseudo-variable but the IR assigns through a LOCAL
-    storage pointer (``$.paused = true``), so no assignment ever names ``var``.
-    The caller passes the member names the guard reads on that slot; an
-    assignment to any of them counts, whatever the pointer is called. Without
-    this the polarity is indeterminate and every namespaced pauser would claim
-    both directions — asserting that ``pause()`` also unpauses."""
+    Follows internal callees (OZ ``_pause()``).
+
+    ``alias_members`` handles ERC-7201 latches assigned through a local storage pointer (``$.paused = true``), which
+    never name ``var``; without it every namespaced pauser would claim both directions.
+    """
     polarities: set[str] = set()
     visited: set[int] = set()
 
@@ -1242,23 +945,15 @@ def _constant_bool_polarity(rvalue: Any) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Supply-sign derivation (the ERC-20 total-supply var, +/- via the Binary IR)
-# ---------------------------------------------------------------------------
-
 _TOTAL_SUPPLY_SELECTOR = abi_selector("totalSupply()")
 
 
 def total_supply_vars(ctx: ClaimContext) -> set[str]:
-    """Names of the state variables this contract publishes as its ERC-20 total
-    supply: a ``public`` variable whose auto-generated getter is the standard's
-    ``totalSupply()`` (``0x18160ddd``).
+    """State variables published as the ERC-20 ``totalSupply()`` via their auto-getter.
 
-    The ABI entry — not the identifier — is what identifies the supply. A private
-    supply var behind a hand-written getter is deliberately NOT resolved here: its
-    binding to ``totalSupply()`` would have to be guessed, and the zero-address
-    ``Transfer`` path (:func:`mint_burn_transfer_sign`) already covers that shape
-    with real evidence."""
+    The ABI entry identifies the supply, not the name; private vars behind a hand-written getter are left to the
+    zero-address ``Transfer`` path.
+    """
     cached = _TOTAL_SUPPLY_VARS.get(ctx)
     if cached is not None:
         return cached
@@ -1275,10 +970,9 @@ def total_supply_vars(ctx: ClaimContext) -> set[str]:
 
 
 def total_supply_sign(function: Any, supply_vars: set[str]) -> str | None:
-    """``"mint"`` if the function increases one of ``supply_vars``, ``"burn"`` if
-    it decreases one, via the Binary IR *operation type* (Addition/Subtraction)
-    on that variable — no source-string parsing. Walks internal/library callees
-    so a supply change through ``_mint``/``_burn`` is attributed to the entry."""
+    """``"mint"``/``"burn"`` from Binary Addition/Subtraction on a supply variable, following internal/library
+    callees (``_mint``/``_burn``).
+    """
     if not supply_vars:
         return None
     signs: set[str] = set()
@@ -1305,8 +999,7 @@ def total_supply_sign(function: Any, supply_vars: set[str]) -> str | None:
                     sign = "burn"
                 if sign is None:
                     continue
-                # In-place (`totalSupply += x`): the Binary lvalue is the supply
-                # var itself. Two-step: a TMP the next Assignment stores back.
+                # In place (``totalSupply += x``) or two-step through a TMP stored back.
                 if _base_name(getattr(lvalue, "name", None)) in supply_vars:
                     signs.add(sign)
                 elif lvalue is not None:
@@ -1331,14 +1024,11 @@ def total_supply_sign(function: Any, supply_vars: set[str]) -> str | None:
 
 
 def monotone_balance_delta(function: Any) -> str | None:
-    """``"mint"`` / ``"burn"`` when every monotone write this function makes to
-    the contract's own storage moves in one direction, else ``None``.
+    """``"mint"``/``"burn"`` when every monotone write to the contract's storage moves one way, else ``None``.
 
-    Unlike :func:`total_supply_sign` this resolves a ``ReferenceVariable`` back to
-    the state variable it indexes, so the WETH9 shape — a balance ledger credited
-    out of nothing (``balanceOf[msg.sender] += msg.value``) with no supply
-    variable anywhere — is observed rather than assumed. A body that both credits
-    and debits (a ledger move) is ambiguous and yields ``None``."""
+    Resolves references to their state variable, so WETH9's ``balanceOf[msg.sender] += msg.value`` (no supply variable)
+    is observed. A ledger move (credit and debit) is ambiguous.
+    """
     from slither.core.variables.state_variable import StateVariable
 
     def state_origin(value: Any) -> Any:
@@ -1379,15 +1069,8 @@ def monotone_balance_delta(function: Any) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Mint/burn via the ERC-20 standard Transfer event (name-independent supply)
-# ---------------------------------------------------------------------------
-
-# The ERC-20 published signature ``Transfer(address,address,uint256)``. A
-# rebasing token (EETH) tracks supply in a differently-named var and computes
-# ``totalSupply()`` externally, so ``total_supply_sign`` cannot see the write;
-# the standard zero-address ``Transfer`` is the general, name-independent mint /
-# burn signal.
+# Rebasing tokens (EETH) track supply under another name, so the zero-address ``Transfer`` is the name-independent
+# mint/burn signal.
 _ERC20_TRANSFER_ARG_TYPES = ("address", "address", "uint256")
 
 
@@ -1409,9 +1092,7 @@ def _arg_is_zero(arg: Any, origins: dict[int, tuple[str, str | None]]) -> bool:
 
 
 def _transfer_zero_direction(ir: Any, origins: dict[int, tuple[str, str | None]]) -> str | None:
-    """``"mint"`` for an ERC-20 ``Transfer`` whose FROM is the zero address,
-    ``"burn"`` when the TO is, ``None`` otherwise (neither endpoint zero, both
-    zero, or not the canonical ``Transfer(address,address,uint256)`` shape)."""
+    """``"mint"`` for a canonical ``Transfer`` from the zero address, ``"burn"`` to it, else ``None``."""
     if not _is_erc20_transfer_event(ir):
         return None
     args = list(getattr(ir, "arguments", []) or [])
@@ -1425,17 +1106,10 @@ def _transfer_zero_direction(ir: Any, origins: dict[int, tuple[str, str | None]]
 
 
 def mint_burn_transfer_sign(function: Any) -> str | None:
-    """``"mint"`` / ``"burn"`` when the function both emits a zero-endpoint
-    ERC-20 ``Transfer`` and makes a matching-direction monotone Binary write to
-    a state variable, else ``None``.
-
-    Both halves are required. The zero-address ``Transfer`` alone would fire on a
-    proxy/forwarder that re-emits it without changing its own supply, so a
-    monotone ``+`` (mint) or ``-`` (burn) to some ``StateVariable`` in the same
-    body must corroborate it. Walks internal/library callees like
-    :func:`total_supply_sign` so a mint/burn routed through a helper is
-    attributed to the entry point. Fails to ``None`` on any doubt — a mixed body
-    that emits both a from-zero and a to-zero ``Transfer`` is ambiguous."""
+    """``"mint"``/``"burn"`` when the function emits a zero-endpoint ``Transfer`` and makes a matching-direction
+    monotone write, else ``None``. The write is required so a forwarder re-emitting ``Transfer`` doesn't count;
+    emitting both directions is ambiguous. Follows internal/library callees.
+    """
     from slither.core.variables.state_variable import StateVariable
 
     transfer_dirs: set[str] = set()
@@ -1469,8 +1143,7 @@ def mint_burn_transfer_sign(function: Any) -> str | None:
                     sign = "burn"
                 if sign is None:
                     continue
-                # In-place (`S += x`): the Binary lvalue is the state var itself.
-                # Two-step: a TMP the next Assignment stores back into a state var.
+                # In place, or two-step through a TMP.
                 if isinstance(lvalue, StateVariable):
                     write_signs.add(sign)
                 elif lvalue is not None:
@@ -1496,21 +1169,12 @@ def mint_burn_transfer_sign(function: Any) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Emitted-log identity (topic0, not the event's name)
-# ---------------------------------------------------------------------------
-
-
 def emits_event_topic(ctx: ClaimContext, function: Any, topic0: str) -> bool:
-    """True when ``function`` (or an internal/library callee it reaches) emits the
-    log whose ``topic0`` is given — the standard's published event, identified by
-    the 32 bytes the chain indexes rather than by the event's name.
+    """True when ``function`` or a callee it reaches emits the log with ``topic0``.
 
-    Each ``emit`` site is resolved through the contract's event *declarations*
-    (:meth:`ClaimContext.declared_event_topic`), which is where the signature
-    lives: the emitted arguments carry post-conversion types (a ``uint96``
-    balance emitted into a ``uint256`` member) and would hash to a topic no chain
-    ever logs."""
+    Resolved through event declarations, since emitted arguments carry converted types that would hash to a topic never
+    logged.
+    """
     visited: set[int] = set()
 
     def walk(unit: Any) -> bool:
@@ -1536,17 +1200,10 @@ def emits_event_topic(ctx: ClaimContext, function: Any, topic0: str) -> bool:
     return walk(function)
 
 
-# ---------------------------------------------------------------------------
-# Callee-pointer use-link (destination identity, not name strings)
-# ---------------------------------------------------------------------------
-
-
 def pointer_write_targets(ctx: ClaimContext, function: str) -> list[Any]:
-    """State variables ``function`` writes that are callable scalar pointers
-    (address / contract-typed, hygiene-normal), as Slither ``StateVariable``
-    objects for identity comparison. The pointer test reads the variable's
-    resolved type; the effects facts contribute only the hygiene filter, which
-    keeps the OZ-v5 slot pseudo-variables out."""
+    """Callable scalar pointer state variables this function writes, as ``StateVariable`` objects for identity
+    comparison; the hygiene filter keeps OZ-v5 slot pseudo-variables out.
+    """
     normal_names = {write["var"] for write in state_writes(ctx, function) if write.get("hygiene_class") == "normal"}
     if not normal_names:
         return []
@@ -1563,12 +1220,9 @@ def pointer_write_targets(ctx: ClaimContext, function: str) -> list[Any]:
 
 
 def writes_first_time_set_pointer(ctx: ClaimContext, function: str, pointers: list[Any]) -> bool:
-    """True if the function gates one of the scalar pointers it writes on a
-    zero-address self-check (``require(pointer == address(0))``) — a set-once
-    latch that installs the pointer for the first time. Distinguishes an
-    initializer's first-time set (setup) from a runtime rotation for the manual
-    ``require``-based latches ``tree_is_one_shot`` (OZ initializer-family
-    modifiers) does not recognize."""
+    """True if the function gates a pointer it writes on ``require(pointer == address(0))``: a set-once install, not
+    a rotation (latches ``tree_is_one_shot`` doesn't recognize).
+    """
     if not pointers:
         return False
     fn = contract_function(ctx, function)
@@ -1591,17 +1245,15 @@ def writes_first_time_set_pointer(ctx: ClaimContext, function: str, pointers: li
 
 
 def _operand_origins(fn: Any) -> dict[int, tuple[str, str | None]]:
-    """``id(ir_value) -> origin`` over the function body, folding
-    ``TypeConversion``/``Assignment`` chains so a Binary operand resolves to the
-    ``("state", name)`` variable or the ``("zero", None)`` address(0)/0 constant
-    it came from (the pieces a ``pointer == address(0)`` latch is built from)."""
+    """``id(ir_value) -> origin``, folding conversion and assignment chains to a ``("state", name)`` variable or
+    ``("zero", None)`` constant.
+    """
     from slither.core.variables.state_variable import StateVariable
     from slither.slithir.operations import Assignment, TypeConversion
     from slither.slithir.variables import Constant
 
     origins: dict[int, tuple[str, str | None]] = {}
-    # Fixpoint over the chain length: address(state) and address(0) are single
-    # TypeConversions here, but nested casts can stack a few links deep.
+    # Nested casts can stack a few links.
     for _ in range(8):
         changed = False
         for node in getattr(fn, "nodes", []) or []:
@@ -1631,10 +1283,9 @@ def _operand_origins(fn: Any) -> dict[int, tuple[str, str | None]]:
 
 
 def sibling_invokes_pointer(ctx: ClaimContext, writer: str, pointer: Any) -> str | None:
-    """Full-name of an entry-point sibling that (transitively) invokes
-    ``pointer`` as a call destination *by identity* and also moves value or
-    writes a mapping — the ``transfer``-calls-``hook`` shape. ``None`` if no
-    such sibling exists."""
+    """An entry-point sibling that transitively calls ``pointer`` by identity while moving value or writing a
+    mapping, or ``None``.
+    """
     from slither.core.variables.state_variable import StateVariable
     from slither.slithir.operations import HighLevelCall, LowLevelCall
 
@@ -1657,9 +1308,8 @@ def sibling_invokes_pointer(ctx: ClaimContext, writer: str, pointer: Any) -> str
                     getattr(ir, "destination", None)
                 ):
                     return True
-                # Body-origin only: a pointer reached only through a modifier
-                # (an authority consulted by a guard) is not a runtime code
-                # pointer the entry point invokes.
+                # Body-origin only: a pointer only reached through a modifier is a guard's authority, not a runtime code
+                # pointer.
                 if type(ir).__name__ in ("InternalCall", "LibraryCall") and not _is_modifier_call(ir):
                     callee = getattr(ir, "function", None)
                     if callee is not None and getattr(callee, "nodes", None) and calls_pointer(callee, seen):
@@ -1677,8 +1327,7 @@ def sibling_invokes_pointer(ctx: ClaimContext, writer: str, pointer: Any) -> str
 
 
 def _is_modifier_call(ir: Any) -> bool:
-    """True iff ``ir`` dispatches a modifier body (a guard), so the walk should
-    not follow it into guard-origin territory."""
+    """Modifier calls lead into guard-origin territory, so walks don't follow them."""
     if getattr(ir, "is_modifier_call", False):
         return True
     return type(getattr(ir, "function", None)).__name__ == "Modifier"

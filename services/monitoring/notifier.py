@@ -34,16 +34,12 @@ logger = logging.getLogger(__name__)
 
 DISCORD_TIMEOUT = 10
 
-# Invariant: outbound webhook POSTs go only to Discord over https. A webhook
-# URL is user-supplied; without this gate it is an SSRF sink that posts our
-# embed body to any host.
+# Webhook URLs are user-supplied; without this gate they are an SSRF sink.
 _DISCORD_WEBHOOK_HOSTS = frozenset({"discord.com", "discordapp.com", "canary.discord.com", "ptb.discord.com"})
 
 
 def _is_discord_webhook(webhook_url: str) -> bool:
-    # Host derived via the shared egress helper (not urlparse) so this gate and
-    # the SSRF guard cannot disagree on the authority — the parser divergence a
-    # backslash/userinfo host exploits.
+    # Same host parser as the SSRF guard, so backslash/userinfo tricks can't make them disagree.
     parsed = urlparse(webhook_url)
     if parsed.scheme != "https":
         return False
@@ -55,12 +51,7 @@ def _is_discord_webhook(webhook_url: str) -> bool:
 
 
 def _send_discord(webhook_url: str, embed: dict) -> bool:
-    """Post one embed. ``True`` iff the webhook accepted it.
-
-    The return value is the point: a non-ok response used to be logged here and
-    then discarded, so a revoked or rate-limited webhook counted toward the
-    caller's "sent" total exactly like a delivered post.
-    """
+    """Post one embed; ``True`` iff the webhook accepted it, so rejected posts don't count as sent."""
     if not _is_discord_webhook(webhook_url):
         logger.warning(
             "Skipping non-Discord webhook target",
@@ -81,48 +72,32 @@ def _send_discord(webhook_url: str, embed: dict) -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# Protocol-level governance event notifications
-# ---------------------------------------------------------------------------
-
-# Embed color resolution. Two-tier:
-#
-#   1. Per-write-target color map — the bulk of colors derive from
-#      what state the emitter mutated. ``pendingOwner`` (intent)
-#      naturally orange where ``owner`` (commit) is red, etc.
-#   2. Per-event_type overrides for outcome- or phase-paired events
-#      whose tags collide. ``safe_tx_executed`` and ``safe_tx_failed``
-#      both have ``writes=["_safe_op"]``; the success/failure split
-#      doesn't fall out of the tag structure (the schema deliberately
-#      doesn't carry outcome flags), so it stays event_type-keyed.
-#      Same shape for timelock scheduled vs executed.
+# Colors come from the write target (``pendingOwner`` intent is orange, ``owner`` commit red), with event_type overrides
+# for outcome- or phase-paired events whose tags collide (Safe success/failure, timelock scheduled/executed).
 
 _DEFAULT_EMBED_COLOR = 0x95A5A6  # neutral grey for unrecognized events
 
 _WRITE_TARGET_TO_COLOR: dict[str, int] = {
-    # RED — committed control-graph changes
+    # RED: committed control-graph changes
     "owner": 0xFF0000,
     "authority": 0xFF0000,
     "paused": 0xFF0000,
-    # ORANGE — upgrade-shape mutations + intent-phase ownership / impl
+    # ORANGE: upgrades and intent-phase ownership
     "pendingOwner": 0xFF9900,
     "pendingImplementation": 0xFF9900,
     "implementation": 0xFF9900,
     "beacon": 0xFF9900,
     "facets": 0xFF9900,
     "admin": 0xFF9900,
-    # BLUE — Safe signer set changes
+    # BLUE: Safe signer set
     "owners": 0x3498DB,
-    # AMBER — operational parameters
+    # AMBER: operational parameters
     "_roles": 0xF39C12,
     "threshold": 0xF39C12,
     "min_delay": 0xF39C12,
 }
 
-# Resolution order: when an event has multiple writes (e.g. Ownable2Step
-# acceptOwnership writes both owner and pendingOwner), the more-critical
-# color wins. Listed in priority order — first matching write target
-# determines the color.
+# When an event writes several targets, the first in this order wins.
 _COLOR_PRIORITY: tuple[str, ...] = (
     "owner",
     "authority",
@@ -140,33 +115,27 @@ _COLOR_PRIORITY: tuple[str, ...] = (
 )
 
 _EVENT_TYPE_COLOR_OVERRIDES: dict[str, int] = {
-    # Outcome-paired Safe execution events
     "safe_tx_executed": 0x2ECC71,  # green — success
     "safe_module_executed": 0x2ECC71,
     "safe_tx_failed": 0xE74C3C,  # red — reverted
     "safe_module_failed": 0xE74C3C,
-    # Phase-paired Timelock ops
     "timelock_scheduled": 0x3498DB,  # blue — queued
     "timelock_executed": 0xFF9900,  # orange — applied
-    # Synthetic poll event — has no tags, has no decoder
+    # Synthetic poll event: no tags, no decoder
     "state_changed_poll": 0x9B59B6,  # purple
 }
 
 
 def _resolve_embed_color(event_type: str, data: dict | None) -> int:
-    """Pick the Discord embed color for an event.
+    """Embed color: event_type override, else the first write target in priority order.
 
-    Per-event_type overrides win for outcome- / phase-paired events
-    whose writes collide. Otherwise walks ``effect_tags.writes`` in
-    priority order and returns the first matching write target's color.
-    Synthesizes tags from event_type for legacy events that lack them.
+    Untagged legacy events synthesize tags.
     """
     override = _EVENT_TYPE_COLOR_OVERRIDES.get(event_type)
     if override is not None:
         return override
     if event_type.startswith("value_changed"):
-        # The proven field, not the emitter's donated write set: the read is
-        # what says which slot moved.
+        # The read proves which slot moved, not the emitter's write set.
         field = (data or {}).get("field")
         if isinstance(field, str) and field in _WRITE_TARGET_TO_COLOR:
             return _WRITE_TARGET_TO_COLOR[field]
@@ -179,27 +148,15 @@ def _resolve_embed_color(event_type: str, data: dict | None) -> int:
     return _DEFAULT_EMBED_COLOR
 
 
-# Per-write-target render specs for ``_format_governance_embed``. Each
-# entry is a list of ``(label, data_key, inline)`` tuples. The renderer
-# walks ``effect_tags.writes``, looks up the spec, and appends one
-# Discord field per entry whose ``data[data_key]`` is populated.
-# Dedup is keyed by ``data_key`` so two writes that share a render arg
-# (Ownable2Step commit phase: owner + pendingOwner both → new_owner)
-# don't produce duplicate fields.
-#
-# Convention: render specs name the user-facing label, NOT the slot.
-# A write to ``admin`` renders "Old Admin" / "New Admin" — the slot
-# name is an implementation detail. Underscore-prefixed targets
-# (``_roles``, ``_timelock_op``, ``_safe_op``) are activity markers
-# with no canonical "before/after"; the render spec just surfaces the
-# meaningful event args.
+# Write target -> ``(label, data_key, inline)`` Discord fields, deduped by ``data_key`` (Ownable2Step writes owner and
+# pendingOwner to one arg). Labels are user-facing, not slot names; underscore targets are activity markers that surface
+# their args.
 _WRITE_TARGET_TO_RENDER: dict[str, list[tuple[str, str, bool]]] = {
     "owner": [
         ("Old Owner", "old_owner", False),
         ("New Owner", "new_owner", False),
     ],
-    # Ownable2Step ``transferOwnership`` (intent) writes pendingOwner;
-    # the canonical semantic-key aliases land in old_owner / new_owner.
+    # Ownable2Step intent; semantic aliases land in old_owner/new_owner.
     "pendingOwner": [
         ("Old Owner", "old_owner", False),
         ("New Owner", "new_owner", False),
@@ -215,9 +172,7 @@ _WRITE_TARGET_TO_RENDER: dict[str, list[tuple[str, str, bool]]] = {
         ("Beacon", "beacon", False),
     ],
     "facets": [
-        # Diamond cuts: the upgrade-history decoder stores the first
-        # facet under ``implementation`` for backward compat with the
-        # generic proxy-upgrade rendering.
+        # Diamond cuts store the first facet under ``implementation``.
         ("New Implementation", "implementation", False),
     ],
     "admin": [
@@ -225,8 +180,7 @@ _WRITE_TARGET_TO_RENDER: dict[str, list[tuple[str, str, bool]]] = {
         ("New Admin", "new_admin", False),
     ],
     "paused": [
-        # paused / unpaused share writes=["paused"]; the renderer
-        # surfaces the account that flipped the flag.
+        # paused/unpaused share a target; show the account that flipped it.
         ("Account", "account", False),
     ],
     "_roles": [
@@ -248,8 +202,7 @@ _WRITE_TARGET_TO_RENDER: dict[str, list[tuple[str, str, bool]]] = {
 
 
 def _render_event_value(value: object) -> str:
-    """Format an event data value for Discord display. Wrap hex strings
-    in backticks (addresses, bytes32 roles); everything else as bare str."""
+    """Hex strings (addresses, roles) in backticks; everything else as str."""
     if isinstance(value, str) and value.startswith("0x"):
         return f"`{value}`"
     return str(value)
@@ -260,15 +213,9 @@ def _generic_render_fallback(
     data: dict,
     seen_keys: set[str],
 ) -> list[dict]:
-    """Render fields for a write target with no entry in ``_WRITE_TARGET_TO_RENDER``.
+    """Fields for a write target with no render spec: ``data["new<Cap>"]`` or ``data[write_target]`` as "New <Cap>".
 
-    Custom slots (``protocolAdmin``, ``feeRecipient``, …) flow through
-    here. The decoder populated ``data[input_name]`` for every event
-    arg, so we look for ``data["new<Cap>"]`` then ``data[write_target]``
-    and surface the value under a humanized "New <Cap>" label.
-
-    Underscore-prefixed targets are synthetic markers (no real data arg) —
-    skip them silently.
+    Underscore targets are skipped.
     """
     if write_target.startswith("_"):
         return []
@@ -285,13 +232,9 @@ def _generic_render_fallback(
 
 
 def _safe_exec_fields(safe_exec: dict) -> list[dict]:
-    """Render a decoded Safe execution — the difference between "safe_tx_executed
-    on 0x41df…6ae" and "Safe executed setFee(uint256) on 0x7a4…e7 (call)".
+    """Render a decoded Safe execution ("Safe executed setFee(uint256) on 0x7a4…e7 (call)").
 
-    Every undecoded outcome renders its OWN reason instead of nothing: a
-    recipient who sees no target must be able to tell "the Safe called nobody"
-    from "we did not decode this", and an embed that renders identically in
-    both cases cannot.
+    Undecoded outcomes render their reason so "called nobody" and "not decoded" look different.
     """
     status = safe_exec.get("status")
     if status != "decoded":
@@ -315,8 +258,7 @@ def _safe_exec_fields(safe_exec: dict) -> list[dict]:
         fields.append({"name": "Target", "value": f"`{target}`", "inline": True})
 
     target_function = safe_exec.get("target_function") or {}
-    # The signature when one was RESOLVED from the target's own verified
-    # source; the raw selector otherwise. A selector renders fine and is true.
+    # Resolved signature from the target's verified source, else the raw selector.
     label = target_function.get("signature") or safe_exec.get("selector")
     if label:
         fields.append({"name": "Function", "value": f"`{label}`", "inline": True})
@@ -350,8 +292,7 @@ def _safe_exec_fields(safe_exec: dict) -> list[dict]:
             }
         )
     elif safe_exec.get("batch_status") == "undecodable":
-        # No partial list, and the embed says so: a truncated batch would
-        # understate what the Safe did. The reason names WHICH layer failed.
+        # No partial list; name which layer failed.
         why = {
             "malformed_payload": "the MultiSend payload did not decode",
             "nested_payload_undecodable": "a nested MultiSend payload did not decode",
@@ -366,7 +307,6 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
     mc = event.monitored_contract
     data = event.data or {}
 
-    # Resolve protocol and contract names from DB if linked
     protocol_name = None
     contract_name = None
     if mc.protocol_id:
@@ -378,7 +318,6 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
         if contract and contract.contract_name:
             contract_name = contract.contract_name
 
-    # Build title with names when available
     if contract_name:
         title_label = contract_name
     else:
@@ -396,16 +335,8 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
     if contract_name:
         fields.insert(0, {"name": "Name", "value": contract_name, "inline": True})
 
-    # Event-specific fields. Two paths:
-    #   1. state_changed_poll is a synthetic poll event with no decoder
-    #      and no effect_tags — render its (field, old, new) shape
-    #      directly.
-    #   2. Everything else flows through the tag-driven render table:
-    #      walk effect_tags.writes, look up the render spec, append
-    #      one Discord field per spec entry whose data key is populated.
-    #      Hand-rolled and per-contract events both carry effect_tags
-    #      from their decoders; legacy events without tags synthesize
-    #      them from event_type via _HANDROLLED_EVENT_TYPE_TO_TAGS.
+    # ``state_changed_poll`` renders its (field, old, new) directly; everything else goes through the tag-driven render
+    # table.
     if event.event_type == "state_changed_poll":
         if data.get("field"):
             fields.append({"name": "Field", "value": data["field"], "inline": True})
@@ -414,9 +345,7 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
         if data.get("new_value"):
             fields.append({"name": "New", "value": f"`{data['new_value']}`", "inline": True})
     elif event.event_type.startswith("value_changed"):
-        # Read-verified diff: the old→new pair IS the witness, so it renders
-        # from the event's own data rather than through the emitter's donated
-        # write set (which is what the tag-driven path below reads).
+        # Read-verified diff: old -> new is the witness.
         if data.get("field"):
             fields.append({"name": "Field", "value": data["field"], "inline": True})
         if data.get("old") is not None:
@@ -425,10 +354,7 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
             fields.append({"name": "New", "value": _render_event_value(data["new"]), "inline": True})
         fields.append({"name": "Witness", "value": "verification read", "inline": True})
     elif isinstance(data.get("safe_exec"), dict):
-        # The decoded execution IS the content of a Safe embed; the tag-driven
-        # path below has no render spec for the ``_safe_op`` marker (it names no
-        # single slot), so before enrichment these embeds carried nothing but
-        # the address and the block.
+        # The decoded execution is the embed's content; ``_safe_op`` has no render spec.
         fields.extend(_safe_exec_fields(data["safe_exec"]))
     else:
         tags = data.get("effect_tags") or _HANDROLLED_EVENT_TYPE_TO_TAGS.get(event.event_type) or {}
@@ -450,10 +376,7 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
                 seen_keys.add(data_key)
                 fields.append({"name": label, "value": _render_event_value(value), "inline": inline})
 
-    # The timelock families publish their resolved signature in a namespaced
-    # block of their own (their ``target``/``selector`` are keys the taxonomy
-    # owns). Rendered here rather than in a branch above so the row keeps
-    # whatever its own family already renders.
+    # Timelock families publish their resolved signature in their own namespaced block.
     target_function = data.get("target_function")
     if isinstance(target_function, dict):
         label = target_function.get("signature") or target_function.get("selector")
@@ -465,12 +388,7 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
     if event.tx_hash:
         fields.append({"name": "Tx", "value": f"`{event.tx_hash}`", "inline": False})
 
-    # The event is real; the watch-list that caught it was built from a plan
-    # that could not be re-read at the last enrollment. Saying so is the
-    # difference between "we are watching this contract" and "we are watching
-    # it on a plan last read at T" — the recipient cannot infer the second
-    # from an embed that looks exactly like a fresh-plan one, and what the
-    # stale plan may have MISSED is invisible by construction.
+    # Tell the recipient the watch-list came from a plan that couldn't be re-read; what it missed is invisible.
     plan_stale_since = data.get("plan_stale_since")
     if plan_stale_since:
         fields.append(
@@ -481,7 +399,6 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
             }
         )
 
-    # If a re-analysis job was queued for this event, note it.
     reanalysis_job_id = data.get("reanalysis_job_id")
     if reanalysis_job_id:
         short_id = str(reanalysis_job_id)[:8]
@@ -502,29 +419,16 @@ def _format_governance_embed(event: MonitoredEvent, session: Session) -> dict:
     }
 
 
-# Legacy "Signers" UI grouping listed only the three signer events;
-# downstream we added safe_tx_* and safe_module_* under the same group.
-# When a user-saved webhook filter only contains the historical types,
-# treat it as covering the whole group so the new event types still
-# flow through. Keys are 'seed' types; values are the additions to
-# allow alongside them.
-#
-# These stay after the `safe_exec` group was split out of `signers` in
-# ``site/src/surface/meta.js``: the split changes what a NEW subscription
-# enumerates, and a filter saved before it says nothing about whether its owner
-# wanted executions — the only reading we can witness is the one the UI gave it
-# at the time, which included them. Muting them on the split would be a claim
-# about a subscriber's intent, exactly what this shim exists to refuse. See
-# ``_FILTER_GROUPS_KEY`` for how a filter states the newer vocabulary instead of
-# being assumed into it.
+# Legacy "Signers" filters listed only three signer events; saved filters with only those also get the Safe execution
+# types added to the group later. Kept after ``safe_exec`` split out of ``signers`` (``site/src/surface/meta.js``):
+# muting executions on old filters would assume the subscriber's intent. See ``_FILTER_GROUPS_KEY``.
 _FILTER_GROUP_EXPANSIONS: dict[str, set[str]] = {
     "signer_added": {"safe_tx_executed", "safe_tx_failed", "safe_module_executed", "safe_module_failed"},
     "signer_removed": {"safe_tx_executed", "safe_tx_failed", "safe_module_executed", "safe_module_failed"},
     "threshold_changed": {"safe_tx_executed", "safe_tx_failed", "safe_module_executed", "safe_module_failed"},
 }
 
-# The three controller_id spellings the analyzer emits, so a seed naming a
-# write target expands to whichever form the tracking plan actually used.
+# The analyzer's three controller_id spellings.
 _CONTROLLER_ID_PREFIXES = ("", "state_variable:", "external_contract:")
 
 
@@ -532,56 +436,29 @@ def _value_changed_forms(write_target: str) -> set[str]:
     return {value_changed_event_type(f"{prefix}{write_target}") for prefix in _CONTROLLER_ID_PREFIXES}
 
 
-# Seeds that ask for read-witnessed field diffs in general rather than for one
-# named slot. ``state_changed_poll`` is the only one today: it is what the
-# "State polling" UI category writes, and a subscriber who picked it asked to
-# hear when a polled field's value moves. A verification read is that same
-# fact observed by the same machinery one tick earlier — and because the read
-# advances ``last_known_state``, the poll that would otherwise have raised
-# ``state_changed_poll`` finds no diff and never fires. Without this rule such
-# a subscriber hears about the rotation from neither path.
-#
-# Per-contract controller ids cannot be enumerated into a static set, so this
-# is a stem rule rather than an expansion.
+# Seeds meaning any read-witnessed field diff. A verification read advances ``last_known_state`` and pre-empts the poll,
+# so without this a "State polling" subscriber would hear about a rotation from neither path. A stem rule, since
+# per-contract ids can't be enumerated.
 _READ_WITNESSED_WILDCARD_SEEDS = frozenset({"state_changed_poll"})
 
 
-# ``event_filter`` key naming the alert-group vocabulary a filter was saved
-# against (``site/src/surface/sidebar/activity/helpers.js``'s group keys). It is
-# a POSITIVE token, and the only thing that will distinguish a post-split
-# "signers, and I mean only signers" save from a pre-split "signers" save —
-# the two enumerate byte-identical ``event_types``. Absent, the filter predates
-# the vocabulary and keeps the legacy grouping expansion, so no saved
-# subscription is ever muted by a split it was not written against; present, the
-# save enumerated its own groups and is taken at its word, so no subscription
-# will be force-fed a group it did not name.
-#
-# The discriminator is inert on the notification plane TODAY: the only producer
-# is ``ActivityPanel.attachWebhook``, and the Alerts control passes it the whole
-# offered group set, so no save the UI can currently produce says "signers
-# without executions". It is written now because a filter saved before this key
-# existed and one saved after it are otherwise indistinguishable forever — the
-# discriminator has to land with the split or not at all. A per-group selector
-# is what would make it bite.
+# ``event_filter`` key naming the UI alert groups a filter was saved against. Present, the filter is taken at its word;
+# absent, it predates the split and keeps the legacy expansion. Pre- and post-split saves otherwise enumerate identical
+# ``event_types``, so the key had to land with the split. Inert today: the UI always passes every group.
 _FILTER_GROUPS_KEY = "groups"
 
-# The group keys the UI can state — mirror of ``MONITOR_ALERT_GROUPS`` in
-# ``site/src/surface/meta.js``. Pinned by
-# ``tests/monitoring/test_witness_notifier_gating.py`` against that table.
+# Mirrors ``MONITOR_ALERT_GROUPS`` in ``site/src/surface/meta.js``; pinned by
+# ``tests/monitoring/test_witness_notifier_gating.py``.
 _KNOWN_FILTER_GROUPS = frozenset(
     {"upgrades", "ownership", "pause", "roles", "signers", "safe_exec", "timelock", "state"}
 )
 
 
 def _stated_filter_groups(event_filter: object) -> list[str] | None:
-    """The group keys a filter positively states, or ``None`` if it states none.
+    """The known group keys a filter states, or ``None``.
 
-    An unreadable token is not a statement, and a name from no vocabulary we
-    have is unreadable in exactly the same way a non-list is: both are treated
-    as absent rather than as a claim of coverage. This matters because the token
-    SUPPRESSES the legacy grouping expansion — reading ``["banana"]`` as a
-    statement would mute a subscription's Safe executions on the strength of a
-    word this system has never defined.
+    Unknown names aren't statements: the token suppresses the legacy expansion, so an unknown word must not mute
+    anything.
     """
     if not isinstance(event_filter, dict):
         return None
@@ -590,42 +467,17 @@ def _stated_filter_groups(event_filter: object) -> list[str] | None:
         return None
     if not all(isinstance(g, str) for g in groups):
         return None
-    # An unknown name is dropped rather than fatal — a filter naming a group we
-    # do know still states that one. A token that names nothing we know states
-    # nothing at all.
+    # Unknown names are dropped; known ones still count.
     known = [g for g in groups if g in _KNOWN_FILTER_GROUPS]
     return known or None
 
 
 def _expand_allowed_event_types(allowed_types: list[str] | None, *, filter_groups: list[str] | None = None) -> set[str]:
-    """Expand legacy webhook event-type filters to include grouped successors.
+    """Expand saved event-type filters to their successors.
 
-    Cheap forward-compat shim so adding a new event type to an existing
-    UI grouping doesn't silently strand pre-existing webhook filters.
-
-    Two expansions:
-
-      * the historical UI groupings above;
-      * the witness taxonomy's read-verified vocabulary. A filter saved
-        against ``ownership_transferred`` (or against the neutral
-        ``state_changed:<controller_id>`` the terminal fallback used to mint)
-        is asking to hear about the owner slot moving, so the
-        ``value_changed:<controller_id>`` that now carries that fact is
-        allowed alongside it. Without this the taxonomy would silently mute
-        every pre-existing subscription for exactly the events it strengthened.
-
-    ``member_changed:<mapping_var>`` is deliberately NOT expanded from any
-    seed: no legacy filter ever covered those mappings (their occurrences
-    published under a neutral ``state_changed`` type or not at all), so
-    inventing coverage for them would be a claim about the subscriber's
-    intent rather than a reading of it.
-
-    ``filter_groups`` is the filter's own statement of which alert groups it
-    covers (see ``_FILTER_GROUPS_KEY``). When it states them, the historical
-    UI-grouping expansion is not applied — the save already enumerated the
-    groups it wanted, so folding a neighbouring group in would override it. The
-    taxonomy expansion below is unconditional either way: it is not a grouping
-    guess but the same fact under the name the taxonomy now gives it.
+    Two expansions: the historical UI groupings (skipped when *filter_groups* states its own groups), and,
+    unconditionally, the witness taxonomy's ``value_changed:<controller_id>`` for filters on the legacy owner events or
+    ``state_changed:<id>``. ``member_changed:<mapping_var>`` is never expanded: no legacy filter covered those.
     """
     if not allowed_types:
         return set()
@@ -649,11 +501,9 @@ def _filter_allows(
     *,
     filter_groups: list[str] | None = None,
 ) -> bool:
-    """Does a saved webhook filter cover *event_type*?
+    """Whether a saved filter covers *event_type*; an empty filter covers everything.
 
-    An empty / absent filter covers everything (the existing contract). Beyond
-    the enumerable expansion, a wildcard seed admits any read-witnessed type —
-    see ``_READ_WITNESSED_WILDCARD_SEEDS``.
+    Wildcard seeds admit any read-witnessed type.
     """
     if not allowed_types:
         return True
@@ -664,10 +514,7 @@ def _filter_allows(
     return False
 
 
-# Tiers whose occurrences prove only that a writer ran. They never reach the
-# notify list from the scanner (no row is inserted at all), so this is the
-# second lock on the same door: any caller handing the notifier a hint- or
-# activity-tier row is refused rather than trusted.
+# Hint/activity tiers only prove a writer ran; refuse them here too, not just in the scanner.
 _NON_NOTIFYING_TIERS = frozenset({WITNESS_TIER_HINT, WITNESS_TIER_ACTIVITY})
 
 
@@ -676,9 +523,7 @@ def _may_notify(event: MonitoredEvent) -> bool:
     return data.get("witness_tier") not in _NON_NOTIFYING_TIERS
 
 
-# Mirror of ``services.monitoring.salience.SALIENCE_ORDER``. ``not_determined``
-# sorts WITH ``notable`` so an unclassified event is never filtered out by a
-# threshold the classifier never rated it against.
+# Mirror of ``salience.SALIENCE_ORDER``: unrated events rank with ``notable``.
 _SALIENCE_ORDER = {
     SALIENCE_ROUTINE: 0,
     SALIENCE_NOT_DETERMINED: 1,
@@ -688,17 +533,9 @@ _SALIENCE_ORDER = {
 
 
 def _salience_allows(subscription: ProtocolSubscription, event: MonitoredEvent) -> bool:
-    """Does *subscription*'s ``min_salience`` admit *event*?
+    """Whether *subscription*'s opt-in ``min_salience`` admits *event*.
 
-    **Opt-in, and only opt-in**. A subscription without
-    ``min_salience`` receives exactly what it receives today — this is the same
-    no-default-change contract ``_expand_allowed_event_types`` keeps for saved
-    event-type filters, and it is why the threshold rides inside the existing
-    ``event_filter`` JSONB rather than in a new column.
-
-    An unrecognized threshold admits everything: a filter value nothing in the
-    vocabulary matches is a filter we cannot honour, and declining to deliver
-    on that basis would mute a subscriber over our own misreading.
+    Absent means no change in behaviour; an unrecognized threshold admits everything rather than mute on our misreading.
     """
     event_filter = subscription.event_filter if isinstance(subscription.event_filter, dict) else {}
     minimum = event_filter.get("min_salience")
@@ -707,25 +544,19 @@ def _salience_allows(subscription: ProtocolSubscription, event: MonitoredEvent) 
     data = event.data if isinstance(event.data, dict) else {}
     level = data.get("salience")
     if level not in _SALIENCE_ORDER:
-        # A row minted before salience landed, or one no rule rated. Unrated is
-        # not routine, so it is measured at the not_determined
-        # rank rather than dropped.
+        # Unrated is not routine.
         level = SALIENCE_NOT_DETERMINED
     return _SALIENCE_ORDER[level] >= _SALIENCE_ORDER[minimum]
 
 
 def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> None:
-    """Send Discord notifications for detected governance/monitoring events.
-
-    Groups events by protocol_id, loads ProtocolSubscription rows, filters
-    by event_filter (if set), and sends Discord embeds.
+    """Send Discord notifications for governance/monitoring events to each protocol's subscriptions, honouring their
+    filters.
     """
     if not events:
         return
 
-    # Group events by protocol_id. Side effects follow claim strength:
-    # an occurrence that only proves a writer ran never pages
-    # anyone, whatever route handed it to this function.
+    # Occurrences that only prove a writer ran never page, whatever route delivered them.
     events_by_protocol: dict[int, list[MonitoredEvent]] = {}
     for event in events:
         if not _may_notify(event):
@@ -737,7 +568,6 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
     if not events_by_protocol:
         return
 
-    # Load subscriptions
     protocol_ids = list(events_by_protocol.keys())
     subs = (
         session.execute(
@@ -767,12 +597,8 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
         for event in proto_events:
             embed = _format_governance_embed(event, session)
             for sub in proto_subs:
-                # Check event filter. Legacy "Signers" filter only listed
-                # signer_added/removed/threshold_changed; expand the
-                # allowed set on the fly so a historic webhook still
-                # picks up the related Safe execution events that were
-                # added later under the same UI grouping — unless the filter
-                # states its own groups, which only a post-split save does.
+                # Expanded so old "Signers" webhooks still get later Safe execution types, unless the filter states its
+                # groups.
                 if sub.event_filter and isinstance(sub.event_filter, dict):
                     if not _filter_allows(
                         sub.event_filter.get("event_types"),
@@ -780,9 +606,7 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
                         filter_groups=_stated_filter_groups(sub.event_filter),
                     ):
                         continue
-                # Composes with the type filter: both must pass. Absent
-                # ``min_salience`` is a no-op, so no existing subscription
-                # changes behaviour.
+                # Both filters must pass; absent ``min_salience`` is a no-op.
                 if not _salience_allows(sub, event):
                     continue
 
@@ -813,20 +637,9 @@ def notify_protocol_events(session: Session, events: list[MonitoredEvent]) -> No
         )
 
 
-# ---------------------------------------------------------------------------
-# Re-analysis completion notification
-# ---------------------------------------------------------------------------
-
-
 def notify_reanalysis_complete(session: Session, job: "Job") -> None:
-    """Send a Discord notification when a re-analysis job finishes.
-
-    Builds a diff summary comparing the pre-reanalysis snapshot (stored in
-    ``job.request["reanalysis_snapshot"]``) with the current DB state, then
-    dispatches the embed to all protocol subscriptions for this job's protocol.
-
-    The embed references the original reanalysis Job ID so recipients can
-    correlate it with the initial event notification.
+    """Notify a finished re-analysis: a diff against ``job.request["reanalysis_snapshot"]``, sent to the protocol's
+    subscriptions and citing the job id.
     """
     request = job.request if isinstance(job.request, dict) else {}
     trigger = request.get("reanalysis_trigger", "unknown")
@@ -834,7 +647,6 @@ def notify_reanalysis_complete(session: Session, job: "Job") -> None:
     if not protocol_id:
         return
 
-    # Load subscriptions
     subs = (
         session.execute(
             select(ProtocolSubscription).where(
@@ -848,12 +660,10 @@ def notify_reanalysis_complete(session: Session, job: "Job") -> None:
     if not subs:
         return
 
-    # Build diff
     from services.monitoring.reanalysis import build_reanalysis_diff
 
     changes = build_reanalysis_diff(session, job)
 
-    # Resolve names
     protocol_name = None
     proto = session.get(Protocol, protocol_id)
     if proto:
@@ -871,7 +681,6 @@ def notify_reanalysis_complete(session: Session, job: "Job") -> None:
         if contract_row:
             contract_name = contract_row.contract_name
 
-    # Build title
     label = contract_name or f"{(job.address or '?')[:10]}...{(job.address or '?')[-4:]}"
     if protocol_name:
         title = f"{protocol_name}: Re-analysis complete — {label}"

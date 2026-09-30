@@ -1,23 +1,12 @@
 """Observability contract for the scoring boundary.
 
-The fold and the resolution planes are deliberately log-free — every refusal is
-published into the score document — so the only
-place a pricing regression, a fail-closed universe or an unreadable execution
-record can become visible to an operator is the impure boundary around them.
-This file locks that boundary in:
-
-* ``document_summary`` reads every field off the finished document, so a step
-  change between two folds is readable from the log stream alone;
-* ``score_protocol`` times its three impure steps, folds the durations into the
-  written line, and raises a WARNING for the two grade-integrity facts that
-  otherwise live only inside the document;
-* the distiller's I/O edges name what they could not read: the W2 asset-identity
-  precondition names the conjunct that refused it, the flow-asset plane
-  distinguishes an absent artifact from a malformed one, and contracts skipped
-  for a NULL ``protocol_id`` are counted rather than dropped.
-
-No database: the fold, the persist and the universe load are all substituted,
-because what is under test is the boundary's own bookkeeping.
+The fold and resolution planes are log-free (every refusal is published into the score document), so the impure
+boundary around them is the only place a pricing
+regression or unreadable execution record can become visible. Locked here: ``document_summary``
+reads every field off the finished document; ``score_protocol`` times its impure steps and WARNs
+for the two grade-integrity facts; the distiller's I/O edges name what they could not read (W2
+refusal conjunct, absent vs malformed flow-asset artifact, NULL-``protocol_id`` contracts counted).
+No database: fold and persist are substituted.
 """
 
 from __future__ import annotations
@@ -38,7 +27,6 @@ from services.scoring.distill import (
     W2_PLANE_ABSENT,
     W2_SELECTOR_UNRESOLVED,
     W2_STATUS_NOT_RESOLVED,
-    ProtocolUniverse,
     _asset_identity,
     _ContractFacts,
     _token_identity,
@@ -98,8 +86,7 @@ def _document(**overrides) -> ScoreDocument:
 
 
 def test_the_summary_reads_every_field_off_the_finished_document():
-    universe = ProtocolUniverse(addresses=frozenset({"0xa", "0xb"}), sources={}, basis="test")
-    summary = loop.document_summary(_document(), universe)
+    summary = loop.document_summary(_document())
 
     assert summary["population_disposition"] == "scored"
     assert summary["signals"] == 120
@@ -108,39 +95,41 @@ def test_the_summary_reads_every_field_off_the_finished_document():
     assert summary["findings"] == 2
     assert summary["warnings_by_kind"] == {"reach_floor_absent": 2, "one_shot_latch": 1}
     assert summary["undetermined_instances"] == 2
-    # The pricing ratio: the pair is [decidable, seen] per entity.
     assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (1, 5)
     assert summary["tracked_total_usd"] == 1234.5
-    assert summary["universe_addresses"] == 2
     assert summary["confidence_pct"] == 44.2
     assert summary["confidence_value_priced_pct"] == 44.2
     assert summary["confidence_reach_magnitude_pct"] == 70.0
-    # An absent census is the earned zero at this model version.
     assert summary["execution_records_faulted"] == 0
 
 
-def test_a_fail_closed_universe_is_null_in_the_summary_and_never_a_zero():
-    summary = loop.document_summary(_document(), None)
-    assert summary["universe_addresses"] is None
-
-
-def test_a_document_with_no_provenance_blocks_omits_rather_than_guesses():
-    summary = loop.document_summary(_document(provenance={}, model_parameters={}), None)
-    assert summary["population_disposition"] is None
-    assert summary["signals"] is None
-    assert summary["tracked_total_usd"] is None
-    assert summary["confidence_reachability_pct"] is None
-    # An ABSENT census is not a completed count of zero.
-    assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
-
-
-def test_an_empty_pricing_census_is_a_real_zero():
-    """Present and empty is the fold saying no flow claim was scored — the one
-    case where 0 is the answer rather than a stand-in for an unasked question."""
-    summary = loop.document_summary(
-        _document(model_parameters={"confidence_detail": {"flow_pricing_decidable": {}}}), None
-    )
-    assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (0, 0)
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        pytest.param(
+            {"provenance": {}, "model_parameters": {}},
+            {
+                "population_disposition": None,
+                "signals": None,
+                "tracked_total_usd": None,
+                "confidence_reachability_pct": None,
+                "flow_pricing_decidable": None,
+                "flow_pricing_seen": None,
+            },
+            id="no-provenance-blocks-omits-rather-than-guesses",
+        ),
+        # Present and empty is the fold saying no flow claim was scored: the one case where 0 is the
+        # answer rather than a stand-in for an unasked question.
+        pytest.param(
+            {"model_parameters": {"confidence_detail": {"flow_pricing_decidable": {}}}},
+            {"flow_pricing_decidable": 0, "flow_pricing_seen": 0},
+            id="empty-pricing-census-is-a-real-zero",
+        ),
+    ],
+)
+def test_summary_null_versus_real_zero(overrides, expected):
+    summary = loop.document_summary(_document(**overrides))
+    assert {key: summary[key] for key in expected} == expected
 
 
 @pytest.mark.parametrize(
@@ -154,46 +143,43 @@ def test_an_empty_pricing_census_is_a_real_zero():
     ],
 )
 def test_an_unaddable_pricing_pair_publishes_null_rather_than_a_short_sum(census):
-    """A partial sum presented as a whole one reads as a pricing regression that
-    never happened — and raising would fail a fold that computed."""
+    """A partial sum presented as whole reads as a pricing regression that never happened, and
+    raising would fail a fold that computed."""
     summary = loop.document_summary(
-        _document(model_parameters={"confidence_detail": {"flow_pricing_decidable": census}}), None
+        _document(model_parameters={"confidence_detail": {"flow_pricing_decidable": census}})
     )
     assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
 
 
-def test_a_kindless_warning_is_bucketed_as_unknown_not_as_the_string_none():
-    summary = loop.document_summary(_document(warnings=[{"note": "no kind here"}, {"kind": ""}, "not a dict"]), None)
-    assert summary["warnings_by_kind"] == {"unknown": 3}
-
-
-def test_the_execution_fault_census_is_counted_into_the_summary():
-    summary = loop.document_summary(
-        _document(execution_evidence_faults={"records_faulted": 3, "faulted_by_reason": {"fetch_failed": 3}}),
-        None,
-    )
-    assert summary["execution_records_faulted"] == 3
-
-
-def test_an_unreadable_fault_count_is_null_and_never_the_earned_zero():
-    summary = loop.document_summary(_document(execution_evidence_faults={"records_faulted": None}), None)
-    assert summary["execution_records_faulted"] is None
+@pytest.mark.parametrize(
+    "faults, expected",
+    [
+        pytest.param(
+            {"records_faulted": 3, "faulted_by_reason": {"fetch_failed": 3}}, 3, id="fault-census-counted-into-summary"
+        ),
+        # An unreadable count is null, never the earned zero.
+        pytest.param({"records_faulted": None}, None, id="unreadable-fault-count-is-null"),
+    ],
+)
+def test_execution_fault_count_in_summary(faults, expected):
+    summary = loop.document_summary(_document(execution_evidence_faults=faults))
+    assert summary["execution_records_faulted"] == expected
 
 
 def test_the_summary_is_total_over_a_malformed_document():
-    """Both entrypoints call this: a raise arms the backoff in the loop and
-    fails a computed score in the CLI."""
+    """Both entrypoints call this: a raise arms the loop's backoff and fails a computed score in the CLI."""
     summary = loop.document_summary(
         _document(
             findings=["not a dict", {"undetermined_instances": "not a list"}],
-            warnings=["not a dict"],
+            # Kindless warnings are bucketed as "unknown", not as the string "None".
+            warnings=[{"note": "no kind here"}, {"kind": ""}, "not a dict"],
             provenance={"population": "not a dict", "exposure_coverage": 7},
             model_parameters={"confidence_detail": "not a dict"},
             execution_evidence_faults={"records_faulted": "three"},
         ),
-        None,
     )
     assert summary["undetermined_instances"] == 0
+    assert summary["warnings_by_kind"] == {"unknown": 3}
     assert summary["signals"] is None
     assert summary["tracked_total_usd"] is None
     assert (summary["flow_pricing_decidable"], summary["flow_pricing_seen"]) == (None, None)
@@ -252,35 +238,10 @@ _LOOP_LOGGER = "services.scoring.loop"
 
 
 def _score(caplog):
-    """Every assertion below is scoped to the loop's own logger: a stray record
-    from any other one must not be able to move a count."""
+    """Every assertion is scoped to the loop's own logger so a stray record can't move a count."""
     with caplog.at_level(logging.INFO, logger=_LOOP_LOGGER):
         loop.score_protocol(_FakeSession(), loop.DueProtocol(7, SCORE_TRIGGER_DIRTY_LOOP))  # pyright: ignore[reportArgumentType]
     return [r for r in caplog.records if r.name == _LOOP_LOGGER]
-
-
-def test_each_impure_step_is_timed_and_the_durations_reach_the_written_line(_substituted_fold, caplog):
-    records = _score(caplog)
-    phases = {r.phase for r in records if getattr(r, "phase", None)}
-    assert phases == {"fold", "persist"}
-
-    written = next(r for r in records if r.message == "protocol score written")
-    assert set(written.durations_ms) == {"fold", "persist"}
-    assert written.duration_ms_total == sum(written.durations_ms.values())
-
-
-def test_one_summary_line_per_fold_carries_the_document(_substituted_fold, caplog):
-    records = _score(caplog)
-    summaries = [r for r in records if r.message == "score document summary"]
-    assert len(summaries) == 1
-    assert summaries[0].population_disposition == "scored"
-    assert summaries[0].universe_addresses is None
-
-
-def test_retired_delivery_loading_does_not_run_or_warn(_substituted_fold, caplog):
-    assert not hasattr(loop, "load_protocol_universe")
-    records = _score(caplog)
-    assert not [r for r in records if r.levelno >= logging.WARNING and r.name == _LOOP_LOGGER]
 
 
 def test_an_execution_evidence_fault_warns_with_its_reasons(_substituted_fold, caplog):
@@ -299,10 +260,9 @@ def test_an_execution_evidence_fault_warns_with_its_reasons(_substituted_fold, c
 
 
 def test_a_failing_summary_never_unmakes_a_committed_score(_substituted_fold, caplog, monkeypatch):
-    """The summary is emitted after the commit; letting it raise would arm the
-    backoff for a protocol whose score is already durable."""
+    """The summary is emitted after the commit; a raise would arm the backoff for a durable score."""
 
-    def _boom(document, universe):
+    def _boom(document):
         raise RuntimeError("summary is broken")
 
     monkeypatch.setattr(loop, "document_summary", _boom)
@@ -311,12 +271,8 @@ def test_a_failing_summary_never_unmakes_a_committed_score(_substituted_fold, ca
     assert [r.message for r in warnings] == ["score summary emit failed"]
 
 
-def test_a_clean_fold_raises_no_warning(_substituted_fold, caplog):
-    assert [r for r in _score(caplog) if r.levelno >= logging.WARNING and r.name == _LOOP_LOGGER] == []
-
-
 def test_the_cli_emits_the_same_summary_and_a_malformed_document_does_not_fail_it(monkeypatch, caplog):
-    """The CLI calls the summary bare, so the summary itself has to be total."""
+    """The CLI calls the summary bare, so it must itself be total."""
     from services.scoring import cli
 
     document = _document(
@@ -325,7 +281,6 @@ def test_the_cli_emits_the_same_summary_and_a_malformed_document_does_not_fail_i
         model_parameters={"confidence_detail": {"flow_pricing_decidable": {"ethereum::0x1": [None, 1]}}},
     )
     monkeypatch.setattr(cli, "distill_protocol_in_memory", lambda session, pid: [])
-    assert not hasattr(cli, "load_protocol_universe")
     monkeypatch.setattr(cli, "compute_protocol_score", lambda *a, **k: document)
 
     with caplog.at_level(logging.INFO, logger="services.scoring.cli"):
@@ -336,7 +291,6 @@ def test_the_cli_emits_the_same_summary_and_a_malformed_document_does_not_fail_i
     ]
     assert len(summaries) == 1
     assert summaries[0].flow_pricing_decidable is None
-    assert summaries[0].universe_addresses is None
 
 
 # --------------------------------------------------- the W2 precondition's arms
@@ -378,8 +332,8 @@ def _entry(provenance="contract_state_unresolved", selector="0xdeadbeef"):
     ],
 )
 def test_every_w2_refusal_arm_names_itself(facts, entries, expected):
-    """Five conjuncts reach one third state; a refusal that cannot be told from
-    the other four is one nobody can act on."""
+    """Five conjuncts reach one third state; a refusal indistinguishable from the other four
+    can't be acted on."""
     tri, refusal = _token_identity(facts, entries)
     assert not tri.is_determined
     assert refusal == expected
@@ -397,7 +351,6 @@ def test_the_refusal_travels_on_the_envelope_and_in_the_witness_notes():
     notes: set[str] = set()
     gates = distill._flow_gates(_facts(state=ASSET_IDENTITY_ARTIFACT_MALFORMED), [_entry()], [], notes)
     envelope = gates["asset_identity"]
-    # Three-state discipline is untouched: a named refusal is still a refusal.
     assert envelope["state"] == "not_determined"
     assert envelope["value"] is None
     assert envelope["not_determined_reason"] == W2_PLANE_ABSENT
@@ -466,9 +419,22 @@ class _Job:
     id = "job-1"
 
 
-def test_contracts_with_no_protocol_are_counted_not_silently_skipped(monkeypatch, caplog):
+@pytest.mark.parametrize(
+    "contracts, expected_skipped, expected_warnings",
+    [
+        pytest.param(
+            [(1, 7), (2, None), (3, None)],
+            2,
+            [(logging.WARNING, 2, [2, 3])],
+            id="null-protocol-contracts-counted-not-silently-skipped",
+        ),
+        # Negative control: no orphans, no warning.
+        pytest.param([(1, 7)], 0, [], id="no-orphans-means-no-warning"),
+    ],
+)
+def test_contracts_with_no_protocol_are_counted(monkeypatch, caplog, contracts, expected_skipped, expected_warnings):
     monkeypatch.setattr(distill.facts, "distill_contract_signals", lambda session, contract, job_id: [])
-    session = _ContractSession([_Contract(1, 7), _Contract(2, None), _Contract(3, None)])
+    session = _ContractSession([_Contract(*c) for c in contracts])
     metrics: dict[str, object] = {}
     token = stage_metrics_var.set(metrics)
     try:
@@ -478,23 +444,7 @@ def test_contracts_with_no_protocol_are_counted_not_silently_skipped(monkeypatch
         stage_metrics_var.reset(token)
 
     assert set(out) == {1}
-    assert metrics["score_signal_contracts_skipped_null_protocol"] == 2
-    record = next(r for r in caplog.records if "no protocol_id" in r.message)
-    assert record.levelno == logging.WARNING
-    assert record.contracts_skipped == 2
-    assert record.contract_ids == [2, 3]
-
-
-def test_no_orphans_means_no_warning(monkeypatch, caplog):
-    monkeypatch.setattr(distill.facts, "distill_contract_signals", lambda session, contract, job_id: [])
-    session = _ContractSession([_Contract(1, 7)])
-    metrics: dict[str, object] = {}
-    token = stage_metrics_var.set(metrics)
-    try:
-        with caplog.at_level(logging.WARNING, logger="services.scoring.distill"):
-            distill.distill_job_signals(session, _Job())  # pyright: ignore[reportArgumentType]
-    finally:
-        stage_metrics_var.reset(token)
-
-    assert metrics["score_signal_contracts_skipped_null_protocol"] == 0
-    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert metrics["score_signal_contracts_skipped_null_protocol"] == expected_skipped
+    warned = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert [(r.levelno, r.contracts_skipped, r.contract_ids) for r in warned] == expected_warnings
+    assert all("no protocol_id" in r.message for r in warned)

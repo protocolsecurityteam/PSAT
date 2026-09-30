@@ -27,7 +27,6 @@ from utils.scoring_status import VALUE_BOUND_EXACT
 
 
 def test_f1_a_native_only_flow_is_still_bounded_by_its_witness(fold):
-    """The fork proved the call moves $10; the entity's sheet is not the answer."""
     plane = value_plane({KEY_C: {"native": 1_000_000_000.0}})
     signal = flow_sig(
         function_name="sweepETH",
@@ -117,7 +116,6 @@ def test_f11_a_withheld_grade_publishes_no_derived_figure(fold):
 
 
 def test_f10_the_transitive_branch_reads_the_signals_value_state(fold):
-    """An unwitnessed reach charges no closure, however rich the neighbours."""
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -137,19 +135,13 @@ def test_f10_the_transitive_branch_reads_the_signals_value_state(fold):
 
 
 def test_v3_the_transitive_branch_discloses_unpriced_closure_entities(fold):
-    """Every closure entity is NAMED, priced or not — and none is priced by its sheet.
+    """Every closure entity is NAMED, priced or not, and none is priced by its sheet.
 
-    The transitive branch used to publish the closure's balance sheets as the
-    row's value, so the entity that could not be priced was the only one that
-    appeared as a gap. Under the magnitude discipline the sheet prices nothing:
-    a reach with no magnitude witness is not_determined at BOTH entities, and
-    both are named. Membership is untouched — the row still reaches them.
-
-    Asked of GATE control, which is the class the sheet may never price: the
-    vault's own code, share math and caller conditions are all still standing
-    and none of them has been examined. Code control has one narrow exception —
-    its own controlled node — and that exception is pinned separately, with its
-    downstream entity still landing here (``test_cc3_*``).
+    A reach with no magnitude witness is not_determined at BOTH entities, and
+    both are named; membership is untouched. Asked of GATE control, which the
+    sheet may never price: the vault's code, share math and caller conditions
+    are all unexamined. Code control's one narrow exception (its own controlled
+    node) is pinned separately (``test_cc3_*``).
     """
     signal = sig(
         claim_id="authority.replace",
@@ -180,7 +172,6 @@ def test_v3_the_transitive_branch_discloses_unpriced_closure_entities(fold):
 
 
 def test_v4_exposure_caps_on_the_entity_contribution_not_the_row_total(fold):
-    """A row spread over N entities must not charge its total against each one."""
     signals = [
         flow_sig(
             function_name=f"withdraw{index}",
@@ -210,9 +201,9 @@ def test_v4_exposure_caps_on_the_entity_contribution_not_the_row_total(fold):
 def test_p0_a_proxy_and_its_implementation_are_one_priced_entity(fold):
     """Reaching both keys of one proxy pair charges one balance, not two.
 
-    The plane folds the implementation's balance onto its proxy, so both keys
-    answer with the same dollars; keying the row's contributions on the raw keys
-    published a value at stake and an exposure that were both exactly 2x real.
+    The plane folds the implementation's balance onto its proxy; keying
+    contributions on the raw keys published a value at stake and an exposure
+    both exactly 2x real.
     """
     signal = sig(
         deployment_address=PROXY,
@@ -243,9 +234,9 @@ def test_p0_a_proxy_and_its_implementation_are_one_priced_entity(fold):
 def test_host_entities_name_the_deployments_not_the_reach(fold):
     """The row publishes WHERE its instances live, apart from what they reach.
 
-    A transitive row's reach set can omit the host entirely (the host may be
-    unpriced), leaving a consumer no way to name the contract the function is
-    actually on. host_entities carries the deployment keys verbatim.
+    A transitive row's reach set can omit an unpriced host, leaving a consumer no
+    way to name the contract the function is on; host_entities carries the
+    deployment keys verbatim.
     """
     signal = sig(
         deployment_address=C,

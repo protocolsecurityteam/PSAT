@@ -1,32 +1,16 @@
-// Single shared claims vocabulary (Plane 1) for every frontend consumer.
-// (One package, src/vocab/: data table here; projection, qualifiers, witness
-// facts, principal notes and capability phrases in sibling modules.)
+// The frontend's single claims vocabulary (Plane 1): claim_id → family, lane,
+// tone, chip sentence, priority. Claims are minted by services/static/claims.
 //
-// A function payload may carry `claims: [{claim_id, tier, witness}]` minted by
-// the backend registry (services/static/claims). This package is the one place
-// that maps a claim_id onto the presentation facts consumers need — family,
-// lane, tone, chip sentence, ordering priority, and legacy projection. Keeping
-// it in one map is the frontend half of the rule "one vocabulary module per
-// side": lane.js, the inspector and the score page all read from here so the
-// sites cannot drift.
+// The primary claim has the lowest `priority` (ties by claim_id) and drives
+// lane, tone, sentence and ordering; a control claim always wins the top lane,
+// otherwise outflow beats inflow. Score takes the strongest severity across
+// claims.
 //
-// Precedence rule for a function with several claims: the *primary* claim is the
-// one with the lowest `priority` number (ties broken by claim_id). Lane, tone,
-// chip sentence and ordering derive from it. Lane additionally honours the
-// legacy in/out merge (a control claim always wins the top lane; when only flow
-// claims exist, an outflow beats an inflow — matching laneForFunction's original
-// ordering). Score takes the strongest severity across all claims.
-//
-// Families → lanes: control_plane and exec render in the top (Control) lane;
-// flow renders in the inflow/outflow lanes by direction; user_plane is NEVER
-// control — user operations sit in a flow lane or ops, never top.
+// control_plane and exec → Control lane; flow → inflow/outflow by direction;
+// user_plane is never Control.
 
-// Concise display phrases ("changes owner") deliberately survive as the chip
-// text — the familiar legacy words are kept, now backed by a checkable
-// claim rather than a name heuristic. The full registry sentence lives on the
-// backend; here we render the glanceable form.
+// Chip text keeps the familiar short phrases, now backed by a checkable claim.
 export const CLAIM_VOCAB = {
-  // ── upgrade / proxy admin (top lane) ──────────────────────────────────────
   "upgrade.implementation": {
     family: "control_plane",
     lane: "top",
@@ -44,7 +28,6 @@ export const CLAIM_VOCAB = {
     legacy: null,
   },
 
-  // ── arbitrary execution / deployment (exec family, top lane) ──────────────
   "exec.arbitrary": {
     family: "exec",
     lane: "top",
@@ -53,11 +36,9 @@ export const CLAIM_VOCAB = {
     priority: 1,
     legacy: "arbitrary_external_call",
   },
-  // Foreign code running in THIS contract's storage. Kept out of
-  // upgrade.implementation on purpose: that claim carries the EIP-1967/UUPS
-  // population and its statistics, and a non-standard split proxy admitted into
-  // it would corrupt them to say the same severity-relevant thing. A consumer
-  // that wants "logic can be replaced" reads the union of the two.
+  // Kept out of upgrade.implementation so non-standard split proxies don't
+  // corrupt its EIP-1967/UUPS statistics; "logic can be replaced" is the union
+  // of both.
   "delegatecall.execute": {
     family: "exec",
     lane: "top",
@@ -75,7 +56,6 @@ export const CLAIM_VOCAB = {
     legacy: "contract_deployment",
   },
 
-  // ── ownership (top lane) ──────────────────────────────────────────────────
   "ownership.transfer": {
     family: "control_plane",
     lane: "top",
@@ -101,7 +81,6 @@ export const CLAIM_VOCAB = {
     legacy: "ownership_transfer",
   },
 
-  // ── role / authority / pointer admin (top lane) ───────────────────────────
   "roles.grant": {
     family: "control_plane",
     lane: "top",
@@ -142,9 +121,8 @@ export const CLAIM_VOCAB = {
     priority: 3,
     legacy: null,
   },
-  // Minted only by the effects claims bridge (behavioral_observed): a simulated
-  // call opened a permission gate to previously-rejected callers. Displayed like
-  // the other control-plane authority claims.
+  // Minted only by the effects bridge: a simulated call opened a gate to
+  // previously-rejected callers.
   "authority.grant": {
     family: "control_plane",
     lane: "top",
@@ -202,7 +180,6 @@ export const CLAIM_VOCAB = {
     legacy: null,
   },
 
-  // ── pause (top lane, split set/unset) ─────────────────────────────────────
   "pause.set": {
     family: "control_plane",
     lane: "top",
@@ -220,7 +197,6 @@ export const CLAIM_VOCAB = {
     legacy: "pause_toggle",
   },
 
-  // ── timelock ops (top lane) ───────────────────────────────────────────────
   "timelock.schedule": {
     family: "control_plane",
     lane: "top",
@@ -254,7 +230,6 @@ export const CLAIM_VOCAB = {
     legacy: "timelock_operation",
   },
 
-  // ── flow / supply (inflow / outflow lanes) ────────────────────────────────
   "flow.in": {
     family: "flow",
     lane: "left",
@@ -279,12 +254,8 @@ export const CLAIM_VOCAB = {
     priority: 7,
     legacy: "asset_send",
   },
-  // The entry neither holds nor sends the value — it calls a contract that does.
-  // Same risk class as a direct out-flow when the routed value LEAVES that
-  // contract (the caller can still name where it lands), so it shares
-  // flow.out's severity. ``lane`` here is the outbound default; laneForClaims
-  // overrides it per-witness, because a router that forwards value INTO a vault
-  // is an inflow and must not read as an outflow.
+  // Calls a contract that moves the value; shares flow.out's severity. ``lane``
+  // is the outbound default; laneForClaims overrides for inbound routers.
   value_router: {
     family: "flow",
     lane: "right",
@@ -302,7 +273,6 @@ export const CLAIM_VOCAB = {
     legacy: "burn",
   },
 
-  // ── user-plane operations (never the control lane) ────────────────────────
   "weth.deposit": {
     family: "user_plane",
     lane: "left",
@@ -352,15 +322,10 @@ export const CLAIM_VOCAB = {
     legacy: null,
   },
 
-  // ── facts (present for provenance; contribute nothing to severity) ────────
-  // A bucket rate limiter bounds throughput per window, not total loss — over N
-  // windows the extractable total is unbounded — so it is recorded and scored at
-  // zero rather than credited as a ceiling. It sits in ops, never a flow lane,
-  // so it can never displace the claim that describes the actual value move.
-  // The severity meaning INVERTS on configuration (a zero refill rate is a
-  // one-shot total cap; a zero capacity is a freeze), and both numbers are chain
-  // state the static witness marks not-determined — so no consumer may derive a
-  // grade from this claim as it stands.
+  // Facts: provenance only, no severity. A rate limiter bounds per-window
+  // throughput, not total loss, so it scores zero and sits in ops. Its meaning
+  // inverts with configuration (zero refill = one-shot cap, zero capacity =
+  // freeze), which is unread chain state.
   "rate_limit.consume": {
     family: "fact",
     lane: "ops",
@@ -378,18 +343,15 @@ const TIER_LABEL = {
   policy_derived: "policy",
 };
 
-// The provenance word, qualified when the observation it names was synthesised
-// (see the synthesis-qualifier block below). `seeded` only ever reaches the
-// observed tier — a static tier is not an observation and cannot be seeded.
+// Only the observed tier can be seeded.
 export function tierLabelFor(tier, seeded) {
   const label = TIER_LABEL[tier];
   if (!label) return label;
   return seeded && tier === OBSERVED_TIER ? `${label} (seeded)` : label;
 }
 
-// behavioral_observed (effects plane) outranks every static tier: a witnessed
-// state transition on real forked state is the strongest provenance a claim can
-// carry. Mirrors services/static/claims/types.py.
+// Fork-observed outranks every static tier. Mirrors
+// services/static/claims/types.py.
 export const TIER_RANK = {
   behavioral_observed: 4,
   standard_exact: 3,
@@ -397,6 +359,4 @@ export const TIER_RANK = {
   policy_derived: 1,
 };
 
-// The tier token for a fork-observed (effects-plane) claim; the only tier a
-// seed qualifier can ever attach to.
 export const OBSERVED_TIER = "behavioral_observed";

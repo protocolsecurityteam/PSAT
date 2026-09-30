@@ -4,21 +4,14 @@ import { Handle, Position } from "@xyflow/react";
 import { formatUsd, principalBadge, shortAddr } from "../format.js";
 import { PRINCIPAL_COLORS } from "../meta.js";
 
-// Co-controller accent (amber). The primary row uses the group's own
-// principal color so a timelock-owned group reads timelock, not teal.
+// The primary row uses the group's own colour so a timelock-owned group reads
+// timelock.
 const CO_ACCENT = "#d99a4e";
 
-// One accordion row: a controller's badge + full capability summary (every
-// tag, comma-separated like the rest of the app — never truncated). Clicking
-// it selects the controller, which highlights the contracts it governs on the
-// canvas (mirroring a click on the group header) and opens its sidebar card —
-// the card's Governs tab is the source of truth for the exact functions it can
-// call on each contract.
+// Clicking selects the controller (highlights what it governs, opens its card).
 function ControllerRow({ controller, accent, selected, focused, onSelect }) {
   const { isPrimary, label, address, capabilities, functions = [], governs } = controller;
-  // Capability tags (all of them, comma-separated, never truncated). When a
-  // controller's functions map to no high-level tag, fall back to function
-  // names like the sidebar's "Can Call" so the summary is never blank.
+  // Falls back to function names so the summary is never blank.
   const capsSummary = capabilities.length
     ? capabilities.join(", ")
     : functions.length
@@ -47,15 +40,9 @@ function ControllerRow({ controller, accent, selected, focused, onSelect }) {
   );
 }
 
-// Container node that wraps every contract a single principal owns. The
-// colored header acts as the principal: clicking it opens the same detail
-// panel a standalone PrincipalNode would. Below it, a Controllers accordion
-// lists every principal with authority inside the box — the primary owner
-// (teal/type-colored, tagged PRIMARY) and every co-controller (amber, tagged
-// CO) — each selecting/highlighting its governed contracts on click and
-// opening its sidebar card (whose Governs tab lists the exact functions). The
-// child contract cards render inside the container via React Flow's parentId
-// mechanism, starting below the reserved header band.
+// A principal's box: the header acts as the principal, the Controllers
+// accordion lists primary and co-controllers, and child cards render inside via
+// parentId.
 export function GroupNode({ data }) {
   const p = data.principal;
   const color = PRINCIPAL_COLORS[p.type] || "#64748b";
@@ -68,11 +55,7 @@ export function GroupNode({ data }) {
   const focusedAddr = data.focusedControllerAddr || null;
   const onMeasureBand = data.onMeasureBand;
 
-  // Measure the real rendered band height (colored bar + accordion, including
-  // any capability summary that wraps to multiple lines) and report it so the
-  // layout reserves exactly that and re-packs the canvas. The inner wrapper is
-  // auto-height; the outer band is pinned + clipped, so this reads the natural
-  // content height regardless of the current reservation.
+  // Reports the natural band height so the layout reserves exactly that.
   const innerRef = useRef(null);
   useLayoutEffect(() => {
     if (!innerRef.current || !onMeasureBand) return;
@@ -80,11 +63,8 @@ export function GroupNode({ data }) {
     if (h > 0) onMeasureBand(h);
   }, [controllers, onMeasureBand]);
 
-  // Body is transparent on purpose — even an 8% colored tint sits above
-  // the React Flow edges layer and dims any line crossing the group.
-  // The colored header bar + 2px colored border carry all the type
-  // identity; the body just needs to let edges read through. `cc` ≈ 80%
-  // top of header, `77` ≈ 47% bottom.
+  // Transparent body: any tint sits above the edges layer and dims lines
+  // crossing the group.
   return (
     <div
       className={`ps-group-node ps-group-${p.type}${data.focused ? " ps-group-focused" : ""}${data.selected ? " ps-group-selected" : ""}${
@@ -111,20 +91,16 @@ export function GroupNode({ data }) {
       {chip?.in && (
         <div className="ps-node-chip ps-node-chip--in">{chip.in}</div>
       )}
-      {/* Edges terminate on the group itself: ctrl-in (top) / ctrl-out
-          (bottom) carry the aggregated cross-group bundles. stub-bottom (a
-          target at the same bottom-centre spot ctrl-out leaves from) is where an
-          outbound contract stub lands. stub-top (top-centre, same spot the
-          inbound bundle arrives) is where an inbound stub leaves to drop down to
-          the contract it feeds. */}
+      {/*
+        ctrl-in/ctrl-out carry cross-group bundles; stub-bottom and stub-top
+        are where outbound/inbound contract stubs meet them.
+      */}
       <Handle type="target" position={Position.Top} id="ctrl-in" className="ps-handle" />
       <Handle type="source" position={Position.Bottom} id="ctrl-out" className="ps-handle" />
       <Handle type="target" position={Position.Bottom} id="stub-bottom" className="ps-handle" />
       <Handle type="source" position={Position.Top} id="stub-top" className="ps-handle" />
 
-      {/* Header band: pinned to the exact height the layout reserved
-          (data.headerHeight, derived from the measured inner content) so the
-          contract cards always start flush below it. */}
+      {/* Pinned to the reserved height so cards start flush below it. */}
       <div className="ps-group-head" style={data.headerHeight ? { height: data.headerHeight } : undefined}>
         <div className="ps-group-head-inner" ref={innerRef}>
           <div

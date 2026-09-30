@@ -1,5 +1,5 @@
 #!/bin/bash
-# `web` process group: FastAPI only.
+# `web` process group: independently supervised API and company preparation.
 set -e
 unset PSAT_WORKER_LIFECYCLE_TOKEN
 
@@ -11,13 +11,9 @@ cd "$(dirname "$0")/.."
 # psycopg2 sockets are not fork-safe — children crash on first DB
 # access.
 #
-# `python serve.py` runs api.serve(), which is uvicorn.run() with our JSON log
-# config attached — the uvicorn CLI can only take that as a file. Same server,
-# same settings; uvicorn's own lines stop bypassing the JSON stream and its
-# access line (a duplicate of the api middleware's) is off. serve.py rather than
-# api.py: uvicorn imports `api` itself, so running api.py directly would execute
-# its module body a second time and build a whole throwaway app.
+# The supervisor launches serve.py to apply JSON logging without importing
+# api twice, and restarts the company builder independently of the API.
 export PSAT_API_HOST=0.0.0.0
 export PSAT_API_PORT=8000
 export PSAT_API_LIMIT_CONCURRENCY=200
-exec uv run --no-sync python serve.py
+exec uv run --no-sync python -m workers.web_runtime

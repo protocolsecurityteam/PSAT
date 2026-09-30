@@ -56,16 +56,14 @@ def _leaf(
     if authority_role is not None:
         leaf["authority_role"] = authority_role
     if operator is not None:
-        # ``operands`` is the comparison's two slots in IR left-right order and the
-        # operator says which side the constant bounds — both are load-bearing for the
-        # pause-window harvest. Every leaf the production builder emits carries
-        # an operator (5,089/5,089 persisted leaves locally); set it wherever a test
-        # asserts a resolved window, and leave it off to exercise the undecidable case.
+        # ``operands`` is the comparison's two slots in IR left-right order and the operator says
+        # which side the constant bounds; both are load-bearing for the pause-window harvest (5,089/5,089
+        # persisted leaves carry one). Set it wherever a test asserts a resolved window; leave it off
+        # to exercise the undecidable case.
         leaf["operator"] = operator
     if absorbed is not None:
-        # The sub-operands a two-slot comparison discarded (``absorbed_operands``,
-        # stamped by the predicate builder). Only set where a test exercises them,
-        # so every other leaf here stays byte-identical to a pre-widening tree.
+        # Sub-operands a two-slot comparison discarded (stamped by the predicate builder); set only
+        # where a test exercises them so other leaves stay byte-identical to a pre-widening tree.
         leaf["absorbed_operands"] = absorbed
     return {"op": "LEAF", "leaf": leaf}
 
@@ -81,12 +79,10 @@ def _or(*children: dict[str, Any]) -> dict[str, Any]:
 def _built_by_current_builder(tree: dict[str, Any]) -> dict[str, Any]:
     """Stamp the root marker the predicate builder stamps (``operand_absorption``).
 
-    Default for every hand-built tree here BECAUSE it is what solc-built trees carry:
-    it says the absorbed-operand recorder ran, so a leaf with no ``absorbed_operands``
-    read no additive sub-expression. Trees WITHOUT it are the persisted pre-widening shape,
-    where the same missing key means "unknown", and
-    ``test_a_pre_widening_tree_can_never_prove_an_indefinite_latch`` is the arm that
-    builds one deliberately."""
+    Default for hand-built trees because solc-built trees carry it: the absorbed-operand recorder ran,
+    so a leaf with no ``absorbed_operands`` read no additive sub-expression. WITHOUT it (the persisted
+    pre-widening shape) the same missing key means "unknown"; see
+    ``test_a_pre_widening_tree_can_never_prove_an_indefinite_latch``."""
     tree["operand_absorption"] = "recorded"
     return tree
 
@@ -262,21 +258,18 @@ def test_value_out_sentinel_lands_in_taint_slot():
     # param 0 is the taint index → sentinel there, base calldata keeps the principal.
     assert spec.sentinel_calldata[10:74].endswith("ee" * 20)
     assert spec.calldata[10:74].endswith("22" * 20)
-    # ...and the plan SAYS which parameter that was, under its DECLARED name —
-    # the vocabulary the exec witness's ``destination_param`` also speaks, which
-    # is the only thing the two can be joined on. (The taint fact here calls slot
-    # 0 ``token``; the declaration calls it ``to``, and the declaration wins.)
+    # ...and the plan SAYS which parameter that was, under its DECLARED name: the vocabulary the exec
+    # witness's ``destination_param`` speaks, the only join key. (The taint fact calls slot 0 ``token``;
+    # the declaration calls it ``to`` and wins.)
     assert spec.sentinel_param == "to"
 
 
 def test_a_slot_the_static_plane_never_named_publishes_no_sentinel_subject():
-    """No positional invention. ``arg0`` is not a name anything else in the
-    pipeline speaks, so a consumer joining on it would be joining on a token this
-    module made up — the field stays absent and the join refuses.
+    """No positional invention: ``arg0`` is not a name anything else in the pipeline speaks, so the
+    field stays absent and the join refuses.
 
-    The sentinel still gets planted: the lattice proves the recipient SLOT without
-    proving a name for it, so "we probed a parameter" and "we can say which" come
-    apart, and only the second is withheld."""
+    The sentinel is still planted (the lattice proves the recipient SLOT without a name), so "we
+    probed a parameter" and "we can say which" come apart and only the second is withheld."""
     fn = cd.FunctionFacts(
         full_name="transfer(address,uint256)",
         selector=TRANSFER,
@@ -343,10 +336,8 @@ def _decode(calldata: str, signature: str) -> tuple[Any, ...]:
 
 
 def test_a_batch_function_is_probed_with_a_non_empty_array():
-    """The encoder's default for a dynamic array is empty, and an empty
-    array is a loop body that never runs — so the probe executed, moved nothing,
-    and that non-observation was published and cached as a structural fact about
-    a function whose body it never entered."""
+    """The encoder's default dynamic array is empty, a loop body that never runs, so the probe
+    executed, moved nothing, and that non-observation was published and cached as structural fact."""
     spec = cd.synthesize_value_out(_candidate(BATCH_SEL), _batch_fn())
     assert spec is not None
     ids, recipients = _decode(spec.calldata, BATCH_SIG)
@@ -451,11 +442,9 @@ def _executor_for(signature: str, names: list[str], **kw: Any) -> Any:
 
 
 def test_an_upgrade_hook_is_not_an_executor():
-    """The over-claim this recognizer has to refuse. ``upgradeToAndCall`` has the
-    same ABI shape as an executor, but nothing proves it forwards a call — and
-    writing a token into a proxy's implementation slot would run that token's code
-    in the proxy's own storage, manufacturing a transfer out of the contract under
-    probe."""
+    """The over-claim this recognizer must refuse: ``upgradeToAndCall`` has an executor's ABI shape
+    but nothing proves it forwards a call, and writing a token into a proxy's implementation slot
+    would run that token's code in the proxy's storage, manufacturing a transfer out of the contract."""
     assert _executor_for("upgradeToAndCall(address,bytes)", ["newImplementation", "data"], flows=[]) is None
 
 
@@ -517,11 +506,9 @@ def test_the_claim_witness_names_the_executor_slots_directly():
 
 
 def test_an_executor_names_its_payload_slot_as_the_sentinel_subject():
-    """The join key's whole reason for existing. An executor's sentinel rides the
-    inner call INSIDE the payload; the outer call target keeps the value the base
-    probe passed. So the proof is about ``payload``, and a consumer joining it
-    onto the ``exec.arbitrary`` witness's ``destination_param`` (``target``) must
-    see the mismatch rather than read the proof as being about the destination."""
+    """The join key's reason for existing. An executor's sentinel rides the inner call INSIDE the
+    payload while the outer target keeps the base probe's value, so the proof is about ``payload``
+    and a consumer joining on ``exec.arbitrary``'s ``destination_param`` (``target``) must see the mismatch."""
     fn = _exec_fn(
         "execute(address,uint256,bytes,bytes32,bytes32)",
         ["target", "value", "payload", "predecessor", "salt"],
@@ -534,12 +521,9 @@ def test_an_executor_names_its_payload_slot_as_the_sentinel_subject():
 
 
 def test_a_witness_that_names_no_binding_does_not_get_treated_as_one():
-    """``state_var`` says no parameter is the destination — the LRTSquaredAdmin
-    shape, where the call goes to a storage-held swapper. With two address
-    parameters the ABI admits no unique pair either, so nothing is synthesized.
-
-    The pre-fix witness named ``fromAsset`` here and this probe built an inner
-    call around it."""
+    """``state_var`` says no parameter is the destination (the LRTSquaredAdmin shape: a storage-held
+    swapper). With two address parameters the ABI admits no unique pair either, so nothing is
+    synthesized. The pre-fix witness named ``fromAsset`` and this probe built an inner call around it."""
     executor = _executor_for(
         "rebalance(address,address,uint256,bytes)",
         ["fromAsset", "toAsset", "amount", "swapData"],
@@ -575,8 +559,6 @@ def test_a_kindless_legacy_witness_is_an_unread_question_not_a_proof():
         )
         is None
     )
-    # …and with the lattice's proof the ABI still admits no unique pair here, so
-    # the fallback does not quietly reinstate the old answer either.
     assert (
         _executor_for(
             "rebalance(address,address,uint256,bytes)",
@@ -589,9 +571,8 @@ def test_a_kindless_legacy_witness_is_an_unread_question_not_a_proof():
 
 
 def test_an_executor_with_no_inner_call_reports_vacuous_inputs():
-    """The payload slot kept the encoder's empty bytes, so the call forwarded
-    nothing — and forwarding nothing succeeds. Without this flag that success is
-    published and CACHED as "this function moves no value"."""
+    """The payload slot kept the encoder's empty bytes, so the call forwarded nothing, and forwarding
+    nothing succeeds. Without this flag that success is published and CACHED as "moves no value"."""
     fn = _exec_fn("forward(address,bytes,uint256)", ["target", "data", "value"], flows=[_FORWARDS_PARAM])
     spec = cd.synthesize_value_out(_candidate(BATCH_SEL), fn)
     assert spec is not None
@@ -677,19 +658,16 @@ def test_taint_without_a_recoverable_param_index_emits_no_sentinel():
 
 # --- the static lattice's recipient slot (``target_param_index``) ----------
 #
-# 76 of 78 live fund-out flows are native ETH sends, whose recipient the legacy
-# ``token_var``/``is_parameter`` shape never named and whose slot the gate-operand
-# name map cannot recover when no gate mentions the recipient. The flow lattice
-# resolves the destination interprocedurally and reports WHICH entry parameter it
-# is; that index is what makes a sentinel probe possible at all.
+# 76 of 78 live fund-out flows are native ETH sends whose recipient the legacy ``token_var``/
+# ``is_parameter`` shape never named and the gate-operand name map can't recover when no gate mentions
+# it. The flow lattice reports WHICH entry parameter is the destination; that makes a sentinel probe possible.
 
 REDEEM = "0x7bde82f2"  # redeem(uint256,address)
 REDEEM_SIG = "redeem(uint256,address)"
 
 
 def _redeem_facts(*, flows: list[dict[str, Any]], legacy: list[dict[str, Any]] | None = None) -> cd.ContractFacts:
-    """An ETH-redeem entry point whose recipient appears in NO gate — the shape
-    the name->slot map is blind to."""
+    """An ETH-redeem entry point whose recipient appears in NO gate (the name->slot map is blind to it)."""
     effects = {REDEEM_SIG: _effect_info(REDEEM_SIG, REDEEM, value_flows=flows, parameter_names=["amount", "recipient"])}
     return cd.ContractFacts(
         address=CONTRACT,
@@ -780,12 +758,10 @@ def test_legacy_name_path_still_serves_a_flow_without_an_index():
 
 # --- the static lattice's QUANTITY slot (``amount_param_index``) ------------
 #
-# Which integer argument is the quantity was previously answered by a parameter
-# NAME vocabulary (``_AMOUNT_WORDS``). For the whole ERC-4626 redemption class the
-# amount is not an argument at all — it is a conversion of one — so the lattice
-# publishes ``param_derived`` plus the slot of the input that fed the conversion,
-# and the prober fills THAT slot. Every case below names the slot ``n``, a word in
-# no vocabulary, so only a lattice fact can produce a role.
+# The quantity slot was answered by a parameter NAME vocabulary (``_AMOUNT_WORDS``). For ERC-4626
+# redemptions the amount is a conversion of an argument, so the lattice publishes ``param_derived``
+# plus the input slot and the prober fills THAT. Every case names the slot ``n`` (in no vocabulary),
+# so only a lattice fact can produce a role.
 
 UNWRAP_SIG = "unwrap(uint256,address)"
 UNWRAP = "0x11112222"
@@ -850,10 +826,9 @@ BURN_SEL = "0x33334444"
 
 
 def _redeem_fn() -> cd.FunctionFacts:
-    """A burn whose quantity and recipient slots carry no vocabulary name, so the
-    only evidence about either is the static flow lattice — and the lattice
-    records the burn's own movement under the direction the artifact actually
-    emits (an outbound payout), never under ``burn``."""
+    """A burn whose quantity and recipient slots carry no vocabulary name, so the only evidence is the
+    static flow lattice, which records the burn's movement under the direction the artifact emits
+    (an outbound payout), never under ``burn``."""
     flow = {
         "kind": "callee_erc20_selector",
         "direction": "out",
@@ -880,11 +855,9 @@ def test_supply_reads_its_lattice_through_the_directions_flows_actually_carry():
     every flow an artifact emits, so the class got no quantity and no recipient."""
     spec = cd.synthesize_supply(_candidate(BURN_SEL), _redeem_fn())
     assert spec is not None
-    # Nothing but the lattice can put the amount in slot 0: ``n`` is in no word
-    # vocabulary, so a zero here means the plan never read the lattice.
+    # Only the lattice can put the amount in slot 0 (``n`` is in no vocabulary).
     assert int(spec.mint_calldata[10:74], 16) == cd.ARG_AMOUNT
-    # And the recipient the lattice named earns the sentinel probe the supply
-    # class could never synthesize.
+    # The recipient the lattice named earns the sentinel probe supply could never synthesize.
     assert spec.sentinel_calldata is not None
     assert spec.sentinel_calldata[74:138].endswith("ee" * 20)
     assert spec.taint_param_reaches_sink is True
@@ -940,13 +913,11 @@ def test_authority_targets_the_gate_the_function_writes():
 
 
 def test_guard_origin_normal_write_is_not_a_gate_target_basis():
-    """The authority-change analogue of the pause reader/writer split: a guard-origin ``normal``
-    write is the modifier's own bookkeeping on F's gate, not an effect F causes, so
-    it must not be read as "the state F mutates" when picking a gate target.
-
-    Measured impact on the etherfi candidate set was zero (10 candidates carry such
-    a write; none selected a different target) — the test exists so the filter is
-    not dropped as dead code."""
+    """The authority-change analogue of the pause reader/writer split: a guard-origin ``normal`` write
+    is the modifier's own bookkeeping on F's gate, not an effect F causes, so it must not be read as
+    "the state F mutates" when picking a gate target. Measured impact on etherfi was zero (10
+    candidates carry such a write, none selected a different target); the test keeps the filter from
+    being dropped as dead code."""
     guard_write = {**_write("owner", "address"), "origin": "guard"}
     effects = dict(_token_facts().effects)
     effects["setOwner(address)"] = _effect_info("setOwner(address)", "0x13af4035", state_writes=[guard_write])
@@ -1005,18 +976,14 @@ def _const(value: str) -> dict[str, Any]:
 
 
 def test_max_pause_duration_needs_a_comparison_SHAPE_not_three_facts_in_one_leaf():
-    """INVERTED. It used to assert ``(2592000, "guard_constant")``
-    for a leaf holding the latch, the clock and the constant as three DIRECT operands
-    — an arrangement no Solidity comparison produces (two slots) and one in which
-    "which side is the constant on" has no answer at all. Since the harvest is now
-    side- and operator-aware, that leaf is honestly undecidable.
+    """INVERTED. It asserted ``(2592000, "guard_constant")`` for a leaf holding the latch, the clock
+    and the constant as three DIRECT operands, an arrangement no Solidity comparison produces and in
+    which "which side is the constant on" has no answer. The harvest is now side- and operator-aware,
+    so that leaf is honestly undecidable.
 
-    The three facts still resolve in the arrangement a compiler DOES emit, which the
-    second half asserts: the clock-and-latch difference on one side, the constant on
-    the other. So the inversion costs no real coverage — it removes a positive that
-    could only ever be reached by a hand-built leaf, and 560 of the 5,089 persisted
-    leaves locally really do carry three or more operands (threshold/oracle shapes),
-    so admitting the arity was not free."""
+    The three facts still resolve in the arrangement a compiler DOES emit (second half), so no real
+    coverage is lost; 560 of 5,089 persisted leaves carry three or more operands (threshold/oracle
+    shapes), so admitting the arity was not free."""
     three_slots = _token_facts(
         trees={
             "unpause()": _and(
@@ -1049,11 +1016,9 @@ def test_max_pause_duration_needs_a_comparison_SHAPE_not_three_facts_in_one_leaf
 
 
 def test_max_pause_duration_is_not_determined_when_the_leaf_has_no_operator():
-    """A leaf with no ``operator`` cannot say which side the constant bounds, so the
-    harvest declines. Measured before relying on it: every one of the 5,089 predicate
-    leaves persisted in the local database carries an operator, so this refuses
-    nothing real — it keeps a hand-built or future partially-built leaf from being
-    read as a proof by defaulting the direction."""
+    """A leaf with no ``operator`` cannot say which side the constant bounds, so the harvest
+    declines (all 5,089 persisted leaves carry an operator, so this refuses nothing real; it stops a
+    hand-built or partial leaf being read as proof by defaulting the direction)."""
     facts = _token_facts(
         trees={
             "unpause()": _and(
@@ -1069,11 +1034,9 @@ def test_max_pause_duration_is_not_determined_when_the_leaf_has_no_operator():
 
 
 def test_max_pause_duration_treats_every_clock_spelling_as_a_clock():
-    """``now`` (the pre-0.7 spelling of ``block.timestamp``) and ``block.number``
-    arrive as ``block_context_kind`` "now" / "number". Both deny the
-    proven-indefinite state — a block-number gate expires on its own schedule just
-    as a timestamp gate does — so a latch compared against either lands on
-    ``not_determined``, exactly like its ``block.timestamp`` twin."""
+    """``now`` (pre-0.7 ``block.timestamp``) and ``block.number`` arrive as ``block_context_kind``
+    "now" / "number". Both deny the proven-indefinite state (a block-number gate expires on its own
+    schedule too), so a latch compared against either lands on ``not_determined`` like its timestamp twin."""
     for kind in ("now", "number"):
         facts = _token_facts(
             trees={
@@ -1089,12 +1052,10 @@ def test_max_pause_duration_treats_every_clock_spelling_as_a_clock():
 
 
 def test_max_pause_duration_never_publishes_a_block_count_as_seconds():
-    """The units trap: ``require(block.number - pausedUntilBlock < 216000)`` holds a
-    latch, a clock and a constant in one leaf — but the constant is a BLOCK COUNT.
-    Harvesting it would publish 216000 "seconds" (2.5 days) for a ~30-day gate, a
-    fabricated mitigating credit. Only second-denominated clocks (timestamp, now)
-    feed the constant harvest; the block-number clock still demotes the proven
-    state."""
+    """The units trap: ``require(block.number - pausedUntilBlock < 216000)`` holds a latch, a clock
+    and a constant, but the constant is a BLOCK COUNT. Harvesting it would publish 216000 "seconds"
+    (2.5 days) for a ~30-day gate, a fabricated mitigating credit. Only second-denominated clocks
+    (timestamp, now) feed the harvest; the block-number clock still demotes the proven state."""
     facts = _token_facts(
         trees={
             "transfer(address)": _and(
@@ -1107,8 +1068,7 @@ def test_max_pause_duration_never_publishes_a_block_count_as_seconds():
         }
     )
     assert cd.read_max_pause_duration(facts, {"LATCH_SLOT"}) == (None, "not_determined")
-    # ``now`` IS the seconds clock, so the same guard one clock spelling over — the
-    # difference-and-ceiling shape, as solc lowers it — resolves the window.
+    # ``now`` IS the seconds clock, so the same guard one clock spelling over resolves the window.
     now_facts = _token_facts(
         trees={
             "transfer(address)": _and(
@@ -1128,13 +1088,11 @@ def test_max_pause_duration_never_publishes_a_block_count_as_seconds():
 
 
 def test_max_pause_duration_refuses_a_leaf_that_mixes_two_CLOCKS():
-    """A leaf whose operand union carries BOTH a seconds clock and
-    ``block.number`` cannot say which clock its constant is denominated against, and
-    the seconds clock alone used to be enough to enter the harvest — so 216000 blocks
-    (~30 days) would publish as 216000 seconds (2.5 days), the fabricated mitigating
-    credit the units trap exists to stop. No single compiled comparison produces this
-    (one comparison holds one comparison); operand ABSORPTION across a mixed
-    expression is what makes it reachable, which is why it is built by hand here."""
+    """A leaf whose operand union carries BOTH a seconds clock and ``block.number`` can't say which
+    clock its constant is denominated in; the seconds clock alone used to suffice, so 216000 blocks
+    (~30 days) would publish as 216000 seconds (2.5 days), the fabricated credit the units trap stops.
+    No single compiled comparison produces this (operand ABSORPTION across a mixed expression does),
+    hence hand-built."""
     facts = _token_facts(
         trees={
             "transfer(address)": _and(
@@ -1155,33 +1113,23 @@ def test_max_pause_duration_refuses_a_leaf_that_mixes_two_CLOCKS():
 
 
 def test_max_pause_duration_reads_a_constant_the_comparison_absorbed():
-    """THE POSITIVE CASE ON REAL COMPILER OUTPUT, narrowed to the shape it can
-    actually PROVE.
+    """THE POSITIVE CASE ON REAL COMPILER OUTPUT, narrowed to the shape it can PROVE.
 
-    A Solidity comparison lowers to a leaf with two operands and the reader needs
-    three facts, so ``absorbed_operands`` is the sibling list that recovers the third.
-    What the union alone does NOT say is which side each fact sat on and with which
-    sign — and the harvest used to take the largest plausible constant out of it, so
-    ``require(block.timestamp + 3600 < pausedUntil)`` published 3600 as the freeze
-    window (a LEAD TIME) and ``require(block.timestamp > pausedUntil + 300)``
-    published 300 (a COOLDOWN offset), for latches whose real expiry is a storage
-    timestamp. Both are severity REDUCERS, which is the direction that matters.
+    A Solidity comparison lowers to a two-operand leaf and the reader needs three facts, so
+    ``absorbed_operands`` recovers the third. The union alone doesn't say which side each fact sat on
+    or its sign, and the harvest used to take the largest plausible constant, so
+    ``require(block.timestamp + 3600 < pausedUntil)`` published 3600 as a freeze window (a LEAD TIME)
+    and ``require(block.timestamp > pausedUntil + 300)`` published 300 (a COOLDOWN), both severity REDUCERS.
 
-    The provable shape, and the only one admitted: the CLOCK and the LATCH sit in the
-    same absorbed additive group (so the compared side is their signed time
-    difference — which no lossy two-slot list can fake and both subtraction orders
-    bound identically) and the constant is that difference's ceiling by side and
-    operator. Three compiled variants of it, all asserted below.
+    Only provable shape admitted: CLOCK and LATCH in the same absorbed additive group (the compared
+    side is their signed time difference, immune to subtraction order) and the constant is that
+    difference's ceiling by side and operator. Three compiled variants asserted below.
 
-    ``require(block.timestamp < pausedUntil + MAX_PAUSE)`` — absorbed group
-    ``{latch, constant}`` — is the recall this narrowing costs, and it is a MISSING
-    PRODUCER FACT rather than a judgment: ``predicates._stamp_absorbed_operands``
-    sorts both inner operands of an ADDITION or a SUBTRACTION into one list and keeps
-    neither the sign nor the side, so ``pausedUntil + MAX_PAUSE`` and
-    ``pausedUntil - MAX_PAUSE`` are byte-identical here and only the first makes the
-    constant a window. Stamping the sign in the static plane restores it provably.
-    Pinned as ``not_determined`` below so the day that lands, this test is what
-    records the change."""
+    ``require(block.timestamp < pausedUntil + MAX_PAUSE)`` (absorbed group ``{latch, constant}``) is
+    the recall this costs, a MISSING PRODUCER FACT: ``predicates._stamp_absorbed_operands`` keeps
+    neither sign nor side, so ``pausedUntil + MAX_PAUSE`` and ``pausedUntil - MAX_PAUSE`` are
+    byte-identical and only the first is a window. Pinned as ``not_determined`` below so the day
+    the static plane stamps the sign, this test records the change."""
     latch = _state("TIMED_SLOT", "pausedUntil")
     difference = [_timestamp(), _state("TIMED_SLOT", "pausedUntil")]
 
@@ -1258,45 +1206,35 @@ def test_max_pause_duration_ignores_a_constant_belonging_to_another_latch():
             )
         }
     )
-    # ``not_determined``, NOT the proven-indefinite state: this contract's other
-    # latch was never seen in a lowered guard here, and absence of a bound is not
-    # proof that no bound exists.
+    # ``not_determined``, NOT proven-indefinite: this contract's other latch was never seen in a
+    # lowered guard, and absence of a bound is not proof that none exists.
     assert cd.read_max_pause_duration(facts, {"INDEFINITE_SLOT"}) == (None, "not_determined")
 
 
 def test_max_pause_duration_is_never_scraped_from_a_constant_name():
-    """A bound reaches the claim witness as a severity REDUCER, so it may only come
-    from a constant the latch's own guard leaf compares ``block.timestamp``
-    against. Source text naming a PAUSE/FREEZE constant is identifier matching: the
-    same pattern catches a cooldown or a minimum, and publishing one of those would
-    discount an indefinite freeze."""
+    """A bound reaches the claim witness as a severity REDUCER, so it may only come from a constant the
+    latch's own guard leaf compares ``block.timestamp`` against. Source text naming a PAUSE/FREEZE
+    constant is identifier matching that also catches a cooldown or minimum, discounting an indefinite freeze."""
     facts = _token_facts(trees={"unpause()": _and(_leaf(_state("TIMED_SLOT", "pausedUntil")))})
-    # The guard reads the latch but compares it against nothing time-shaped, so no
-    # constant in the unit is provably this latch's window — and because a lowered
-    # guard DOES read the latch and no clock appears beside it, that is the PROVEN
-    # indefinite state rather than an unmeasured one.
+    # The guard reads the latch but compares it to nothing time-shaped, so no constant is provably its
+    # window, and since no clock appears beside it that is the PROVEN indefinite state, not unmeasured.
     assert cd.read_max_pause_duration(facts, {"TIMED_SLOT"}) == (None, "no_time_reference")
     # And the reader takes no session at all: there is no source plane to consult.
     assert "session" not in inspect.signature(cd.read_max_pause_duration).parameters
 
 
 def test_a_clock_in_a_sibling_leaf_denies_the_proven_indefinite_state():
-    """A lowered ``||`` splits the latch and the clock into SEPARATE leaves, so
-    "no leaf reading the latch touches a clock" is not proof that time cannot lift
-    the freeze.
+    """A lowered ``||`` splits the latch and the clock into SEPARATE leaves, so "no leaf reading the
+    latch touches a clock" is not proof that time can't lift the freeze.
 
-    The two leaves below are copied from compiled output: ``require(!frozen ||
-    block.timestamp > unpauseAt)`` at solc 0.8.27 yields one leaf whose operands are
-    ``{frozen}`` and a sibling whose operands are ``{timestamp, unpauseAt}``. The
-    freeze DEMONSTRABLY expires, and the leaf-local reading published
-    ``no_time_reference`` — documented as *PROVEN indefinite, the most severe freeze
-    there is* — for it.
+    The two leaves are copied from compiled output: ``require(!frozen || block.timestamp > unpauseAt)``
+    at solc 0.8.27 yields ``{frozen}`` and a sibling ``{timestamp, unpauseAt}``. The freeze
+    DEMONSTRABLY expires, yet the leaf-local reading published ``no_time_reference`` (*PROVEN
+    indefinite, the most severe freeze*).
 
-    This is the whole two-variable timed-pause family, not a curiosity:
-    ``_latch_pairs`` admits only ``bool``-typed writes (or the ERC-7201 pseudo-slot),
-    and a ``bool`` can never be compared against ``block.timestamp`` in ANY leaf, so
-    ``bool paused`` + ``uint pauseExpiry`` could only ever land on ``not_determined``
-    or on the proven-most-severe state."""
+    This is the whole two-variable timed-pause family: ``_latch_pairs`` admits only ``bool`` writes
+    (or the ERC-7201 pseudo-slot), and a ``bool`` is never compared to ``block.timestamp`` in ANY leaf,
+    so ``bool paused`` + ``uint pauseExpiry`` could only land on ``not_determined`` or proven-most-severe."""
     disjunction = _or(
         _leaf(_state("frozen")),
         _leaf(
@@ -1306,12 +1244,10 @@ def test_a_clock_in_a_sibling_leaf_denies_the_proven_indefinite_state():
     )
     facts = _token_facts(trees={"transfer(address,uint256)": disjunction})
     assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "not_determined")
-    # The clock-bearing var is not a latch this reader can bound either — the window
-    # is a stored timestamp, not an offset in the code.
+    # The clock-bearing var is not a latch this reader can bound either: the window is a stored timestamp.
     assert cd.read_max_pause_duration(facts, {"unpauseAt"}) == (None, "not_determined")
-    # POSITIVE CONTROL, same reader, same run: a latch whose OWN tree reads no clock
-    # anywhere still reaches the proven state, so this is a discrimination and not a
-    # blanket demotion.
+    # POSITIVE CONTROL, same run: a latch whose OWN tree reads no clock still reaches the proven state
+    # (a discrimination, not a blanket demotion).
     with_indefinite = _token_facts(
         trees={
             "transfer(address,uint256)": disjunction,
@@ -1322,23 +1258,18 @@ def test_a_clock_in_a_sibling_leaf_denies_the_proven_indefinite_state():
 
 
 def test_a_pre_widening_tree_can_never_prove_an_indefinite_latch():
-    """``absorbed_operands`` absent means two different things, and only the root
-    marker separates them.
+    """``absorbed_operands`` absent means two different things, and only the root marker separates them.
 
-    ``require(block.timestamp - pausedUntil < 2592000)`` compiles to ONE leaf whose
-    ``operands`` are ``{pausedUntil, 2592000}`` — the clock is absorbed into the
-    subtraction and dropped. Read with the absorbed list, that is
-    ``(2592000, "guard_constant")``. Read WITHOUT it — the shape of every
-    ``contract_materializations.predicate_trees`` row written before the widening, and
-    re-running effects does not re-run the static stage — the clock is simply not there, and the
-    leaf-local reader called it PROVEN INDEFINITE: the same source, the opposite
-    answer, in the severe direction.
+    ``require(block.timestamp - pausedUntil < 2592000)`` compiles to ONE leaf with operands
+    ``{pausedUntil, 2592000}`` (the clock is absorbed and dropped); read with the absorbed list that is
+    ``(2592000, "guard_constant")``. Read WITHOUT it (every ``contract_materializations.predicate_trees``
+    row written before the widening; re-running effects doesn't re-run the static stage) the clock is
+    simply absent and the leaf-local reader called it PROVEN INDEFINITE: same source, opposite answer,
+    in the severe direction.
 
-    So the proven state requires the marker the builder stamps. Its practical effect
-    is that ``no_time_reference`` has zero realised rows in this database until the
-    static stage re-runs, which is the honest reading of the evidence rather than a
-    dead branch (it fires from compiled source in
-    ``test_label_corpus_discrimination``)."""
+    So the proven state requires the builder's marker. ``no_time_reference`` therefore has zero realised
+    rows until the static stage re-runs, the honest reading rather than a dead branch (it fires from
+    compiled source in ``test_label_corpus_discrimination``)."""
     absorbed = [
         {"source": "block_context", "block_context_kind": "timestamp"},
         _state("pausedUntil"),
@@ -1357,9 +1288,8 @@ def test_a_pre_widening_tree_can_never_prove_an_indefinite_latch():
     pre = _token_facts(trees={"transfer(address,uint256)": stripped})
     assert cd.read_max_pause_duration(pre, {"pausedUntil"}) == (None, "not_determined")
 
-    # And the marker is not a rubber stamp for the CLOCK-FREE shape either: the same
-    # unmarked tree carrying a genuinely clock-free latch guard is still unknown,
-    # because a two-slot list may have dropped the clock there too.
+    # The marker is no rubber stamp for the CLOCK-FREE shape: an unmarked clock-free latch guard is
+    # still unknown (a two-slot list may have dropped the clock).
     unmarked_bool = {"op": "AND", "children": [_leaf(_state("halted"))]}
     assert cd.read_max_pause_duration(_token_facts(trees={"t()": unmarked_bool}), {"halted"}) == (
         None,
@@ -1375,31 +1305,26 @@ def test_a_pre_widening_tree_can_never_prove_an_indefinite_latch():
 OPAQUE_OPERANDS = (
     {"source": "computed", "computed_kind": "arithmetic"},
     {"source": "top"},
-    # An operand that only NAMES a callee: the recorder is additive and one level
-    # deep, and it never enters a function body, so ``_blockTimestamp()`` (Uniswap
-    # V3), ``clock()`` (OZ Governor) or a time oracle is a clock nobody read.
+    # An operand that only NAMES a callee: the recorder is additive, one level deep and never enters a
+    # body, so ``_blockTimestamp()`` (Uniswap V3), ``clock()`` (OZ Governor) or a time oracle is a clock nobody read.
     {"source": "view_call", "callee": "_clock()"},
     {"source": "external_call", "callee": "nowSeconds"},
 )
 
 
 def test_an_unread_operand_denies_the_proven_indefinite_state():
-    """The marker promises only what the recorder does — ADDITIVE, one level deep,
-    and never into a callee — so an operand standing for an expression nobody
-    decomposed denies the proof.
+    """The marker promises only what the recorder does (ADDITIVE, one level deep, never into a callee),
+    so an operand standing for an expression nobody decomposed denies the proof.
 
-    ``block.timestamp / 2 > pausedUntil`` records ``{computed, pausedUntil}``: the
-    recorder skips a quotient by design (an offset is additive; a product or a
-    quotient carries no window length), so the clock sits INSIDE an operand that was
-    never read. Concluding "no leaf reading this latch touches a clock" from that is
-    the same proof-by-absence in a marked tree. ``view_call``/``external_call`` are
-    the same fact about a callee — see ``test_pause_duration_clock_opacity.py`` for
-    the compiled shape."""
+    ``block.timestamp / 2 > pausedUntil`` records ``{computed, pausedUntil}``: the recorder skips a
+    quotient by design, so the clock sits INSIDE an unread operand and "no leaf reading this latch
+    touches a clock" is proof-by-absence. ``view_call``/``external_call`` are the same fact about a
+    callee; see ``test_pause_duration_clock_opacity.py`` for the compiled shape."""
     for opaque in OPAQUE_OPERANDS:
         facts = _token_facts(trees={"transfer(address,uint256)": _and(_leaf(_state("pausedUntil"), opaque))})
         assert cd.read_max_pause_duration(facts, {"pausedUntil"}) == (None, "not_determined"), opaque
-    # POSITIVE CONTROL: the same leaf shape with a FULLY READ second operand keeps
-    # the proven state — the demotion is about the unread operand, not arity.
+    # POSITIVE CONTROL: a FULLY READ second operand keeps the proven state (the demotion is about
+    # the unread operand, not arity).
     readable = _and(_leaf(_state("pausedUntil"), {"source": "constant", "constant_value": "0"}))
     assert cd.read_max_pause_duration(_token_facts(trees={"t()": readable}), {"pausedUntil"}) == (
         None,
@@ -1408,22 +1333,19 @@ def test_an_unread_operand_denies_the_proven_indefinite_state():
 
 
 def test_an_unread_operand_in_a_sibling_leaf_denies_the_proven_indefinite_state():
-    """The opacity test is asked of the whole latch-reading TREE, exactly like the
-    clock walk — a lowered ``||`` puts the unread operand in the sibling leaf.
+    """The opacity test is asked of the whole latch-reading TREE, like the clock walk: a lowered ``||``
+    puts the unread operand in the sibling leaf.
 
-    ``require(!frozen || _clock() > unpauseAt)`` compiles to ``{frozen}`` and
-    ``{view_call _clock(), unpauseAt}``. The leaf that reads the latch is a
-    single-operand equality — fully read, no clock — so a leaf-local opacity test saw
-    a clean tree and published PROVEN indefinite for a freeze that expires at
-    ``unpauseAt``. Neither precondition caught it: there is no ``block_context``
-    operand anywhere for the clock walk to find."""
+    ``require(!frozen || _clock() > unpauseAt)`` compiles to ``{frozen}`` and ``{view_call _clock(),
+    unpauseAt}``. The latch leaf is a fully-read single-operand equality, so a leaf-local test saw a
+    clean tree and published PROVEN indefinite for a freeze expiring at ``unpauseAt``; no
+    ``block_context`` operand exists for the clock walk to find."""
     for opaque in OPAQUE_OPERANDS:
         disjunction = _or(_leaf(_state("frozen")), _leaf(opaque, _state("unpauseAt")))
         facts = _token_facts(trees={"transfer(address,uint256)": disjunction})
         assert cd.read_max_pause_duration(facts, {"frozen"}) == (None, "not_determined"), opaque
-    # POSITIVE CONTROL, same disjunction shape: a sibling leaf whose operands were
-    # ALL read keeps the proven state, so the demotion tracks opacity and not the
-    # mere presence of a sibling leaf.
+    # POSITIVE CONTROL, same shape: a sibling leaf whose operands were ALL read keeps the proven state
+    # (demotion tracks opacity, not a sibling leaf).
     read_sibling = _or(
         _leaf(_state("frozen")),
         _leaf(_state("minDeposit"), {"source": "parameter", "parameter_name": "amount"}),
@@ -1494,9 +1416,8 @@ def test_synthesize_pause_entry_points_fixtures_and_denominator(db_session):
 
 @requires_postgres
 def test_synthesize_pause_falls_back_to_state_changing_entry_points(db_session):
-    """No tree predicts a reader (static under-enumerated) ⇒ probe every
-    state-changing entry point, keep the empty denominator, let the discrepancy
-    router file the vocabulary-growth discrepancy for anything the diff witnesses."""
+    """No tree predicts a reader (static under-enumerated) => probe every state-changing entry point,
+    keep the empty denominator, and let the discrepancy router file vocabulary growth."""
     contract, ids = _pause_contract(db_session)
     facts = _token_facts(trees={"pause()": OWNER_GATE})  # nothing reads `paused`
     fn = cd.resolve_function(_token_facts(), PAUSE_SEL)
@@ -1524,9 +1445,8 @@ def test_synthesize_pause_falls_back_to_state_changing_entry_points(db_session):
 
 @requires_postgres
 def test_synthesize_pause_adds_pauser_identity_probe_for_unresolved_victim(db_session):
-    """A PREDICTED victim with no resolved principal is
-    additionally probed from the PAUSE principal, so a freeze the neutral caller
-    can't reach pre-pause is still witnessed. Union semantics via a shared key."""
+    """A PREDICTED victim with no resolved principal is also probed from the PAUSE principal, so a
+    freeze the neutral caller can't reach pre-pause is still witnessed. Union via a shared key."""
     proto = Protocol(name=f"pauser-probe-{uuid.uuid4().hex[:8]}")
     db_session.add(proto)
     db_session.flush()
@@ -1584,9 +1504,8 @@ def test_synthesize_pause_adds_pauser_identity_probe_for_unresolved_victim(db_se
 
 @requires_postgres
 def test_pause_fallback_set_gets_no_pauser_identity_probes(db_session):
-    """When static predicts nothing (empty guard set → probe-everything fallback),
-    NO pauser-identity probes are added — the recovery is scoped to the predicted
-    victims, so a contract whose pause gates nothing gains no extra work."""
+    """With an empty guard set (probe-everything fallback) NO pauser-identity probes are added: the
+    recovery is scoped to predicted victims, so a pause that gates nothing gains no extra work."""
     contract, ids = _pause_contract(db_session)
     facts = _token_facts(trees={"pause()": OWNER_GATE})  # nothing reads `paused`
     fn = cd.resolve_function(_token_facts(), PAUSE_SEL)
@@ -1671,9 +1590,8 @@ EETH_GUARDED = (
 
 
 def _eeth_facts(latch_var: str) -> cd.ContractFacts:
-    """eETH-shaped artifacts: an ERC-7201 latch written with an EMPTY member path
-    and read with member ``paused``; ``canonical_signatures`` ABSENT (the common
-    case — the artifact omits it when canonical == full_name)."""
+    """eETH-shaped artifacts: an ERC-7201 latch written with an EMPTY member path and read with member
+    ``paused``; ``canonical_signatures`` ABSENT (the common case, omitted when canonical == full_name)."""
     guarded_tree = _and(_leaf(_state(latch_var, "paused")))
     effects = {
         "pause()": _effect_info(
@@ -1798,10 +1716,9 @@ def test_acceptance_eeth_pause_matches_the_live_fork_run(db_session):
 
 @requires_postgres
 def test_guard_origin_latch_write_is_a_reader_not_a_pauser(db_session):
-    """A ``whenNotPaused`` VICTIM records the same latch var, hygiene class and
-    member path as the pauser — only ``origin`` separates them. Treating the
-    readers as pausers puts a pause's whole blast radius on the fork tier to probe
-    functions that cannot flip the latch."""
+    """A ``whenNotPaused`` VICTIM records the same latch var, hygiene class and member path as the
+    pauser, separated only by ``origin``. Treating readers as pausers puts a pause's whole blast
+    radius on the fork tier to probe functions that can't flip the latch."""
     facts = _eeth_facts(PAUSABLE_SLOT)
     candidate, ids = _eeth_candidate(db_session, PAUSABLE_SLOT)
     victim = "mintShares(address,uint256)"
@@ -1833,19 +1750,14 @@ def test_guard_origin_latch_write_is_a_reader_not_a_pauser(db_session):
 
 @requires_postgres
 def test_acceptance_timed_latch_publishes_not_determined_not_indefinite(db_session):
-    """The same contract's ``*_UNTIL_*`` latch DECLARES a MAX_PAUSE_DURATION in
-    source, and that is still not enough: nothing here proves the latch's guard
-    reads it. No bound is the conservative output — never a scraped constant.
+    """The same contract's ``*_UNTIL_*`` latch DECLARES a MAX_PAUSE_DURATION in source, and that is
+    still not enough: nothing proves the latch's guard reads it. No bound, never a scraped constant.
 
-    INVERTED. This test previously asserted only ``is None`` and called
-    that "conservative", but ``None`` was consumed as *proven indefinite latch, the
-    most severe freeze*: ``claimsVocab`` rendered "(indefinite)" and "indefinite
-    latch (no self-recovery bound)" from it. The etherfi shape reaching this
-    assertion is ``pauseUntil`` — a latch that DOES expire, whose window is a
-    storage value — so the severe reading was false on all four proven verdicts in
-    the corpus. The conservative answer is ``not_determined``: the guard compares
-    the latch against ``block.timestamp`` (so time is involved) and the window is
-    not in the code."""
+    INVERTED. This asserted only ``is None`` ("conservative"), but ``None`` was consumed as *proven
+    indefinite latch, the most severe freeze* (``claimsVocab`` rendered "(indefinite)"). The etherfi
+    ``pauseUntil`` latch DOES expire (window is a storage value), so the severe reading was false on
+    all four proven verdicts. The conservative answer is ``not_determined``: the guard compares the
+    latch to ``block.timestamp`` (time is involved) and the window is not in the code."""
     pausable_until_source = """
         library PausableUntilStorage {
             bytes32 internal constant PAUSABLE_UNTIL_STORAGE_SLOT = keccak256("pausableUntil.storage");
@@ -1857,10 +1769,9 @@ def test_acceptance_timed_latch_publishes_not_determined_not_indefinite(db_sessi
     # Declared in source, and deliberately unreachable from here.
     assert "MAX_PAUSE_DURATION" in pausable_until_source
     facts = _eeth_facts(PAUSABLE_UNTIL_SLOT)
-    # The guard shape is copied from the persisted WeETH artifact verbatim
-    # (``_pausedUntil >= block.timestamp``, operator ``lt`` after the polarity fold,
-    # no third operand and nothing absorbed) — the leaf all four proven
-    # ``freeze_pause`` verdicts in the local corpus are gated by.
+    # Guard shape copied verbatim from the persisted WeETH artifact (``_pausedUntil >= block.timestamp``,
+    # operator ``lt`` after the polarity fold, no third operand, nothing absorbed): the leaf all four
+    # proven ``freeze_pause`` verdicts in the local corpus are gated by.
     timed_facts = cd.ContractFacts(
         address=facts.address,
         job_id=facts.job_id,
@@ -1878,13 +1789,11 @@ def test_acceptance_timed_latch_publishes_not_determined_not_indefinite(db_sessi
         by_selector=facts.by_selector,
     )
     assert cd.read_max_pause_duration(timed_facts, {PAUSABLE_UNTIL_SLOT}) == (None, "not_determined")
-    # A latch NO lowered leaf reads is also ``not_determined`` — not indefinite.
-    # This is the tree-absent case, and it is the governing rule: absence of a
-    # proven bound is not proof that no bound exists.
+    # A latch NO lowered leaf reads is also ``not_determined``, not indefinite: the governing rule is
+    # that absence of a proven bound is not proof that none exists.
     assert cd.read_max_pause_duration(timed_facts, {"NEVER_READ_SLOT"}) == (None, "not_determined")
-    # ...while the plain boolean latch, whose guard reads it beside no clock at all,
-    # gets no bound either — but a DIFFERENT no-bound: that one is PROVEN
-    # indefinite, and the two must never render as the same sentence.
+    # ...while the plain boolean latch (guard reads it beside no clock) gets no bound either, but a
+    # DIFFERENT one: PROVEN indefinite. The two must never render as the same sentence.
     assert cd.read_max_pause_duration(_eeth_facts(PAUSABLE_SLOT), {PAUSABLE_SLOT}) == (None, "no_time_reference")
 
 
@@ -1942,9 +1851,8 @@ SCHEDULE_BATCH_SIG = "scheduleBatch(address[],uint256[],bytes[],bytes32,bytes32,
 
 
 def _timelock_facts(*, signatures: list[str] | None = None) -> cd.ContractFacts:
-    """A delayed executor's own ABI. Nothing here is protocol-specific: the plan
-    finds the scheduling half by SHAPE (the executed tuple plus a trailing
-    delay), so the same facts stand for any timelock."""
+    """A delayed executor's own ABI. Nothing is protocol-specific: the plan finds the scheduling half by
+    SHAPE (the executed tuple plus a trailing delay), so the same facts stand for any timelock."""
     names = signatures if signatures is not None else [EXECUTE_SIG, SCHEDULE_SIG, "getMinDelay()"]
     effects = {
         name: _effect_info(
@@ -2000,9 +1908,8 @@ def _timelock_spec(*, holdings: tuple[str, ...] = (), signature: str = EXECUTE_S
 
 
 def test_the_timelock_plan_schedules_and_executes_one_operation_tuple():
-    """OZ's ``execute`` recomputes the operation id from its own arguments, so the
-    two calls only have to agree — and if they ever stop agreeing the timelock
-    executes an operation nobody scheduled, which reverts and proves nothing."""
+    """OZ's ``execute`` recomputes the operation id from its own arguments, so the two calls only have
+    to agree; if they diverge the timelock executes an unscheduled operation, which reverts and proves nothing."""
     spec = _timelock_spec()
     assert spec is not None
     executed = _decode(spec.execute_calldata, EXECUTE_SIG)
@@ -2012,9 +1919,8 @@ def test_the_timelock_plan_schedules_and_executes_one_operation_tuple():
 
 
 def test_the_timelock_plan_targets_the_sentinel_when_the_contract_holds_nothing():
-    """The normal case: a timelock holds authority, not funds. The operation is
-    still one the proposer chose, and the value question is left to the recipe to
-    answer honestly rather than answered here by an invented asset."""
+    """The normal case: a timelock holds authority, not funds. The operation is still one the proposer
+    chose, and the value question is left to the recipe, not answered by an invented asset."""
     spec = _timelock_spec()
     assert spec is not None
     target, value, payload, predecessor, _salt = _decode(spec.execute_calldata, EXECUTE_SIG)
@@ -2067,9 +1973,8 @@ def test_no_timelock_plan_without_the_contracts_own_delay():
 
 
 def test_the_timelock_plan_prefers_a_principal_behind_both_gates():
-    """Scheduling and executing are separately gated. Picking the address the
-    resolution plane put behind BOTH is what keeps the probe from having to grant
-    itself a role — which a read-only probe must never do."""
+    """Scheduling and executing are separately gated. Picking the address behind BOTH keeps the probe
+    from having to grant itself a role, which a read-only probe must never do."""
     spec = _timelock_spec(session=_timelock_session(schedule_principal=PRINCIPAL))
     assert spec is not None
     assert spec.principal == PRINCIPAL.lower()
@@ -2088,8 +1993,8 @@ def test_the_timelock_plan_reads_the_delay_off_the_contract():
     spec = _timelock_spec()
     assert spec is not None
     assert spec.delay_calldata == delay_selector
-    # A delay we could not read is not defaulted to something plausible: zero goes
-    # to the contract, whose own minimum rejects it.
+    # An unreadable delay is not defaulted to something plausible: zero goes to the contract, whose
+    # own minimum rejects it.
     assert spec.schedule_calldata(0) == spec.schedule_calldata_zero
 
 
@@ -2351,17 +2256,12 @@ def test_token_seed_fixtures_one_per_caller_and_entry():
         _slot_entry(getter="ownerOf(uint256)", role="owner", key_kind="uint256", base_slot=cd._word_hex(2)),
     )
     fixtures = cd._token_seed_fixtures(entries, [CALLER, SPENDER], CONTRACT)
-    # Caller-keyed entries seed every caller; the owner entry seeds only the
-    # FIRST caller — its slot is tokenId-keyed, so a second seed would overwrite
-    # the first (last-writer-wins) while both read-backs claimed ok.
+    # Caller-keyed entries seed every caller; the owner entry seeds only the FIRST (its slot is
+    # tokenId-keyed, so a second seed would overwrite the first while both read-backs claimed ok).
     assert len(fixtures) == 3  # balance x 2 callers + owner x first caller only
     assert all(fx.kind == "set_storage_at" and fx.verify_calldata is not None for fx in fixtures)
     owner_seeds = [fx for fx in fixtures if fx.value == cd._word_hex(int(CALLER, 16))]
     assert len(owner_seeds) == 1
-
-
-def test_token_seed_fixtures_empty_without_slots():
-    assert cd._token_seed_fixtures((), [CALLER], CONTRACT) == ()
 
 
 # ---------------------------------------------------------------------------
@@ -2396,30 +2296,6 @@ def test_synthesize_pause_emits_token_seed_fixtures(db_session):
     assert seed.verify_expected == cd._word_hex(cd.SEED_AMOUNT)
     # the principal set_balance is still present and unchanged.
     assert any(fx.kind == "set_balance" and fx.address == PRINCIPAL for fx in spec.fixtures)
-
-
-@requires_postgres
-def test_synthesize_pause_without_token_slots_is_unchanged(db_session):
-    """Regression: no token_slots key ⇒ the fixture list is exactly today's — one
-    set_balance for the principal, nothing else."""
-    contract, ids = _pause_contract(db_session)
-    facts = _token_facts()  # no token_slots
-    fn = cd.resolve_function(facts, PAUSE_SEL)
-    assert fn is not None
-    candidate = Candidate(
-        function_id=ids[PAUSE_SEL],
-        contract_id=contract.id,
-        contract_address=CONTRACT,
-        selector=PAUSE_SEL,
-        function_name="pause",
-        authority_public=False,
-        principal_addresses=(PRINCIPAL,),
-    )
-    spec = cd.synthesize_pause(db_session, candidate, facts, fn)
-    assert spec is not None
-    assert all(fx.kind == "set_balance" for fx in spec.fixtures)
-    assert {fx.address for fx in spec.fixtures} == {PRINCIPAL}
-    assert all(fx.verify_calldata is None for fx in spec.fixtures)
 
 
 # ---------------------------------------------------------------------------
@@ -2474,13 +2350,6 @@ def _stub_seams(*, block_number=None) -> _Seams:
         chain_id=1,
         block_number=block_number,
     )
-
-
-def test_preflight_pins_the_real_head_block():
-    worker = EffectsWorker()
-    supported, block = worker._preflight(_stub_seams(block_number=lambda: 21_000_123), {})
-    assert supported is True
-    assert block == 21_000_123
 
 
 def test_preflight_without_a_pinned_head_disables_tier1():

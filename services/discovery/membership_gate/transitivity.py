@@ -1,5 +1,4 @@
-"""W3 transitivity: anchor chains, controller exclusivity, and via-fact
-re-verification (``_witness_fact_holds``)."""
+"""W3 transitivity: anchor chains, controller exclusivity, and via-fact re-verification (``_witness_fact_holds``)."""
 
 from __future__ import annotations
 
@@ -70,33 +69,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TransitivityProof:
-    """Which arm proved a W3-D1 via transitive. ``anchor_chain`` is set
-    only for the anchored-authority-chain arm; ``principal_fact`` only for the
-    perimeter-principal arm."""
+    """Which arm proved a W3-D1 via transitive; ``anchor_chain`` or ``principal_fact`` set accordingly."""
 
     arm: str
     anchor_chain: dict[str, Any] | None = None
     principal_fact: dict[str, Any] | None = None
-
-
-def _via_is_transitive(
-    session: Session,
-    *,
-    protocol_id: int,
-    via_address: str,
-    chain_key: str,
-    exclude_contract_id: int | None = None,
-) -> bool:
-    return (
-        _via_transitivity(
-            session,
-            protocol_id=protocol_id,
-            via_address=via_address,
-            chain_key=chain_key,
-            exclude_contract_id=exclude_contract_id,
-        )
-        is not None
-    )
 
 
 def _via_transitivity(
@@ -109,22 +86,14 @@ def _via_transitivity(
     in_progress: frozenset[str] = frozenset(),
     depth: int = 0,
 ) -> TransitivityProof | None:
-    """W3-D1: TRANSITIVE ⇔ the via is a member through an INDEPENDENT
-    witness (w2/w4/w5/w6 or w3-d1), or a D2 controller proven exclusive —
-    every contract it is observed to control belongs to this protocol — or
-    (see ``_anchor_chain_for``) a D2-only member
-    controller whose OWN resolved controllers root in the protocol's
-    independently anchored perimeter — or (owner ruling, salvage wave) a
-    resolved perimeter-principal EOA of an anchoring member, the same
-    Class-A inference already accepted for deployer EOAs.
+    """W3-D1: the via is transitive if it's a member through an independent witness (w2/w4/w5/w6 or w3-d1); or a
+    D2 controller proven exclusive; or (spec extension, ``_anchor_chain_for``) a D2-only member controller whose
+    own controllers root in the anchored perimeter; or (owner ruling) a perimeter-principal EOA of an anchoring
+    member.
 
-    Arms are tried strongest-first and the principal arm last, so a via that
-    gains a stronger proof publishes the stronger one and re-derivation is
-    stable across rounds. Every arm is MONOTONE in the member set
-    — growing it can add transitivity, never withdraw it — which is what keeps
-    the fixpoint from oscillating a candidate between promoted and demoted.
-
-    The candidate under evaluation never counts toward its own license."""
+    Strongest arm first so re-derivation is stable. Every arm is monotone in the member set, so the
+    fixpoint can't oscillate. The candidate never counts toward its own license.
+    """
     if via_address in in_progress:
         return None
     for member in _member_rows_at(session, protocol_id=protocol_id, address=via_address, chain_key=chain_key):
@@ -168,10 +137,8 @@ def _via_transitivity(
     )
     if fact is None:
         return None
-    # Shared-operator observations used as POSITIVE counterevidence rather
-    # than as a positive-exclusivity requirement (which absence of foreign rows
-    # could never supply): a perimeter principal observed controlling a row
-    # that provably belongs elsewhere licenses nothing here.
+    # shared-operator warning as positive counterevidence: a perimeter principal controlling a provably foreign row
+    # licenses nothing.
     if _address_proven_foreign(session, protocol_id=protocol_id, address=via_address):
         logger.info(
             "perimeter-principal transitivity refused: via is proven foreign",
@@ -185,8 +152,6 @@ def _via_transitivity(
 
 @dataclass(frozen=True)
 class _ControllerLink:
-    """One resolved controller of a controller, controller-type-agnostic."""
-
     kind: str
     address: str
     detail: str | None
@@ -196,10 +161,9 @@ class _ControllerLink:
 
 
 def _role_hash_anchors(plane: RoleHolderPlane) -> bool:
-    """Is this plane row an UPGRADE/ADMIN-class role? Keyed off role IDENTITY:
-    DEFAULT_ADMIN_ROLE is the zero word, everything else needs a keccak-proven
-    ``role_name`` (``db/models/roles.py`` — a name nobody proved keys nothing).
-    A withheld ``holders`` (NULL) is not_determined and contributes nothing."""
+    """Whether this plane row is an upgrade/admin-class role: DEFAULT_ADMIN_ROLE (zero word) or a keccak-proven
+    ``role_name``. A NULL holder set contributes nothing.
+    """
     if not isinstance(plane.holders, list) or not plane.holders:
         return False
     if (plane.role_hash or "").lower() == _DEFAULT_ADMIN_ROLE_HASH:
@@ -208,12 +172,9 @@ def _role_hash_anchors(plane: RoleHolderPlane) -> bool:
 
 
 def _own_controller_links(session: Session, *, protocol_id: int, controller: Contract) -> list[_ControllerLink]:
-    """The resolved controllers of *controller* itself, from the three W3
-    sources already codified (caller-gating controller values, the proxy-admin
-    slot, probe reads) plus two set-valued authorities: AccessControl role
-    holders of an upgrade/admin-class role on this registry, and the signer set
-    of a Safe. Deterministic (sorted); self-references and the zero address are
-    dropped — they name no separate authority."""
+    """The resolved controllers of *controller*: the three W3 sources plus admin-class AccessControl role holders and
+    Safe signers. Sorted; self-references and the zero address dropped.
+    """
     own = (controller.address or "").lower()
     links: dict[tuple[str, str, str | None], _ControllerLink] = {}
 
@@ -251,10 +212,7 @@ def _own_controller_links(session: Session, *, protocol_id: int, controller: Con
                 add("role_holder", holder, (plane.role_hash or "").lower())
 
     if own:
-        # The Safe under evaluation is the LINK: its signer set is its own
-        # controller set. Read off this protocol's MEMBERS only — a demoted
-        # row's stale analysis is not this protocol's observation — and the
-        # NEWEST such row wins, so a re-analysis supersedes what it replaced.
+        # Signer sets read from this protocol's members only (not demoted rows), newest row winning.
         for details, member_id in session.execute(
             select(FunctionPrincipal.details, Contract.id)
             .join(EffectiveFunction, FunctionPrincipal.function_id == EffectiveFunction.id)
@@ -286,16 +244,11 @@ def _independent_anchor_rule(
     blocked: frozenset[str],
     depth: int = 0,
 ) -> str | None:
-    """The admitting rule by which this member is anchored INDEPENDENTLY of
-    every address in *blocked* — the anchor-chain arm's cycle break. W3-D2
-    never anchors; W5/W6 rest on no via-fact at all and
-    anchor outright; W2/W3-D1 anchor only when their via names a member that is
-    itself independently anchored, so a chain cannot bootstrap itself through a
-    hop resting on the address under evaluation.
+    """The rule by which this member is anchored independently of *blocked*, the anchor-chain cycle break.
 
-    Of several anchoring witnesses the SMALLEST rule name wins, not the oldest
-    row: the published rule is then a function of the evidence set, not of the
-    order the rows were written."""
+    W3-D2 never anchors; W5/W6 anchor outright; W2/W3-D1 only via an independently anchored member. Smallest rule name
+    wins.
+    """
     contract = session.get(Contract, contract_id)
     if contract is None:
         return None
@@ -337,11 +290,9 @@ def _independent_anchor_rule(
 
 
 def _perimeter_anchor(session: Session, *, protocol_id: int, address: str, blocked: frozenset[str]) -> str | None:
-    """The anchor-chain arm's reading of the same observations, narrower than
-    the ladder's on two counts: the anchoring member must be anchored
-    INDEPENDENTLY of *blocked*, and a ``safe_owner`` fact never anchors — only
-    the ladder, which names signer-set entries explicitly, reads those.
-    Returns the anchoring member's admitting rule, or None."""
+    """The anchor-chain arm's perimeter reading: narrower than the ladder's (the member must anchor independently of
+    *blocked*, and ``safe_owner`` never anchors). Returns the anchoring rule, or None.
+    """
     for fact, member_id in _perimeter_fact_candidates(session, protocol_id=protocol_id, address=address):
         if fact.get("kind") == "safe_owner":
             continue
@@ -361,17 +312,12 @@ def _link_root(
     depth: int,
     require_member_terminal: bool,
 ) -> dict[str, Any] | None:
-    """Where a controller link terminates: an independently anchored member at
-    *address*, a perimeter principal of such a member, or — recursively —
-    a D2-only member controller that itself anchors through its own
-    controllers. Returns the chain suffix (links already walked stay with the
-    caller), or None when the link roots nowhere.
+    """Where a controller link terminates: an independently anchored member, a perimeter principal of one, or
+    recursively a D2-only member controller that anchors. Returns the chain suffix, or None.
 
-    ``require_member_terminal`` binds a set-valued link (:data:`W3_SET_VALUED_LINK_KINDS`)
-    to an anchor of kind ``member``. It binds the ELEMENT as well as the
-    terminal: the element must itself be an independently anchored member, so
-    the recursive branch demands exactly what the direct branch does and a set
-    element cannot enter the walk on a D2-only entry."""
+    ``require_member_terminal`` binds set-valued links to a member anchor, and the element itself must be an
+    independently anchored member.
+    """
     for member in _member_rows_at(session, protocol_id=protocol_id, address=address, chain_key=chain_key):
         rule = _independent_anchor_rule(session, contract_id=member.id, protocol_id=protocol_id, blocked=in_progress)
         if rule is not None:
@@ -386,8 +332,7 @@ def _link_root(
                 "anchor_rule": anchor,
             }
     if require_member_terminal or depth + 1 >= _ANCHOR_CHAIN_MAX_DEPTH:
-        # A set element that reached here is a D2-only member (the direct
-        # branch above already refused it), which is not an anchor.
+        # A set element here is a D2-only member, which isn't an anchor.
         return None
     for member in _member_rows_at(session, protocol_id=protocol_id, address=address, chain_key=chain_key):
         nested = _anchor_chain_for(
@@ -412,16 +357,11 @@ def _anchor_chain_for(
     in_progress: frozenset[str],
     depth: int,
 ) -> dict[str, Any] | None:
-    """Anchored-authority-chain transitivity.
-
-    A D2-only member controller is TRANSITIVE when its own resolved
-    controllers root in this protocol's independently anchored perimeter:
-    ≥1 link roots, no link is proven foreign, and the controller is observed
-    controlling no foreign row. A SET-valued link
-    (:data:`W3_SET_VALUED_LINK_KINDS`) roots only at an anchor of kind
-    ``member``.
-
-    Returns the anchor-chain evidence, or None."""
+    """Controller-chain extension: a D2-only member controller is transitive when at least one of its own
+    controller links
+    roots in the anchored perimeter, none is proven foreign, and it controls no foreign row. Set-valued links root
+    only at member anchors. Returns the anchor-chain evidence, or None.
+    """
     if depth >= _ANCHOR_CHAIN_MAX_DEPTH:
         return None
     own = (controller.address or "").lower()
@@ -468,17 +408,11 @@ def _controller_is_exclusive(
     chain_key: str,
     exclude_contract_ids: set[int],
 ) -> bool:
-    """Shared-operator kill: every contract the controller is
-    observed to control (caller-gating resolved controller values +
-    proxy-admin pointers) maps into this protocol's member/candidate set, with
-    ≥1 member proven under ``member_for_evidence`` — a heuristic-only member
-    is not_determined: tolerated as protocol-family, never the mandatory
-    proof. Control is observed on
-    a deployment, and a deployment is (address, chain), so the controlled set
-    is scoped to the controller's chain (same NULL≡'ethereum' convention as
-    ``_member_rows_at``). Any foreign or unclaimed observation refuses —
-    revocable, mirroring Class B. A ``call_target``/NULL-provenance row is not
-    an observation of control, so it neither licenses nor refuses here."""
+    """Shared-operator kill: every contract the controller is observed controlling on its chain maps into
+    this protocol's member/candidate set, with at least one proven member (heuristic-only members are tolerated
+    but never the proof). Any foreign or unclaimed observation refuses. ``call_target``/NULL rows aren't control
+    observations.
+    """
     chain_scope = func.lower(func.coalesce(Contract.chain, "ethereum")) == chain_key
     controlled: dict[int, Contract] = {}
     for row in session.execute(
@@ -507,16 +441,14 @@ def _controller_is_exclusive(
             if member_for_evidence(session, contract_id=row.id, protocol_id=protocol_id):
                 member_seen = True
             continue
-        # a candidate tolerates the exclusivity check only with real
-        # membership evidence — a bare nomination proves nothing.
+        # F1: candidates count only with real evidence.
         if (
             row.protocol_id is None
             and row.nominated_protocol_id == protocol_id
             and _has_nonlineage_witness(session, contract_id=row.id, protocol_id=protocol_id)
         ):
             continue
-        # Member-factory rule: a child of the protocol's own
-        # member factory is a protocol-family observation, not a foreign one.
+        # Children of the protocol's own member factory are protocol-family, not foreign.
         if _member_factory_created(session, protocol_id=protocol_id, contract=row):
             continue
         return False
@@ -532,9 +464,7 @@ def _witness_fact_holds(
     evidence: Any,
     via_address: str | None,
 ) -> bool:
-    """Does the via-fact this witness rests on still hold? W1 (block-stamped
-    probe), W5 (attributed assertion) and W6 (externally revocable seed) have
-    no via-fact and hold as recorded."""
+    """Whether this witness's via-fact still holds. W1, W5 and W6 have none and hold as recorded."""
     if rule in (WITNESS_RULE_W1_CODE, WITNESS_RULE_W5_HUMAN, WITNESS_RULE_W6_LLAMA_SEED):
         return True
     evidence = evidence if isinstance(evidence, dict) else {}
@@ -544,16 +474,12 @@ def _witness_fact_holds(
             return False
         return _proof_registry_row(session, protocol_id=protocol_id, address=via) is not None
     if rule == WITNESS_RULE_W4H_DEPLOYER_AFFINITY:
-        # A standing heuristic witness holds while its H registry row is
-        # UNREVOKED: a frozen or suspended row
-        # stops new admissions and flags, it does not de-stamp what stands.
+        # A heuristic witness holds while its H row is unrevoked; freezing only stops new admissions.
         if not via or (contract.deployer or "").lower() != via:
             return False
         return _heuristic_registry_row(session, protocol_id=protocol_id, address=via) is not None
     if rule == WITNESS_RULE_W4_FACTORY:
-        # Re-derived, never trusted: the stored attribution must still name
-        # this factory AND the factory must still be an anchoring member —
-        # its demotion is what revokes this witness.
+        # Re-derived: the attribution must still name this factory, which must still anchor.
         if not via:
             return False
         return _member_factory_lineage(session, protocol_id=protocol_id, contract=contract, factory=via) is not None
@@ -563,9 +489,7 @@ def _witness_fact_holds(
         if member is None or member.protocol_id != protocol_id or _chain_key(member.chain) != chain_key:
             return False
         if evidence.get(W2_HEURISTIC_VIA_KEY) is True:
-            # Same-contract exception: the via is a heuristic member, so the edge is
-            # re-verified without the evidence-membership test — but only for a
-            # same-contract edge kind, which ``w2_evidence`` already pins.
+            # re-verified without the evidence-membership test, but only for same-contract edges.
             if evidence.get("edge_kind") not in W2_SAME_CONTRACT_EDGE_KINDS:
                 return False
         elif not member_for_evidence(session, contract_id=member.id, protocol_id=protocol_id):
@@ -581,9 +505,8 @@ def _witness_fact_holds(
         addr = (contract.address or "").lower()
         if direction == W3_DIRECTION_D2:
             if source == "function_principal":
-                # Anchoring is re-checked here, not only at derivation: a hosting
-                # member demoted to a D2-only entry stops anchoring, and the
-                # principal fact it hosts must fall with it.
+                # F2 re-checked here: a host demoted to D2-only stops anchoring, and its principal facts fall (invariant
+                # 8).
                 return any(
                     member.address and member.address.lower() == via
                     for member, _fact in _d2_principal_facts(
@@ -616,10 +539,7 @@ def _witness_fact_holds(
                 return False
             recorded = evidence.get("anchor_chain")
             recorded_principal = evidence.get("principal_fact")
-            # A witness that PUBLISHED a proof must still be able to cite it: a
-            # re-proof by a different arm, at a different anchor, or off a
-            # different hosting member is a different fact and gets re-derived
-            # with its own evidence.
+            # A published proof must still be citable as-is; a different arm, anchor or host is a new fact to re-derive.
             if proof.arm == "anchor_chain":
                 if recorded_principal is not None:
                     return False

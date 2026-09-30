@@ -1,5 +1,3 @@
-/* ── Protocol list (home, scroll target) — splash aesthetic ──────────────── */
-
 .home-protocol-section {
   --bone: #f4ede1;
   --bone-mute: rgba(244, 237, 225, 0.82);
@@ -21,10 +19,8 @@
   font-family: "IBM Plex Mono", ui-monospace, monospace;
 }
 
-/* Full-bleed warm-void backdrop with a subtle top gradient that connects
- * to the hero, plus a faint radial wash so the section isn't pure flat void.
- * `isolation: isolate` on the section creates a stacking context so the
- * negative z-index here stays behind content but ABOVE the body bg. */
+/* `isolation: isolate` on the section keeps this negative z-index behind
+   content but above the body background. */
 .home-protocol-section::before {
   content: "";
   position: absolute;
@@ -108,14 +104,10 @@
   align-items: center;
   padding: 28px 28px;
   background: rgba(244, 237, 225, 0.015);
-  border: none;
   border-bottom: 1px solid var(--line-soft);
   border-radius: 0;
-  cursor: pointer;
   text-align: left;
   font: inherit;
-  color: inherit;
-  box-shadow: none;
   transition: background 140ms ease, border-color 140ms ease, padding 140ms ease;
 }
 

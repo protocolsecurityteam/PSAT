@@ -1,9 +1,4 @@
-"""Build the per-analysis detail payload used by the SPA's analysis page.
-
-Routes ``/api/analyses/{run_name}`` through here. Returns ``None`` when no
-matching job is found so the caller can map to a 404 — services don't
-import FastAPI.
-"""
+"""Per-analysis detail payload for ``/api/analyses/{run_name}``. Returns ``None`` for the caller to map to 404."""
 
 from __future__ import annotations
 
@@ -23,8 +18,7 @@ from db.models import (
     PrincipalLabel,
 )
 
-# Indirect through ``routers.deps`` so tests get a single patch point for
-# ``SessionLocal``/``get_all_artifacts``.
+# One patch point for tests.
 from routers import deps
 from services.aggregations.action_summary import describe_action
 from services.policy.capability_surface import capability_currency, exact_empty_credit
@@ -33,35 +27,20 @@ logger = logging.getLogger(__name__)
 
 
 def _principal_label_payload(row: PrincipalLabel) -> dict[str, Any]:
-    """One ``principal_labels`` row as published, with two assertions narrowed.
+    """One ``principal_labels`` row with two assertions narrowed.
 
-    ``confidence`` is NOT published under that name. The column is a
-    NAMING-BRANCH label: ``principal_enrichment._display_name`` returns ``"high"``
-    both for the ``safe_signer`` branch (an on-chain-verified fact) and for the
-    final fallback, where it means only *"``resolved_type`` was not the literal
-    string ``unknown``"*, and both print ``high``. Distribution: ``high`` 1,376 /
-    ``medium`` 180 / ``low`` **0** — ``low`` is reachable only when
-    ``resolved_type == "unknown"`` and no such row exists, so the field is
-    two-valued in practice, is ~97% a restatement of ``resolved_type``, and CANNOT
-    express "I did not determine this" — a state an evidence column has to keep
-    distinct from a determined answer.
-    Published as ``naming_rule``, which is what it measures. A real per-principal
-    confidence has to come from whether the identity was verified on-chain (Safe
-    ``getOwners``/``getThreshold``, timelock ``getMinDelay``) — that derivation
-    needs wiring this consumer does not own, and inventing one from this column
-    would be manufacturing the evidence the rename exists to stop claiming.
+    ``confidence`` is published as ``naming_rule``: it is the naming branch, returning ``high`` for both verified Safe
+    signers and the final fallback, and can't express "not determined". Real confidence needs on-chain verification
+    wiring this consumer doesn't own.
 
-    ``label`` is byte-identical to ``display_name`` on 1,556/1,556 rows, so a
-    consumer reading both believed there were two facts. It is published only when
-    the two actually differ.
+    ``label`` equals ``display_name`` on every observed row, so it's published only when they differ.
     """
     out: dict[str, Any] = {
         "address": row.address,
         "display_name": row.display_name,
         "resolved_type": row.resolved_type,
         "labels": list(row.labels or []),
-        # Which naming branch produced ``display_name``. Never an epistemic
-        # confidence, and never omitted — key-absence marks a pre-rename payload.
+        # Never omitted: key-absence marks a pre-rename payload.
         "naming_rule": row.confidence,
         "details": row.details or {},
         "graph_context": list(row.graph_context or []),
@@ -77,27 +56,12 @@ def _artifacts_or_degrade(
     not_determined: dict[str, str],
     proven_absent: dict[str, str],
 ) -> dict[str, Any]:
-    """``get_all_artifacts`` for a page that may render partially.
+    """``get_all_artifacts`` for a page that may render partially, naming what didn't load:
+    ``artifacts_not_determined`` (bucket couldn't be asked; may resolve) vs ``artifacts_body_absent`` (bucket
+    answered; never will).
 
-    ``get_all_artifacts`` fails closed, because a short dict is
-    indistinguishable from "the job produced fewer artifacts". This page is
-    allowed to render what did load — but only by naming what did not, in the
-    two maps published as ``artifacts_not_determined`` (the bucket could not be
-    asked) and ``artifacts_body_absent`` (the bucket answered; the row asserts a
-    key nothing is stored under). Every artifact this payload carries is
-    consumed as evidence about the contract, and the two shortfalls are not the
-    same evidence — one may resolve itself, the other never will.
-
-    NO ``site/`` CONSUMER, and this is why. Nothing in the SPA
-    fetches this merged payload at all: ``grep`` over ``site/src`` finds
-    ``/api/analyses`` only as the LISTING (``App.jsx``) plus two per-artifact reads
-    (``EntityActivity`` → ``upgrade_history``, ``layout/dependencies`` →
-    ``dependency_graph_viz``), both of which go through
-    ``routers/analyses``'s artifact endpoint and already receive the same three
-    answers on the wire via ``X-PSAT-Artifact-State``. So wiring a consumer for
-    these two maps means building a page that reads the multi-MB payload, which is
-    a feature and not a consumer-side split. The maps stay published for API
-    consumers; the SPA's equivalent distinction is served by the header.
+    No SPA consumer: the SPA reads per-artifact endpoints, which carry the same states in ``X-PSAT-Artifact-State``. The
+    maps stay for API consumers.
     """
     try:
         return deps.get_all_artifacts(session, job_id)
@@ -115,7 +79,6 @@ def _artifacts_or_degrade(
 
 
 def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | None:
-    # Try by name first, then by id, then by address
     stmt = select(Job).where(Job.name == run_name).order_by(Job.updated_at.desc()).limit(1)
     job = session.execute(stmt).scalar_one_or_none()
     if job is None:
@@ -124,7 +87,6 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         except Exception:
             session.rollback()
     if job is None:
-        # Try by address
         job = session.execute(
             select(Job)
             .where(
@@ -138,14 +100,11 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     if job is None:
         return None
 
-    # Load artifacts (for those still stored as artifacts)
     not_determined: dict[str, str] = {}
     body_absent: dict[str, str] = {}
     all_artifacts = _artifacts_or_degrade(session, job.id, not_determined, body_absent)
 
-    # Fall back to address lookup when copy_static_cache has reassigned
-    # the Contract row to a newer job. Chain-scoped so we don't pick up
-    # the same address on a different chain.
+    # ``copy_static_cache`` may have reassigned the Contract row to a newer job; chain-scoped.
     contract_row = session.execute(select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
     if contract_row is None and job.address:
         fallback_stmt = select(Contract).where(Contract.address == job.address.lower())
@@ -186,40 +145,24 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         "dependency_graph_viz",
         "upgrade_history",
         "principal_history",
-        # Raw predicate trees per externally-callable function. Consumers
-        # can read this directly or fetch resolved semantic capabilities
-        # below.
         "predicate_trees",
     ):
         if artifact_name in all_artifacts and isinstance(all_artifacts[artifact_name], dict):
             payload[artifact_name] = all_artifacts[artifact_name]
 
-    # Resolved semantic capabilities. Computed lazily — the raw
-    # predicate_trees lives on the artifact; resolving it to the typed
-    # CapabilityExpr requires the AdapterRegistry + repos. Defensive: a
-    # capability-resolution failure MUST NOT fail the whole analysis_detail
-    # response; the rest of the detail payload is still useful.
+    # Resolved lazily; a capability-resolution failure must not fail the whole response.
     if "predicate_trees" in all_artifacts and job.address:
         try:
             from services.resolution.capability_resolver import resolve_contract_capabilities
 
-            # Per C.1 cutover: scope by (job_id, chain) so a re-analysis
-            # on a different chain or a follow-up job on the same address
-            # doesn't leak controller rows into this job's resolution.
-            # Chain comes from the Contract row when present, falling
-            # back to job.request['chain'].
+            # Scope by (job_id, chain) so another chain's controller rows don't leak in.
             req_chain = job.request.get("chain") if isinstance(job.request, dict) else None
             chain = (contract_row.chain if contract_row and contract_row.chain else None) or req_chain
-            # chain_id is required: bind the resolver's live reads to the
-            # job's first-class chain_id, falling back to the registry-backed
-            # derivation from the job's chain string (mirrors the chain-id migration backfill).
             from db.models import derive_job_chain_id
 
             chain_id = getattr(job, "chain_id", None)
             if not isinstance(chain_id, int):
                 chain_id = derive_job_chain_id(chain if isinstance(chain, str) else req_chain, job.address)
-                # ``job.address`` is truthy here (guarded above), so the
-                # derivation never hits its address-less ``None`` case.
                 assert chain_id is not None
             semantic_caps = resolve_contract_capabilities(
                 session,
@@ -241,7 +184,6 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
     if contract_row:
         _populate_from_contract(session, payload, contract_row)
 
-    # For impl jobs, inherit proxy-specific artifacts from the proxy job
     request = job.request if isinstance(job.request, dict) else {}
     proxy_address = request.get("proxy_address")
     if proxy_address:
@@ -262,7 +204,6 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
                     payload[fallback_name] = fallback
     payload["proxy_address"] = proxy_address
 
-    # For proxy jobs, inherit analysis from the impl child job
     is_proxy = contract_row.is_proxy if contract_row else False
     impl_addr = contract_row.implementation if contract_row else None
     if is_proxy and impl_addr:
@@ -276,18 +217,13 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
         if impl_job:
             _inherit_from_impl(session, payload, job, impl_job, impl_addr, not_determined, body_absent)
 
-    # Add subject info from contract_analysis if available
     if isinstance(all_artifacts.get("contract_analysis"), dict):
         subject = all_artifacts["contract_analysis"].get("subject", {})
         payload["contract_name"] = subject.get("name", payload["run_name"])
         payload["summary"] = all_artifacts["contract_analysis"].get("summary")
 
-    # Synthesis fallback for upgrade_history. Mirrors the per-artifact
-    # endpoint at /api/analyses/{job}/artifact/upgrade_history. Runs after
-    # all other paths (artifact body, proxy-impl inheritance) so it only
-    # fires when nothing else surfaced one — typically a storage outage or
-    # a never-materialized artifact. Gated on is_proxy because UpgradeEvent
-    # rows only ever exist for proxies.
+    # Synthesis fallback mirroring the per-artifact upgrade_history endpoint; runs last, only for proxies (UpgradeEvent
+    # rows only exist for them).
     if "upgrade_history" not in payload and contract_row is not None and getattr(contract_row, "is_proxy", False):
         from services.discovery.upgrade_history import synthesize_from_events
 
@@ -296,14 +232,10 @@ def build_analysis_detail(session: Session, run_name: str) -> dict[str, Any] | N
             payload["upgrade_history"] = synthesized
 
     if not_determined:
-        # Names whose row exists but whose body the bucket could not be asked
-        # about. Without this the SPA reads their absence from ``payload`` as
-        # proof the analysis never produced them.
+        # Row exists but the bucket couldn't be asked; without this the SPA reads absence as never produced.
         payload["artifacts_not_determined"] = dict(sorted(not_determined.items()))
     if body_absent:
-        # Names whose row exists and whose object the bucket says it does not
-        # hold. Also not "the analysis never produced them" — but unlike the map
-        # above, re-asking will not change the answer.
+        # Bucket says the object is gone; re-asking won't change it.
         payload["artifacts_body_absent"] = dict(sorted(body_absent.items()))
 
     return payload
@@ -331,7 +263,6 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
                 set(payload.get("available_artifacts", [])) | {"effective_permissions"}
             )
 
-    # Build principal_labels from table
     pl_rows = (
         session.execute(select(PrincipalLabel).where(PrincipalLabel.contract_id == contract_row.id)).scalars().all()
     )
@@ -369,10 +300,8 @@ def _populate_from_contract(session: Session, payload: dict[str, Any], contract_
 
 
 def _index_frontier(session: Session, contract_row: Contract) -> int | None:
-    """The durable event index's own frontier for this contract's chain — the
-    yardstick ``capability_currency`` measures a capability's fold height
-    against. A local read; ``None`` when the chain has no cursors at all, which
-    keeps the currency verdict ``not_determined`` rather than inventing a head.
+    """The event index's own frontier for this chain; ``None`` keeps currency ``not_determined`` rather than
+    inventing a head.
     """
     from db.models import IndexedEventCursor
     from utils.chains import UnknownChainError, chain_by_name
@@ -417,26 +346,16 @@ def _serialize_effective_functions(
             "effect_labels": list(ef.effect_labels or []),
             "effect_targets": list(ef.effect_targets or []),
             "claims": list(getattr(ef, "claims", None) or []),
-            # The quotable copy of the structured planes, reconciled against them
-            # and labelled with which shape it is: 130 local rows say
-            # "Performs a contract action." (no evidence at all), 528 restate
-            # effect_targets as a "write", and the 20 arbitrary-execution rows
-            # outlived the narrowing of the structured exec.arbitrary claim. See
-            # services/aggregations/action_summary.
+            # Reconciled against the structured planes; see services/aggregations/action_summary.
             "action_summary": _action_summary_text,
             "action_summary_kind": _action_summary_kind,
             "action_summary_note": _action_summary_note,
             "authority_public": ef.authority_public,
-            # Three-state authority verdict beside the bool it splits. NULL on a
-            # row written before the column existed — passed through as null so
-            # a consumer can tell "this row never carried the distinction" from
-            # the resolver's own 'not_determined'.
+            # NULL on pre-column rows, passed through so it's distinguishable from the resolver's 'not_determined'.
             "authority_openness": getattr(ef, "authority_openness", None),
             "controllers": [{"principals": controller_principals}] if controller_principals else [],
-            # Three states preserved: a non-empty list is witnessed, ``None``
-            # is role-gated with the role not determined (the enumerable
-            # role-store dissolves role identity by design), ``[]`` is proven
-            # not role-gated. ``or []`` folded the middle into the last.
+            # Non-empty = witnessed, ``None`` = role-gated with role undetermined, ``[]`` = proven not role-gated. ``or
+            # []`` would fold the middle into the last.
             "authority_roles": _authority_roles_state(ef.authority_roles),
             "direct_owner": direct_owner,
             "signature_witnesses": signature_witnesses,
@@ -445,11 +364,8 @@ def _serialize_effective_functions(
         if capability_expr is not None:
             entry["capability_expr"] = capability_expr
             entry["capability_currency"] = capability_currency(capability_expr, index_head=index_head)
-            # Served beside the payload it gates, never derived downstream from
-            # ``exact + members == []``: a consumer reading that shape alone
-            # cannot tell a read-confirmed empty from a provenance-less one.
-            # ``not_determined`` here withholds the earned-negative credit; it
-            # never asserts a caller exists, and it does not change ``status``.
+            # Served beside the payload it gates: ``exact + members == []`` alone can't tell read-confirmed empty from
+            # provenance-less.
             entry["exact_empty_credit"] = exact_empty_credit(capability_expr)
         conditions = getattr(ef, "conditions", None)
         if conditions is not None:
@@ -462,13 +378,9 @@ def _serialize_effective_functions(
 
 
 def _authority_roles_state(column: Any) -> Any:
-    """The ``authority_roles`` column, with one guard: a non-empty list whose
-    members are ALL non-objects was unreadable as role grants, not a witnessed
-    role requirement — serve the not-determined ``None``, exactly as the
-    company serializer does when the same list enriches to nothing
-    (``services/governance/principals.py``), so the two surfaces derive the
-    same state from the same row. 0-realised on observed rows (0 non-object
-    grants of 210 non-empty ones)."""
+    """A non-empty list with no object members is unreadable, not a witnessed requirement: serve ``None``, matching
+    ``services/governance/principals.py``.
+    """
     if isinstance(column, list) and column and not any(isinstance(grant, dict) for grant in column):
         return None
     return column
@@ -505,10 +417,7 @@ def _build_control_graph(root_address: str, cgn_rows, cge_rows) -> dict[str, Any
                 "contract_name": n.contract_name,
                 "depth": n.depth,
                 "analyzed": n.analyzed,
-                # ``analyzed=false`` is four populations; this says which, and
-                # ``null`` is the honest fifth ("not determined") for rows
-                # written before the column. ``graph_max_depth`` is what makes
-                # "beyond_depth_horizon" checkable against ``depth``.
+                # ``analyzed=false`` covers four populations; this says which, ``null`` for pre-column rows.
                 "analysis_state": n.analysis_state,
                 "graph_max_depth": n.graph_max_depth,
                 "details": n.details or {},

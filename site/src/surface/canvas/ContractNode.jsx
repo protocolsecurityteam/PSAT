@@ -6,10 +6,8 @@ import { ROLE_META } from "../meta.js";
 export function ContractNode({ data }) {
   const m = data.machine;
   const roleColor = (ROLE_META[m.role] || ROLE_META.utility).color;
-  // A passthrough timelock contract (control-graph type=timelock) defaults to
-  // its functional role label; surface the timelock identity so it isn't read
-  // as a plain contract and lines up with the Timelocks filter. Owner
-  // attribution is unchanged — this re-labels, it doesn't re-attribute.
+  // Passthrough timelocks would otherwise read as plain contracts. Re-labels
+  // only; ownership is unchanged.
   const TIMELOCK_COLOR = "#9a8a6e";
   const accent = m.isTimelock ? TIMELOCK_COLOR : roleColor;
   const roleLabel = m.isTimelock
@@ -17,9 +15,7 @@ export function ContractNode({ data }) {
     : (ROLE_META[m.role] || ROLE_META.utility).singular;
   const delayStr = m.isTimelock ? formatDelay(m.timelockDelay) : "";
   const chip = data.selectionChip;
-  // The reach chip shares the above-the-card slot with the out/browse chip, so
-  // it stacks a row higher when one of those is present rather than landing on
-  // top of it.
+  // Stacks a row higher when the out/browse chip occupies the slot.
   const reachStacked = Boolean(data.browseChip || chip?.out);
   return (
     <div
@@ -29,9 +25,7 @@ export function ContractNode({ data }) {
       style={{ borderLeftColor: accent }}
       onClick={data.onSelect}
     >
-      {/* Transitive reach (purple, above the card): the selection reaches this
-          contract over the control graph in N hops. The card itself is left
-          untouched — the chip is the whole claim. */}
+      {/* Transitive reach: the chip is the whole claim; the card is untouched. */}
       {data.reachChip && (
         <div
           className={`ps-node-chip ps-node-chip--reach${reachStacked ? " ps-node-chip--stacked" : ""}`}
@@ -40,9 +34,7 @@ export function ContractNode({ data }) {
           {data.reachChip}
         </div>
       )}
-      {/* Browse-fallback note (gold, above the card): who the browsed
-          off-graph principal is and what it can call here. Takes the --out
-          slot, so the selection's own out-chip yields while it's shown. */}
+      {/* Takes the --out slot; the selection's own out-chip yields while shown. */}
       {data.browseChip && (
         <div className="ps-node-chip ps-node-chip--browse">{data.browseChip}</div>
       )}
@@ -70,10 +62,10 @@ export function ContractNode({ data }) {
         <div className="ps-node-standards">{m.standards.join(" · ")}</div>
       )}
       <div className="ps-node-addr">{shortAddr(m.address)}</div>
-      {/* Timelock marker. A timelock contract is owned by a Safe (passthrough),
-          so by default it renders as whatever functional role the classifier
-          gave it ("Value Handler") with nothing flagging the delay-gated
-          control surface it actually is. */}
+      {/*
+        Safe-owned timelocks otherwise render as their functional role with
+        nothing flagging the delay gate.
+      */}
       {m.isTimelock && (
         <div className="ps-node-timelock" title={`timelock${delayStr ? ` · ${delayStr} delay` : ""}`}>
           <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
@@ -83,11 +75,10 @@ export function ContractNode({ data }) {
           <span>TIMELOCK{delayStr ? ` · ${delayStr} delay` : ""}</span>
         </div>
       )}
-      {/* Proxy marker. Without it the card is identical to a regular
-          contract, hiding that most protocol contracts are upgradeable —
-          the single most security-relevant attribute on the canvas. The
-          impl name + functions already render as the card's identity;
-          this just declares the proxy wrapper + how often it's changed. */}
+      {/*
+        Without it a proxy looks identical to a regular contract, hiding the
+        most security-relevant attribute.
+      */}
       {m.is_proxy && (
         <div
           className="ps-node-proxy"

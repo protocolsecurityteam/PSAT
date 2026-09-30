@@ -26,22 +26,14 @@ from ..slither_compat import (
     StateVariable,
 )
 
-# ---------------------------------------------------------------------------
-# Operand classification
-# ---------------------------------------------------------------------------
-
 
 def _source_sort_key(source: Source) -> tuple[str, ...]:
-    """Total deterministic order over Source records. ``SourceSet`` is a
-    frozenset of string-bearing dataclasses, so its iteration order varies
-    with PYTHONHASHSEED — any "pick the first matching source" over it is
-    nondeterministic ACROSS PROCESSES (a fold flickered between
-    ``ownerOf(uint256)`` and ``_getQueue()`` run to run, flipping the
-    public/gated verdict of WithdrawalQueueERC721.approve). Every
-    single-source pick must sort by this key first. Deliberately *not* a
-    semantic preference: preferring e.g. arg-taking views could attribute a
-    nullary authority getter to an inner keyed lookup and manufacture an
-    open."""
+    """Total deterministic order over sources.
+
+    A ``SourceSet``'s iteration order varies with PYTHONHASHSEED, which once flipped WithdrawalQueueERC721.approve
+    between public and gated across runs, so every single-source pick sorts by this. Deliberately not a semantic
+    preference.
+    """
     return (
         str(source.kind),
         str(source.parameter_index),
@@ -62,15 +54,7 @@ def _source_sort_key(source: Source) -> tuple[str, ...]:
 
 
 def _published_source_key(source: Source) -> tuple[str, ...]:
-    """Order over the fields a Source actually *publishes* to an operand.
-
-    ``callee_args_digest`` is deliberately excluded. It is never emitted, so
-    two Sources that differ only in the digest render identically and their
-    relative order cannot matter. (The digest is content-stable now —
-    ``provenance._digest`` hashes the sorted canonical member keys — so
-    including it would no longer vary run to run, but it still orders nothing
-    a reader can see.)
-    """
+    """Order over the fields a Source publishes; ``callee_args_digest`` is never emitted, so it can't matter."""
     return (
         str(source.kind),
         str(source.parameter_index),
@@ -89,12 +73,9 @@ def _published_source_key(source: Source) -> tuple[str, ...]:
 
 
 def _derived_from_sort_key(derived_from: frozenset[Source] | None) -> str:
-    """Canonical string for ``Source.derived_from`` inside ``_source_sort_key``.
+    """Canonical string for ``derived_from`` (a frozenset's ``str`` is iteration-ordered).
 
-    ``str()`` of a frozenset is iteration-ordered, which is the exact
-    nondeterminism ``_source_sort_key`` exists to remove, so the members are
-    sorted by their published key first. Recursion terminates at one level:
-    every member is stored with ``derived_from=None``.
+    Members have ``derived_from=None``, so one level.
     """
     if derived_from is None:
         return "None"
@@ -104,9 +85,7 @@ def _derived_from_sort_key(derived_from: frozenset[Source] | None) -> str:
 
 
 def _operand_for_value(value: Any, prov: ProvenanceMap) -> Operand:
-    """Translate a Slither IR value's source set into the semantic Operand
-    record. Picks the most informative source if multiple are
-    present."""
+    """A value's source set as an Operand, picking the most informative source."""
     sources = _sources_for_value(value, prov)
     if not sources:
         op: Operand = {"source": "constant", "constant_value": str(value) if value is not None else ""}
@@ -118,16 +97,12 @@ def _operand_for_value(value: Any, prov: ProvenanceMap) -> Operand:
 
 
 def _picked_source_operand(value: Any, sources: SourceSet) -> Operand:
-    """The source the projection publishes, out of everything that reached the
-    value. Extracted so the element-read stamp runs once, over whichever source
-    won."""
+    """The published source; the element-read stamp runs once over it."""
     view_call = _derived_view_call_source(sources)
     if view_call is not None:
         op = _source_to_operand(view_call)
         _attach_state_constant_value(op, value)
         return op
-    # Priority: msg_sender > signature_recovery > parameter > state_variable
-    # > view_call > external_call > computed > constant > block_context > top.
     priority = (
         "msg_sender",
         "tx_origin",
@@ -145,42 +120,27 @@ def _picked_source_operand(value: Any, sources: SourceSet) -> Operand:
     for kind in priority:
         matches = sorted((s for s in sources if s.kind == kind), key=_source_sort_key)
         if kind == "state_variable":
-            # Stable sort: member-path depth first, sort-key order within ties.
             matches = sorted(matches, key=lambda source: len(getattr(source, "member_path", ()) or ()), reverse=True)
         for s in matches:
             op = _source_to_operand(s)
             _attach_state_constant_value(op, value)
             return op
-    # Fallback: any source (deterministically the sort-key minimum).
     op = _source_to_operand(min(sources, key=_source_sort_key))
     _attach_state_constant_value(op, value)
     return op
 
 
-# Deeper nesting than ``record.member.member`` is a coverage question of its own
-# and is not answered here, so it publishes nothing rather than a truncated path.
+# Deeper nesting publishes nothing rather than a truncated path.
 _MAX_ELEMENT_MEMBER_DEPTH = 2
-# An access chain is straight-line ``Index``/``Member`` IR; the cap only bounds a
-# malformed self-referential one.
+# Only bounds a malformed self-referential chain.
 _ELEMENT_CHAIN_CAP = 8
 
 
 def _attach_element_read(op: Operand, value: Any, sources: SourceSet, prov: ProvenanceMap) -> None:
-    """Stamp the three ``element_*`` facts when ``value`` is one resolved storage
-    element read, and stamp nothing at all otherwise.
+    """Stamp the three ``element_*`` facts when ``value`` is one resolved storage element read, else nothing.
 
-    All three or none: they describe a single cell, so a chain that pins a base
-    but not its key must publish no cell — the consumer joining an amount to a
-    guard has no way to recover the missing half and would otherwise join on the
-    base name alone.
-
-    All-or-none is also what keeps ``_operand_sort_key`` total across these
-    fields. Its presence flag for ``element_key_param_index`` cannot on its own
-    separate an operand carrying no element read from one whose key is a proven
-    ``None`` — both render as the absent flag — and it is
-    ``element_base_variable``'s slot, present exactly when the other two are,
-    that discriminates them. A later unit that relaxes all-or-none collapses
-    that distinction in the published order and owes the sort key a fix.
+    All or none: a base without its key would let a consumer join on the base alone. It also keeps ``_operand_sort_key``
+    total: ``element_base_variable`` distinguishes "no element read" from a key proven ``None``.
     """
     fields = _element_read_fields(value, sources, prov)
     if fields is None:
@@ -200,17 +160,14 @@ def _element_read_fields(
     if chain is None:
         return None
     base, member_path, keys = chain
-    # Exactly one key level: the published slot names ONE level, and a second
-    # would have nowhere to land — an ambiguous cell, not a narrower one.
+    # One key level only; a second has nowhere to land.
     if len(keys) != 1 or len(member_path) > _MAX_ELEMENT_MEMBER_DEPTH:
         return None
     canonical = getattr(base, "canonical_name", None)
     if not canonical:
         return None
-    # Provenance has to have seen the read the IR walk just described: one base
-    # declaration, and a state-variable source carrying exactly this member path.
-    # A chain merged through a phi, or one whose base saturated to top, fails
-    # here instead of publishing a cell nothing proves was read.
+    # Provenance must agree: one base and a state-variable source with exactly this path (a phi-merged or saturated
+    # chain fails).
     if {source.state_variable_name for source in sources if source.kind == "state_variable"} != {base.name}:
         return None
     if not any(source.kind == "state_variable" and tuple(source.member_path) == member_path for source in sources):
@@ -222,12 +179,8 @@ def _element_read_fields(
 
 
 def _element_access_chain(value: Any) -> tuple[Any, tuple[str, ...], list[Any]] | None:
-    """Walk a reference back through its defining ``Index``/``Member`` IR to the
-    state variable it reads, collecting the member path and the index keys.
-
-    ``None`` for anything else on the chain — a storage-pointer local, an
-    assignment, a type conversion, a reference whose definition is not singular —
-    because a read this walk cannot follow is a read it cannot name.
+    """Walk a reference through ``Index``/``Member`` IR to its state variable, collecting member path and keys;
+    ``None`` for anything else on the chain.
     """
     member_path: list[str] = []
     keys: list[Any] = []
@@ -257,12 +210,8 @@ def _element_access_chain(value: Any) -> tuple[Any, tuple[str, ...], list[Any]] 
 
 
 def _defining_reference_ir(ref: Any) -> Any | None:
-    """The ONE IR in the reference's home node whose lvalue IS this reference.
-
-    The uniqueness rule is what makes the answer safe: a reference with two
-    definitions in its node is a chain this walk cannot read, so it yields
-    nothing rather than the first candidate. Identity rather than name because
-    identity is what "this reference" means; ``REF_n`` names carry no promise.
+    """The one IR in the reference's node whose lvalue is this reference (by identity); two definitions yield
+    nothing.
     """
     node = getattr(ref, "node", None)
     if node is None:
@@ -272,23 +221,11 @@ def _defining_reference_ir(ref: Any) -> Any | None:
 
 
 def _key_definition_is_merged(key: Any, value: Any) -> bool:
-    """True when the index key's SSA definition chain passes through a ``Phi``
-    that joins more than one value — ``recs[flag ? a : b]`` and its if/else form.
+    """True when the index key's SSA chain passes through a multi-value ``Phi`` (``recs[flag ? a : b]``).
 
-    Structural on purpose, because the key's SOURCE SET does not answer this and
-    cannot be made to: provenance folds a merged local back to a single source,
-    so ``recs[flag ? a : b]`` reports the one parameter ``b`` and the cardinality
-    test that refuses ``recs[_bidId + 1]`` never fires. Publishing that slot
-    would name a cell the read is only sometimes keyed by, and
-    ``balances[flag ? msg.sender : who]`` would publish a possibly-caller-keyed
-    cell as parameter-keyed — inverting the one distinction these fields exist
-    to carry.
-
-    Refuses outright when the containing declaration cannot be reached: a key
-    whose definitions cannot be enumerated is not a proven key. The BASE chain
-    needs no equivalent test — ``_element_access_chain`` follows only
-    ``Index``/``Member``, so a ``Phi`` on the base stops the walk before any cell
-    is named.
+    Structural because provenance folds a merged local to one source, so the arithmetic refusal never fires, and
+    ``balances[flag ? msg.sender : who]`` would publish a possibly-caller-keyed cell as parameter-keyed. Refuses when
+    the declaration can't be reached. The base needs no such check (``_element_access_chain`` stops at a Phi).
     """
     definitions = _ssa_definitions(value)
     if definitions is None:
@@ -317,11 +254,8 @@ def _key_definition_is_merged(key: Any, value: Any) -> bool:
 
 
 def _ssa_definitions(value: Any) -> dict[int, list[Any]] | None:
-    """Every SSA lvalue in the reference's containing declaration and its
-    modifiers, mapped by identity to the IRs that define it.
-
-    ``None`` when the declaration cannot be reached at all, which the caller
-    reads as a refusal rather than as an empty answer.
+    """Every SSA lvalue in the reference's declaration and modifiers, by identity, to its defining IRs; ``None`` if
+    unreachable (a refusal).
     """
     node = getattr(value, "node", None)
     container = getattr(node, "function", None) if node is not None else None
@@ -340,15 +274,10 @@ def _ssa_definitions(value: Any) -> dict[int, list[Any]] | None:
 
 
 def _element_key_param_index(key: Any, prov: ProvenanceMap) -> tuple[bool, int | None]:
-    """``(resolved, slot)`` for an index key: the entry-parameter slot it came
-    from, or ``None`` for a key proven to be ``msg.sender``.
+    """``(resolved, slot)`` for a key: its entry-parameter slot, or ``None`` for a key proven to be ``msg.sender``.
 
-    One source and one source only. ``bids[_bidId + 1]`` carries the parameter's
-    own source alongside the arithmetic, and reading the slot off it would
-    publish agreement with ``bids[_bidId]`` over two different cells. ``None`` is
-    reserved for the caller: it is the one non-parameter key whose identity is
-    proven rather than merely unresolved, and a consumer reads it as "no entry
-    parameter names this cell", not as "the key is unknown".
+    Exactly one source: ``bids[_bidId + 1]`` carries the parameter's source too and would falsely agree with
+    ``bids[_bidId]``. ``None`` means "no entry parameter names this cell", not unknown.
     """
     key_sources = _sources_for_value(key, prov)
     if len(key_sources) != 1:
@@ -398,15 +327,9 @@ def _source_to_operand(source: Source, *, nested: bool = False) -> Operand:
     if source.block_context_kind is not None:
         op["block_context_kind"] = source.block_context_kind
     if source.kind in ("computed", "view_call", "external_call") and not nested:
-        # Always emitted on a computed / view_call / external_call operand, and
-        # only there, so absence is "the question does not apply" rather than a
-        # silent third meaning. (view_call/external_call are included because
-        # the call's argument provenance — the caller, in the RoleRegistry
-        # shape — must survive onto the operand; the digest alone is opaque.)
-        # ``null`` is not-determined; a list (possibly empty) is determined.
-        # ``nested`` renders the members, whose own ``derived_from`` was
-        # stripped by ``arg_origins`` after being spliced into this list —
-        # emitting ``null`` there would read as an unknown that isn't one.
+        # Emitted on every computed/view_call/external_call operand and only there, so absence means "doesn't apply".
+        # Call operands keep argument provenance (the caller, in the RoleRegistry shape). ``null`` is not determined; a
+        # list is determined.
         op["derived_from"] = (
             None
             if source.derived_from is None
@@ -508,14 +431,8 @@ def _value_type_name(value: Any) -> str | None:
 
 
 def _sources_for_value(value: Any, prov: ProvenanceMap) -> SourceSet:
-    """Read provenance for a Slither value.
-
-    For SolidityVariables (msg.sender / tx.origin / block.*) we
-    classify on-demand — they don't appear as SSA lvalues in the
-    provenance map. For StateVariables we emit a state_variable
-    source directly. For Constants we emit a constant source. For
-    everything else (LocalIRVariables, ReferenceVariables, TMPs,
-    Phi outputs) we look up the name in the provenance map.
+    """Provenance for a Slither value: Solidity variables classified on demand (not SSA lvalues), state variables and
+    constants directly, everything else looked up in the map.
     """
     if value is None:
         return EMPTY
@@ -540,9 +457,7 @@ def _sources_for_value(value: Any, prov: ProvenanceMap) -> SourceSet:
 
 
 def _classify_solidity_variable(var: Any) -> SourceSet:
-    """Same logic as ProvenanceEngine._classify_solidity_variable but
-    re-implemented here so the predicate builder can call it on
-    operands without needing the engine instance."""
+    """Mirror of ProvenanceEngine._classify_solidity_variable, usable without an engine."""
     name = getattr(var, "name", "")
     if name == "msg.sender":
         return frozenset({Source(kind="msg_sender")})
@@ -573,7 +488,6 @@ def _classify_solidity_variable(var: Any) -> SourceSet:
 
 
 def _sources_from_destination(ir: Any, prov: ProvenanceMap) -> SourceSet:
-    """For a HighLevelCall, return the destination (call target)'s
-    provenance. Slither exposes this as ``destination``."""
+    """Provenance of a HighLevelCall's ``destination``."""
     dest = getattr(ir, "destination", None)
     return _sources_for_value(dest, prov) if dest is not None else EMPTY

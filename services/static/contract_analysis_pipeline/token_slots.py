@@ -1,33 +1,13 @@
 """Static derivation of token-precondition storage slots for the effects stage.
 
-The effects stage proves pause behaviour on an anvil fork by diffing entry
-points pre/post pause. Token entry points (``transferFrom`` etc.) revert
-pre-pause because the simulated caller has no balance/allowance/shares/ownership,
-so they never reach the pause gate and the verdict degrades to unknown. To let
-the fork seed those preconditions with ``anvil_setStorageAt``, the fork needs the
-storage *base slot* of the backing mapping — a fact of the layout, i.e. of the
-bytecode, so it rides the existing cross-chain artifact reuse unchanged.
+Pause proofs on an anvil fork call token entry points that otherwise revert for lack of
+balance/allowance/shares/ownership, so the fork seeds those with ``anvil_setStorageAt``, which needs the backing
+mapping's base slot. That needs a live Slither parse the effects stage lacks, so it is derived here into the effects
+artifact's ``token_slots``.
 
-That derivation needs a live Slither parse, which the effects stage does not have
-(it runs off the persisted artifact). So this pass runs at STATIC time and stamps
-the derived slots into the ``effects`` artifact under the top-level ``token_slots``
-key. Each entry names a public/external VIEW getter that returns the raw mapping
-value for its key(s) — the effects side seeds ``base_slot`` then reads that getter
-back with strict equality, so the getter MUST be a direct read of the mapping, not
-a computed/derived value (a rebasing ``balanceOf = shares * rate`` never qualifies).
-
-The rule of the pass is: never guess. Anything uncertain is skipped; absence of an
-entry degrades to today's behaviour, and the effects-side read-back is a further
-net against any residual derivation error. Two layout standards are supported:
-
-  * ``storage_layout`` — the mapping is a plain contract state variable; its base
-    slot comes from Slither's storage layout.
-  * ``oz_v5_namespaced`` — the mapping is a member of an ERC-7201 namespaced
-    struct (OZ v5 ``ERC20Storage``: ``_balances`` then ``_allowances`` …); the
-    struct base is the folded ``*StorageLocation`` bytes32 constant and the member
-    offset is walked with standard Solidity slot rules.
-
-Vyper units use different slot math and are skipped entirely.
+Each entry names a view getter that returns the raw mapping value (the fork reads it back with strict equality, so
+derived getters like rebasing ``balanceOf`` never qualify). Never guess: anything uncertain is skipped. Supports plain
+state-variable mappings (Slither layout) and OZ v5 ERC-7201 namespaced struct members. Vyper is skipped.
 """
 
 from __future__ import annotations
@@ -53,9 +33,7 @@ from .slither_compat import (
 logger = logging.getLogger(__name__)
 
 
-# Family of semantic getters this pass anchors on, keyed by canonical signature.
-# The role/key_kind are fixed per signature (a semantic anchor, not a name guess).
-# ``key_types`` is the flattened key-type tuple the backing mapping must have.
+# Getters anchored on by canonical signature, with role, key kind and the backing mapping's key types.
 _FAMILY: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "balanceOf(address)": ("balance", "address", ("address",)),
     "allowance(address,address)": ("allowance", "address_address", ("address", "address")),
@@ -64,15 +42,11 @@ _FAMILY: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "ownerOf(uint256)": ("owner", "uint256", ("uint256",)),
 }
 
-# Deterministic emission order.
 _ROLE_ORDER = {"balance": 0, "allowance": 1, "shares": 2, "owner": 3}
 
 _ADDRESS_TYPES = {"address", "address payable"}
 
-# Binary IR types that do NOT transform the mapping value (comparisons /
-# short-circuit boolean ops, i.e. the kind that appears in a require guard). Any
-# other Binary in the getter's dataflow means the returned value is computed, not
-# the raw mapping read the read-back anchor requires.
+# Comparisons and boolean ops (require guards); any other Binary means a computed value.
 _NON_TRANSFORMING_BINARY: frozenset[Any] = frozenset(
     getattr(BinaryType, name)
     for name in ("EQUAL", "NOT_EQUAL", "LESS", "LESS_EQUAL", "GREATER", "GREATER_EQUAL", "ANDAND", "OROR")
@@ -83,11 +57,7 @@ _MAX_TRACE_DEPTH = 3
 
 
 def derive_token_slots(contract: Any) -> dict[str, Any] | None:
-    """Return ``{"entries": [...]}`` for ``contract``'s token-precondition
-    mappings, or ``None`` when nothing was derived with certainty.
-
-    Never raises: any Slither edge degrades to ``None`` (the key is then omitted
-    and the effects stage keeps its current behaviour)."""
+    """``{"entries": [...]}`` of token-precondition mappings, or ``None``. Never raises."""
     if not SLITHER_AVAILABLE:
         return None
     try:
@@ -98,9 +68,7 @@ def derive_token_slots(contract: Any) -> dict[str, Any] | None:
         entries: list[dict[str, Any]] = []
         seen_roles: set[str] = set()
 
-        # Auto-generated public-mapping getters first: a public mapping is a
-        # direct read by construction, and Slither does not surface its getter
-        # as an entry-point function, so it must be matched structurally.
+        # Public mappings first: direct reads by construction, and Slither doesn't list their getters as functions.
         for var in _public_mapping_state_vars(contract):
             fam = _family_for_public_mapping(var)
             if fam is None or fam[1] in seen_roles:
@@ -111,8 +79,7 @@ def derive_token_slots(contract: Any) -> dict[str, Any] | None:
                 entries.append(entry)
                 seen_roles.add(role)
 
-        # Handwritten getters: a real view function whose canonical signature is
-        # in the family and whose single return is a direct mapping index.
+        # Handwritten views in the family whose single return is a direct mapping index.
         for fn in _candidate_view_functions(contract):
             fam = _FAMILY.get(_full_name(fn))
             if fam is None or fam[0] in seen_roles:
@@ -130,11 +97,6 @@ def derive_token_slots(contract: Any) -> dict[str, Any] | None:
     except Exception:  # pragma: no cover - defensive; never break the artifact
         logger.debug("token-slot derivation failed", exc_info=True)
         return None
-
-
-# ---------------------------------------------------------------------------
-# Compilation-unit / contract introspection
-# ---------------------------------------------------------------------------
 
 
 def _is_vyper(cu: Any) -> bool:
@@ -174,18 +136,12 @@ def _full_name(fn: Any) -> str:
     return str(getattr(fn, "full_name", "") or "")
 
 
-# ---------------------------------------------------------------------------
-# Mapping shape
-# ---------------------------------------------------------------------------
-
-
 def _elem_name(type_obj: Any) -> str:
     return str(getattr(type_obj, "name", None) or type_obj)
 
 
 def _flatten_mapping(map_type: Any) -> tuple[tuple[str, ...], Any] | None:
-    """``(flattened key-type names, terminal value type)`` for a (possibly
-    nested) mapping, or ``None`` if ``map_type`` isn't a mapping."""
+    """``(flattened key types, value type)`` for a (nested) mapping, or ``None``."""
     if not isinstance(map_type, MappingType):
         return None
     keys: list[str] = []
@@ -212,8 +168,7 @@ def _mapping_matches(map_type: Any, key_types: tuple[str, ...], role: str) -> bo
 
 
 def _family_for_public_mapping(var: Any) -> tuple[str, str, str] | None:
-    """``(canonical getter signature, role, key_kind)`` if ``var``'s
-    auto-generated getter is in the family and its value shape fits."""
+    """``(signature, role, key_kind)`` if the public mapping's getter is in the family and its value shape fits."""
     flat = _flatten_mapping(getattr(var, "type", None))
     if flat is None:
         return None
@@ -229,11 +184,6 @@ def _family_for_public_mapping(var: Any) -> tuple[str, str, str] | None:
     if not _mapping_matches(getattr(var, "type", None), key_types, role):
         return None
     return sig, role, key_kind
-
-
-# ---------------------------------------------------------------------------
-# storage_layout path
-# ---------------------------------------------------------------------------
 
 
 def _storage_layout_for(contract: Any, state_var: Any) -> tuple[int, int] | None:
@@ -272,13 +222,7 @@ def _plain_entry(contract: Any, var: Any, sig: str, role: str, key_kind: str) ->
     }
 
 
-# ---------------------------------------------------------------------------
-# Handwritten getters: return-value dataflow
-# ---------------------------------------------------------------------------
-
-
 def _defining_map(fn: Any) -> dict[str, Any]:
-    """``{lvalue_name: first defining IR}`` for a function's IR."""
     out: dict[str, Any] = {}
     for node in getattr(fn, "nodes", []) or []:
         for ir in getattr(node, "irs", []) or []:
@@ -304,10 +248,9 @@ def _single_return_value(fn: Any) -> Any | None:
 
 
 def _trace_return_to_index(fn: Any, depth: int = 0) -> tuple[Any, Any] | None:
-    """``(Index IR, owning function)`` for the mapping read whose value the
-    function directly returns, following a short chain of trivial internal
-    wrappers (up to ``_MAX_TRACE_DEPTH``; the OZ ``ownerOf → _requireOwned →
-    _owners[id]`` shape). ``None`` if the return isn't a direct mapping index."""
+    """``(Index IR, owning function)`` for the mapping read the function returns directly, through trivial internal
+    wrappers (``ownerOf -> _requireOwned -> _owners[id]``), or ``None``.
+    """
     if depth > _MAX_TRACE_DEPTH:
         return None
     value = _single_return_value(fn)
@@ -330,8 +273,7 @@ def _resolve_value_to_index(value: Any, fn: Any, dm: dict[str, Any], depth: int)
 
 
 def _index_root(index_ir: Any, dm: dict[str, Any]) -> tuple[Any, Any]:
-    """Walk an Index chain's ``variable_left`` back to its base. Returns
-    ``(base_operand, base_defining_ir)``."""
+    """Walk an Index chain to its base: ``(base_operand, base_defining_ir)``."""
     current = index_ir
     seen: set[int] = set()
     while isinstance(current, Index):
@@ -346,8 +288,7 @@ def _index_root(index_ir: Any, dm: dict[str, Any]) -> tuple[Any, Any]:
 
 
 def _has_value_transforming_arithmetic(fn: Any, depth: int = 0, seen: set[Any] | None = None) -> bool:
-    """Any Binary op other than a comparison/boolean guard — in ``fn`` or an
-    internal/library function it calls — means the returned value is computed."""
+    """Any non-guard Binary in ``fn`` or its callees means the return is computed."""
     if seen is None:
         seen = set()
     key = getattr(fn, "canonical_name", None) or id(fn)
@@ -387,8 +328,7 @@ def _handwritten_entry(
 def _handwritten_plain_entry(
     contract: Any, fn: Any, var: Any, role: str, key_kind: str, key_types: tuple[str, ...]
 ) -> dict[str, Any] | None:
-    # The getter must read exactly this one mapping — nothing else feeds the
-    # returned value (a second read is a computed getter, not a raw read).
+    # Reading anything else means a computed getter.
     reads = _state_variables_read(fn)
     if len(reads) != 1 or reads[0] is not var:
         return None
@@ -406,11 +346,6 @@ def _state_variables_read(fn: Any) -> list[Any]:
     except Exception:  # pragma: no cover - slither edge
         return []
     return list(result or [])
-
-
-# ---------------------------------------------------------------------------
-# oz_v5_namespaced path
-# ---------------------------------------------------------------------------
 
 
 def _handwritten_namespaced_entry(
@@ -464,9 +399,9 @@ def _struct_member_type(struct: Any, member_name: str) -> Any | None:
 
 
 def _namespaced_struct_base(struct_local: Any, owning_fn: Any) -> int | None:
-    """Base slot of the ERC-7201 struct the storage pointer ``struct_local``
-    aliases: the folded ``*StorageLocation`` constant the accessor's assembly
-    assigns to ``$.slot``."""
+    """Base slot of the ERC-7201 struct a storage pointer aliases: the ``*StorageLocation`` constant assigned to
+    ``$.slot``.
+    """
     accessor = _accessor_for_pointer(struct_local, owning_fn)
     if accessor is None:
         return None
@@ -487,8 +422,7 @@ def _namespaced_struct_base(struct_local: Any, owning_fn: Any) -> int | None:
 
 
 def _accessor_for_pointer(struct_local: Any, owning_fn: Any) -> Any | None:
-    """The internal accessor (``_getERC20Storage``) whose return is assigned to
-    the storage pointer local."""
+    """The accessor (``_getERC20Storage``) whose return is assigned to the pointer."""
     dm = _defining_map(owning_fn)
     value: Any = struct_local
     for _ in range(_MAX_TRACE_DEPTH):
@@ -514,11 +448,10 @@ def _bytes32_constant_value(state_var: Any) -> str | None:
 
 
 def _struct_member_slot_offset(struct: Any, member_name: str) -> int | None:
-    """Slot offset of ``member_name`` within ``struct``, walking members in
-    declaration order under standard Solidity rules. Every preceding member
-    must occupy exactly one full slot (mapping / 32-byte scalar / dynamic
-    array-or-string head); any sub-slot scalar means packing could shift the
-    target, so the derivation is abandoned."""
+    """Slot offset of ``member_name`` in ``struct`` by Solidity rules.
+
+    Every preceding member must take exactly one full slot; packing aborts the derivation.
+    """
     offset = 0
     for elem in getattr(struct, "elems_ordered", []) or []:
         if getattr(elem, "name", None) == member_name:
@@ -531,8 +464,7 @@ def _struct_member_slot_offset(struct: Any, member_name: str) -> int | None:
 
 
 def _full_slot_count(type_obj: Any) -> int | None:
-    """``1`` for a type that occupies exactly one full 32-byte slot, else
-    ``None`` (packable scalar, multi-slot aggregate, or unknown)."""
+    """``1`` for a type taking exactly one full slot, else ``None``."""
     size_spec: Any = getattr(type_obj, "storage_size", None)
     try:
         size = int(size_spec[0])

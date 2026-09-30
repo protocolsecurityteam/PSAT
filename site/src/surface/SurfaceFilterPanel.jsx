@@ -5,19 +5,10 @@ import { ChainSwitcher } from "./sidebar/ChainSwitcher.jsx";
 import { SearchModesBar } from "./sidebar/search/SearchModesBar.jsx";
 import { SearchNavigator } from "./sidebar/search/SearchNavigator.jsx";
 
-// Unified filter panel — top-left. Search + sort + browse nav, then the
-// Type filter and Role visibility rows (injected as children), then the
-// browse preview. Collapsed to a pill by default — the full panel is
-// large and competes with the selection legend on narrow embeds. The
-// pill IS the toggle and sits in the same top-left spot in both states;
-// collapsed, it wears the active chain (multichain pages — chain scope
-// must not be silently hidden behind an unopened panel).
-//
-// The panel starts collapsed — it is large, and at first glance the
-// canvas matters more. Nothing in it hides nodes (the Type modes only scope
-// the search), so collapsing it conceals no active state. Search mode lives
-// here (not inside SearchNavigator) so the mode-pill bar can render in the
-// Type row while the rest of SearchNavigator stays in the centre overlay.
+// Top-left filter panel, collapsed to a pill by default (it competes with the
+// legend on narrow embeds). Collapsed, the pill shows the active chain so scope
+// is never hidden. Nothing here hides nodes, so collapsing conceals no state.
+// Search mode lives here so its pill bar can render in the Type row.
 export function SurfaceFilterPanel({
   machines,
   principals,
@@ -38,8 +29,7 @@ export function SurfaceFilterPanel({
         className="ps-filter-pill"
         onClick={() => {
           if (filtersOpen) {
-            // Unmounting the navigator skips its preview cleanup — drop any
-            // lingering browse marker along with the panel.
+            // Unmounting skips the navigator's preview cleanup.
             onPreview(null);
           }
           setFiltersOpen((was) => !was);
@@ -63,8 +53,7 @@ export function SurfaceFilterPanel({
         onPreview={onPreview}
         onCommit={onCommit}
       >
-        {/* Chain row renders only for multi-chain protocols;
-            single-chain pages show no chain UI at all. */}
+        {/* Multichain only. */}
         <ChainSwitcher chains={availableChains} active={activeChain} onSelect={onSelectChain} />
         <div className="ps-filter-row">
           <span className="ps-filter-gutter">Type</span>

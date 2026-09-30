@@ -1,9 +1,4 @@
-"""Predicate capability + probe endpoints.
-
-Hosts the read path that consumes the semantic ``predicate_trees`` artifact:
- - per-contract / per-company capability resolution
- - membership and signature probes against individual leaves
-"""
+"""Capability resolution and membership/signature probes over the ``predicate_trees`` artifact."""
 
 from __future__ import annotations
 
@@ -29,41 +24,23 @@ router = APIRouter()
 _ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 
-# ---------------------------------------------------------------------------
-# Probe rate limiter
-# ---------------------------------------------------------------------------
-# Default is "10/min/key/contract" — sliding-window per
-# (admin_key, address, chain_id). PSAT_PROBE_RATE_LIMIT and PSAT_PROBE_RATE_WINDOW_S
-# override. Each worker has its own state so a multi-worker deployment
-# allows up to N×limit requests in aggregate; that's an acceptable first
-# cut. Long-term: shared store (Redis) for fleet-wide accounting.
+# 10/min per (admin_key, address). Per-process, so N workers allow N×limit.
 
 _PROBE_RATE_LIMIT = int(os.environ.get("PSAT_PROBE_RATE_LIMIT", "10"))
 _PROBE_RATE_WINDOW_S = float(os.environ.get("PSAT_PROBE_RATE_WINDOW_S", "60"))
 _probe_limiter = SlidingWindowRateLimiter(_PROBE_RATE_LIMIT, _PROBE_RATE_WINDOW_S)
-# The probe bucket key is still ``(admin_key, address, chain_id)``; this alias
-# keeps that per-key window observable under the pre-refactor name.
+# Pre-refactor name, kept observable.
 _probe_rate_state = _probe_limiter._buckets
 
-# The two public capability reads run the AdapterRegistry over each
-# contract's predicate trees + repo lookups (tens of ms per contract), so a
-# tighter per-IP window fronts them independently of the fleet-wide cap in
-# api.py. PSAT_CAPABILITIES_RATE_LIMIT / _WINDOW_S override; 0 disables.
+# Capability reads run the AdapterRegistry (tens of ms per contract), so they get a tighter per-IP window.
 _CAP_RATE_LIMIT = int(os.environ.get("PSAT_CAPABILITIES_RATE_LIMIT", "30"))
 _CAP_RATE_WINDOW_S = float(os.environ.get("PSAT_CAPABILITIES_RATE_WINDOW_S", "60"))
 _capabilities_limiter = SlidingWindowRateLimiter(_CAP_RATE_LIMIT, _CAP_RATE_WINDOW_S)
 
 
 def _probe_rate_check(admin_key: str | None, address: str, chain_id: int) -> None:
-    """Raise HTTPException(429) when the (admin_key, address, chain_id) sliding
-    window has hit its limit. No-op when the limit is 0 (env override
-    for testing / disabled-by-default flag use).
-
-    The chain is part of the bucket key: the same address on two chains is two
-    distinct contracts, so probing one must not consume the other's budget.
-    The route resolves any mainnet default before calling this helper."""
-    # The module-level knobs stay authoritative (and monkeypatchable) so an env
-    # or test override of the limit/window takes effect without reconstructing.
+    """429 when the window is exhausted; limit 0 disables. Chain is in the key."""
+    # Module-level knobs stay authoritative and monkeypatchable.
     _probe_limiter.limit = _PROBE_RATE_LIMIT
     _probe_limiter.window_s = _PROBE_RATE_WINDOW_S
     retry_after = _probe_limiter.hit((admin_key or "<no-key>", address.lower(), chain_id))
@@ -93,14 +70,7 @@ def _capabilities_rate_check(request: Request, route: str) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Capabilities response cache
-# ---------------------------------------------------------------------------
-# In-process TTL cache for /api/contract/{addr}/capabilities; defaults to
-# 60 seconds.
-# PSAT_CAPABILITIES_CACHE_TTL_S overrides; 0 disables. Each worker process
-# has its own cache; that's fine — the resolver is read-only and the cache
-# is best-effort.
+# Per-process TTL cache. Best-effort; the resolver is read-only.
 _CAPABILITIES_CACHE_TTL_S = float(os.environ.get("PSAT_CAPABILITIES_CACHE_TTL_S", "60"))
 _capabilities_cache: dict[tuple[str, int, int | None], tuple[float, dict[str, Any]]] = {}
 
@@ -126,11 +96,6 @@ def _capabilities_cache_put(key: tuple[str, int, int | None], value: dict[str, A
     import time as _time
 
     _capabilities_cache[key] = (_time.time() + _CAPABILITIES_CACHE_TTL_S, value)
-
-
-# ---------------------------------------------------------------------------
-# Probe request models
-# ---------------------------------------------------------------------------
 
 
 class _ProbeMembershipRequest(BaseModel):
@@ -170,13 +135,7 @@ class _ProbeSignatureRequest(BaseModel):
         return v.lower()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _compute_data_freshness(session, address: str, chain_id: int) -> dict[str, Any]:
-    """Return generic indexed-event freshness for ``address``."""
     from db.models import IndexedEventCursor
 
     row = session.execute(
@@ -200,11 +159,6 @@ def _compute_data_freshness(session, address: str, chain_id: int) -> dict[str, A
     }
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-
-
 @router.post(
     "/api/contract/{address}/probe/membership",
     dependencies=[Depends(deps.require_admin_key)],
@@ -214,22 +168,15 @@ def probe_contract_membership(
     req: _ProbeMembershipRequest,
     x_psat_admin_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Semantic predicate probe: is ``member`` allowed by leaf ``predicate_index``
-    of ``function_signature`` on ``address``?'
-
-    Resolves the predicate_trees artifact server-side from the most
-    recent successful job for ``address``; the descriptor is NEVER
-    client-supplied — clients only carry the leaf index they received
-    from the semantic capability rendering.
+    """Is ``member`` allowed by leaf ``predicate_index`` of ``function_signature``? The descriptor is loaded
+    server-side, never client-supplied.
     """
     addr = deps._normalize_address_or_400(address)
     if "chain_id" not in req.model_fields_set:
-        # Admin API edge: chain_id defaults to mainnet; log when taken.
         logger.info("probe_membership: chain_id defaulted to mainnet (chain_id=1) for %s", addr)
     _probe_rate_check(x_psat_admin_key, addr, req.chain_id)
 
-    # Lazy-import the resolver bits so the probe route doesn't impose
-    # its dependency surface on the rest of the API.
+    # Keeps the resolver's deps off the rest of the API.
     from services.resolution.adapters import AdapterRegistry, EvaluationContext
     from services.resolution.adapters.event_indexed import EventIndexedAdapter
     from services.resolution.probe import probe_membership
@@ -244,9 +191,7 @@ def probe_contract_membership(
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
         )
-        # An explicit chain_id scopes to that chain's job: a CREATE2
-        # twin's trees must not cross-load. Absent, the mainnet-default edge
-        # (logged above) keeps the address-only most-recent pick.
+        # Explicit chain_id scopes to that chain's job so a twin's trees can't cross-load.
         if "chain_id" in req.model_fields_set:
             job_stmt = job_stmt.where(Job.chain_id == req.chain_id)
         job = session.execute(job_stmt).scalar_one_or_none()
@@ -264,9 +209,6 @@ def probe_contract_membership(
             )
 
         if not isinstance(artifact, dict) or "trees" not in artifact:
-            # Either an error-path placeholder ({"error": "..."}) or a
-            # malformed payload — surface the reason rather than silently
-            # treating as no-tree.
             reason = artifact.get("error") if isinstance(artifact, dict) else "predicate_trees payload was not a dict"
             return {
                 "result": "unknown",
@@ -276,9 +218,7 @@ def probe_contract_membership(
 
         tree = artifact["trees"].get(req.function_signature)
         if tree is None:
-            # Resolver convention: absent function = unguarded (publicly
-            # callable). For probe semantics, that means anyone is in
-            # the set.
+            # Resolver convention: absent function = unguarded, so anyone is in the set.
             return {
                 "result": "yes",
                 "reason": "function_unguarded",
@@ -312,10 +252,7 @@ def probe_contract_signature(
     req: _ProbeSignatureRequest,
     x_psat_admin_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Counterpart to /probe/membership for signature_auth leaves.
-    Caller already did ECDSA recovery (or EIP-1271 verification); we
-    check whether the recovered signer is in the leaf's allowed-signer
-    set."""
+    """Counterpart for signature_auth leaves: the caller already recovered the signer."""
     from services.resolution.adapters import AdapterRegistry, EvaluationContext
     from services.resolution.adapters.event_indexed import EventIndexedAdapter
     from services.resolution.probe import probe_signature
@@ -323,7 +260,6 @@ def probe_contract_signature(
 
     addr = deps._normalize_address_or_400(address)
     if "chain_id" not in req.model_fields_set:
-        # Admin API edge: chain_id defaults to mainnet; log when taken.
         logger.info("probe_signature: chain_id defaulted to mainnet (chain_id=1) for %s", addr)
     _probe_rate_check(x_psat_admin_key, addr, req.chain_id)
     with deps.SessionLocal() as session:
@@ -335,8 +271,6 @@ def probe_contract_signature(
             .order_by(Job.updated_at.desc(), Job.created_at.desc())
             .limit(1)
         )
-        # An explicit chain_id scopes to that chain's job; absent,
-        # the mainnet-default edge (logged above) keeps the most-recent pick.
         if "chain_id" in req.model_fields_set:
             job_stmt = job_stmt.where(Job.chain_id == req.chain_id)
         job = session.execute(job_stmt).scalar_one_or_none()
@@ -387,39 +321,15 @@ def get_contract_capabilities(
     chain_id: int = 1,
     block: int | None = None,
 ) -> dict[str, Any]:
-    """Return semantic capabilities per externally-callable function on
-    ``address``.
+    """Semantic capabilities per externally-callable function: ``{contract_address, chain_id, block, capabilities:
+    {signature: {kind, members, membership_quality, confidence, ...}}}``.
 
-    Response shape::
-
-        {
-          "contract_address": "0x...",
-          "chain_id": 1,
-          "block": null,
-          "capabilities": {
-            "grantRole(bytes32,address)": {
-              "kind": "finite_set",
-              "members": ["0x..."],
-              "membership_quality": "exact",
-              "confidence": "enumerable",
-              ...
-            },
-            ...
-          }
-        }
-
-    Empty ``capabilities`` dict means every function on the contract is
-    unguarded (publicly callable) per the resolver convention.
-
-    Returns 404 if no completed analysis Job exists for the address, or
-    no predicate_trees artifact has been written for the latest analysis.
+    Empty ``capabilities`` means all functions are unguarded. 404 without a completed job or predicate_trees.
     """
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     _capabilities_rate_check(request, "/api/contract/{address}/capabilities")
     addr = deps._normalize_address_or_400(address)
-    # Admin API edge: chain_id query param defaults to mainnet. Logged so
-    # the mainnet assumption is visible for a chainless admin query.
     logger.info("get_contract_capabilities: resolving %s on chain_id=%s (default mainnet=1)", addr, chain_id)
     cache_key = (addr, chain_id, block)
     cached = _capabilities_cache_get(cache_key)
@@ -427,18 +337,9 @@ def get_contract_capabilities(
         return cached
 
     with deps.SessionLocal() as session:
-        # Resolve the chain string from the most recent completed Job's
-        # request so ``_load_state_var_values`` can scope ``Contract``
-        # by (address, chain). The resolver itself defaults from the
-        # job's request when chain is None, but doing it here too keeps
-        # cache and direct resolver lookups aligned.
+        # Scopes ``_load_state_var_values`` by (address, chain) and keeps the cache aligned with the resolver.
         chain_str: str | None = None
-        # Hard-filter the job pick to the requested chain: a CREATE2
-        # twin's trees must never cross-load. Ordering-by-preference used to fall
-        # back to another chain's job when the requested chain had none, serving
-        # that chain's trees under the requested chain_id. No job on this chain
-        # falls through to the 404 below. Address-scoped jobs always carry a
-        # chain_id (Job CHECK constraint), so no legacy NULL-chain row is lost.
+        # Hard-filter to the requested chain: falling back served another chain's trees under this chain_id.
         latest_job = session.execute(
             select(Job)
             .where(func.lower(Job.address) == addr)
@@ -456,9 +357,7 @@ def get_contract_capabilities(
             "analysis exists or the predicate-tree artifact is missing. Fall "
             "back to /api/company/* or /api/jobs?address=..."
         )
-        # No job on the requested chain: 404 directly rather than calling the
-        # resolver, whose ``job_id=None`` fallback re-looks-up the job by address
-        # alone and would cross-load a twin's trees from another chain.
+        # The resolver's ``job_id=None`` fallback would cross-load a twin by address alone.
         if latest_job is None:
             raise HTTPException(status_code=404, detail=no_capabilities_detail)
         if isinstance(latest_job.request, dict):
@@ -489,41 +388,12 @@ def get_contract_capabilities(
 
 @router.get("/api/company/{company_name}/semantic_capabilities")
 def company_semantic_capabilities(request: Request, company_name: str) -> dict[str, Any]:
-    """Semantic capability map for every analyzed contract in a company.
+    """Capability map for every analyzed contract in a company.
 
-    Returned as a separate endpoint (not embedded in the company-
-    overview payload) because resolving capabilities requires running
-    the AdapterRegistry over each contract's predicate trees + repo
-    lookups — adds tens of milliseconds per contract, not free to
-    include in the already-1-3MB overview response. UI consumers fetch
-    this when they want to render resolved guard details without
-    inflating the overview response.
+    Separate from the overview because resolution costs tens of ms per contract.
 
-    Response shape::
-
-        {
-          "company": "<name>",
-          "contracts": {
-            "0xab...": {
-              "guardedFn()": {
-                "kind": "finite_set", "members": [...],
-                "membership_quality": "exact",
-                "confidence": "enumerable", ...
-              },
-              ...
-            },
-            "0xcd...": {...},
-            "0xef...": null
-          },
-          "missing_semantic_count": <int>
-        }
-
-    A contract with no predicate-tree artifact maps to ``null`` so consumers can
-    distinguish "not yet semantically analyzed" from "semantically analyzed and has no
-    guarded functions" (the latter maps to ``{}``).
-
-    NOT admin-gated — read-only / idempotent, the same shape contract
-    as ``/api/contract/{addr}/capabilities``.
+    ``contracts`` maps address to ``{signature: capability}``; ``null`` means no predicate trees yet, ``{}`` means
+    analyzed with no guarded functions. Not admin-gated.
     """
     from services.aggregations.company_overview.entity_keys import _entity_addr, _entity_key
     from services.aggregations.company_overview.jobs import _job_chain_name
@@ -535,11 +405,7 @@ def company_semantic_capabilities(request: Request, company_name: str) -> dict[s
         if protocol_row is None:
             raise HTTPException(status_code=404, detail="Company not found")
 
-        # Group completed jobs by composite (chain, address) entity: a
-        # CREATE2 twin analyzed on two chains is two entities, resolved against
-        # its OWN chain's job. Resolving per bare address collapsed the twin and
-        # dropped one chain's capability set. Jobs newest-first within each entity
-        # so the per-entity pick and the bare-map winner are deterministic.
+        # Per (chain, address) entity: per bare address collapsed twins and dropped one chain.
         jobs_by_entity: dict[str, list[Job]] = {}
         for job in session.execute(
             select(Job).where(
@@ -559,10 +425,7 @@ def company_semantic_capabilities(request: Request, company_name: str) -> dict[s
         for entity_jobs in jobs_by_entity.values():
             entity_jobs.sort(key=_job_recency, reverse=True)
 
-        # ``contracts_by_entity`` carries one entry per (chain, address); the bare
-        # ``contracts`` map keeps one deterministic entry per address (newest
-        # completed job across chains wins), preserving the pre-multichain shape
-        # for single-chain consumers. ``missing_semantic_count`` counts per entity.
+        # The bare ``contracts`` map keeps one entry per address (newest wins) for single-chain consumers.
         contracts_by_entity: dict[str, Any] = {}
         missing = 0
         bare_winner: dict[str, tuple[tuple[Any, Any], str]] = {}
@@ -575,10 +438,7 @@ def company_semantic_capabilities(request: Request, company_name: str) -> dict[s
                 if isinstance(req_chain, str) and req_chain:
                     chain_str = req_chain
             try:
-                # Job.chain_id is guaranteed for address-scoped jobs (Phase-0
-                # dual-write + backfill); a job that still can't resolve raises
-                # UnsupportedChainError and lands in the warn-and-count-missing
-                # path below rather than 500ing the whole company map.
+                # Unresolvable chains are counted missing rather than 500ing the map.
                 chain_info = require_chain(
                     latest_job.chain_id,
                     chain=chain_str,

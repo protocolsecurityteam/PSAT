@@ -4,11 +4,12 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from services.crawlers.defillama.core_assets import build_address_to_chain_map, load_core_assets
 
 
 def _make_repo_with_core_assets(tmp: str, assets: dict) -> Path:
-    """Create a mock repo directory with a coreAssets.json file."""
     repo = Path(tmp) / "repo"
     helper = repo / "projects" / "helper"
     helper.mkdir(parents=True)
@@ -62,17 +63,22 @@ def test_load_core_assets_missing_file():
     assert result == {}
 
 
-def test_build_address_to_chain_map():
-    core_assets = {
-        "ethereum": {"WETH": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"},
-        "arbitrum": {"WETH": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"},
-    }
-    addr_map = build_address_to_chain_map(core_assets)
-
-    assert addr_map["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"] == "ethereum"
-    assert addr_map["0x82af49447d8a07e3bd95bd0d56f35241523fbab1"] == "arbitrum"
-    assert len(addr_map) == 2
-
-
-def test_build_address_to_chain_map_empty():
-    assert build_address_to_chain_map({}) == {}
+@pytest.mark.parametrize(
+    ("core_assets", "expected"),
+    [
+        pytest.param(
+            {
+                "ethereum": {"WETH": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"},
+                "arbitrum": {"WETH": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1"},
+            },
+            {
+                "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2": "ethereum",
+                "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": "arbitrum",
+            },
+            id="inverts_chain_map",
+        ),
+        pytest.param({}, {}, id="empty"),
+    ],
+)
+def test_build_address_to_chain_map(core_assets, expected):
+    assert build_address_to_chain_map(core_assets) == expected

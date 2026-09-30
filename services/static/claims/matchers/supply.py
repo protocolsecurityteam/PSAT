@@ -1,21 +1,9 @@
-"""``supply.mint`` / ``supply.burn`` — the contract increases or decreases its
-own token supply or share balances.
+"""``supply.mint`` / ``supply.burn``: the contract changes its own supply or share balances.
 
-Evidence, most-exact first:
-
-* own canonical ``mint``/``burn`` selector inside an ERC-20 / FiatToken gate
-  (``standard_exact``);
-* a callee ``mint``/``burn`` selector on a body external call (``standard_exact``);
-* the supply-write-sign idiom — ERC-20 and a Binary-IR increase/decrease of the
-  variable the contract publishes as ``totalSupply()`` (``idiom_structural``);
-* the mint/burn Transfer idiom — ERC-20 and a zero-address-endpoint
-  ``Transfer(address,address,uint256)`` corroborated by a matching-direction
-  monotone state-var write, so a rebasing token that publishes no supply variable
-  is still recognized (``idiom_structural``);
-* the WETH wrap/unwrap idiom — inside the WETH gate, ``deposit`` mints and
-  ``withdraw`` burns, corroborated by an observed one-directional balance write
-  (WETH9 keeps no supply variable and emits no ``Transfer`` on wrap, so this is
-  the only path that sees it) (``idiom_structural``).
+standard_exact: own ``mint``/``burn`` inside an ERC-20/FiatToken gate, or a callee ``mint``/``burn`` selector.
+idiom_structural: a signed write to the variable published as ``totalSupply()``; a zero-address ``Transfer``
+corroborated by a monotone write (rebasing tokens with no supply variable); or WETH ``deposit``/``withdraw`` with a
+one-directional balance write (WETH9 has no supply variable and no wrap ``Transfer``).
 """
 
 from __future__ import annotations
@@ -31,7 +19,6 @@ _OWN_SELECTORS = {
 }
 _CALLEE_SELECTORS = _OWN_SELECTORS
 
-# Circle FiatToken's published minter ABI — the non-ERC-20 half of the token gate.
 _FIAT_TOKEN_SELECTORS = selectors_of("configureMinter(address,uint256)", "isMinter(address)")
 _DEPOSIT = abi_selector("deposit()")
 _WITHDRAW = abi_selector("withdraw(uint256)")
@@ -76,9 +63,7 @@ def _supply_evidence(ctx: ClaimContext, function: str, kind: str) -> ClaimEviden
                 tier="idiom_structural",
                 witness={"kind": "mint_burn_transfer", "supply": kind},
             )
-        # The wrap/unwrap arm asserts a supply move, so it must observe one: the
-        # gate alone says the contract is wrapped native, not that this call
-        # created or destroyed anything.
+        # The gate only says the contract wraps native; the balance write shows this call moved supply.
         if _weth_gate(ctx) and _facts.monotone_balance_delta(fn) == kind:
             if kind == "mint" and selector == _DEPOSIT:
                 return ClaimEvidence(tier="idiom_structural", witness={"kind": "weth_wrap", "supply": "mint"})

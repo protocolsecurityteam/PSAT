@@ -12,9 +12,7 @@ from .types import KindTier
 
 
 def _base_name(name: Any) -> str | None:
-    """Strip Slither's SSA version suffix (``dest_1`` -> ``dest``). The
-    provenance engine keys locals by their *base* name, so version suffixes
-    must be normalized before a set-membership test against it."""
+    """Strip Slither's SSA suffix (``dest_1`` -> ``dest``); the provenance engine keys locals by base name."""
     if not isinstance(name, str):
         return None
     parts = name.rsplit("_", 1)
@@ -24,42 +22,19 @@ def _base_name(name: Any) -> str | None:
 
 
 class _UnitCtx:
-    """Per-walked-unit classification context for value-flow destinations and
-    amounts. Carries the unit's provenance map plus the two soundness guards:
+    """Per-unit classification context for value-flow destinations and amounts.
 
-    * ``merged`` — base names of LOCAL variables that a Phi merges across
-      branches. The engine keys locals by base name, so two branch versions of
-      ``d`` (``d = cond ? who : feeSink``) collapse to whichever assignment was
-      processed last — silently discarding the other origin. Any destination
-      that reaches such a base is forced ``indeterminate`` rather than trusting
-      the collapsed value. (State-variable entrypoint Phis are excluded: their
-      incoming versions are the same origin, not a cross-branch merge.)
-    * ``nested`` — True when the unit is an internal callee, not the entry
-      point. A ``parameter`` origin inside a callee is not self-evidently
-      caller-directed: the entry may forward a fixed state var OR a
-      caller-chosen argument into it. But the value-flow walk is rooted at ONE
-      external entry, so the argument forwarded at each call site along that
-      single path is unambiguous. ``param_bindings`` carries that forwarded
-      origin (see below); a nested ``parameter`` is resolved through it to the
-      entry-rooted kind, and only degrades to ``indeterminate`` when the
-      binding is missing, unresolvable, or divergent across call sites. A state
-      var / ``msg.sender`` / constant is contract-global and stays trustworthy
-      across the internal-call boundary regardless.
-    * ``param_bindings`` — for a nested unit, maps each of the unit's formal
-      parameter base names to the *neutral origin* (see ``_arg_origin``) the
-      entry-rooted walk forwarded into it at this call site: an entry parameter,
-      ``msg.sender``, ``tx.origin``, ``address(this)``, a constant, or a named
-      state variable. ``None`` on the entry itself (its own parameters ARE the
-      caller-directed origin). Threaded down ``walk`` per call site; a helper
-      reached from two sites with divergent bindings is re-walked so the
-      cross-site fold collapses the disagreement to ``indeterminate``.
-    * ``param_index_bindings`` — the positional half of ``param_bindings``: for a
-      nested unit, the ENTRY parameter INDEX each formal binds to, present only
-      for the formals whose argument resolved to one unambiguous entry parameter
-      (never for a struct member / array element of one). The origin alone says
-      *a* parameter; addressing an ABI argument slot needs *which*. Threaded and
-      re-walked exactly like ``param_bindings``, so two call sites forwarding
-      different parameter positions disagree at the fold instead of one winning."""
+    * ``merged``: local base names a Phi merges across branches. The engine keys locals by base name, so ``d = cond ?
+    who : feeSink`` collapses to one origin; anything reaching such a base is ``indeterminate``. Entrypoint Phis on
+    state variables are excluded.
+    * ``nested``: the unit is an internal callee. A ``parameter`` there is resolved through ``param_bindings`` (the
+    argument the single entry path forwarded) and is ``indeterminate`` only when the binding is missing or divergent.
+    State vars, ``msg.sender`` and constants are contract-global.
+    * ``param_bindings``: formal base name -> neutral origin forwarded at this call site (``None`` on the entry). A
+    helper reached with divergent bindings is re-walked so the fold yields ``indeterminate``.
+    * ``param_index_bindings``: formal -> entry parameter index, only where the argument is one whole entry parameter;
+    threaded like ``param_bindings``.
+    """
 
     def __init__(
         self,
@@ -73,13 +48,11 @@ class _UnitCtx:
         param_bindings: dict[str, tuple[str, ...]] | None = None,
         param_index_bindings: dict[str, int] | None = None,
     ) -> None:
-        # Context-independent, shared across every entry that reaches this unit.
         self.engine = bundle.engine
         self.param_names = bundle.param_names
         self.merged = bundle.merged
         self.def_by_id = bundle.def_by_id
         self.param_indexes = bundle.param_indexes
-        # Contract-level (constant within a contract) + the per-context nested flag.
         self.state_vars_by_name = state_vars_by_name
         self.setters = setters
         self.alias_indeterminate = alias_indeterminate
@@ -91,12 +64,9 @@ class _UnitCtx:
 
 
 class _EngineBundle:
-    """The context-independent provenance artifacts for one function: the SSA
-    ``ProvenanceEngine`` (run to fixed point), formal-parameter base names, the
-    Phi-merged local bases, and the SSA def-use index. All are pure functions of
-    the function's own IR — identical whichever entry point reaches it — so the
-    bundle is memoized per function across the whole build pass. Only the
-    per-context ``nested`` interpretation lives on ``_UnitCtx``."""
+    """Context-independent provenance for one function (engine at fixed point, formal names, Phi-merged bases, SSA
+    def-use index), memoized across the build pass. Only ``nested`` lives on ``_UnitCtx``.
+    """
 
     __slots__ = ("engine", "param_names", "merged", "def_by_id", "param_indexes")
 
@@ -115,19 +85,15 @@ class _EngineBundle:
         self.param_indexes = param_indexes
 
 
-# The bundle holds its function through ProvenanceEngine.function. A process-wide
-# weak-key dictionary would therefore keep both its keys and their Slither
-# compilation units alive. build_effects scopes this memo to one artifact pass.
+# Scoped to one artifact pass: the bundle references its function, so a process-wide weak map would keep compilation
+# units alive.
 _ENGINE_BUNDLE_SCOPE: ContextVar[dict[Any, _EngineBundle] | None] = ContextVar(
     "psat_effects_engine_bundle", default=None
 )
 
 
 def _param_indexes_of(unit: Any) -> dict[str, int]:
-    """``formal parameter base name -> positional index``. A name that repeats
-    (shadowing, an unnamed formal reusing the empty name) is DROPPED: the index
-    is used to address an ABI argument slot, so an ambiguous name must resolve to
-    nothing rather than to the first match."""
+    """Formal base name -> positional index. Repeated names are dropped: an ambiguous name must address no ABI slot."""
     indexes: dict[str, int] = {}
     ambiguous: set[str] = set()
     for position, param in enumerate(getattr(unit, "parameters", []) or []):
@@ -164,12 +130,8 @@ def _engine_bundle_for(unit: Any) -> _EngineBundle:
     merged: set[str] = set()
     def_by_id: dict[int, Any] = {}
     for node in getattr(unit, "nodes", []) or []:
-        # An ENTRYPOINT-node Phi is a parameter-binding phi (Slither's
-        # interprocedural SSA linking a callee param to its caller argument), NOT
-        # an intra-function cross-branch merge. Counting it as "merged" would
-        # spuriously force every forwarded-param destination in an internal
-        # helper to indeterminate. A genuine reassignment merge lives at an
-        # ENDIF/other body node and is still caught.
+        # An ENTRYPOINT Phi is Slither's interprocedural parameter binding, not a cross-branch merge; counting it would
+        # force every forwarded parameter to indeterminate.
         is_entrypoint = getattr(node, "type", None) == NodeType.ENTRYPOINT
         for ir in getattr(node, "irs_ssa", ()) or ():
             lvalue = getattr(ir, "lvalue", None)
@@ -215,8 +177,7 @@ def _build_unit_ctx(
 
 
 def _ir_source_operands(ir: Any) -> list[Any]:
-    """The value operands an IR derives its lvalue from — the edges of the
-    def-use backward walk used by ``_reaches_merged_local``."""
+    """The operands an IR derives its lvalue from (the def-use edges for ``_reaches_merged_local``)."""
     tn = type(ir).__name__
     if tn == "TypeConversion":
         return [getattr(ir, "variable", None)]
@@ -231,12 +192,10 @@ def _ir_source_operands(ir: Any) -> list[Any]:
     if tn == "Binary":
         return [getattr(ir, "variable_left", None), getattr(ir, "variable_right", None)]
     if tn == "Member":
-        # ``s.field`` — the field access carries the base local's identity, so a
-        # destination read off a branch-reassigned struct local must reach it.
+        # The field access carries the base local's identity.
         return [getattr(ir, "variable_left", None)]
     if tn == "Index":
-        # ``arr[k]`` — both the base and the key select the element; a merge in
-        # either makes the destination element ambiguous.
+        # A merge in either base or key makes the element ambiguous.
         return [getattr(ir, "variable_left", None), getattr(ir, "variable_right", None)]
     return []
 
@@ -259,16 +218,12 @@ def _reaches_merged_local(value: Any, ctx: _UnitCtx) -> bool:
     return False
 
 
-# How deep to chase nested merges when deciding whether every branch of a value
-# is caller-supplied. Reassignment chains are a hop or two (`if native: amount =
-# msg.value`); past that the answer is "we did not prove it", which is the safe
-# direction anyway.
+# Reassignment chains are a hop or two; deeper is "not proven".
 _MERGE_RESOLVE_DEPTH = 4
 
 
 def _phi_of(value: Any, ctx: _UnitCtx) -> Any:
-    """The Phi IR that defines ``value``, or ``None``. Walks copy edges only, so
-    the returned merge IS this value's definition rather than one of its inputs'."""
+    """The Phi that defines ``value`` (through copies only), or ``None``."""
     seen: set[int] = set()
     stack: list[Any] = [value]
     while stack:
@@ -289,25 +244,17 @@ def _phi_of(value: Any, ctx: _UnitCtx) -> Any:
     return None
 
 
-# Neutral-origin tags that ARE a caller-chosen quantity, for the merge proof
-# below. ``param`` is an entry parameter; ``caller_supplied`` is an already-proven
-# merge of them, so a two-hop forward composes.
+# ``param`` is an entry parameter; ``caller_supplied`` is an already-proven merge of them, so forwards compose.
 _CALLER_SUPPLIED_TAGS = ("param", "caller_supplied")
 
 
 def _is_caller_supplied_leaf(value: Any, ctx: _UnitCtx) -> bool:
-    """True when ``value`` IS a caller-chosen quantity: the ETH attached to the
-    call, or a formal parameter that the caller-directed origin actually reaches.
+    """True when ``value`` is a caller-chosen quantity: ``msg.value``, or a formal the caller-directed origin
+    reaches.
 
-    The parameter half is NOT the bare AST test it looks like. On the entry, a
-    formal IS the caller's argument. In a NESTED unit it is only whatever the
-    caller bound to it, and the caller may well have forwarded a state variable —
-    so the formal is resolved through ``param_bindings`` exactly as
-    :func:`_single_param_origin` resolves it. Reading a nested formal as
-    self-evidently caller-supplied published ``caller_supplied`` for
-    ``_helper(feeAmount)`` merged with ``msg.value``: an assertion that the caller
-    picks the magnitude, on a branch where the magnitude is storage they cannot
-    influence. A missing binding fails closed."""
+    A nested formal is resolved through ``param_bindings`` (the caller may have forwarded storage); a missing binding
+    fails closed.
+    """
     if value is None:
         return False
     from slither.core.declarations.solidity_variables import SolidityVariable
@@ -325,20 +272,10 @@ def _is_caller_supplied_leaf(value: Any, ctx: _UnitCtx) -> bool:
 
 
 def _merged_caller_supplied(value: Any, ctx: _UnitCtx, depth: int = 0) -> bool:
-    """True when EVERY branch of a merged value is caller-supplied.
-
-    ``function deposit(IERC20 asset, uint256 amount) payable`` that does
-    ``if (asset == native) amount = msg.value;`` merges an ABI argument with the
-    attached ETH. Both are the caller's number, so the merge is not the absence of
-    an answer — it is a disjunction whose members agree on the only thing an
-    amount kind claims. Collapsing it to ``indeterminate`` published "we traced
-    nothing" about a quantity the caller picks outright.
-
-    Deliberately NOT a slot claim: one branch has no ABI slot at all, so no
-    ``amount_param_index`` follows from this (see :func:`_fold_param_index`).
-    Anything the walk cannot prove caller-supplied — a storage read, a call
-    result, a nested merge past the depth bound — fails the whole conjunction, so
-    the answer degrades to ``indeterminate`` rather than to a guessed member."""
+    """True when every branch of a merged value is caller-supplied (``if (asset == native) amount = msg.value``: both
+    are the caller's number, so this is an agreeing disjunction, not "traced nothing"). Not a slot claim: one
+    branch has no ABI slot. Anything unproven fails the whole conjunction.
+    """
     if depth > _MERGE_RESOLVE_DEPTH:
         return False
     phi = _phi_of(value, ctx)
@@ -360,10 +297,9 @@ def _merged_caller_supplied(value: Any, ctx: _UnitCtx, depth: int = 0) -> bool:
 
 
 def _operand_is_direct(value: Any, param_names: set[str]) -> bool:
-    """True when the operand is a definitive AST leaf (Tier-1 dispositive): a
-    StateVariable, a Solidity built-in (``msg.sender``/``msg.value``), a literal
-    constant, or a formal-parameter read with no intervening cast/computation.
-    Temporaries/references (cast results, computed values) are Tier-2 traces."""
+    """True for a direct AST leaf (Tier 1): a state variable, a Solidity built-in, a literal, or an uncast parameter
+    read. Temporaries and references are Tier-2 traces.
+    """
     if value is None:
         return False
     tn = type(value).__name__
@@ -392,31 +328,22 @@ def _state_var_target_kind(name: str, ctx: _UnitCtx) -> str:
     if name in ctx.setters:
         return TARGET_KIND_STORAGE_SETTER
     if name in ctx.alias_indeterminate:
-        # Aliased into a callee we could not decide writes-through — the
-        # no-setter proof for this specific var is unsound.
+        # Aliased into a callee we couldn't decide writes through, so no-setter is unsound.
         return "indeterminate"
-    # No attributed setter. Only a *complete* scan makes that a proven negative
-    # ("fixed destination"); an assembly-sstore/delegatecall/unresolved-alias
-    # blind spot leaves it unknown — never assert immutability we could not prove.
+    # Only a complete setter scan proves "fixed"; assembly sstore, delegatecall or unresolved aliases leave it unknown.
     return TARGET_KIND_STORAGE_NO_SETTER if ctx.setter_scan_complete else "indeterminate"
 
 
-# A ``neutral origin`` is the entry-rooted source of a value forwarded across an
-# internal-call boundary, independent of whether the value is used as a
-# destination or an amount. One of: ``("param",)`` (an entry parameter, the
-# caller-directed origin), ``("msg_sender",)``, ``("caller_controlled",)``
-# (tx.origin), ``("self",)`` (address(this)), ``("constant",)``,
-# ``("state_variable", name)``, or ``("indeterminate",)``. ``_arg_origin``
-# computes it for a call-site argument (chaining through the caller's own
-# bindings); ``_origin_to_*_kind`` translates it back into the destination /
-# amount lattice at the use site.
+# A neutral origin is the entry-rooted source of a value, independent of whether it's used as destination or amount:
+# ``("param",)``, ``("msg_sender",)``, ``("caller_controlled",)`` (tx.origin), ``("self",)``, ``("constant",)``,
+# ``("state_variable", name)`` or ``("indeterminate",)``. ``_arg_origin`` computes it for a call-site argument;
+# ``_origin_to_*_kind`` maps it back at the use site.
 
 
 def _single_param_origin(source: Any, ctx: _UnitCtx) -> tuple[str, ...]:
-    """The neutral origin one ``parameter`` source resolves to. On the entry its
-    own parameter IS the caller-directed origin → ``("param",)``. In a nested
-    callee look it up in the forwarded ``param_bindings``; a missing binding →
-    ``("indeterminate",)``."""
+    """A ``parameter`` source's neutral origin: ``("param",)`` on the entry, the forwarded binding in a nested
+    callee, else indeterminate.
+    """
     if not ctx.nested:
         return ("param",)
     if ctx.param_bindings is None:
@@ -426,77 +353,49 @@ def _single_param_origin(source: Any, ctx: _UnitCtx) -> tuple[str, ...]:
 
 
 def _source_neutral_origin(source: Any, ctx: _UnitCtx) -> tuple[str, ...]:
-    """One provenance source → its neutral origin. A ``parameter`` chains through
-    the entry-rooted binding (``_single_param_origin``); every other kind maps to
-    a contract-global origin. Anything not a clean single origin (view/external
-    call, block context, signature recovery) → ``("indeterminate",)``.
+    """One provenance source's neutral origin; anything not a clean single origin is indeterminate.
 
-    This is what neutralizes Slither's entrypoint-Phi parameter binding: a nested
-    forwarded param carries BOTH its own ``parameter`` seed AND the caller's
-    argument source unioned in by the entry Phi. Resolving every source to a
-    neutral origin and demanding they AGREE turns a consistent echo into that one
-    origin, and any cross-site contamination into ``indeterminate``."""
+    This neutralizes Slither's entrypoint-Phi binding: a nested forwarded param carries its own seed plus the caller's
+    argument sources, so requiring all to agree turns a consistent echo into one origin and contamination into
+    indeterminate.
+    """
     kind = source.kind
     if kind == "parameter":
         return _single_param_origin(source, ctx)
     if kind == "msg_sender":
         return ("msg_sender",)
     if kind == "tx_origin":
-        # The transaction origin (an EOA the caller controls) — a proven
-        # caller-directed destination, theft-shaped like msg_sender/param, but a
-        # distinct address fact so it is not folded into msg_sender.
+        # tx.origin: caller-directed like msg_sender/param, but a distinct fact.
         return ("caller_controlled",)
     if kind == "self_address":
         return ("self",)
     if kind == "constant":
-        # Carry the literal so a provably-zero value call can be recognized as a
-        # non-flow. Classification only reads ``origin[0]`` so the extra element
-        # is inert for the target/amount lattice.
+        # Keep the literal so a provably-zero value call is recognized as a non-flow; only ``origin[0]`` is classified.
         return ("constant", source.constant_value or "")
     if kind == "state_variable":
         return ("state_variable", source.state_variable_name) if source.state_variable_name else ("indeterminate",)
-    # view_call, external_call, block_context, signature_recovery, top.
     return ("indeterminate",)
 
 
 def _arg_origin(operand: Any, ctx: _UnitCtx, depth: int = 0) -> tuple[str, ...]:
-    """The neutral origin a single call-site argument forwards, resolved in the
-    caller's entry-rooted context. Every meaningful source resolves to a neutral
-    origin and they must AGREE; any merge / unresolvable / multi-origin shape →
-    ``("indeterminate",)`` — never a guessed member.
+    """The neutral origin a call-site argument forwards, resolved in the caller's context; all sources must agree,
+    else indeterminate.
 
-    A directly-read nested parameter takes the same entrypoint-Phi echo-drop the
-    use-site classifiers take (``_forwarded_param_sources``): forwarding a
-    parameter ONWARD through a second helper must resolve exactly as reading it
-    at the send site would, or a two-hop forward through a helper that other
-    entries also call (Lido ``claimWithdrawalsTo`` → ``_claim`` → ``_sendValue``,
-    where ``_claim``'s Phi carries the sibling entries' ``msg.sender``) loses its
-    binding to a phantom disagreement."""
+    A directly read nested parameter drops entrypoint-Phi echoes like the use-site classifiers do, so a two-hop forward
+    through a shared helper (Lido ``claimWithdrawalsTo`` -> ``_claim`` -> ``_sendValue``) keeps its binding.
+    """
     if operand is None:
         return ("indeterminate",)
-    # An element read forwarded as an argument (``_execute(targets[i], …)``)
-    # carries its ROOT base's origin — same rule, and same key-blindness, as
-    # classifying it at a send site.
+    # An element argument (``_execute(targets[i], ...)``) takes its root base's origin.
     elem = _element_origin(operand, ctx)
     if elem is not None:
         return elem
     if _reaches_merged_local(operand, ctx):
-        # A merge whose every branch is caller-supplied is a known disjunction,
-        # not an unknown. It resolves ONLY on the amount side: two caller-chosen
-        # QUANTITIES agree on what an amount kind asserts, whereas two caller-
-        # chosen DESTINATIONS are two different addresses and must stay
-        # indeterminate — which is what ``_origin_to_target_kind`` does with this
-        # tag, having no case for it.
+        # Only amounts can agree across caller-chosen branches; two caller-chosen destinations are different addresses,
+        # and ``_origin_to_target_kind`` has no case for this tag.
         return ("caller_supplied",) if _merged_caller_supplied(operand, ctx) else ("indeterminate",)
-    # The AMOUNT vocabulary, deliberately, even though this binding also feeds
-    # destination resolution in the callee. ``param_derived`` is the one tag it
-    # adds, and ``_origin_to_target_kind`` has no case for it, so a destination
-    # resolved through this binding lands on ``indeterminate`` — bit-identical to
-    # what the narrower call had already produced for the same operand. What it
-    # buys is the amount side: ``vault.exit(to, asset, shareAmount.mulDivDown(
-    # rate, ONE), …)`` forwards a scaled caller input, and refusing to name it
-    # here made every ERC-4626-style redemption's amount ``indeterminate`` at the
-    # sink, one hop from a fact we hold.
+    # Amount vocabulary even for destinations: ``param_derived`` has no destination case, so destinations still land on
+    # indeterminate, while amounts like ``shareAmount.mulDivDown(rate, ONE)`` forwarded into ``vault.exit`` resolve.
     call = _call_origin(operand, ctx, amount=True, depth=depth)
     if call is not None:
         return call
@@ -514,9 +413,7 @@ def _arg_origin(operand: Any, ctx: _UnitCtx, depth: int = 0) -> tuple[str, ...]:
 
 
 def _source_param_index(source: Any, ctx: _UnitCtx) -> int | None:
-    """The ENTRY parameter index one provenance source resolves to — the
-    positional twin of ``_single_param_origin``. ``None`` for every source that
-    is not a parameter reaching one unambiguous entry parameter."""
+    """The entry parameter index one source resolves to, or ``None``."""
     if source.kind != "parameter":
         return None
     base = _base_name(source.parameter_name) if source.parameter_name else None
@@ -528,14 +425,11 @@ def _source_param_index(source: Any, ctx: _UnitCtx) -> int | None:
 
 
 def _reads_element(operand: Any, ctx: _UnitCtx) -> bool:
-    """True when the operand's value is read THROUGH an array/mapping/struct
-    access (``a[k]``, ``s.field``, ``map[k].field``).
+    """True when the operand is read through an array/mapping/struct access.
 
-    Such a destination is not an ABI argument slot even when its root is a
-    parameter: planting a probe address would mean rewriting a field inside an
-    encoded struct/array. Index emission bails on this shape entirely — the
-    ``target_kind`` (``param`` for a calldata-struct root, the base var's
-    mutability for a storage root) is unaffected."""
+    Such a destination is no ABI slot (a probe would have to rewrite inside an encoding), so no index is emitted;
+    ``target_kind`` is unaffected.
+    """
     seen: set[int] = set()
     stack: list[Any] = [operand]
     while stack:
@@ -557,14 +451,10 @@ def _reads_element(operand: Any, ctx: _UnitCtx) -> bool:
 
 
 def _operand_param_index(operand: Any, ctx: _UnitCtx) -> int | None:
-    """The ENTRY parameter index an operand resolves to — the positional twin of
-    ``_arg_origin``, and the ONLY producer of ``target_param_index``.
+    """The entry parameter index an operand resolves to (the only producer of ``target_param_index``).
 
-    Emits an index only when EVERY source the origin resolution considered is a
-    parameter binding onto the SAME entry parameter, so the operand is that whole
-    argument and nothing else. Element reads, merged locals, computed mixes,
-    missing bindings and non-parameter origins all yield ``None`` — the caller
-    must then plant no probe rather than address a guessed slot."""
+    Emitted only when every source binds to the same entry parameter; otherwise ``None`` and no probe is planted.
+    """
     if operand is None or _reads_element(operand, ctx) or _reaches_merged_local(operand, ctx):
         return None
     srcs = ctx.engine._sources_for_value(operand)
@@ -588,11 +478,9 @@ def _is_zero_literal(value: str) -> bool:
 
 
 def _amount_is_provably_zero(operand: Any, ctx: _UnitCtx) -> bool:
-    """True when a value-call's ``call_value`` provably resolves to constant zero,
-    threading the caller binding (OZ ``SafeERC20`` routes token transfers through
-    ``Address.functionCallWithValue(token, data, 0)`` — a ``.call{value: value}``
-    whose ``value`` param is bound to the literal ``0``). A zero-value call moves
-    no ETH, so it is not a value-out flow and must not fold with a real send."""
+    """True when a value-call's value provably resolves to zero through the caller binding (OZ ``SafeERC20`` calls
+    ``functionCallWithValue(token, data, 0)``). A zero-value call moves no ETH.
+    """
     origin = _arg_origin(operand, ctx)
     return origin[0] == "constant" and len(origin) > 1 and _is_zero_literal(origin[1])
 
@@ -617,17 +505,14 @@ def _origin_to_target_kind(origin: tuple[str, ...], ctx: _UnitCtx) -> str:
 
 
 def _is_derivation(computed_kind: str | None) -> bool:
-    """True for a ``computed`` tag produced by arithmetic on other operands
-    (``BinaryType.SUBTRACTION`` / ``UnaryType.*``) — as opposed to a tag that
-    merely names the value read (``msg.value``, ``balance(address)``,
-    ``member.<field>``)."""
+    """True for a ``computed`` tag made by arithmetic, as opposed to one naming the value read (``msg.value``,
+    ``balance(address)``).
+    """
     return computed_kind is not None and computed_kind.startswith(("BinaryType.", "UnaryType."))
 
 
 def _is_subtraction(computed_kind: str | None) -> bool:
-    """True for the one arithmetic op that makes a balance read a DELTA. A
-    comparison (``Math.min``'s ``a < b``) or a scaling (``balance / 2``) is not a
-    delta and must not borrow the name."""
+    """True for subtraction, the only op that makes a balance read a delta."""
     return computed_kind == "BinaryType.SUBTRACTION"
 
 
@@ -643,30 +528,23 @@ def _origin_to_amount_kind(origin: tuple[str, ...]) -> str:
         return "param_derived"
     if tag == "caller_supplied":
         return "caller_supplied"
-    # An address origin (msg.sender / tx.origin / self) forwarded as an amount is
-    # not a meaningful value bound — stay indeterminate rather than invent one.
+    # An address origin used as an amount bounds nothing.
     return "indeterminate"
 
 
-# Element-root origins we classify from. A storage root gives the base var's
-# mutability, a parameter root gives ``param`` (an element of a caller-supplied
-# array/struct is still caller-chosen), a constant root is fixed. Any other root
-# (``address(this)`` — some solc versions lower ``address(this).balance`` to a
-# Member — an unresolved local, a merged base) is NOT an element classification;
-# the caller falls through to the source-set path instead.
+# Roots classified from: storage gives the base var's mutability, a parameter gives ``param``, a constant is fixed.
+# Anything else (``address(this)``, unresolved or merged bases) falls through to the source-set path.
 _ELEMENT_ROOT_TAGS = ("param", "state_variable", "constant")
 
 _ELEMENT_WALK_DEFS = ("TypeConversion", "Assignment", "Index", "Member")
 
 
 def _single_phi_input(var: Any, ctx: _UnitCtx) -> Any:
-    """The one distinct predecessor of ``var`` when its SSA def is a SINGLE-input
-    body Phi — pure renaming, not a merge (a storage-pointer local given a fresh
-    version because the body wrote through it). ``None`` for a non-Phi def, a
-    genuine multi-input merge (must NOT be followed to either arm), or an
-    ENTRYPOINT parameter-binding Phi (Slither's interprocedural SSA link — following
-    it would cross into the caller's SSA and strip a forwarded parameter of the
-    binding the nested classifiers resolve it through)."""
+    """The single predecessor when ``var``'s def is a single-input body Phi (pure renaming, e.g.
+
+    a storage pointer written through). ``None`` for real merges and ENTRYPOINT binding Phis (following those would
+    cross into the caller's SSA).
+    """
     from slither.core.cfg.node import NodeType
 
     ir = ctx.def_by_id.get(id(var))
@@ -679,25 +557,18 @@ def _single_phi_input(var: Any, ctx: _UnitCtx) -> Any:
 
 
 def _member_name(ir: Any) -> str:
-    """The field name a ``Member`` IR selects. Slither carries it as a Constant
-    whose ``name`` is the identifier; ``str`` is the fallback so an unusual
-    right-hand shape names itself rather than vanishing."""
+    """The field a ``Member`` IR selects (``str`` fallback so odd shapes still name themselves)."""
     right = getattr(ir, "variable_right", None)
     name = getattr(right, "name", None)
     return str(name) if name else str(right)
 
 
 class _ElementRoot(NamedTuple):
-    """One ROOT the element walk reached, with the access path taken to it.
+    """One root an element walk reached, with its access path.
 
-    ``keys`` and ``members`` are in WALK order — the access nearest the read
-    first, which is the reverse of source order: ``m[a][b].f`` walks ``f``, then
-    ``b``, then ``a``. ``variable`` is the state variable the walk actually
-    landed on, carried so a reader takes the declaration off the object it
-    proved rather than re-resolving a bare name. ``merged_base`` records that
-    the root was a multi-input Phi: a genuine cross-branch merge resolved as an
-    argument would be, not a base this walk identified, so nothing may be read
-    off it as a record identity."""
+    ``keys``/``members`` are in walk order, nearest first (``m[a][b].f`` gives ``f``, ``b``, ``a``). ``variable`` is the
+    state variable reached; ``merged_base`` marks a multi-input Phi root, which is no record identity.
+    """
 
     origin: tuple[str, ...]
     keys: tuple[Any, ...]
@@ -707,23 +578,13 @@ class _ElementRoot(NamedTuple):
 
 
 def _element_walk(operand: Any, ctx: _UnitCtx) -> list[_ElementRoot] | None:
-    """The shared def-edge walk behind every element fact: if ``operand`` reads
-    an array/mapping/struct element (``a[k]`` / ``s.field`` / ``map[k].field``,
-    possibly via a storage-pointer local ``Req storage rq = _requests[id];
-    rq.recipient``), every ROOT base it reaches together with the keys and
-    members the access path selected. ``None`` when it is not such an access.
+    """Every root an element read (``a[k]``, ``s.field``, ``map[k].field``, including via storage-pointer locals)
+    reaches, with the keys and members selected, or ``None``.
 
-    This is a POSITIVE structural test on the operand's def-use chain — an
-    ``Index`` / ``Member`` op — so it distinguishes a genuine element read from
-    the source-set-identical shape a forwarded param produces via the entrypoint
-    Phi (which has no Index/Member IR).
-
-    One walk, two readers: :func:`_element_root_origins` keeps only the roots
-    (the amount/destination LATTICE is decided by the base alone), while
-    :func:`_element_record_site` also reads the path (the RECORD identity is the
-    base, the member and the key together). Forking the walk would let the two
-    drift, and a join across them would then join a record to a different
-    record."""
+    A positive test for ``Index``/``Member`` IR, which separates real element reads from forwarded params that look
+    identical in the source set. Shared by :func:`_element_root_origins` (roots only) and :func:`_element_record_site`
+    (path too) so the two can't drift.
+    """
     from slither.core.variables.state_variable import StateVariable
 
     seen: set[int] = set()
@@ -736,9 +597,7 @@ def _element_walk(operand: Any, ctx: _UnitCtx) -> list[_ElementRoot] | None:
             continue
         seen.add(id(v))
         if isinstance(v, StateVariable) or isinstance(getattr(v, "non_ssa_version", None), StateVariable):
-            # A bare state-var read only counts as an element base when it was
-            # reached THROUGH an Index/Member (found_access) — a whole-var
-            # destination stays a plain state_variable classification.
+            # A bare state var only counts when reached through an access.
             continue
         ir = ctx.def_by_id.get(id(v))
         if ir is None:
@@ -749,14 +608,8 @@ def _element_walk(operand: Any, ctx: _UnitCtx) -> list[_ElementRoot] | None:
         elif tn == "Assignment":
             stack.append((getattr(ir, "rvalue", None), keys, members))
         elif tn == "Phi":
-            # A single-input Phi is pure SSA renaming — a storage-pointer local
-            # (``Bid storage bid = bids[id]``) given a fresh version because the
-            # body wrote through it (``bid.isActive = false``). Follow it so the
-            # aliased element resolves to the same root a direct read would. A
-            # multi-input Phi is a genuine merge and ends this branch; the caller
-            # then falls through to the merged-local guard rather than picking one
-            # arm. (Reached only for a Phi in the def chain, not a Phi BASE — that
-            # case is routed at the Index/Member handler below.)
+            # Follow single-input Phis (SSA renames after writing through a storage pointer); a real merge ends the
+            # branch.
             nxt = _single_phi_input(v, ctx)
             if nxt is not None:
                 stack.append((nxt, keys, members))
@@ -775,43 +628,29 @@ def _element_walk(operand: Any, ctx: _UnitCtx) -> list[_ElementRoot] | None:
                 if base_var.name:
                     roots.append(_ElementRoot(("state_variable", base_var.name), keys, members, False, base_var))
             elif type(ctx.def_by_id.get(id(base))).__name__ in _ELEMENT_WALK_DEFS or _single_phi_input(base, ctx):
-                # A nested access (map[k].field), an aliasing local, or a
-                # single-input-Phi storage pointer (``bid.amount`` where ``bid``
-                # was SSA-renamed by a write through it) — keep walking to the root
-                # rather than reading the intermediate reference's base∪key source
-                # union. A multi-input Phi base is NOT walked here; it falls to the
-                # ``_arg_origin`` resolution below, exactly as before.
+                # Nested access, aliasing local, or renamed storage pointer: keep walking to the root. Multi-input Phi
+                # bases fall to ``_arg_origin``.
                 stack.append((base, keys, members))
             else:
-                # A parameter / merged / unresolvable root: resolve it exactly as
-                # a forwarded call-site argument would be (binding-chained, with
-                # the merged-local guard).
+                # Parameter, merged or unresolvable root: resolve like a forwarded argument.
                 merged = type(ctx.def_by_id.get(id(base))).__name__ == "Phi"
                 roots.append(_ElementRoot(_arg_origin(base, ctx), keys, members, merged, None))
-        # An unknown def (call return, etc.) ends this branch.
     return roots if (found_access and roots) else None
 
 
 def _element_root_origins(operand: Any, ctx: _UnitCtx) -> set[tuple[str, ...]] | None:
-    """The set of neutral origins of an element read's ROOT base(s), or ``None``
-    when the operand is not an element read.
+    """Neutral origins of an element read's root bases, or ``None``.
 
-    The KEY is deliberately ignored here: every element of one base shares that
-    base's origin, so the base alone decides the kind and a caller-chosen (or
-    loop-merged) index cannot upgrade or degrade it. The key is not lost — it is
-    read by :func:`_element_record_site` off the same walk, where identity, not
-    kind, is the question."""
+    The key is ignored: every element shares the base's origin. :func:`_element_record_site` reads the key.
+    """
     roots = _element_walk(operand, ctx)
     return {root.origin for root in roots} if roots is not None else None
 
 
 def _element_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...] | None:
-    """The neutral origin an element read takes from its ROOT base — NEVER from
-    the caller-supplied key. ``None`` when the operand is not an element read, or
-    when its root is not one we classify from (``address(this)``, a merged or
-    unresolvable base). The caller then falls through to the source-set path,
-    where the merged-local guard still applies — and that guard is also what
-    catches a >1-root walk, since two roots require a Phi between them."""
+    """An element read's origin from its root base, never the key; ``None`` when not an element read or the root
+    isn't classifiable (the merged-local guard then applies, which also catches multi-root walks).
+    """
     roots = _element_root_origins(operand, ctx)
     if roots is None or len(roots) != 1:
         return None
@@ -820,51 +659,32 @@ def _element_origin(operand: Any, ctx: _UnitCtx) -> tuple[str, ...] | None:
 
 
 class ElementRecordSite(TypedDict):
-    """The storage RECORD one element read names, at one IR site.
-
-    Where :func:`_element_origin` answers "what kind of value is this", this
-    answers "which cell is it read out of" — the base DECLARATION (canonical,
-    because two contracts in one call graph may each declare ``bids``), the
-    member selected inside it, and the origin of every key that selected it.
-    Identity for a join; it resolves nothing on its own."""
+    """The storage record one element read names: the base declaration (canonical, since two contracts may each
+    declare ``bids``), the member, and each key's origin. An identity for joins only.
+    """
 
     base_variable: str
     base_canonical: str
     member_path: tuple[str, ...]
-    # Per index level in SOURCE order — the first index level written first
-    # (``m[a][b]`` gives ``a`` then ``b``). Three tokens only —
-    # ``("param",)``, ``("msg_sender",)``, ``("indeterminate",)`` — because the
-    # question this answers is "which caller-relative slot names this key", and
-    # every other resolved origin (a constant, a state variable) answers "none
-    # of them". ``indeterminate`` here is therefore never readable as "no origin
-    # exists". ``param`` is EARNED: it rides only where the level is one whole
-    # entry argument and ``key_param_indexes`` names its slot, so a consumer
-    # reading the kind alone can never take a caller-derived arithmetic mix
-    # (``bids[a + b]``) for a cell the caller named.
+    # Per key level in source order. Only ``param``, ``msg_sender`` or ``indeterminate``; other origins mean no
+    # caller-relative slot. ``param`` only where the level is one whole entry argument with ``key_param_indexes`` naming
+    # it, so ``bids[a + b]`` never reads as caller-named.
     key_origins: tuple[tuple[str, ...], ...]
-    # The ENTRY parameter slot of each key level, positionally aligned with
-    # ``key_origins``. ``None`` where the key is not one whole entry argument —
-    # ``msg.sender``, a constant, a merged mix, or a value narrowed on the way
-    # in (see :func:`_key_conversion_is_lossy`).
+    # Entry parameter slot per key level; ``None`` unless the key is one whole argument (see
+    # :func:`_key_conversion_is_lossy`).
     key_param_indexes: tuple[int | None, ...]
     key_levels: int
 
 
-# Deep nesting is not this pass's problem: past these depths the record identity
-# a join would compare stops being a thing one guard leaf can name, so the site
-# refuses instead of publishing a path no consumer is specified to read.
+# Past these depths no single guard leaf can name the record, so the site refuses.
 _MAX_RECORD_MEMBER_DEPTH = 2
 _MAX_RECORD_KEY_LEVELS = 2
 
-# The key-origin vocabulary — see ``ElementRecordSite.key_origins``.
 _RECORD_KEY_ORIGINS: dict[str, tuple[str, ...]] = {"param": ("param",), "msg_sender": ("msg_sender",)}
 
 
 def _type_bit_width(declared: Any) -> int | None:
-    """The width in bits of a value type, or ``None`` when it is not a fixed
-    width this pass can measure (a dynamic type, an enum, a struct). A contract
-    reference IS an address, which is what lets an ``IERC20(addr)`` /
-    ``uint160`` hop keep resolving."""
+    """Bit width of a value type, or ``None`` when not measurable. Contract references are addresses."""
     from slither.core.declarations.contract import Contract
     from slither.core.solidity_types.elementary_type import ElementaryType
     from slither.core.solidity_types.user_defined_type import UserDefinedType
@@ -882,17 +702,11 @@ def _type_bit_width(declared: Any) -> int | None:
 
 
 def _key_conversion_is_lossy(operand: Any, ctx: _UnitCtx) -> bool:
-    """True when the key's def chain holds a ``TypeConversion`` this pass cannot
-    prove keeps the whole value — a NARROWING cast (``uint128(id)``), or one
-    between widths it cannot measure. Widening and same-width casts
-    (``uint160`` → ``address``, ``address`` → a contract type) keep resolving.
+    """True when the key's def chain has a narrowing or unmeasurable ``TypeConversion``.
 
-    The KEY is the cell's identity, and a narrowed key selects a DIFFERENT cell
-    for a large argument while still resolving to that argument's ABI slot. The
-    guard side reads the slot through this same helper, so without this test a
-    guard on ``bids[id]`` and a payout from ``bids[uint128(id)]`` — two cells —
-    AGREE on the slot they were keyed by, and that agreement is the whole join.
-    So the slot is withheld: the argument was not, in whole, the key."""
+    A narrowed key selects a different cell for large arguments while resolving to the same ABI slot, so a guard on
+    ``bids[id]`` would falsely join a payout from ``bids[uint128(id)]``.
+    """
     seen: set[int] = set()
     stack: list[Any] = [operand]
     while stack:
@@ -919,19 +733,12 @@ def _key_conversion_is_lossy(operand: Any, ctx: _UnitCtx) -> bool:
 
 
 def _element_record_site(operand: Any, ctx: _UnitCtx) -> ElementRecordSite | None:
-    """The record ``operand`` is read out of, or ``None`` on any ambiguity.
+    """The record ``operand`` is read from, or ``None`` on any ambiguity: several roots, a non-state-variable root, a
+    merged base, a merged key, no key, or excessive depth. Refusal means an absent record, never a weaker one.
 
-    Refuses — and a refusal is an absent record downstream, never a weaker one —
-    on more than one root, a root that is not a state variable this walk landed
-    on (a parameter or constant root — a calldata struct, a literal table — has
-    no declaration to compare a guard's against), a merged (multi-input Phi)
-    base, a key reaching a cross-branch merge, no key at all (a whole-struct
-    read is not a keyed record), and depths past ``_MAX_RECORD_*``.
-
-    The key origins reuse ``_arg_origin``, so a key that is a callee formal
-    resolves through the call-site binding the flow walk already threads —
-    which is what makes ``_burn(msg.sender, amt)``'s ``_balances[account]``
-    resolve to the caller's own cell rather than to an unknown address."""
+    Key origins reuse ``_arg_origin``, so ``_burn(msg.sender, amt)``'s ``_balances[account]`` resolves to the caller's
+    own cell.
+    """
     roots = _element_walk(operand, ctx)
     if roots is None or len(roots) != 1:
         return None
@@ -950,17 +757,13 @@ def _element_record_site(operand: Any, ctx: _UnitCtx) -> ElementRecordSite | Non
     key_param_indexes: list[int | None] = []
     for key in keys:
         if key is None or _reaches_merged_local(key, ctx):
-            # The key IS the cell's identity: a merged one selects one of several
-            # cells and the walk cannot say which.
+            # A merged key selects one of several cells.
             return None
         index = None if _key_conversion_is_lossy(key, ctx) else _operand_param_index(key, ctx)
         origin = _RECORD_KEY_ORIGINS.get(_arg_origin(key, ctx)[0], ("indeterminate",))
         if origin == ("param",) and index is None:
-            # Caller-DERIVED is not caller-NAMED: ``bids[a + b]`` and
-            # ``bids[uint128(id)]`` both come from the caller's arguments, and
-            # neither says which argument IS the key. Publishing ``param`` there
-            # would let a consumer reading the kind alone take an unproven slot
-            # for a proven one.
+            # Caller-derived isn't caller-named: ``bids[a + b]`` and ``bids[uint128(id)]`` don't say which argument is
+            # the key.
             origin = ("indeterminate",)
         key_origins.append(origin)
         key_param_indexes.append(index)
@@ -974,35 +777,23 @@ def _element_record_site(operand: Any, ctx: _UnitCtx) -> ElementRecordSite | Non
     )
 
 
-# ERC-721 ``ownerOf(uint256)``. A destination read back from it is the CURRENT
-# owner of the token id the caller passed: the caller chooses the id, the token's
-# transfer history chooses the address. That is neither a caller-supplied
-# argument (``param`` — the caller cannot name the payee) nor a fixed or
-# admin-settable one (``storage_*`` — no setter redirects it), so it gets its own
-# kind rather than being folded into a neighbour it would misdescribe.
+# ERC-721 ``ownerOf(uint256)``: the current owner of a caller-chosen id. Neither caller-named nor admin-settable, so it
+# gets its own kind.
 _TOKEN_OWNER_SELECTOR = "0x6352211e"
 
-# Def-chain edges that preserve "this value IS that call's return value".
 _CALL_WALK_DEFS = ("TypeConversion", "Assignment")
 _CALL_IR_OPS = ("InternalCall", "LibraryCall", "HighLevelCall")
 
 
 def _call_standard_origin(ir: Any) -> tuple[str, ...]:
-    """The neutral origin a recognized STANDARD callee returns. An unrecognized
-    callee is ``("indeterminate",)`` — a return value we cannot name, NOT a value
-    to keep resolving from the callee's internals."""
+    """The origin a recognized standard callee returns; unrecognized callees are indeterminate."""
     if _selector_for(_callee_signature(ir)) == _TOKEN_OWNER_SELECTOR:
         return ("token_owner",)
     return ("indeterminate",)
 
 
 def _call_param_argument_indexes(ir: Any, ctx: _UnitCtx) -> set[int]:
-    """The distinct ENTRY parameter slots this call's ARGUMENTS resolve to.
-
-    Each argument goes through :func:`_operand_param_index`, so an argument
-    counts only when it IS one whole unambiguous entry parameter — an element
-    read, a merged local, a computed mix and a non-parameter origin all
-    contribute nothing."""
+    """Distinct entry parameter slots of this call's arguments; only whole unambiguous entry parameters count."""
     out: set[int] = set()
     for arg in getattr(ir, "arguments", None) or []:
         index = _operand_param_index(arg, ctx)
@@ -1012,73 +803,38 @@ def _call_param_argument_indexes(ir: Any, ctx: _UnitCtx) -> set[int]:
 
 
 def _call_amount_origin(ir: Any, ctx: _UnitCtx) -> tuple[str, ...]:
-    """The neutral origin of an AMOUNT read back from a call, which can name one
-    shape the destination lattice has no use for: ``param_derived``.
+    """The origin of an amount read back from a call, including the amount-only ``param_derived``.
 
-    ``param_derived`` claims EXACTLY this and nothing more, and every consumer
-    must read it that way:
-
-    - It is NOT a bound. The callee's rate is state we cannot see and it can
-      move arbitrarily, so this kind must never be treated as an upper bound
-      nor credited as a mitigation.
-    - It is NOT proof of caller control. We cannot see inside the callee, so we
-      cannot prove it honors its argument; it must not be read as "the caller
-      determines the magnitude".
-    - It IS: the amount is an external call's return value, and a caller-supplied
-      entry parameter was among that call's arguments — the caller supplied an
-      input, an external contract scaled it.
-
-    The shape is ubiquitous (``transfer(receiver, convertToAssets(shares))`` in
-    every ERC-4626-style redemption, ``unwrap`` on a rebasing wrapper), and
-    collapsing it to ``indeterminate`` made it indistinguishable from "we traced
-    nothing". A recognized standard callee still wins: naming what the callee
-    returns is strictly more informative than naming what fed it."""
+    ``param_derived`` means only: the amount is an external call's return value and a caller-supplied entry parameter
+    was among its arguments. It is not a bound (the callee's rate can move arbitrarily) and not proof of caller control.
+    It covers ubiquitous shapes like ``convertToAssets(shares)`` that were otherwise indistinguishable from "traced
+    nothing". A recognized standard callee still wins.
+    """
     standard = _call_standard_origin(ir)
     if standard[0] != "indeterminate":
         return standard
     return ("param_derived",) if _call_param_argument_indexes(ir, ctx) else ("indeterminate",)
 
 
-# Call ops whose callee runs against the CALLER's own contract storage, so the
-# caller's state-variable context classifies the callee's body correctly. An
-# ``InternalCall`` is the same contract by definition; a library's functions are
-# inlined (internal) or delegatecalled (external), and both read the caller's
-# storage. A ``HighLevelCall`` is deliberately absent — its callee's state
-# variables belong to a DIFFERENT contract, and reusing this context there would
-# classify one contract's mutability as another's.
+# Calls whose callee runs against the caller's storage (internal and library). Not ``HighLevelCall``: its state
+# variables belong to another contract.
 _SAME_CONTEXT_CALL_OPS = ("InternalCall", "LibraryCall")
 
-# Depth bound on chasing helper returns through helpers. Real getter chains are a
-# hop or two (``_governorIndirect`` -> ``_governor`` -> the state var); past that
-# the answer degrades to "not proven", which is the safe direction.
+# Real getter chains are a hop or two.
 _RETURN_ORIGIN_DEPTH = 4
 
-# Re-entrancy guard for :func:`_callee_return_origin`. Resolving a helper's
-# return value re-enters the general origin machinery, which can reach the same
-# helper again (directly recursive, or mutually so through a second helper), and
-# the recursion has no natural base case. A module-level set is sound here
-# because the whole static build pass is single-threaded, and it is always
-# cleared in a ``finally``.
+# Resolving a return can re-enter the same helper; the build pass is single-threaded and this is cleared in a
+# ``finally``.
 _RETURN_ORIGIN_ACTIVE: set[int] = set()
 
 
 def _return_values(callee: Any) -> list[Any] | None:
-    """The single value each of ``callee``'s ``return`` statements yields, or
-    ``None`` when the shape is not one this can reason about.
-
-    ``None`` for a callee with no explicit return at all (it yields the type's
-    zero value, which is not an origin), and for any return carrying a number of
-    values other than one — a tuple return gives no way to say WHICH member
-    reached the sink, and guessing a member is the failure mode this whole
-    module is built to avoid."""
+    """The single value each ``return`` yields, or ``None`` (no explicit return, or a tuple return where the member
+    reaching the sink is unknown).
+    """
     values: list[Any] = []
     for node in getattr(callee, "nodes", []) or []:
-        # ``irs_ssa``, NOT ``irs``: every lookup the returned operand then feeds
-        # (the def-use index, the provenance engine) is keyed on the SSA objects,
-        # so a non-SSA twin of the same variable resolves to nothing. It fails
-        # quietly, and only for values whose SSA identity carries the answer — a
-        # returned state variable resolves by name either way, a returned call
-        # result does not.
+        # ``irs_ssa``: every downstream lookup is keyed on SSA objects, and non-SSA twins fail quietly.
         for ir in getattr(node, "irs_ssa", ()) or ():
             if type(ir).__name__ != "Return":
                 continue
@@ -1090,39 +846,16 @@ def _return_values(callee: Any) -> list[Any] | None:
 
 
 def _callee_return_origin(ir: Any, ctx: _UnitCtx, depth: int) -> tuple[str, ...] | None:
-    """The neutral origin of the value an in-contract helper RETURNS, or ``None``.
+    """The origin of the value an in-contract helper returns, or ``None``.
 
-    The lattice already threads a caller's arguments INTO a helper, so a
-    destination or amount passed down resolves interprocedurally. Nothing carried
-    the answer back OUT, so ``_send(_governor(), amount)`` published
-    ``indeterminate`` for a destination the contract states plainly — an
-    admin-settable state variable, which is exactly the redirectable-vs-fixed
-    distinction a scorer reads. The shape recurs on every diamond-storage getter
-    and ``_calculate*`` helper.
+    Arguments already flow into helpers; this carries answers back out, so ``_send(_governor(), amount)`` resolves to
+    the admin-settable state variable. The callee is classified in its own context with the call's arguments bound, so
+    returning a parameter resolves to what the caller passed. All returns must agree.
 
-    The callee is classified in its OWN context, with the call site's arguments
-    bound exactly as ``walk`` binds them, so a helper that returns one of its
-    parameters resolves to whatever the caller passed — including ``param``, when
-    the caller passed a caller-chosen address. That is a finding, not a leak: the
-    destination really is caller-named.
-
-    Every ``return`` must agree on one resolved origin. Two returns naming
-    different origins is a genuine disagreement the caller cannot see through
-    (``if (flag) return governor; return treasury;``), and picking either member
-    would assert a destination the code does not commit to.
-
-    An ELEMENT read is refused outright, and that refusal is the whole safety
-    argument. ``function beneficiaryOf(uint256 id) { return _owners[id]; }``
-    resolves, by the element rule, to the mutability of the BASE variable — and
-    ``_owners`` has no setter function, so the base reads ``storage_no_setter``,
-    i.e. *provably fixed*. The destination is nothing of the sort: the caller
-    picks the key, and a different key is a different address. Publishing it as
-    fixed is the worst over-claim this module can make — it is the benign end of
-    the redirectability axis, and ``services/effects/calldata/flows.py`` promotes
-    it to ``immutable_fixed`` on the verdict. The base's mutability is simply not
-    a statement about any one entry, which is exactly why a keyed lookup earns a named kind only where a published
-    standard says what it means (``ownerOf`` -> ``token_owner``) and is otherwise
-    left unresolved."""
+    Element reads are refused: ``return _owners[id]`` would resolve to the base's mutability (``storage_no_setter``,
+    provably fixed), but the caller picks the key. Keyed lookups only get a named kind via a standard (``ownerOf`` ->
+    ``token_owner``).
+    """
     if depth > _RETURN_ORIGIN_DEPTH or type(ir).__name__ not in _SAME_CONTEXT_CALL_OPS:
         return None
     callee = getattr(ir, "function", None)
@@ -1160,8 +893,7 @@ def _callee_return_origin(ir: Any, ctx: _UnitCtx, depth: int) -> tuple[str, ...]
 
 
 def _call_irs(operand: Any, ctx: _UnitCtx) -> list[Any]:
-    """Every call IR ``operand`` IS the return value of, walking casts/copies
-    only — the def-chain edges that preserve that identity."""
+    """Every call IR ``operand`` is the return value of, through casts and copies."""
     seen: set[int] = set()
     stack: list[Any] = [operand]
     irs: list[Any] = []
@@ -1180,19 +912,15 @@ def _call_irs(operand: Any, ctx: _UnitCtx) -> list[Any]:
             stack.append(getattr(ir, "rvalue", None))
         elif tn in _CALL_IR_OPS:
             irs.append(ir)
-        # An unknown def (a Phi, a binary op) ends this branch.
     return irs
 
 
 def _param_derived_index(operand: Any, ctx: _UnitCtx) -> int | None:
-    """The ENTRY parameter slot of the caller INPUT that fed a ``param_derived``
-    amount's conversion — NOT the slot of the amount itself (the amount is a call
-    return value and occupies no ABI slot).
+    """The entry slot of the input that fed a ``param_derived`` amount (the amount itself has no slot).
 
-    Emitted only when exactly ONE call produced the operand and its arguments
-    identify exactly ONE unambiguous entry parameter. Two distinct entry params
-    feeding the call keep the KIND (it is still param-derived) but emit no index:
-    a prober plants a value in the slot, so a guessed one is worse than none."""
+    Only when exactly one call produced it and its arguments name exactly one entry parameter; a guessed slot is worse
+    than none for a prober.
+    """
     irs = _call_irs(operand, ctx)
     if len(irs) != 1:
         return None
@@ -1201,18 +929,10 @@ def _param_derived_index(operand: Any, ctx: _UnitCtx) -> int | None:
 
 
 def _one_call_origin(ir: Any, ctx: _UnitCtx, *, amount: bool, depth: int) -> tuple[str, ...]:
-    """The neutral origin of ONE call's return value, best evidence first.
-
-    1. A recognized STANDARD callee (``ownerOf``) — a published contract, so it
-       beats anything read off a body.
-    2. What an in-contract helper's body actually RETURNS
-       (:func:`_callee_return_origin`). A traced origin outranks
-       ``param_derived`` below, which only says a caller input went in somewhere.
-    3. The amount-only ``param_derived`` fallback, then ``indeterminate``.
-
-    The order matters in one direction only: step 2 can never turn an
-    ``indeterminate`` into a wrong answer, because it declines unless every
-    ``return`` agrees on one resolved origin."""
+    """One call's return origin, best evidence first: a recognized standard callee, then what an in-contract helper
+    provably returns, then the amount-only ``param_derived``, then indeterminate. The helper step only answers
+    when all returns agree.
+    """
     standard = _call_standard_origin(ir)
     if standard[0] != "indeterminate":
         return standard
@@ -1223,43 +943,26 @@ def _one_call_origin(ir: Any, ctx: _UnitCtx, *, amount: bool, depth: int) -> tup
 
 
 def _call_origin(operand: Any, ctx: _UnitCtx, *, amount: bool = False, depth: int = 0) -> tuple[str, ...] | None:
-    """The neutral origin of an operand that IS a call's return value. ``None``
-    only when the operand does not resolve — through casts/copies alone — to
-    exactly one call, in which case the caller falls through to the source set.
+    """The origin of an operand that is a call's return value; ``None`` unless it resolves (through casts/copies) to
+    exactly one call. ``amount`` enables the amount vocabulary.
 
-    ``amount`` opts into the amount-only vocabulary (:func:`_call_amount_origin`);
-    destination resolution is unaffected, so ``param_derived`` can never reach
-    :func:`_origin_to_target_kind`.
-
-    A POSITIVE test on the def-use chain, not on the source set, for two reasons.
-    A set-membership test would fire on a value merely TAINTED by the call
-    (``ownerOf(id) ^ salt``) rather than one that IS its result. And going the
-    other way, the source set of a DIRECTLY-READ nested parameter can carry a
-    call tag as a Slither entrypoint-Phi echo from a sibling call site — blocking
-    on that would degrade a perfectly resolvable forwarded parameter.
-
-    Answering here is what keeps ``_forwarded_param_sources`` honest for call
-    results. ``_handle_internal_call`` sets its lvalue to the callee's return
-    sources UNIONED with the call tag, so ``ownerOf(id)`` carries
-    ``{view_call, state_variable _owners, parameter id}`` — where the parameter
-    is the mapping KEY, not the value. Falling through to the source set there
-    lets the drop-the-rest shortcut pick ``param`` out of a real union and report
-    a token-owner payout as a caller-chosen destination."""
+    A positive def-use test, not a source-set test: the set would also fire on values merely tainted by a call
+    (``ownerOf(id) ^ salt``), and a forwarded parameter can carry a sibling call's tag as an entrypoint-Phi echo. It
+    also stops ``ownerOf(id)``, whose sources include the key parameter, from reading as a caller-chosen destination.
+    """
     origins: set[tuple[str, ...] | None] = {
         _one_call_origin(ir, ctx, amount=amount, depth=depth) for ir in _call_irs(operand, ctx)
     }
-    # Two calls reaching one operand require a Phi between them, so >1 origin is
-    # a merge and must not resolve to either member.
+    # Two calls reaching one operand need a Phi: a merge.
     if len(origins) != 1:
         return ("indeterminate",) if origins else None
     return next(iter(origins))
 
 
 def _element_kind(operand: Any, ctx: _UnitCtx, *, amount: bool) -> str | None:
-    """An element read's destination/amount kind. A storage root yields the base
-    var's mutability (``storage_setter`` / ``storage_no_setter`` /
-    ``bounded_by_storage``) and can never become ``param``; a caller-supplied
-    array/struct root yields ``param``."""
+    """An element read's kind: storage roots give the base's mutability (never ``param``); caller-supplied roots give
+    ``param``.
+    """
     origin = _element_origin(operand, ctx)
     if origin is None:
         return None
@@ -1267,32 +970,13 @@ def _element_kind(operand: Any, ctx: _UnitCtx, *, amount: bool) -> str | None:
 
 
 def _forwarded_param_sources(srcs: Any, ctx: _UnitCtx) -> list[Any] | None:
-    """In a nested callee reached through a DIRECT forwarded read, the
-    ``parameter`` sources whose bindings are the authoritative single-entry-path
-    origin — or ``None`` when the drop-the-rest shortcut is not sound and the
-    caller must use the all-sources-agree path instead.
+    """For a directly read nested parameter, the ``parameter`` sources whose bindings decide (other sources can only
+    be entrypoint-Phi echoes), or ``None`` when that shortcut is unsound.
 
-    The other non-parameter sources present alongside a *directly-read* nested
-    parameter can only be Slither entrypoint-Phi echoes (the parameter's
-    interprocedural binding from OTHER call sites / entries) — a genuine in-body
-    second origin needs a body Phi, already caught by ``_reaches_merged_local``.
-    So for a direct read those echoes are safely dropped and the binding decides.
-
-    But a ``computed`` operand (``Binary`` / ``Member`` / ``Unary`` / ``Length`` /
-    ``SolidityCall`` attach a ``computed`` wrapper alongside ALL of their operand
-    sources) can combine the forwarded parameter with a genuine co-origin and no
-    Phi — ``dest = uint160(to) ^ uint160(owner)``. Dropping the co-origin there
-    would guess the ``param`` member of a real union and make the nested
-    classification MORE specific than the byte-identical entry-level code (which
-    sees ``{parameter, state_variable}`` and yields indeterminate). So a computed
-    operand returns ``None`` and falls through to the agreement path, where the
-    disagreement correctly yields indeterminate while a computed-but-single-origin
-    shape (a struct-member read of a forwarded param) still recovers.
-
-    A CALL RESULT is the same trap without a ``computed`` wrapper to mark it, but
-    it is intercepted upstream by ``_call_origin`` rather than here: the source
-    set alone cannot tell a call the operand IS from a call tag echoed onto a
-    forwarded parameter by a sibling call site."""
+    A ``computed`` operand can combine the parameter with a real co-origin without a Phi (``uint160(to) ^
+    uint160(owner)``), so it returns ``None`` and uses the agreement path. Call results are intercepted upstream by
+    ``_call_origin``.
+    """
     if not ctx.nested:
         return None
     if any(s.kind == "computed" for s in srcs):
@@ -1304,10 +988,7 @@ def _forwarded_param_sources(srcs: Any, ctx: _UnitCtx) -> list[Any] | None:
 def _target_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
     if not srcs or is_top(srcs):
         return "indeterminate"
-    # ``computed`` is a wrapper tag Binary/Member ops attach alongside the real
-    # operand sources; it is never itself a destination origin. Every real source
-    # resolves to a neutral origin (a nested forwarded ``parameter`` through its
-    # binding); a single agreeing origin classifies, any MIX -> indeterminate.
+    # ``computed`` is a wrapper tag, never an origin. A single agreeing origin classifies; any mix is indeterminate.
     forwarded = _forwarded_param_sources(srcs, ctx)
     if forwarded is not None:
         kinds = {_origin_to_target_kind(_single_param_origin(s, ctx), ctx) for s in forwarded}
@@ -1325,28 +1006,17 @@ def _amount_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
     has_value = any(c == "msg.value" for c in computed_kinds)
     has_balance = any(c and "balance" in c for c in computed_kinds)
     if has_balance and not has_value and any(_is_derivation(c) for c in computed_kinds):
-        # Arithmetic ON a balance read. Subtraction is a DELTA
-        # (``address(this).balance - prevBalance``, ``balance - locked``) and gets
-        # named; any other derivation (``balance / 2``) has no bound we can name.
-        # Either way the OTHER operand must not win alone: reporting
-        # ``balance - locked`` as ``bounded_by_storage``, or ``balance / 2`` as
-        # ``fixed_constant``, credits that operand with bounding an amount that
-        # actually tracks the balance. This runs ahead of the meaningful-source
-        # split precisely because that operand is usually the only non-``computed``
-        # source and would otherwise be the whole answer.
+        # Arithmetic on a balance read: subtraction is a delta and gets named; other derivations can't be bounded. The
+        # other operand must never win alone (``balance - locked`` isn't ``bounded_by_storage``).
         return "balance_delta" if any(_is_subtraction(c) for c in computed_kinds) else "indeterminate"
     meaningful = {s.kind for s in srcs} - {"computed"}
     if not meaningful:
-        # Pure computed: only ``msg.value`` and a bare ``address(this).balance``
-        # read are unambiguous amount origins; hash/mixed tags stay indeterminate.
+        # Only ``msg.value`` and a bare self-balance read are unambiguous amount origins.
         if has_value and not has_balance:
-            # A msg.value derivation (``msg.value - fee``) is still bounded by
-            # what the caller attached to THIS call, so the label does not
-            # over-claim the way a bare balance read would.
+            # Still bounded by what the caller attached.
             return "msg_value"
         if has_balance and not has_value:
-            # ``whole_balance`` asserts the send can drain everything the contract
-            # holds — true only of a bare READ, and every derivation is gone by here.
+            # Only a bare read can drain everything.
             return "whole_balance"
         return "indeterminate"
     forwarded = _forwarded_param_sources(srcs, ctx)
@@ -1359,20 +1029,16 @@ def _amount_kind_from_sources(srcs: Any, ctx: _UnitCtx) -> str:
     return "indeterminate"
 
 
-# Inequalities under which a ``cond ? A : B`` returns the SMALLER operand — the
-# shape a hand-written or library ``min`` compiles to. ``<``/``<=`` return the
-# then-value when it is the left (smaller) operand; ``>``/``>=`` return it when it
-# is the right one.
+# Comparisons under which ``cond ? A : B`` returns the smaller operand (how ``min`` compiles).
 _MIN_LT_OPS = ("BinaryType.LESS", "BinaryType.LESS_EQUAL")
 _MIN_GT_OPS = ("BinaryType.GREATER", "BinaryType.GREATER_EQUAL")
 
 
 def _resolve_copies(value: Any, def_by_id: dict[int, Any]) -> tuple[Any, Any]:
-    """Follow copy edges (``TypeConversion`` cast, ``Assignment``) from ``value``
-    to the value that actually defines it. Returns ``(value, defining_ir)`` where
-    ``defining_ir`` is ``None`` for a leaf (param / constant / state var / call
-    argument with no def in this map). A pure identity walk — it never crosses a
-    Phi merge or a computation, so the returned value IS the input, just renamed."""
+    """Follow cast and assignment edges to the defining value: ``(value, defining_ir)``, with ``None`` for a leaf.
+
+    Never crosses a Phi or computation.
+    """
     seen: set[int] = set()
     v = value
     while v is not None and id(v) not in seen:
@@ -1391,10 +1057,7 @@ def _resolve_copies(value: Any, def_by_id: dict[int, Any]) -> tuple[Any, Any]:
 
 
 def _is_self_balance_read(value: Any, ctx: _UnitCtx) -> bool:
-    """``value`` (through casts/copies) IS ``address(this).balance`` — the
-    ``SOLIDITY_CALL balance(address)`` built-in whose sole argument resolves to the
-    ``this`` Solidity variable. An arbitrary ``other.balance`` reads a foreign
-    balance and must NOT qualify, so the argument identity is checked."""
+    """``value`` is ``address(this).balance`` (argument identity checked; a foreign ``.balance`` doesn't count)."""
     from slither.core.declarations.solidity_variables import SolidityVariable
 
     _, ir = _resolve_copies(value, ctx.def_by_id)
@@ -1411,8 +1074,7 @@ def _is_self_balance_read(value: Any, ctx: _UnitCtx) -> bool:
 
 
 def _fn_def_by_id(fn: Any) -> dict[int, Any]:
-    """A ``def_by_id`` map for an ARBITRARY function's SSA — needed to inspect a
-    call's callee body, which lives outside the entry unit's own map."""
+    """A ``def_by_id`` map for a callee's SSA, outside the entry unit."""
     out: dict[int, Any] = {}
     for node in getattr(fn, "nodes", ()) or ():
         for ir in getattr(node, "irs_ssa", ()) or ():
@@ -1423,8 +1085,7 @@ def _fn_def_by_id(fn: Any) -> dict[int, Any]:
 
 
 def _branch_return_value(node: Any) -> Any:
-    """The single value a straight-line branch returns, or ``None`` when the arm is
-    not a simple ``return <expr>`` (it splits/merges or returns a tuple)."""
+    """The value a straight-line branch returns, or ``None``."""
     seen: set[int] = set()
     cur = node
     while cur is not None and id(cur) not in seen:
@@ -1439,11 +1100,9 @@ def _branch_return_value(node: Any) -> Any:
 
 
 def _callee_is_two_arg_min(fn: Any) -> bool:
-    """PROVE ``fn`` computes the minimum of its two arguments — returns ``arg_i``
-    when ``arg_i < arg_j`` else ``arg_j`` (the smaller). Keyed on the body's SHAPE,
-    never its name: exactly one comparison IF over the two parameters, each arm
-    returning one parameter, the smaller taken on the corresponding branch. Any
-    other shape (a max, three args, a computed result) fails to ``False``."""
+    """Prove ``fn`` returns the smaller of its two arguments, by body shape (one comparison, each arm returning one
+    parameter), never by name.
+    """
     from slither.core.cfg.node import NodeType
 
     params = getattr(fn, "parameters", None) or []
@@ -1484,10 +1143,7 @@ def _callee_is_two_arg_min(fn: Any) -> bool:
 
 
 def _capped_ternary(operand: Any, ctx: _UnitCtx) -> bool:
-    """Form 1: a hand-written ``contractBalance < X ? contractBalance : X`` lowered
-    to a 2-input Phi over branch assignments, controlled by an inequality IF, where
-    the construct returns the SMALLER value and one compared operand is the
-    self-balance read. ``min(self_balance, X) <= self_balance``."""
+    """Form 1: a hand-written ``bal < X ? bal : X`` (a 2-input Phi under an inequality) over the self-balance read."""
     from slither.core.cfg.node import NodeType
 
     phi = ctx.def_by_id.get(id(operand))
@@ -1530,7 +1186,6 @@ def _capped_ternary(operand: Any, ctx: _UnitCtx) -> bool:
     if cmp is None:
         return False
     st = getattr(cif, "son_true", None)
-    # Map each branch's assigned value to the true/false side of the condition.
     tv = fv = None
     for _, (node, val) in branch.items():
         if st is not None and id(node) == id(st):
@@ -1553,9 +1208,7 @@ def _capped_ternary(operand: Any, ctx: _UnitCtx) -> bool:
 
 
 def _capped_min_call(operand: Any, ctx: _UnitCtx) -> bool:
-    """Form 2: ``operand`` is the result of a 2-argument ``min`` call (a library or
-    internal function PROVEN to return the smaller argument) one of whose arguments
-    is the self-balance read. ``min(self_balance, X) <= self_balance``."""
+    """Form 2: a proven 2-arg ``min`` call with the self-balance read as an argument."""
     _, ir = _resolve_copies(operand, ctx.def_by_id)
     if ir is None or type(ir).__name__ not in ("LibraryCall", "InternalCall"):
         return False
@@ -1569,45 +1222,29 @@ def _capped_min_call(operand: Any, ctx: _UnitCtx) -> bool:
 
 
 def _is_capped_by_balance(operand: Any, ctx: _UnitCtx) -> bool:
-    """An amount provably ``<= address(this).balance``: the minimum of the
-    contract's own balance and some other value. Recognized in the two forms a min
-    compiles to (a hand-written ternary, a min-call). Fails to ``False`` on any
-    doubt — a MAX, a foreign balance, more than two inputs — so the caller stays
-    ``indeterminate`` rather than over-claiming a bound."""
+    """An amount provably at most ``address(this).balance`` (either min form). Any doubt stays indeterminate."""
     return _capped_ternary(operand, ctx) or _capped_min_call(operand, ctx)
 
 
 def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, str]:
-    """Classify one destination/amount operand at one IR site -> (kind, tier).
+    """Classify one destination/amount operand at one site -> ``(kind, tier)``.
 
-    The load-bearing fallback: any operand that could be a collapsed
-    cross-branch merge (``_reaches_merged_local``) is ``indeterminate`` — we
-    never project a concrete kind the engine's base-name keying might have
-    silently picked from an ambiguous set."""
+    Anything that may be a collapsed cross-branch merge is indeterminate.
+    """
     if operand is None:
         return ("indeterminate", "static_trace")
-    # An array/mapping/struct element is classified by its ROOT base, detected
-    # positively from the operand IR so it is not confused with a forwarded
-    # parameter (source-set-identical via the entrypoint Phi). This runs BEFORE
-    # the merged-local guard because the guard also walks the element KEY, and a
-    # loop-merged index (``targets[i]``) says nothing about the destination's
-    # kind — every element of the base shares its origin. A merged BASE is still
-    # caught: the root resolves through ``_arg_origin``, which applies the guard.
+    # Elements classify by their root, detected from IR. Before the merged-local guard because that guard also walks the
+    # key, and a loop-merged index says nothing about the base; merged bases are still caught via ``_arg_origin``.
     elem = _element_kind(operand, ctx, amount=amount)
     if elem is not None:
         return (elem, "static_trace")
-    # An amount that is provably ``min(address(this).balance, X)`` is bounded by
-    # the contract's own balance. This runs BEFORE the merged-local guard because
-    # the ternary form (Form 1) IS a cross-branch Phi merge the guard would fold to
-    # indeterminate, and before the source path because the min-call form (Form 2)
-    # otherwise declines there. Amount-only: a destination has no such bound.
+    # Before the merged-local guard (the ternary form is a Phi) and the source path (which declines the call form).
+    # Amounts only.
     if amount and _is_capped_by_balance(operand, ctx):
         return ("capped_by_balance", "static_trace")
     if _reaches_merged_local(operand, ctx):
         return ("indeterminate", "static_trace")
-    # A call's return value classifies from the callee's standard identity, or
-    # from what an in-contract helper's body provably returns — a trace through
-    # the call either way, never a dispositive AST read.
+    # A call result classifies from the callee's standard identity or a helper's proven return: always a trace.
     call = _call_origin(operand, ctx, amount=amount)
     if call is not None:
         kind = _origin_to_amount_kind(call) if amount else _origin_to_target_kind(call, ctx)
@@ -1616,60 +1253,40 @@ def _classify_site(operand: Any, ctx: _UnitCtx, *, amount: bool) -> tuple[str, s
     kind = _amount_kind_from_sources(srcs, ctx) if amount else _target_kind_from_sources(srcs, ctx)
     if kind == "indeterminate":
         return ("indeterminate", "static_trace")
-    # A ``parameter`` operand resolved inside a nested callee was recovered by
-    # threading the caller's binding across the internal-call boundary — a trace,
-    # not a dispositive AST fact at the entry. State-var / msg.sender reads are
-    # contract-global and stay dispositive regardless of nesting.
+    # A nested parameter was recovered through the call binding: a trace, not an entry-level fact.
     forwarded_param = ctx.nested and any(s.kind == "parameter" for s in srcs)
     direct = _operand_is_direct(operand, ctx.param_names) and not forwarded_param
     tier = "dispositive_ast" if direct else "static_trace"
     return (kind, tier)
 
 
-# ``writer_surface_closed`` has exactly one admissible value. Declared as a
-# literal-typed constant so the type checker, not a reviewer, is what rejects a
-# ``True`` — there is no migration here and so no CHECK constraint to lean on.
+# Its only admissible value; typed as a literal so the checker rejects ``True``.
 _WRITER_SURFACE_CLOSED: Literal["not_determined"] = "not_determined"
 
 
-# One destination site that named no state variable at all.
 _NO_TARGET_VAR: tuple[str | None, str | None, tuple[str, ...], bool, str | None] = (None, None, (), False, None)
 
 
 def _target_variable_site(name: str, ctx: _UnitCtx) -> tuple[str | None, str | None, tuple[str, ...], bool, str | None]:
-    """One destination site: ``(name, canonical name, writers, scan complete,
-    reason no writer was attributed)``.
+    """One destination site: ``(name, canonical name, writers, scan complete, reason no writer was attributed)``.
 
-    The CANONICAL name is what sites are compared on. Two contracts in one call
-    graph may each declare ``recipient``, with separate setters and separate
-    values; agreeing on the bare identifier would publish the scalar — whose
-    registered meaning is "every contributing site named the same one" — over
-    two different declarations, and silently skip the member list a consumer is
-    instructed to read the worst of."""
+    Compared on the canonical name: two contracts may each declare ``recipient``.
+    """
     variable = ctx.state_vars_by_name.get(name)
     canonical = getattr(variable, "canonical_name", None) if variable is not None else None
     writers = tuple(ctx.setters.get(name, ()))
     reason: str | None = None
     if not writers and name in ctx.setters:
-        # Only a SETTER target has an absent-writer question at all: a constant
-        # or immutable is not in this map, and its kind already answers it. The
-        # two ways a setter target can have no NAMED writer carry opposite risk,
-        # so they must not both read as a bare absent key: a declaration-site
-        # initialiser is effectively fixed short of an upgrade, while an
-        # unattributed storage-pointer alias is a real writer this pass could
-        # not name and may be reachable by anyone.
+        # Only setter targets can lack a named writer, and the two reasons carry opposite risk: a declaration
+        # initialiser is effectively fixed, an unattributed storage alias is a real writer anyone might reach.
         reason = "alias_unattributed" if name in ctx.alias_resolved else "declaration_initialiser_only"
     return (name, str(canonical) if canonical else None, writers, ctx.setter_scan_complete, reason)
 
 
 def _target_state_var_name(operand: Any, ctx: _UnitCtx) -> str | None:
-    """The ONE state variable a destination operand reads, or ``None``.
-
-    Mirrors :func:`_classify_site`'s decision path exactly, guard for guard, so
-    the name can never disagree with the kind published beside it. In
-    particular an ELEMENT read declines: ``tokens[id]`` classifies by its base's
-    mutability, but the base is not the destination, and publishing its name
-    would say one address where there is one per key."""
+    """The one state variable a destination reads, or ``None``, following :func:`_classify_site`'s path exactly so
+    the name matches the kind. Element reads decline: the base isn't the destination.
+    """
     if operand is None:
         return None
     if _element_kind(operand, ctx, amount=False) is not None:
@@ -1694,31 +1311,14 @@ def _target_state_var_name(operand: Any, ctx: _UnitCtx) -> str | None:
 
 
 def _fold_sites(sites: list[tuple[str, str]]) -> KindTier | None:
-    """Collapse every contributing IR site's (kind, tier) to one classification.
-    Tier is the weaker of the contributing sites — one traced site makes the
-    whole a ``static_trace``.
+    """Collapse all sites' ``(kind, tier)``; the tier is the weakest.
 
-    Three outcomes, and the middle one is the point:
+    Agreeing kinds give that kind. Disagreeing but all resolved gives ``several``: we know each destination, so
+    ``indeterminate`` would hide it. Any indeterminate member gives ``indeterminate``: the set isn't closed.
 
-    * sites AGREE on one resolved kind — that kind.
-    * sites DISAGREE but every member is itself resolved — ``several``. The
-      function has several destinations (or several amounts) and we know what
-      each of them is; saying ``indeterminate`` there claimed we had traced
-      nothing, on flows where we had traced everything. A scorer reading the
-      scalar alone would score a function that pays a caller-named address and a
-      fixed one identically to a function nothing is known about.
-    * any member is itself ``indeterminate`` — ``indeterminate``. One unresolved
-      site means the set of destinations is not closed, so the members cannot be
-      published as the whole of it.
-
-    The name is deliberately quantitative and says nothing about control flow:
-    ``several`` is a set, not a sequence and not a disjunction. The sites may be
-    mutually exclusive branches or may all execute in one call, and nothing here
-    distinguishes those — a withdrawal that pays the user and then sweeps the
-    remainder to a pool makes BOTH moves in the same invocation. A consumer must
-    read ``target_kinds``/``amount_kinds`` and take the WORST member — one
-    caller-chosen site in the set means the caller can name a destination on some
-    path, which is the whole question."""
+    ``several`` is a set, not a sequence or disjunction; the moves may all happen in one call. Consumers read
+    ``target_kinds``/``amount_kinds`` and take the worst.
+    """
     if not sites:
         return None
     kinds = {kind for kind, _ in sites}
@@ -1732,25 +1332,9 @@ def _fold_sites(sites: list[tuple[str, str]]) -> KindTier | None:
 
 
 def _site_breakdown(sites: list[tuple[str, str]]) -> list[KindTier] | None:
-    """The distinct site classifications behind a fold, or ``None`` when the
-    fold is already the whole answer.
-
-    ``_fold_sites`` must keep returning one scalar (a scorer reads it), but a
-    function with two separately-resolved destinations then publishes only
-    ``indeterminate`` — we would be hiding an answer we hold. This publishes the
-    contributing sites alongside it, deduplicated by MEANING (the ``(kind,
-    tier)`` pair, so provenance is not flattened either) in first-seen order.
-
-    Emitted only when the sites disagree on the KIND, which is exactly when
-    ``_fold_sites`` gives up its answer; sites agreeing on a kind are already
-    fully described by the fold (which carries their weaker tier), so publishing
-    "msg_sender, msg_sender" there would be noise on a flow nothing was hidden
-    from. An ``indeterminate`` site stays in the list — the breakdown says why
-    the fold is what it is, it never makes it look more resolved.
-
-    Size needs no cap: both lattices are finite closed vocabularies and dedup is
-    by lattice member × tier, so the list is bounded by that product (≤20 target,
-    ≤14 amount entries) no matter how many IR sites a function has."""
+    """The distinct ``(kind, tier)`` site classifications, published only when sites disagree on kind (when the fold
+    loses information), in first-seen order. Indeterminate sites stay listed. Bounded by the vocabularies' size.
+    """
     if len({kind for kind, _ in sites}) < 2:
         return None
     ordered: list[KindTier] = []
@@ -1764,12 +1348,9 @@ def _site_breakdown(sites: list[tuple[str, str]]) -> list[KindTier] | None:
 
 
 def _bindings_for_call(ir: Any, callee: Any, ctx: _UnitCtx) -> tuple[dict[str, tuple[str, ...]], dict[str, int]]:
-    """The param→neutral-origin map forwarded at one internal/library call site,
-    resolved in the caller's ``ctx``, plus its param→entry-parameter-INDEX half.
-    Each callee formal parameter binds to the entry-rooted origin of its
-    positional argument (``_arg_origin``), chaining through the caller's own
-    bindings so a multi-hop forward stays exact. The index map carries only the
-    formals whose argument is one whole entry parameter."""
+    """The param -> neutral-origin map (and param -> entry-index map) forwarded at one call site, resolved in the
+    caller's context so multi-hop forwards stay exact.
+    """
     bindings: dict[str, tuple[str, ...]] = {}
     index_bindings: dict[str, int] = {}
     args = list(getattr(ir, "arguments", []) or [])

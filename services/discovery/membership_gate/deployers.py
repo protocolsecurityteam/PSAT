@@ -37,25 +37,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Deployer trust ladder
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class DeployerClassification:
-    """Ladder verdict. ``trust_class`` is 'A'/'B', or None for Class C —
-    which is the absence of a registry row, never a row."""
+    """Ladder verdict: ``trust_class`` 'A'/'B', or None for Class C (the absence of a row)."""
 
     trust_class: str | None
     evidence: dict[str, Any]
 
 
 def _nonlineage_corroborating_member_ids(session: Session, *, protocol_id: int, address: str) -> list[int]:
-    """Members deployed by *address* whose membership rests on a NON-lineage
-    witness (for Class B corroboration). The member must also hold a non-D2
-    admitting witness — a D2-only entry is non-transitive and must not
-    corroborate exclusivity."""
+    """Members deployed by *address* whose membership rests on a non-lineage witness (the Class B anchor
+    requirement), also
+    holding a non-D2 admitting witness (F2).
+    """
     candidates = {
         row[0]
         for row in session.execute(
@@ -87,18 +81,14 @@ def classify_deployer(
     history_complete: bool = False,
     creation_factories: Mapping[str, str] | None = None,
 ) -> DeployerClassification:
-    """Trust-ladder verdict for one EOA. Reads only; ``register_deployer``
-    writes the registry row for an A/B verdict.
+    """trust-ladder verdict for one EOA (read-only; ``register_deployer`` writes A/B rows).
 
-    ``creation_history`` is the EOA's Etherscan-enumerated FULL creation list;
-    ``history_complete=False`` (cap exceeded, not enumerated) can never reach
-    Class B — DB-local exclusivity is absence of counterevidence, not proof.
+    ``creation_history`` is the EOA's full Etherscan creation list; ``history_complete=False`` can never reach Class B
+    (absence of counterevidence isn't proof).
 
-    ``creation_factories`` (created address → factory address, from the
-    enumeration's internal CREATE frames) feeds the member-factory mapping
-    rule — a DELIBERATE deviation (owner ruling): a creation minted by
-    this protocol's own anchoring MEMBER factory counts as mapped in the
-    exclusivity test. Mapping only — it admits nothing and mints no witness.
+    ``creation_factories`` (created → factory) feeds the member-factory rule, a deliberate extension of deployer
+    lineage: a creation by
+    this protocol's own anchoring member factory counts as mapped for exclusivity. It admits nothing itself.
     """
     _require_positive_int(protocol_id, "protocol_id")
     addr = _require_address(address, "address")
@@ -153,10 +143,8 @@ def classify_deployer(
             evidence={"perimeter_fact": perimeter, "checked_at": checked_at},
         )
 
-    # Corroboration before completeness: an EOA that cannot reach Class B
-    # regardless of its creation history must never cost an enumeration —
-    # ``no_complete_enumeration`` is the one reason that invites callers (and
-    # the fixpoint's ``deployer_enumerator``) to pay for one.
+    # Check corroboration first so EOAs that can't reach Class B never cost an enumeration (``no_complete_enumeration``
+    # is what triggers one).
     corroborating = _nonlineage_corroborating_member_ids(session, protocol_id=protocol_id, address=addr)
     if len(corroborating) < 2:
         return DeployerClassification(
@@ -177,8 +165,8 @@ def classify_deployer(
     created = {_require_address(a, "creation_history entry") for a in creation_history}
     known: set[str] = set()
     if created:
-        # a creation "maps in" only as a member or as a candidate holding
-        # ≥1 unrevoked non-lineage witness — never on a bare nomination.
+        # F1: a creation maps in only as a member or a candidate with an unrevoked non-lineage witness, never a bare
+        # nomination.
         evidenced_candidates = (
             select(ContractMembershipWitness.contract_id)
             .where(
@@ -228,8 +216,7 @@ def classify_deployer(
         "checked_at": checked_at,
     }
     if factory_mapped:
-        # The deciding attribution for the member-factory-mapped creations
-        # rides in the evidence: which factories, and how many children each.
+        # The deciding factories and their child counts.
         evidence["member_factory_mapped"] = {
             "count": len(factory_mapped),
             "factories": sorted(set(factory_mapped.values())),
@@ -244,10 +231,10 @@ def register_deployer(
     address: str,
     classification: DeployerClassification,
 ) -> ProtocolDeployer:
-    """Upsert the registry row for a proof-class (A/B) verdict. A Class C
-    verdict may never produce a row — raise instead of writing.
-    Trust class H is not a ladder verdict and is granted by
-    ``grant_heuristic_deployer`` instead."""
+    """Upsert the registry row for an A/B verdict.
+
+    Class C raises. H is granted by ``grant_heuristic_deployer``.
+    """
     if classification.trust_class not in PROOF_DEPLOYER_TRUST_CLASSES:
         raise ValueError("Class C is the absence of a registry row; nothing to register")
     addr = _require_address(address, "address")
@@ -276,7 +263,6 @@ def register_deployer(
 
 
 def _heuristic_registry_row(session: Session, *, protocol_id: int, address: str) -> ProtocolDeployer | None:
-    """The unrevoked trust-class-H row for (P, E), or None."""
     return session.execute(
         select(ProtocolDeployer).where(
             ProtocolDeployer.protocol_id == protocol_id,
@@ -288,8 +274,7 @@ def _heuristic_registry_row(session: Session, *, protocol_id: int, address: str)
 
 
 def _proof_registry_row(session: Session, *, protocol_id: int, address: str) -> ProtocolDeployer | None:
-    """The unrevoked Class-A/B row for (P, E), or None. Its existence is what
-    keeps H unminted — the proof classes take precedence."""
+    """The unrevoked Class-A/B row for (P, E), or None; its existence keeps H unminted."""
     return session.execute(
         select(ProtocolDeployer).where(
             ProtocolDeployer.protocol_id == protocol_id,

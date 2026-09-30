@@ -21,23 +21,35 @@ def _response(payload):
     return response
 
 
-def test_erpc_url_for_chain_id_uses_configured_route(monkeypatch):
-    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-
-    assert rpc.erpc_url_for_chain_id(8453) == "https://erpc-proxy.example/main/evm/8453"
-
-
-def test_rpc_url_for_chain_id_preserves_explicit_rpc_url(monkeypatch):
-    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-
-    assert rpc.rpc_url_for_chain_id(1, "http://127.0.0.1:8545") == "http://127.0.0.1:8545"
-
-
-def test_default_rpc_url_prefers_erpc_for_known_chain(monkeypatch):
+@pytest.mark.parametrize(
+    "call, expected",
+    [
+        pytest.param(
+            lambda: rpc.erpc_url_for_chain_id(8453), "https://erpc-proxy.example/main/evm/8453", id="erpc-url-for-chain"
+        ),
+        pytest.param(
+            lambda: rpc.rpc_url_for_chain_id(1, "http://127.0.0.1:8545"),
+            "http://127.0.0.1:8545",
+            id="explicit-rpc-url-preserved",
+        ),
+        pytest.param(
+            lambda: rpc.default_rpc_url(chain="base"),
+            "https://erpc-proxy.example/main/evm/8453",
+            id="default-prefers-erpc-over-legacy-eth-rpc",
+        ),
+        # A local node URL (Anvil / test fork) is the one explicit override allowed to win over eRPC.
+        pytest.param(
+            lambda: rpc.default_rpc_url(explicit_rpc_url="http://127.0.0.1:8545", chain_id=1),
+            "http://127.0.0.1:8545",
+            id="default-honors-local-explicit-url",
+        ),
+    ],
+)
+def test_erpc_url_routing(monkeypatch, call, expected):
     monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
     monkeypatch.setenv("ETH_RPC", "https://legacy.example")
 
-    assert rpc.default_rpc_url(chain="base") == "https://erpc-proxy.example/main/evm/8453"
+    assert call() == expected
 
 
 def test_default_rpc_url_does_not_invent_mainnet_for_unknown_chain(monkeypatch):
@@ -75,14 +87,6 @@ def test_default_rpc_url_ignores_hosted_explicit_url_in_favor_of_erpc(monkeypatc
         rpc.default_rpc_url(explicit_rpc_url="https://eth-mainnet.g.alchemy.com/v2/key", chain_id=1)
         == "https://erpc-proxy.example/main/evm/1"
     )
-
-
-def test_default_rpc_url_honors_local_explicit_url(monkeypatch):
-    monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
-
-    # A local node URL (Anvil / test fork) is the one explicit override allowed
-    # to win over eRPC.
-    assert rpc.default_rpc_url(explicit_rpc_url="http://127.0.0.1:8545", chain_id=1) == "http://127.0.0.1:8545"
 
 
 def test_require_rpc_url_raises_without_route(monkeypatch):

@@ -1,8 +1,6 @@
-"""Brute-force fallback that walks the first ~20 pages in N-page windows.
+"""Fallback walking the first ~20 pages in N-page windows when no header matches.
 
-Runs only when header + content-pattern matching in ``_locate`` finds
-nothing useful. Bounded cost (4 chunks × ~$0.0003) covers ~95% of real
-reports whose scope isn't reachable via structural headers.
+4 chunks × ~$0.0003 covers ~95% of such reports.
 """
 
 from __future__ import annotations
@@ -23,9 +21,7 @@ _CHUNK_SCAN_MAX_CHUNKS: Final[int] = 4
 _CHUNK_SCAN_MAX_CHARS: Final[int] = 12_000
 
 
-# Phrases that, when present in a chunk, confirm it carries scope content
-# rather than findings prose. Gates chunk-scan output — without this we'd
-# accept finding-title mentions as scope.
+# Without this gate, finding-title mentions were accepted as scope.
 _SCOPE_HEADER_SIGNAL: Final[re.Pattern[str]] = re.compile(
     r"\b(?:smart\s+contracts?\s+in\s+scope|"
     r"contracts?\s+in\s+scope|"
@@ -46,12 +42,7 @@ _SCOPE_HEADER_SIGNAL: Final[re.Pattern[str]] = re.compile(
 
 
 def _split_text_into_chunks(text: str) -> list[ScopeSection]:
-    """Slice the document into ``_CHUNK_SCAN_PAGES_PER_CHUNK``-page windows.
-
-    At most ``_CHUNK_SCAN_MAX_CHUNKS`` chunks from the start of the doc.
-    """
     pages = _page_offsets(text)
-    # pages ends with a sentinel at len(text); iterate the real pages.
     real_pages = pages[:-1]
     chunks: list[ScopeSection] = []
     for i in range(0, len(real_pages), _CHUNK_SCAN_PAGES_PER_CHUNK):
@@ -80,17 +71,9 @@ def _split_text_into_chunks(text: str) -> list[ScopeSection]:
 
 
 def _has_scope_signal(text: str, extracted_names: list[str]) -> bool:
-    """Accept a chunk only if it shows one of three scope signals.
+    """Accept a chunk only with a scope signal: a scope header, a ``<Name>.sol``/``.vy`` mention, or repetition.
 
-    1. Explicit scope header / intro phrase (``_SCOPE_HEADER_SIGNAL``)
-    2. An extracted name appears as ``<Name>.sol`` / ``.vy`` (table row)
-    3. A name repeats ≥2 times (subject-of-audit signal)
-
-    Rejects findings-page chunks where names appear once in finding titles.
-    The 3rd rule needs two DISTINCT repeaters in a multi-name extraction
-    (one repeat in a multi-name list is often coincidental), but one
-    repeater is sufficient when only a single name was extracted (audits
-    that focus on a single contract repeat it across findings).
+    Multi-name extractions need two distinct repeaters (one is often coincidental); single-name extractions need one.
     """
     if _SCOPE_HEADER_SIGNAL.search(text):
         return True
@@ -111,19 +94,11 @@ def _has_scope_signal(text: str, extracted_names: list[str]) -> bool:
 def extract_scope_via_chunk_scan(
     text: str, title: str, auditor: str
 ) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]], str, str, int, ScopeSection | None]:
-    """Walk chunks, merge accepted results.
+    """Walk chunks and merge accepted results (short audits list one contract on the title page and full scope
+    later).
 
-    Returns ``(names, scope_entries, classified_commits, raw_response,
-    model, chunks_consumed, winning_chunk)``. ``winning_chunk`` is the
-    first accepted chunk (used for artifact provenance). ``scope_entries``
-    merges by ``(name_lower, address)``; ``classified_commits`` merges by
-    SHA, keeping the strongest label seen across chunks.
-
-    Merges across chunks rather than stopping at first hit: short
-    multi-section audits list one contract on the title page and the full
-    scope on a later page. The ``_has_scope_signal`` gate keeps
-    findings-only chunks out. Raises ``LLMUnavailableError`` only if every
-    chunk call fails.
+    Returns ``(names, scope_entries, classified_commits, raw_response, model, chunks_consumed, winning_chunk)``. Raises
+    ``LLMUnavailableError`` only if every chunk call fails.
     """
     chunks = _split_text_into_chunks(text)
     if not chunks:
@@ -133,7 +108,6 @@ def extract_scope_via_chunk_scan(
     seen: set[str] = set()
     merged_entries: list[dict[str, Any]] = []
     seen_entries: set[tuple[str, str]] = set()
-    # Merge classified commits across chunks, preferring stronger labels.
     merged_commits_by_sha: dict[str, dict[str, Any]] = {}
     label_rank = {"reviewed": 3, "fix": 2, "cited": 1, "unclear": 0}
     first_winning_chunk: ScopeSection | None = None

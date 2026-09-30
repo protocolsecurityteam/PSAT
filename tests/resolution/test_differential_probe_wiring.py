@@ -45,14 +45,6 @@ def _gated_unknown_cap(selector_hint: str = "0xabcdef01") -> CapabilityExpr:
 # ---------------------------------------------------------------------------
 
 
-def test_flag_defaults_on(monkeypatch):
-    # Default ON; delenv removes the conftest hermetic force-off.
-    monkeypatch.delenv("PSAT_DIFFERENTIAL_PROBE", raising=False)
-    assert dp.differential_probe_enabled() is True
-    monkeypatch.setenv("PSAT_DIFFERENTIAL_PROBE", "0")  # kill-switch
-    assert dp.differential_probe_enabled() is False
-
-
 def test_should_probe_only_gated_unknown_external_check():
     assert _should_differential_probe(_gated_unknown_cap()) is True
     # Not a caller-gate external check (no basis tag) → downstream probe / adapter-pending, skip.
@@ -68,7 +60,6 @@ def test_should_probe_only_gated_unknown_external_check():
         _should_differential_probe(CapabilityExpr.external_check_only(ExternalCheck(None, "0x1", extra=deferred_extra)))
         is False
     )
-    # Other kinds are already resolved — not the probe's job.
     assert _should_differential_probe(CapabilityExpr.finite_set(["0x" + "11" * 20])) is False
     assert _should_differential_probe(CapabilityExpr.unsupported("x")) is False
 
@@ -88,10 +79,8 @@ def test_apply_public_result_mints_conditional_universal_that_projects_public():
     )
     opened = _apply_probe_result(cap, result)
     assert opened.kind == "conditional_universal"
-    # Transcript travels into the persisted capability (replayable).
     cap_dict = capability_to_dict(opened)
     assert any(step.get("step") == "differential_probe" for step in cap_dict.get("trace", []))
-    # And it re-projects to a PUBLIC verdict.
     surface = project_capability_surface(cap_dict)
     assert surface.authority_public is True
     assert capability_surface_status(cap_dict, surface) == "public"

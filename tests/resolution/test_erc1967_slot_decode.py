@@ -1,11 +1,9 @@
 """_read_erc1967_implementation decodes strictly.
 
-"Slot is zero ⇒ not a proxy" is a typing verdict, so it is earned only by a
-full 64-nibble zero word. Any shorter return is a transport artifact and must
-stay ``_PROBE_ERROR`` — there is deliberately no pad-then-check path, because
-padding turns an empty or truncated response into a minted zero (or, worse, a
-minted implementation address). Mirrors the discipline of
-``services/monitoring/restaking_reads.decode_word``.
+"Slot is zero => not a proxy" is a typing verdict, earned only by a full 64-nibble zero
+word. Shorter returns are transport artifacts and stay ``_PROBE_ERROR``: no pad-then-check
+path, since padding mints a zero (or an implementation address) from a truncated response.
+Mirrors ``services/monitoring/restaking_reads.decode_word``.
 """
 
 from __future__ import annotations
@@ -24,14 +22,15 @@ def _stub_storage(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
     monkeypatch.setattr(tracking, "_get_storage_at", lambda *a, **kw: raw)
 
 
-def test_full_word_with_implementation_decodes_identically(monkeypatch):
-    """The recall pin: a clean 32-byte word still yields the address."""
-    _stub_storage(monkeypatch, FULL_IMPL_WORD)
-    assert _read_erc1967_implementation("rpc", "0x" + "ab" * 20, "0x1") == "0x" + IMPL_ADDR
-
-
-def test_uppercase_full_word_decodes_lowercased(monkeypatch):
-    _stub_storage(monkeypatch, ("0x" + "00" * 12 + IMPL_ADDR).upper().replace("0X", "0x"))
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(FULL_IMPL_WORD, id="full_word"),
+        pytest.param(FULL_IMPL_WORD.upper().replace("0X", "0x"), id="uppercase_lowercased"),
+    ],
+)
+def test_full_word_with_implementation_decodes_identically(monkeypatch, raw):
+    _stub_storage(monkeypatch, raw)
     assert _read_erc1967_implementation("rpc", "0x" + "ab" * 20, "0x1") == "0x" + IMPL_ADDR
 
 

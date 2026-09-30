@@ -1,5 +1,5 @@
 // Direct render tests for ProtocolSurface's public prop API.
-// Complements ../App.test.jsx: the App suite proves
+// Complements ../../App.test.jsx: the App suite proves
 // a route reaches the component, this suite proves the component honors its
 // props in isolation.
 
@@ -9,6 +9,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 
 import ProtocolSurface from "./ProtocolSurface.jsx";
 import { installCommonApiMocks } from "../test/commonApiMocks.js";
+import { setFetchHandler } from "../test/fetchMock.js";
 import { ETHERFI_COMPANY } from "../test/fixtures.js";
 
 function expectNoCrash() {
@@ -47,6 +48,24 @@ describe("ProtocolSurface", () => {
         /Loading surface/i.test(text);
       expect(ready).toBeTruthy();
     });
+    expectNoCrash();
+  });
+
+  it("labels a stale company payload it fetched itself", async () => {
+    setFetchHandler((url) => url.pathname === "/api/company/etherfi", () => new Response(
+      JSON.stringify(ETHERFI_COMPANY),
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "X-PSAT-Response-Source": "prepared-stale",
+          "X-PSAT-Stale-Reason": "code",
+          "X-PSAT-Prepared-At": "2026-09-29T08:00:00Z",
+          "X-PSAT-Payload-Schema": "1",
+        },
+      },
+    ));
+    render(<ProtocolSurface companyName="etherfi" />);
+    await screen.findByText(`Updating — data as of ${new Date("2026-09-29T08:00:00Z").toLocaleString()}`);
     expectNoCrash();
   });
 });

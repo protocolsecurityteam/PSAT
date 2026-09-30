@@ -1,23 +1,9 @@
 """D4 — what an event cursor proves about absence, and what it does not.
 
-Absence of a log was treated as proof that an event never fired. Three things
-that had to be true for that were never checked:
-
-  * (a) the covered range's LOWER bound was not persisted at all. A cursor
-    seeded at a deploy block and warm to head reads identically to one seeded
-    above the first write.
-  * (b) cursors were only ever enrolled from ``enumeration_hint`` records, which
-    the static pass attaches only to caller-keyed mappings. A denylist keyed on
-    the transfer RECIPIENT gets no hint at any emitter, so its writers had no
-    cursor anywhere and its history was never indexed.
-  * (c) a silently truncated 200-OK ``eth_getLogs`` page advanced the cursor
-    past logs that were never returned. Only a raised error bisected.
-
-These tests pin the honest states, and — the load-bearing half — pin that the
-new evidence does NOT combine into a licence. Enrolling from a tracking plan
-gathers history it could not see before; it must never turn a zero-row fold into
-"this variable was never written", because the plan attributes topics to no
-variable at all.
+Pins the honest states of the lower bound (a), tracking-plan enrolment (b) and cap-truncated pages (c).
+Load-bearing half: the new evidence must NOT combine into a licence. Enrolling from a tracking plan
+gathers history it could not see before, but must never turn a zero-row fold into "this variable was
+never written" — the plan attributes topics to no variable at all.
 """
 
 from __future__ import annotations
@@ -121,8 +107,6 @@ def _provenance(cursor: IndexedEventCursor) -> dict[str, Any]:
 
 
 class _StubRpc:
-    """Pinned responses for the three-read witness, keyed by method+block."""
-
     def __init__(self, *, code_before=_EMPTY, code_at=_CODE, prior_logs=None, raise_on=None) -> None:
         self.code_before = code_before
         self.code_at = code_at
@@ -157,15 +141,11 @@ def stub_rpc(monkeypatch):
     return _install
 
 
-# ---------------------------------------------------------------------------
 # D4(a) — the persisted lower bound and its three-read witness
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
 def test_enrol_persists_the_witnessed_lower_bound_byte_exactly(db_session):
-    """Arm 1. A cursor enrolled with a graded witness carries the bound AND what
-    proves it, and is not yet backfilled."""
     assert enroll_event_cursor(
         db_session,
         chain_id=1,
@@ -204,8 +184,7 @@ def test_enrol_without_provenance_defaults_to_not_determined(db_session):
 
 
 def test_witness_requires_all_three_reads_to_agree(stub_rpc):
-    """The empty→code transition alone is a necessary condition, not the proof.
-    All three reads agreeing is what earns the basis."""
+    """The empty→code transition alone is necessary, not proof; all three reads must agree."""
     stub = stub_rpc()
     assert _witness_seed_block(_ADDR, _SEED, {}, chain_id=1) == (_SEED, FIRST_INDEXED_BASIS_CREATION)
     assert [m for m, _ in stub.calls] == ["eth_getCode", "eth_getCode", "eth_getLogs"]
@@ -216,23 +195,19 @@ def test_witness_requires_all_three_reads_to_agree(stub_rpc):
 
 
 def test_witness_rejects_a_prior_incarnation_and_discards_the_number(stub_rpc):
-    """A2 falsifier. Code appearing at B proves a deployment landed there, not
-    that it was the first — a CREATE2 redeploy over a pre-Cancun-cleared address
-    reads identically. A log below the seed refutes the bound, and the block is
-    DISCARDED rather than kept as an unqualified number."""
+    """A2 falsifier. Code at B proves a deployment landed there, not that it was the first (CREATE2
+    redeploy over a pre-Cancun-cleared address). A log below the seed refutes the bound; the block is DISCARDED."""
     stub_rpc(prior_logs=[{"blockNumber": "0x1"}])
     assert _witness_seed_block(_ADDR, _SEED, {}, chain_id=1) == (None, "not_determined")
 
 
 def test_witness_rejects_an_eip7702_delegation_stub(stub_rpc):
-    """A2 falsifier. A 0xef0100‖address stub is code that was never deployed and
-    can be set and cleared repeatedly, so the transition dates nothing."""
+    """A2 falsifier. A 0xef0100‖address stub is never-deployed code that can be set and cleared, so it dates nothing."""
     stub_rpc(code_at=_EIP7702_STUB)
     assert _witness_seed_block(_ADDR, _SEED, {}, chain_id=1) == (None, "not_determined")
 
 
 def test_witness_failure_yields_not_determined_never_a_bound(stub_rpc):
-    """A2 falsifier. Every failure path lands on not_determined with no number."""
     stub_rpc(raise_on="eth_getLogs")
     assert _witness_seed_block(_ADDR, _SEED, {}, chain_id=1) == (None, "not_determined")
     stub_rpc(raise_on="eth_getCode")
@@ -243,9 +218,7 @@ def test_witness_failure_yields_not_determined_never_a_bound(stub_rpc):
 
 @requires_postgres
 def test_legacy_null_lower_bound_publishes_not_determined_never_zero(db_session):
-    """Arm 5. A row that predates the column means "the lower bound is unknown".
-    Read as 0 it would assert coverage from genesis — the strongest possible
-    claim, minted from a missing value."""
+    """Arm 5. Read as 0, a pre-column row would assert coverage from genesis, minted from a missing value."""
     enroll_event_cursor(db_session, chain_id=1, event_address=_ADDR, topic0=_TOPIC_ALLOW_TO)
     db_session.execute(
         text(
@@ -263,8 +236,7 @@ def test_legacy_null_lower_bound_publishes_not_determined_never_zero(db_session)
 
 @requires_postgres
 def test_migration_left_legacy_rows_unmeasured_not_measured_empty(db_session):
-    """A4. The legacy token must not read as a completeness measurement, and the
-    counts stay NULL — a 0 there would be a measured empty page."""
+    """A4. Legacy rows must not read as a completeness measurement; a 0 count would be a measured empty page."""
     db_session.execute(
         text(
             "INSERT INTO indexed_event_cursors (chain_id, event_address, topic0, last_indexed_block, "
@@ -279,9 +251,7 @@ def test_migration_left_legacy_rows_unmeasured_not_measured_empty(db_session):
     assert absence_coverage(db_session, chain_id=1, address=_ADDR)["page_completeness"] == "not_determined"
 
 
-# ---------------------------------------------------------------------------
 # D4(b) — enrolment from tracking plans, and the ceiling that stays a ceiling
-# ---------------------------------------------------------------------------
 
 
 def _monitored(
@@ -309,11 +279,8 @@ def _monitored(
 
 @requires_postgres
 def test_enrolment_drains_the_whole_fleet_across_passes(db_session, stub_rpc):
-    """R2. The per-pass budget bounds addresses that still NEED a cursor, not
-    rows inspected. Bounding rows would re-walk the same head of the ordering
-    every pass, leaving the tail permanently unenrolled while the counter
-    reported progress — and which addresses those are would depend on an id
-    ordering nothing records."""
+    """R2. The per-pass budget bounds addresses that still NEED a cursor, not rows inspected; bounding rows
+    would re-walk the same head every pass, leaving the tail unenrolled while the counter reported progress."""
     stub_rpc()
     # From 1: ``0x0…0`` is correctly refused by ``_is_enrollable_event_address``
     # (no creation block, so it would seed at genesis), and counting it here would
@@ -330,10 +297,8 @@ def test_enrolment_drains_the_whole_fleet_across_passes(db_session, stub_rpc):
 
 @requires_postgres
 def test_tracked_topics_enrol_the_writers_no_hint_ever_reached(db_session, stub_rpc):
-    """Arm 9. AllowTo/DenyTo key their mapping on the transfer RECIPIENT, so the
-    static pass attaches no hint and nothing enrolled them. The tracking plan
-    already names them; enrolling from it is what makes their history
-    observable at all."""
+    """Arm 9. AllowTo/DenyTo key on the transfer RECIPIENT, so the static pass attaches no hint;
+    only the tracking plan names their writers."""
     stub_rpc()
     _monitored(db_session, _DENYLIST_SURFACE)
     assert enroll_from_tracked_topics(db_session) == 6
@@ -346,8 +311,7 @@ def test_tracked_topics_enrol_the_writers_no_hint_ever_reached(db_session, stub_
 
 @requires_postgres
 def test_tracked_topics_enrolment_skips_unresolvable_and_inactive_rows(db_session, stub_rpc):
-    """Arm 9 fail-closed. An unresolvable chain is skipped rather than guessed as
-    mainnet, and an inactive row is not a monitoring surface."""
+    """Arm 9 fail-closed. An unresolvable chain is skipped, not guessed as mainnet."""
     stub_rpc()
     _monitored(db_session, _DENYLIST_SURFACE, chain="not-a-real-chain")
     assert enroll_from_tracked_topics(db_session) == 0
@@ -358,8 +322,6 @@ def test_tracked_topics_enrolment_skips_unresolvable_and_inactive_rows(db_sessio
 
 @requires_postgres
 def test_coverage_gate_reports_missing_writers_and_licenses_nothing(db_session, stub_rpc):
-    """Arm 6. With two of six writers unenrolled the report names them — and the
-    earned negative is refused, which it would be even if none were missing."""
     stub_rpc()
     _monitored(db_session, [_TOPIC_ALLOW_FROM, _TOPIC_DENY_FROM, _TOPIC_ALLOW_OP, _TOPIC_DENY_OP])
     enroll_from_tracked_topics(db_session)
@@ -374,12 +336,9 @@ def test_coverage_gate_reports_missing_writers_and_licenses_nothing(db_session, 
 def test_full_surface_fully_witnessed_still_licenses_nothing(db_session):
     """Arm 7 / A3 falsifier — the one that matters.
 
-    Every condition a consumer could check is satisfied: all six writers
-    enrolled, warm, lower bound witnessed, every page sub-cap under the cap
-    actually in force. The verdict is still false, because the caller's belief
-    about which topics write the variable is not a witness — a direct
-    ``_roles[role].members[x] = true`` write, or an implementation swapped
-    behind a proxy, emits none of them.
+    Every checkable condition holds (six writers enrolled, warm, lower bound witnessed, pages under the cap),
+    yet the verdict is false: the caller's belief about which topics write the variable is not a witness
+    (a direct ``_roles[role].members[x] = true`` write or a proxy swap emits none of them).
     """
     for topic in _DENYLIST_SURFACE:
         enroll_event_cursor(
@@ -427,8 +386,6 @@ def test_full_surface_fully_witnessed_still_licenses_nothing(db_session):
 
 @requires_postgres
 def test_cold_asserted_cursor_is_named_as_such(db_session):
-    """A cursor that exists but is not warm proves nothing about absence, and is
-    reported separately from one that does not exist at all."""
     enroll_event_cursor(db_session, chain_id=1, event_address=_ADDR, topic0=_TOPIC_ALLOW_TO)
     db_session.commit()
     report = absence_coverage(db_session, chain_id=1, address=_ADDR, write_surface_topics=[_TOPIC_ALLOW_TO])
@@ -437,9 +394,7 @@ def test_cold_asserted_cursor_is_named_as_such(db_session):
     assert REASON_COLD_CURSORS in report["blocking_reasons"]
 
 
-# ---------------------------------------------------------------------------
 # A1 — a tracking-plan cursor never becomes an exactness source
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -457,9 +412,7 @@ def test_cold_asserted_cursor_is_named_as_such(db_session):
     ],
 )
 def test_ineligible_basis_cannot_mint_an_exact_empty(db_session, basis):
-    """R1 falsifier. Warm, at head, zero matching rows — the exact shape that
-    publishes "this event never fired". Only an allow-listed basis may support
-    it; every other value, recognised or not, folds partial."""
+    """R1 falsifier. Warm, at head, zero rows publishes "this event never fired"; only an allow-listed basis may."""
     enroll_event_cursor(
         db_session,
         chain_id=1,
@@ -480,10 +433,7 @@ def test_ineligible_basis_cannot_mint_an_exact_empty(db_session, basis):
 
 @requires_postgres
 def test_legacy_and_hint_cursors_still_fold_enumerable(db_session):
-    """R1 companion. The allow-list admits exactly two shapes, so rows that
-    predate the column (NULL) and rows enrolled from a static hint keep folding
-    exactly as before — inverting the gate did not demote them, and the deferral
-    of the wider lower-bound gate is not silently broken here."""
+    """R1 companion. Rows predating the column (NULL) and static-hint rows keep folding enumerable."""
     for topic, basis in ((_TOPIC_ALLOW_TO, None), (_TOPIC_ALLOW_FROM, ENROLLMENT_BASIS_PREDICATE_HINT)):
         enroll_event_cursor(
             db_session, chain_id=1, event_address=_ADDR, topic0=topic, start_block=_SEED, enrollment_basis=basis
@@ -502,9 +452,7 @@ def test_legacy_and_hint_cursors_still_fold_enumerable(db_session):
 
 @requires_postgres
 def test_refused_cursor_is_not_reported_warm(db_session):
-    """R7. ``warm`` must agree with what the gate does. A refused cursor reported
-    as warm would say the recording surface is covered by a cursor that folds as
-    cold."""
+    """R7. ``warm`` must agree with the gate; a refused cursor reported warm folds as cold."""
     enroll_event_cursor(
         db_session,
         chain_id=1,
@@ -524,9 +472,7 @@ def test_refused_cursor_is_not_reported_warm(db_session):
 
 @requires_postgres
 def test_uppercase_topic_is_not_silently_dropped_from_missing(db_session):
-    """R7. Lower-casing after the ``0x`` prefix test threw away an uppercase
-    topic, shortening ``missing`` — the caller would be told a writer is covered
-    because its topic never survived the door."""
+    """R7. Lower-casing after the ``0x`` test dropped uppercase topics, shortening ``missing``."""
     report = absence_coverage(db_session, chain_id=1, address=_ADDR, write_surface_topics=[_TOPIC_DENY_TO.upper()])
     assert report["write_surface_asserted"] == [_TOPIC_DENY_TO]
     assert report["missing"] == [_TOPIC_DENY_TO]
@@ -534,10 +480,8 @@ def test_uppercase_topic_is_not_silently_dropped_from_missing(db_session):
 
 @requires_postgres
 def test_out_of_band_readers_ignore_refused_cursors(db_session):
-    """R5. Both readers answer "is there a usable cursor here". A refused cursor
-    that counted would skip the detection that enrols the attributed one, and
-    would tell the reconciler the index caught up while the fold still reads
-    cold — a permanently-skipped upgrade and a per-pass re-enqueue thrash."""
+    """R5. A refused cursor that counted would skip the detection that enrols the attributed one and
+    thrash the reconciler with per-pass re-enqueues."""
     # A real role-STORE topic (AccessControl RoleGranted family) — the set
     # ``_authority_has_role_store_cursor`` actually looks at.
     role_topic = _ALL_ROLE_STORE_TOPIC0S[0]
@@ -563,14 +507,10 @@ def test_out_of_band_readers_ignore_refused_cursors(db_session):
     assert _authority_backfilled(db_session, 1, _ADDR) is True
 
 
-# ---------------------------------------------------------------------------
 # D4(c) — a page at the cap is a reject, not a result
-# ---------------------------------------------------------------------------
 
 
 class _CappedRpc:
-    """Returns ``count_for(from, to)`` synthetic logs and records every window."""
-
     def __init__(self, count_for) -> None:
         self.count_for = count_for
         self.windows: list[tuple[int, int]] = []
@@ -601,9 +541,7 @@ def _fetcher(monkeypatch, rpc, **kwargs) -> RpcEventLogFetcher:
 
 
 def test_page_at_the_cap_bisects_instead_of_advancing(monkeypatch):
-    """Arm 8. A 200-OK page whose length reaches the cap is indistinguishable
-    from a truncated one, so it takes the same bisect an error takes. The halves
-    are the existing split, unchanged."""
+    """Arm 8. A page at the cap is indistinguishable from a truncated one, so it bisects like an error."""
     rpc = _CappedRpc(lambda lo, hi: 100 if (lo, hi) == (0, 99_999) else 1)
     fetcher = _fetcher(monkeypatch, rpc, max_block_range=1_000_000, min_bisect_span=10_000, result_cap=100)
     fetcher.fetch_logs(event_address=_ADDR, topics=[_TOPIC_DENY_TO], from_block=0, to_block=99_999)
@@ -612,9 +550,7 @@ def test_page_at_the_cap_bisects_instead_of_advancing(monkeypatch):
 
 
 def test_page_at_the_cap_on_the_floor_span_raises(monkeypatch):
-    """Arm 8. At the bisect floor there is nowhere left to narrow, so the only
-    honest outcome is to fail — never to accept a page that cannot be proven
-    whole and advance the cursor over it."""
+    """Arm 8. At the bisect floor the only honest outcome is to fail, never advance over an unprovable page."""
     rpc = _CappedRpc(lambda lo, hi: 100)
     fetcher = _fetcher(monkeypatch, rpc, max_block_range=1_000_000, min_bisect_span=10_000, result_cap=100)
     with pytest.raises(RuntimeError, match="result cap"):
@@ -622,8 +558,6 @@ def test_page_at_the_cap_on_the_floor_span_raises(monkeypatch):
 
 
 def test_page_below_the_cap_is_accepted_and_counted(monkeypatch):
-    """Arm 8. No false positives: one under the cap is a whole page, recorded
-    with the cap that gated it."""
     rpc = _CappedRpc(lambda lo, hi: 99)
     fetcher = _fetcher(monkeypatch, rpc, min_bisect_span=10_000, result_cap=100)
     stats: list[FetchWindowStat] = []
@@ -636,9 +570,8 @@ def test_page_below_the_cap_is_accepted_and_counted(monkeypatch):
 
 
 def test_unset_cap_never_raises_and_never_claims_completeness(monkeypatch):
-    """A5. The guard must read ``cap is not None and len(...) >= cap`` literally:
-    an unguarded comparison against None raises TypeError, which is not
-    RuntimeError and would escape the bisect entirely."""
+    """A5. ``cap is not None and len(...) >= cap`` must be literal: comparing to None raises TypeError,
+    not RuntimeError, and would escape the bisect."""
     rpc = _CappedRpc(lambda lo, hi: 125_629)
     fetcher = _fetcher(monkeypatch, rpc, min_bisect_span=10_000, result_cap=None)
     stats: list[FetchWindowStat] = []
@@ -649,9 +582,7 @@ def test_unset_cap_never_raises_and_never_claims_completeness(monkeypatch):
 
 @pytest.mark.parametrize("payload", [None, {}, "0x", 0])
 def test_unreadable_page_is_not_recorded_as_zero_logs(monkeypatch, payload):
-    """R3. A 200-OK body that is not a list is a page we could not read, not a
-    page of zero logs. Counting it as 0 would mint a proven empty window out of
-    a malformed payload."""
+    """R3. A non-list 200-OK body is an unreadable page, not zero logs; counting it would mint a proven empty window."""
 
     def _rpc(url, method, params, chain_id=None):
         return payload
@@ -669,8 +600,6 @@ def test_unreadable_page_is_not_recorded_as_zero_logs(monkeypatch, payload):
 @requires_postgres
 @pytest.mark.parametrize("payload", [None, {}])
 def test_unreadable_page_downgrades_the_cursor_never_completes(db_session, monkeypatch, payload):
-    """R3. The downgrade has to reach the cursor, or the malformed window is
-    invisible to the completeness verdict and the range reads proven."""
 
     class _BadFetcher:
         def fetch_logs(self, *, event_address, topics, from_block, to_block, window_stats=None):
@@ -710,9 +639,8 @@ def test_unreadable_page_downgrades_the_cursor_never_completes(db_session, monke
 
 
 def test_watcher_construction_does_not_inherit_the_env_cap(monkeypatch):
-    """R8. ``_fetch_range`` is shared with the monitoring watcher, which does not
-    persist window counts and must keep returning pages. Setting the indexer's
-    cap must not silently give the watcher bisect-and-raise behaviour."""
+    """R8. ``_fetch_range`` is shared with the monitoring watcher, which must keep returning pages, not
+    bisect-and-raise."""
     monkeypatch.setenv("PSAT_GETLOGS_RESULT_CAP", "50000")
     assert default_result_cap() == 50_000
     # The watcher's construction shape (services/monitoring/unified_watcher.py).
@@ -723,8 +651,6 @@ def test_watcher_construction_does_not_inherit_the_env_cap(monkeypatch):
 
 
 def test_default_result_cap_is_unset_and_ignores_junk(monkeypatch):
-    """The shipped default is "no cap is known", and a malformed override does
-    not become one."""
     monkeypatch.delenv("PSAT_GETLOGS_RESULT_CAP", raising=False)
     assert default_result_cap() is None
     monkeypatch.setenv("PSAT_GETLOGS_RESULT_CAP", "not-a-number")
@@ -735,9 +661,7 @@ def test_default_result_cap_is_unset_and_ignores_junk(monkeypatch):
 
 @requires_postgres
 def test_completeness_is_refused_when_the_cap_in_force_changed(db_session):
-    """A5 falsifier. Pages accepted under one guard say nothing about a different
-    guard. Raising the cap must not silently re-grade history that was never
-    fetched under it."""
+    """A5 falsifier. Pages accepted under one cap say nothing about a different cap."""
     enroll_event_cursor(
         db_session,
         chain_id=1,
@@ -764,14 +688,11 @@ def test_completeness_is_refused_when_the_cap_in_force_changed(db_session):
     assert unset["page_completeness"] == "not_determined"
 
 
-# ---------------------------------------------------------------------------
 # A6 — the shared fetcher's behaviour is unchanged for callers without stats
-# ---------------------------------------------------------------------------
 
 
 def test_fetch_without_accumulator_is_byte_identical(monkeypatch):
-    """A6. ``_fetch_range`` is shared with the monitoring watcher, which passes no
-    accumulator. Same request sequence, same logs, with the cap unset."""
+    """A6. The watcher passes no accumulator: same requests, same logs, cap unset."""
 
     def _run(**kwargs):
         rpc = _CappedRpc(lambda lo, hi: 3)
@@ -788,8 +709,6 @@ def test_fetch_without_accumulator_is_byte_identical(monkeypatch):
 
 
 def test_error_bisect_path_is_untouched(monkeypatch):
-    """A6. The pre-existing raise-driven bisect keeps its exact split and its
-    raise-at-the-floor behaviour."""
     windows: list[tuple[int, int]] = []
 
     def _rpc(url, method, params, chain_id=None):
@@ -803,9 +722,7 @@ def test_error_bisect_path_is_untouched(monkeypatch):
     assert windows[:3] == [(0, 39_999), (0, 19_999), (0, 9_999)]
 
 
-# ---------------------------------------------------------------------------
 # The indexer records what its pages returned
-# ---------------------------------------------------------------------------
 
 
 class _StatsFetcher:
@@ -841,9 +758,7 @@ class _NoHash:
     ],
 )
 def test_advancing_records_page_stats_or_downgrades(db_session, fetcher, expected_max, expected_cap, expected_basis):
-    """A cursor that advances records what its pages returned. A fetcher that
-    records nothing downgrades the cursor instead of leaving a stale claim — an
-    absent measurement is not a measurement of absence."""
+    """A fetcher that records nothing downgrades the cursor: absent measurement is not a measurement of absence."""
     enroll_event_cursor(
         db_session,
         chain_id=1,

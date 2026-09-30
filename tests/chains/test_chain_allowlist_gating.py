@@ -1,20 +1,9 @@
-"""Allowlist gating at internal work-origination sites.
-
-``require_supported_chain`` guards the user-facing router edges, but the paths
-that ORIGINATE work internally — the selection worker's analysis-child spawns and
-the monitoring auto-enroll path — enforced nothing. A company scan whose
-DeFiLlama membership evidence names a chain the deployment has not enabled would
-therefore spawn analysis jobs and create ``monitored_contracts`` rows on that
-chain.
-
-These tests pin the decided behavior: off-allowlist discoveries keep their
-evidence (Contract rows, ``Protocol.chains``) but originate no analysis job and no
-monitoring row; widening ``PSAT_SUPPORTED_CHAIN_IDS`` lets the retained evidence
-be picked up. On a mainnet-only deployment (the ``{1}`` default) mainnet contracts
-behave exactly as before.
-
-Only the wire (the Etherscan activity fetch, ``rpc_request``) is stubbed — never
-the production workers — matching the hermetic offline suite.
+"""Allowlist gating at internal work-origination sites. ``require_supported_chain`` guards the
+router edges, but the selection worker's analysis-child spawns and monitoring auto-enroll enforced nothing, so a
+company scan whose DeFiLlama evidence named a non-enabled chain spawned analysis jobs and
+``monitored_contracts`` rows there. Pinned: off-allowlist discoveries keep their evidence (Contract rows,
+``Protocol.chains``) but originate no job or monitoring row; widening ``PSAT_SUPPORTED_CHAIN_IDS`` lets the
+evidence be picked up; mainnet-only default ``{1}`` behaves as before. Only the wire is stubbed, never the workers.
 """
 
 from __future__ import annotations
@@ -36,40 +25,43 @@ pytestmark = [requires_postgres]
 # ---------------------------------------------------------------------------
 
 
-def test_chain_enabled_mainnet_default(monkeypatch):
-    """Unset allowlist = mainnet-only, so only chain 1 (and the NULL≡mainnet
-    coalescing of None/empty) is enabled."""
+@pytest.mark.parametrize(
+    ("allowlist", "expected"),
+    [
+        # Unset allowlist = mainnet-only, so only chain 1 (and the NULL≡mainnet coalescing of
+        # None/empty) is enabled.
+        pytest.param(
+            None,
+            {
+                1: True,
+                "ethereum": True,
+                "mainnet": True,
+                None: True,  # NULL≡mainnet
+                "": True,
+                8453: False,
+                "base": False,
+                "optimism": False,
+            },
+            id="mainnet_default",
+        ),
+        pytest.param(
+            "1,8453",
+            {"base": True, 8453: True, "8453": True, "optimism": False, 10: False},
+            id="widened_allowlist",
+        ),
+        # A non-empty but unresolvable name returns False rather than coalescing to mainnet: an unknown
+        # chain can never be 'enabled'.
+        pytest.param("1", {"not-a-real-chain": False}, id="unknown_chain_never_enabled"),
+    ],
+)
+def test_chain_enabled(monkeypatch, allowlist, expected):
     from utils.chains import chain_enabled
 
-    monkeypatch.delenv("PSAT_SUPPORTED_CHAIN_IDS", raising=False)
-    assert chain_enabled(1) is True
-    assert chain_enabled("ethereum") is True
-    assert chain_enabled("mainnet") is True
-    assert chain_enabled(None) is True  # NULL≡mainnet
-    assert chain_enabled("") is True
-    assert chain_enabled(8453) is False
-    assert chain_enabled("base") is False
-    assert chain_enabled("optimism") is False
-
-
-def test_chain_enabled_widened_allowlist(monkeypatch):
-    from utils.chains import chain_enabled
-
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
-    assert chain_enabled("base") is True
-    assert chain_enabled(8453) is True
-    assert chain_enabled("8453") is True
-    assert chain_enabled("optimism") is False
-    assert chain_enabled(10) is False
-
-
-def test_chain_enabled_unknown_chain_never_enabled(monkeypatch):
-    """A non-empty but unresolvable name returns False rather than coalescing to
-    mainnet — an unknown chain can never be 'enabled'."""
-    from utils.chains import chain_enabled
-
-    monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1")
-    assert chain_enabled("not-a-real-chain") is False
+    if allowlist is None:
+        monkeypatch.delenv("PSAT_SUPPORTED_CHAIN_IDS", raising=False)
+    else:
+        monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", allowlist)
+    assert {chain: chain_enabled(chain) for chain in expected} == expected
 
 
 # ---------------------------------------------------------------------------
@@ -79,8 +71,6 @@ def test_chain_enabled_unknown_chain_never_enabled(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _stub_activity_fetch(monkeypatch):
-    """Deterministic offline replacement for the per-contract Etherscan activity
-    fetch the ranking pass issues."""
     from services.discovery import activity as activity_module
 
     def fake_etherscan_get(module, action, **params):
@@ -187,7 +177,6 @@ def test_selection_gates_off_allowlist_chain_but_spawns_enabled(db_session, monk
     assert base_addr in spawned
     assert op_addr not in spawned
 
-    # Evidence for the off-allowlist chain is retained, not deleted.
     op_row = db_session.execute(
         select(Contract).where(Contract.address == op_addr, Contract.chain == "optimism")
     ).scalar_one()
@@ -250,7 +239,6 @@ def test_enrollment_gates_off_allowlist_chain_within_one_protocol(db_session, mo
     assert (base_addr, "base") in enrolled
     assert (op_addr, "optimism") not in enrolled
 
-    # Cleanup
     db_session.query(MonitoredContract).filter_by(protocol_id=proto.id).delete()
     db_session.query(Job).filter_by(protocol_id=proto.id).delete()
     db_session.query(Contract).filter_by(protocol_id=proto.id).delete()

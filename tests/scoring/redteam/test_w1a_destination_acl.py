@@ -1,8 +1,8 @@
-"""W1a — the destination-side ACL as the second act-as witness shape.
+"""W1a: the destination-side ACL as the second act-as witness shape.
 
 The corpus's own AtomicSolverV3 -> Teller shape: a restricted, authority-gated
-function whose callee is a PARAMETER, so no storage of the caller can name the
-destination and the binding lives in the destination's own ACL.
+function whose callee is a PARAMETER, so the binding lives in the destination's
+own ACL, not the caller's storage.
 """
 
 from __future__ import annotations
@@ -31,11 +31,10 @@ from utils.scoring_status import VALUE_STATE_PROVEN_REACH
 def test_w1a_a_parameter_bound_call_site_composes_on_the_destinations_own_acl(fold):
     """The second witness shape, whole.
 
-    The caller's compiled body calls the selector at an address its own caller
-    supplies — the shape the state-variable witness is structurally unable to
-    satisfy — and the destination's resolved access-control list names the
-    caller as an accepted caller of that selector by an enumerated role. Neither
-    fact alone witnesses the step; joined they do, and the magnitude composes.
+    The caller's body calls the selector at an address its own caller supplies
+    (which the state-variable witness cannot satisfy) and the destination's ACL
+    names the caller as an accepted caller of that selector by an enumerated
+    role. Neither fact alone witnesses the step; joined they do.
     """
     document = fold(
         _composing_signals(),
@@ -53,10 +52,9 @@ def test_w1a_an_acl_admitted_step_publishes_the_witness_shape_that_admitted_it(f
     """No abstraction above a witness, and no basis borrowed from one.
 
     An ACL-admitted step must not be rendered through the state-variable
-    sentence — there is no state variable and no on-chain read of one. It names
-    the shape, the ``function_principals`` row, the admitting roles and the
-    membership quality, and leaves the receiver fields empty because nothing
-    filled them.
+    sentence (no state variable, no on-chain read). It names the shape, the
+    ``function_principals`` row, the admitting roles and the membership quality,
+    and leaves the receiver fields empty.
     """
     document = fold(
         _composing_signals(),
@@ -102,13 +100,10 @@ def test_w1a_the_acl_admission_is_a_magnitude_witness_and_never_a_reach_one(fold
 def test_w1a_a_missing_or_unenumerated_acl_row_is_a_typed_refusal_not_a_pass():
     """Absence of the destination's acceptance is refused under its own reason.
 
-    Each variant removes exactly one conjunct. A parameter-bound call site is
-    promoted only when the destination's own list names this caller, for this
-    selector, on this chain, by a ROLE, with the accepted set ENUMERATED. Each
-    shortfall carries its own reason: "the list does not name this caller",
-    "it names this caller and no role that admits it" and "it names a role and
-    does not bound the accepted set" are three different findings, and a reader
-    charged the wrong one is charged a claim the evidence does not support.
+    Each variant removes exactly one conjunct: the list must name this caller,
+    for this selector, on this chain, by a ROLE, with the accepted set
+    ENUMERATED. The shortfalls are different findings, and a reader charged the
+    wrong one is charged a claim the evidence does not support.
     """
     other_chain = entity_key("base", VAULT)
     variants = {
@@ -194,8 +189,8 @@ def test_w1a_a_state_variable_site_still_reports_its_own_sharper_shortfall():
     """One caller, two call sites, two shapes: report how far the walk GOT.
 
     A state-variable site that was read and holds somebody else got further than
-    a parameter-bound site whose destination never named the caller, and the
-    refusal a reader is charged must be the sharper one.
+    a parameter-bound site whose destination never named the caller; the refusal
+    charged must be the sharper one.
     """
     plane = act_as_plane(
         call_sites={
@@ -218,10 +213,8 @@ def test_w1a_a_state_variable_site_still_reports_its_own_sharper_shortfall():
 def test_w1a_a_satisfied_state_variable_read_is_still_the_witness_that_admits(fold):
     """Both shapes satisfied at once: the caller's own storage is what is read.
 
-    The state-variable witness is the stronger fact — the caller's own storage
-    names the destination, no arm of it depends on the destination's list — so
-    it keeps priority, and the published step must be that one and not a second
-    shape that also happened to hold. A step admitted on the caller's storage
+    The state-variable witness is stronger (no arm depends on the destination's
+    list), so it keeps priority and the published step must be that one. It
     carries no ``destination_acceptance``: nothing consulted one.
     """
     both = _acl_plane(

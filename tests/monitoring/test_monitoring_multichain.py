@@ -1,19 +1,8 @@
-"""Second-chain threading proof for the monitoring daemons.
+"""M1.1 item 4 - second-chain threading proof for the monitoring daemons.
 
-Every existing monitoring test drives chain-``ethereum`` (chain 1) inputs and so
-only proves mainnet stays unchanged. These tests drive a chain-``base`` (8453)
-input through each threaded path and assert the *base* eRPC route / chain id is
-what actually reaches the wire — the required routing behavior:
-
-  - ``poll_for_state_changes`` sends a base contract's batch to the base RPC URL
-  - ``scan_for_events`` reads head + getLogs for a base cohort on the base RPC URL
-  - ``refresh_contract_balances`` passes chain_id 8453 to the Etherscan balance calls
-  - ``enroll_protocol_contracts`` keys a base proxy's WatchedProxy on ``chain="base"``
-    and seeds its block from the base RPC
-
-Only the wire is stubbed (``rpc_batch_request_classified`` / ``rpc_request`` / the Etherscan
-balance helpers) — never the production classes — matching the hermetic offline
-suite.
+Existing monitoring tests drive chain-``ethereum`` inputs only. These drive a chain-``base``
+(8453) input through poller, scanner, TVL refresh and enrollment and assert the *base* eRPC
+route / chain id reaches the wire. Only the wire is stubbed, never the production classes.
 """
 
 from __future__ import annotations

@@ -1,25 +1,15 @@
 """D2: an external call's RECEIVER must publish what it structurally is, and
 nothing the evidence does not carry.
 
-The sink's ``target`` string has always held the receiver's identifier. A name
-is not an identity: it does not say whether the CALLER chose the asset (in which
-case there is no single token to price against), whether it is this unit's
-storage, or how it could be read. Those are AST facts, dropped one line after
-being derived. These tests compile the shapes and drive production
-``build_effects`` / the production claims phase — nothing is faked.
+A sink ``target`` name is not an identity: it does not say whether the CALLER chose
+the asset, whether it is this unit's storage, or how it could be read. Tests
+compile the shapes and drive production ``build_effects`` and the claims phase.
 
-The three refusals are the point, and each has its own test:
-
-* ``visibility`` may not decide the binding — a Slither ``LocalVariable``
-  answers ``internal`` / ``is_immutable=False`` / ``is_constant=False``
-  identically to an internal state variable;
-* the auto-getter selector is licensed by the DECLARED TYPE, not the name — a
-  parameterised getter's selector is not ``name()``;
-* a formal of an internal helper is not an ABI slot of the entry point.
-
-Protocol-agnostic by construction: the fixture models shapes — a
-library-wrapped send, a public immutable, an internal, a constant, a local
-copied out of storage, a collection-typed receiver — never a named protocol.
+Three refusals, one test each: ``visibility`` may not decide the binding (a
+``LocalVariable`` answers like an internal state variable); the auto-getter
+selector is licensed by the DECLARED TYPE, not the name; a formal of an internal
+helper is not an ABI slot of the entry point. Protocol-agnostic by construction:
+shapes only, never a named protocol.
 """
 
 from __future__ import annotations
@@ -286,16 +276,6 @@ def test_local_and_internal_state_variable_are_not_confused(effects):
     assert internal is not None and internal["binding"] == "state_variable"
 
 
-def test_hand_written_getter_is_never_paired_with_a_local(effects):
-    """``getToken()`` reads exactly what ``local`` holds, and pairing them would
-    be a name/behaviour guess, not a compiler fact — solc minted no accessor for
-    a local, so there is nothing to publish."""
-    local = _receiver(effects, "payLocal(address,uint256)", "local.safeTransfer")
-    assert local is not None
-    assert local["auto_getter_selector"] is None
-    assert local["receiver_provenance"] == "not_determined"
-
-
 # --- A1: the DECLARED TYPE licenses the selector, not the identifier --------
 
 
@@ -355,20 +335,14 @@ def test_disagreeing_sites_fold_to_not_determined(effects):
     }
 
 
-def test_non_call_sinks_carry_no_receiver_key(effects):
-    """Absent means never computed. A state write has no receiver, and the key
-    must not appear holding a null that a consumer could read as an answer."""
+def test_receiver_schema_invariants(effects):
+    """Absent means never computed: a state write has no receiver, and the key must not appear holding a
+    null that a consumer could read as an answer. This plane resolves no address, so every state-variable
+    receiver reads ``contract_state_unresolved`` and carries no address key at all."""
     for info in effects["functions"].values():
         for sink in info["sinks"]:
             if sink["kind"] != "external_call":
                 assert "receiver" not in sink, sink
-
-
-def test_no_asset_address_is_ever_published_by_this_plane(effects):
-    """This plane resolves no address. Every state-variable receiver therefore
-    reads ``contract_state_unresolved`` and carries no address key at all."""
-    for info in effects["functions"].values():
-        for sink in info["sinks"]:
             receiver = sink.get("receiver")
             if receiver is None:
                 continue

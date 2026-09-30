@@ -1,24 +1,3 @@
-/* ── Company hero (protocol page top) ─────────────────────────────────────── */
-
-.company-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
-  gap: 24px;
-  margin-bottom: 20px;
-}
-
-.company-hero-card {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.company-hero-top {
-  display: flex;
-  gap: 18px;
-  align-items: center;
-}
-
 .company-hero-title {
   font-family: "Space Grotesk", system-ui, sans-serif;
   font-size: 40px;
@@ -64,9 +43,6 @@
 }
 
 @media (max-width: 900px) {
-  .company-hero {
-    grid-template-columns: 1fr;
-  }
   .company-hero-title { font-size: 32px; }
 }
 

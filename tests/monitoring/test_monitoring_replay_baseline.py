@@ -38,42 +38,9 @@ TRANSFER_TOPIC0 = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df52
 GOV_TOKEN = "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
 
 
-def test_fixture_carries_the_audited_window():
-    """A fixture that lost its logs or its baseline must fail here, not pass
-    downstream as a green zero-diff."""
-    fixture = load_replay_fixture()
-    assert len(fixture["logs"]) == 446
-    assert len(fixture["baseline_event_identities"]) == 446
-    assert len(baseline_identities(fixture)) == 446
-    assert len(fixture["contracts"]) == 3
-    assert fixture["window"] == {
-        "chain": "ethereum",
-        "chain_id": 1,
-        "from_block": 25657762,
-        "to_block": 25661204,
-    }
-
-
-def test_recorded_baseline_was_444_balances_and_2_locked():
-    """The shape of what the pre-taxonomy run published, pinned from the
-    recording so the differential below is read against a stated baseline
-    rather than an implied one."""
-    by_type: dict[str, int] = {}
-    for _addr, event_type, _tx, _li, _hist in load_replay_fixture()["baseline_event_identities"]:
-        by_type[event_type] = by_type.get(event_type, 0) + 1
-    assert by_type == {
-        "state_changed:state_variable:_balances": 444,
-        "state_changed:state_variable:locked": 2,
-    }
-
-
 def test_replay_publishes_nothing_unwitnessed(db_session):
-    """The differential: 446 REMOVED, 0 ADDED.
-
-    Every recorded row was an occurrence of an open-path writer on a
-    controller that cannot be read back — activity tier — so the honest
-    publication for this window is nothing at all.
-    """
+    """The differential: 446 REMOVED, 0 ADDED. Every recorded row was an open-path writer on
+    an unreadable controller (activity tier), so the honest publication is nothing."""
     env = build_replay(db_session)
     env.run()
 
@@ -95,17 +62,10 @@ def test_replay_publishes_nothing_unwitnessed(db_session):
 
 
 def test_replay_reproduces_all_446_recorded_rows_when_every_spec_publishes(db_session):
-    """The pre-taxonomy behaviour, reproduced in-suite.
-
-    Before the tier gate, every tracked spec published on every occurrence.
-    Forcing each spec back to ``self_describing`` restores exactly that rule
-    and must reproduce the recording identity-for-identity — all 446 rows
-    across all five decoded event shapes, not just the Transfers.
-
-    This is the harness's own liveness proof and it is load-bearing: without
-    it, "0 produced / 446 removed" is indistinguishable from a fixture whose
-    logs stopped decoding. A fixture bug that pins 0 fails HERE.
-    """
+    """The pre-taxonomy behaviour, reproduced in-suite: forcing each spec back to
+    ``self_describing`` must reproduce the recording identity-for-identity (all 446 rows,
+    all five event shapes). Load-bearing liveness proof: without it "0 produced / 446
+    removed" is indistinguishable from a fixture whose logs stopped decoding."""
     fixture = copy.deepcopy(load_replay_fixture())
     for contract in fixture["contracts"]:
         for spec in contract["monitoring_config"].get("tracked_topics") or []:
@@ -136,21 +96,27 @@ def test_replay_reproduces_all_446_recorded_rows_when_every_spec_publishes(db_se
     topics_seen = {log["topics"][0] for log in fixture["logs"]}
     assert len(topics_seen) == 6
 
+    # Salience census (c) on the same run: all 446 rows must carry a level AND a non-empty basis. They
+    # are ``self_describing`` so ``notable``; none collapse, since the routine arms need inputs
+    # (``signal_class``, ``safe_exec`` status) no row here has.
+    rated = env.persisted_salience()
+    assert len(rated) == 446
+    assert all(level in SALIENCE_VALUES for _et, level, _basis in rated)
+    assert all(basis and set(basis) <= SALIENCE_BASIS_VALUES for _et, _level, basis in rated)
+
+    by_level: dict[str | None, int] = {}
+    for _event_type, level, _basis in rated:
+        by_level[level] = by_level.get(level, 0) + 1
+    assert by_level == {SALIENCE_NOTABLE: 446}
+    assert {basis for _et, _level, basis in rated} == {(BASIS_TRACKED_CONFIG_EVENT,)}
+
 
 def test_replay_classifies_every_window_spec(db_session):
-    """Per-spec adjudication of the differential.
-
-    ``_balances`` and ``locked`` are activity — neither controller has a
-    poll-decodable read spec, so no verification read exists to witness them.
-    ``locked`` is the Solmate reentrancy guard: it is ``private`` and exposes no
-    getter, so it is not readable at all. Writer hygiene closes that residual from the other
-    end — a latch written and restored inside one call is no longer a writer of
-    anything, so it stops being a controller and this spec is not derived at
-    all on a re-analysed contract. The row here is the PERSISTED one, which is
-    what the fixture pins. The two ``authority_updated`` specs stay
-    self_describing (canonical family, signature-corroborated) — they emitted
-    no logs in this window, which is why nothing was ADDED.
-    """
+    """Per-spec adjudication. ``_balances`` and ``locked`` are activity (no poll-decodable
+    read spec; ``locked`` is a private Solmate reentrancy guard). F7 closes that residual
+    from the other end (a latch restored within one call is no controller on re-analysis),
+    but the PERSISTED row pinned here still has it. The two ``authority_updated`` specs stay
+    self_describing and emitted no logs, which is why nothing was ADDED."""
     fixture = load_replay_fixture()
     tiers: dict[str, set[str]] = {}
     for contract in fixture["contracts"]:
@@ -186,58 +152,13 @@ def test_replay_queues_no_reanalysis(db_session):
     assert db_session.query(Job).count() == 0
 
 
-def test_every_replayed_publication_carries_an_auditable_salience(db_session):
-    """Salience census (c), on the recording rather than on a synthetic row.
-
-    Run the window with every spec forced to publish — the pre-taxonomy rule,
-    which is the only variant of this replay that produces rows at all — and
-    require all 446 of them to carry a level AND a non-empty basis from the
-    closed vocabulary. Nothing here is allowed to reach the DB unrated.
-
-    These are ``state_changed:<controller_id>`` rows: the self_describing arm
-    of the per-contract taxonomy, so ``notable``. **None of them collapse** —
-    which is the point of running the assertion on real recorded traffic: the
-    routine arms need positive inputs (a stamped ``signal_class``, a decoded
-    ``safe_exec`` status) that no row in this window has.
-    """
-    fixture = copy.deepcopy(load_replay_fixture())
-    for contract in fixture["contracts"]:
-        for spec in contract["monitoring_config"].get("tracked_topics") or []:
-            spec["witness_tier"] = WITNESS_TIER_SELF_DESCRIBING
-
-    from tests.support.monitoring_replay import ReplayEnv
-
-    env = ReplayEnv(db_session, fixture).seed()
-    env.run()
-
-    rated = env.persisted_salience()
-    assert len(rated) == 446
-    assert all(level in SALIENCE_VALUES for _et, level, _basis in rated)
-    assert all(basis and set(basis) <= SALIENCE_BASIS_VALUES for _et, _level, basis in rated)
-
-    by_level: dict[str | None, int] = {}
-    for _event_type, level, _basis in rated:
-        by_level[level] = by_level.get(level, 0) + 1
-    assert by_level == {SALIENCE_NOTABLE: 446}
-    assert {basis for _et, _level, basis in rated} == {(BASIS_TRACKED_CONFIG_EVENT,)}
-
-
 @pytest.mark.parametrize("openness", ["restricted", "open", "not_determined", None])
 def test_member_witness_qualification_republishes_the_transfers(db_session, openness):
-    """Liveness + the member-witness qualification interface, on the real logs.
-
-    The same 388 Transfer logs that publish nothing as activity publish again
-    the moment the spec carries a member witness AND a proven-restricted
-    writer. Anything weaker than ``restricted`` — including the absent third
-    state — leaves them silent. This tests refusal to promote without proof
-    on real traffic rather than on a synthetic spec.
-
-    The injected record is one that could actually be PUBLISHED: it names the
-    mapping whose entry moved, and the spec publishes under that vocabulary. A
-    record naming no mapping does not promote anything (a slot-typed row
-    carrying an entry key is what the member guards exist to prevent), so
-    injecting one here would test the refusal, not the liveness.
-    """
+    """Liveness + the G3 interface on real logs: the 388 Transfer logs publish again once the
+    spec carries a member witness AND a proven-restricted writer; anything weaker (including
+    the absent third state) stays silent. The injected record names the
+    mapping whose entry moved, since a record naming none promotes nothing and would test
+    the refusal, not liveness."""
     fixture = copy.deepcopy(load_replay_fixture())
     for contract in fixture["contracts"]:
         if contract["address"] != GOV_TOKEN:

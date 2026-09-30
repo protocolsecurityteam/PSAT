@@ -1,9 +1,6 @@
-"""Enrollment-reconciler daemon shell — ``python -m workers.enrollment_reconciler``.
+"""Enrollment-reconciler process edge; logic lives in ``services.monitoring.reconciler``.
 
-The reconcile logic (queue claim/drain, sweep, loop) lives in
-``services.monitoring.reconciler``; this module only owns the process edge:
-signal handling and the CLI entry. Production runs the same loop via
-``workers/protocol_monitor.py --reconcile`` (deploy/start_workers.sh).
+Production runs the same loop via ``protocol_monitor.py --reconcile``.
 """
 
 from __future__ import annotations
@@ -28,9 +25,7 @@ def main() -> None:
     stop_event = Event()
 
     def handle_signal(signum, _frame):
-        # Named and pid-stamped: this line is emitted by every daemon in the
-        # stack under the ``__main__`` logger, and identical copies of it say
-        # nothing about which process actually went down.
+        # Every daemon logs this as ``__main__``; the name and pid say which one went down.
         logger.info(
             "received signal %s, shutting down",
             signum,
@@ -41,11 +36,8 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
 
-    # Daemon edge: the reconciler is one process serving every chain;
-    # ``RECONCILER_FALLBACK_CHAIN`` is the explicit, documented base + ambiguous-
-    # protocol fallback (``_protocol_chain`` still derives each protocol's own
-    # chain, and ``rpc_for_chain`` picks the per-chain URL). Logged so the choice
-    # is visible, not a buried default.
+    # One process serves every chain; each protocol's own chain is still derived. Logged so the fallback isn't
+    # a buried default.
     fallback_chain = RECONCILER_FALLBACK_CHAIN
     logger.info("enrollment reconciler daemon starting with fallback chain=%s", fallback_chain)
     rpc_url = require_rpc_url(chain=fallback_chain)

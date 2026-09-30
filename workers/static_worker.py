@@ -1,4 +1,4 @@
-"""Static analysis worker — runs Slither and contract analysis in a temp directory."""
+"""Static analysis worker: runs Slither and contract analysis in a temp directory."""
 
 from __future__ import annotations
 
@@ -55,9 +55,6 @@ from workers.static_support.upgrade_history import (
 
 logger = logging.getLogger("workers.static_worker")
 
-# ---------------------------------------------------------------------------
-# Error logging template
-# ---------------------------------------------------------------------------
 _ERROR_TEMPLATE = """
 ================== STATIC WORKER ERROR ==================
 Job:      {job_id}
@@ -70,9 +67,8 @@ Phase:    {phase}
 """.strip()
 
 
-# WARNING (not ERROR): callers swallow the underlying exception and continue with a
-# stub artifact, so the job-level outcome is degraded — not failed. Pair every call
-# site with ``record_degraded`` so the swallow shows up in the stage_errors artifact.
+# WARNING, not ERROR: callers continue with a stub artifact (degraded, not failed). Pair each call with
+# ``record_degraded``.
 def _log_phase_error(job_id: str, address: str, contract_name: str, phase: str, error: str) -> None:
     logger.warning(
         _ERROR_TEMPLATE.format(
@@ -86,11 +82,10 @@ def _log_phase_error(job_id: str, address: str, contract_name: str, phase: str, 
 
 
 def _request_rpc_url(job: Job) -> str | None:
-    """eRPC URL for the job's own chain, resolved via the first-class
-    ``jobs.chain_id`` column (``_parent_chain_name``), not the request JSONB —
-    a chainless ``/api/analyze`` submission carries the mainnet edge default
-    only in the column, so a request-only read comes back None and silently
-    skips classification/deps. The request's local-node override still wins."""
+    """eRPC URL for the job's chain via ``jobs.chain_id`` (``_parent_chain_name``), not the request: a chainless
+    submission has the mainnet default only in the column, so a request-only read would silently skip
+    classification and deps. A local-node override in the request still wins.
+    """
     request = job.request if isinstance(job.request, dict) else {}
     explicit = request.get("rpc_url")
     return default_rpc_url(
@@ -100,10 +95,9 @@ def _request_rpc_url(job: Job) -> str | None:
 
 
 def _parent_chain_id(job: Job) -> int:
-    """The parent job's first-class ``chain_id``: the populated
-    ``jobs.chain_id`` column, else derived from ``request["chain"]`` via the
-    registry, else mainnet. Threaded into RPC reads so the URL↔chain_id
-    guard is armed."""
+    """The parent job's ``chain_id``: the column, else derived from ``request["chain"]``, else mainnet. Arms the
+    URL/chain guard.
+    """
     chain_id = getattr(job, "chain_id", None)
     if isinstance(chain_id, int):
         return chain_id
@@ -112,22 +106,15 @@ def _parent_chain_id(job: Job) -> int:
 
 
 def _parent_chain_name(job: Job) -> str:
-    """Canonical chain name of the parent job, for stamping onto a spawned impl
-    child so chain never cascades as ``None``. Uses the first-class
-    ``jobs.chain_id`` column, else derives from ``request["chain"]`` via the
-    registry; mainnet resolves to ``"ethereum"`` so mainnet spawns are unchanged."""
+    """Canonical chain name of the parent, stamped on spawned impl children so chain never cascades as ``None``.
+    Mainnet is ``"ethereum"``.
+    """
     chain_id = _parent_chain_id(job)
     try:
         return chain_by_id(chain_id).name
     except UnknownChainError as exc:
-        # The fallback keeps the spawn path alive, but stamping "ethereum" onto a
-        # child whose parent lives on an unregistered chain is a wrong answer, not
-        # a missing one — surface it rather than let the default pass for a lookup.
-        # ``process()`` calls this ~10× per job, so report each unknown chain_id
-        # once: one data bug is one line, not ten. The seen-set hangs off the job
-        # row (same trick as ``_heartbeat_job_id`` in ``base.py``) rather than a
-        # ContextVar — the K=1 loop runs every job on the worker's own context,
-        # where a ContextVar set would silence every job after the first.
+        # Stamping "ethereum" for an unregistered chain is a wrong answer, so report it, once per chain per job (this
+        # runs ~10 times per job). Stored on the job row, not a ContextVar, since all jobs share the worker's context.
         seen = getattr(job, "_unknown_chains_reported", None)
         if seen is None:
             seen = set()
@@ -157,10 +144,8 @@ def _redirect_proxy_policy_dependencies(
 ) -> int:
     """Move pending policy dependency edges from a proxy to its impl job.
 
-    Resolution can discover an authority proxy before static has created the
-    proxy's implementation child. At that point the only durable provider
-    address is the proxy. Once static resolves the implementation, the edge
-    must wait on the impl job because policy artifacts are produced there.
+    Resolution can find an authority proxy before static creates its impl child; once it exists, the edge must wait on
+    the impl job, where policy artifacts are produced.
     """
     from datetime import datetime, timezone
 
@@ -212,11 +197,6 @@ def _redirect_proxy_policy_dependencies(
     return changed
 
 
-# ---------------------------------------------------------------------------
-# Misc helpers
-# ---------------------------------------------------------------------------
-
-
 _GENERIC_PROXY_NAMES = {
     "uupsproxy",
     "erc1967proxy",
@@ -229,11 +209,8 @@ _GENERIC_PROXY_NAMES = {
 
 
 def _contract_label_from_meta(project_dir: Path) -> str:
-    """Derive the human-readable contract label for the dependency graph.
-
-    Reads ``contract_meta.json`` written by the static source preparation
-    pipeline; falls back to the workspace directory name. Generic proxy contract
-    names are swapped for the job's ``display_name`` when available.
+    """Human-readable label for the dependency graph, from ``contract_meta.json`` (else the workspace dir name);
+    generic proxy names are replaced with the job's ``display_name``.
     """
     meta_path = project_dir / "contract_meta.json"
     if not meta_path.exists():
@@ -248,22 +225,12 @@ def _contract_label_from_meta(project_dir: Path) -> str:
     return name or project_dir.name
 
 
-# ---------------------------------------------------------------------------
-# Dynamic dependency merge helper
-# ---------------------------------------------------------------------------
-
-
 def _load_prev_dynamic_deps(session, job, tx_hashes: list[str] | None) -> dict | None:
-    """Read the persisted dynamic_dependencies artifact, if any. Tx-hash overrides skip the cache."""
+    """The persisted dynamic_dependencies artifact, if any; tx-hash overrides skip it."""
     if tx_hashes:
         return None
     raw = get_artifact(session, job.id, "dynamic_dependencies")
     return raw if isinstance(raw, dict) else None
-
-
-# ---------------------------------------------------------------------------
-# Upgrade history merge helper
-# ---------------------------------------------------------------------------
 
 
 def _finalize_upgrade_history(
@@ -275,16 +242,9 @@ def _finalize_upgrade_history(
     unified: dict,
     contract_row: Contract | None = None,
 ) -> dict | None:
-    """Apply known-name backfill, merge with prior cached upgrade history,
-    persist, and project to relational rows.
-
-    ``uh_pre`` is the freshly-computed upgrade history from the parallel
-    section. After persistence, the upgrade events are projected into
-    ``UpgradeEvent`` rows (for company-overview aggregates) and historical
-    impl addresses are backfilled into ``Contract`` rows (so the
-    audit-coverage matcher can link audits whose scope names a past impl).
-    The projection step is best-effort — the artifact is already stored
-    when it runs, so a failure leaves the data recoverable via re-running.
+    """Backfill known names, merge with cached history, persist, and project to rows: ``UpgradeEvent`` rows for
+    overview aggregates, and historical impl ``Contract`` rows so audit coverage can match past impls. Projection
+    is best-effort; the stored artifact allows re-running.
     """
     if uh_pre is None:
         return None
@@ -304,11 +264,7 @@ def _finalize_upgrade_history(
 
     store_artifact(session, job.id, "upgrade_history", data=uh)
 
-    # Project the artifact's "upgraded" events into UpgradeEvent rows and
-    # backfill historical impl Contract rows. Both operate on the in-memory
-    # dict — no re-read of storage. Errors here are non-fatal: the artifact
-    # is already stored, so a failure leaves the data still recoverable
-    # via re-running this stage.
+    # Non-fatal: the artifact is already stored.
     stats_proxy_ids: set[int] = set()
     if contract_row is not None:
         try:
@@ -335,10 +291,7 @@ def _finalize_upgrade_history(
             )
             backfill_protocol_id = contract_row.protocol_id or contract_row.nominated_protocol_id
             if backfill_protocol_id is not None and stats["impl_addrs"]:
-                # Impls are NOMINATED here; membership is earned through the
-                # gate (W2 impl-of-member-proxy at the observed upgrade tx),
-                # never inherited from the subject's stamp —
-                # nominating from a candidate subject is safe recall.
+                # Nominated, not stamped; membership is earned via the gate (W2).
                 backfill_historical_impl_contracts(
                     session,
                     protocol_id=backfill_protocol_id,
@@ -358,10 +311,8 @@ def _finalize_upgrade_history(
                 exc,
             )
 
-    # The executor fold is a SEPARATE failure domain from the projection: it is
-    # the only part of this stage that touches the wire twice more (receipts,
-    # creation witnesses), and a wire failure must cost the receipt facts only,
-    # never the event rows that were just written.
+    # A separate failure domain: the executor fold does more wire calls, and a failure there must cost only the receipt
+    # facts.
     if contract_row is not None and stats_proxy_ids:
         try:
             from services.clients.rpc import chain_id_for_chain_name
@@ -383,10 +334,7 @@ def _finalize_upgrade_history(
                     fold_stats["kinds"],
                 )
         except Exception as exc:
-            # A DB-layer failure leaves the session in a failed transaction, and
-            # every later statement in this stage would raise
-            # PendingRollbackError instead of doing its work. Roll back first so
-            # the fold's failure costs the fold only.
+            # Roll back so later statements don't hit PendingRollbackError.
             session.rollback()
             record_degraded(
                 phase="static_upgrade_executor_fold",
@@ -402,11 +350,10 @@ def _finalize_upgrade_history(
     return uh
 
 
-# Proxy types where the implementation is baked into bytecode (immutable) —
-# safe to reuse from cache without an RPC slot check.
+# Implementation baked into bytecode; reusable without a slot check.
 _IMMUTABLE_PROXY_TYPES = frozenset({"eip1167"})
 
-# Proxy types with multiple facets that can't be verified with a single slot check.
+# Multiple facets can't be verified with one slot check.
 _MULTI_FACET_PROXY_TYPES = frozenset({"eip2535"})
 
 _PROXY_FIELDS = _MUTABLE_CONTRACT_FIELDS
@@ -418,18 +365,10 @@ def _validate_cached_dep_classifications(
     *,
     chain_id: int | None = None,
 ) -> dict[str, dict]:
-    """Validate cached dependency proxy classifications against live on-chain state.
+    """Validate cached dependency proxy classifications against live state with one call each.
 
-    For each cached proxy classification that has a known implementation
-    address, makes a single RPC call to verify the implementation hasn't
-    changed.  Returns a dict of ``{address: classification}`` entries that
-    are still valid.
-
-    Stale entries (where the on-chain implementation differs) are dropped
-    so ``classify_contracts`` will re-classify them from scratch.
-
-    Non-proxy entries and immutable proxy types (e.g. EIP-1167) are kept
-    unconditionally.
+    Returns ``{address: classification}`` for entries still valid; stale ones are dropped so ``classify_contracts``
+    redoes them. Non-proxies, immutable and multi-facet proxies are kept as-is.
     """
     valid: dict[str, dict] = {}
 
@@ -437,7 +376,6 @@ def _validate_cached_dep_classifications(
         if not isinstance(cls_info, dict):
             continue
 
-        # Non-proxy classifications are immutable — keep as-is
         if cls_info.get("type") != "proxy":
             valid[addr] = cls_info
             continue
@@ -445,22 +383,18 @@ def _validate_cached_dep_classifications(
         proxy_type = cls_info.get("proxy_type")
         cached_impl = cls_info.get("implementation")
 
-        # Immutable proxy types: implementation baked into bytecode
         if proxy_type in _IMMUTABLE_PROXY_TYPES:
             valid[addr] = cls_info
             continue
 
-        # Diamond proxies: can't verify with a single call
         if proxy_type in _MULTI_FACET_PROXY_TYPES:
             continue
 
-        # No cached implementation to compare — keep as-is (e.g. beacon
-        # proxies that only have a beacon address, or partial classifications).
+        # Nothing to compare (e.g. beacon-only or partial).
         if not cached_impl:
             valid[addr] = cls_info
             continue
 
-        # Single RPC call to check current implementation
         try:
             current_impl = resolve_current_implementation(addr, rpc_url, proxy_type=proxy_type, chain_id=chain_id)
             if not current_impl:
@@ -483,14 +417,9 @@ def _validate_cached_dep_classifications(
 
 
 def _apply_proxy_cache(session, src_contract, contract_row, proxy_state: dict | None = None) -> dict:
-    """Copy proxy fields from *src_contract* (or *proxy_state* dict) to
-    *contract_row* and return a ``classify_single``-style dict for downstream
-    consumers.
-
-    When *proxy_state* is provided (e.g. from a ``cached_proxy_state``
-    artifact), its values take precedence over the ``src_contract`` attributes
-    — this handles the case where the unique-constraint reuse in
-    ``copy_static_cache`` reset the proxy fields on the shared Contract row.
+    """Copy proxy fields from *src_contract* (or *proxy_state*, which wins) to *contract_row* and return a
+    ``classify_single``-style dict. *proxy_state* covers the case where ``copy_static_cache`` reset the shared
+    row's proxy fields.
     """
     for field in _PROXY_FIELDS:
         if proxy_state is not None:
@@ -499,8 +428,7 @@ def _apply_proxy_cache(session, src_contract, contract_row, proxy_state: dict | 
             setattr(contract_row, field, getattr(src_contract, field))
     session.commit()
 
-    # The membership gate also runs on the cache path: the copied pointers are the
-    # same fact delta a fresh classification would have committed.
+    # Pointer-change evaluation runs on the cache path too: copied pointers are the same fact delta.
     from services.discovery.membership_gate import FactsDelta, evaluate_committed
 
     own_address = (getattr(contract_row, "address", None) or "").lower()
@@ -534,11 +462,7 @@ def _apply_proxy_cache(session, src_contract, contract_row, proxy_state: dict | 
 
 
 def _check_proxy_cache(session, job, contract_row) -> dict | None:
-    """Check whether proxy classification can be reused from a cached source job.
-
-    Returns a ``classify_single``-style dict if the cached proxy state is still
-    valid, or ``None`` when full ``_resolve_proxy`` must run.
-    """
+    """Reuse proxy classification from a cached source job if still valid; ``None`` means run ``_resolve_proxy``."""
     request = job.request if isinstance(job.request, dict) else {}
     if not request.get("static_cached"):
         return None
@@ -555,34 +479,28 @@ def _check_proxy_cache(session, job, contract_row) -> dict | None:
         logger.debug("Cache source contract lookup failed for job %s: %s", job.id, exc)
         src_contract = None
 
-    # With the (address, chain) unique constraint, copy_static_cache may have
-    # reused the same Contract row (updating its job_id to the target and
-    # resetting proxy fields).  Read the saved proxy state from artifact.
+    # ``copy_static_cache`` may have reused this row and reset its proxy fields; read the saved state from the artifact.
     cached_proxy_state: dict | None = None
     if src_contract is None:
         _raw_proxy = get_artifact(session, job.id, "cached_proxy_state")
         if not isinstance(_raw_proxy, dict):
             return None
         cached_proxy_state = _raw_proxy
-        # Use contract_row as the base but check proxy state from artifact
         src_contract = contract_row
 
-    # Determine proxy state: prefer artifact (accurate pre-reset snapshot)
+    # Prefer the artifact's pre-reset snapshot.
     src_is_proxy = cached_proxy_state["is_proxy"] if cached_proxy_state else src_contract.is_proxy
     src_proxy_type = cached_proxy_state.get("proxy_type") if cached_proxy_state else src_contract.proxy_type
     src_implementation = cached_proxy_state.get("implementation") if cached_proxy_state else src_contract.implementation
 
-    # Non-proxy source: non-proxies don't become proxies.
     if not src_is_proxy:
         return _apply_proxy_cache(session, src_contract, contract_row, proxy_state=cached_proxy_state)
 
     proxy_type = src_proxy_type
 
-    # Diamond proxies have multiple facets — can't verify with a single call.
     if proxy_type in _MULTI_FACET_PROXY_TYPES:
         return None
 
-    # Immutable proxy types (e.g. EIP-1167): impl is baked into bytecode.
     if proxy_type in _IMMUTABLE_PROXY_TYPES:
         return _apply_proxy_cache(session, src_contract, contract_row, proxy_state=cached_proxy_state)
 
@@ -594,8 +512,7 @@ def _check_proxy_cache(session, job, contract_row) -> dict | None:
     if not rpc_url:
         return None
 
-    # Single RPC call — resolve_current_implementation handles all proxy types
-    # (slot reads, getter calls, fallback discovery).
+    # ``resolve_current_implementation`` handles every proxy type.
     try:
         current_impl = resolve_current_implementation(
             contract_row.address, rpc_url, proxy_type=proxy_type, chain_id=_parent_chain_id(job)
@@ -621,13 +538,8 @@ class StaticWorker(BaseWorker):
     def _load_contract_row(session, job):
         """Resolve the Contract row for ``job``, tolerating job_id rebinds.
 
-        Two jobs targeting the same ``(address, chain)`` (e.g. USDC discovered
-        concurrently across protocols) collide on ``uq_contract_address_chain``;
-        ``workers/discovery.py:402`` rebinds the existing row's ``job_id`` to
-        whichever job wrote it last, orphaning the earlier job. A job_id-keyed
-        lookup then returns ``None`` and the worker terminates with "Contract
-        row not found for this job". Match the address+chain fallback already
-        used by ``services.aggregations.company_overview.prefetch_contracts``.
+        Two jobs for the same ``(address, chain)`` collide on the unique key and ``workers/discovery.py`` rebinds the
+        row to the last writer, so fall back to address+chain (as ``company_overview.prefetch_contracts`` does).
         """
         from sqlalchemy import func
         from sqlalchemy import select as sa_select
@@ -635,11 +547,8 @@ class StaticWorker(BaseWorker):
         row = session.execute(sa_select(Contract).where(Contract.job_id == job.id).limit(1)).scalar_one_or_none()
         if row is not None or not job.address:
             return row
-        # Chain comes from the first-class ``jobs.chain_id`` column, not the
-        # request JSONB: a chainless submission has ``request["chain"]=None`` but
-        # a real mainnet ``chain_id``, so a request-only read would drop the
-        # filter and match any chain's row at this address. Coalesce so a mainnet
-        # lookup also finds legacy NULL-chain rows.
+        # Chain from ``jobs.chain_id`` (a chainless request has ``chain=None`` but a real chain_id), mainnet-coalesced
+        # for legacy NULL rows.
         chain_name = _parent_chain_name(job)
         stmt = (
             sa_select(Contract)
@@ -656,7 +565,6 @@ class StaticWorker(BaseWorker):
         if not sources:
             raise RuntimeError("No source files found in DB for this job")
 
-        # Read from contracts table instead of artifacts
         contract_row = self._load_contract_row(session, job)
         if not contract_row:
             raise RuntimeError("Contract row not found for this job")
@@ -665,7 +573,7 @@ class StaticWorker(BaseWorker):
         address = contract_row.address or job.address or "0x0"
         job_id_str = str(job.id)
 
-        # Build meta dict for downstream tools that still expect it
+        # Meta dict for downstream tools that still expect it.
         meta = {
             "address": address,
             "contract_name": contract_name,
@@ -675,12 +583,8 @@ class StaticWorker(BaseWorker):
             "source_format": contract_row.source_format or "flat",
             "source_file_count": contract_row.source_file_count or len(sources),
             "remappings": list(contract_row.remappings or []),
-            # Carried, not defaulted: the discovery fetch already answered this and
-            # the column keeps all three answers (TRUE 230 / FALSE 1 / NULL 410 on the
-            # 2026-07-28 corpus). ``or``-ing a default here would erase the NULL, which
-            # is the state that says the fetch fact never reached this row. Consumed by
-            # ``core._source_verified`` and published as
-            # ``contract_summaries.source_verified``.
+            # Carried, not defaulted: NULL means the fetch fact never reached this row, which a default would erase.
+            # Consumed by ``core._source_verified``.
             "source_verified": contract_row.source_verified,
         }
         build_settings = {
@@ -690,8 +594,7 @@ class StaticWorker(BaseWorker):
         }
         remappings = meta.get("remappings", [])
 
-        # Attach the job's display name so downstream tools (e.g. graph builder)
-        # can use it instead of the Etherscan contract name for proxy contracts.
+        # Lets the graph builder use the display name instead of a proxy's Etherscan name.
         if job.name:
             meta["display_name"] = job.name
 
@@ -704,12 +607,11 @@ class StaticWorker(BaseWorker):
             contract_name,
         )
 
-        # Attempt to reuse proxy classification from a cached source job.
-        # This avoids 3-8 RPC calls when the proxy hasn't been upgraded.
+        # Saves several RPC calls when the proxy hasn't been upgraded.
         cached_proxy = _check_proxy_cache(session, job, contract_row)
         if cached_proxy is not None:
             target_classification = cached_proxy
-            # Store contract_flags artifact to match what _resolve_proxy would produce
+            # Same artifact _resolve_proxy would produce.
             cached_type = cached_proxy.get("type", "regular")
             flags = {
                 "is_proxy": cached_type == "proxy",
@@ -724,32 +626,23 @@ class StaticWorker(BaseWorker):
                 cached_type,
             )
         else:
-            # Always attempt semantic proxy classification when RPC is available.
-            # Hidden proxies often won't match cheap static classifiers, so we run
-            # this unconditionally.  The result is reused by classify_contracts()
-            # in the dependency phase to avoid duplicate RPC calls.
+            # Always run: hidden proxies often evade cheap classifiers. The result is reused by classify_contracts().
             target_classification = self._resolve_proxy(session, job, address, contract_name)
 
-        # Check if proxy classification marked this as a proxy — if so,
-        # skip Slither/analysis on the proxy source (it's just a thin wrapper).
-        # Dependency discovery still runs because proxy-address deps are useful.
+        # Proxies skip Slither/analysis (just a thin wrapper) but still get dependency discovery.
         session.refresh(contract_row)
         is_proxy = contract_row.is_proxy
         record_stage_metric("is_proxy", bool(is_proxy))
 
-        # Check if the discovery worker flagged this job as using cached static
-        # data.  When set, we skip the expensive Slither / contract-analysis /
-        # tracking-plan phases but still run the dependency phase (resolution
-        # needs it).
+        # Cached static data: skip Slither, analysis and tracking plan; dependencies still run (resolution needs them).
         has_cached_static = bool(request.get("static_cached"))
 
-        # Create temp directory and write source files
         tmp_dir = tempfile.mkdtemp(prefix="psat_static_")
         project_dir = Path(tmp_dir)
         try:
             self._scaffold_project(project_dir, sources, meta, build_settings, remappings)
 
-            # Phase 0: Dependency artifacts (always runs — proxy deps are useful)
+            # Phase 0: always runs.
             with log_timed_phase(logger, "dependency_discovery"):
                 self._run_dependency_phase(session, job, project_dir, contract_name, address, target_classification)
 
@@ -761,49 +654,39 @@ class StaticWorker(BaseWorker):
                     job_id_str,
                     contract_name,
                 )
-                # Proxy jobs skip resolution/policy — complete directly
+                # Proxy jobs skip resolution and policy.
                 from db.queue import complete_job
 
                 complete_job(session, job.id, f"Proxy {contract_name} — impl child job queued for full analysis")
                 raise JobHandledDirectly()
             elif has_cached_static:
-                # Static artifacts already present from cache — skip analysis phases.
                 logger.info(
                     "Static stage cache hit for job %s (%s) — skipping Slither/analysis/tracking plan",
                     job_id_str,
                     contract_name,
                 )
                 self.update_detail(session, job, "Static analysis complete (cached)")
-                # The cached contract_analysis still carries secondary_impl_pointers
-                # (copy_static_cache copies it), so secondaries get resolved on the
-                # cache path too — not only on a fresh (Slither) analysis.
+                # The cached analysis still has secondary_impl_pointers, so secondaries resolve on the cache path too.
                 cached_analysis = get_artifact(session, job.id, "contract_analysis")
                 secondary_analysis = cached_analysis if isinstance(cached_analysis, dict) else None
             else:
-                # Phase 1: Contract analysis (uses Slither's Python IR — the
-                # CLI subprocess that produced detector findings was removed;
-                # vulnerability triage is now an out-of-band concern, not part
-                # of the cascade pipeline).
+                # Phase 1, using Slither's Python IR.
                 with log_timed_phase(logger, "contract_analysis"):
                     analysis_data = self._run_analysis_phase(session, job, project_dir, contract_name, address)
 
                 if analysis_data is None:
                     raise RuntimeError(f"Contract analysis failed for {contract_name} ({address}).")
 
-                # Phase 2: Control tracking plan
                 with log_timed_phase(logger, "tracking_plan"):
                     self._run_tracking_plan_phase(session, job, analysis_data, contract_name, address)
                 secondary_analysis = analysis_data if isinstance(analysis_data, dict) else None
 
-            # 1A: queue split-proxy secondary implementations (best-effort). SINGLE
-            # call site reached by BOTH the fresh-analysis and cache-hit paths, so
-            # an impl re-seen in proxy context never silently skips secondary-impl
-            # linkage just because its static artifacts were cached.
+            # One call site for both fresh and cached paths, so cached impls in proxy context still get secondary
+            # linkage.
             if secondary_analysis is not None:
                 self._resolve_secondary_impls(session, job, address, secondary_analysis)
 
-            # Both paths above leave the same three artifacts behind (the cache
-            # path copies them), so supply is published from one call site.
+            # Both paths leave the same three artifacts, so publish once here.
             self._publish_materialization(session, job, address, contract_name)
 
             self.update_detail(session, job, "Static analysis complete")
@@ -813,14 +696,10 @@ class StaticWorker(BaseWorker):
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def _resolve_proxy(self, session, job, address: str, contract_name: str) -> dict | None:
-        """Use on-chain classification to detect proxy type and resolve implementation.
+        """Detect proxy type on-chain and resolve the implementation, spawning a child job for it.
 
-        If an implementation is found, creates a linked child job for it so the
-        real business logic gets analyzed.
-
-        Returns the raw ``classify_single`` result dict so callers can pass it
-        to ``classify_contracts(pre_classified=...)`` and avoid duplicate RPC calls.
-        Returns ``None`` when classification was skipped or failed.
+        Returns the ``classify_single`` result for ``classify_contracts(pre_classified=...)``, or ``None`` when skipped
+        or failed.
         """
         from services.discovery.classifier import ClassificationIncompleteError, classify_single
 
@@ -839,12 +718,8 @@ class StaticWorker(BaseWorker):
         try:
             classification = classify_single(address, rpc_url, chain_id=_parent_chain_id(job))
         except ClassificationIncompleteError as exc:
-            # #121: the proxy-detection slots could not be read (transient RPC).
-            # Storing is_proxy=False here and analyzing the address as-is would
-            # silently erase a real implementation's access-control surface.
-            # Record the degradation and re-raise so the static stage fails
-            # closed into the worker retry path (registered transient) rather
-            # than completing a confident clean model of a proxy shell.
+            # #121: proxy slots unreadable. Recording is_proxy=False would erase a real implementation's access-control
+            # surface, so record and re-raise (transient) to retry.
             from utils.secrets import sanitize_string
 
             record_degraded(
@@ -880,10 +755,8 @@ class StaticWorker(BaseWorker):
             return None
 
         classification_type = classification.get("type", "regular")
-        # An UpgradeableBeacon is analysed as itself (is_proxy stays False so the
-        # static worker runs Slither/tracking and discovers its owner()) yet still
-        # spawns its implementation as a beacon-context child, so each governed
-        # instance resolves against the beacon. Every other non-proxy type returns.
+        # A beacon is analysed as itself (so its owner() is found) but still spawns its implementation as a
+        # beacon-context child; other non-proxies return.
         is_beacon = classification_type == "beacon"
         if classification_type != "proxy" and not is_beacon:
             store_artifact(
@@ -902,12 +775,11 @@ class StaticWorker(BaseWorker):
 
         proxy_type = "beacon" if is_beacon else classification.get("proxy_type", "unknown")
         impl_address = classification.get("implementation")
-        # A beacon governs instances FROM the beacon address itself.
+        # A beacon governs instances from its own address.
         beacon = address if is_beacon else classification.get("beacon")
         admin = classification.get("admin")
         facets = classification.get("facets")
 
-        # Update contracts table with proxy info
         from sqlalchemy import select as sa_select
 
         contract_row = session.execute(
@@ -921,11 +793,8 @@ class StaticWorker(BaseWorker):
             contract_row.admin = admin
             session.commit()
 
-            # The freshly stored pointers are a fact delta the
-            # membership gate evaluates — the proxy itself (its impl/beacon
-            # may be a member) and every pointer target (it may be a member
-            # proxy's impl/beacon/admin). Never a stamp; this
-            # replaces the ad-hoc proxy-of-HIGH-impl runtime adoption.
+            # new pointers are a fact delta for the gate (the proxy and every pointer target). Never a
+            # stamp.
             from services.discovery.membership_gate import FactsDelta, evaluate_committed
 
             edge_addrs = tuple(
@@ -970,7 +839,6 @@ class StaticWorker(BaseWorker):
             impl_address or "unknown",
         )
 
-        # Queue implementation addresses for analysis
         impl_entries: list[tuple[str, str]] = []  # (address, label)
         if impl_address:
             impl_entries.append((impl_address, "impl"))
@@ -981,29 +849,22 @@ class StaticWorker(BaseWorker):
 
         base_name = job.name or contract_name
         force = bool(request.get("force"))
-        # Within-cascade dedupe under --force: same impl reached via multiple proxy paths must not spawn N copies.
+        # Under --force, the same impl reached via several proxies spawns once per cascade.
         root_job_id = request.get("root_job_id") or str(job.id)
-        # Coalesce a chainless request via the job's first-class chain (same
-        # derivation as the child stamp below): reconcile_impl_job_for_proxy
-        # disables its chain filter for chain=None, and impl singletons share
-        # addresses across chains (CREATE2), so an unfiltered lookup could
-        # adopt or backpatch another chain's impl job.
+        # Coalesce a chainless request via the job's chain: with chain=None the reconcile has no chain filter, and
+        # CREATE2 impls share addresses across chains.
         chain = request.get("chain") or _parent_chain_name(job)
         from sqlalchemy import text as _sa_text
 
         for impl_addr, label in impl_entries:
             if force:
-                # Advisory xact lock serializes the reconcile-then-INSERT against concurrent static workers.
+                # Serializes reconcile-then-insert across workers.
                 lock_seed = f"impl-dedupe:{root_job_id}:{chain or '-'}:{impl_addr.lower()}"
                 lock_key = int(hashlib.sha1(lock_seed.encode()).hexdigest()[:15], 16)
                 session.execute(_sa_text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
 
-            # Proxy-aware dedupe. A standalone (no-proxy) job for this impl is the
-            # discovery-ordering race — convert it to proxy context so it stops
-            # resolving against its own empty storage, rather than skipping it. A
-            # same-proxy job is a true duplicate; a different-proxy job means a
-            # shared impl (N proxies → 1 impl), which spawns its own per-deployment
-            # job keyed by deployment_address.
+            # A standalone job for this impl is the discovery-order race: convert it to proxy context. Same proxy is a
+            # duplicate; a different proxy is a shared impl and gets its own per-deployment job.
             decision = reconcile_impl_job_for_proxy(
                 session,
                 impl_addr=impl_addr,
@@ -1030,10 +891,8 @@ class StaticWorker(BaseWorker):
                 continue
 
             impl_name = f"{base_name}: ({label})"
-            # Spawns key off the gate's promotion result: the
-            # parent signal the child carries is the proxy's MEMBERSHIP —
-            # the earned stamp the evaluate above may have just set — never
-            # a source tag.
+            # The child carries the proxy's membership, which the evaluate above may have just set; never a
+            # source tag.
             parent_is_member = bool(contract_row is not None and contract_row.protocol_id is not None)
             child_request = {
                 "address": impl_addr,
@@ -1046,15 +905,10 @@ class StaticWorker(BaseWorker):
                 "discovery_relationship": "implementation",
                 "parent_is_member": parent_is_member,
             }
-            # Always stamp the child's chain from the parent: a None here
-            # used to cascade and let the impl child derive its own default chain,
-            # divorcing it from the proxy's chain. Mainnet parents carry
-            # chain="ethereum", so this is unchanged there.
+            # Always stamp the parent's chain so the child can't default elsewhere.
             impl_chain = request.get("chain") or _parent_chain_name(job)
             child_request["chain"] = impl_chain
-            # Defense in depth: the impl shares the proxy's chain, so a
-            # gated parent implies a gated impl — but a disabled chain must spawn
-            # no analysis work, so the gate is asserted here too.
+            # Defence in depth: a disabled chain spawns nothing.
             if not chain_enabled(impl_chain):
                 logger.info(
                     "Skipping implementation child: chain not enabled for this deployment",
@@ -1089,20 +943,17 @@ class StaticWorker(BaseWorker):
         return classification
 
     def _resolve_secondary_impls(self, session, job, address: str, analysis_data) -> None:
-        """1A: detect + queue split-proxy secondary implementations.
+        """1A: detect and queue split-proxy secondary implementations.
 
-        When an impl analysed in proxy context (``request.proxy_address`` set)
-        has a fallback/receive that delegatecalls a state-var address, resolve
-        that secondary logic contract against the PROXY's storage and analyse it
-        the same way (a proxy-child job) so its admin functions resolve to the
-        proxy's controller instead of stranding on an ownerless orphan node.
-        Best-effort — never fails the parent analysis.
+        When an impl in proxy context delegatecalls a state-var address from fallback/receive, resolve it against the
+        proxy's storage and analyse it as a proxy child, so its admin functions resolve to the proxy's controller.
+        Best-effort.
         """
         request = job.request if isinstance(job.request, dict) else {}
         proxy_address = request.get("proxy_address")
         if not (isinstance(proxy_address, str) and proxy_address.startswith("0x") and len(proxy_address) == 42):
             return
-        # One level only: a secondary impl doesn't itself spawn secondaries.
+        # One level only.
         if request.get("discovery_relationship") == "secondary_implementation":
             return
         pointers = (analysis_data or {}).get("secondary_impl_pointers") or []
@@ -1120,9 +971,7 @@ class StaticWorker(BaseWorker):
                 resolve_secondary_impl_addresses,
             )
 
-            # Chain from the first-class ``jobs.chain_id`` column, coalesced so a
-            # mainnet lookup finds legacy NULL-chain rows while an L2 lookup stays
-            # isolated.
+            # From ``jobs.chain_id``, mainnet-coalesced.
             proxy_chain_name = _parent_chain_name(job)
             proxy_stmt = (
                 sa_select(Contract)
@@ -1179,7 +1028,6 @@ class StaticWorker(BaseWorker):
         build_settings: dict,
         remappings: list[str],
     ) -> None:
-        """Write source files, foundry.toml, remappings to the temp project."""
         sources = _relax_pragmas(sources)
         for filepath, content in sources.items():
             full_path = _confine(project_dir, filepath)
@@ -1208,7 +1056,7 @@ class StaticWorker(BaseWorker):
             )
         )
 
-        # Prune remappings to only those whose target dirs have actual source files
+        # Keep only remappings whose targets contain sources.
         pruned = _prune_remappings(remappings, set(sources.keys()))
         if pruned:
             (project_dir / "remappings.txt").write_text("\n".join(pruned) + "\n")
@@ -1224,16 +1072,12 @@ class StaticWorker(BaseWorker):
         address: str,
         target_classification: dict | None = None,
     ) -> None:
-        """Build dependency artifacts before compile-dependent analysis starts."""
         self.update_detail(session, job, "Discovering dependencies")
 
         request = job.request if isinstance(job.request, dict) else {}
         deps_rpc = _request_rpc_url(job)
-        # Chain from the first-class ``jobs.chain_id`` column (via
-        # ``_parent_chain_name``), not a mainnet default: the dynamic-dependency
-        # txlist and the upgrade-history getLogs both hit Etherscan and must
-        # query the proxy's own chain, or an L2 proxy's timeline/deps come back
-        # silently empty from mainnet.
+        # The job's chain, not mainnet: dynamic deps and upgrade history both hit Etherscan, and an L2 proxy would
+        # otherwise come back empty (F1/F2).
         phase_chain_id = require_chain(chain=_parent_chain_name(job), context="dependency phase").chain_id
         dynamic_rpc_raw = request.get("dynamic_rpc")
         dynamic_rpc = dynamic_rpc_raw if isinstance(dynamic_rpc_raw, str) and dynamic_rpc_raw.strip() else deps_rpc
@@ -1247,7 +1091,7 @@ class StaticWorker(BaseWorker):
             contract_name,
         )
 
-        # ---- Sequential setup: read every cached artifact + compute incremental anchors. ----
+        # Sequential setup: cached artifacts and incremental anchors.
         _raw_static_deps = get_artifact(session, job.id, "static_dependencies")
         cached_static_deps = _raw_static_deps if isinstance(_raw_static_deps, dict) else None
 
@@ -1259,10 +1103,8 @@ class StaticWorker(BaseWorker):
         prev_uh = prev_uh_raw if isinstance(prev_uh_raw, dict) else None
         uh_from_block = _from_block_for_upgrade_history(prev_uh)
 
-        # ---- Parallel section: 3 RPC/Etherscan-bound sub-phases. ----
-        # Each sub-phase gets its own ``code_cache`` dict; the global locked
-        # ``_GETCODE_CACHE`` in services.clients.rpc dedups across them so the only cost
-        # is independent dict lookups per thread.
+        # Parallel section: three RPC/Etherscan-bound sub-phases. Each has its own code_cache; the locked global
+        # ``_GETCODE_CACHE`` dedups across them.
         proxy_addr = request.get("proxy_address")
 
         def run_static() -> dict:
@@ -1285,16 +1127,13 @@ class StaticWorker(BaseWorker):
         def run_upgrade_history() -> dict | None:
             from services.discovery.upgrade_history import build_upgrade_history
 
-            # Always call ``build_upgrade_history``: when the target isn't a proxy
-            # it returns an empty proxies dict cheaply and the test harness still
-            # observes the call. Real Etherscan fetches only happen when
-            # ``proxy_meta`` is non-empty inside the helper.
+            # Always called: it returns quickly for non-proxies, and tests observe the call.
             minimal_deps = {
                 "address": address,
                 "target_classification": target_classification or {},
                 "dependencies": {},
             }
-            # Rebuilt as a plain dict: the worker merges prior history into it.
+            # A plain dict because prior history is merged into it.
             return dict(build_upgrade_history(minimal_deps, from_block=uh_from_block, chain_id=phase_chain_id))
 
         from services.concurrency import parallel_map
@@ -1310,7 +1149,7 @@ class StaticWorker(BaseWorker):
             name: outcome for (name, _fn), (_task, outcome) in zip(sub_phases, results)
         }
 
-        # ---- Static dependencies: persist + branch on success. ----
+        # Static dependencies: persist and branch on success.
         deps_output: dict | None = None
         static_outcome = outcomes["static"]
         if isinstance(static_outcome, BaseException):
@@ -1339,7 +1178,7 @@ class StaticWorker(BaseWorker):
                 static_dep_count,
             )
 
-        # ---- Dynamic dependencies: merge with prev, persist. ----
+        # Dynamic dependencies: merge with previous and persist.
         dyn_output: dict | None = None
         dyn_outcome = outcomes["dynamic"]
         if isinstance(dyn_outcome, NoNewTransactionsError):
@@ -1378,7 +1217,7 @@ class StaticWorker(BaseWorker):
                     len(dyn_output.get("dependencies", [])),
                 )
 
-        # ---- Upgrade history: merge + persist (handled below alongside the cleaner pre-classify path). ----
+        # Upgrade history.
         uh_outcome_raw = outcomes["upgrade_history"]
         uh_pre: dict | None
         if isinstance(uh_outcome_raw, BaseException):
@@ -1399,9 +1238,8 @@ class StaticWorker(BaseWorker):
         else:
             uh_pre = None
 
-        # Mirror the resolution order inside find_dependencies /
-        # find_dynamic_dependencies so classification hits the same
-        # endpoint discovery actually used.
+        # Same resolution order as find_dependencies / find_dynamic_dependencies, so classification uses the same
+        # endpoint.
         resolved_rpc = deps_rpc or dynamic_rpc
 
         cls_output = None
@@ -1417,9 +1255,7 @@ class StaticWorker(BaseWorker):
                 if target_classification:
                     pre_classified[normalize_address(address)] = target_classification
 
-                # Load previous classifications to skip already-classified addresses.
-                # Validate cached proxy classifications against live on-chain
-                # state so upgraded dependencies get re-classified.
+                # Reuse previous classifications, revalidating proxies so upgraded dependencies are redone.
                 prev_cls = get_artifact(session, job.id, "classifications")
                 if isinstance(prev_cls, dict):
                     validated_cls = _validate_cached_dep_classifications(
@@ -1439,7 +1275,6 @@ class StaticWorker(BaseWorker):
                         chain_id=_parent_chain_id(job),
                         pre_classified=pre_classified or None,
                     )
-                    # Store classifications artifact for future cache hits
                     store_artifact(session, job.id, "classifications", data=cls_output)
                     discovered_count = len(cls_output.get("discovered_addresses", []))
                     record_stage_metric("discovered_addresses", discovered_count)
@@ -1473,7 +1308,7 @@ class StaticWorker(BaseWorker):
             unified = build_unified_dependencies(
                 address, deps_output, dyn_output, cls_output, target_classification=target_classification
             )
-            # Load cached enrichment data (contract names + selectors are immutable)
+            # Contract names and selectors are immutable, so cache them.
             prev_enrichment = get_artifact(session, job.id, "enrichment_cache")
             info_cache: dict[str, tuple[str | None, dict[str, str]]] = {}
             if isinstance(prev_enrichment, dict):
@@ -1488,13 +1323,11 @@ class StaticWorker(BaseWorker):
                     chain_id=require_chain(chain=_parent_chain_name(job), context="dependency enrichment").chain_id,
                 )
 
-            # Store updated enrichment cache (includes any newly fetched entries)
             enrichment_data = {
                 addr: {"name": name, "selectors": selectors} for addr, (name, selectors) in info_cache.items()
             }
             store_artifact(session, job.id, "enrichment_cache", data=enrichment_data)
 
-            # Write to contract_dependencies table
             from sqlalchemy import select as sa_select
 
             contract_row = session.execute(
@@ -1557,10 +1390,7 @@ class StaticWorker(BaseWorker):
                     address,
                 )
 
-            # Upgrade history was computed in the parallel section above using
-            # ``target_classification`` only. Apply known names from the unified
-            # deps so we can drop redundant Etherscan name lookups, then merge
-            # with any prior cached upgrade history and persist.
+            # Apply known names from the unified deps to avoid Etherscan lookups, merge with cached history, persist.
             try:
                 uh = _finalize_upgrade_history(
                     session,
@@ -1600,7 +1430,6 @@ class StaticWorker(BaseWorker):
     def _run_analysis_phase(
         self, session, job, project_dir: Path, contract_name: str, address: str
     ) -> ContractAnalysis | None:
-        """Run structured contract analysis. Returns the analysis dict or None on failure."""
         self.update_detail(session, job, "Building structured contract analysis")
         try:
             analysis_data, semantic_predicate_trees, semantic_effects = collect_contract_analysis_with_artifacts(
@@ -1616,11 +1445,8 @@ class StaticWorker(BaseWorker):
             store_artifact(session, job.id, "analysis_error", data={"error": str(exc)})
             return None
 
-        # ``predicate_trees`` and ``effects`` are the semantic artifacts
-        # consumed by policy resolution. ``default=str`` is defence in depth:
-        # a stray non-JSON analyzer object (a Slither ``Constant`` reached
-        # ``derived_from.callee`` before provenance stringified it) must
-        # degrade to its string form rather than kill the whole static job.
+        # ``predicate_trees`` and ``effects`` feed policy. ``default=str`` so a stray non-JSON analyzer object degrades
+        # rather than killing the job.
         (project_dir / "contract_analysis.json").write_text(json.dumps(analysis_data, indent=2, default=str) + "\n")
         if semantic_predicate_trees is not None:
             (project_dir / "predicate_trees.json").write_text(
@@ -1666,7 +1492,6 @@ class StaticWorker(BaseWorker):
         return analysis_data
 
     def _write_analysis_tables(self, session, job: Job, analysis: ContractAnalysis | dict) -> None:
-        """Extract structured data from contract_analysis JSON into relational tables."""
         from sqlalchemy import select as sa_select
 
         contract_row = session.execute(
@@ -1678,11 +1503,9 @@ class StaticWorker(BaseWorker):
         summary = analysis.get("summary", {})
         subject = analysis.get("subject", {})
 
-        # Update contract name from analysis if available
         if subject.get("name"):
             contract_row.contract_name = subject["name"]
 
-        # Write contract_summary
         existing_summary = session.execute(
             sa_select(ContractSummary).where(ContractSummary.contract_id == contract_row.id)
         ).scalar_one_or_none()
@@ -1706,7 +1529,6 @@ class StaticWorker(BaseWorker):
 
         semantic_section = analysis.get("semantic_control", {})
 
-        # Write role_definitions
         session.query(RoleDefinition).filter(RoleDefinition.contract_id == contract_row.id).delete()
         for rd in semantic_section.get("role_definitions", []):
             session.add(
@@ -1722,32 +1544,16 @@ class StaticWorker(BaseWorker):
     def _publish_materialization(self, session, job: Job, address: str, contract_name: str) -> None:
         """Record this job's analysis bundle in ``contract_materializations``.
 
-        Until now the versioned store had exactly one writer: the authority
-        recursion, which materializes whichever dependencies it happens to
-        visit. Monitoring enrolls from that store, so whether a contract was
-        watched on its real tracking plan or on the baseline registry alone was
-        decided by an accident of graph traversal (136 of 183 monitored
-        contracts read ``no_current_materialization`` while their own jobs held
-        a substantive plan). Publishing here makes coverage follow from analysis
-        having run.
+        Previously only the authority recursion wrote this store, so whether monitoring used a contract's real tracking
+        plan depended on graph traversal. Publishing here makes coverage follow from analysis.
 
-        Reads back the three artifacts this stage just stored rather than taking
-        them as arguments: the artifacts are what the job actually left behind,
-        they are identical on the fresh and the static-cache paths, and a bundle
-        that failed to store is one this row must not claim to hold.
+        Reads back the three stored artifacts (identical on fresh and cache paths; an unstored bundle must not be
+        claimed). A row stamped ``ANALYSIS_SCHEMA_VERSION`` requires a bundle proven to be of that era: cache hits leave
+        the job's stamp NULL, so ``proven_analysis_schema_version`` follows the cache chain, and an undetermined era
+        publishes nothing.
 
-        A row is stamped ``ANALYSIS_SCHEMA_VERSION``, so it may only be written
-        for a bundle PROVEN to be of that era. The stamp lives on the job, but
-        only the fetch path writes it — a same-address cache hit copies the
-        donor's artifacts and returns before it, leaving NULL. NULL is not
-        "current", so ``proven_analysis_schema_version`` follows the cache chain
-        to the era that was actually witnessed, and a job whose era stays
-        undetermined publishes nothing. Same rule the promotion sweep applies to
-        the same fact.
-
-        Best-effort in every arm. Supply is not the analysis: a bucket outage, a
-        keccak we cannot read, or a row another writer holds must never fail a
-        job whose analysis succeeded. Each refusal is logged with its reason.
+        Best-effort: storage outages, unreadable keccaks or rows held by other writers never fail a successful job;
+        refusals are logged.
         """
         from db.contract_materializations import (
             ANALYSIS_SCHEMA_VERSION,
@@ -1793,8 +1599,7 @@ class StaticWorker(BaseWorker):
             )
             return
         if not isinstance(analysis, dict) or not isinstance(tracking_plan, dict):
-            # The plan phase records its own failure; a row without both halves
-            # would read downstream as a contract with no analysis and no plan.
+            # The plan phase records its own failure; a row missing either half would read as no analysis.
             logger.info(
                 "Static stage: no materialization published for %s — analysis or tracking plan absent",
                 address,
@@ -1803,17 +1608,15 @@ class StaticWorker(BaseWorker):
 
         chain = _parent_chain_name(job)
         request = job.request if isinstance(job.request, dict) else {}
-        # Did THIS job's analysis produce these artifacts, or did it copy an
-        # ancestor's? The era gate above proves they are of the current era; it
-        # says nothing about which of two same-era bundles is the later record.
+        # Whether this job produced the artifacts or copied an ancestor's; the era gate doesn't say which same-era
+        # bundle is newer.
         produced_here = not request.get("static_cached")
         try:
             from services.clients.rpc import get_code_with_keccak
 
             _code, keccak = get_code_with_keccak(_request_rpc_url(job) or "", address, chain_id=_parent_chain_id(job))
         except Exception as exc:
-            # The row is keyed on bytecode. Without the keccak there is no key,
-            # and inventing one would key the bundle to code nobody read.
+            # No keccak, no key.
             record_degraded(phase="materialization_publish", exc=exc, context={"address": address})
             logger.warning(
                 "Static stage: materialization publish skipped for %s — bytecode keccak not determined: %s",
@@ -1834,12 +1637,8 @@ class StaticWorker(BaseWorker):
                 predicate_trees=predicate_trees if isinstance(predicate_trees, dict) else None,
                 source_content_hash=job.source_content_hash,
                 provenance=build_provenance(PRODUCED_BY_PIPELINE, source_job_id=job.id),
-                # Only a bundle THIS job produced may overwrite a current row.
-                # On the static-cache path these artifacts are an ancestor's,
-                # copied — same era (the gate above proves that), but not the
-                # newer record: a fresh analysis and a later cache hit reproducing
-                # its ancestor would then take turns overwriting each other, and
-                # each flip moves where monitoring watches.
+                # Only a bundle this job produced may overwrite a current row; otherwise a fresh analysis and a later
+                # cache copy would keep flipping it.
                 refresh_on_differ=produced_here,
             )
         except Exception as exc:
@@ -1854,7 +1653,7 @@ class StaticWorker(BaseWorker):
         if outcome in (PUBLISH_WRITTEN, PUBLISH_REFRESHED):
             log = logger.info
         elif outcome == PUBLISH_ALREADY_CURRENT:
-            # The steady state on every re-run of an unchanged contract.
+            # Steady state on unchanged re-runs.
             log = logger.debug
         else:
             log = logger.warning
@@ -1869,7 +1668,6 @@ class StaticWorker(BaseWorker):
     def _run_tracking_plan_phase(
         self, session, job, analysis: ContractAnalysis | dict, contract_name: str, address: str
     ) -> None:
-        """Build control tracking plan. Non-fatal on failure."""
         self.update_detail(session, job, "Building control tracking plan")
         try:
             tracking_plan = build_control_tracking_plan(cast(ContractAnalysis, analysis))

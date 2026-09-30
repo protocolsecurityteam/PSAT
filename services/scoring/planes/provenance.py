@@ -21,21 +21,13 @@ from utils.scoring_status import (
     PERIMETER_UNSETTLED,
 )
 
-# Confined to the I/O-EDGE loaders in this module — the handlers that swallow a
-# database error while reading a plane. The resolution work itself publishes
-# every refusal into the document — the fold must replay from the
-# document alone, so nothing on a compute path logs. These WARNINGs carry no
-# ``record_degraded`` because no accumulator is bound here today: the fold runs
-# on the score loop's monitor thread and under the offline CLI, and the call
-# would be a permanent no-op rather than a record of anything.
+# Only the I/O-edge loaders log: compute paths publish refusals into the document (the fold must replay from it alone).
+# No ``record_degraded``: nothing binds an accumulator on the score loop or the CLI.
 logger = logging.getLogger("services.scoring.planes")
 
 
-# Why each relation this scorer knows of is NOT walked as reach. The map is a
-# vocabulary of reasons, not the published set: ``unconsumed_reach_relations``
-# enumerates from what the DATABASE holds (plus every relation the graph writer
-# can emit), so a relation nobody has classified still gets published with its
-# count rather than being dropped for want of an entry here.
+# Reasons per relation; the published set comes from the database plus every relation the graph writer can emit, so
+# unclassified relations are still published with counts.
 UNCONSUMED_REACH_REASONS: dict[str, str] = {
     "safe_owner": (
         "one owner is not the unit that can act: a k-of-n Safe's authority is folded at "
@@ -82,16 +74,10 @@ UNCONSUMED_REASON_UNCLASSIFIED = (
 
 
 def unconsumed_reach_relations(session: Session, protocol_id: int) -> dict[str, Any]:
-    """Every edge that exists but is NOT walked as reach, and why. Provenance.
+    """Every edge not walked as reach, and why.
 
-    DISCOVERY-FIXED: the enumeration is built from what the database holds —
-    ``GROUP BY relation`` over this protocol's edges, with no filter — unioned
-    with every relation the graph writer is able to emit
-    (``db.CONTROL_EDGE_RELATIONS``). It is deliberately NOT built from what this
-    scorer chose to name: a relation nobody classified, and a relation that
-    carries no rows today and rows tomorrow, would both be silently unwalked
-    under an enumeration keyed on the consumed set. A zero count is a named
-    exclusion, not an absence.
+    Enumerated from the database (``GROUP BY relation``) plus ``db.CONTROL_EDGE_RELATIONS``, not from what this scorer
+    names, so an unclassified or newly populated relation can't go silently unwalked. A zero count is a named exclusion.
     """
     from db.models import CONTROL_EDGE_RELATIONS as WRITER_RELATIONS
     from db.models import Contract, ControlGraphEdge, EffectiveFunction, FunctionPrincipal
@@ -115,11 +101,8 @@ def unconsumed_reach_relations(session: Session, protocol_id: int) -> dict[str, 
         }
         for relation in excluded
     }
-    # The withdrawn rationale for excluding ``capability_principal`` was that its
-    # population is materialization-budget gated. Withdrawing it in prose leaves
-    # a reader unable to check the refutation, so the budget and the observed
-    # headroom are published beside the exclusion: the perimeter above is a full
-    # enumeration only if nothing was clipped, and that is a number, not a claim.
+    # The materialization budget and headroom behind ``capability_principal``'s exclusion are published, so "the
+    # perimeter is complete" is a checkable number.
     per_anchor = [
         int(total or 0)
         for _, _, total in session.query(
@@ -168,19 +151,10 @@ def unconsumed_reach_relations(session: Session, protocol_id: int) -> dict[str, 
 
 
 def discovery_relation_entities(session: Session, protocol_id: int) -> dict[str, set[str]]:
-    """Every endpoint of every AUTHORITY relation discovery recorded, per relation.
+    """Endpoints of every authority relation discovery recorded, per relation.
 
-    ``CONTROL_EDGE_RELATIONS`` is the database's own vocabulary for a relation
-    that carries authority; this scorer walks three of its seven. The four it
-    declines are still work discovery did, and the entities they name are still
-    entities this document must answer for — so they enter the confidence
-    perimeter whether or not the walk consumes them. Relations outside that set
-    (``external_call_target``, ``controller_value_unattributed``) assert no
-    authority by their own register entries and are not admitted here.
-
-    Sibling of :func:`unconsumed_reach_relations`, which counts the same excluded
-    edges: that one publishes how much reach is not being claimed, this one puts
-    the entities behind it into the denominator that has to account for them.
+    The scorer walks three of the seven, but the other four's entities still enter the confidence perimeter.
+    Non-authority relations are excluded. Sibling of :func:`unconsumed_reach_relations`.
     """
     from db.models import CONTROL_EDGE_RELATIONS, Contract, ControlGraphEdge
 
@@ -203,13 +177,8 @@ def discovery_relation_entities(session: Session, protocol_id: int) -> dict[str,
 
 
 def load_upgrade_provenance(session: Session, protocol_id: int) -> dict[str, Any]:
-    """Upgrade history as PROVENANCE only — it moves no severity in v1.
-
-    Counted through the action folds, never ``COUNT(upgrade_events.id)``: the
-    unit is the transaction, one of which carried 19 ``Upgraded`` logs. A
-    post-exclusion zero publishes ``None``, because "no event recorded" never
-    licenses "no upgrade happened" over a recording surface that is itself
-    unwitnessed.
+    """Upgrade history as provenance only (no severity in v1), counted by transaction (one carried 19 ``Upgraded``
+    logs). Zero after exclusions publishes ``None``: no recorded event doesn't prove no upgrade.
     """
     from db.models import Contract
     from services.discovery.upgrade_history import governance_actions_for, upgrade_action_counts
@@ -243,11 +212,8 @@ def load_upgrade_provenance(session: Session, protocol_id: int) -> dict[str, Any
 
 
 def load_ledgers(session: Session, protocol_id: int) -> dict[str, Any]:
-    """The omission ledgers, as provenance references.
-
-    Nothing was dropped only if BOTH selection ledgers are empty, and the spawn
-    dispositions partition the node list only when ``walked`` is true. An absent
-    artifact means the ledger predates the writer, never "omitted nothing".
+    """Omission ledgers as provenance: nothing was dropped only if both selection ledgers are empty; spawn
+    dispositions partition the nodes only when ``walked``. A missing artifact predates the writer.
     """
     from db.models import Artifact, Job
 
@@ -269,12 +235,7 @@ def load_ledgers(session: Session, protocol_id: int) -> dict[str, Any]:
 
 
 def perimeter_state(session: Session, protocol_id: int) -> tuple[str, dict[str, Any]]:
-    """Whether the perimeter was settled when this score was computed.
-
-    A failed queue read lands on ``not_determined`` rather than either polarity:
-    stamping "unsettled" on an unreadable queue would be a positive claim with no
-    witness.
-    """
+    """Whether the perimeter was settled when scored; a failed queue read is ``not_determined``, not "unsettled"."""
     from db.models import Job, JobStatus, PendingEffectsWork
 
     try:
@@ -305,18 +266,9 @@ def perimeter_state(session: Session, protocol_id: int) -> tuple[str, dict[str, 
 
 
 def load_audit_posture(session: Session, protocol_id: int, value_plane: ValuePlane) -> dict[str, Any]:
-    """Audit coverage, classified and weighted by contracts and by value.
-
-    Coverage rows are per (audit, contract), so counting them answers neither
-    "how much of the protocol is audited" nor "how much of the money is": one
-    contract reviewed by four audits is four rows and one contract, and the
-    contracts that hold the value are a handful of the total. Both weightings
-    are computed here, over the same reduction the fold's exposure uses — the
-    latest observation per (entity, asset, observed account), implementation
-    folded onto its proxy — so a consumer joining these counts to a value plane
-    of its own would re-introduce the double count that reduction exists to
-    remove. An entity whose total is not a number contributes nothing and is
-    never read as $0.
+    """Audit coverage weighted by contracts and by value (rows are per audit and contract, so counting them answers
+    neither). Uses the fold's own value reduction so joins can't double count; undetermined totals contribute
+    nothing.
     """
     from db.models import AuditContractCoverage, AuditReport, Contract
 
@@ -348,14 +300,9 @@ def load_audit_posture(session: Session, protocol_id: int, value_plane: ValuePla
     reports = int(
         session.query(sql_func.count(AuditReport.id)).filter(AuditReport.protocol_id == protocol_id).scalar() or 0
     )
-    # A published zero is a claim that the protocol has no audits, and an empty
-    # table is that fact only where discovery is proven to have looked. A stage
-    # that never ran, or died before persisting (the billing-failure shape),
-    # leaves the same empty table and lands on not_determined instead.
+    # Zero audits is only a fact if discovery provably ran; otherwise not determined.
     reports_on_file = reports if reports or _audit_discovery_witnessed(session, protocol_id) else None
-    # Zero covered contracts needs its own licence: with no audit on file there
-    # was nothing that could match, but audits with no coverage row are a
-    # matcher run this fold has no witness for.
+    # Zero covered contracts is only licensed when no audit is on file; otherwise the matcher run is unwitnessed.
     coverage_zero_licensed = reports_on_file == 0
     return {
         "rows": len(rows),
@@ -382,13 +329,7 @@ def load_audit_posture(session: Session, protocol_id: int, value_plane: ValuePla
 
 
 def _audit_discovery_witnessed(session: Session, protocol_id: int) -> bool:
-    """Whether audit discovery is proven to have run and persisted its result.
-
-    ``store_artifact(job, "audit_reports", ...)`` commits on the one path that
-    persists discovered reports, so the row is the witness that the stage got
-    that far. Existence only — the body lives in the bucket and this fold reads
-    the database alone.
-    """
+    """Whether audit discovery ran and persisted (the ``audit_reports`` artifact row is the witness)."""
     from db.models import Artifact, Job
 
     return (
@@ -403,12 +344,10 @@ def _audit_discovery_witnessed(session: Session, protocol_id: int) -> bool:
 def _audited_value(
     contracts: list[Any], audited_contract_ids: set[int], value_plane: ValuePlane
 ) -> tuple[float | None, int]:
-    """Canonical priced value behind a set of audited contracts, and how many priced.
+    """Priced value behind audited contracts, and how many are priced.
 
-    An entity counts when its own contract is audited OR when the implementation
-    it delegates to is: a proxy holds the balance and an audit reviews the
-    implementation's source, so keying on the audited row's contract alone would
-    report the money as unaudited.
+    An entity counts if its own contract or the implementation it delegates to is audited (proxies hold balances; audits
+    review implementations).
     """
     audited_keys = {entity_key(c.chain, c.address) for c in contracts if c.id in audited_contract_ids}
     entities: set[str] = set()
@@ -425,7 +364,6 @@ def _audited_value(
 
 
 def plane_row_counts(session: Session, protocol_id: int) -> dict[str, Any]:
-    """Per-plane row counts + max ``updated_at``, for the provenance block."""
     from db.models import (
         Contract,
         ContractBalanceLatest,
@@ -438,18 +376,12 @@ def plane_row_counts(session: Session, protocol_id: int) -> dict[str, Any]:
     )
 
     def _count(query: Any, plane: str) -> int | None:
-        """A plane that cannot be read is ``None`` — not_determined, never 0.
-
-        A missing table (a database this build's migration has not reached) and
-        a genuinely empty plane are different facts, and a zero here would make
-        an unread plane look like a proven-empty one in the provenance block.
-        """
+        """An unreadable plane is ``None``, never 0 (a missing table isn't an empty plane)."""
         try:
             return int(query.scalar() or 0)
         except Exception as exc:
             session.rollback()
-            # The document says "not_determined"; only the exception type says
-            # WHY, and schema drift is the usual answer.
+            # The exception type says why; usually schema drift.
             logger.warning(
                 "plane row count unreadable for %s",
                 plane,
@@ -475,9 +407,7 @@ def plane_row_counts(session: Session, protocol_id: int) -> dict[str, Any]:
         .join(Contract, Contract.id == EffectiveFunction.contract_id)
         .filter(Contract.protocol_id == protocol_id)
     )
-    # Both keying arms, because both are rows the value plane reads. Counting
-    # only the join to ``contracts`` would report a plane smaller than the one
-    # the score was computed over the moment an entity-keyed holder is observed.
+    # Both keying arms, so entity-keyed holders are counted.
     entity_identities = sorted(
         (chain, address)
         for chain, _, address in (key.partition("::") for key in load_proven_eoa_entities(session, protocol_id))
@@ -537,15 +467,8 @@ def plane_row_counts(session: Session, protocol_id: int) -> dict[str, Any]:
 
 
 def native_value_state(plane: ValuePlane, key: str) -> Tri[float]:
-    """The native holding of an entity with no native balance row.
-
-    ``proven_zero`` is a real answer and enters as 0.0; everything else —
-    including a failed fetch — is ``not_determined`` and is never read as zero.
-
-    The label a proven zero carries is the same whichever witness supplied it: a
-    stored zero-quantity native row and the fetch record's ``proven_zero`` status
-    are the same fact read two ways, and calling one of them plain ``proven``
-    would make the label depend on which writer got there first.
+    """Native holding of an entity with no native row: ``proven_zero`` is 0.0, anything else (including failed
+    fetches) is ``not_determined``. The label is the same whichever witness supplied the zero.
     """
     canonical = plane.canonical(key)
     assets = plane.per_asset.get(canonical) or {}

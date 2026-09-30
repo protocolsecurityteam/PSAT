@@ -1,5 +1,3 @@
-"""Liveness, version, config, and pipeline-stats endpoints."""
-
 from __future__ import annotations
 
 import logging
@@ -28,12 +26,7 @@ def index():
 
 @router.get("/api/health")
 def health(x_psat_admin_key: str | None = Header(default=None)):
-    """Liveness/readiness probe — verifies the database and object storage are reachable.
-
-    The status/db/storage booleans stay public for load-balancer probes; the
-    ``pool`` connection-stats sub-object is operator detail, included only for a
-    caller presenting a valid admin key.
-    """
+    """Liveness probe for DB and storage. ``pool`` stats only for admins."""
     from db.models import engine as _engine
 
     body: dict[str, Any] = {"status": "ok", "db": "ok", "storage": "inline"}
@@ -41,8 +34,7 @@ def health(x_psat_admin_key: str | None = Header(default=None)):
 
     try:
         with deps.SessionLocal() as session:
-            # Cap the probe at 2s so a hung Postgres can't hang the health endpoint.
-            # SET LOCAL statement_timeout is Postgres-specific syntax.
+            # So a hung Postgres can't hang the probe.
             session.execute(text("SET LOCAL statement_timeout = 2000"))
             session.execute(select(1))
     except Exception as exc:
@@ -50,7 +42,7 @@ def health(x_psat_admin_key: str | None = Header(default=None)):
         body["db"] = "unavailable"
         failures.append("db")
 
-    # NullPool (used in some test setups) lacks these counters.
+    # NullPool lacks these counters.
     from sqlalchemy.pool import QueuePool
 
     if deps.admin_key_valid(x_psat_admin_key) and isinstance(_engine.pool, QueuePool):
@@ -80,17 +72,8 @@ def health(x_psat_admin_key: str | None = Header(default=None)):
 
 @router.get("/api/health/monitoring", dependencies=[Depends(deps.require_admin_key)])
 def monitoring_health() -> Any:
-    """Monitoring-fleet liveness, for an external uptime checker.
-
-    Operator-only because it exposes fleet/process details. Where basic health
-    proves only that *web* is alive, this one 503s the moment any
-    background monitoring daemon goes stale or errors — closing the "web up,
-    monitoring dead" blind spot. 200 with an empty ``stale`` list when all
-    processes are fresh; 503 with the offending processes otherwise.
-
-    ``chains`` reports per-chain staleness for the chain-scoped subsystems
-    (indexer, monitoring scanner) so a stalled Base indexer degrades health —
-    and names the chain — even while mainnet stays fresh.
+    """Monitoring-fleet liveness for an uptime checker: 503 when any daemon is stale or erroring, with per-chain
+    detail. Operator-only.
     """
     from services.monitoring.ops_alerts import collect_chain_health, collect_stale_processes
 
@@ -111,8 +94,7 @@ def monitoring_health() -> Any:
 
 @router.get("/api/version")
 def version() -> dict[str, str]:
-    """Returns the deployed git SHA. Used by post-deploy smoke checks to confirm
-    the running image matches the commit that triggered the deploy."""
+    """Deployed git SHA, for post-deploy smoke checks."""
     return {"sha": os.environ.get("GIT_SHA", "unknown")}
 
 
@@ -125,10 +107,8 @@ def config() -> dict[str, str]:
 
 @router.get("/api/stats", dependencies=[Depends(deps.require_admin_key)], response_model=None)
 def pipeline_stats() -> PipelineStatsResponse:
-    """Quick stats: unique addresses stored, total jobs, etc."""
     with deps.SessionLocal() as session:
-        # Count entities as (chain_id, address): a CREATE2 twin is one address
-        # on two chains, i.e. two distinct entities.
+        # A CREATE2 twin is two entities.
         unique_addresses = (
             session.execute(
                 select(func.count(distinct(tuple_(Job.chain_id, Job.address)))).where(Job.address.isnot(None))

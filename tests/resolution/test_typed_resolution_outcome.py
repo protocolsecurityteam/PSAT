@@ -1,22 +1,14 @@
 """P1 — typed resolution outcome: the read-failure reason is carried end-to-end.
 
-The binary ``exact``/``lower_bound`` collapse discarded *why* an authority point
-read came back empty — revert vs empty-return vs nothing-attempted all funneled
-to one silent ``lower_bound`` sink. P1 attaches a machine-readable ``empty_reason``
-to the labeled empty and threads it through the persisted ``capability_expr``,
-WITHOUT changing the outcome (kind / quality / members / surface status stay put).
+The binary ``exact``/``lower_bound`` collapse discarded *why* an authority read came back
+empty (revert vs empty-return vs nothing-attempted). P1 attaches a machine-readable
+``empty_reason`` to the labeled empty and threads it through the persisted ``capability_expr``
+WITHOUT changing the outcome (kind / quality / members / surface status). On main the
+serialized capability has no ``empty_reason`` key, so every assertion here fails.
 
-The P1 cases use NON-pending operands on purpose: they isolate the labeling layer
-(P1) from the empty-by-design promotion (P2, tested separately). On main the
-serialized capability carries no ``empty_reason`` key, so every assertion here
-fails — pinning that P1 is what adds it.
-
-The second half of the file characterizes the REAL operand shapes
-behind the etherfi under-resolved functions, including the *pending* ones the
-P1 cases avoid. See its section header.
-
-Pure/offline, ``test_authority_live_getter_resolution`` pattern; the global
-``_stub_live_authority`` fixture is deliberately not used.
+P1 cases use NON-pending operands to isolate labeling from the empty-by-design promotion (P2,
+tested separately). The second half is the claim-#3 characterization net (see its header).
+Pure/offline; the global ``_stub_live_authority`` fixture is deliberately not used.
 """
 
 from __future__ import annotations
@@ -33,10 +25,9 @@ from tests.support.eq_tree import eq_tree as _eq_tree
 
 CONTRACT = "0x" + "11" * 20
 
-# Non-pending operands (so the read-failure reason — not empty_by_design — is what
-# rides through). ``membershipManager`` / ``vault`` are bare address state vars;
-# ``receivers[originEid]`` is a param-keyed mapping read, modeled as a member
-# operand with no nullary getter (nothing is read).
+# Non-pending operands (so the read-failure reason, not empty_by_design, rides through).
+# ``receivers[originEid]`` is a param-keyed mapping read modeled as a member operand with no
+# nullary getter (nothing is read).
 REVERTING_VAR = {"source": "state_variable", "state_variable_name": "membershipManager"}
 EMPTY_RETURN_VAR = {"source": "state_variable", "state_variable_name": "vault"}
 UNREAD_MEMBER = {"source": "state_variable", "state_variable_name": "receivers", "member_path": ["originEid"]}
@@ -76,7 +67,6 @@ def _stub_rpc(monkeypatch: pytest.MonkeyPatch, mode: str, *, recorder: list | No
 
 
 def _expr_dict(cap: CapabilityExpr) -> dict[str, Any]:
-    """The persisted ``capability_expr`` JSON the policy/surface layers read."""
     return capability_to_dict(cap)
 
 
@@ -84,48 +74,36 @@ def _status(cap_dict: dict[str, Any]) -> str | None:
     return capability_surface_status(cap_dict, project_capability_surface(cap_dict))
 
 
-def _principal_rows(cap_dict: dict[str, Any]) -> list[dict[str, Any]]:
-    return project_capability_surface(cap_dict).principal_rows
-
-
 def _assert_unchanged_empty(cap_dict: dict[str, Any]) -> None:
-    """kind / quality / members / status are exactly the main-branch placeholder."""
     assert cap_dict["kind"] == "finite_set"
     assert cap_dict["membership_quality"] == "lower_bound"
     assert cap_dict["members"] == []
     assert _status(cap_dict) != "resolved_empty"
 
 
-def test_revert_carries_unreadable_revert(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_rpc(monkeypatch, "revert")
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(REVERTING_VAR), _ctx_with_rpc()))
-
-    assert cap_dict["empty_reason"] == "unreadable_revert"
-    _assert_unchanged_empty(cap_dict)
-
-
-def test_empty_return_carries_unreadable_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_rpc(monkeypatch, "empty")
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(EMPTY_RETURN_VAR), _ctx_with_rpc()))
-
-    assert cap_dict["empty_reason"] == "unreadable_empty"
-    _assert_unchanged_empty(cap_dict)
-
-
-def test_nothing_attempted_carries_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A struct-member operand has no nullary getter — nothing is read.
+@pytest.mark.parametrize(
+    "mode, var, expected_reason, attempted",
+    [
+        pytest.param("revert", REVERTING_VAR, "unreadable_revert", True, id="revert"),
+        pytest.param("empty", EMPTY_RETURN_VAR, "unreadable_empty", True, id="empty-return"),
+        # not_read means no RPC was attempted at all.
+        pytest.param("revert", UNREAD_MEMBER, "not_read", False, id="nothing-attempted"),
+    ],
+)
+def test_empty_reason_labels_why_the_set_is_empty(
+    monkeypatch: pytest.MonkeyPatch, mode: str, var: Any, expected_reason: str, attempted: bool
+) -> None:
     recorder: list = []
-    _stub_rpc(monkeypatch, "revert", recorder=recorder)
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(UNREAD_MEMBER), _ctx_with_rpc()))
+    _stub_rpc(monkeypatch, mode, recorder=recorder)
+    cap_dict = _expr_dict(evaluate_tree(_eq_tree(var), _ctx_with_rpc()))
 
-    assert cap_dict["empty_reason"] == "not_read"
-    assert recorder == []  # nothing attempted
+    assert cap_dict["empty_reason"] == expected_reason
+    assert bool(recorder) is attempted
     _assert_unchanged_empty(cap_dict)
 
 
 def test_empty_reason_absent_on_populated_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Precision: a resolved (non-empty) authority carries NO empty_reason — the
-    field is emit-when-non-default, so populated sets keep their wire shape."""
+    """Precision: a populated authority carries NO empty_reason (emit-when-non-default keeps its wire shape)."""
     addr = "0x" + "ab" * 20
     monkeypatch.setattr(
         "services.clients.rpc.rpc_request",
@@ -140,25 +118,16 @@ def test_empty_reason_absent_on_populated_set(monkeypatch: pytest.MonkeyPatch) -
 # ==========================================================================
 # Claim-#3 characterization net.
 #
-# Pins the lowering of the operand shapes behind the etherfi (protocol_id=1,
-# run ``1279e07382b24d32``) ``finite_set/lower_bound`` under-resolved
-# functions. Every operand is the REAL shape, taken by compiling the on-chain
-# source through the production static pipeline (not guessed):
+# Pins the lowering of the operand shapes behind the etherfi (protocol_id=1, run
+# ``1279e07382b24d32``) ``finite_set/lower_bound`` under-resolved functions. Operands are the
+# REAL shapes from compiling on-chain source through the production static pipeline:
+#   * A ``claimGovernance`` — ``view_call _pendingGovernor()`` (internal; reverts/empties everywhere).
+#   * B ``acceptDefaultAdminTransfer`` — ``state_variable _pendingDefaultAdmin`` member
+#     ``newAdmin`` (OZ's public getter is inlined to the struct read: nothing is read).
 #
-#   * A ``claimGovernance`` — ``view_call _pendingGovernor()`` (internal,
-#     reverts/empties on every deployment).
-#   * B ``acceptDefaultAdminTransfer`` — ``state_variable _pendingDefaultAdmin``
-#     member ``newAdmin``. The provenance engine inlines OZ's public
-#     ``pendingDefaultAdmin()`` down to its storage struct read, so the operand
-#     is a struct member with NO getter to call — nothing is read at runtime.
-#
-# What this net locks (true on both main and the P1/P2 branch, so it never
-# goes stale): the A/B functions resolve to an EMPTY caller set with NO
-# principal rows — the under-resolution symptom. The status *flip* those
-# empties undergo (A/B → ``resolved_empty`` once the empty-by-design detector
-# lands) is pinned by ``test_pending_transfer_ceiling``, so this net stays a
-# stable scope witness: non-pending getter-less authorities (the guard) must
-# NOT flip.
+# Locks what holds on both main and the P1/P2 branch: A/B resolve to an EMPTY caller set with
+# NO principal rows. The flip to ``resolved_empty`` is pinned by ``test_pending_transfer_ceiling``,
+# so this net stays a stable scope witness: non-pending getter-less authorities must NOT flip.
 # ==========================================================================
 
 OWNER_SELECTOR = "0x8da5cb5b"  # owner()
@@ -175,38 +144,3 @@ B_PENDING_DEFAULT_ADMIN = {
     "member_path": ["newAdmin"],
 }
 GUARD_OWNER = {"source": "view_call", "callee_signature": "owner()", "callee_selector": OWNER_SELECTOR}
-
-
-@pytest.mark.parametrize("mode", ["revert", "empty"])
-def test_group_a_pending_governor_yields_empty_caller_set(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
-    _stub_rpc(monkeypatch, mode)
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(A_PENDING_GOVERNOR), _ctx_with_rpc()))
-
-    assert cap_dict["kind"] == "finite_set"
-    assert cap_dict["members"] == []
-    assert _principal_rows(cap_dict) == []
-
-
-def test_group_b_pending_default_admin_member_yields_empty_caller_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Struct member, no getter — recorder proves no read is attempted.
-    recorder: list = []
-    _stub_rpc(monkeypatch, "revert", recorder=recorder)
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(B_PENDING_DEFAULT_ADMIN), _ctx_with_rpc()))
-
-    assert cap_dict["kind"] == "finite_set"
-    assert cap_dict["members"] == []
-    assert _principal_rows(cap_dict) == []
-    assert recorder == []  # no getter exists to call
-
-
-def test_guard_non_pending_owner_revert_stays_unresolved(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Precision baseline: a non-pending ``view_call`` authority whose getter
-    reverts stays the lower_bound placeholder, proving the P1/P2 changes do not
-    over-reach onto non-pending authorities."""
-    _stub_rpc(monkeypatch, "revert")
-    cap_dict = _expr_dict(evaluate_tree(_eq_tree(GUARD_OWNER), _ctx_with_rpc()))
-
-    assert cap_dict["kind"] == "finite_set"
-    assert cap_dict["members"] == []
-    assert cap_dict["membership_quality"] == "lower_bound"
-    assert _status(cap_dict) != "resolved_empty"

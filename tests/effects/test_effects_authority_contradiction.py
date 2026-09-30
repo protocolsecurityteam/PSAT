@@ -1,17 +1,16 @@
 """Authority-plane contradictions between resolution and execution.
 
-Effects is the only stage that executes a call AS a resolved principal, so it is
-uniquely able to falsify authority resolution. When the resolver marks a
-function's caller set an EXACT ``finite_set`` and the probe — run as that member —
-is rejected by a CANONICAL, published gate-rejection selector, the enumeration
-named the wrong holder. The detector must key on selectors ONLY: the negative
-below (a state-precondition revert-string) is the case that matters, because the
-first pass of this investigation false-positived by substring-matching "not ".
+Effects is the only stage that executes a call AS a resolved principal, so it can
+falsify authority resolution: an EXACT ``finite_set`` whose member is rejected by
+a CANONICAL gate-rejection selector named the wrong holder. The detector must key
+on selectors ONLY (the first pass false-positived by substring-matching "not ").
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+import pytest
 
 from services.effects import discrepancies
 from services.effects.selection import _membership_exact
@@ -63,50 +62,42 @@ def test_membership_exact_requires_finite_set_and_exact_quality():
     assert _membership_exact(None) is False
 
 
-def test_canonical_gate_rejection_on_an_exact_member_files_a_degraded_error():
-    filed, errors = _run(_transcript(ACCESS_CONTROL_UNAUTHORIZED))
+@pytest.mark.parametrize(
+    ("selector", "success_first"),
+    [
+        pytest.param(ACCESS_CONTROL_UNAUTHORIZED, False, id="access_control_unauthorized"),
+        pytest.param(OWNABLE_UNAUTHORIZED, True, id="ownable_unauthorized"),
+    ],
+)
+def test_canonical_gate_rejection_on_an_exact_member_files_a_degraded_error(selector, success_first):
+    filed, errors = _run(_transcript(selector, success_first=success_first))
     assert filed is True
     assert len(errors) == 1
     err = errors[0]
     assert err.severity == "degraded"
     assert err.context is not None
     assert err.context["discrepancy_kind"] == discrepancies.AUTHORITY_CONTRADICTION_KIND
-    assert err.context["gate_rejection_selector"] == ACCESS_CONTROL_UNAUTHORIZED
+    assert err.context["gate_rejection_selector"] == selector
 
 
-def test_ownable_unauthorized_also_files():
-    filed, errors = _run(_transcript(OWNABLE_UNAUTHORIZED, success_first=True))
-    assert filed is True
-    err = errors[0]
-    assert err.context is not None
-    assert err.context["gate_rejection_selector"] == OWNABLE_UNAUTHORIZED
-
-
-def test_a_state_precondition_revert_files_nothing():
-    """THE test that matters: a state error carries a different, published
-    selector, so a selector-keyed detector never mistakes it for a gate rejection —
-    where a revert-string substring match would."""
-    filed, errors = _run(_transcript(STATE_PRECONDITION))
-    assert filed is False
-    assert errors == []
-
-
-def test_a_non_exact_membership_files_nothing():
-    filed, errors = _run(_transcript(ACCESS_CONTROL_UNAUTHORIZED), membership_exact=False)
-    assert filed is False
-    assert errors == []
-
-
-def test_authority_change_class_is_excluded():
-    """``authority_change`` rejects RANDOM identities at the gate by design, so a
-    gate-rejection revert there is expected behaviour, not a contradiction."""
-    filed, errors = _run(_transcript(ACCESS_CONTROL_UNAUTHORIZED), effect_class="authority_change")
-    assert filed is False
-    assert errors == []
-
-
-def test_a_probe_that_executed_files_nothing():
-    filed, errors = _run(_transcript(success_first=True))
+@pytest.mark.parametrize(
+    ("transcript", "run_kwargs"),
+    [
+        # THE case that matters: a state error carries a different, published selector, so a
+        # selector-keyed detector never mistakes it for a gate rejection, where a revert-string substring
+        # match would.
+        pytest.param(_transcript(STATE_PRECONDITION), {}, id="state_precondition_revert"),
+        pytest.param(_transcript(ACCESS_CONTROL_UNAUTHORIZED), {"membership_exact": False}, id="non_exact_membership"),
+        # ``authority_change`` rejects RANDOM identities at the gate by design, so a gate-rejection revert
+        # there is expected behaviour, not a contradiction.
+        pytest.param(
+            _transcript(ACCESS_CONTROL_UNAUTHORIZED), {"effect_class": "authority_change"}, id="authority_change_class"
+        ),
+        pytest.param(_transcript(success_first=True), {}, id="probe_that_executed"),
+    ],
+)
+def test_files_nothing(transcript, run_kwargs):
+    filed, errors = _run(transcript, **run_kwargs)
     assert filed is False
     assert errors == []
 

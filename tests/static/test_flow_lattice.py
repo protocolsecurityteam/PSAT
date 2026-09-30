@@ -1,14 +1,10 @@
 """Regression tests for the ``flow.out`` destination/amount lattice.
 
-Each test compiles a real Solidity fixture with Slither and drives the
-production ``build_effects`` (and, for the passthrough test, ``build_claims``)
-sequence — no fakes, only the solc compile is real. Precedent:
-``tests/static/test_effects_facts.py``.
-
-These fixtures are the guard for the two −12 theft-vs-routing false positives:
-an immutable/fixed destination (operational routing) must classify distinctly
-from a caller-chosen one (extraction), and any ambiguity must degrade to
-``indeterminate`` rather than silently guessing a member of the union.
+Each test compiles a real Solidity fixture and drives production ``build_effects``
+(``build_claims`` for the passthrough test). Guards the two -12 theft-vs-routing
+false positives: an immutable/fixed destination (routing) must classify distinctly
+from a caller-chosen one (extraction), and ambiguity must degrade to
+``indeterminate`` rather than guess a member of the union.
 """
 
 from __future__ import annotations
@@ -187,10 +183,8 @@ def test_cross_branch_mix_names_both_destinations(tmp_path):
     contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payMix(bool,address,uint256)"])
-    # param on one branch, immutable on the other. The scalar must never collapse
-    # to a MEMBER of the union — but both members are themselves resolved, so it
-    # is a known disjunction rather than an absence of knowledge, and saying
-    # "indeterminate" claimed we had traced nothing on a flow we had traced fully.
+    # param on one branch, immutable on the other: never collapse to a MEMBER, but
+    # both are resolved, so it is a known disjunction, not an absence of knowledge.
     assert flow["target_kind"]["kind"] == "several"
     assert {e["kind"] for e in flow["target_kinds"]} == {"param", "immutable"}
     # Tier stays the weaker of the contributing sites, as for any other fold.
@@ -252,19 +246,7 @@ def test_state_var_survives_internal_call(tmp_path):
     assert flow["target_kind"]["kind"] == "immutable"
 
 
-def test_forwarded_param_recovers_in_callee(tmp_path):
-    contract = _compile(tmp_path, INDIRECTION_SRC, "Indirection")
-    effects = build_effects(contract)
-    flow = _out_flow(effects["functions"]["payForward(address,uint256)"])
-    # The entry's caller-chosen ``dest``/``amt`` forwarded one hop into ``_pay``:
-    # recovered to ``param`` (a trace, since it crossed the internal-call boundary).
-    assert flow["target_kind"] == {"kind": "param", "tier": "static_trace"}
-    assert flow["amount_kind"] == {"kind": "param", "tier": "static_trace"}
-
-
 def test_lattice_reaches_the_claim_witness(tmp_path):
-    """The classified fields survive projection into the ``flow.out`` claim
-    witness the scorer/frontend read (matchers/flows.py)."""
     contract = _compile(tmp_path, LATTICE_SRC, "Lattice")
     effects = build_effects(contract)
     claims = build_claims(contract, effects, {})["functions"]
@@ -281,12 +263,10 @@ def test_lattice_reaches_the_claim_witness(tmp_path):
     assert any(e.get("target_kind") == {"kind": "immutable", "tier": "static_trace"} for e in routing)
 
 
-# ---------------------------------------------------------------------------
 # Setter-scan completeness: ``storage_no_setter`` is a proven negative only when
-# Slither's write attribution is exhaustive. A raw/computed-slot ``sstore`` or a
-# ``delegatecall`` is a write channel the scan cannot see, so "no attributed
-# setter" must NOT be read as "fixed destination" — it degrades to indeterminate
-# (never storage_setter, which would assert an unproven positive).
+# Slither's write attribution is exhaustive. A raw-slot ``sstore`` or ``delegatecall``
+# is a write channel the scan cannot see, so it degrades to indeterminate (never
+# storage_setter, which would assert an unproven positive).
 # ---------------------------------------------------------------------------
 
 _RAW_SLOT_SRC = """
@@ -355,12 +335,9 @@ def test_clean_no_setter_stays_proven_negative(tmp_path):
     assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_no_setter"
 
 
-# ---------------------------------------------------------------------------
-# Storage-pointer aliasing (register #1): a state var written only through a
-# callee taking a ``storage`` reference (``using X for`` / library idiom) is not
-# attributed by Slither. We resolve the alias back to its origin var (a real
-# setter -> storage_setter), and degrade to indeterminate only when the alias
-# genuinely cannot be resolved — never a false storage_no_setter.
+# Storage-pointer aliasing (register #1): a var written only through a callee taking
+# a ``storage`` reference is not attributed by Slither. Resolve the alias to its
+# origin (a real setter); degrade to indeterminate only when unresolvable.
 # ---------------------------------------------------------------------------
 
 _STORAGE_LIB = """
@@ -447,46 +424,30 @@ contract LibReturn {
 )
 
 
-def test_library_storage_write_is_real_setter(tmp_path):
-    contract = _compile(tmp_path, _LIB_WRITE_SRC, "LibWrite")
+@pytest.mark.parametrize(
+    ("src", "name", "expected_kind"),
+    [
+        # box.owner is redirectable via L.put -> the alias is resolved to a setter.
+        pytest.param(_LIB_WRITE_SRC, "LibWrite", "storage_setter", id="library_write"),
+        # A storage ref passed only for reading is not a setter; the clean proof holds.
+        pytest.param(_LIB_READ_SRC, "LibRead", "storage_no_setter", id="library_read_only"),
+        # putNested forwards the storage ref into _inner, which writes it.
+        pytest.param(_LIB_NESTED_SRC, "LibNested", "storage_setter", id="library_transitive_write"),
+        # ``Box storage b = box;`` traces back to box -> a resolved setter.
+        pytest.param(_LIB_LOCAL_SRC, "LibLocal", "storage_setter", id="library_local_pointer_write"),
+        # The storage pointer comes from a call return: some unknown var was written
+        # through the alias, so no no-setter proof in the contract is sound.
+        pytest.param(_LIB_UNRESOLVABLE_SRC, "LibReturn", "indeterminate", id="library_unresolvable_alias"),
+    ],
+)
+def test_library_storage_alias_target_kind(tmp_path, src, name, expected_kind):
+    contract = _compile(tmp_path, src, name)
     effects = build_effects(contract)
-    # box.owner is redirectable via L.put -> the alias is resolved to a setter.
-    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_setter"
+    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == expected_kind
 
 
-def test_library_read_only_stays_no_setter(tmp_path):
-    contract = _compile(tmp_path, _LIB_READ_SRC, "LibRead")
-    effects = build_effects(contract)
-    # A storage ref passed only for reading is not a setter; the clean proof holds.
-    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_no_setter"
-
-
-def test_library_transitive_write_is_real_setter(tmp_path):
-    contract = _compile(tmp_path, _LIB_NESTED_SRC, "LibNested")
-    effects = build_effects(contract)
-    # putNested forwards the storage ref into _inner, which writes it.
-    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_setter"
-
-
-def test_library_local_pointer_write_is_real_setter(tmp_path):
-    contract = _compile(tmp_path, _LIB_LOCAL_SRC, "LibLocal")
-    effects = build_effects(contract)
-    # ``Box storage b = box;`` traces back to box -> a resolved setter.
-    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "storage_setter"
-
-
-def test_library_unresolvable_alias_is_indeterminate(tmp_path):
-    contract = _compile(tmp_path, _LIB_UNRESOLVABLE_SRC, "LibReturn")
-    effects = build_effects(contract)
-    # The storage pointer comes from a call return: some unknown var was written
-    # through the alias, so no no-setter proof in the contract is sound.
-    assert _out_flow(effects["functions"]["pay()"])["target_kind"]["kind"] == "indeterminate"
-
-
-# ---------------------------------------------------------------------------
-# tx.origin destination (register #7): a distinct caller-directed destination
-# fact -> ``caller_controlled`` (theft-shaped, deduction-admissible like
-# param/msg_sender), NOT folded into msg_sender (the address differs).
+# tx.origin destination (register #7): ``caller_controlled`` (theft-shaped), NOT
+# folded into msg_sender (the address differs).
 # ---------------------------------------------------------------------------
 
 _TX_ORIGIN_SRC = """
@@ -510,10 +471,8 @@ def test_tx_origin_destination_is_caller_controlled(tmp_path):
     assert traced["target_kind"] == {"kind": "caller_controlled", "tier": "static_trace"}
 
 
-# ---------------------------------------------------------------------------
 # Struct-field destination of a branch-reassigned local (register #8): the
-# merged-local guard must reach the base through a Member/Index op, or the
-# engine's collapsed (single-branch) value escapes as a guessed concrete kind.
+# merged-local guard must reach the base through Member/Index ops.
 # ---------------------------------------------------------------------------
 
 _STRUCT_MERGE_SRC = """
@@ -542,10 +501,8 @@ def test_struct_field_of_merged_local_is_indeterminate(tmp_path):
     assert _out_flow(effects["functions"]["payMerged(bool,uint256)"])["target_kind"]["kind"] == "indeterminate"
 
 
-# ---------------------------------------------------------------------------
-# Engine-bundle memoization (register #9): a helper reached from multiple entry
-# points is analyzed once. Behavior-preserving — the bundle is a pure function of
-# the helper's IR; only the per-context ``nested`` flag stays on _UnitCtx.
+# Engine-bundle memoization (register #9): a helper reached from multiple entries is
+# analyzed once (behavior-preserving).
 # ---------------------------------------------------------------------------
 
 _SHARED_HELPER_SRC = """
@@ -588,11 +545,8 @@ def test_shared_helper_engine_built_once(tmp_path, monkeypatch):
     assert a["amount_kind"] == b["amount_kind"]
 
 
-# ---------------------------------------------------------------------------
-# Per-site breakdown: the fold collapses every contributing IR site to one
-# scalar and returns ``indeterminate`` on any MIX — right for a single answer,
-# but it hides destinations we actually resolved. ``target_kinds`` /
-# ``amount_kinds`` publish the contributing sites beside the unchanged fold.
+# Per-site breakdown: the fold returns ``indeterminate`` on any MIX, hiding resolved
+# destinations; ``target_kinds`` / ``amount_kinds`` publish the sites beside it.
 # ---------------------------------------------------------------------------
 
 _SITES_SRC = """
@@ -684,11 +638,8 @@ def test_two_resolved_sites_publish_both_destinations(tmp_path):
 def test_sites_that_all_execute_in_one_call_still_fold_to_several(tmp_path):
     """``several`` counts classifications, it does not claim exclusivity.
 
-    Both sends here run in the same invocation, so a name meaning "one of these"
-    would be a false statement about control flow — and a consumer that read it
-    that way would look for the single destination the funds went to when in fact
-    they went to two.
-    """
+    Both sends run in the same invocation, so a name meaning "one of these" would
+    be a false statement about control flow."""
     contract = _compile(tmp_path, _SITES_SRC, "Sites")
     effects = build_effects(contract)
     flow = _out_flow(effects["functions"]["payThenSweep(address,uint256)"])

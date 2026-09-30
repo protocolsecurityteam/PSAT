@@ -1,14 +1,6 @@
-"""Shared per-process display metadata + one staleness rule.
+"""Per-process display metadata and the staleness rule.
 
-Both the ``/api/fleet`` reader (``services.aggregations.fleet``) and the ops
-watchdog (``services.monitoring.ops_alerts``) need to answer the same question —
-"is this daemon fresh, stale, or errored?" — off the same ``worker_heartbeats``
-rows. Keeping ``PROCESS_META`` and the staleness formula in one module (imported
-by both) is what stops the fleet view and the alerter from drifting: a daemon the
-operator sees as green in ``/api/fleet`` is exactly one the watchdog won't page on.
-
-Kept import-light on purpose (only the ``db.queue`` name constants) so both a
-FastAPI router and a low-level aggregation can import it without a cycle.
+Shared by ``/api/fleet`` and the ops watchdog, so a daemon shown green is never paged on.
 """
 
 from __future__ import annotations
@@ -31,10 +23,7 @@ from db.queue import (
     HEARTBEAT_ROLE_HOLDER_PLANE,
 )
 
-# Per-process display metadata + staleness window. ``interval_s`` is the loop
-# cadence; a process is flagged stale when its last beat is older than
-# ``3 × interval`` (with a 120s floor) — long enough to absorb one slow pass,
-# short enough to surface a crash. ``kind`` groups processes for the UI.
+# ``interval_s`` is the loop cadence; ``kind`` groups processes in the UI.
 PROCESS_META: dict[str, dict[str, Any]] = {
     HEARTBEAT_COVERAGE_VERIFY: {"kind": "drainer", "interval_s": 30, "label": "Coverage / source-equivalence"},
     HEARTBEAT_AUDIT_TEXT: {"kind": "drainer", "interval_s": 30, "label": "Audit text extraction"},
@@ -87,7 +76,6 @@ def planned_sleep(process: str, controller: dict | None) -> bool:
     )
 
 
-# Classification labels shared by the fleet view and the watchdog.
 FRESH = "fresh"
 STALE = "stale"
 ERROR = "error"
@@ -96,28 +84,17 @@ _STALE_FLOOR_S = 120
 
 
 def stale_after_seconds(interval_s: int) -> float:
-    """The age past which a heartbeat is stale: ``3 × interval``, floored at 120s.
-
-    The single source of the staleness window — imported by both the fleet
-    aggregation and the ops watchdog so the two can never disagree.
-    """
+    """``3 × interval``, floored at 120s: absorbs one slow pass, still surfaces a crash."""
     return float(max(3 * interval_s, _STALE_FLOOR_S))
 
 
 def is_stale(beat_age_s: float | None, interval_s: int) -> bool:
-    """A missing heartbeat (``beat_age_s is None``) or one older than the
-    staleness window counts as stale."""
+    """A missing heartbeat is stale."""
     return beat_age_s is None or beat_age_s >= stale_after_seconds(interval_s)
 
 
 def classify(status: str | None, beat_age_s: float | None, interval_s: int) -> str:
-    """Bucket a heartbeat into :data:`FRESH` / :data:`STALE` / :data:`ERROR`.
-
-    Staleness dominates: a process whose heartbeat has gone silent is stale
-    regardless of the last status it wrote. Among live beats, an explicit
-    ``error`` status (the supervisor stamps it when a loop escapes) is
-    surfaced as :data:`ERROR`; everything else is :data:`FRESH`.
-    """
+    """Staleness dominates the last written status; among live beats an ``error`` status maps to :data:`ERROR`."""
     if is_stale(beat_age_s, interval_s):
         return STALE
     if status == ERROR:

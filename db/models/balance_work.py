@@ -1,5 +1,3 @@
-"""Selected effects awaiting deferred token collection."""
-
 from __future__ import annotations
 
 import uuid

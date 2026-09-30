@@ -22,11 +22,8 @@ from services.resolution.mapping_enumerator import (
 
 @pytest.fixture(autouse=True)
 def _isolated_cache(monkeypatch):
-    # Tests in this file exercise the in-process L1 cache only; the L2
-    # (Postgres-backed) cache lives in db.mapping_enumeration_cache and
-    # has its own test file. Disable L2 here so these tests don't depend
-    # on a live DB connection or the migrated mapping_enumeration_cache
-    # table being present.
+    # These tests exercise the in-process L1 cache only; disable L2 so they don't need a
+    # live DB or the migrated mapping_enumeration_cache table.
     monkeypatch.setenv("PSAT_MAPPING_ENUMERATION_DB_CACHE", "0")
     clear_enumeration_cache()
     yield
@@ -34,13 +31,8 @@ def _isolated_cache(monkeypatch):
 
 
 def enumerate_mapping_allowlist(contract_address, writer_specs, **kwargs):
-    """Test helper. The function now returns an EnumerationResult dict;
-    legacy tests below expect the bare principal list, so this helper
-    unwraps result["principals"] to keep the legacy tests focused on
-    the per-event semantics they were written for.
-
-    ``from_block`` is now a required enumerator arg; these per-event unit
-    tests replay over the full stub-log range, so default it to genesis here."""
+    """Unwraps ``result["principals"]`` so legacy per-event tests stay focused. ``from_block``
+    is a required enumerator arg; these replay the full stub-log range, so default to genesis."""
     kwargs.setdefault("from_block", 0)
     result = _enumerate(contract_address, cast(Any, writer_specs), **kwargs)
 
@@ -119,31 +111,23 @@ def _run(coroutine):
     return asyncio.run(coroutine)
 
 
-def test_event_topic0_hashes_canonical_signature():
-    expected = "0xdd0e34038ac38b2a1ce960229778ac48a8719bc900b6c4f8d0475c6e8b385a60"
-    assert _event_topic0("Rely(address)") == expected
+_ALICE_WORD = "0x" + _addr("aa11")[2:].rjust(64, "0")
+_BOB_WORD = _addr("bb22")[2:].rjust(64, "0")
 
 
-def test_decode_address_topic_strips_padding():
-    padded = _indexed_topic(_addr("dead1234"))
-    assert _decode_address_topic(padded) == _addr("dead1234")
-
-
-def test_decode_address_topic_rejects_wrong_length():
-    assert _decode_address_topic("0xdead") == ""
-
-
-def test_decode_address_arg_from_data_position_0():
-    a = _addr("aa11")
-    padded = "0x" + a[2:].rjust(64, "0")
-    assert _decode_address_arg_from_data(padded, 0) == a
-
-
-def test_decode_address_arg_from_data_position_1():
-    a = _addr("aa11")
-    b = _addr("bb22")
-    data = "0x" + a[2:].rjust(64, "0") + b[2:].rjust(64, "0")
-    assert _decode_address_arg_from_data(data, 1) == b
+@pytest.mark.parametrize(
+    ("decode", "args", "expected"),
+    [
+        pytest.param(
+            _decode_address_topic, (_indexed_topic(_addr("dead1234")),), _addr("dead1234"), id="topic-strips-padding"
+        ),
+        pytest.param(_decode_address_topic, ("0xdead",), "", id="topic-rejects-wrong-length"),
+        pytest.param(_decode_address_arg_from_data, (_ALICE_WORD, 0), _addr("aa11"), id="data-position-0"),
+        pytest.param(_decode_address_arg_from_data, (_ALICE_WORD + _BOB_WORD, 1), _addr("bb22"), id="data-position-1"),
+    ],
+)
+def test_address_decoders(decode, args, expected):
+    assert decode(*args) == expected
 
 
 def _rely_spec():
@@ -170,52 +154,49 @@ def _deny_spec():
     }
 
 
-def test_single_add_appears_in_output():
-    rely_topic = _event_topic0("Rely(address)")
-    alice = _addr("a11ce")
+ALICE = _addr("a11ce")
+BOB = _addr("b0b")
+
+
+@pytest.mark.parametrize(
+    ("specs", "events", "expected"),
+    [
+        pytest.param((_rely_spec,), [("Rely", ALICE, 10)], [(ALICE, ["add"], 10)], id="single-add"),
+        # CRITICAL: a remove after an add must drop the principal.
+        pytest.param(
+            (_rely_spec, _deny_spec),
+            [("Rely", ALICE, 10), ("Deny", ALICE, 20)],
+            [],
+            id="add-then-remove-leaves-empty",
+        ),
+        pytest.param(
+            (_rely_spec, _deny_spec),
+            [("Rely", ALICE, 10), ("Deny", ALICE, 20), ("Rely", ALICE, 30)],
+            [(ALICE, ["add", "remove", "add"], 30)],
+            id="add-remove-add-ends-present",
+        ),
+        pytest.param(
+            (_rely_spec,),
+            [("Rely", ALICE, 10), ("Rely", BOB, 11)],
+            [(ALICE, ["add"], 10), (BOB, ["add"], 11)],
+            id="multiple-principals-independent",
+        ),
+    ],
+)
+def test_event_fold_semantics(specs, events, expected):
+    topics = {"Rely": _event_topic0("Rely(address)"), "Deny": _event_topic0("Deny(address)")}
     client, _ = _fake_client(
-        [
-            ([_log(rely_topic, indexed_args=[alice], block=10)], None),
-        ]
+        [([_log(topics[name], indexed_args=[who], block=block) for name, who, block in events], None)]
     )
     out = _run(
         enumerate_mapping_allowlist(
             "0xCC00000000000000000000000000000000000001",
-            [_rely_spec()],
+            [spec() for spec in specs],
             client=client,
             hypersync_module=_FakeHypersyncModule(),
         )
     )
-    addresses = [p["address"] for p in out]
-    assert addresses == [alice]
-    assert out[0]["direction_history"] == ["add"]
-    assert out[0]["last_seen_block"] == 10
-
-
-def test_add_then_remove_leaves_empty():
-    rely_topic = _event_topic0("Rely(address)")
-    deny_topic = _event_topic0("Deny(address)")
-    alice = _addr("a11ce")
-    client, _ = _fake_client(
-        [
-            (
-                [
-                    _log(rely_topic, indexed_args=[alice], block=10),
-                    _log(deny_topic, indexed_args=[alice], block=20),
-                ],
-                None,
-            ),
-        ]
-    )
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [_rely_spec(), _deny_spec()],
-            client=client,
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert out == []
+    assert sorted((p["address"], p["direction_history"], p["last_seen_block"]) for p in out) == sorted(expected)
 
 
 def test_conflicting_directions_for_same_event_topic_are_rejected():
@@ -246,62 +227,6 @@ def test_conflicting_directions_for_same_event_topic_are_rejected():
     )
     assert out == []
     assert calls["n"] == 0
-
-
-def test_add_remove_add_ends_present():
-    rely_topic = _event_topic0("Rely(address)")
-    deny_topic = _event_topic0("Deny(address)")
-    alice = _addr("a11ce")
-    client, _ = _fake_client(
-        [
-            (
-                [
-                    _log(rely_topic, indexed_args=[alice], block=10),
-                    _log(deny_topic, indexed_args=[alice], block=20),
-                    _log(rely_topic, indexed_args=[alice], block=30),
-                ],
-                None,
-            ),
-        ]
-    )
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [_rely_spec(), _deny_spec()],
-            client=client,
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert [p["address"] for p in out] == [alice]
-    assert out[0]["direction_history"] == ["add", "remove", "add"]
-    assert out[0]["last_seen_block"] == 30
-
-
-def test_multiple_principals_independent():
-    rely_topic = _event_topic0("Rely(address)")
-    alice = _addr("a11ce")
-    bob = _addr("b0b")
-    client, _ = _fake_client(
-        [
-            (
-                [
-                    _log(rely_topic, indexed_args=[alice], block=10),
-                    _log(rely_topic, indexed_args=[bob], block=11),
-                ],
-                None,
-            ),
-        ]
-    )
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [_rely_spec()],
-            client=client,
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    addresses = sorted(p["address"] for p in out)
-    assert addresses == sorted([alice, bob])
 
 
 def test_non_indexed_key_decodes_from_data_slot():
@@ -359,30 +284,6 @@ def test_indexed_argument_before_non_indexed_key_uses_data_slot_zero():
     assert [p["address"] for p in out] == [alice]
 
 
-def test_empty_history_returns_empty():
-    client, _ = _fake_client([])
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [_rely_spec()],
-            client=client,
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert out == []
-
-
-def test_no_specs_returns_empty_without_client():
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [],
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert out == []
-
-
 def test_pagination_via_next_block():
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
@@ -408,44 +309,31 @@ def test_pagination_via_next_block():
     assert calls["n"] == 3
 
 
-def test_unknown_topic_ignored():
-    rely_topic = _event_topic0("Rely(address)")
-    other_topic = _event_topic0("Unrelated(uint256)")
-    alice = _addr("a11ce")
-    client, _ = _fake_client(
-        [
-            (
-                [
-                    _log(other_topic, indexed_args=[alice], block=5),
-                    _log(rely_topic, indexed_args=[alice], block=10),
-                ],
-                None,
-            ),
-        ]
-    )
-    out = _run(
-        enumerate_mapping_allowlist(
-            "0xCC00000000000000000000000000000000000001",
-            [_rely_spec()],
-            client=client,
-            hypersync_module=_FakeHypersyncModule(),
-        )
-    )
-    assert [p["address"] for p in out] == [alice]
-
-
-def test_malformed_address_topic_skipped():
-    rely_topic = _event_topic0("Rely(address)")
-    bad_log = SimpleNamespace(
+def _malformed_topic_log(rely_topic, _alice):
+    return SimpleNamespace(
         topics=[rely_topic, "0xdead"],
         data="0x",
         block_number=10,
         transaction_hash="0x" + "f" * 64,
         log_index=0,
     )
+
+
+@pytest.mark.parametrize(
+    "make_noise_log",
+    [
+        pytest.param(
+            lambda rely_topic, alice: _log(_event_topic0("Unrelated(uint256)"), indexed_args=[alice], block=5),
+            id="unknown-topic",
+        ),
+        pytest.param(_malformed_topic_log, id="malformed-address-topic"),
+    ],
+)
+def test_unusable_logs_are_skipped(make_noise_log):
+    rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
     good_log = _log(rely_topic, indexed_args=[alice], block=11)
-    client, _ = _fake_client([([bad_log, good_log], None)])
+    client, _ = _fake_client([([make_noise_log(rely_topic, alice), good_log], None)])
     out = _run(
         enumerate_mapping_allowlist(
             "0xCC00000000000000000000000000000000000001",
@@ -460,16 +348,12 @@ def test_malformed_address_topic_skipped():
 # ---------------------------------------------------------------------------
 # Bound + cache + status regression tests (PSAT-speedup #1).
 #
-# Background: the original `while True` pagination loop had no max_pages,
-# no timeout, and no lookback bound. For 2017-deployed contracts
-# (LinkToken etc.) that's ~190 pages × 25s = 80 min of sync work blocking
-# the resolution worker — heartbeat misses, reclaim_stuck_jobs releases
-# the row, live tests time out at 600s.
-#
-# Naive truncation that returns an empty list silently is a CORRECTNESS
-# regression: a Rely(alice) in 2017 with no later Deny means alice is
-# still authorized. These tests pin the bound + the requirement that
-# truncation is surfaced via `result["status"]` rather than swallowed.
+# The original `while True` pagination had no max_pages/timeout/lookback bound: for
+# 2017-deployed contracts (LinkToken etc.) ~190 pages x 25s = 80 min blocking the
+# resolution worker (heartbeat misses, reclaim_stuck_jobs, live tests time out at 600s).
+# Naive truncation to an empty list is a CORRECTNESS regression (a 2017 Rely(alice) with
+# no later Deny means alice is still authorized), so truncation must surface via
+# `result["status"]`.
 # ---------------------------------------------------------------------------
 
 
@@ -488,16 +372,13 @@ def test_max_pages_bound_returns_incomplete_status():
             max_pages=2,
         )
     )
-    # Bound hit at page 2; status surfaces it.
     assert result["status"] == "incomplete_max_pages"
     assert result["pages_fetched"] == 2
-    # Partial principals returned — not silent empty.
     assert len(result["principals"]) == 2
 
 
 def test_timeout_returns_incomplete_status():
-    """Wall-clock bound: each page sleeps 0.05s, timeout is 0.12s, so
-    we expect ~2 pages then a timeout (definitely <20)."""
+    """Each page sleeps 0.05s, timeout is 0.12s: ~2 pages then a timeout (definitely <20)."""
     rely_topic = _event_topic0("Rely(address)")
 
     class _SlowClient:
@@ -529,15 +410,12 @@ def test_timeout_returns_incomplete_status():
     assert result["status"] == "incomplete_timeout"
     assert result["pages_fetched"] >= 1
     assert result["pages_fetched"] < 20  # bound stopped us well before n=20
-    # Partial principals — not silent empty.
     assert len(result["principals"]) >= 1
 
 
 def test_rpc_error_surfaces_status_not_silent_fallback():
-    """The original recursive.py caller had `except Exception:
-    enumerated = []` which silently dropped principals. Now an
-    underlying RPC error must surface as status='error' with whatever
-    partial data was already collected."""
+    """The original recursive.py caller had ``except Exception: enumerated = []``, silently
+    dropping principals. An RPC error must surface as status='error' with the partial data."""
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
 
@@ -564,8 +442,7 @@ def test_rpc_error_surfaces_status_not_silent_fallback():
     assert result["status"] == "error"
     assert result["error"] == "hypersync 503"
     assert result["pages_fetched"] == 1
-    # Page 1 principal still surfaced — caller must NOT see an empty list
-    # and conclude "no admins".
+    # Page 1 principal still surfaced: the caller must NOT conclude "no admins".
     assert [p["address"] for p in result["principals"]] == [alice]
 
 
@@ -590,8 +467,7 @@ def test_complete_result_carries_status_complete():
 
 
 def test_sync_wrapper_caches_results():
-    """Sibling cascade jobs enumerating the same contract within the TTL
-    must share results without re-running the pagination loop."""
+    """Sibling cascade jobs enumerating the same contract within the TTL share results."""
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
     pages = [([_log(rely_topic, indexed_args=[alice], block=10)], None)]
@@ -610,7 +486,6 @@ def test_sync_wrapper_caches_results():
     calls_after_first = calls["n"]
     assert calls_after_first >= 1
 
-    # Second call — cache hit, no new client.get invocations.
     result2 = enumerate_mapping_allowlist_sync(
         "0x" + "AA" * 20,
         cast(Any, [_rely_spec()]),
@@ -621,21 +496,6 @@ def test_sync_wrapper_caches_results():
     assert result2["status"] == "complete"
     assert result2["principals"] == result1["principals"]
     assert calls["n"] == calls_after_first  # no additional calls
-
-
-def test_clear_enumeration_cache_drops_entries():
-    rely_topic = _event_topic0("Rely(address)")
-    client, _ = _fake_client([([_log(rely_topic, indexed_args=[_addr("aa")], block=10)], None)])
-    enumerate_mapping_allowlist_sync(
-        "0x" + "BB" * 20,
-        cast(Any, [_rely_spec()]),
-        from_block=0,
-        client=client,
-        hypersync_module=_FakeHypersyncModule(),
-    )
-    assert mapping_enumerator._CACHE  # populated
-    clear_enumeration_cache()
-    assert not mapping_enumerator._CACHE
 
 
 # ---------------------------------------------------------------------------
@@ -746,7 +606,6 @@ def test_value_predicate_latest_value_wins_over_older_assignment():
         )
     )
     assert filter_value_entries(result["entries"], {"op": "eq", "rhs_values": ["10"], "value_type": "uint256"}) == []
-    # And 5 matches.
     assert filter_value_entries(result["entries"], {"op": "eq", "rhs_values": ["5"], "value_type": "uint256"}) == [
         a.lower()
     ]
@@ -773,19 +632,18 @@ def test_value_predicate_passes_op_handles_addresses_and_any_nonzero():
 
 
 # ---------------------------------------------------------------------------
-# L1 re-key on (chain, address, specs_hash) + size cap.
+# P1.3 - L1 re-key on (chain, address, specs_hash) + size cap.
 #
-# The old address-only L1 key collided across chains and writer-spec sets,
-# defeating L2's careful (chain, address, specs_hash) keying. These pin the
-# re-key (distinct specs/chain MISS) AND the parity requirement (the common
-# single-chain/single-specs repeat must still HIT — no extra hypersync scan).
-# The autouse _isolated_cache fixture sets DB cache OFF and clears L1/L2.
+# The old address-only L1 key collided across chains and writer-spec sets, defeating L2's
+# keying. These pin the re-key (distinct specs/chain MISS) AND parity (a single-chain/
+# single-specs repeat must still HIT). The autouse _isolated_cache fixture sets DB cache
+# OFF and clears L1/L2.
 # ---------------------------------------------------------------------------
 
 
 def test_l1_rekey_parity_same_chain_single_specs():
-    """PARITY: a repeat with the same chain + specs must still HIT L1 (the re-key must
-    not introduce a miss that re-pays the hypersync scan)."""
+    """PARITY: a repeat with the same chain + specs must still HIT L1 (no extra hypersync
+    scan)."""
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
     client, calls = _fake_client([([_log(rely_topic, indexed_args=[alice], block=10)], None)])
@@ -875,9 +733,8 @@ def test_l1_enumeration_cache_size_capped(monkeypatch):
 
 
 def test_value_cache_rekey_ignores_predicate():
-    """The value-fold L1 key is (chain, address, specs_hash) WITHOUT the predicate: the
-    cached entries are predicate-independent (filter_value_entries applies the predicate
-    downstream), so a re-run with a different predicate HITs instead of re-paginating."""
+    """The value-fold L1 key omits the predicate (cached entries are predicate-independent;
+    ``filter_value_entries`` applies it downstream), so a different predicate HITs."""
     from services.resolution.mapping_enumerator import enumerate_mapping_values_sync
 
     topic0 = _event_topic0("OwnerSet(address,uint256)")

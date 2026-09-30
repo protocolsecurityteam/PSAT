@@ -1,11 +1,5 @@
-"""Admin-curated address → name labels.
-
-Global-plus-override model: a label row is either *global*
-(``chain IS NULL`` — applies on every chain, the right semantics for EOA /
-Safe-signer accounts) or *chain-qualified* (a concrete chain name that overrides
-the global label on that chain, so contract labels are safe cross-chain). The
-API preserves the historical address-keyed shape for global rows so existing
-consumers are unchanged, and exposes chain-qualified rows under a separate map.
+"""Admin-curated address labels: a row is global (``chain IS NULL``, right for EOAs/Safe signers) or a
+chain-qualified override (safe for contracts cross-chain). Global rows keep the historical address-keyed shape.
 """
 
 from __future__ import annotations
@@ -29,13 +23,7 @@ router = APIRouter()
 
 
 def _resolve_chain_or_400(chain: str | None) -> str | None:
-    """Normalize an optional ``?chain=`` param to a canonical chain name.
-
-    ``None`` / empty stays ``None`` (operate on the global row — unchanged
-    behavior). A concrete value is normalized through the registry so aliases
-    (``"mainnet"`` → ``"ethereum"``) collapse to one row; an unknown chain is a
-    client error (400) with the offending value, never a silent fallthrough.
-    """
+    """Aliases collapse to one canonical name; an unknown chain is a 400, never a silent fallthrough."""
     if chain is None or not chain.strip():
         return None
     try:
@@ -54,15 +42,9 @@ def _row_view(row: AddressLabel) -> AddressLabelView:
 
 @router.get("/api/address_labels", response_model=None)
 def list_address_labels() -> AddressLabelsResponse:
-    """Return stored address → name mappings.
+    """Public so any page can decorate addresses.
 
-    ``labels`` keeps the original ``{address: {...}}`` shape and carries only
-    GLOBAL rows, so every existing consumer is byte-compatible. Chain-qualified
-    overrides live under ``chain_labels`` as ``{chain: {address: {...}}}``.
-
-    Public read endpoint so any page (principal detail, surface node, etc.) can
-    decorate raw hex addresses with the admin-assigned name. The admin key is
-    only required to mutate labels (PUT/DELETE below).
+    ``labels`` holds global rows in the original shape; overrides are under ``chain_labels``.
     """
     with deps.SessionLocal() as session:
         rows = session.execute(select(AddressLabel)).scalars().all()
@@ -82,19 +64,10 @@ def upsert_address_label(
     payload: AddressLabelUpsert,
     chain: str | None = Query(default=None),
 ) -> AddressLabelUpsertResponse:
-    """Create or update the human-readable name for an address.
-
-    Idempotent — repeated calls with the same body leave the row unchanged
-    (aside from ``updated_at``). Without ``?chain=`` this writes the GLOBAL row
-    (``chain IS NULL``), exactly as before — the frontend uses that for Safe
-    signers and EOA principals. With ``?chain=`` it writes the chain-qualified
-    override for a contract on that specific network.
-    """
+    """Without ``?chain=`` writes the global row; with it, a chain-qualified override."""
     a = deps._normalize_address_or_400(address)
     c = _resolve_chain_or_400(chain)
     with deps.SessionLocal() as session:
-        # Cannot key by PK (surrogate id now); match on the (address, chain)
-        # override slot, with chain IS NULL selecting the single global row.
         stmt = select(AddressLabel).where(AddressLabel.address == a)
         stmt = stmt.where(AddressLabel.chain == c) if c is not None else stmt.where(AddressLabel.chain.is_(None))
         row = session.execute(stmt).scalar_one_or_none()

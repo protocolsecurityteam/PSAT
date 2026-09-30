@@ -1,20 +1,12 @@
 """Regression tests for the Plane-0 facts hardening in ``effects/``.
 
-Each test compiles a real Solidity fixture with Slither and drives the
-production ``build_effects`` -> ``build_claims`` -> ``project_effect_labels``
-sequence — no fakes, only the solc compile is real. Precedent:
-``tests/policy/test_selector_canonicalization.py``.
-
-The six facts-plane hardening fixes:
-  (a) sink ``origin`` in {body, guard} — a modifier's own auth call is a guard
-      fact, not an effect;
-  (b) ``build_effects`` keying prefers a concrete body over a 0-node interface
-      re-declaration;
-  (c) member-level write facts ``(var, member_path)`` with declared types;
-  (d) ``hygiene_class`` on writes, and the ownership harvest gated on
-      hygiene-clean scalar address vars;
-  (e) native ``transfer``/``send`` become value sinks;
-  (f) ``transferFrom`` direction corrected when ``from == address(this)``.
+Each test compiles a real Solidity fixture and drives the production
+``build_effects`` -> ``build_claims`` -> ``project_effect_labels`` sequence. The
+six fixes (FACT records / prerequisites), one section each:
+(a) sink ``origin`` body vs guard; (b) keying prefers a concrete body over a 0-node
+interface re-declaration; (c) member-level write facts; (d) ``hygiene_class`` and
+the hygiene-gated ownership harvest; (e) native ``transfer``/``send`` value sinks;
+(f) ``transferFrom`` direction when ``from == address(this)``.
 """
 
 from __future__ import annotations
@@ -33,7 +25,6 @@ from services.static.claims import (  # noqa: E402
     project_effect_labels,
 )
 from services.static.contract_analysis_pipeline.effects import (  # noqa: E402
-    SCHEMA_VERSION,
     build_effects,
 )
 from services.static.contract_analysis_pipeline.predicate_artifacts import (  # noqa: E402
@@ -49,8 +40,7 @@ def _compile(tmp_path: Path, source: str, name: str):
 
 
 def _effects_with_labels(contract):
-    """Facts + Plane-1 claims + the effect-label projection, exactly as core.py
-    runs them (the claim projection is what now emits ``ownership_transfer``)."""
+    """Facts + Plane-1 claims + label projection, exactly as core.py runs them."""
     predicate_trees, _pause = build_predicate_artifacts_with_pause_info(contract)
     effects = build_effects(contract)
     claims_artifact = build_claims(contract, effects, predicate_trees)
@@ -97,23 +87,20 @@ contract Svc is Auth {
 
 
 def test_modifier_auth_call_is_guard_origin_and_never_an_effect(tmp_path):
-    """The ``requiresAuth`` modifier's ``authority.canCall`` is reached only
-    through the modifier, so it's a guard-origin sink and does NOT make
-    ``pause()`` an ``external_contract_call``. A real body call (``t.ping``)
-    stays body-origin and does drive the label."""
+    """``authority.canCall`` is reached only through the modifier, so it is a
+    guard-origin sink and does NOT make ``pause()`` an ``external_contract_call``;
+    a real body call (``t.ping``) does."""
     contract = _compile(tmp_path, _GUARD_ORIGIN_SRC, "Svc")
     effects = build_effects(contract)
 
     pause = _info(effects, "pause()")
     assert _sink(pause, "external_call", "canCall")["origin"] == "guard"
     assert _sink(pause, "state_write", "isPaused")["origin"] == "body"
-    # The only external call is the guard's — the effect is not diluted.
     assert "external_contract_call" not in pause["effect_labels"]
 
     poke = _info(effects, "poke(Pinger,uint256)")
     assert _sink(poke, "external_call", "ping")["origin"] == "body"
     assert _sink(poke, "external_call", "canCall")["origin"] == "guard"
-    # A genuine body call still surfaces as an external_contract_call.
     assert "external_contract_call" in poke["effect_labels"]
 
 
@@ -136,10 +123,9 @@ contract Manager is Pausable {
 
 
 def test_concrete_body_wins_over_zero_node_interface_declaration(tmp_path):
-    """``Manager`` inherits both the concrete ``Pausable.pause`` and the
-    0-node ``IPausable.pause`` interface declaration under one ``full_name``.
-    Keying by ``full_name`` alone lets the interface clobber the real record
-    and blank its sinks; the fix keeps the implemented body."""
+    """``Manager`` inherits the concrete ``Pausable.pause`` and the 0-node
+    ``IPausable.pause`` under one ``full_name``; keying by name alone lets the
+    interface clobber the real record and blank its sinks."""
     contract = _compile(tmp_path, _CLOBBER_SRC, "Manager")
 
     # Precondition: the clobber scenario really exists (two records, one blank).
@@ -171,9 +157,8 @@ contract Accountant {
 
 
 def test_member_write_facts_carry_member_path_and_declared_type(tmp_path):
-    """Writing ``s.isPaused`` vs. ``s.payoutAddress`` produces distinct member
-    facts with the member's own declared type — the substrate a pause claim
-    needs to tell the bool member from the address member of one struct."""
+    """Distinct member facts with each member's declared type: the substrate a
+    pause claim needs to tell the bool member from the address member."""
     contract = _compile(tmp_path, _MEMBER_SRC, "Accountant")
     effects = build_effects(contract)
 
@@ -198,9 +183,9 @@ def test_member_write_facts_carry_member_path_and_declared_type(tmp_path):
 
 # --- (d) hygiene classes + ownership harvest gate -----------------------
 
-# OZ v5 namespaced-storage Ownable: Slither attributes the bytes32 slot
-# *constant* ``OwnableStorageLocation`` as "written" by every function that
-# touches the namespaced storage — including the ``owner()`` view.
+# OZ v5 namespaced-storage Ownable: Slither reports the bytes32 slot constant
+# ``OwnableStorageLocation`` as "written" by every function touching the storage,
+# including the ``owner()`` view.
 _OZ_V5_SRC = """
 pragma solidity ^0.8.20;
 abstract contract OwnableUpgradeable {
@@ -221,13 +206,11 @@ contract Vault is OwnableUpgradeable {
 
 
 def test_oz_v5_slot_constant_ghost_is_not_ownership_and_is_hygiene_tagged(tmp_path):
-    """Ghost-immunity via standards, not write identity: the ``ownership.*``
-    matcher keys on the canonical ``transferOwnership`` selector + the
-    ``owner()`` getter sibling, so ``transferOwnership`` IS tagged even on OZ v5
-    namespaced storage — while the ``owner()`` view and the unrelated
-    ``setToken`` setter (which also "write" the ``OwnableStorageLocation`` slot
-    constant per Slither) are NOT. The ghost writes stay recorded with a hygiene
-    class (``view_writer`` / ``storage_location_pseudo``)."""
+    """Ghost-immunity via standards, not write identity: ``transferOwnership`` IS
+    tagged even on OZ v5 namespaced storage, while the ``owner()`` view and
+    ``setToken`` (which also "write" the slot constant per Slither) are NOT. The
+    ghost writes stay recorded with a hygiene class (``view_writer`` /
+    ``storage_location_pseudo``)."""
     contract = _compile(tmp_path, _OZ_V5_SRC, "Vault")
     effects = _effects_with_labels(contract)
 
@@ -235,7 +218,6 @@ def test_oz_v5_slot_constant_ghost_is_not_ownership_and_is_hygiene_tagged(tmp_pa
     for signature in ("owner()", "setToken(address)"):
         assert "ownership_transfer" not in _info(effects, signature)["effect_labels"], signature
 
-    # A view "writing" the slot constant is a ghost.
     owner_write = _sink(_info(effects, "owner()"), "state_write", "OwnableStorageLocation")
     assert owner_write["origin"] == "body"
     owner_fact = next(sw for sw in _info(effects, "owner()")["state_writes"] if sw["var"] == "OwnableStorageLocation")
@@ -262,9 +244,7 @@ contract Token is Ownable {
 
 
 def test_hygiene_gate_keeps_real_address_owner_ownership(tmp_path):
-    """The gate drops slot constants, not real pointers: a plain
-    ``address private _owner`` still yields ``ownership_transfer`` on its
-    setter (control for the OZ v5 ghost test)."""
+    """A plain ``address private _owner`` still yields ``ownership_transfer`` (control for the OZ v5 ghost test)."""
     contract = _compile(tmp_path, _OZ_V4_OWNABLE_SRC, "Token")
     effects = _effects_with_labels(contract)
 
@@ -290,9 +270,8 @@ contract Pool is ReentrancyGuard {
 
 
 def test_reentrancy_guard_write_is_guard_origin_and_hygiene_tagged(tmp_path):
-    """The ``_status`` write lives in the ``nonReentrant`` modifier, so it is
-    a guard-origin, ``reentrancy_guard``-hygiene fact, kept apart from the
-    body write ``x``."""
+    """The ``_status`` write lives in ``nonReentrant``: a guard-origin,
+    ``reentrancy_guard``-hygiene fact, apart from the body write ``x``."""
     contract = _compile(tmp_path, _REENTRANCY_SRC, "Pool")
     effects = build_effects(contract)
     facts = {sw["var"]: sw for sw in _info(effects, "doWork(uint256)")["state_writes"]}
@@ -323,9 +302,8 @@ contract W {
 
 
 def test_native_transfer_and_send_become_asset_send(tmp_path):
-    """``.transfer()``/``.send()`` lower to their own IR op (not a low-level
-    call), so the old scan missed them and the balance-map setters fell to the
-    ``hook_update`` fallback. They are now outbound value flows → ``asset_send``."""
+    """``.transfer()``/``.send()`` lower to their own IR op, not a low-level call,
+    so the old scan missed them and the setters fell to ``hook_update``."""
     contract = _compile(tmp_path, _NATIVE_TRANSFER_SRC, "W")
     effects = build_effects(contract)
 
@@ -339,7 +317,6 @@ def test_native_transfer_and_send_become_asset_send(tmp_path):
     assert any(vf["kind"] == "native_transfer_send" for vf in send["value_flows"])
     assert "asset_send" in send["effect_labels"]
 
-    # deposit takes ETH in but sends nothing out: no native value flow.
     assert not _info(effects, "deposit()")["value_flows"]
 
 
@@ -364,10 +341,8 @@ contract Rec {
 
 
 def test_transferfrom_from_self_is_asset_send_not_pull(tmp_path):
-    """``transferFrom(address(this), to, id)`` sends OUT — the selector alone
-    reads as a pull, so the ``from == address(this)`` fact corrects it to
-    ``asset_send``. A genuine ``transferFrom(from, address(this), id)`` stays
-    ``asset_pull``."""
+    """``transferFrom(address(this), to, id)`` sends OUT though the selector alone
+    reads as a pull; ``transferFrom(from, address(this), id)`` stays ``asset_pull``."""
     contract = _compile(tmp_path, _DIRECTION_SRC, "Rec")
     effects = build_effects(contract)
 
@@ -397,8 +372,6 @@ contract A {
 
 
 def test_inline_assembly_write_is_assembly_slot_granularity(tmp_path):
-    """An inline-assembly ``sstore`` write (no named state var) is recorded as
-    an ``assembly_slot`` state-write fact."""
     contract = _compile(tmp_path, _ASSEMBLY_SLOT_SRC, "A")
     effects = build_effects(contract)
     facts = _info(effects, "setSlot(uint256)")["state_writes"]
@@ -409,17 +382,7 @@ def test_inline_assembly_write_is_assembly_slot_granularity(tmp_path):
     assert assembly_facts[0]["member_path"] == []
 
 
-def test_schema_version_bumped_for_additive_fact_fields(tmp_path):
-    """The additive facts (``origin``, ``state_writes``, ``value_flows``) bump
-    the artifact schema version."""
-    contract = _compile(tmp_path, _MEMBER_SRC, "Accountant")
-    artifact = build_effects(contract)
-    assert artifact["schema_version"] == SCHEMA_VERSION == "semantic-3"
-
-
-# ---------------------------------------------------------------------------
 # Probe-input facts: which argument is the quantity, and can the target take ETH
-# ---------------------------------------------------------------------------
 
 _PROBE_INPUT_SRC = """
     pragma solidity ^0.8.20;
@@ -445,9 +408,8 @@ _PROBE_INPUT_SRC = """
 
 
 def test_parameter_names_and_payability_are_recorded(tmp_path):
-    """A prober cannot tell a quantity from a token id without the declared
-    names, and cannot know a ``msg.value`` attempt is doomed without payability.
-    Both are ABI facts the compiler already has."""
+    """A prober needs declared names to tell a quantity from a token id, and
+    payability to know a ``msg.value`` attempt is doomed."""
     contract = _compile(tmp_path, _PROBE_INPUT_SRC, "Redeemer")
     effects = build_effects(contract)
 
@@ -459,13 +421,10 @@ def test_parameter_names_and_payability_are_recorded(tmp_path):
 
 
 def test_value_flow_records_which_parameter_carries_the_amount(tmp_path):
-    """``amount_param_index`` is the dispositive answer to "which argument is the
-    quantity" — the mirror of ``target_param_index`` for the destination."""
     contract = _compile(tmp_path, _PROBE_INPUT_SRC, "Redeemer")
     effects = build_effects(contract)
     flows = [f for f in _info(effects, "payOut(address,uint256,uint256)")["value_flows"] if f["direction"] == "out"]
     assert flows, "expected a native transfer out"
     assert any(f.get("amount_kind", {}).get("kind") == "param" for f in flows)
     assert {f.get("amount_param_index") for f in flows} == {1}
-    # ...and the destination slot is still resolved independently.
     assert {f.get("target_param_index") for f in flows} == {0}

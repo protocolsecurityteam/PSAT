@@ -110,7 +110,6 @@ def test_capabilities_returns_404_for_unknown_address(api_client, db_session):
 
 @requires_postgres
 def test_capabilities_returns_404_when_predicate_tree_artifact_is_missing(api_client, db_session):
-    """A completed Job without a predicate_trees artifact returns 404."""
     address = "0x" + uuid.uuid4().hex[:8] + "b2" * 16
     _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=None)
     resp = api_client.get(f"/api/contract/{address}/capabilities")
@@ -120,9 +119,7 @@ def test_capabilities_returns_404_when_predicate_tree_artifact_is_missing(api_cl
 
 @requires_postgres
 def test_capabilities_empty_dict_for_unguarded_only_contract(api_client, db_session):
-    """A contract with no guarded functions returns 200 with
-    capabilities={}; consumers know the contract IS analyzed but
-    every function is implicitly public."""
+    """No guarded functions -> 200 with capabilities={} (analyzed, every function implicitly public)."""
     address = "0x" + uuid.uuid4().hex[:8] + "c3" * 16
     _seed_completed_job_with_artifact(
         db_session,
@@ -137,27 +134,12 @@ def test_capabilities_empty_dict_for_unguarded_only_contract(api_client, db_sess
 
 @requires_postgres
 def test_capabilities_block_query_param(api_client, db_session):
-    """``block=N`` supports point-in-time queries — the response
-    echoes the block back so a UI can display 'as of block N'."""
+    """``block=N`` supports point-in-time queries; the response echoes it for 'as of block N' UIs."""
     address = "0x" + uuid.uuid4().hex[:8] + "d4" * 16
     _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=_equality_leaf_artifact())
     resp = api_client.get(f"/api/contract/{address}/capabilities", params={"block": 18_000_000})
     assert resp.status_code == 200
     assert resp.json()["block"] == 18_000_000
-
-
-@requires_postgres
-def test_capabilities_chain_id_query_param(api_client, db_session):
-    """``chain_id`` defaults to 1 (mainnet) but is overridable for
-    multi-chain contracts. The job pick is a hard filter on the requested
-    chain, so the seeded job lives on the queried chain (137)."""
-    address = "0x" + uuid.uuid4().hex[:8] + "e5" * 16
-    _seed_completed_job_with_artifact(
-        db_session, address=address, predicate_trees=_equality_leaf_artifact(), chain_id=137, chain="polygon"
-    )
-    resp = api_client.get(f"/api/contract/{address}/capabilities", params={"chain_id": 137})
-    assert resp.status_code == 200
-    assert resp.json()["chain_id"] == 137
 
 
 @requires_postgres
@@ -185,7 +167,6 @@ def test_capabilities_explicit_chain_isolates_twin(api_client, db_session, monke
         db_session, address=address, predicate_trees=_guard_tree("poly_fn()"), chain_id=137, chain="polygon"
     )
 
-    # Requested chain has its own job -> its trees, never the twin's.
     resp_poly = api_client.get(f"/api/contract/{address}/capabilities", params={"chain_id": 137})
     assert resp_poly.status_code == 200, resp_poly.text
     poly_caps = resp_poly.json()["capabilities"]
@@ -203,9 +184,8 @@ def test_capabilities_explicit_chain_isolates_twin(api_client, db_session, monke
 
 @requires_postgres
 def test_capabilities_response_includes_data_freshness(api_client, db_session, monkeypatch):
-    """The response carries a ``data_freshness`` block summarizing
-    the indexer cursor for the contract. UI uses this to render
-    'data current as of block X' and warn if it's stale."""
+    """The response carries a ``data_freshness`` block for the indexer cursor (UI: 'current as of
+    block X' / stale warning)."""
     from db.models import IndexedEventCursor
     from routers import predicate_capabilities
 
@@ -241,7 +221,6 @@ def test_capabilities_response_includes_data_freshness(api_client, db_session, m
 
 @requires_postgres
 def test_capabilities_response_freshness_null_when_no_cursor(api_client, db_session, monkeypatch):
-    """No IndexedEventCursor -> data_freshness.event_logs is null."""
 
     from routers import predicate_capabilities
 
@@ -258,21 +237,25 @@ def test_capabilities_response_freshness_null_when_no_cursor(api_client, db_sess
 
 
 @requires_postgres
-def test_capabilities_response_is_cached(api_client, db_session, monkeypatch):
-    """Repeat hits within the TTL window short-circuit the
-    resolver — proven by counting resolve_contract_capabilities
-    invocations across two requests."""
+@pytest.mark.parametrize(
+    "ttl_s, expected_resolver_calls",
+    [
+        # Repeat hits within the TTL short-circuit the resolver.
+        pytest.param(60.0, 1, id="cached-within-ttl"),
+        # PSAT_CAPABILITIES_CACHE_TTL_S=0 disables caching: every request runs the resolver.
+        pytest.param(0.0, 2, id="ttl-disabled-when-zero"),
+    ],
+)
+def test_capabilities_response_caching(api_client, db_session, monkeypatch, ttl_s, expected_resolver_calls):
     from services.resolution import capability_resolver as resolver_mod
 
     address = "0x" + uuid.uuid4().hex[:8] + "ca" * 16
     _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=_equality_leaf_artifact())
 
-    # Empty the cache so the test starts clean (other tests may
-    # have warmed it).
     from routers import predicate_capabilities
 
     predicate_capabilities._capabilities_cache.clear()
-    monkeypatch.setattr(predicate_capabilities, "_CAPABILITIES_CACHE_TTL_S", 60.0)
+    monkeypatch.setattr(predicate_capabilities, "_CAPABILITIES_CACHE_TTL_S", ttl_s)
 
     calls = {"n": 0}
     original = resolver_mod.resolve_contract_capabilities
@@ -288,45 +271,12 @@ def test_capabilities_response_is_cached(api_client, db_session, monkeypatch):
     assert r1.status_code == 200
     assert r2.status_code == 200
     assert r1.json() == r2.json()
-    # Resolver invoked once across the two requests (second was a
-    # cache hit).
-    assert calls["n"] == 1
-
-
-@requires_postgres
-def test_capabilities_cache_ttl_disabled_when_zero(api_client, db_session, monkeypatch):
-    """``PSAT_CAPABILITIES_CACHE_TTL_S=0`` (or default-overridden
-    to 0) disables caching entirely — every request runs the
-    resolver fresh."""
-    from services.resolution import capability_resolver as resolver_mod
-
-    address = "0x" + uuid.uuid4().hex[:8] + "cb" * 16
-    _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=_equality_leaf_artifact())
-
-    from routers import predicate_capabilities
-
-    predicate_capabilities._capabilities_cache.clear()
-    monkeypatch.setattr(predicate_capabilities, "_CAPABILITIES_CACHE_TTL_S", 0.0)
-
-    calls = {"n": 0}
-    original = resolver_mod.resolve_contract_capabilities
-
-    def _counting(*args, **kwargs):
-        calls["n"] += 1
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(resolver_mod, "resolve_contract_capabilities", _counting)
-
-    api_client.get(f"/api/contract/{address}/capabilities")
-    api_client.get(f"/api/contract/{address}/capabilities")
-    assert calls["n"] == 2  # both requests hit the resolver
+    assert calls["n"] == expected_resolver_calls
 
 
 @requires_postgres
 def test_capabilities_cache_keyed_on_block_and_chain(api_client, db_session, monkeypatch):
-    """Different ``block`` or ``chain_id`` parameters cache
-    independently — no cross-contamination between e.g. mainnet
-    and polygon, or between point-in-time queries."""
+    """Different ``block`` / ``chain_id`` parameters cache independently."""
     from services.resolution import capability_resolver as resolver_mod
 
     address = "0x" + uuid.uuid4().hex[:8] + "cc" * 16
@@ -357,26 +307,21 @@ def test_capabilities_cache_keyed_on_block_and_chain(api_client, db_session, mon
     api_client.get(f"/api/contract/{address}/capabilities")  # default chain=1, block=None
     api_client.get(f"/api/contract/{address}/capabilities?chain_id=137")
     api_client.get(f"/api/contract/{address}/capabilities?block=18000000")
-    # Three distinct keys -> three resolver calls.
     assert calls["n"] == 3
 
 
 @requires_postgres
 def test_capabilities_route_is_not_admin_gated(api_client, db_session):
-    """Verify no X-PSAT-Admin-Key header is required — the route
-    is read-only / idempotent so anyone can hit it. Pinned because
-    accidentally adding require_admin_key would lock external
-    consumers out."""
+    """No X-PSAT-Admin-Key required: the route is read-only/idempotent, and adding
+    require_admin_key would lock external consumers out."""
     import api as api_module
 
-    # No dependency override — let the real require_admin_key run
-    # if it's wired (it shouldn't be, on this route).
+    # No override: the real require_admin_key must not gate this route.
     from routers.deps import require_admin_key
 
     api_module.app.dependency_overrides.pop(require_admin_key, None)
 
     address = "0x" + uuid.uuid4().hex[:8] + "f6" * 16
     _seed_completed_job_with_artifact(db_session, address=address, predicate_trees=_equality_leaf_artifact())
-    # Send with no X-PSAT-Admin-Key header -> still 200.
     resp = api_client.get(f"/api/contract/{address}/capabilities")
     assert resp.status_code == 200

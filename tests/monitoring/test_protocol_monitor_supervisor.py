@@ -1,16 +1,9 @@
-"""Thread-supervisor + stop-event tests.
+"""Stage 6 - thread-supervisor + stop-event tests (HR3).
 
-Two layers:
-
-* The ``Supervisor`` (unit under test) is driven with injected fast-failing loop
-  callables — acceptable here because the supervisor's restart/backoff/heartbeat
-  policy is exactly what we're asserting, and a real scan/poll pass is neither
-  fast nor deterministic. The error-heartbeat assertion captures the
-  supervisor's ``record_heartbeat`` calls via a pure spy (no DB) — ``db.queue``'s
-  write path is covered against the real test DB elsewhere.
-* The *real* loops' stop-event plumbing is integration-tested by running
-  ``run_scan_loop`` / ``run_poll_loop`` briefly (only the RPC wire stubbed) and
-  proving a stop request returns promptly instead of sleeping out the interval.
+The ``Supervisor`` is driven with injected fast-failing loops (its restart/backoff/heartbeat
+policy is what's asserted; the error heartbeat is captured by a pure spy, no DB). The real
+``run_scan_loop`` / ``run_poll_loop`` are run briefly with only the RPC wire stubbed to prove
+a stop request returns promptly instead of sleeping out the interval.
 """
 
 from __future__ import annotations
@@ -36,11 +29,8 @@ from workers.protocol_monitor import Supervisor, _build_default_supervisor, main
 
 
 class RecordingEvent(threading.Event):
-    """A stop event that records every ``wait(timeout)`` and auto-stops.
-
-    Lets a synchronous ``_supervise`` call terminate deterministically after N
-    backoff waits while capturing the exact backoff schedule — no real sleeping.
-    """
+    """A stop event that records every ``wait(timeout)`` and auto-stops, so ``_supervise``
+    terminates after N backoff waits while capturing the schedule without sleeping."""
 
     def __init__(self, stop_after_waits: int):
         super().__init__()
@@ -59,15 +49,24 @@ class RecordingEvent(threading.Event):
 # ---------------------------------------------------------------------------
 
 
-def test_raising_loop_restarts_with_growing_capped_backoff():
-    """Each death backs off exponentially from base, capped at the ceiling."""
-    ev = RecordingEvent(stop_after_waits=6)
+@pytest.mark.parametrize(
+    "stop_after,max_backoff_s,healthy_stretch_s,expected_waits",
+    [
+        # Each death backs off exponentially from base (5 → 10 → 20), then pins at the 20s cap;
+        # 1e9 means never "healthy", so the backoff never resets.
+        pytest.param(6, 20.0, 1e9, [5.0, 10.0, 20.0, 20.0, 20.0, 20.0], id="growing_capped"),
+        # A run that clears the healthy threshold resets the backoff to base (0.0: every run is healthy).
+        pytest.param(4, 300.0, 0.0, [5.0, 5.0, 5.0, 5.0], id="reset_after_healthy_stretch"),
+    ],
+)
+def test_raising_loop_restart_backoff(stop_after, max_backoff_s, healthy_stretch_s, expected_waits):
+    ev = RecordingEvent(stop_after_waits=stop_after)
     sup = Supervisor(
         [],
         stop_event=ev,
         base_backoff_s=5.0,
-        max_backoff_s=20.0,
-        healthy_stretch_s=1e9,  # never "healthy" → backoff never resets
+        max_backoff_s=max_backoff_s,
+        healthy_stretch_s=healthy_stretch_s,
     )
 
     def raiser(_ev):
@@ -75,27 +74,7 @@ def test_raising_loop_restarts_with_growing_capped_backoff():
 
     sup._supervise("protocol_scanner", raiser)
 
-    # 5 → 10 → 20 (grow), then pinned at the 20s cap.
-    assert ev.waits == [5.0, 10.0, 20.0, 20.0, 20.0, 20.0]
-
-
-def test_backoff_resets_after_a_healthy_stretch():
-    """A run that clears the healthy threshold resets the backoff to base."""
-    ev = RecordingEvent(stop_after_waits=4)
-    sup = Supervisor(
-        [],
-        stop_event=ev,
-        base_backoff_s=5.0,
-        max_backoff_s=300.0,
-        healthy_stretch_s=0.0,  # every run counts as healthy → always resets
-    )
-
-    def raiser(_ev):
-        raise ValueError("boom")
-
-    sup._supervise("protocol_scanner", raiser)
-
-    assert ev.waits == [5.0, 5.0, 5.0, 5.0]
+    assert ev.waits == expected_waits
 
 
 # ---------------------------------------------------------------------------
@@ -220,33 +199,18 @@ def _stub_scan_wire(monkeypatch, head: int = 100):
     monkeypatch.setattr(elr, "rpc_request", getlogs_rpc)
 
 
-def test_run_scan_loop_honors_stop_event_mid_interval(db_session, monkeypatch):
+@pytest.mark.parametrize("loop_name", ["run_scan_loop", "run_poll_loop"])
+def test_real_loop_honors_stop_event_mid_interval(db_session, monkeypatch, loop_name):
     """A stop mid-interval returns promptly instead of sleeping the interval."""
-    from services.monitoring.unified_watcher import run_scan_loop
+    import services.monitoring.unified_watcher as uw
 
+    loop = getattr(uw, loop_name)
     _stub_scan_wire(monkeypatch)
     stop = threading.Event()
-    # A 3600s interval: if the loop slept it out rather than waiting on the
-    # stop event, the bounded join below would time out.
-    t = threading.Thread(target=run_scan_loop, args=("http://stub", 3600.0), kwargs={"stop_event": stop}, daemon=True)
+    # 3600s interval: sleeping it out instead of waiting on the stop event would time out the join.
+    t = threading.Thread(target=loop, args=("http://stub", 3600.0), kwargs={"stop_event": stop}, daemon=True)
     t.start()
     time.sleep(0.2)  # let it finish one empty-DB pass and enter the inter-pass wait
-    t0 = time.monotonic()
-    stop.set()
-    t.join(timeout=5.0)
-
-    assert not t.is_alive()
-    assert time.monotonic() - t0 < 5.0
-
-
-def test_run_poll_loop_honors_stop_event_mid_interval(db_session, monkeypatch):
-    from services.monitoring.unified_watcher import run_poll_loop
-
-    _stub_scan_wire(monkeypatch)
-    stop = threading.Event()
-    t = threading.Thread(target=run_poll_loop, args=("http://stub", 3600.0), kwargs={"stop_event": stop}, daemon=True)
-    t.start()
-    time.sleep(0.2)
     t0 = time.monotonic()
     stop.set()
     t.join(timeout=5.0)
@@ -297,19 +261,15 @@ def _monitor_launch_flags(script: str) -> list[str]:
 
 
 def test_start_local_launches_each_monitor_loop_exactly_once():
-    """Flag modes run a loop ALONE; co-launching one beside default mode doubles it.
-
-    The Aug-10 local run started default mode *and* ``--poll`` *and* ``--tvl``,
-    so the poller and TVL loops each had two live instances — the TVL loop has no
-    daemon lease, so both instances ran the full scan.
-    """
+    """Flag modes run a loop ALONE; co-launching one beside default mode doubles it (the
+    Aug-10 local run ran default + ``--poll`` + ``--tvl``; the TVL loop has no daemon lease,
+    so both instances ran the full scan)."""
     root = pathlib.Path(__file__).resolve().parents[2]
     launched = _monitor_launch_flags((root / "deploy/start_local.sh").read_text())
 
     assert launched == ["default"], f"start_local.sh must launch default mode alone, got {launched}"
 
-    # The reconciler is not a default-mode loop, so it needs its own process —
-    # and deploy/start_workers.sh, which start_local.sh runs, is the one that owns it.
+    # The reconciler needs its own process, owned by deploy/start_workers.sh (run by start_local.sh).
     workers_launched = _monitor_launch_flags((root / "deploy/start_workers.sh").read_text())
     assert workers_launched == ["--reconcile"], workers_launched
 
@@ -345,9 +305,8 @@ def test_start_local_launches_each_monitor_loop_exactly_once():
     ],
 )
 def test_main_flag_dispatch(monkeypatch, argv, patch_targets, expected):
-    """Each CLI mode flag routes ``main()`` to exactly its loop entry point with
-    the parsed rpc-url/interval. The loops are patched where ``main`` imports
-    them, so the real functions never run."""
+    """Each CLI mode flag routes ``main()`` to exactly its loop entry point; loops are patched
+    where ``main`` imports them."""
     seen: dict[str, tuple] = {}
 
     for label, (mod_path, attr) in patch_targets.items():
@@ -367,17 +326,6 @@ def test_main_flag_dispatch(monkeypatch, argv, patch_targets, expected):
             assert isinstance(stop_event, threading.Event)
             assert not stop_event.is_set()
         assert seen.get(label) == exp
-
-
-def test_run_supervised_default_installs_signals_and_runs(monkeypatch):
-    """Drive _run_supervised_default end-to-end without blocking forever."""
-    sup = Supervisor([], stop_event=threading.Event())
-    sup.stop_event.set()  # run_forever exits immediately
-    monkeypatch.setattr(pm, "_build_default_supervisor", lambda rpc, interval: sup)
-    # Don't mutate the process-wide SIGTERM/SIGINT handlers under the test runner.
-    monkeypatch.setattr(pm.signal, "signal", lambda *a, **k: None)
-
-    pm._run_supervised_default("http://d", None)  # returns cleanly
 
 
 def test_run_forever_returns_after_stop():

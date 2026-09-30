@@ -1,16 +1,9 @@
 """Code-plane / state-plane separation, asserted against real rows.
 
-``effect_behavior_cache`` is keyed on code alone (behavior hash + class + scope +
-surface + gate ref), so every row in it is re-published verbatim to EVERY other
-deployment of that bytecode — across protocols, chains and runs. Anything
-per-deployment that reaches ``details`` therefore stops being an observation of
-the contract it came from.
-
-The downstream value-reach fields were exactly that: holder ADDRESSES and a
-USD figure, written into a proven ``value_out`` verdict's ``details``, cached,
-and copied back out on the next hit as a different deployment's witness. These
-tests drive the real worker against real Postgres rows — a mock cannot show a
-value crossing between two deployments.
+``effect_behavior_cache`` is keyed on code alone, so every row is re-published verbatim to EVERY
+other deployment of that bytecode. The downstream value-reach fields (holder ADDRESSES and a USD
+figure) once leaked into a proven ``value_out`` verdict's ``details`` and came back as another
+deployment's witness. Drives the real worker on real Postgres rows; a mock can't show a value crossing deployments.
 """
 
 from __future__ import annotations
@@ -208,11 +201,9 @@ def _flat_values(obj: Any):
         yield obj
 
 
-# Integer-valued keys a CACHEABLE ``details`` payload may legitimately carry, with
-# the code-plane justification for each. Everything else numeric is a per-execution
-# measurement (a count of logs, a balance, a USD figure) and belongs on the
-# deployment's own row: the cache re-publishes ``details`` verbatim to every other
-# deployment of the bytecode, so a count observed on one becomes a claim about all.
+# Integer keys a CACHEABLE ``details`` payload may carry, with the code-plane justification for each.
+# Any other number is a per-execution measurement that belongs on the deployment's own row: the
+# cache republishes ``details`` verbatim, so a count seen on one becomes a claim about all.
 _CODE_PLANE_INT_KEYS = {
     # Read out of THIS bytecode's own source/guard constants (calldata.read_max_pause_duration).
     "duration_bound_seconds",
@@ -222,10 +213,8 @@ _CODE_PLANE_INT_KEYS = {
 
 
 def _plane_violations(details: dict[str, Any] | None) -> list[Any]:
-    """Anything in a CACHEABLE ``details`` payload that is per-deployment: an
-    address, a float (every float the recipes produce is a USD/amount figure), or
-    a bare int outside the allowlist above — the code-plane fields are otherwise
-    all bools, names and selectors."""
+    """Anything per-deployment in a CACHEABLE ``details`` payload: an address, a float (every recipe
+    float is a USD/amount figure), or a bare int outside the allowlist."""
     bad: list[Any] = []
 
     def walk(node: Any, key: str | None) -> None:
@@ -253,12 +242,10 @@ def _plane_violations(details: dict[str, Any] | None) -> list[Any]:
 def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
     """The cross-class audit, as a standing guard.
 
-    ``details`` is the only recipe output that enters ``effect_behavior_cache``,
-    whose key is code-only — so every value in it is asserted about EVERY other
-    deployment of the same bytecode. This drives each Tier-1 recipe on an
-    observation FULL of per-deployment data (real addresses, a USD holder set) and
-    proves none of it reaches ``details``. Concrete values belong in ``concrete``,
-    which the worker routes to ``effect_verdicts`` instead."""
+    ``details`` is the only recipe output entering the code-keyed ``effect_behavior_cache``, so every
+    value in it is asserted about EVERY deployment of that bytecode. Each Tier-1 recipe runs on an
+    observation FULL of per-deployment data and none of it may reach ``details``; concrete values
+    belong in ``concrete``, which the worker routes to ``effect_verdicts``."""
     from services.effects import recipes
 
     zero = "0x" + "00" * 20
@@ -317,7 +304,6 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
         impl_before="0x" + "dd" * 20,
     )
 
-    # Authority-change: two randoms rejected, then all accepted.
     rejected = SimCallResult(False, "0x", "0xdeadbeef", ())
     randoms = ["0x" + "31" * 20, "0x" + "32" * 20]
     a = recipes.authority_change(
@@ -348,12 +334,10 @@ def test_no_tier1_recipe_puts_per_deployment_data_in_cacheable_details():
 
     for eff in (v, s, u, a, p):
         assert _plane_violations(eff.details) == [], f"{eff.effect_class}: {_plane_violations(eff.details)}"
-    # ...and the per-deployment values are not simply lost — they are on the
-    # state-plane side of the same verdict.
+    # ...and the per-deployment values are not lost; they are on the state-plane side.
     assert v.concrete["observed_reach_holders"] == [HOLDER.lower()]
     assert u.concrete["impl_before"] == "0x" + "dd" * 20
     assert s.concrete["backing_inflow_transfers"] == 1
-    # The code-plane witness the counts were extracted from is still there.
     assert s.details["backing"]["inflow_observed"] is True
     assert a.details["gate_mutation"] is True
     assert p.details["observed_blast_radius"] == ["foo"]
@@ -373,34 +357,25 @@ def test_reach_never_reaches_the_code_plane_cache(clean_effects, monkeypatch):
     assert RECIPIENT.lower() not in body.lower()
     assert str(REACH_USD) not in body
     assert not any(k.startswith(("observed_reach", "reach_")) for k in (cached.details or {}))
-    # The PROVING EXECUTION is the same class of fact and obeys the same rule: an
-    # impersonated caller at one block is one deployment's observation, and a
-    # cache hit republishing it would name another contract's call as this one's
-    # proof.
+    # The PROVING EXECUTION obeys the same rule: an impersonated caller at one block is one
+    # deployment's observation, and a cache hit would name another contract's call as this one's proof.
     assert PROVING_EXECUTION_KEY not in (cached.details or {})
     assert PRINCIPAL.lower() not in body.lower()
-    # ...while the code-plane witness the cache exists to carry is intact.
     assert (cached.details or {})["value_moved"] is True
 
-    # The observation itself is not lost — it landed on the deployment's own row.
     row = session.query(EffectVerdict).one()
     residue = dict(row.observed_residue or {})
     execution = residue.pop(PROVING_EXECUTION_KEY)
     assert residue == {
         "observed_reach_value_usd": REACH_USD,
         "observed_reach_holders": [HOLDER.lower()],
-        # The reach-determined discriminator and the asset list ride the STATE plane with the figures
-        # they qualify: both are answers about this deployment's observation, not
-        # about the code.
+        # The reach-determined discriminator and asset list ride the STATE plane with the figures they qualify.
         "reach_determined": True,
         "observed_reach_assets": [TOKEN.lower()],
-        # The TVL ceiling's outcome travels with the figure it qualifies; this stub
-        # protocol has no snapshot, so the honest answer is "not checked".
+        # The TVL ceiling's outcome travels with its figure; this stub protocol has no snapshot, so "not checked".
         "reach_tvl_check": "skipped_no_tvl",
     }
-    # The figure and the call that proved it are on the same row, which is the
-    # whole point: a magnitude reaching a consumer without its execution is a
-    # number with no account of itself.
+    # The figure and the call that proved it share a row: a magnitude without its execution has no account of itself.
     assert execution["caller"] == PRINCIPAL.lower()
     assert execution["target"] == CONTRACT_A.lower()
 
@@ -466,8 +441,7 @@ def test_reach_survives_a_later_observation_less_rewrite(clean_effects, monkeypa
     pid, fns, cids = _protocol(session, [CONTRACT_A])
     runs: list[str] = []
     _run_for(session, pid, fns, cids, CONTRACT_A, "leak-keep-1", monkeypatch, runs)
-    # Second job: the behavior is now cached, so this one is a plain hit carrying
-    # no observation of its own.
+    # Second job: a plain cache hit carrying no observation of its own.
     _run_for(session, pid, fns, cids, CONTRACT_A, "leak-keep-2", monkeypatch, runs)
     session.expire_all()
 

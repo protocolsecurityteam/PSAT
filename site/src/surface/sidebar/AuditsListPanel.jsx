@@ -1,32 +1,22 @@
 import { useState } from "react";
-
 import { isBytecodeVerifiedAudit } from "../../audits/auditCoverage.js";
 import { formatAuditDate } from "../../audits/auditUi.jsx";
 import { AuditReadModal } from "../modals/AuditReadModal.jsx";
-import { GotoArrow } from "../GotoArrow.jsx";
 import { entityKey } from "../entityKey.js";
 import { principalLabel, shortAddr } from "../format.js";
+import { EntityRef } from "../EntityRef.jsx";
 
-// Sentinel activeAuditId value for the summary's "all proven contracts"
-// highlight. The picked-audit state is one radio: null (nothing), a numeric
-// audit_id (that audit's covered set), or ALL_PROVEN (every proven contract).
+// Picked-audit state is one radio: null, an audit_id, or ALL_PROVEN.
 const ALL_PROVEN = "all";
 
-// Proof-first audits panel.
-//
-// The governing principle: only assert what we can cryptographically verify.
-// v1 carries a single verdict — "Running audited code" — meaning the deployed,
-// Etherscan-verified source hash-matches the reviewed commit
-// (equivalence_status='proven' + match_type='reviewed_commit', excluding
-// proof_kind='cited_only'; gated by isBytecodeVerifiedAudit). Everything
-// low-confidence or accusatory (hash_mismatch, pre_fix_unpatched, cited_only,
-// name-heuristic matches) is deliberately omitted. Freshness/drift is out of
-// scope for v1.
+// Proof-first audits panel. Only
+// assert what's cryptographically verified: one verdict, "Running audited code"
+// (isBytecodeVerifiedAudit). Low-confidence or accusatory states are
+// deliberately omitted.
 const PROVEN = "#4ade80";
 
-// The one verdict. It lives on the (audit × contract) row, not the audit — a
-// single audit can carry a different verdict per contract. v1 has one verdict,
-// so every proven row reads the same, but the shape keeps that honest.
+// The verdict lives on the (audit × contract) row: one audit can differ per
+// contract.
 function ProvenVerdict() {
   return (
     <span className="ps-audits-verdict">
@@ -36,12 +26,9 @@ function ProvenVerdict() {
   );
 }
 
-// A principal (safe/timelock/EOA) has no bytecode of its own, so audit coverage
-// is meaningless for it — audits attach to the contracts it controls. Show an
-// honest hint pointing at the controlled set instead of pretending nothing is
-// selected. Deliberately NOT `.ps-audits-contract-card`: that class is the
-// selected-contract card, whose absence is the regression invariant for a
-// principal selection.
+// A principal has no bytecode, so audits attach to what it controls.
+// Deliberately not `.ps-audits-contract-card`, whose absence is the
+// principal-selection regression invariant.
 function SelectedPrincipalAuditHint({ principal }) {
   if (!principal) return null;
   const count = (principal.controls || []).length;
@@ -58,10 +45,8 @@ function SelectedPrincipalAuditHint({ principal }) {
   );
 }
 
-// One expandable audit row. Collapsed: auditor · date · title · "covers N".
-// Expanded: the per-contract breakdown, each contract carrying its proven
-// verdict and matched-commit SHA. Expansion is driven by `activeAuditId` so it
-// doubles as the canvas highlight (the covered contracts get a green ring).
+// Expansion is driven by `activeAuditId`, which also rings the covered
+// contracts.
 function AuditRow({ audit, contracts, open, onToggle, onRead }) {
   return (
     <div className={`ps-audits-arow ${open ? "open" : ""}`}>
@@ -104,7 +89,7 @@ function AuditRow({ audit, contracts, open, onToggle, onRead }) {
               </div>
               <div className="ps-audits-cc-badges">
                 <ProvenVerdict />
-                {c.sha && <span className="ps-audits-shabadge">{String(c.sha).slice(0, 7)}</span>}
+                {c.sha && <span className="tag tag-mono ps-audits-shabadge">{String(c.sha).slice(0, 7)}</span>}
               </div>
             </div>
           ))}
@@ -114,10 +99,6 @@ function AuditRow({ audit, contracts, open, onToggle, onRead }) {
   );
 }
 
-// Whole-protocol view: the proof-first summary + the single Bytecode-verified
-// tier. Also rendered beneath the hint when a principal is selected (a
-// principal has no coverage of its own, but the protocol-wide proof summary is
-// still worth showing).
 function ProtocolAuditsView({
   auditEntries,
   provenContracts,
@@ -129,9 +110,8 @@ function ProtocolAuditsView({
   onPreview,
   onNavigate,
 }) {
-  // The summary doubles as the whole-proven-set control: click it to ring every
-  // source-proven contract at once and list them (one meaning — "has a proof");
-  // click an audit row to narrow to that audit's set. Mutually exclusive.
+  // The summary rings every proven contract; an audit row narrows to its own
+  // set. Mutually exclusive.
   const allActive = activeAuditId === ALL_PROVEN;
   const canExpand = provenContracts > 0;
   return (
@@ -162,30 +142,7 @@ function ProtocolAuditsView({
         {allActive && canExpand && (
           <div className="ps-audits-covlist">
             {provenList.map((c) => (
-              <div
-                key={c.address}
-                className="ps-audits-covrow"
-                role="button"
-                tabIndex={0}
-                onClick={() => onPreview?.(c.address)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onPreview?.(c.address);
-                  }
-                }}
-              >
-                <span className="ps-audits-covrow-name">{c.name}</span>
-                <span className="ps-audits-covrow-addr">{shortAddr(c.address)}</span>
-                {onNavigate && (
-                  <GotoArrow
-                    onCommit={() =>
-                      onNavigate({ type: "contract", address: c.address, label: c.name })
-                    }
-                    label={`Go to ${c.name}`}
-                  />
-                )}
-              </div>
+              <EntityRef key={c.address} address={c.address} name={c.name} onPreview={onPreview} onNavigate={onNavigate} />
             ))}
           </div>
         )}
@@ -228,9 +185,6 @@ function ProtocolAuditsView({
   );
 }
 
-// Contract-selected mode: the audits that source-prove this one contract. The
-// verdict here is the same one shown in the whole-protocol breakdown, keyed to
-// the selected contract's address.
 function SelectedContractAuditsView({ machine, byAudit, onClear, onRead }) {
   const key = entityKey(machine.chain, machine.address);
   const covering = [];
@@ -282,7 +236,7 @@ function SelectedContractAuditsView({ machine, byAudit, onClear, onRead }) {
               {audit.title && <div className="ps-audits-arow-title">{audit.title}</div>}
               <div className="ps-audits-cc-badges" style={{ marginTop: 2 }}>
                 <ProvenVerdict />
-                {sha && <span className="ps-audits-shabadge">{String(sha).slice(0, 7)}</span>}
+                {sha && <span className="tag tag-mono ps-audits-shabadge">{String(sha).slice(0, 7)}</span>}
               </div>
             </div>
             <button
@@ -333,9 +287,6 @@ export function AuditsListPanel({
       </section>
     );
   if (!coverageData) {
-    // Coverage hasn't resolved. A selected principal still gets its honest
-    // hint (it doesn't depend on coverageData); anything else has nothing to
-    // show until coverage arrives.
     return selectedPrincipal ? (
       <section className="ps-audits-panel">
         <SelectedPrincipalAuditHint principal={selectedPrincipal} />
@@ -343,11 +294,8 @@ export function AuditsListPanel({
     ) : null;
   }
 
-  // Resolve (chain, address) → machine so covered contracts are legible instead
-  // of raw hex, and so off-canvas impl rows collapse into their proxy. machines
-  // is activeChain-scoped but coverageData spans all chains, so the join must
-  // key on the composite entity — a base twin sharing an address must not
-  // resolve to the ethereum machine.
+  // Machines are chain-scoped but coverage spans all chains, so join on the
+  // composite entity; off-canvas impl rows collapse into their proxy.
   const contractByKey = new Map();
   if (Array.isArray(machines)) {
     for (const m of machines) {
@@ -356,16 +304,12 @@ export function AuditsListPanel({
     }
   }
 
-  // `/api/company/{name}` deduplicates impls under their proxy, but
-  // `/audit_coverage` returns one row per Contract DB entity (proxy AND impl
-  // AND historical impls). The endpoint already unions a proxy's coverage with
-  // its impl's, so every logical contract's proof surfaces under its on-canvas
-  // (proxy) entity. Skipping entities that aren't on the canvas both drops the
-  // duplicate impl rows and gives one entry per logical contract.
+  // The endpoint returns one row per Contract entity (proxy, impl, historical
+  // impls) with the proxy already unioned; skipping off-canvas entities leaves
+  // one entry per logical contract.
 
-  // audit_id → { audit, contracts: [{ name, address, chain, sha }] }, built from
-  // the proven set only. `trackedContracts` is the honest denominator (contracts
-  // on this surface we have coverage data for); `provenContracts` the numerator.
+  // `trackedContracts` is the honest denominator: contracts here with coverage
+  // data.
   const byAudit = new Map();
   const provenKeys = new Set();
   let trackedContracts = 0;
@@ -388,7 +332,6 @@ export function AuditsListPanel({
     }
   }
 
-  // Sort audits by date desc (nulls last), then id desc.
   const auditEntries = [...byAudit.values()].sort((x, y) => {
     const dx = x.audit.date || "";
     const dy = y.audit.date || "";
@@ -396,9 +339,6 @@ export function AuditsListPanel({
     return (y.audit.audit_id || 0) - (x.audit.audit_id || 0);
   });
 
-  // The proven-contract roster the summary dropdown lists (and the canvas rings
-  // when "all" is picked): one entry per distinct source-proven entity, named
-  // from its on-canvas machine, sorted by name.
   const provenList = [...provenKeys]
     .map((key) => {
       const m = contractByKey.get(key);

@@ -1,29 +1,15 @@
 """Negative-control discipline for the duck-typed address classifier (W6-2).
 
-An unverified contract with a catch-all fallback answers EVERY selector —
-including ``getMinDelay()``/``delay()``/``getOwners()`` — so a single
-successful probe is not evidence of an interface. Observed on mainnet:
-0x008702e6…84 answered ``getMinDelay()`` and the nonsense selector
-``0xdeadbeef`` with the same payload and was published as
-``resolved_type='timelock'`` with ``details.delay=1``, which the scorer reads
-as full protective credit. The discriminating control was a real, verified
-``TimelockController`` (0x5eb52f8a…), which reverts on nonsense selectors.
+An unverified contract with a catch-all fallback answers EVERY selector, so one
+successful probe is not evidence of an interface. Observed on mainnet: 0x008702e6...84
+answered ``getMinDelay()`` and ``0xdeadbeef`` identically and was published as
+``timelock`` with ``details.delay=1`` (full protective credit). A verified
+TimelockController (0x5eb52f8a...) reverts on nonsense selectors.
 
-Discipline under test (services/resolution/tracking.py):
-  * before ANY concrete duck-typed kind (safe / timelock / the
-    UPGRADE_INTERFACE_VERSION arm) is published, a probe of a selector no
-    real contract implements must revert or return empty ("passed");
-  * an address that ANSWERS it is classified plain ``contract`` with the
-    definitive ``details.duck_type_negative_control = 'failed'`` marker;
-  * a control that cannot be established (transport error) withholds the
-    concrete kind AND marks the classification uncacheable (not determined,
-    retryable) — never a concrete type;
-  * single-word probe returns must be exactly 32 bytes
-    (returndata-length discipline).
-
-Wire is stubbed per the repo convention (``_eth_call_raw`` /
-``_rpc_batch_request_with_status`` / the aggregate3 ``rpc_request``), never
-live-probed.
+Before any duck-typed kind is published, a probe of a selector no real contract implements
+must revert/return empty. An answer -> plain ``contract`` + ``duck_type_negative_control =
+'failed'``; a transport error withholds the kind and marks it uncacheable. Single-word
+returns must be exactly 32 bytes. Wire is stubbed, never live-probed.
 """
 
 from __future__ import annotations
@@ -86,9 +72,8 @@ def _wire(monkeypatch, probe_map, *, batched: bool):
     monkeypatch.setattr(tracking, "_get_code", lambda *_a, **_k: "0x6000")
     monkeypatch.setattr(tracking, "type_authority_contract", lambda *_a, **_k: {})
     monkeypatch.setattr(tracking, "_eth_call_raw", _fake_eth_call_raw)
-    # Stub the batch layer on both parametrizations: the `batched` flag chooses
-    # which classifier the test drives, but classify_resolved_address_with_status
-    # (exercised for cacheability) always dispatches through the batched path.
+    # Stub the batch layer on both parametrizations:
+    # classify_resolved_address_with_status always dispatches through the batched path.
     del batched
     monkeypatch.setattr(tracking, "_rpc_batch_request_with_status", _fake_batch_with_status)
 
@@ -167,7 +152,6 @@ def test_control_transport_error_withholds_concrete_type_uncached(monkeypatch, b
     assert kind == "contract"
     assert had_error is True
     assert "duck_type_negative_control" not in details
-    # And the public entry point must report it uncacheable.
     _kind, _details, cacheable = tracking.classify_resolved_address_with_status("https://rpc", ADDR)
     assert cacheable is False
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Discover statically embedded dependent contract addresses from EVM bytecode."""
+"""Discover dependency addresses embedded in EVM bytecode."""
 
 from pathlib import Path
 from typing import Any
@@ -17,17 +17,15 @@ EMPTY_CODE_VALUES = {"0x", "0x0"}
 
 
 def has_deployed_code(bytecode_hex: str) -> bool:
-    """Return True if an eth_getCode response represents deployed contract bytecode."""
     return bytecode_hex not in EMPTY_CODE_VALUES
 
 
 def rpc_call(rpc_url: str, method: str, params: list, retries: int = 1, *, chain_id: int | None = None) -> Any:
-    """Backward-compatible wrapper. Prefer services.clients.rpc.rpc_request for new code."""
+    """Prefer services.clients.rpc.rpc_request in new code."""
     return rpc_request(rpc_url, method, params, retries=retries, chain_id=chain_id) or "0x"
 
 
 def extract_push20_addresses(bytecode_hex: str) -> set[str]:
-    """Parse EVM bytecode and extract 20-byte constants from PUSH20 (0x73) opcodes."""
     raw = bytecode_hex[2:] if bytecode_hex.startswith("0x") else bytecode_hex
     if len(raw) % 2 != 0:
         return set()
@@ -57,15 +55,10 @@ def discover_dependencies(
     *,
     chain_id: int | None = None,
 ) -> list[str]:
-    """BFS-traverse embedded PUSH20 addresses and return deployed contract dependencies.
+    """BFS over embedded PUSH20 addresses, returning deployed contract dependencies.
 
-    Uses ``services.clients.rpc.get_code_batch`` to probe all candidates extracted
-    from one contract's bytecode in a single JSON-RPC roundtrip — saves
-    N-1 sequential RTTs per BFS layer when the contract embeds many
-    PUSH20 addresses (Solidity hardcoded library refs, factory deploys,
-    etc.). Falls back transparently to single-address ``get_code`` for
-    addresses not returned by the batch (per-call error handling lives
-    inside get_code_batch).
+    Each layer's candidates are probed in one ``get_code_batch`` call, with single ``get_code`` fallback for addresses
+    the batch didn't return.
     """
     from services.clients.rpc import get_code_batch
 
@@ -80,15 +73,12 @@ def discover_dependencies(
         return code_cache[normalized]
 
     def batch_fill_cache(addrs: list[str]) -> None:
-        """Populate code_cache for every address in addrs in one batch."""
         to_fetch = [a for a in addrs if a not in code_cache]
         if not to_fetch:
             return
         results = get_code_batch(rpc_url, to_fetch, chain_id=chain_id)
         for addr in to_fetch:
-            # get_code_batch omits errored slots; backfill with single-call
-            # so the per-cascade contract still gets evaluated (will raise
-            # if the RPC is genuinely down — same surface as before).
+            # The batch omits errored slots; retry them singly.
             if addr in results:
                 code_cache[addr] = results[addr]
             else:
@@ -103,8 +93,6 @@ def discover_dependencies(
 
     while stack:
         current = stack.pop()
-        # Collect candidates from this contract's bytecode, dedupe against
-        # the BFS-wide `seen` set, then batch-probe them all at once.
         candidates: list[str] = []
         for raw in extract_push20_addresses(cached_get_code(current)):
             cand = normalize_address(raw)
@@ -130,17 +118,14 @@ def find_dependencies(
     *,
     chain_id: int | None = None,
 ) -> dict:
-    """Resolve an RPC endpoint and return discovered static contract dependencies.
+    """Resolve an RPC endpoint and return static dependencies.
 
-    *chain_id* (the job's chain, threaded from the static worker) arms the
-    URL↔chain_id guard on every ``eth_getCode`` read; None keeps it a no-op for
-    the CLI ``main`` path below (which has no chain in scope)."""
+    *chain_id* arms the URL/chain guard; None for the CLI.
+    """
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     from services.clients.rpc import default_rpc_url
 
-    # The pipeline (static_worker) always passes a chain-resolved rpc_url; this
-    # explicit-mainnet base is only reached from the CLI ``main`` below when no
-    # --rpc is given — a documented dev-tool default, not a silent one.
+    # Pipeline callers pass a chain-resolved URL; this mainnet default is only for the CLI.
     effective_rpc = rpc_url or default_rpc_url(chain_id=1)
     if not effective_rpc:
         raise RuntimeError("No RPC URL provided and eRPC not configured (set ERPC_BASE_URL)")

@@ -108,6 +108,9 @@ const COMPANY_FIXTURE = {
 
 /** Intercept the company API and return our fixture. */
 async function mockApi(page) {
+  await page.route(/\/api\/company\/[^/]+\/summary$/, (route) =>
+    route.fulfill({ contentType: "application/json", body: "{}" })
+  );
   await page.route("**/api/company/testco", (route) =>
     route.fulfill({
       status: 200,

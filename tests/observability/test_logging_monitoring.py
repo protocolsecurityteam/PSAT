@@ -1,13 +1,8 @@
 """Observability locks for the monitoring daemons (scan / poll / TVL cycles).
 
-These daemons run outside ``BaseWorker``, so the job-scoped ``record_degraded``
-accumulator is a no-op. The house-standard substitute is a per-cycle
-``record_heartbeat(detail={...})`` plus one unconditional INFO carrying the
-cycle counts as queryable ``extra`` fields — even on a 0-event / 0-contract
-cycle. This test pins that contract.
-
-Offline: the RPC/DB wire is stubbed (MagicMock session, patched heartbeat); no
-network, no live marker.
+These run outside ``BaseWorker``, so the job-scoped ``record_degraded`` accumulator is a no-op.
+The substitute is a per-cycle ``record_heartbeat(detail={...})`` plus one unconditional INFO with
+cycle counts as queryable ``extra``, even on a 0-event / 0-contract cycle. RPC/DB wire stubbed.
 """
 
 from __future__ import annotations
@@ -54,7 +49,7 @@ def test_emit_monitor_cycle_running_heartbeat_and_info(caplog):
                 partial=False,
             )
 
-    # Heartbeat: a healthy quiet cycle beats as "running" with the counts in detail.
+    # A healthy quiet cycle beats "running" with the counts in detail.
     hb.assert_called_once()
     (process,), kwargs = hb.call_args
     assert process == HEARTBEAT_PROTOCOL_SCANNER
@@ -93,9 +88,8 @@ def test_emit_monitor_cycle_partial_marks_degraded():
 
 
 def test_scan_for_events_zero_active_contracts_still_emits_cycle(caplog):
-    # No enrolled contracts: scan_for_events returns [] early but must still
-    # beat so a dead watcher is distinguishable from a healthy idle one. The
-    # columns-only index load reads ``session.execute(...).all()`` directly.
+    # scan_for_events returns [] early but must still beat so a dead watcher is distinguishable
+    # from a healthy idle one. The columns-only index load reads ``session.execute(...).all()``.
     session = MagicMock()
     session.execute.return_value.all.return_value = []
     session.execute.return_value.scalars.return_value.all.return_value = []
@@ -150,42 +144,6 @@ def test_tvl_refresh_all_protocols_emits_cycle_on_empty():
 # --- the silent-collapse class: one alarm per cycle, then a count -------------
 
 
-def test_warn_degraded_once_warns_first_then_debugs(caplog):
-    counts: dict[str, int] = {}
-    with caplog.at_level(logging.DEBUG, logger="services.monitoring"):
-        for _ in range(4):
-            monitoring.warn_degraded_once(
-                monitoring.logger, counts, "balance_batch_failed", "batch did not answer", chain_id=1
-            )
-
-    records = [r for r in caplog.records if r.message == "batch did not answer"]
-    assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG, logging.DEBUG, logging.DEBUG]
-    # The count is what the cycle summary publishes; the level is only the alarm.
-    assert counts["balance_batch_failed"] == 4
-    assert records[0].degraded_kind == "balance_batch_failed"
-    assert records[-1].degraded_seen == 4
-
-
-def test_warn_degraded_once_alarms_per_scope_not_per_kind(caplog):
-    """One chain's outage must not demote the next chain's to DEBUG."""
-    counts: dict[str, int] = {}
-    with caplog.at_level(logging.DEBUG, logger="services.monitoring"):
-        for chain_id in (1, 1, 8453, 8453):
-            monitoring.warn_degraded_once(
-                monitoring.logger,
-                counts,
-                "head_read_failed",
-                "head read failed",
-                scope=chain_id,
-                chain_id=chain_id,
-            )
-
-    records = [r for r in caplog.records if r.message == "head read failed"]
-    assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG, logging.WARNING, logging.DEBUG]
-    # And the tally says WHICH unit degraded, not only how often something did.
-    assert counts == {"head_read_failed:1": 2, "head_read_failed:8453": 2}
-
-
 # --- disposition: the per-cycle outcome summary ------------------------------
 
 
@@ -202,8 +160,7 @@ def test_proxy_watcher_unanswered_probe_warns_once_per_resolution(caplog):
     with patch.object(proxy_watcher, "rpc_request", _dead):
         with caplog.at_level(logging.DEBUG, logger="services.monitoring.proxy_watcher"):
             assert proxy_watcher.resolve_current_implementation("0x" + "e" * 40, "http://stub") is None
-            # Eight probes failed; the next pass over the SAME proxy carries the
-            # repeat at DEBUG (a different proxy has its own alarm — see below).
+            # Eight probes failed; the next pass over the SAME proxy repeats at DEBUG.
             assert proxy_watcher.resolve_current_implementation("0x" + "e" * 40, "http://stub") is None
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]

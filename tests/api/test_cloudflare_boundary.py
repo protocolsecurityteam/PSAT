@@ -25,6 +25,14 @@ CONFIG = EdgeConfig(
 ORIGIN = {"X-PSAT-Origin-Secret": CONFIG.secret, "X-PSAT-Visitor-IP": "192.0.2.1"}
 
 
+def assert_bounded_company_cache(response):
+    value = response.headers["cache-control"]
+    ttl = int(value.split("s-maxage=")[1].split(",")[0])
+    assert 0 < ttl <= 60
+    assert re.sub(r"s-maxage=\d+", "s-maxage=60", value) == PUBLIC_CACHE
+    assert "x-psat-fresh-until" not in response.headers
+
+
 @pytest.fixture(scope="module")
 def signing_keys():
     return [rsa.generate_private_key(public_exponent=65537, key_size=2048) for _ in range(2)]
@@ -286,7 +294,7 @@ def test_company_payload_equality_and_cache_matrix(edge_client, signing_keys, mo
     path = "/api/company/Example"
     anonymous = edge_client.get(path, headers=ORIGIN)
     assert anonymous.status_code == 200
-    assert anonymous.headers["cache-control"] == PUBLIC_CACHE
+    assert_bounded_company_cache(anonymous)
     for extra in (
         {"Cookie": "any=1"},
         {"Origin": "https://snif.sh"},
@@ -323,6 +331,34 @@ def test_company_admission_is_after_authentication_and_includes_operator_alias(e
         assert response.headers["retry-after"] == "2"
         assert response.headers["x-content-type-options"] == "nosniff"
     assert edge_client.get("/api/version", headers=ORIGIN).status_code == 200
+
+
+def test_prepared_freshness_headers_cannot_reset_edge_ttl():
+    from fastapi import FastAPI
+    from starlette.responses import JSONResponse
+
+    from utils.edge import CloudflareBoundary
+
+    app = FastAPI()
+    deadline = str(time.time() + 20)
+
+    @app.get("/api/company/example")
+    def prepared():
+        return JSONResponse({"company": "example"}, headers={"X-PSAT-Fresh-Until": deadline})
+
+    app.add_middleware(CloudflareBoundary, config=EdgeConfig("local"))
+    client = TestClient(app)
+    response = client.get("/api/company/example")
+    assert "x-psat-fresh-until" not in response.headers
+    ttl = int(response.headers["cache-control"].split("s-maxage=")[1].split(",")[0])
+    assert 0 < ttl <= 20
+    for value in ("nan", "inf", "bad", str(time.time() - 1)):
+        deadline = value
+        response = client.get("/api/company/example")
+        assert "s-maxage=0," in response.headers["cache-control"]
+    response = client.get("/api/company/example?x=1")
+    assert response.headers["cache-control"] == PRIVATE
+    assert "x-psat-fresh-until" not in response.headers
 
 
 @pytest.mark.parametrize("status", [200, 302, 400, 401, 403, 404, 422, 429, 500, 503])
@@ -401,7 +437,7 @@ def test_other_cacheable_payloads_equal_across_callers(edge_client, signing_keys
     )
     assert anonymous.status_code == authenticated.status_code == 200
     assert anonymous.json() == authenticated.json()
-    assert anonymous.headers["cache-control"] == PUBLIC_CACHE
+    assert_bounded_company_cache(anonymous)
     assert authenticated.headers["cache-control"] == PRIVATE
 
 

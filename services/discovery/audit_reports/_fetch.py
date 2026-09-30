@@ -1,8 +1,6 @@
-"""HTTP page fetching + URL routing.
+"""Page fetching and URL routing.
 
-``_fetch_and_extract`` is the main dispatcher: GitHub URLs route to the
-GitHub API for structured data; everything else goes through an HTML fetch
-+ LLM extraction.
+``_fetch_and_extract`` sends GitHub URLs to the GitHub API and everything else through HTML fetch + LLM extraction.
 """
 
 from __future__ import annotations
@@ -37,11 +35,8 @@ _SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style|noscript|svg)\b.*?</\1>")
 
 
 def _page_to_text(page_html: str) -> str:
-    """Convert HTML to LLM-friendly text, preserving anchor URLs.
-
-    Anchor tags become ``link_text (href)`` so the LLM sees where links
-    point — critical for GitHub directory pages where the PDF links ARE
-    the content.
+    """HTML to LLM-friendly text, keeping links as ``link_text (href)`` (on GitHub directory pages the links are the
+    content).
     """
     cleaned = _SCRIPT_STYLE_RE.sub(" ", page_html)
     cleaned = _ANCHOR_RE.sub(
@@ -56,10 +51,8 @@ def _page_to_text(page_html: str) -> str:
 def _fetch_html_page(url: str, debug: bool = False) -> str | None:
     """Fetch a page, reject binary content, cap at ``_MAX_DOWNLOAD_BYTES``.
 
-    The candidate URL is attacker-seedable (Exa/Tavily results), so the
-    outbound request goes through the shared SSRF egress guard, which
-    re-validates the target and every redirect hop against
-    ``assert_public_http_url`` and follows redirects itself.
+    URLs come from search results (attacker-seedable), so requests go through the SSRF egress guard, which validates
+    every redirect via ``assert_public_http_url``.
     """
     from utils.egress import UnsafeUrlError, safe_get
 
@@ -100,12 +93,8 @@ def _fetch_html_page(url: str, debug: bool = False) -> str | None:
         return text
 
     except UnsafeUrlError as exc:
-        # Refused egress target (non-public host or a redirect to one) is a
-        # coverage gap like an unreachable page: the candidate contributes no
-        # reports. Recorded as degraded to match the sibling handler below and
-        # keep the gap observable; the URL rides only the internal signal, never
-        # returned or stored (witness discipline — an SSRF probe leaves no trace
-        # in published output).
+        # A refused egress target is a coverage gap like an unreachable page. The URL goes only to the internal degraded
+        # record, never to output.
         record_degraded(
             phase="audit_report_html_fetch",
             exc=exc,
@@ -141,13 +130,9 @@ def _fetch_and_extract(
     *,
     enumerated_orgs: set[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Fetch a URL and run LLM extraction.
+    """Fetch a URL and run LLM extraction (GitHub URLs via the API, others via HTML).
 
-    GitHub tree/blob/repo/org URLs route to the GitHub API for clean
-    structured data; everything else goes through an HTML fetch. When
-    ``enumerated_orgs`` is provided, any org that gets fully enumerated
-    here is recorded so the orchestrator can skip subsequent same-org
-    URLs.
+    Fully enumerated orgs are added to ``enumerated_orgs`` so later same-org URLs can be skipped.
     """
     github = _parse_github_url(url)
 
@@ -170,9 +155,7 @@ def _fetch_and_extract(
                 debug=debug,
             )
             if extracted is not None and enumerated_orgs is not None:
-                # Only record coverage when enumeration actually ran — an
-                # empty list from a rate-limited call shouldn't suppress
-                # per-URL fallback later.
+                # Only when enumeration actually ran, so a rate-limited empty result doesn't suppress fallback.
                 enumerated_orgs.add(github["owner"].lower())
             return extracted
         if github["kind"] == "repo":
@@ -200,8 +183,7 @@ def _fetch_and_extract(
                 merged_reports.extend(sub.get("reports", []))
                 merged_linked.extend(sub.get("linked_urls", []))
             return {"reports": merged_reports, "linked_urls": merged_linked}
-        # blob: PDF blobs expand to their parent directory; non-PDF blobs
-        # fetch raw and run extraction.
+        # PDF blobs expand to their parent directory; other blobs are fetched raw.
         if _is_pdf_url(github["path"]):
             return _expand_blob_to_directory(
                 github["owner"],
@@ -222,7 +204,6 @@ def _fetch_and_extract(
             return None
         return extract_report_details(url, page_text, company, debug=debug)
 
-    # Non-GitHub: HTML fetch → text → LLM extract
     page_html = _fetch_html_page(url, debug=debug)
     if not page_html:
         return None

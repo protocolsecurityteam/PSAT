@@ -1,19 +1,11 @@
-"""Regression: the event-log indexer enrolls a proxy-linked impl job's
-self-administered role/authority cursors at the **proxy** — where the events are
-emitted and where ``capability_resolver`` reads them — not at ``job.address``
-(the impl, which delegatecalls and emits nothing under its own address).
+"""Regression: the event-log indexer enrolls a proxy-linked impl job's self-administered role/authority
+cursors at the **proxy** (where events are emitted and ``capability_resolver`` reads them), not ``job.address``.
 
-The bug: ``_event_address_for_descriptor`` fell through to ``job.address`` for a
-self-administered OZ AccessControl descriptor (no ``authority_contract``, no
-``event_address`` on the hint — KING Distributor's exact shape: all 40 hints had
-both ``None``). For an ``(impl)`` job that is the implementation address, so the
-cursor landed on an address that emits nothing and the proxy stayed permanently
-un-indexed. Every privileged function then fell back to a ~30–40 s HyperSync
-full-history scan — driving both the ~13-min policy stage AND run-to-run
-controller drift (a cold fold lands on the full set / a truncated subset /
-``external_check`` depending on how the scan races the 45 s timeout). The fix
-routes the fallback through the same ``runtime_addr`` the resolver uses
-(``request['proxy_address']`` when set).
+The bug: ``_event_address_for_descriptor`` fell through to ``job.address`` (the impl, which emits nothing) for a
+self-administered OZ AccessControl descriptor (KING Distributor's shape: no ``authority_contract``, no hint
+``event_address``). The proxy stayed un-indexed, every privileged function fell back to a ~30-40 s HyperSync scan,
+inflating the policy stage to ~13 min and causing run-to-run controller drift. The fix routes the fallback through
+the resolver's ``runtime_addr``.
 """
 
 from __future__ import annotations
@@ -43,10 +35,8 @@ _ROLE_REVOKED = "0x" + keccak(text="RoleRevoked(bytes32,address,address)").hex()
 
 
 def _self_admin_descriptor() -> dict[str, Any]:
-    """A self-administered OZ AccessControl role set: no ``authority_contract``
-    (the contract administers its own roles) and the hint carries no
-    ``event_address`` — so address resolution falls through to the job-runtime
-    fallback. This is KING Distributor's exact descriptor shape."""
+    """Self-administered OZ AccessControl role set (KING Distributor's exact shape): no ``authority_contract``, no hint
+    ``event_address``."""
     return {
         "kind": "event_indexed",
         "enumeration_hint": [
@@ -63,59 +53,67 @@ def _impl_job_with_proxy() -> Any:
 # --- unit: _job_runtime_address mirrors capability_resolver's runtime_addr ---
 
 
-def test_runtime_address_is_proxy_when_proxy_linked():
-    assert _job_runtime_address(_impl_job_with_proxy()) == _PROXY
-
-
-def test_runtime_address_is_job_address_when_standalone():
-    job = cast(Any, SimpleNamespace(address=_IMPL, request={"address": _IMPL}))
-    assert _job_runtime_address(job) == _IMPL
-
-
-def test_runtime_address_tolerates_missing_request():
-    assert _job_runtime_address(cast(Any, SimpleNamespace(address=_IMPL))) == _IMPL
+@pytest.mark.parametrize(
+    "job, expected",
+    [
+        pytest.param(_impl_job_with_proxy(), _PROXY, id="proxy-linked"),
+        pytest.param(cast(Any, SimpleNamespace(address=_IMPL, request={"address": _IMPL})), _IMPL, id="standalone"),
+        pytest.param(cast(Any, SimpleNamespace(address=_IMPL)), _IMPL, id="missing-request"),
+    ],
+)
+def test_job_runtime_address(job, expected):
+    assert _job_runtime_address(job) == expected
 
 
 # --- unit: _event_address_for_descriptor picks the proxy for self-admin events ---
 
-
-def test_self_administered_role_enrolls_at_proxy_not_impl():
-    # THE BUG: this returned _IMPL (job.address) before the fix, leaving the
-    # proxy's event index cold ⇒ per-function HyperSync fallback.
-    addr = _event_address_for_descriptor(
-        _self_admin_descriptor(), {"topic0": _ROLE_GRANTED, "direction": "add"}, _impl_job_with_proxy(), {}
-    )
-    assert addr == _PROXY
+_EXTERNAL_AUTHORITY_DESCRIPTOR = {
+    "kind": "external_set",
+    "authority_contract": {"address": _EXTERNAL},
+    "enumeration_hint": [{"topic0": _ROLE_GRANTED, "direction": "add"}],
+}
 
 
-def test_standalone_contract_still_enrolls_at_job_address():
-    job = cast(Any, SimpleNamespace(address=_IMPL, request={}))
-    addr = _event_address_for_descriptor(_self_admin_descriptor(), {"topic0": _ROLE_GRANTED}, job, {})
-    assert addr == _IMPL
-
-
-def test_explicit_hint_event_address_wins_over_proxy():
-    # An emitter named on the hint is authoritative; the proxy fallback only
-    # fills the self-administered gap.
-    addr = _event_address_for_descriptor(
-        _self_admin_descriptor(),
-        {"topic0": _ROLE_GRANTED, "event_address": _EXTERNAL},
-        _impl_job_with_proxy(),
-        {},
-    )
-    assert addr == _EXTERNAL
-
-
-def test_external_authority_address_wins_over_proxy():
-    # An external authority (e.g. a shared RolesAuthority) emits its own events;
-    # the proxy fallback must not override an explicit authority address.
-    desc = {
-        "kind": "external_set",
-        "authority_contract": {"address": _EXTERNAL},
-        "enumeration_hint": [{"topic0": _ROLE_GRANTED, "direction": "add"}],
-    }
-    addr = _event_address_for_descriptor(desc, {"topic0": _ROLE_GRANTED}, _impl_job_with_proxy(), {})
-    assert addr == _EXTERNAL
+@pytest.mark.parametrize(
+    "descriptor, hint, job, expected",
+    [
+        # THE BUG: returned _IMPL (job.address) before the fix, leaving the proxy's event index cold, so each
+        # function fell back to a HyperSync scan.
+        pytest.param(
+            _self_admin_descriptor(),
+            {"topic0": _ROLE_GRANTED, "direction": "add"},
+            _impl_job_with_proxy(),
+            _PROXY,
+            id="self-administered-role-enrolls-at-proxy-not-impl",
+        ),
+        pytest.param(
+            _self_admin_descriptor(),
+            {"topic0": _ROLE_GRANTED},
+            cast(Any, SimpleNamespace(address=_IMPL, request={})),
+            _IMPL,
+            id="standalone-contract-enrolls-at-job-address",
+        ),
+        # An emitter named on the hint is authoritative; the proxy fallback only fills the self-administered gap.
+        pytest.param(
+            _self_admin_descriptor(),
+            {"topic0": _ROLE_GRANTED, "event_address": _EXTERNAL},
+            _impl_job_with_proxy(),
+            _EXTERNAL,
+            id="explicit-hint-event-address-wins-over-proxy",
+        ),
+        # An external authority (e.g. a shared RolesAuthority) emits its own events; the proxy fallback must not
+        # override an explicit authority address.
+        pytest.param(
+            _EXTERNAL_AUTHORITY_DESCRIPTOR,
+            {"topic0": _ROLE_GRANTED},
+            _impl_job_with_proxy(),
+            _EXTERNAL,
+            id="external-authority-address-wins-over-proxy",
+        ),
+    ],
+)
+def test_event_address_for_descriptor(descriptor, hint, job, expected):
+    assert _event_address_for_descriptor(descriptor, hint, job, {}) == expected
 
 
 # --- integration: enroll_from_completed_jobs seeds the cursor at the proxy ---
@@ -123,10 +121,8 @@ def test_external_authority_address_wins_over_proxy():
 
 @pytest.fixture(autouse=True)
 def _no_creation_witness(monkeypatch):
-    """Enrollment grades its seed with three pinned chain reads before writing
-    the cursor. Nothing here asserts that grade — the subject is which ADDRESS
-    the cursor lands on — so the wire is stubbed to the unreachable-RPC failure,
-    whose documented outcome is ``(None, not_determined)``."""
+    """Stub the seed-grading wire to the unreachable-RPC outcome ``(None, not_determined)``; this module asserts which
+    ADDRESS the cursor lands on, not the grade."""
     import workers.event_log_indexer as eli
 
     def _no_wire(*_a, **_kw):

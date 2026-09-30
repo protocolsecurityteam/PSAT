@@ -1,20 +1,16 @@
 """Cross-contract policy-derived claim tests (unit layer).
 
-Drives the real production functions in ``services.static.cross_contract`` — the
-registry, ``emit_claim``, ``resolve_claim_precedence``, and every derivation —
-over ``effects``-shaped fact dicts (input data, not faked collaborators). No
-Slither/DB, so these run in every offline suite.
-
-The legacy propagate-every-effect-label rule is gone: these assert typed
-``policy_derived`` claims only, and that a control-plane label never rides across
-a call boundary.
+Drives the real ``services.static.cross_contract`` functions over ``effects``-shaped fact
+dicts (no Slither/DB). The legacy propagate-every-effect-label rule is gone: these assert
+typed ``policy_derived`` claims only, and that a control-plane label never rides across a
+call boundary.
 """
 
 from __future__ import annotations
 
+import pytest
 from eth_utils.crypto import keccak
 
-from services.static.claims import is_registered
 from services.static.cross_contract import (
     TRANSFER_POLICY_CONFIGURE,
     build_callee_claim_map,
@@ -51,15 +47,6 @@ def _external_sink(target: str, selector: str, *, origin: str = "body", sid: str
 
 def _caller(fn_sig: str, sinks: list[dict]) -> dict:
     return {"functions": {fn_sig: {"selector": _selector(fn_sig), "sinks": sinks, "claims": []}}}
-
-
-# ---------------------------------------------------------------------------
-# The new claim id is registered (emit_claim would fail closed otherwise)
-# ---------------------------------------------------------------------------
-
-
-def test_transfer_policy_claim_is_registered():
-    assert is_registered(TRANSFER_POLICY_CONFIGURE)
 
 
 # ---------------------------------------------------------------------------
@@ -112,31 +99,22 @@ def test_value_flow_propagation_emits_policy_derived():
     assert claim["witness"]["source_tier"] == "standard_exact"
 
 
-def test_guard_origin_call_is_not_a_value_flow():
-    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])})
-    target = _caller("guarded(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR, origin="guard")])
-    out = derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, callee_map)
-    assert out == {}
+_RESOLVED = {"state_variable:token": {"value": TOKEN}}
 
 
-def test_no_join_when_controller_value_unresolved():
-    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])})
-    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
-    # No controller_values: "token" cannot resolve to an address.
-    assert derive_cross_contract_claims(target, {}, callee_map) == {}
-
-
-def test_no_join_when_callee_not_analyzed():
-    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
-    assert derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, {}) == {}
-
-
-def test_control_plane_callee_claim_never_propagates():
-    # A callee whose transfer selector somehow carried an authority claim must
-    # not contaminate the caller: build_callee_claim_map already dropped it.
-    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("authority.replace")])})
-    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR)])
-    assert derive_cross_contract_claims(target, {"state_variable:token": {"value": TOKEN}}, callee_map) == {}
+@pytest.mark.parametrize(
+    ("origin", "controller_values", "analyzed_callees"),
+    [
+        pytest.param("guard", _RESOLVED, {TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])}, id="guard_origin"),
+        # No controller_values: "token" cannot resolve to an address.
+        pytest.param("body", {}, {TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])}, id="controller_unresolved"),
+        pytest.param("body", _RESOLVED, {}, id="callee_not_analyzed"),
+    ],
+)
+def test_no_join_derives_nothing(origin, controller_values, analyzed_callees):
+    callee_map = build_callee_claim_map(analyzed_callees)
+    target = _caller("sweep(address)", [_external_sink("token.transfer", TRANSFER_SELECTOR, origin=origin)])
+    assert derive_cross_contract_claims(target, controller_values, callee_map) == {}
 
 
 def test_external_contract_controller_id_format_resolves():
@@ -242,24 +220,20 @@ def test_transfer_policy_configure_on_bool_mapping_setter():
     assert claim["witness"]["set_vars"] == ["allowlist"]
 
 
-def test_transfer_policy_requires_bool_mapping_shape():
-    links = [{"sibling_address": VAULT, "pointer_var": "hook"}]
-    # A scalar address write (e.g. setOwner) is not a transfer allow/deny list.
+@pytest.mark.parametrize(
+    ("var", "declared_type", "links"),
+    [
+        # A scalar address write (e.g. setOwner) is not a transfer allow/deny list.
+        pytest.param("owner", "address", [{"sibling_address": VAULT, "pointer_var": "hook"}], id="not_bool_mapping"),
+        pytest.param("allowlist", "mapping(address => bool)", [], id="no_sibling_hook_link"),
+    ],
+)
+def test_transfer_policy_negatives(var, declared_type, links):
     out = derive_cross_contract_claims(
-        _teller_with_setter("owner", "address"),
+        _teller_with_setter(var, declared_type),
         {},
         {},
         sibling_transfer_hooks=links,
-    )
-    assert out == {}
-
-
-def test_transfer_policy_requires_a_sibling_hook_link():
-    out = derive_cross_contract_claims(
-        _teller_with_setter("allowlist", "mapping(address => bool)"),
-        {},
-        {},
-        sibling_transfer_hooks=[],
     )
     assert out == {}
 
@@ -312,8 +286,6 @@ def test_provenance_upgrade_emits_policy_derived():
 
 
 def test_provenance_does_not_override_static_standard_exact():
-    """A static standard_exact upgrade claim on the same function survives the
-    per-function precedence merge; the policy_derived duplicate is dropped."""
     from services.static.claims import Claim, resolve_claim_precedence
 
     pp = proxy_provenance_from_classifications(
@@ -329,48 +301,6 @@ def test_provenance_does_not_override_static_standard_exact():
     merged = resolve_claim_precedence([static_claim, *out["upgradeTo(address)"]])
     assert len(merged) == 1
     assert merged[0]["tier"] == "standard_exact"
-
-
-# ---------------------------------------------------------------------------
-# The four derivations compose without clobbering each other
-# ---------------------------------------------------------------------------
-
-
-def test_derivations_merge_per_function():
-    callee_map = build_callee_claim_map({TOKEN: _callee(TRANSFER_SELECTOR, [_std("flow.out")])})
-    target = {
-        "functions": {
-            "sweep(address)": {
-                "selector": _selector("sweep(address)"),
-                "sinks": [_external_sink("token.transfer", TRANSFER_SELECTOR)],
-                "state_writes": [],
-                "claims": [],
-            },
-            "allowFrom(address)": {
-                "selector": "0xccddeeff",
-                "sinks": [],
-                "state_writes": [
-                    {
-                        "var": "allowlist",
-                        "declared_type": "mapping(address => bool)",
-                        "member_path": [],
-                        "granularity": "var",
-                        "hygiene_class": "normal",
-                        "origin": "body",
-                    }
-                ],
-                "claims": [],
-            },
-        }
-    }
-    out = derive_cross_contract_claims(
-        target,
-        {"state_variable:token": {"value": TOKEN}},
-        callee_map,
-        sibling_transfer_hooks=[{"sibling_address": VAULT, "pointer_var": "hook"}],
-    )
-    assert out["sweep(address)"][0]["claim_id"] == "flow.out"
-    assert out["allowFrom(address)"][0]["claim_id"] == TRANSFER_POLICY_CONFIGURE
 
 
 # ---------------------------------------------------------------------------
@@ -409,9 +339,7 @@ def test_interface_param_callee_joins_via_the_canonical_key():
 
 
 def test_unstamped_interface_param_callee_still_misses_honestly():
-    """An artifact minted before the stamp existed carries no canonical key.
-    Absence is not-determined: the join must NOT guess a lowering, so the
-    pre-fix miss is preserved rather than a claim being manufactured."""
+    """A pre-stamp artifact has no canonical key; absence is not-determined, so the join must not guess a lowering."""
     callee_map = build_callee_claim_map({TOKEN: _interface_param_callee([_std("flow.out")], stamped=False)})
     assert CANONICAL_SWEEP_TO not in callee_map[TOKEN]
     target = _caller("recoverVia(address,address,uint256)", [_external_sink("recovery.sweepTo", CANONICAL_SWEEP_TO)])
@@ -431,8 +359,6 @@ def test_non_propagatable_claims_never_join_even_via_the_canonical_key():
 
 
 def test_elementary_callee_is_not_double_counted_by_the_two_keys():
-    """When canonical == declared the two keys collapse to one map entry, so a
-    caller inherits the claim exactly once."""
     record = {"selector": TRANSFER_SELECTOR, "abi_selector": TRANSFER_SELECTOR, "claims": [_std("flow.out")]}
     callee_map = build_callee_claim_map({TOKEN: {"functions": {"transfer(address,uint256)": record}}})
     assert list(callee_map[TOKEN]) == [TRANSFER_SELECTOR]

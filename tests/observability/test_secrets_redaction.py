@@ -39,115 +39,136 @@ class TestSanitizeUrl:
         out = sanitize_url(_ETHERSCAN)
         assert "FAKE_ETHERSCAN_KEY" not in out
         assert "apikey=<redacted>" in out
-        # Non-secret params survive.
         assert "module=account" in out
         assert "chainid=1" in out
 
     def test_discord_webhook_token_is_masked(self):
         out = sanitize_url(_DISCORD_WEBHOOK)
         assert "FAKE_DISCORD_TOKEN_FOR_TESTS" not in out
-        # Webhook id (the public-ish part) survives so an admin can still
-        # tell two webhooks apart in the UI.
+        # Webhook id (public-ish) survives so an admin can still tell two webhooks apart.
         assert "123456789012345678" in out
 
-    def test_discord_legacy_host_webhook_is_masked(self):
-        legacy = "https://discordapp.com/api/webhooks/123456789012345678/LEGACY_TOKEN_VALUE_HERE"
-        out = sanitize_url(legacy)
-        assert "LEGACY_TOKEN_VALUE_HERE" not in out
-        assert "<redacted>" in out
-        assert "123456789012345678" in out
+    @pytest.mark.parametrize(
+        ("url", "secret", "must_contain"),
+        [
+            pytest.param(
+                "https://discordapp.com/api/webhooks/123456789012345678/LEGACY_TOKEN_VALUE_HERE",
+                "LEGACY_TOKEN_VALUE_HERE",
+                ("<redacted>", "123456789012345678"),
+                id="discord_legacy_host",
+            ),
+            # Discord's documented base is /api/v{N}/...; unversioned /api/webhooks/ is a convenience alias.
+            pytest.param(
+                "https://discord.com/api/v10/webhooks/123456789012345678/VERSIONED_TOKEN_VAL",
+                "VERSIONED_TOKEN_VAL",
+                ("<redacted>", "123456789012345678", "/api/v10/webhooks/"),
+                id="discord_versioned",
+            ),
+            pytest.param(
+                "https://canary.discord.com/api/webhooks/123456789012345678/CANARY_TOK",
+                "CANARY_TOK",
+                ("<redacted>",),
+                id="discord_canary_subdomain",
+            ),
+            pytest.param(
+                "https://ptb.discordapp.com/api/webhooks/123456789012345678/PTB_TOK",
+                "PTB_TOK",
+                ("<redacted>",),
+                id="discord_ptb_subdomain_on_legacy_host",
+            ),
+            # BlockPI's /v1/rpc/<key> has a short separator segment escaping the generic /vN/<long>
+            # fallback; the host list catches it.
+            pytest.param(
+                "https://ethereum.blockpi.network/v1/rpc/abc123XYZdef456GHI789jkl",
+                "abc123XYZdef456GHI789jkl",
+                ("<redacted>",),
+                id="blockpi_host_path",
+            ),
+            # Dwellir puts the key directly under the host, so it relies on the host list.
+            pytest.param(
+                "https://api-ethereum-mainnet.n.dwellir.com/abc123XYZdef456GHI789jkl",
+                "abc123XYZdef456GHI789jkl",
+                ("<redacted>",),
+                id="dwellir_bare_key_path",
+            ),
+            pytest.param(
+                "https://eth.nownodes.io/abc123XYZdef456GHI789jkl",
+                "abc123XYZdef456GHI789jkl",
+                ("<redacted>",),
+                id="nownodes_bare_key_path",
+            ),
+            pytest.param(
+                "https://newprovider.example/v10/super_long_key_value_here_xyz",
+                "super_long_key_value_here_xyz",
+                ("/v10/<redacted>",),
+                id="v10_plus_path_segment_caught_by_shape",
+            ),
+            # A provider not in the host list: the ``/v2/<longblob>`` shape still redacts.
+            pytest.param(
+                "https://rpc.obscure-provider.example/v2/abc123XYZdef456GHI",
+                "abc123XYZdef456GHI",
+                ("/v2/<redacted>",),
+                id="generic_path_key_segment_caught_by_shape",
+            ),
+        ],
+    )
+    def test_secret_is_masked(self, url, secret, must_contain):
+        out = sanitize_url(url)
+        assert secret not in out
+        for fragment in must_contain:
+            assert fragment in out
 
-    def test_discord_versioned_webhook_token_is_masked(self):
-        # Discord's documented API base is /api/v{N}/...; the unversioned
-        # /api/webhooks/ path is just a convenience alias.
-        versioned = "https://discord.com/api/v10/webhooks/123456789012345678/VERSIONED_TOKEN_VAL"
-        out = sanitize_url(versioned)
-        assert "VERSIONED_TOKEN_VAL" not in out
-        assert "<redacted>" in out
-        assert "123456789012345678" in out
-        assert "/api/v10/webhooks/" in out
+    @pytest.mark.parametrize(
+        ("url", "must_not_contain", "must_contain"),
+        [
+            pytest.param(
+                "https://alice:secret_123@private-eth-node.example.com/jsonrpc",
+                ("alice", "secret_123"),
+                ("private-eth-node.example.com",),
+                id="userinfo_stripped_from_netloc",
+            ),
+            # Userinfo and path-key are independent leak channels; scrub both.
+            pytest.param(
+                "https://u:pwd@eth-mainnet.g.alchemy.com/v2/SECRETKEY",
+                ("pwd", "SECRETKEY"),
+                ("<redacted>", "eth-mainnet.g.alchemy.com"),
+                id="stripped_even_when_path_already_masked",
+            ),
+            pytest.param(
+                "https://u:p@eth.example.com:8545/jsonrpc",
+                ("u:p",),
+                ("eth.example.com:8545",),
+                id="preserves_port",
+            ),
+            # Bare IPv6 would re-parse as host:port garbage, so the bracketed form must survive.
+            pytest.param(
+                "https://u:p@[::1]:8545/jsonrpc",
+                ("u:p",),
+                ("[::1]:8545",),
+                id="ipv6_host_preserves_brackets",
+            ),
+        ],
+    )
+    def test_basic_auth_userinfo_is_stripped(self, url, must_not_contain, must_contain):
+        out = sanitize_url(url)
+        for fragment in must_not_contain:
+            assert fragment not in out
+        for fragment in must_contain:
+            assert fragment in out
 
-    def test_discord_canary_subdomain_webhook_is_masked(self):
-        out = sanitize_url("https://canary.discord.com/api/webhooks/123456789012345678/CANARY_TOK")
-        assert "CANARY_TOK" not in out
-        assert "<redacted>" in out
-
-    def test_discord_ptb_subdomain_on_legacy_host_is_masked(self):
-        out = sanitize_url("https://ptb.discordapp.com/api/webhooks/123456789012345678/PTB_TOK")
-        assert "PTB_TOK" not in out
-        assert "<redacted>" in out
-
-    def test_basic_auth_userinfo_stripped_from_netloc(self):
-        out = sanitize_url("https://alice:secret_123@private-eth-node.example.com/jsonrpc")
-        assert "alice" not in out
-        assert "secret_123" not in out
-        assert "private-eth-node.example.com" in out
-
-    def test_basic_auth_stripped_even_when_path_already_masked(self):
-        # Userinfo and path-key are independent leak channels; both must
-        # be scrubbed on the same URL.
-        out = sanitize_url("https://u:pwd@eth-mainnet.g.alchemy.com/v2/SECRETKEY")
-        assert "pwd" not in out
-        assert "SECRETKEY" not in out
-        assert "<redacted>" in out
-        assert "eth-mainnet.g.alchemy.com" in out
-
-    def test_basic_auth_preserves_port(self):
-        out = sanitize_url("https://u:p@eth.example.com:8545/jsonrpc")
-        assert "u:p" not in out
-        assert "eth.example.com:8545" in out
-
-    def test_basic_auth_ipv6_host_preserves_brackets(self):
-        # Bare IPv6 without brackets would be re-parsed as host:port garbage,
-        # so the bracketed form must survive netloc rebuild.
-        out = sanitize_url("https://u:p@[::1]:8545/jsonrpc")
-        assert "u:p" not in out
-        assert "[::1]:8545" in out
-
-    def test_v10_plus_path_segment_caught_by_shape(self):
-        # Same defense-in-depth as /v2/, but for double-digit versions.
-        out = sanitize_url("https://newprovider.example/v10/super_long_key_value_here_xyz")
-        assert "super_long_key_value_here_xyz" not in out
-        assert "/v10/<redacted>" in out
-
-    def test_blockpi_host_path_is_masked(self):
-        # BlockPI's /v1/rpc/<key> layout has a short separator segment
-        # that escapes the generic /vN/<long> fallback; host-list entry
-        # is what catches it.
-        out = sanitize_url("https://ethereum.blockpi.network/v1/rpc/abc123XYZdef456GHI789jkl")
-        assert "abc123XYZdef456GHI789jkl" not in out
-        assert "<redacted>" in out
-
-    def test_dwellir_bare_key_path_is_masked(self):
-        # Dwellir places the key directly under the host with no version
-        # segment, so it relies entirely on the host list.
-        out = sanitize_url("https://api-ethereum-mainnet.n.dwellir.com/abc123XYZdef456GHI789jkl")
-        assert "abc123XYZdef456GHI789jkl" not in out
-        assert "<redacted>" in out
-
-    def test_nownodes_bare_key_path_is_masked(self):
-        out = sanitize_url("https://eth.nownodes.io/abc123XYZdef456GHI789jkl")
-        assert "abc123XYZdef456GHI789jkl" not in out
-        assert "<redacted>" in out
+    @pytest.mark.parametrize(
+        "value",
+        [
+            pytest.param("not a url", id="non_url_string"),
+            pytest.param("", id="empty_string"),
+            pytest.param(None, id="non_string"),
+        ],
+    )
+    def test_non_url_input_passes_through(self, value):
+        assert sanitize_url(value) == value
 
     def test_public_rpc_pass_through(self):
-        # No path-key, no query-key — nothing to redact.
         assert sanitize_url(_PUBLIC_RPC) == _PUBLIC_RPC
-
-    def test_generic_path_key_segment_caught_by_shape(self):
-        # An obscure provider not in the host suffix list — the
-        # ``/v2/<longblob>`` shape still triggers redaction.
-        out = sanitize_url("https://rpc.obscure-provider.example/v2/abc123XYZdef456GHI")
-        assert "abc123XYZdef456GHI" not in out
-        assert "/v2/<redacted>" in out
-
-    def test_non_url_string_passes_through(self):
-        assert sanitize_url("not a url") == "not a url"
-        assert sanitize_url("") == ""
-
-    def test_non_string_passes_through(self):
-        # ``Job.error`` can be None; helper must not raise.
-        assert sanitize_url(None) is None  # pyright: ignore[reportArgumentType]
 
 
 class TestSanitizeString:
@@ -163,12 +184,8 @@ class TestSanitizeString:
         assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in out
         assert "FAKE_ETHERSCAN_KEY" not in out
 
-    def test_no_url_pass_through(self):
-        assert sanitize_string("nothing to see") == "nothing to see"
-
     def test_wss_url_embedded_in_text_is_scrubbed(self):
-        # RPC providers also expose wss:// endpoints; the URL extractor
-        # must reach into ws/wss schemes, not just http(s).
+        # RPC providers also expose wss:// endpoints; the extractor must handle ws/wss.
         wss_url = _ALCHEMY.replace("https://", "wss://")
         msg = f"failed to connect to {wss_url}: timeout"
         out = sanitize_string(msg)
@@ -194,9 +211,8 @@ class TestSanitizeObj:
         assert out[1]["foo"] == "bar"
 
     def test_url_in_arbitrary_string_field_still_caught(self):
-        # A user pasted the URL into a free-text field. The recursive
-        # sanitize_string() pass catches it even though the key name
-        # isn't in the SECRET_VALUE_KEYS list.
+        # URL pasted into a free-text field: the recursive sanitize_string() pass catches it
+        # though the key isn't in SECRET_VALUE_KEYS.
         body = {"detail": f"trying to use {_ALCHEMY} for tracing"}
         out = sanitize_obj(body)
         assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in out["detail"]

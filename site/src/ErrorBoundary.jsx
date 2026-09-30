@@ -10,7 +10,7 @@ export default class ErrorBoundary extends React.Component {
           <div className="card" style={{ maxWidth: 600, margin: "0 auto" }}>
             <h3>Something went wrong</h3>
             <p className="muted">{String(this.state.error)}</p>
-            <button onClick={() => { this.setState({ error: null }); window.location.reload(); }}>Reload</button>
+            <button className="btn" onClick={() => { this.setState({ error: null }); window.location.reload(); }}>Reload</button>
           </div>
         </div>
       );

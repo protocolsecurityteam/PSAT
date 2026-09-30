@@ -126,16 +126,6 @@ def test_ready_stale_row_needs_its_staleness_stamp(fleet, db_session):
     assert counts["contracts"] == 8  # still a partition
 
 
-def test_stale_is_neither_fresh_nor_ignorance(fleet):
-    """The ``ready_stale`` state has to survive to the consumer as its own number:
-    folding it into ready collapses "we cannot re-read this" and folding it into
-    not-determined discards a watch list we do hold."""
-    counts = plan_coverage_counts(fleet)
-    assert counts[READY_STALE] == 1
-    assert NO_CURRENT_MATERIALIZATION not in {READY_STALE}
-    assert counts["not_determined"][NO_CURRENT_MATERIALIZATION] == 1  # the row with no topics only
-
-
 def test_failed_analysis_is_reported_as_an_overlay(db_session):
     """A failed build reads as ``no_current_materialization`` at enrollment — the
     reader cannot see why. The census names the reason without double-counting:

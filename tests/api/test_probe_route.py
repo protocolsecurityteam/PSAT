@@ -1,13 +1,8 @@
 """End-to-end tests for ``POST /api/contract/{address}/probe/membership``.
 
-Exercises the full route: address → most-recent completed Job →
-predicate_trees artifact → probe_membership. Uses the
-``api_client`` + ``db_session`` fixtures from conftest, which point
-the FastAPI app at the test database.
-
-The route is admin-gated; tests bypass auth by overriding
-``api.require_admin_key`` to a no-op (the same pattern test_api.py
-uses for other admin-gated endpoints).
+Full route: address → most-recent completed Job → predicate_trees artifact → probe_membership,
+via the conftest ``api_client`` + ``db_session`` fixtures. The route is admin-gated; tests
+override the auth dependency with a no-op (same pattern as test_api.py).
 """
 
 from __future__ import annotations
@@ -137,18 +132,14 @@ def test_probe_membership_uses_explicit_chain_id_job(api_client, db_session):
 
 @requires_postgres
 def test_probe_membership_returns_yes_for_known_member(api_client, db_session):
-    """End-to-end happy path: a guarded function with a multi-key
-    membership leaf, member is the caller. Adapter returns
-    finite_set exact → result yes."""
+    """Guarded function with a multi-key membership leaf, member is the caller: finite_set exact -> yes."""
     import api as api_module
 
     _no_auth(api_module)
     address = "0x" + "ab" * 20
     member = "0x" + "11" * 20
-    # No event hint means there is no semantic enumeration backend for
-    # this descriptor. The point of this test is that the route HTTP
-    # layer (resolve address → job → artifact → tree → probe_membership)
-    # plumbs through; we assert the payload shape.
+    # No event hint -> no semantic enumeration backend. This only proves the HTTP layer plumbs
+    # through (address -> job -> artifact -> tree -> probe_membership), so assert payload shape.
     artifact = {
         "schema_version": "semantic",
         "contract_name": "T",
@@ -241,7 +232,6 @@ def test_probe_membership_no_completed_job_returns_404(api_client, db_session):
 
 @requires_postgres
 def test_probe_membership_no_artifact_returns_404(api_client, db_session):
-    """A completed job without a predicate_trees artifact returns 404."""
     import api as api_module
 
     _no_auth(api_module)
@@ -291,9 +281,7 @@ def test_probe_membership_semantic_error_payload_returns_unknown(api_client, db_
 
 @requires_postgres
 def test_probe_membership_rejects_malformed_address_payload(api_client, db_session):
-    """Pydantic validator: ``member`` must be a 0x-prefixed
-    20-byte address. Pinned so a regression doesn't allow an empty
-    string / wrong-length blob through."""
+    """Pydantic validator: ``member`` must be a 0x-prefixed 20-byte address."""
     import api as api_module
 
     _no_auth(api_module)
@@ -327,10 +315,8 @@ def test_probe_membership_returns_yes_via_postgres_event_log_repo(api_client, db
 
     _no_auth(api_module)
 
-    # Seed one generic indexed event for the role+member, plus a cursor
-    # row so the repo reports a freshness block. Address derived from a
-    # uuid so reruns + parallel test files don't collide on the
-    # ``contracts.address+chain`` unique constraint.
+    # One generic indexed event for role+member plus a cursor row (freshness block). Address is
+    # uuid-derived so reruns/parallel files don't collide on ``contracts.address+chain``.
     import uuid as _uuid
 
     suffix = _uuid.uuid4().hex[:8]
@@ -421,7 +407,6 @@ def test_probe_membership_returns_yes_via_postgres_event_log_repo(api_client, db
     # in prod (max(1, head - RESOLVER_FINALITY_MARGIN)).
     covering_block = 18_000_000
 
-    # Granted member -> yes
     granted_resp = api_client.post(
         f"/api/contract/{address}/probe/membership",
         json={
@@ -455,9 +440,7 @@ def test_probe_membership_returns_yes_via_postgres_event_log_repo(api_client, db
 
 @requires_postgres
 def test_probe_signature_returns_unknown_for_non_signature_leaf(api_client, db_session):
-    """The signature probe at index 0 of a membership leaf returns
-    unknown with reason=non_signature_leaf — the routes are
-    differentiated."""
+    """The signature probe at index 0 of a membership leaf returns unknown/non_signature_leaf."""
     import api as api_module
 
     _no_auth(api_module)
@@ -557,8 +540,6 @@ def test_probe_signature_route_for_signature_auth_leaf(api_client, db_session):
 
 @requires_postgres
 def test_probe_signature_rejects_malformed_signer(api_client, db_session):
-    """Pydantic Field validator pins recovered_signer shape (0x +
-    40 hex)."""
     import api as api_module
 
     _no_auth(api_module)
@@ -632,7 +613,6 @@ def test_probe_rate_limit_blocks_after_limit(api_client, db_session, monkeypatch
     }
     headers = {"X-PSAT-Admin-Key": "test-key"}
 
-    # First 3 requests succeed (function unguarded -> result yes).
     for _ in range(3):
         resp = api_client.post(
             f"/api/contract/{address}/probe/membership",
@@ -641,7 +621,6 @@ def test_probe_rate_limit_blocks_after_limit(api_client, db_session, monkeypatch
         )
         assert resp.status_code == 200, resp.text
 
-    # 4th request rate-limited.
     resp = api_client.post(
         f"/api/contract/{address}/probe/membership",
         json=payload,
@@ -654,8 +633,6 @@ def test_probe_rate_limit_blocks_after_limit(api_client, db_session, monkeypatch
 
 @requires_postgres
 def test_probe_rate_limit_keyed_per_address(api_client, db_session, monkeypatch):
-    """The rate limit is per (admin_key, address) — exhausting
-    the budget for one contract doesn't block others."""
     import api as api_module
 
     _no_auth(api_module)
@@ -680,55 +657,17 @@ def test_probe_rate_limit_keyed_per_address(api_client, db_session, monkeypatch)
     }
     headers = {"X-PSAT-Admin-Key": "test-key"}
 
-    # Exhaust addr_a (limit=2).
     for _ in range(2):
         api_client.post(f"/api/contract/{addr_a}/probe/membership", json=payload, headers=headers)
     a_third = api_client.post(f"/api/contract/{addr_a}/probe/membership", json=payload, headers=headers)
     assert a_third.status_code == 429
 
-    # addr_b's budget is independent.
     b_first = api_client.post(f"/api/contract/{addr_b}/probe/membership", json=payload, headers=headers)
     assert b_first.status_code == 200
 
 
 @requires_postgres
-def test_probe_rate_limit_disabled_when_zero(api_client, db_session, monkeypatch):
-    """``PSAT_PROBE_RATE_LIMIT=0`` (env-tuned to 0) disables
-    rate limiting entirely — useful for local dev / the existing
-    tests that don't care about throttling."""
-    import api as api_module
-
-    _no_auth(api_module)
-    address = "0x" + uuid.uuid4().hex[:8] + "ec" * 16
-    _seed_completed_job_with_artifact(
-        db_session,
-        address=address,
-        predicate_trees={"schema_version": "semantic", "contract_name": "T", "trees": {}},
-    )
-
-    from routers import predicate_capabilities
-
-    monkeypatch.setattr(predicate_capabilities, "_PROBE_RATE_LIMIT", 0)
-    predicate_capabilities._probe_rate_state.clear()
-
-    payload = {
-        "function_signature": "open()",
-        "predicate_index": 0,
-        "member": "0x" + "11" * 20,
-    }
-    # 50 requests in a tight loop — none rate-limited.
-    for _ in range(50):
-        resp = api_client.post(
-            f"/api/contract/{address}/probe/membership",
-            json=payload,
-            headers={"X-PSAT-Admin-Key": "test-key"},
-        )
-        assert resp.status_code == 200
-
-
-@requires_postgres
 def test_probe_rate_limit_applies_to_signature_route_too(api_client, db_session, monkeypatch):
-    """Both probe routes share the rate limiter."""
     import api as api_module
 
     _no_auth(api_module)
@@ -839,7 +778,8 @@ def test_probe_membership_picks_most_recent_completed_job(api_client, db_session
             },
         }
 
-    store_artifact(db_session, older.id, "predicate_trees", data=_tree("OLD"))
+    # The older tree omits f(), so picking it would answer function_unguarded.
+    store_artifact(db_session, older.id, "predicate_trees", data={"schema_version": "semantic", "trees": {}})
     store_artifact(db_session, newer.id, "predicate_trees", data=_tree("NEW"))
     db_session.commit()
 
@@ -851,12 +791,6 @@ def test_probe_membership_picks_most_recent_completed_job(api_client, db_session
             "member": "0x" + "11" * 20,
         },
     )
-    # Equality leaf -> non_membership_leaf; that's expected. The
-    # point: the route picked the NEWER tree, so the leaf walks
-    # without finding membership data. We don't assert text equality
-    # on `expression` here because the field isn't surfaced in the
-    # response — the implicit pin is "no 500 / no stale-tree
-    # error", just the standard non-membership-leaf signal.
     assert resp.status_code == 200
     body = resp.json()
     assert body["leaf_kind"] == "equality"

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
 from eth_utils.crypto import keccak
 
 import services.resolution.role_store_standards as rss
 from services.resolution.role_store_standards import (
     OZ_ACCESS_CONTROL_ENUMERABLE,
     SOLADY_ENUMERABLE_ROLES,
-    STANDARDS,
-    all_topic0s,
     detect_standards,
     resolve_probe_code,
 )
@@ -48,37 +47,28 @@ def test_oz_grant_revoke_polarity_and_eip165():
     assert OZ_ACCESS_CONTROL_ENUMERABLE.eip165_interface_id == "0x5a05180f"
 
 
-def test_all_topic0s_is_the_sorted_union():
-    expected = set()
-    for standard in STANDARDS:
-        expected.update(standard.topic0s())
-    assert all_topic0s() == sorted(expected)
-    # Solady RoleSet + OZ RoleGranted/RoleRevoked = 3 distinct topics.
-    assert len(all_topic0s()) == 3
-
-
 # --- detect_standards ------------------------------------------------------
 
 
-def test_detect_solady_by_all_markers():
-    code = _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors)
-    assert detect_standards(code) == [SOLADY_ENUMERABLE_ROLES]
-
-
-def test_detect_oz_by_all_markers():
-    code = _code_with(*OZ_ACCESS_CONTROL_ENUMERABLE.marker_selectors)
-    assert detect_standards(code) == [OZ_ACCESS_CONTROL_ENUMERABLE]
-
-
-def test_partial_markers_is_inconclusive():
-    # Missing one Solady marker → no detection (falls to union-enroll upstream).
-    partial = _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors[:-1])
-    assert detect_standards(partial) == []
-
-
-def test_detect_empty_or_none_code():
-    assert detect_standards(None) == []
-    assert detect_standards("0x") == []
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        pytest.param(
+            _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors), [SOLADY_ENUMERABLE_ROLES], id="solady_all_markers"
+        ),
+        pytest.param(
+            _code_with(*OZ_ACCESS_CONTROL_ENUMERABLE.marker_selectors),
+            [OZ_ACCESS_CONTROL_ENUMERABLE],
+            id="oz_all_markers",
+        ),
+        # Missing one Solady marker -> no detection (falls to union-enroll upstream).
+        pytest.param(_code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors[:-1]), [], id="partial_markers_inconclusive"),
+        pytest.param(None, [], id="none_code"),
+        pytest.param("0x", [], id="empty_code"),
+    ],
+)
+def test_detect_standards(code, expected):
+    assert detect_standards(code) == expected
 
 
 # --- resolve_probe_code: proxy hop -----------------------------------------

@@ -1,85 +1,36 @@
-import { useState } from "react";
+import { fnChipClass, formatUsd } from "../format.js";
+import { EntityRef } from "../EntityRef.jsx";
 
-import { fnChipClass, formatUsd, shortAddr } from "../format.js";
-import { GotoArrow } from "../GotoArrow.jsx";
-
-// One shared row for both Governs sections. Collapsed content is identical
-// everywhere: contract name (+ proxy/impl tag), short address, USD value when
-// known. Clicking the row head previews the contract on the canvas (gold marker
-// + pan) — no selection change; the trailing arrow commits to its card. A ghost
-// "N fns" button appears only when the row carries function data (every Can Call
-// row does; governance-path rows are reachability-only and never do) and expands
-// to the full function-chip list.
+// Shared row: head previews, arrow commits. The "N fns" button appears only on
+// Can Call rows (path rows are reachability-only).
 function GovernsRow({ row, onPreview, onNavigate }) {
-  const [open, setOpen] = useState(false);
-  const label = row.name || shortAddr(row.address);
   const functions = Array.isArray(row.functions) ? row.functions : [];
-  const usd = formatUsd(row.total_usd);
-
   return (
-    <div className="ps-governs-row">
-      <div
-        className="ps-governs-head"
-        role="button"
-        tabIndex={0}
-        onClick={() => onPreview && onPreview(row.address)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onPreview && onPreview(row.address);
-          }
-        }}
-      >
-        <span className="ps-governs-name">
-          {label}
-          {row.tag ? <span className="ps-governs-tag"> ({row.tag})</span> : null}
-        </span>
-        <span className="ps-governs-addr">{shortAddr(row.address)}</span>
-        {usd ? <span className="ps-governs-value">{usd}</span> : null}
-        {functions.length > 0 ? (
-          <button
-            type="button"
-            className="ps-governs-expand"
-            aria-expanded={open}
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen((v) => !v);
-            }}
-          >
-            {functions.length} fns
-            <span className="ps-governs-caret">{open ? "▾" : "▸"}</span>
-          </button>
-        ) : null}
-        {onNavigate && (
-          <GotoArrow onCommit={() => onNavigate({ type: "contract", address: row.address, label })} label={`Go to ${label}`} />
-        )}
+    <EntityRef
+      address={row.address}
+      name={row.name}
+      tag={row.tag}
+      value={formatUsd(row.total_usd)}
+      summary={functions.length > 0 ? `${functions.length} fns` : null}
+      onPreview={onPreview}
+      onNavigate={onNavigate}
+    >
+      <div className="ps-ctrl-fns">
+        {functions.map((fn) => (
+          <span className={`ps-ctrl-fnchip ${fnChipClass(fn)}`} key={fn}>{fn}</span>
+        ))}
       </div>
-      {open && functions.length > 0 && (
-        <div className="ps-ctrl-fns">
-          {functions.map((fn) => (
-            <span className={`ps-ctrl-fnchip ${fnChipClass(fn)}`} key={fn}>{fn}</span>
-          ))}
-        </div>
-      )}
-    </div>
+    </EntityRef>
   );
 }
 
-// The Governs tab of the universal entity card: "authority OUT" — what this
-// entity can do TO other contracts. Two sections share one row shape:
+// Authority out, in two sections sharing one row shape:
 //
-//   1. Can Call — one row per governed contract (client-inverted from every
-//      contract's per-function authority, so it resolves for machine-only
-//      authorities too). Rows carry the concrete function list, expandable.
-//   2. Appears in governance path for — the server-walked reached set (the
-//      same record the canvas reach chips render). Reachability-only, so rows
-//      carry no function list (no expand button). `frontierCount` — on-page
-//      destinations the server walk could NOT confirm a path to — renders as
-//      a count line only, never as rows: not_determined stays a distinct
-//      third state from reached.
-//
-// Both lists are pre-deduped and proxy/impl-tagged by the card. Every row body
-// previews the contract on the canvas; its arrow commits to the contract's card.
+// 1. Can Call — per governed contract, client-inverted so machine-only
+//      authorities resolve; expandable functions.
+// 2. Appears in governance path for — the server-walked reached set (same as
+//      the canvas chips). `frontierCount` is only a count line: not_determined
+//      stays distinct from reached.
 export function GovernsTab({ canCallRows, pathRows, frontierCount = 0, onPreview, onNavigate }) {
   if (!canCallRows.length && !pathRows.length && !frontierCount) {
     return <div className="ps-lane-empty">Governs nothing</div>;

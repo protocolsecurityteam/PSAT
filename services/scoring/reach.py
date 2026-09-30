@@ -1,11 +1,8 @@
 """Scorer-authoritative reach, computed once and shipped to the surface.
 
-The surface used to run its own ungated client BFS over display edges and so
-published reach on paths the score document holds as ``not_determined``. This
-module is the single server-side computation both consumers share: the per-hop
-verdict is :func:`hop_bound` — the fold imports it back, so the two cannot
-drift — and every hop the walk could not establish is published as a frontier
-entry, a distinct third state, never dropped and never walked.
+Replaces the surface's ungated client BFS, which published reach on paths the score holds as ``not_determined``. The
+per-hop verdict is :func:`hop_bound`, which the fold imports so they can't drift; un-established hops are published as
+frontier entries.
 """
 
 from __future__ import annotations
@@ -32,10 +29,8 @@ HOP_REFUSED_SCOPE = "gate_scope_not_determined"
 HOP_REFUSED_CONFERRAL = "gate_does_not_confer_this_scope"
 HOP_REFUSED_CONDITION = "caller_condition_not_satisfiable"
 
-# A stored-authority anchor's outgoing edges are not blindly expanded: being
-# the slot's value is only witnessed to matter via a distilled gate signal,
-# which walks under its own grant. Without one, what exercising the authority
-# reaches is a question nothing answered.
+# A stored-authority anchor's edges aren't expanded without a distilled gate signal witnessing what exercising it
+# reaches.
 AUTHORITY_EXERCISE_NOT_WITNESSED = "authority_exercise_not_witnessed"
 _AUTHORITY_EXERCISE_BASIS = "no witness of what exercising this stored authority reaches"
 
@@ -43,25 +38,13 @@ _AUTHORITY_EXERCISE_BASIS = "no witness of what exercising this stored authority
 def hop_bound(edge: P.ControlEdge, conditions: P.ConditionPlane, *, grant: P.GateGrant | None) -> dict[str, Any] | None:
     """Why this hop is NOT walked as proven, or ``None`` when it is.
 
-    Two bounds, in the order that costs least to decide. The SCOPE bound is
-    gate-control's alone — ``grant`` is the gate asking, and ``None`` is code
-    control, which does not ask: controlling the code exercises everything the
-    code is authorized to exercise, whatever the label happened to record.
+    Scope bound (gate control only; ``grant=None`` is code control, which exercises everything): a ``roles N`` edge
+    walks where the role -> selector join licenses functions at the destination, a ``state_var`` edge where the gate's
+    witness rewrites that variable. Labels naming unseized scopes, or nothing, don't suffice.
 
-    For a gate the question is CONFERRAL, not label presence: a ``roles N`` edge
-    is walked where the role -> selector join names functions role N licenses at
-    the destination, and a ``state_var`` edge where the gate's own witness is
-    observed to rewrite a variable of that name. A label naming a scope the gate
-    is not witnessed to seize (`hook`, `vault`, `roleRegistry`) is no longer
-    enough, and neither is a label naming nothing at all — 55 of the role edges
-    restate their own relation and name no role.
+    Condition bound (shared): the destination's guards may pin the caller to the destination itself.
 
-    The CONDITION bound is shared: the destination's own guards may pin their
-    caller to the destination itself, and no authority relation makes one
-    address another.
-
-    A refused hop is a published ``not_determined``, never a silent drop and
-    never a proven negative.
+    Refused hops are published ``not_determined``.
     """
     if grant is not None:
         verdict = grant.confers(edge.scope, edge.anchor)
@@ -69,10 +52,7 @@ def hop_bound(edge: P.ControlEdge, conditions: P.ConditionPlane, *, grant: P.Gat
             return {
                 "caller": edge.principal,
                 "destination": edge.anchor,
-                # The unlabelled edges keep their own reason: "the label named
-                # nothing" and "the label named something this gate does not
-                # seize" are different shortfalls and only the first is a
-                # pipeline gap.
+                # "Named nothing" is a pipeline gap; "named something unseized" isn't, so they keep separate reasons.
                 "reason": (
                     HOP_REFUSED_SCOPE if verdict.outcome == P.CONFERRAL_SCOPE_NOT_DETERMINED else HOP_REFUSED_CONFERRAL
                 ),
@@ -103,14 +83,10 @@ def hop_bound(edge: P.ControlEdge, conditions: P.ConditionPlane, *, grant: P.Gat
 def _bfs(
     seeds: Iterable[str], closure: P.ControlClosure, conditions: P.ConditionPlane, grant: P.GateGrant | None
 ) -> tuple[dict[str, int], dict[str, str], list[dict[str, Any]]]:
-    """One walk: min hop per reached key, the parent that proved it, the refusals.
+    """One walk: min hop per reached key, the parent that proved it, and the refusals.
 
-    Seeds start at hop 1 (they are already reached by their own witness); every
-    further hop is admitted only where :func:`hop_bound` returns ``None`` —
-    the fold's verdict, computed by the fold's code. The burn sentinel is
-    refused at every hop, same second line of defence as ``fold._closure``.
-    Refusals are deduped on the ``(caller, destination)`` pair and, as in the
-    fold, a hop another path reached anyway withheld nothing.
+    Seeds are hop 1; further hops need :func:`hop_bound` to return ``None``. The zero address is refused at every hop,
+    as in ``fold._closure``. Refusals are deduped by pair and dropped if reached another way.
     """
     dist = {key: 1 for key in sorted(seeds) if not P.is_zero_key(key)}
     parent: dict[str, str] = {}
@@ -136,10 +112,8 @@ def _bfs(
 def _relax(reached: dict[str, dict[str, Any]], parents: dict[str, str], self_keys: set[str]) -> None:
     """Shorten each published hop to the ``parents`` route the overlay draws.
 
-    Min-hop merging across walks can leave a child's count from one walk while
-    its parent was later re-admitted shorter by another. Every ``parents`` edge
-    was individually walked, so relaxing along them never claims new reach —
-    it only stops a chip's number exceeding the length of its own lit route.
+    Merging walks can leave a child's count longer than its lit route; every ``parents`` edge was walked, so this claims
+    no new reach.
     """
     changed = True
     while changed:
@@ -165,36 +139,16 @@ def entity_reach(
 ) -> dict[str, Any]:
     """What ``entity`` provably reaches, and every path that is not_determined.
 
-    Four evidence sources, merged with ``reached`` winning over the frontier:
+    1. ``entity``'s own closure edges: the anchor is hop 1. Column witnesses (``contracts.admin``/``beacon``) are code
+    control and walk on with ``grant=None``; other relations publish the anchor's outgoing edges as frontier.
+    2. ``entity``'s proven-reach signals: seeds at hop 1; transitive capabilities walk on under their own grant;
+    non-transitive ones stop with no frontier.
+    3. Transitive signals seeded at ``entity`` (``signals_by_seed``), so the standpoint shows the same path the finding
+    row does.
+    4. Merge: min hop wins, ``parents`` records the proving hop, reached beats frontier, and hop-verdict entries
+    displace authority-exercise ones.
 
-    1. ``entity``'s own closure edges. The anchor is reached at hop 1. A column
-       witness (``relation is None``: ``contracts.admin`` / ``contracts.beacon``)
-       is code control — holding the slot is upgrade power — so the walk
-       continues from the anchor with ``grant=None``. Any other relation is a
-       stored authority whose exercise no gate signal witnesses: no blind
-       expansion, and each of the anchor's own outgoing edges is published as a
-       frontier entry instead.
-    2. ``entity``'s current proven-reach signals. Seeds are reached at hop 1;
-       a transitive capability walks on from them under its own grant
-       (``None`` for code control, ``grant_for`` for a gate — the fold's exact
-       inputs). Non-transitive capabilities stop at their seeds with NO
-       frontier: non-transitivity is a proven boundary, not a gap.
-    3. Transitive proven-reach signals SEEDED at ``entity`` (``signals_by_
-       seed``). The fold's walk for such a row starts standing here — the
-       score page names this entity as the walk's origin — so its walked
-       hops and its refusals belong on this standpoint's record too, not
-       only on the holding principal's. Without this arm, the finding row
-       says "AtomicSolverV3 -> reaches BoringVault" while selecting
-       AtomicSolverV3 shows that same path as unwitnessed.
-    4. Merge: min hop wins and ``parents`` records the hop that proved it; a
-       frontier entry whose destination is reached anyway is dropped, and a
-       hop-verdict entry displaces the less specific authority-exercise one.
-
-    ``canonical`` is the value plane's proxy/impl fold. The walk speaks in raw
-    edge anchors and an implementation folded onto its proxy is one entity
-    under two of them, so everything is PUBLISHED at the canonical key — the
-    same rule the fold applies to its ``reached`` set — or a consumer keying
-    nodes by the proxy would silently miss every destination that folds.
+    Everything is published at ``canonical`` keys, matching the fold's ``reached`` set.
     """
     fold_key = canonical or (lambda key: key)
     self_keys = {entity, fold_key(entity)}
@@ -214,8 +168,7 @@ def entity_reach(
 
     def refuse(entry: dict[str, Any]) -> None:
         pair = (fold_key(str(entry["from"])), fold_key(str(entry["to"])))
-        # A refusal folding onto its own caller withheld nothing: the
-        # destination is the caller's alias, reached the moment the caller was.
+        # Refusal onto the caller's own alias withheld nothing.
         if pair[0] == pair[1]:
             return
         standing = frontier.get(pair)
@@ -279,10 +232,8 @@ def entity_reach(
             continue
         merge_walk(seeds, signal_grant(signal))
 
-    # Standpoint arm: the fold's walk for a row seeded here starts at THIS
-    # entity, so its hops are numbered from it (dist 1 is the standpoint
-    # itself, hence the -1). Only transitive proven-reach rows appear in the
-    # map — a value seed is where reached VALUE sits, not a standpoint.
+    # Hops are numbered from this standpoint (hence -1). Only transitive rows are in the map; value seeds aren't
+    # standpoints.
     for signal in (signals_by_seed or {}).get(entity, ()):
         merge_walk({entity}, signal_grant(signal), hop_offset=-1)
 
@@ -290,9 +241,7 @@ def entity_reach(
     return {
         "reached": {key: reached[key] for key in sorted(reached)},
         "parents": {key: parents[key] for key in sorted(parents)},
-        # Same rule as the fold: a hop another path reached anyway withheld
-        # nothing. ``entity`` itself is trivially reached, so a cycle back to
-        # it is not an unconfirmed path either.
+        # Reached another way, or a cycle back to ``entity``, isn't a frontier.
         "frontier": [
             frontier[pair] for pair in sorted(frontier) if pair[1] not in reached and pair[1] not in self_keys
         ],
@@ -300,12 +249,8 @@ def entity_reach(
 
 
 def merge_reach(records: Iterable[dict[str, dict[str, Any]]]) -> dict[str, dict[str, Any]]:
-    """Per-protocol reach maps folded into one entity map.
-
-    Closure edges never cross protocols, but one principal can hold authority
-    in two protocols of the same company, so a key collision merges on the same
-    rules the walk uses: min hop wins, reached beats frontier, and a
-    hop-verdict frontier entry displaces the authority-exercise one.
+    """Per-protocol reach maps folded into one entity map, using the walk's merge rules (one principal can hold
+    authority in two protocols).
     """
     out: dict[str, dict[str, Any]] = {}
     for entities in records:
@@ -339,18 +284,10 @@ def merge_reach(records: Iterable[dict[str, dict[str, Any]]]) -> dict[str, dict[
 
 
 def load_protocol_reach(session: Session, protocol_id: int) -> dict[str, dict[str, Any]]:
-    """entity_key -> reach record, for every entity with any outbound closure
-    edge or any current proven-reach signal held.
+    """entity_key -> reach record for every entity with an outbound closure edge or a current proven-reach signal.
 
-    Same loaders the fold uses, one pass over shared planes. A signal row that
-    could not be typed withholds itself (the score document already publishes
-    the fault) and contributes no reach here.
-
-    Published entirely at CANONICAL keys — the value plane's proxy/impl fold,
-    on both the outer entity keys and everything inside a record — so the
-    block joins against the same keys the score document's ``reached`` set and
-    the surface's nodes use. Two raw holders folding onto one canonical entity
-    merge on the walk's own rules.
+    Uses the fold's loaders. Untypeable signal rows contribute nothing. Published at canonical keys throughout so it
+    joins with the score document and surface nodes.
     """
     closure = P.load_control_closure(session, protocol_id)
     conditions = P.load_condition_plane(session, protocol_id)

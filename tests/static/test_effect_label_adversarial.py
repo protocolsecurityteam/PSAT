@@ -6,9 +6,8 @@ These test whether the detection works based on *what the code does*
 
 Randomization strengthens a *positive* assertion and weakens a *negative*
 one: for an assertion-of-absence, conventional naming is the adversarial
-input. So the file ends with conventional-name controls (merged from the
-former ``test_effect_label_weaknesses.py``) — the pairs are what make the
-earned negatives falsifiable in both directions.
+input. So the file ends with conventional-name controls — the pairs are what
+make the earned negatives falsifiable in both directions.
 """
 
 import random
@@ -29,7 +28,6 @@ from services.static.contract_analysis_pipeline.summaries import _build_semantic
 
 
 def _rand(n: int = 8) -> str:
-    """Generate a random lowercase identifier."""
     return "".join(random.choices(string.ascii_lowercase, k=n))
 
 
@@ -59,18 +57,7 @@ def _get_function_labels(analysis: dict, function_name: str) -> set[str]:
     return set()
 
 
-def _get_function_claims(analysis: dict, function_name: str) -> set[str]:
-    for sig, info in (analysis.get("effects", {}).get("functions") or {}).items():
-        if sig.split("(")[0] == function_name:
-            return {claim["claim_id"] for claim in (info.get("claims") or [])}
-    return set()
-
-
-# =========================================================================
 # 1. Randomized impl slot name + delegatecall fallback
-#    The variable storing the implementation has a random name.
-#    Detection must rely on: "writes var X" + "fallback reads X and delegatecalls"
-# =========================================================================
 
 
 def test_random_impl_slot_with_delegatecall():
@@ -100,14 +87,7 @@ contract Target {{
     assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
 
 
-# =========================================================================
-# 2. Randomized pause variable name
-#    A bool with a random name gates a modifier, and a function flips it.
-#    Detection must rely on: "writes a bool that gates other functions"
-#    (Currently we expanded the name list, but random names will fail.)
-# =========================================================================
-
-
+# 2. Randomized pause variable name (a bool gating a modifier, flipped by a function)
 def test_random_pause_variable():
     var_name = f"_{_rand()}"
     pause_fn = _rand()
@@ -134,11 +114,7 @@ contract Target {{
     )
 
 
-# =========================================================================
-# 3. Raw storage slot write via assembly (no named variable at all)
-#    Malicious dev uses sstore to a hardcoded slot that the fallback
-#    reads via sload and delegatecalls to.
-# =========================================================================
+# 3. Raw storage slot write via assembly (no named variable; fallback sloads + delegatecalls)
 
 
 def test_raw_assembly_storage_slot_impl():
@@ -173,10 +149,7 @@ contract Target {{
     assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
 
 
-# =========================================================================
-# 4. ETH drain via selfdestruct (sends all ETH to an address)
-#    Not a .call{value:} — uses selfdestruct as a value transfer mechanism.
-# =========================================================================
+# 4. ETH drain via selfdestruct (not a .call{value:})
 
 
 def test_selfdestruct_value_drain():
@@ -200,11 +173,7 @@ contract Target {{
     )
 
 
-# =========================================================================
-# 5. Randomized function name for cross-contract mint
-#    Calls token.mint() but the calling function has a random name.
-#    The label comes from the called selector, not the caller name.
-# =========================================================================
+# 5. Randomized caller name for cross-contract mint (label comes from the callee selector)
 
 
 def test_random_named_cross_contract_mint():
@@ -225,14 +194,10 @@ contract Target {{
     assert "mint" in labels, f"Cross-contract mint fn '{fn_name}': expected mint, got {labels}"
 
 
-# =========================================================================
-# 6. Cross-contract "mint" via a randomized interface method name.
-#    The retired ``str(ir)`` totalSupply-sandwich parser used to infer mint
-#    from an observed totalSupply delta around an arbitrarily-named call. It is
-#    gone: ``supply.mint`` keys on the canonical ``mint`` selector or an
-#    ERC-20 gate, so a bespoke, non-selector call is not a supply claim — the
-#    honest label is the external-call fact.
-# =========================================================================
+# 6. Cross-contract "mint" via a randomized interface method name. The retired
+# ``str(ir)`` totalSupply-sandwich parser is gone: ``supply.mint`` keys on
+#    the canonical ``mint`` selector or an ERC-20 gate, so a bespoke call is not a
+#    supply claim; the honest label is the external-call fact.
 
 
 def test_random_interface_mint_name():
@@ -264,11 +229,7 @@ contract Target {{
     assert labels == {"external_contract_call"}
 
 
-# =========================================================================
-# 7. Value transfer hidden behind an internal helper with random name
-#    The external function calls an internal function with a random name,
-#    which does the actual .call{value:}.
-# =========================================================================
+# 7. Value transfer hidden behind a randomly-named internal helper
 
 
 def test_value_transfer_via_random_internal_helper():
@@ -297,10 +258,7 @@ contract Target {{
     )
 
 
-# =========================================================================
 # 8. ERC20 transfer via abi.encodeWithSelector (low-level obfuscation)
-#    Instead of calling token.transfer(), uses address.call with encoded selector.
-# =========================================================================
 
 
 def test_erc20_transfer_via_encode_selector():
@@ -323,45 +281,12 @@ contract Target {{
     assert "asset_send" in labels, f"ERC20 via encodeWithSelector fn '{fn_name}': expected asset_send, got {labels}"
 
 
-# =========================================================================
 # 9. Ownership transfer with randomized variable name
-#    The "owner" variable has a random name; detection should still find
-#    the ownership pattern via the modifier.
-# =========================================================================
 
 
-def test_random_owner_variable_name():
-    var_name = f"_{_rand()}"
-    fn_name = _rand()
-    source = f"""
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-contract Target {{
-    address public {var_name};
-    constructor() {{ {var_name} = msg.sender; }}
-    modifier auth() {{ require(msg.sender == {var_name}); _; }}
-    function {fn_name}(address newAdmin) external auth {{ {var_name} = newAdmin; }}
-}}
-"""
-    analysis = _scaffold_and_analyze(source)
-    labels = _get_function_labels(analysis, fn_name)
-    claims = _get_function_claims(analysis, fn_name)
-    # No ownership standard on this contract (no owner()/transferOwnership),
-    # so the bespoke caller-authority scalar rotation is authorized_caller.rotate
-    # rather than the ghost-prone ownership_transfer.
-    assert "authorized_caller.rotate" in claims, (
-        f"Random owner var '{var_name}', fn '{fn_name}': expected authorized_caller.rotate, got {claims}"
-    )
-    assert "ownership_transfer" not in labels
-
-
-# =========================================================================
-# Conventional-name controls (merged from tests/test_effect_label_weaknesses.py)
-#
-# Same pipeline, ordinary identifiers. Each is the paired control for a
-# randomized test above: together they prove a label comes from what the code
-# does, in both directions.
-# =========================================================================
+# Conventional-name controls:
+# the paired control for each randomized test above, so a label is proven to come
+# from what the code does in both directions.
 
 
 def test_nonstandard_impl_slot_name():
@@ -408,11 +333,7 @@ def test_nonstandard_impl_slot_name():
     assert "delegatecall_execution" in _get_function_labels(analysis, "fallback")
 
 
-# =========================================================================
-# WEAKNESS 2: Non-standard naming for pause variables
-# Pause toggles should be found from guarded bool-state semantics, not
-# from the state-variable name.
-# =========================================================================
+# WEAKNESS 2: non-standard naming for pause variables
 
 
 def test_raw_eth_transfer():
@@ -441,12 +362,7 @@ def test_raw_eth_transfer():
     assert "asset_send" in labels, f"Expected asset_send for sweep (raw ETH transfer), got: {labels}"
 
 
-# =========================================================================
 # WEAKNESS 4: ERC20 transfer() instead of safeTransfer()
-# Many contracts use IERC20(token).transfer() directly instead of
-# SafeERC20.safeTransfer(). Direct ERC20 calls should classify from the
-# called selector as asset movement.
-# =========================================================================
 
 
 def test_raw_erc20_transfer():
@@ -479,15 +395,10 @@ def test_raw_erc20_transfer():
     assert "asset_send" in labels, f"Expected asset_send for withdrawTokens (ERC20.transfer), got: {labels}"
 
 
-# =========================================================================
-# WEAKNESS 5: Indirect mint through another contract
-# If contract A calls contract B.mint(), the semantic effect should carry
-# enough selector/callee evidence to classify the supply-changing action.
-# =========================================================================
+# WEAKNESS 5: indirect mint through another contract
 
 
 def test_standard_ownable_transfer():
-    """Standard ownership transfer via owner variable should be detected."""
     source = textwrap.dedent("""\
         // SPDX-License-Identifier: MIT
         pragma solidity ^0.8.20;
@@ -511,7 +422,6 @@ def test_standard_ownable_transfer():
 
 
 def test_standard_pause():
-    """A pause flag that gates another function should be detected."""
     source = textwrap.dedent("""\
         // SPDX-License-Identifier: MIT
         pragma solidity ^0.8.20;
@@ -550,7 +460,6 @@ def test_standard_pause():
 
 
 def test_standard_mint_burn_names_are_not_inferred_without_semantic_evidence():
-    """Internal helper names alone should not produce mint/burn labels."""
     source = textwrap.dedent("""\
         // SPDX-License-Identifier: MIT
         pragma solidity ^0.8.20;

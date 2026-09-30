@@ -23,17 +23,14 @@ TRACE_OPS = {"CALL", "STATICCALL", "DELEGATECALL", "CALLCODE", "CREATE", "CREATE
 
 
 class NoNewTransactionsError(RuntimeError):
-    """Raised when no representative transactions are found for tracing."""
-
     pass
 
 
-# EVM precompile addresses (ecrecover, sha256, ripemd160, identity, etc.)
+# ecrecover through the other precompiles at 0x01-0x09.
 _MAX_PRECOMPILE_ADDR = 9
 
 
 def _is_precompile(address: str) -> bool:
-    """Return True if address is an EVM precompile (0x01-0x09)."""
     try:
         val = int(address, 16)
         return 0 < val <= _MAX_PRECOMPILE_ADDR
@@ -75,12 +72,10 @@ def _tx_selector(input_data: Any) -> str:
 
 
 def fetch_contract_transactions(address: str, limit: int = 30, start_block: int = 0, chain_id: int = 1) -> list[dict]:
-    """Fetch recent normal and internal transactions for an address from Etherscan.
+    """Recent normal and internal txs from Etherscan.
 
-    If the most recent normal transactions are all plain ETH transfers
-    (selector ``0x``), a second oldest-first fetch is performed to find
-    function calls that may be buried under high-volume value transfers
-    (common for reward routers, fee vaults, treasury contracts).
+    If every recent normal tx is a plain ETH transfer, also fetch the oldest ones, since function calls can be buried
+    under value transfers (reward routers, fee vaults).
     """
     txs: list[dict] = []
     normal_txs: list[dict] = []
@@ -107,8 +102,7 @@ def fetch_contract_transactions(address: str, limit: int = 30, start_block: int 
             if action == "txlist":
                 normal_txs = result
 
-    # If every normal tx is a plain ETH transfer, fetch oldest txs too —
-    # early transactions (deployment, init, admin calls) have real selectors.
+    # Early txs (deployment, init, admin) have real selectors.
     has_function_call = any(len(tx.get("input", "0x") or "0x") >= 10 for tx in normal_txs)
     if normal_txs and not has_function_call:
         try:
@@ -134,7 +128,6 @@ def fetch_contract_transactions(address: str, limit: int = 30, start_block: int 
 
 
 def pick_representative_transactions(address: str, transactions: list[dict], max_txs: int = 5) -> list[dict]:
-    """Select representative successful txs to the target, prioritizing selector diversity."""
     target = normalize_address(address)
     unique_selector_seen = set()
     selected = []
@@ -177,20 +170,16 @@ def pick_representative_transactions(address: str, transactions: list[dict], max
 
 
 def resolve_trace_rpc(rpc_url: str | None = None) -> str:
-    """Resolve a tracing-capable RPC URL from arg or eRPC.
+    """A tracing-capable RPC URL: the argument (e.g.
 
-    eRPC proxies trace methods (debug_traceTransaction), so dynamic dependency
-    discovery routes through it like every other read. Pass an explicit local
-    URL (``--dynamic-rpc``) for an Anvil fork.
+    an Anvil fork via ``--dynamic-rpc``) or eRPC, which proxies trace methods.
     """
     if rpc_url:
         return rpc_url
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     from services.clients.rpc import default_rpc_url
 
-    # Pipeline callers pass a chain-resolved rpc_url; this explicit-mainnet base
-    # is only reached from the trace CLI when no --dynamic-rpc is given — a
-    # documented dev-tool default, not a silent one.
+    # Pipeline callers pass a chain-resolved URL; this mainnet default is only for the CLI.
     resolved = default_rpc_url(chain_id=1)
     if resolved:
         return resolved
@@ -209,7 +198,6 @@ def _fetch_tx_metadata_from_rpc(rpc_url: str, tx_hash: str) -> dict:
 
 
 def trace_transaction(rpc_url: str, tx_hash: str) -> tuple[str, Any]:
-    """Trace a transaction using debug_traceTransaction or trace_transaction."""
     attempts = [
         ("debug_traceTransaction", [tx_hash, {"tracer": "callTracer", "timeout": "20s"}]),
         ("debug_traceTransaction", [tx_hash, {"tracer": "callTracer"}]),
@@ -307,7 +295,6 @@ def _dedupe_edges(edges: list[dict]) -> list[dict]:
 def extract_edges_from_trace(
     trace_method: str, trace_result: Any, tx_hash: str, block_number: int | None
 ) -> list[dict]:
-    """Extract call/create edges from a trace result."""
     out_edges = []
     if trace_method == "trace_transaction":
         _parse_parity_trace_entries(trace_result, tx_hash, block_number, out_edges)
@@ -357,11 +344,9 @@ def find_dynamic_dependencies(
     start_block: int | None = None,
     chain_id: int = 1,
 ) -> dict:
-    """Trace representative transactions and return a dynamic dependency graph.
+    """Trace representative txs and return a dynamic dependency graph.
 
-    When *proxy_address* is set, transactions are fetched for the proxy
-    (where real traffic goes) but the returned graph is attributed to
-    *address* (the implementation).
+    With *proxy_address*, txs are fetched for the proxy (where traffic goes) but attributed to *address*.
     """
     if tx_limit < 1:
         raise RuntimeError("tx_limit must be >= 1")
@@ -389,9 +374,7 @@ def find_dynamic_dependencies(
     trace_errors: list[dict] = []
     first_trace_exc: BaseException | None = None
 
-    # Trace calls are RTT-dominated and independent — fan out across the shared
-    # executor and reassemble results in input order so trace_errors stays
-    # deterministic relative to selected_txs.
+    # Independent RTT-bound traces; results reassembled in input order.
     parallel_traces = parallel_map(
         lambda tx: trace_transaction(trace_rpc, tx["tx_hash"]),
         selected_txs,
@@ -407,9 +390,7 @@ def find_dynamic_dependencies(
             logger.debug("trace failed for %s: %s", tx_hash, result, extra={"tx_hash": tx_hash})
             continue
         if isinstance(result, BaseException):
-            # Non-RuntimeError unexpected failure — preserve the existing surface
-            # by raising. trace_transaction is documented to raise RuntimeError
-            # on tracing failure; anything else is a bug we want surfaced.
+            # ``trace_transaction`` raises RuntimeError on tracing failure; anything else is a bug.
             raise result
         method, trace_result = result
         trace_methods.add(method)
@@ -423,9 +404,7 @@ def find_dynamic_dependencies(
             f"All {len(trace_errors)} transaction trace(s) failed. First error: {trace_errors[0]['error']}"
         )
 
-    # Partial failure: some traces succeeded, so dynamic deps are still emitted
-    # but built on an incomplete call graph — record it as degraded so a
-    # truncated dependency set is attributable rather than silently smaller.
+    # Partial failure: deps are still emitted from an incomplete graph, so record it.
     if trace_errors and first_trace_exc is not None:
         logger.warning(
             "Partial trace failure: %d/%d transaction trace(s) failed; dependency graph may be incomplete",
@@ -441,14 +420,11 @@ def find_dynamic_dependencies(
 
     edges = _dedupe_edges(all_edges)
 
-    # Keep only direct calls from the tx source (proxy or target).
-    # Intermediate calls between dependencies (e.g. DEX pool → oracle) are
-    # trace noise — they don't represent what the *target* depends on.
-    # Exclude edges back to the source or to the target itself.
+    # Keep only direct calls from the tx source; calls between dependencies are noise.
     exclude_to = {tx_source, target}
     direct_edges = [edge for edge in edges if edge["from"] == tx_source and edge["to"] not in exclude_to]
 
-    # Filter out precompiles and addresses with no deployed code (EOAs)
+    # Drop precompiles and codeless addresses.
     dep_candidates = sorted({edge["to"] for edge in direct_edges})
     if code_cache is None:
         code_cache = {}

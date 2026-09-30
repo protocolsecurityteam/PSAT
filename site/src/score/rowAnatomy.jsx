@@ -1,9 +1,5 @@
-// The anatomy of a score-page row: who acts, on what, and how far it reaches.
-// Lifted out of Deductions.jsx so the protections panel and the confidence
-// zone's "proven" cell are the SAME components rather than second readings of
-// the same fields — an entity click has to mean one thing on this page, and a
-// row that renders its targets twice will eventually render them two
-// different ways.
+// Row anatomy shared by deductions, protections and the confidence zone, so an
+// entity click means one thing.
 
 import { Fragment, useState } from "react";
 
@@ -12,16 +8,13 @@ import { shortAddress } from "./format.js";
 
 const TARGETS_SHORT = 3;
 
-// The kind chip is a row's handle on WHO ACTS, on every panel that renders
-// one. A merged chip splits into one handle per member: each k/n selects its
-// own Safe, so no click has to pick a member for the user. A single-member
-// chip selects its controller whole — the interactive props go onto the chip
-// span itself rather than a wrapper, which would become the flex item and
-// change what the row lays out. A principal with no address stays plain.
+// A merged chip splits into one handle per member so no click picks a member
+// for the user. Props go on the chip span; a wrapper would change the flex
+// layout.
 export function KindChip({ chip, chain, controller, onSelect }) {
   if (chip.members?.length) {
     return (
-      <span className={`sc-kchip sc-kchip-${chip.kind}`}>
+      <span className={`tag sc-kchip sc-kchip-${chip.kind}`}>
         {"Safes "}
         {chip.members.map((member, i) => (
           <Fragment key={member.address}>
@@ -39,10 +32,8 @@ export function KindChip({ chip, chain, controller, onSelect }) {
       </span>
     );
   }
-  // A merged chip whose member shapes are unwitnessed has no honest single
-  // target: the one address on hand is an arbitrary member, and clicking it
-  // under the unit's label would attribute the whole unit's power to one Safe
-  // — the exact misattribution the member handles exist to prevent.
+  // No honest single target: clicking an arbitrary member would attribute the
+  // unit's power to one Safe.
   const props = chip.merged
     ? null
     : entityProps({
@@ -51,32 +42,23 @@ export function KindChip({ chip, chain, controller, onSelect }) {
         title: controller ? `Show ${shortAddress(controller)} on the control surface` : undefined,
       });
   return (
-    <span className={`sc-kchip sc-kchip-${chip.kind}${props ? " sc-lnk" : ""}`} {...(props || {})}>
+    <span className={`tag sc-kchip sc-kchip-${chip.kind}${props ? " sc-lnk" : ""}`} {...(props || {})}>
       {chip.label}
     </span>
   );
 }
 
-// What this row is ABOUT, carried alongside the entity a click asks for: the
-// example function the row DISPLAYS (never the other n−1 it counts — the user
-// read this one) and the controllers it names — every member of a merged unit,
-// because which member gates a given host is the card's fact, not this row's.
-// The surface marks the pair its own caller list witnesses, or marks less;
-// nothing here asserts any pair is on any particular contract.
+// The displayed example function and every named controller; the surface marks
+// only pairs its own caller list witnesses.
 function highlightHint(row) {
   const controllers = row.controllers?.length ? row.controllers : row.controller ? [row.controller] : [];
   if (!row.exampleFunction && !controllers.length) return undefined;
   return { functionSignature: row.exampleFunction || "", controllers };
 }
 
-// The row's action line: the example function and, on rows that aggregate
-// several holders of one identical gap (the possible-deductions table), the
-// addresses holding the permission.
 export function ActorLine({ row, controllers = [], onSelect }) {
-  // The function click names its host when the document does: a single-host
-  // row selects that contract and marks the function/controller pair on it.
-  // A multi-host row's displayed example could live on any of them, so the
-  // click stays name-only and the surface graph resolves or declines.
+  // Multi-host rows keep the click name-only: the example could live on any
+  // host.
   const host = row.hosts.length === 1 ? row.hosts[0] : null;
   const detail = [];
   if (row.exampleFunction) {
@@ -89,8 +71,6 @@ export function ActorLine({ row, controllers = [], onSelect }) {
           ...(host ? { address: host.address } : {}),
           functionSignature: row.exampleFunction,
           label: row.exampleFunction,
-          // The controller rides along so the resolved row can mark the caller
-          // chip too — the row names an action AND who can take it.
           highlight: highlightHint(row),
         }}
         title={`Show ${row.exampleFunction} on the control surface`}
@@ -128,22 +108,19 @@ export function TargetList({ row, onSelect }) {
   const { hosts, targets, reachWitnessed } = row;
   if (!hosts.length && !targets.length) return null;
   const hint = highlightHint(row);
-  // Hosts and reach share the collapsed line's budget, hosts first — a row
-  // with dozens of hosts must not push its reach out of the line entirely.
+  // Hosts first within the collapsed budget, so many hosts can't push reach off
+  // the line.
   const shownHosts = open ? hosts : hosts.slice(0, TARGETS_SHORT);
   const shown = open ? targets : targets.slice(0, Math.max(0, TARGETS_SHORT - shownHosts.length));
   const hiddenCount = hosts.length - shownHosts.length + targets.length - shown.length;
   return (
     <div className={`sc-targets${open ? " sc-open" : ""}`}>
-      {/* The entity line ellipsises on its own, INSIDE this child — the
-          expander button is a sibling the flex row never shrinks, so a run of
-          long names can eat the line but never the control that reveals the
-          rest. */}
+      {/* Ellipsises inside this child; the expander is a non-shrinking sibling. */}
       <span className="sc-targets-line">
-      {/* The hosts come first and apart: they are the contracts the function
-          is ON — where the named controller acts directly. Everything after
-          the arrow is reach through the control graph, a different (weaker)
-          relationship that must not read as more direct calls. */}
+      {/*
+        Hosts (direct) before the arrow; reach through the graph after, a
+        weaker relationship.
+      */}
       {shownHosts.map((host, i) => {
         const label = host.name || host.short;
         return (
@@ -160,8 +137,7 @@ export function TargetList({ row, onSelect }) {
         );
       })}
       {hosts.length > 0 && (targets.length > 0 || !reachWitnessed) && " "}
-      {/* The not-witnessed note survives an empty list: hosts are where the
-          function IS, which says nothing about what it reaches. */}
+      {/* Hosts say nothing about reach, so the note survives an empty list. */}
       {reachWitnessed && shown.length > 0 && (
         <span className="sc-arr">{shownHosts.length ? "→ reaches" : "→"}</span>
       )}
@@ -173,16 +149,11 @@ export function TargetList({ row, onSelect }) {
       )}{" "}
       {shown.map((target, i) => {
         const label = target.name || target.short;
-        // Where the reach STARTED. The row's hosts are the contracts the named
-        // controller acts on directly; this entity is downstream of them, and
-        // its own card says nothing about the deduction without that. All hosts
-        // ride along — the surface picks whichever one actually reaches this
-        // entity in the graph it carries, which the score document does not say.
+        // Where reach started; the surface picks whichever host actually
+        // reaches this entity.
         const reachedFrom = hosts.map((host) => host.address);
-        // Navigating to an entity is not a claim that the capability reaches
-        // it. Where reach was never witnessed the button still works, but the
-        // qualifier rides along in the interaction — a screen-reader user or a
-        // hover must not lose the third state the line carries visually.
+        // Navigating isn't a claim of reach; the qualifier keeps the third
+        // state for screen readers and hover.
         const qualifier = reachWitnessed ? "" : " — reach not witnessed";
         return (
           <span key={target.canonical} className="sc-reached">

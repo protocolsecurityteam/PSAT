@@ -1,5 +1,3 @@
-"""Disclosures, warnings, and counterfactuals."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -14,14 +12,8 @@ from utils.scoring_status import (
     VALUE_STATE_PROVEN_NO_REACH,
 )
 
-# ---------------------------------------------------------------- disclosures
-
-
-# The upgrade-authority disclosure and the same-function residual an uncharged
-# row carries, in preference order — the first present on the row wins each slot.
-# Both the self-service pair and the msg_value siblings are here, so
-# the earned negative reads the actual token the excluded row published rather
-# than a hard-coded self-service one it may not carry.
+# Preference order per slot, covering the self-service pair (G7) and msg_value siblings, so the earned negative
+# carries the token the row actually published.
 _UNCHARGED_CONDITIONAL_TOKENS = (
     "self_service_bound_conditional_on_upgrade_authority",
     "fixed_destination_conditional_on_upgrade_authority",
@@ -37,10 +29,8 @@ _UNCHARGED_RESIDUAL_TOKENS = (
 def _is_uncharged_product(signal: FunctionSignal) -> bool:
     """A proven-0.0 row whose severity_basis names an uncharged-product token.
 
-    Gated on BOTH the token AND the value, never the float alone: a proven 0.0
-    with no such token (``pause.set``'s build-up-from-zero) is a real charge that
-    happens to start at zero, not a benign payout. A token beside a non-zero
-    value is a disagreement handled by :func:`_uncharged_product`, not here."""
+    Both are required: ``pause.set`` is a real charge that starts at zero.
+    """
     if not (set(signal.severity_basis) & K.UNCHARGED_PRODUCT_BASES):
         return False
     return signal.severity.state == SEVERITY_STATE_PROVEN and signal.severity.value == 0.0
@@ -49,10 +39,8 @@ def _is_uncharged_product(signal: FunctionSignal) -> bool:
 def _uncharged_product(signal: FunctionSignal, warnings: list[dict[str, Any]]) -> bool:
     """Whether the fold excludes this row as uncharged product surface.
 
-    A severity_basis that names an uncharged-product token beside a severity that
-    is not proven 0.0 is a bug, not a benign row: it is published as a warning and
-    the row is NOT excluded (it keeps whatever charge its non-zero severity
-    carries), so the disagreement can never buy a silent exclusion."""
+    A token beside a non-zero severity is a bug: warned about and not excluded.
+    """
     tokens = set(signal.severity_basis) & K.UNCHARGED_PRODUCT_BASES
     if not tokens:
         return False
@@ -78,10 +66,7 @@ def _collect_disclosures(
     credit = _gate(signal, "exact_empty_credit")
     if credit.is_determined:
         if signal.principal_state != PRINCIPAL_STATE_NOT_DETERMINED:
-            # "No resolved caller can reach this" cannot be published beside ANY
-            # determined caller state: ``enumerated`` names callers that reach it,
-            # and ``none_required`` is a PROVEN PUBLIC PATH — the opposite pole,
-            # and the worse contradiction of the two.
+            # Contradicts any determined caller state; ``none_required`` is a proven public path.
             warnings.append(
                 _warning(
                     "exact_empty_credit_contradicted_by_principals",
@@ -114,9 +99,7 @@ def _collect_disclosures(
                 }
             )
     if signal.value_state == VALUE_STATE_PROVEN_NO_REACH and (entity, signal.function_name + ":no_reach") not in seen:
-        # An earned negative in its own right: reach was WITNESSED and reached
-        # nothing. Publishing it beside the undetermined rows would lose the one
-        # value fact on the page that was actually proven.
+        # An earned negative: reach was witnessed and reached nothing.
         seen.add((entity, signal.function_name + ":no_reach"))
         earned_negatives.append(
             {
@@ -131,12 +114,8 @@ def _collect_disclosures(
             }
         )
     if _is_uncharged_product(signal) and (entity, signal.function_name + ":uncharged") not in seen:
-        # An excluded row leaves NO finding, so its witness_notes reach no
-        # document surface (``row.notes`` is the only path). The UUPS disclosure
-        # and the same-function residual would vanish with it — so the earned
-        # negative carries them here, read from the row's own notes rather than
-        # hard-coded, because the excluded row may be a msg_value arm whose
-        # disclosures are not the self-service pair.
+        # An excluded row leaves no finding, so its notes are carried here (read from the row, since it may be a
+        # msg_value arm).
         seen.add((entity, signal.function_name + ":uncharged"))
         notes = set(signal.witness_notes)
         conditional_on = next((t for t in _UNCHARGED_CONDITIONAL_TOKENS if t in notes), NOT_DETERMINED)
@@ -218,10 +197,7 @@ _NOTE_WARNINGS = {
     "concrete_destination_existential_not_a_fixed_destination": (
         "an observed sink is existential and cannot prove a fixed destination"
     ),
-    # The self-service arm's disclosures. An excluded row publishes no
-    # witness_notes on any finding, so these must surface as warnings (the
-    # third channel) as well as ride the earned negative — otherwise a proven
-    # benign payout's residuals would be legible on no document surface at all.
+    # Excluded rows publish no witness_notes, so these surface as warnings too.
     "self_service_uncharged_product_surface": (
         "the payout is proven bounded to the caller's own position and the record is cleared before "
         "the external call, so the row is uncharged product surface and creates no finding"

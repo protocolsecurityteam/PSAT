@@ -1,21 +1,13 @@
 """Company/inventory persist chain threading.
 
-Regression coverage for the duplicate-stub bug found in the PR-154 preview DB:
-for 10 mainnet addresses, two unanalyzed Contract stubs coexisted — one
-``chain=NULL`` (the defillama company-inventory persist path passing no chain)
-and one ``chain='ethereum'`` written ~1 min later by the dapp-crawl persist path.
-``NULL ≠ NULL`` defeats ``uq_contract_address_chain``, so the second writer minted
-a duplicate instead of matching the first.
+Regression for the PR-154 preview DB: 10 mainnet addresses had two stubs, one ``chain=NULL`` (defillama
+persist, no chain) and one ``'ethereum'`` (dapp-crawl persist ~1 min later); ``NULL ≠ NULL`` defeats
+``uq_contract_address_chain``.
 
-The fix lives in ``db.queue.bulk_upsert_discovered_contracts`` — the shared writer
-for all three company-inventory sources (inventory, defillama, dapp_crawl): an
-entry with no evidence chain of its own inherits the job's ``default_chain``, and
-the dedup key is mainnet-coalesced (``NULL≡'ethereum'``) so writers match each
-other's rows regardless of historical NULLs. No data backfill (decided in the
-doc): reads keep the NULL≡mainnet coalescing convention.
+Fix is in ``db.queue.bulk_upsert_discovered_contracts``: entries without an evidence chain inherit the
+job's ``default_chain`` and the dedup key is mainnet-coalesced (``NULL≡'ethereum'``). No backfill.
 
-Real-DB tests, because the fix hinges on the ``(address, chain)`` uniqueness grain
-and the coalesced dedup — a mocked session can't exercise it.
+Real-DB tests: a mocked session can't exercise the uniqueness grain or the coalesced dedup.
 """
 
 from __future__ import annotations
@@ -48,9 +40,7 @@ def proto_id(db_session):
 
 @requires_postgres
 def test_defillama_then_dapp_crawl_same_mainnet_address_yields_one_row(db_session, proto_id):
-    """The observed dup anatomy, with both writers now on the fix: a chainless
-    defillama persist followed by a chainless dapp_crawl persist of the same
-    mainnet address collapses to one row with unioned discovery_sources."""
+    """Chainless defillama then dapp_crawl persists of one mainnet address collapse to one row, sources unioned."""
     from db.models import Contract
     from db.queue import bulk_upsert_discovered_contracts
 
@@ -87,9 +77,7 @@ def test_defillama_then_dapp_crawl_same_mainnet_address_yields_one_row(db_sessio
 
 @requires_postgres
 def test_dapp_crawl_dedups_against_legacy_null_defillama_stub(db_session, proto_id):
-    """Migration-realistic case: a legacy defillama write already persisted
-    ``chain=NULL`` (pre-fix). A later mainnet dapp_crawl write must dedup against
-    it via the coalesced key rather than mint a second stub — no backfill needed."""
+    """A legacy ``chain=NULL`` defillama stub is deduped via the coalesced key by a later mainnet dapp_crawl write."""
     from db.models import Contract
     from db.queue import bulk_upsert_discovered_contracts
 
@@ -173,10 +161,8 @@ def test_base_entry_does_not_dedup_against_legacy_null_row(db_session, proto_id)
 
 @requires_postgres
 def test_unknown_chain_entry_is_preserved_and_isolated(db_session, proto_id):
-    """Design intent preserved: ``'unknown'`` is a real "resolve later" bucket
-    (chain_resolver probes it), not absent evidence. It is never coerced to the
-    job chain, and its coalesced key ('unknown' ≠ 'ethereum') keeps it from
-    deduping against — or minting a dup against — a mainnet stub at the same address."""
+    """``'unknown'`` is a real "resolve later" bucket (chain_resolver probes it): never coerced to the job
+    chain, and its coalesced key keeps it from deduping against a mainnet stub at the same address."""
     from db.models import Contract
     from db.queue import bulk_upsert_discovered_contracts
 
@@ -208,9 +194,7 @@ def test_unknown_chain_entry_is_preserved_and_isolated(db_session, proto_id):
 
 @requires_postgres
 def test_defillama_worker_chainless_job_writes_ethereum_not_null(db_session, monkeypatch):
-    """End-to-end for the writer that produced the NULL stubs: a defillama scan
-    job whose request carries no chain persists ``chain='ethereum'`` (the mainnet
-    edge default) for an address the scan couldn't attribute, not ``chain=NULL``."""
+    """The writer that produced the NULL stubs: a chainless defillama scan persists ``chain='ethereum'``, not NULL."""
     from db.models import Contract, JobStage
     from db.queue import create_job
     from workers.base import JobHandledDirectly

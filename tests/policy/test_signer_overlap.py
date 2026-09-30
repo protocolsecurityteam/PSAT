@@ -148,8 +148,7 @@ def test_load_protocol_safe_owner_sets_conflicting_exacts_omitted(db_session):
 
 
 def test_load_protocol_safe_owner_sets_exact_and_lower_bound_not_a_conflict(db_session):
-    # An exact + lower_bound pair for one Safe is NOT a conflict: lower_bound is
-    # skipped and the exact stands (regression guard).
+    # lower_bound is skipped and the exact stands: an exact + lower_bound pair is not a conflict (regression guard).
     protocol = Protocol(name="etherfi-mixed-quality")
     db_session.add(protocol)
     db_session.flush()

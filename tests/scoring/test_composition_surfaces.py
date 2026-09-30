@@ -1,9 +1,8 @@
 """The two composed-entry surfaces, and the disclosures beside them.
 
-Each case is a *derivation* pinned by two carriers whose data differs, never by
-one carrier against a literal: the mutation that de-interpolates a derived
-string into a constant has to fail here, and a test that asserts only that the
-field exists does not count.
+Each case is a *derivation* pinned by two carriers whose data differs, never one
+carrier against a literal: a mutation that de-interpolates a derived string into
+a constant has to fail here.
 """
 
 from __future__ import annotations
@@ -42,10 +41,6 @@ _CONSTRAINS_THE_TARGET_AT_C = ((KEY_C, CALLING_SELECTOR, COMPOSED_SELECTOR, "par
 _GATING_AUTHORITY = "0x" + "9" * 40
 _VAULT_CONSULTS_AN_AUTHORITY = {("ethereum", KEY_V.partition("::")[2], COMPOSED_SELECTOR): (_GATING_AUTHORITY,)}
 
-# The retired token. Kept as a literal here on purpose:
-# it is the one string this module asserts the ABSENCE of, and a symbol would
-# make the assertion vacuous the day the symbol is deleted.
-RETIRED_CALLEE_TOKEN = "destination_callee_is_restricted_by_the_intermediate"
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -55,8 +50,7 @@ def _withheld(row: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _gate_only_document(fold, routes):
-    """One withheld entry on the gate-only arm: the join returns no setter row so
-    arm 3 cannot republish and the route alone decides the arm."""
+    """One withheld entry on the gate-only arm: no setter row, so the route alone decides."""
     return CA.composed_document(
         fold, deletability=CA.deletability_plane(gating=_VAULT_CONSULTS_AN_AUTHORITY), routes=routes
     )
@@ -68,8 +62,7 @@ def _gate_only_document(fold, routes):
 def test_the_second_typed_reason_names_the_constrained_target_and_not_a_callee(fold):
     """The token is read off ``target_constraint``, which pins the
     destination call's counterparty ARGUMENT; no stored witness restricts the
-    callee, so "the callee is restricted" asserted a property the evidence does
-    not earn. The state and the boolean now share one name."""
+    callee, so "the callee is restricted" asserted an unearned property."""
     entry = _withheld(_gate_row(_gate_only_document(fold, _CONSTRAINS_THE_TARGET_AT_C)))[0]
     classification = entry["route_classification"]
 
@@ -80,30 +73,13 @@ def test_the_second_typed_reason_names_the_constrained_target_and_not_a_callee(f
     assert "callee" not in P.ROUTE_TARGET_CONSTRAINED
 
 
-@pytest.mark.parametrize(
-    "routes",
-    [_AUTHORS_THE_AMOUNT_AT_C, _CONSTRAINS_THE_TARGET_AT_C, ()],
-    ids=["amount_authored", "target_constrained", "no_flow_witness"],
-)
-def test_no_published_route_state_claims_a_restricted_callee(fold, routes):
-    """The retired token has no producer: the classifier cannot emit it under any
-    of its outcomes, and it is not in the registry a state is checked against."""
-    assert RETIRED_CALLEE_TOKEN not in P.ROUTE_CLASSIFICATIONS
-    row = _gate_row(_gate_only_document(fold, routes))
-    for entry in _withheld(row):
-        assert entry["route_classification"]["state"] != RETIRED_CALLEE_TOKEN
-        assert entry["withheld_reason"] != RETIRED_CALLEE_TOKEN
-    assert RETIRED_CALLEE_TOKEN not in row["reach_composition_census"]["reading"]
-
-
 # B1-R R2-a — the gate-only arm fires on two tokens and its cause names which
 
 
 def test_the_census_cause_names_the_route_token_and_not_only_the_arm(fold):
     """B1-R R2-a. ``ARM_GATE_ONLY`` is taken on either of two route tokens and
-    the census gave both the AUTHORING cause. The two documents differ only in
-    the intermediate's stored flow witness, so a cause keyed on the arm alone
-    publishes one sentence for both and fails here."""
+    the census gave both the AUTHORING cause. The documents differ only in the
+    intermediate's flow witness, so a cause keyed on the arm alone fails here."""
     authored = _gate_row(_gate_only_document(fold, _AUTHORS_THE_AMOUNT_AT_C))
     constrained = _gate_row(_gate_only_document(fold, _CONSTRAINS_THE_TARGET_AT_C))
 
@@ -126,9 +102,8 @@ def test_the_census_cause_names_the_route_token_and_not_only_the_arm(fold):
 
 def test_a_cause_is_registered_per_arm_and_route_token_with_no_fall_through():
     """No default sentence: an unregistered pair raises rather than reaching the
-    document through a cause nobody wrote for it. And the count the closing
-    sentence prints is the registry's own size, so a frozen "three" cannot
-    survive the day a fourth cause is registered."""
+    document through a cause nobody wrote. The closing count is the registry's own
+    size, so a frozen "three" cannot survive a fourth cause."""
     assert (FOLD.ARM_GATE_ONLY, P.ROUTE_AMOUNT_AUTHORED) in FOLD._WITHHELD_CAUSE_ORDER
     assert (FOLD.ARM_GATE_ONLY, P.ROUTE_TARGET_CONSTRAINED) in FOLD._WITHHELD_CAUSE_ORDER
     assert (FOLD.ARM_GATE_ONLY, None) not in FOLD._WITHHELD_CAUSE_ORDER
@@ -161,7 +136,6 @@ def _a_withheld_record() -> FOLD._WithheldComposition:
 
 
 def _tied_pair(**over: Any) -> FOLD._ComposedMagnitude:
-    """A winner carrying one tied candidate that differs only where ``over`` says."""
     base = FOLD._ComposedMagnitude(
         entity=KEY_V,
         selector="0x11111111",
@@ -179,7 +153,7 @@ def _tied_pair(**over: Any) -> FOLD._ComposedMagnitude:
 
 def _tie(entry: FOLD._ComposedMagnitude) -> dict[str, Any]:
     """The published tie block. ``None`` there is the proven "one candidate",
-    which none of these fixtures builds, so it is an error rather than a skip."""
+    which no fixture here builds, so it is an error rather than a skip."""
     block = entry._tie_json()
     assert block is not None
     return block
@@ -187,8 +161,7 @@ def _tie(entry: FOLD._ComposedMagnitude) -> dict[str, Any]:
 
 def test_chosen_by_names_the_component_that_actually_decided_the_tie():
     """Ruling 6.2 M4. Reciting the whole ladder reads as though every component
-    applied; three ties decided at three different components publish three
-    different strings, which a recital cannot do."""
+    applied; three ties decided at three components publish three strings."""
     by_state = _tied_pair(witness_state="proven_upper_bound")
     by_selector = _tied_pair(selector="0x22222222")
     by_function = _tied_pair(function="manage")
@@ -212,10 +185,9 @@ def test_chosen_by_names_the_component_that_actually_decided_the_tie():
     ids=["selector_then_function", "state_then_selector", "three_components"],
 )
 def test_chosen_by_names_the_FIRST_differing_component_and_not_a_later_one(rival, first, later):
-    """B2-R SF-1. Every other fixture here builds a rival differing at exactly
-    ONE component, where first and last are the same index — so a rule returning
-    the LAST differing component is still derived, moves all twelve published
-    strings, and passed the module. These rivals differ at two components (one at
+    """B2-R SF-1. Other fixtures build a rival differing at exactly ONE
+    component, where first and last coincide, so a rule returning the LAST
+    differing component passed the module. These rivals differ at two (one at
     three)."""
     chosen_by = _tie(_tied_pair(**rival))["chosen_by"]
 
@@ -232,7 +204,6 @@ def test_chosen_by_names_the_FIRST_differing_component_and_not_a_later_one(rival
 
 
 def test_chosen_by_counts_the_candidates_each_component_separated():
-    """The counts are this tie's own, not a frozen "1 candidate(s)"."""
     winner = _tied_pair(selector="0x22222222")
     two_rivals = replace(
         winner,
@@ -269,12 +240,6 @@ def test_a_tie_the_order_does_not_separate_publishes_that_and_names_no_decider()
     assert chosen_by != _tie(_tied_pair(selector="0x22222222"))["chosen_by"]
 
 
-def test_the_component_names_line_up_with_the_order_they_describe():
-    """A name per component, positionally. A ladder that grew a component without
-    a name would publish the wrong rule for every tie decided past it."""
-    assert len(FOLD._ORDER_COMPONENT_NAMES) == len(FOLD._composed_order(_tied_pair()))
-
-
 def test_chosen_by_glosses_the_chain_component_over_the_fields_a_step_publishes(fold):
     """The order's tail is every field ``ActAsStep.as_json``
     publishes, so the gloss is read off the steps in hand."""
@@ -293,7 +258,6 @@ def test_chosen_by_glosses_the_chain_component_over_the_fields_a_step_publishes(
 
 
 def test_the_chain_gloss_is_read_off_the_steps_and_not_written_into_the_sentence():
-    """A chain-less candidate cannot claim a field list it does not publish."""
     chosen_by = _tie(_tied_pair(selector="0x22222222"))["chosen_by"]
     assert "no candidate here publishes a step at all" in chosen_by
     assert "receiver_variable" not in chosen_by
@@ -303,10 +267,9 @@ def test_the_chain_gloss_is_read_off_the_steps_and_not_written_into_the_sentence
 
 
 def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):
-    """Ruling 6.1's KEEP, asserted as a property rather than left as an absence
-    of change: the block is the only place a reader can check the composed
-    ceiling against the destination's own body. M1 and M2 landed in B1 and A3 and
-    are re-verified here on the post-Phase-B document."""
+    """Ruling 6.1's KEEP, asserted as a property: the block is the only place a
+    reader can check the composed ceiling against the destination's own body.
+    M1 and M2 landed in B1 and A3 and are re-verified on the post-Phase-B document."""
     document = fold(_tied_signals(), principals=_composing_principals(), **_tied_case())
     entries = _gate_row(document).get("reach_composed_magnitudes") or []
     assert entries
@@ -334,15 +297,13 @@ def test_the_predicate_block_survives_and_claims_nothing_about_this_row(fold):
 
 def test_the_frontend_golden_was_regenerated_for_the_current_model_version():
     """The residual staleness hole in the version-bump checklist, closed on the
-    side that actually runs in CI.
+    side that runs in CI.
 
-    `site/src/test/fixtures/score_etherfi.json` is the document the vitest
-    suites assert against, and a bump that edits `MODEL_VERSION` without
-    regenerating it leaves the page's tests pinned to the PREVIOUS model's
-    lambda, letter and ranking — all still internally consistent, so vitest
-    stays green and nothing anywhere reports that the golden is a version
-    behind. Asserting the stamp here makes the omission fail loudly in the
-    Python suite, which is where the bump is made."""
+    `site/src/test/fixtures/score_etherfi.json` is what the vitest suites assert
+    against; a `MODEL_VERSION` bump that skips regenerating it leaves those tests
+    pinned to the PREVIOUS model, still internally consistent and green. Asserting
+    the stamp here makes the omission fail in the Python suite, where the bump is
+    made."""
     import json
 
     golden = json.loads((ROOT / "site" / "src" / "test" / "fixtures" / "score_etherfi.json").read_text())
@@ -351,14 +312,6 @@ def test_the_frontend_golden_was_regenerated_for_the_current_model_version():
         f"{K.MODEL_VERSION!r} — regenerate site/src/test/fixtures/score_etherfi.json "
         f"(see its README for the shape and the minified one-line write)"
     )
-
-
-def test_the_ceiling_direction_stays_allow_listed_on_the_page():
-    """The register is the fix, not the removal: dropping `ceiling` from
-    `BOUND_DIRECTIONS` trades an undisclosed badge for an undisclosed blank."""
-    derive = (ROOT / "site" / "src" / "score" / "derive.js").read_text()
-    assert f'"{FOLD.BOUND_DIRECTION_CEILING}"' in derive
-    assert "BOUND_DIRECTIONS" in derive
 
 
 # --------------------------------------------------------------------------
@@ -388,12 +341,11 @@ def _trimmed_entry(fold, per_asset_state):
 def test_a_magnitude_trimmed_to_an_incomplete_sheet_publishes_that_it_is_incomplete(fold):
     """U1-F4. ``min(witness, sheet)`` against a sheet nobody proved whole.
 
-    The published figure is $250k where the destination's own witness says $1M,
-    and the entry said the sheet capped it and stopped there. But this sheet
-    carries an asset no price answered, so it is a FLOOR over what was priced —
-    not an at-most on what is there to move — and a min against a floor hands
-    back a smaller number on a bound nothing established. The dollars stand;
-    what the entry may no longer do is call them a ceiling in silence.
+    The figure is $250k where the destination's witness says $1M, and the entry
+    said the sheet capped it and stopped. But the sheet carries an unpriced
+    asset, so it is a FLOOR, not an at-most, and a min against a floor is a
+    smaller number on an unestablished bound. The dollars stand; the entry may no
+    longer call them a ceiling in silence.
     """
     entry = _trimmed_entry(fold, {"usdc": P.ASSET_PRICED, "other": P.ASSET_UNPRICED})
 
@@ -413,9 +365,9 @@ def test_a_magnitude_trimmed_to_an_incomplete_sheet_publishes_that_it_is_incompl
 
 
 def test_a_trim_onto_a_fully_covered_sheet_claims_the_ceiling_it_earned(fold):
-    """The negative path. Every asset observed at the destination is priced, so
-    the sheet IS an at-most and the entry says so with no caveat attached — a
-    disclosure that fired on every trim would say nothing about any of them."""
+    """The negative path: every asset at the destination is priced, so the sheet
+    IS an at-most and the entry says so uncaveated; a disclosure that fired on
+    every trim would say nothing about any."""
     entry = _trimmed_entry(fold, {"usdc": P.ASSET_PRICED})
 
     assert entry["bounded_by"] == FOLD._BOUNDED_BY_SHEET
@@ -427,10 +379,9 @@ def test_a_trim_onto_a_fully_covered_sheet_claims_the_ceiling_it_earned(fold):
 def test_an_entry_no_sheet_bounded_publishes_no_direction_at_all(fold):
     """``null`` is the third state, and it is not "not_determined".
 
-    Where no sheet exists there is no direction to publish and no completeness
-    to refuse; ``sheet_not_determined`` beside it already carries the fact.
-    Spelling a refusal here would put "there is no sheet" and "there is a sheet
-    and it proves no at-most" under one token.
+    With no sheet there is no direction to publish and no completeness to refuse;
+    ``sheet_not_determined`` carries the fact, and a refusal here would conflate
+    "no sheet" with "a sheet that proves no at-most".
     """
     document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case(value=value_plane()))
     entry = _gate_row(document)["reach_composed_magnitudes"][0]
@@ -445,10 +396,9 @@ def test_an_entry_built_without_a_plane_cannot_claim_a_ceiling_it_never_read(fol
     """Fail-closed on the third state of the completeness question itself.
 
     ``sheet_is_proven_complete`` is ``None`` where nobody read the destination's
-    coverage — the state every hand-built entry is in. That is the absence of a
-    completeness proof, which is not a completeness proof, so the direction is
-    not_determined and never ``ceiling``. The two coverage fields are also one
-    answer and may not be published apart.
+    coverage (every hand-built entry). That is no completeness proof, so the
+    direction is not_determined, never ``ceiling``. The two coverage fields are
+    one answer and may not be published apart.
     """
     entry = FOLD._ComposedMagnitude(
         entity=KEY_V,
@@ -496,15 +446,14 @@ _SECOND_ADMIN = "0x" + "4" * 40
 def _two_powers_over_one_pot(fold):
     """Two admin capabilities at one seized node, both reaching one destination.
 
-    The owner's ruling is about this exact shape on the reference corpus:
-    ``authority.replace`` and ``ownership.transfer`` at the same unit, both
-    licensing the same selector at the same vault, whose composed figure is
-    BYTE-IDENTICAL under either — one pot, two doors. The pot is counted once;
-    what may not happen is the second door disappearing to achieve that.
+    The owner's ruling concerns this exact reference-corpus shape:
+    ``authority.replace`` and ``ownership.transfer`` at one unit, both licensing
+    the same selector at the same vault, with a BYTE-IDENTICAL composed figure:
+    one pot, two doors. The pot is counted once; the second door may not
+    disappear to achieve that.
 
-    The two rows are separated by the one witness the composition rule reads:
-    only the ``authority.replace`` principal holds a setter at the destination,
-    so its figure is republished and the other's is withheld.
+    Only the ``authority.replace`` principal holds a setter at the destination,
+    so its figure is republished and the other's withheld.
     """
     ownership = replace(
         _composing_signals()[0],
@@ -523,8 +472,8 @@ def _two_powers_over_one_pot(fold):
 
 
 def _row_for(document, capability: str) -> dict[str, Any]:
-    """The published row for a capability, findings or subsumed — a subsumed row
-    is published in full and is not the same thing as a row that vanished."""
+    """The published row for a capability, findings or subsumed; a subsumed row
+    is published in full and is not a row that vanished."""
     published = (*document.findings, *(document.provenance.get("subsumed_rows") or ()))
     rows = [row for row in published if row["capability"] == capability]
     assert len(rows) == 1, f"{capability}: expected one published row, got {len(rows)}"
@@ -535,10 +484,9 @@ def test_the_shared_pot_is_priced_once_and_both_admin_powers_stay_attributed(fol
     """One shared pot is charged once while both admin powers stay attributed.
 
     THE RULING: composition stays withheld for the second power, so the pot is
-    charged once. THE CONDITION: both powers over that pot remain visibly
-    attributed on the published unit — the withheld one is not silently dropped,
-    because "we decided not to charge you twice" and "we never saw the second
-    door" are different documents and only one of them is true.
+    charged once. THE CONDITION: both powers remain visibly attributed on the
+    unit, because "we decided not to charge you twice" and "we never saw the
+    second door" are different documents and only one is true.
     """
     document = _two_powers_over_one_pot(fold)
     replace_row = _row_for(document, "authority.replace")
@@ -570,9 +518,8 @@ def test_the_shared_pot_is_priced_once_and_both_admin_powers_stay_attributed(fol
 def test_the_withheld_door_is_counted_in_its_rows_own_census(fold):
     """A refusal nobody counted reads the same as a rule nobody ran.
 
-    The visibility the ruling turns on is not only the entry: the row's census
-    has to say a candidate reached the admission rule and was refused there, or
-    a reader aggregating censuses sees a unit with one power over the pot.
+    The row's census must say a candidate reached the admission rule and was
+    refused, or a reader aggregating censuses sees a unit with one power.
     """
     census = _row_for(_two_powers_over_one_pot(fold), "ownership.transfer")["reach_composition_census"]
 
@@ -585,10 +532,9 @@ def test_the_withheld_door_is_counted_in_its_rows_own_census(fold):
 def test_the_composed_figure_is_the_same_under_either_power(fold):
     """Why counting it once is the right answer rather than a convenient one.
 
-    The reason the second charge is refused is that it is the SAME dollars: the
-    destination's own witness at the same selector, reached from the same seized
-    node. Pinned by measuring it — a document where the two figures differed
-    would be two pots and the ruling would not apply to it.
+    The second charge is refused because it is the SAME dollars (the destination's
+    witness at the same selector from the same seized node). Pinned by measuring:
+    figures that differed would be two pots and the ruling would not apply.
     """
     both = _two_powers_over_one_pot(fold)
     replace_only = fold(

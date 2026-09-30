@@ -1,4 +1,4 @@
-"""W4a — the disclosure items that ride with the conferral test."""
+"""W4a: the disclosure items that ride with the conferral test."""
 
 from __future__ import annotations
 
@@ -23,9 +23,8 @@ from tests.support.scoring_builders import (
 def test_w4a_the_citation_cap_shows_evidence_before_prose_and_counts_what_it_hid():
     """The cap is a display bound; the order it evicts in must not be arbitrary.
 
-    A prose ``reading`` restating how to read a field is not something a reader
-    can check. Two transcript-bearing citations were evicted by one on a shipped
-    row. Evidence first, prose last, and the total says how many were not shown.
+    Two transcript-bearing citations were evicted by a prose ``reading`` on a
+    shipped row. Evidence first, prose last, and the total counts what was hidden.
     """
     prose = [{"field": "reach_gate_state", "reading": "how to read it", "value": i} for i in range(8)]
     evidence = [{"field": "claims[].witness", "transcript_ptr": "t", "verdict": "proven"}]
@@ -68,10 +67,10 @@ def test_w4a_a_walked_hop_says_whether_the_surface_was_read_in_full():
 def test_w4a_the_self_pin_recogniser_only_ever_withholds():
     """Its breadth is safe in exactly one direction, and this is that direction.
 
-    Both comparators and every caller-named parameter are read as a pin, because
-    the stored description carries no polarity and the name is the whole
-    evidence. Every over-read moves a hop from walked to not_determined; nothing
-    here can mint a proven-clear. The whole-word guard keeps ``spender`` out.
+    Both comparators and every caller-named parameter read as a pin, because the
+    stored description carries no polarity. Every over-read moves a hop from
+    walked to not_determined; nothing mints a proven-clear. The whole-word guard
+    keeps ``spender`` out.
     """
     pinned = [
         "require(bool)(msg.sender != address(this))",
@@ -95,10 +94,9 @@ def test_w4a_the_self_pin_recogniser_only_ever_withholds():
 def test_w4a_licensed_functions_are_keyed_on_the_entity_the_reach_set_uses(fold):
     """The join key a consumer joins on, not the raw anchor the walk speaks in.
 
-    ``reach_entities`` is canonical — an implementation folded onto its proxy is
-    one entity under two raw keys — while the walk names anchors. Publishing the
-    licensed functions under the raw anchor would leave every folded destination
-    unjoinable, silently, on the field the composition pass consumes.
+    ``reach_entities`` is canonical (an implementation folded onto its proxy is
+    one entity under two raw keys); publishing licensed functions under the raw
+    anchor would leave folded destinations silently unjoinable.
     """
     closure = P.ControlClosure(edges=(_role_edge("roles 3", principal=KEY_C, anchor=KEY_IMPL),))
     plane = conferral_plane(role_functions={(KEY_IMPL, 3): (P.LicensedFunction("0xaaaaaaaa", "pull"),)})
@@ -124,7 +122,7 @@ def test_w4a_a_withheld_frontier_hop_sizes_the_subtree_it_hides(fold):
 
     A row losing 22 entities behind 2 published hops named 2 destinations and
     said nothing about the other 20. The withheld population is sized against
-    the widest walk this fold performs, and it is a size, never a claim.
+    the widest walk this fold performs; it is a size, never a claim.
     """
     a, b, c = KEY_V, KEY_PROXY, KEY_IMPL
     closure = P.ControlClosure(
@@ -154,10 +152,9 @@ def test_w4a_a_dangling_function_reference_recovers_on_deployment_and_selector()
     """A stale foreign key must not read as an extraction that never ran.
 
     ``function_score_signals.function_id`` is ON DELETE SET NULL and a
-    re-analysis deletes and reinserts a contract's functions, so a signal that
-    outlives one re-analysis points at nothing — and every state-variable hop it
-    gates would degrade to writes-not-extracted, losing reach with a counted but
-    causeless withhold. The signal's own (deployment, selector) survives that.
+    re-analysis reinserts a contract's functions, so an outliving signal points
+    at nothing and every state-variable hop it gates would degrade to
+    writes-not-extracted. The signal's own (deployment, selector) survives.
     """
     plane = P.ConferralPlane(
         writes_by_function={7: frozenset({"owner"})},

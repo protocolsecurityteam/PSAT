@@ -1,22 +1,12 @@
 """What a probe may PUBLISH about a call it could not fully control.
 
-Three failures share one shape: the prober supplies part of the input, the call
-then behaves in a way that is about the PROBER's choice rather than about the
-function, and the resulting payload is published as though it described the
-function.
-
-* backing — a call to a CODELESS address is a silent no-op success inside
-  ``SafeTransferLib``, so a deposit-backed conversion handed the acting identity
-  for its asset still mints while pulling nothing. ``inflow_observed: false`` on
-  that execution is fabricated dilution. Parameter names cannot rule it out (an
-  asset called ``want`` matches no vocabulary), so it is settled by observation.
-* value-out and code-upgrade — a REVERTED probe has no logs and moved
-  no slot, exactly like a probe that ran and did nothing. Collapsing the two put
-  a precondition revert into the code-plane cache, where it transferred to every
-  bytecode twin.
-* every row — ``effect_verdicts.witness`` is written for ``unknown`` verdicts
-  too, so the payload needs a self-contained discriminator.
-
+The prober supplies part of the input, the call then behaves per the PROBER's choice, and the
+payload is published as if it described the function:
+* backing: a call to a CODELESS address is a silent no-op success inside ``SafeTransferLib``,
+  so ``inflow_observed: false`` there is fabricated dilution. Names can't rule it out, so it is settled by observation.
+* value-out / code-upgrade: a REVERTED probe looks like one that ran and did nothing;
+  collapsing them put a precondition revert into the code-plane cache, transferring to every bytecode twin.
+* every row: ``effect_verdicts.witness`` is written for ``unknown`` too, so it needs a self-contained discriminator.
 Fixtures are generic ABI shapes; nothing here recognizes a protocol.
 """
 
@@ -56,9 +46,8 @@ def _calldata(sig: str, *args: str | int) -> str:
 
 
 class _Recorder:
-    """Replays scripted blocks and keeps every ``(calls, overrides)`` it was
-    handed, so a test can assert on the OVERRIDES a differential issued rather
-    than only on its verdict."""
+    """Replays scripted blocks and keeps every ``(calls, overrides)``, so a test can assert on the
+    OVERRIDES a differential issued, not only its verdict."""
 
     def __init__(self, *blocks: SimResult) -> None:
         self.blocks = list(blocks)
@@ -103,14 +92,12 @@ def _supply(simulate, calldata: str, **kw):
 
 def test_a_mint_whose_asset_slot_held_the_prober_identity_withholds_the_negative():
     """``enter(address want, uint256)``: ``want`` is in no token vocabulary, so
-    ``token_param_indexes`` is empty and the old gate passed vacuously. The
-    prober's own identity sits in the asset slot; with reverting code placed
-    there the mint no longer executes, which proves the pull WAS on the executed
-    path and that the observed "no inflow" was the prober's doing."""
+    ``token_param_indexes`` is empty and the old gate passed vacuously. With reverting code in the
+    asset slot the mint stops executing, proving the pull WAS on the executed path and the "no
+    inflow" was the prober's doing."""
     sig = "enter(address,uint256)"
     calldata = _calldata(sig, PRINCIPAL, 1)
     sim = _Recorder(
-        # The unseeded call succeeds — the codeless no-op — and mints.
         _supply_block(0, 100, _mint_only()),
         # Differential: with a revert stub in the asset slot the pull is fatal.
         _supply_block(0, 0, (), mint_ok=False),
@@ -122,16 +109,15 @@ def test_a_mint_whose_asset_slot_held_the_prober_identity_withholds_the_negative
     # ABSENT, not false: the claims bridge reads absence as unmeasured.
     assert "backing" not in eff.details
     assert "backing_inflow_transfers" not in eff.concrete
-    # The differential was issued with plain reverting code at the address the
-    # prober itself supplied — nothing name-derived took part in the decision.
+    # Plain reverting code at the prober-supplied address: nothing name-derived took part.
     _calls, overrides = sim.seen[-1]
     assert overrides[PRINCIPAL.lower()]["code"] == recipes._REVERT_STUB_CODE
 
 
 def test_a_mint_unaffected_by_the_stub_still_publishes_the_negative():
-    """The counterpart, and the reason the fix is a differential rather than a
-    codesize check: an admin mint's recipient is routinely a codeless EOA, and
-    withholding on that alone would delete the unbacked-issuance witness."""
+    """The counterpart, and why the fix is a differential rather than a codesize check: an admin
+    mint's recipient is routinely a codeless EOA, and withholding on that alone would delete the
+    unbacked-issuance witness."""
     sig = "mint(address,uint256)"
     calldata = _calldata(sig, PRINCIPAL, 1)
     sim = _Recorder(_supply_block(0, 100, _mint_only()), _supply_block(0, 100, _mint_only()))
@@ -181,11 +167,9 @@ def test_a_mint_with_no_address_argument_at_all_needs_no_differential():
 def test_prober_supplied_address_args_reads_the_bytes_not_the_types():
     principal = PRINCIPAL
     assert recipes._prober_supplied_address_args(_calldata("f(address)", principal), principal) == [principal.lower()]
-    # A token written into the slot by the seeded retry is a proved contract and
-    # is no longer the principal, so it drops out by construction.
+    # A token written into the slot by the seeded retry is a proved contract, not the principal.
     assert recipes._prober_supplied_address_args(_calldata("f(address)", TOKEN_A), principal) == []
     assert recipes._prober_supplied_address_args(_calldata("f(uint256)", 1), principal) == []
-    # No identity to look for ⇒ nothing can be identified (the caller withholds).
     assert recipes._prober_supplied_address_args(_calldata("f(address)", ZERO), None) == []
 
 
@@ -433,10 +417,9 @@ def test_a_sign_contradicted_by_the_transfer_logs_publishes_nothing():
     assert eff.verdict == VERDICT_UNKNOWN
     assert eff.reason == "supply_sign_contradicted_by_transfers"
     assert eff.details["observation"] == "executed"
-    # And it must NOT transfer on the behavioral hash. The contradiction is a
-    # property of this probe's state — which token emitted what, under whatever
-    # was seeded — not a structural fact a bytecode twin inherits. Caching it
-    # would republish "we could not read this call" as a fact about every twin.
+    # Must NOT transfer on the behavioral hash: the contradiction is a property of this probe's
+    # state (which token emitted what, under what seed), and caching it would republish "we could
+    # not read this call" as a fact about every twin.
     assert not _is_cacheable(eff)
 
 
@@ -494,8 +477,7 @@ def test_static_destination_shape_is_earned_across_every_out_flow():
     assert shape(_facts_with_out_flows("constant", "storage_no_setter"), out) == "immutable_fixed"
     # An admin-settable site downgrades the whole function, never the reverse.
     assert shape(_facts_with_out_flows("immutable", "storage_setter"), out) == "storage_determined"
-    # ONE caller-chosen site and there is no claim to make: the function is
-    # caller-redirectable however fixed its other destinations are.
+    # ONE caller-chosen site and the function is caller-redirectable however fixed the others are.
     assert shape(_facts_with_out_flows("immutable", "param"), out) is None
     assert shape(_facts_with_out_flows("msg_sender"), out) is None
     assert shape(_facts_with_out_flows("indeterminate"), out) is None
@@ -510,10 +492,8 @@ def test_static_destination_shape_is_earned_across_every_out_flow():
 
 
 def test_a_proven_fixed_shape_reaches_the_verdict():
-    """The branch that publishes it was unreachable for the stage's whole life:
-    it demanded a static ADDRESS, which the static plane classifies destinations
-    by KIND and never resolves. The shape is a universal and stands on its own;
-    the address comes from the observation when there is one."""
+    """The publishing branch was unreachable: it demanded a static ADDRESS, but the static plane
+    classifies destinations by KIND. The shape stands on its own; the address comes from observation."""
     moved = [transfer_log(VAULT, VAULT, TOKEN_A, 5)]
     eff = recipes.value_out(
         simulate=_Recorder(SimResult(calls=(SimCallResult(True, "0x", None, tuple(moved)),))),

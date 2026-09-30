@@ -11,27 +11,14 @@ from sqlalchemy.orm import Session
 from db.models import AuditReport, Protocol
 from services.audits.serializers import _pipeline_item
 
-# Failed-status lookback window for the pipeline endpoint. Keeps the
-# "recent failures" panel from growing unbounded while still surfacing
-# anything an on-call dev would want to see.
 _PIPELINE_FAILED_LOOKBACK_HOURS = 24
 
-# Hard cap per bucket so a pathological backlog can't wedge the monitor.
 _PIPELINE_BUCKET_LIMIT = 50
 
 
 def build_audits_pipeline(session: Session) -> dict[str, Any]:
-    """In-flight audit text + scope extraction, grouped by bucket.
-
-    Response shape per worker:
-        {
-          "processing": [item, ...],  # currently being worked
-          "pending":    [item, ...],  # ready to claim, not yet picked up
-          "failed":     [item, ...],  # terminal failures in the last 24h
-        }
-
-    The scope ``pending`` list only includes rows whose text extraction has
-    already succeeded — otherwise they aren't actually claimable.
+    """In-flight audit text + scope extraction per worker: ``processing``, ``pending`` (claimable), ``failed`` (last
+    24h). Scope ``pending`` requires successful text extraction.
     """
     now = datetime.now(timezone.utc)
     failed_cutoff = now - timedelta(hours=_PIPELINE_FAILED_LOOKBACK_HOURS)
@@ -65,8 +52,6 @@ def build_audits_pipeline(session: Session) -> dict[str, Any]:
         .limit(_PIPELINE_BUCKET_LIMIT)
     )
 
-    # Scope is only reachable once text extraction succeeded. Filter on
-    # that so the "pending" count reflects actually-claimable work.
     scope_processing = _fetch(
         select(AuditReport)
         .where(AuditReport.scope_extraction_status == "processing")

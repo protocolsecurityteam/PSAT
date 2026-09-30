@@ -1,18 +1,15 @@
 """ "Gates the caller" and "gets called" must stay distinguishable.
 
-``build_controller_tracking`` used to union the two into one set and type both
-``external_contract``, so a callee (``eETH``, ``lido``, ``liquidityPool``) was
-published as a controller. The union is still what decides ``kind`` (both do
-hold another contract's address); what is new is that each target carries the
-provenance that put it there, and the resolution stage reads it.
+``build_controller_tracking`` used to union the two and type both ``external_contract``,
+so a callee (``eETH``, ``lido``, ``liquidityPool``) was published as a controller. The
+union still decides ``kind``; each target now also carries the provenance that put it
+there, which the resolution stage reads.
 
-Positive control: an authority registry the caller is checked against —
-``authority_provenance == "caller_gate"``.
-Negative control: a token the contract only calls — ``"call_target"``.
-Third state: a slot that is neither — the key is absent, never guessed.
-Fourth state: no predicate trees at all (the builder raised and ``core.py``
-continued) — NEITHER answer is evidence, so the key is absent for every slot
-including the proven gate, and no control edge is demoted.
+Positive control: an authority registry the caller is checked against
+(``authority_provenance == "caller_gate"``). Negative control: a token only called
+(``"call_target"``). Third state: neither — key absent, never guessed. Fourth state: no
+predicate trees at all (builder raised, ``core.py`` continued) — NEITHER answer is
+evidence, so the key is absent for every slot and no control edge is demoted.
 """
 
 from __future__ import annotations
@@ -133,18 +130,15 @@ _TREELESS_ARTIFACTS = {
 
 @pytest.mark.parametrize("shape", sorted(_TREELESS_ARTIFACTS))
 def test_treeless_artifact_claims_no_provenance_for_anything(tmp_path, shape):
-    """Without trees, ``caller_gate`` is unanswerable — so ``call_target`` must
-    not be emitted either.
+    """Without trees, ``caller_gate`` is unanswerable — so ``call_target`` must not be
+    emitted either.
 
-    ``caller_gate`` is read out of ``predicate_trees`` alone. If a treeless
-    artifact still let the effects arm answer, every name would fall through to
-    ``call_target``, and the POSITIVE control — a registry the caller is
-    provably checked against — would be published as a proven callee. That is a
-    proven-absent gate synthesized from a failure to determine, and downstream
-    it demotes the control edge to ``external_call_target``, drops the address
-    out of the authority closure and strips its ``controller_*`` labels: the
-    contract is published as having no external authority controller because
-    the analysis crashed.
+    If the effects arm still answered, every name would fall through to ``call_target``
+    and the POSITIVE control would be published as a proven callee: a proven-absent gate
+    synthesized from a failure to determine. Downstream that demotes the control edge to
+    ``external_call_target``, drops the address from the authority closure and strips its
+    ``controller_*`` labels — the contract published as having no external authority
+    controller because the analysis crashed.
     """
     by_source = _targets(tmp_path, _TREELESS_ARTIFACTS[shape])
 
@@ -296,14 +290,11 @@ def test_a_lowered_receive_gate_publishes_caller_gate(tmp_path):
 def test_gate_in_an_unlowered_function_is_not_published_as_a_callee(tmp_path):
     """A gate the builder FAILED to lower must not mint ``call_target``.
 
-    Post class R the builder lowers every plain caller gate we could write —
-    including receive() and assembly if-reverts — so the blind-spot branch's
-    realised population is *lowering failures*, which have no nameable source
-    shape. The failure is therefore constructed directly: the tree the builder
-    produced for ``receive()`` is removed from the artifact, which is exactly
-    the shape a raised or degraded tree stage persists. Reachable by
-    construction, fixture-covered; realised rows are a lower bound, the same
-    convention this suite already uses for the entry-point arm.
+    Post class R the builder lowers every plain caller gate we could write, so the
+    blind-spot branch's realised population is *lowering failures* with no nameable
+    source shape. The failure is constructed directly: the tree for ``receive()`` is
+    removed from the artifact, the shape a raised or degraded tree stage persists.
+    Reachable by construction; realised rows are a lower bound.
     """
     predicate_trees, _ = _unlowered_targets(tmp_path)
     degraded = dict(predicate_trees)
@@ -374,29 +365,21 @@ def test_plan_built_from_a_pre_provenance_artifact_claims_nothing(tmp_path):
 
 @pytest.mark.parametrize("failing_accessor", ["all_state_variables_read", "all_solidity_variables_read"])
 def test_accessor_failure_answers_not_determined_instead_of_narrowing(tmp_path, failing_accessor):
-    """When a recursive Slither accessor RAISES, the blind-spot answer must
-    go not-determined — never fall back to the non-recursive attribute.
+    """When a recursive Slither accessor RAISES, the blind-spot answer must go
+    not-determined — never fall back to the non-recursive attribute.
 
-    The non-recursive attribute is a strictly narrower set: this function's own
-    body, without its callees. Substituting it turns "we could not read the
-    callees" into "the callees read nothing", so a gate reached through an
-    internal call becomes invisible, its name drops out of the blind spot, and
-    ``call_target`` — a claim of PROVEN ABSENCE of a caller gate — is minted from
-    a failure to determine. That is the one direction this split exists to
-    prevent.
+    That attribute is strictly narrower (this function's own body, without callees).
+    Substituting it turns "could not read the callees" into "the callees read nothing", so
+    a gate reached through an internal call becomes invisible and ``call_target`` — a
+    claim of PROVEN ABSENCE of a caller gate — is minted from a failure to determine.
 
     Both accessors are exercised because they are consulted at different points:
-    ``all_solidity_variables_read`` decides whether a treeless function observes
-    the caller at all (a failure there must not let the function be EXCLUDED on
-    evidence), ``all_state_variables_read`` then collects its names.
+    ``all_solidity_variables_read`` decides whether a treeless function observes the
+    caller at all, ``all_state_variables_read`` then collects its names.
 
-    Runs on the degraded-``receive()`` shape rather than the Vault fixture,
-    because Vault's entry points are all lowered and never reach the accessor at
-    all — a fixture where the raise cannot fire proves nothing.
-
-    Reachable by construction only. Slither's accessors raise on no contract
-    in the local corpus; realised rows are 0 and this is a lower bound, the same
-    convention the entry-point arm in this file already uses.
+    Runs on the degraded-``receive()`` shape rather than the Vault fixture, whose entry
+    points are all lowered and never reach the accessor — a fixture where the raise
+    cannot fire proves nothing. Reachable by construction only (0 realised rows).
     """
     predicate_trees, _ = _unlowered_targets(tmp_path)
     degraded = dict(predicate_trees)

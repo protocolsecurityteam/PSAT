@@ -1,16 +1,13 @@
 """``delegatecall.execute`` destination resolution, per destination kind.
 
-The self arm is the one this module was added for: a literal ``address(this)``
-destination is a compile-time value that no writer and no caller can redirect,
-so it must publish the proven ``self`` kind with a proven-constrained
-``destination_constraint``. It reaches the opcode two ways — directly, and (the
-OZ v5 ``Multicall`` shape) through a library formal — and both must earn the
-same answer.
+The self arm is why this module exists: a literal ``address(this)`` is a compile-time
+value no writer or caller can redirect, so it publishes the proven ``self`` kind with
+a proven-constrained ``destination_constraint`` — reached directly or (OZ v5
+``Multicall``) through a library formal, with the same answer.
 
-The arms that must NOT be affected are asserted beside it in the same compile:
-a caller-named destination stays ``param``, a storage-held one stays
-``storage_setter`` with its writer, and ``msg.sender`` — a solidity variable
-like ``this``, but not this contract — stays ``indeterminate``.
+Arms that must NOT change are asserted in the same compile: caller-named stays
+``param``, storage-held stays ``storage_setter`` with its writer, and ``msg.sender``
+(a solidity variable like ``this``, but not this contract) stays ``indeterminate``.
 """
 
 from __future__ import annotations
@@ -92,8 +89,6 @@ _CONTRACT = "DelegatecallDestinations"
 
 @pytest.fixture(scope="module")
 def witnesses(tmp_path_factory) -> dict[str, dict]:
-    """``{signature: delegatecall.execute witness}`` from the real static
-    pipeline — Slither, effects, and the production claims phase."""
     from services.static.contract_analysis_pipeline import collect_contract_analysis_with_artifacts
 
     project_dir = write_foundry_project(
@@ -144,8 +139,6 @@ def test_the_claim_still_fires_on_a_self_destination(witnesses):
 
 
 def test_a_caller_named_destination_still_resolves_to_its_param(witnesses):
-    """The negative guard: the caller supplies this destination, and the self
-    branch must not swallow it."""
     witness = witnesses["execTarget(address,bytes)"]
     assert witness["destination"]["target_kind"] == "param"
     assert witness["destination"]["variable"] == "target"

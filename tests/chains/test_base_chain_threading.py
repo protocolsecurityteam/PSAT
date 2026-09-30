@@ -1,11 +1,6 @@
-"""Second-chain threading proofs.
-
-Every test here drives a non-mainnet chain (Base, id 8453) through one of the
-threaded paths and asserts the chain reaches it: the resolver's bound RPC
-URL/chain_id, the balance Etherscan reads, the materialization cache
-name, the monitoring-enroll chain, the probe rate bucket, the company-overview
-join, and the audit-timeline bytecode read. The wire is stubbed (never the
-class) so the offline suite stays hermetic.
+"""M1.1 item 1: a non-mainnet chain (Base, 8453) reaches each threaded path: the resolver's bound RPC URL/chain_id,
+balance Etherscan reads, materialization cache name, monitoring-enroll chain, probe rate bucket,
+company-overview join and audit-timeline bytecode read. The wire is stubbed (never the class) to stay hermetic.
 """
 
 from __future__ import annotations
@@ -36,7 +31,6 @@ _MAINNET_URL_SUFFIX = "/main/evm/1"
 
 @pytest.fixture
 def _erpc_base(monkeypatch: pytest.MonkeyPatch) -> str:
-    """Configure a deterministic eRPC base so URL routes are assertable."""
     base = "https://erpc.example"
     monkeypatch.setenv("ERPC_BASE_URL", base)
     monkeypatch.delenv("ERPC_SECRET", raising=False)
@@ -48,28 +42,21 @@ def _erpc_base(monkeypatch: pytest.MonkeyPatch) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_chain_context_binds_base_url_to_base_id(_erpc_base):
+@pytest.mark.parametrize(
+    ("chain_id", "rpc_url", "chain_name", "expected_url"),
+    [
+        # Chain-to-RPC binding: the Base id must bind the Base URL.
+        pytest.param(_BASE_ID, None, "base", "https://erpc.example" + _BASE_URL_SUFFIX, id="binds_base_url_to_base_id"),
+        pytest.param(1, None, "ethereum", "https://erpc.example" + _MAINNET_URL_SUFFIX, id="mainnet_unchanged"),
+        pytest.param(_BASE_ID, "http://127.0.0.1:8545", "base", "http://127.0.0.1:8545", id="local_override_wins"),
+    ],
+)
+def test_resolve_chain_context(_erpc_base, chain_id, rpc_url, chain_name, expected_url):
     from services.resolution.capability_resolver import _resolve_chain_context
 
-    ctx = _resolve_chain_context(_BASE_ID, None, "base")
-    assert ctx.chain_id == _BASE_ID
-    assert ctx.rpc_url.endswith(_BASE_URL_SUFFIX)
-
-
-def test_resolve_chain_context_mainnet_unchanged(_erpc_base):
-    from services.resolution.capability_resolver import _resolve_chain_context
-
-    ctx = _resolve_chain_context(1, None, "ethereum")
-    assert ctx.chain_id == 1
-    assert ctx.rpc_url.endswith(_MAINNET_URL_SUFFIX)
-
-
-def test_resolve_chain_context_local_override_wins(_erpc_base):
-    from services.resolution.capability_resolver import _resolve_chain_context
-
-    ctx = _resolve_chain_context(_BASE_ID, "http://127.0.0.1:8545", "base")
-    assert ctx.chain_id == _BASE_ID
-    assert ctx.rpc_url == "http://127.0.0.1:8545"
+    ctx = _resolve_chain_context(chain_id, rpc_url, chain_name)
+    assert ctx.chain_id == chain_id
+    assert ctx.rpc_url == expected_url
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +136,6 @@ def test_resolution_worker_chain_id_for_job_column_and_derived():
     from workers.resolution_worker import _chain_id_for_job
 
     assert _chain_id_for_job(_row(chain_id=_BASE_ID, request={}, address="0x1")) == _BASE_ID
-    # No column → derive from request chain.
     assert _chain_id_for_job(_row(request={"chain": "base"}, address="0x1")) == _BASE_ID
     assert _chain_id_for_job(_row(request={"chain": "ethereum"}, address="0x1")) == 1
 
@@ -283,11 +269,9 @@ def test_probe_rate_bucket_is_chain_scoped(monkeypatch):
     predicate_capabilities._probe_rate_state.clear()
 
     addr = "0x" + "ab" * 20
-    # First mainnet probe consumes the mainnet bucket.
     predicate_capabilities._probe_rate_check("k", addr, 1)
     # The Base bucket is independent — this must NOT be rate-limited.
     predicate_capabilities._probe_rate_check("k", addr, _BASE_ID)
-    # A second mainnet probe trips the (now-full) mainnet bucket.
     with pytest.raises(HTTPException):
         predicate_capabilities._probe_rate_check("k", addr, 1)
 
@@ -323,18 +307,11 @@ def test_audit_timeline_bytecode_read_uses_contract_chain(monkeypatch):
 
 @pytest.fixture
 def _bind_router_session(session, monkeypatch):
-    """Point the router-facing ``deps.SessionLocal`` at this file's own test-DB
-    session.
-
-    The router functions under test open ``deps.SessionLocal()`` themselves,
-    which binds to the app ``DATABASE_URL`` (``psat``) — a different database
-    than this module's local ``session`` fixture, which seeds through
-    ``TEST_DATABASE_URL`` (``psat_test``). Without this rebind the endpoint reads
-    an empty DB and 404s. (In the full suite these passed only incidentally: an
-    earlier test left ``deps.SessionLocal`` rebound at ``psat_test`` — an
-    order-dependency this fixture removes.) Mirrors conftest's documented
-    ``SessionFactory`` wiring, scoped to the seeded session so the endpoint sees
-    exactly the rows the test committed."""
+    """Point ``deps.SessionLocal`` at this file's test-DB session. The router functions open it themselves, which
+    binds to ``DATABASE_URL`` (``psat``) while the ``session`` fixture seeds ``psat_test``; without the rebind the
+    endpoint reads an empty DB and 404s. (In the full suite this passed only via an earlier test's leaked rebind,
+    an order-dependency this fixture removes.)
+    """
     from routers import deps
 
     class _SharedSessionFactory:

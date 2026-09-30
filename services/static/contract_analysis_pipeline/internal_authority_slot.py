@@ -1,29 +1,10 @@
-"""Attach the sequential storage slot of a getter-less address authority var to
-its caller-equality operand, so resolution can read the live value with
-``eth_getStorageAt`` (claim #3 group D — ether.fi ``MembershipNFT.membershipManager``).
+"""Stamp the sequential storage slot of a getter-less address authority var onto its caller-equality operand, so
+resolution can read it with ``eth_getStorageAt`` (ether.fi ``MembershipNFT.membershipManager``, whose getter
+reverts on every deployment). Like the constant-slot ``view_call`` path, but for a named var at its layout
+position.
 
-An address/contract-typed state var declared without ``public`` has no
-auto-generated getter, so a ``msg.sender == <var>`` gate cannot be resolved by an
-``eth_call`` — the getter (``membershipManager()``) reverts on *every* deployment,
-not just a standalone impl. The value still lives in the contract's own storage at
-a fixed sequential slot (the var is not a proxy/impl split — its ``public`` siblings
-read clean via ``eth_call`` on the same address), which is exactly what
-``eth_getStorageAt`` returns. This pass computes that slot from Slither's storage
-layout and stamps it onto the operand; the read itself happens at resolution.
-
-This mirrors the keccak-constant-slot path the ``view_call`` branch already carries
-(Governable ``_pendingGovernor`` → ``keccak256("LRTSquare.pending.governor")``), but
-for a *named state var* whose slot is its sequential layout position rather than an
-inline ``sload(<constant>)``.
-
-Precision — so a non-address word is never misread as a 20-byte principal:
-  * address-typed *scalar* only: elementary ``address`` / ``address payable`` or a
-    contract/interface reference (stored as an address); never a mapping, struct,
-    array, enum, or user-defined value type;
-  * no public getter — ``public`` vars resolve through their auto-getter, leave them;
-  * not ``constant`` / ``immutable`` — those are inlined in bytecode, not in storage;
-  * storage offset 0 only — a var packed at a non-zero byte offset would need a
-    shifted decode the resolver's low-20-byte slot read does not perform.
+Only address-typed scalars (address or contract reference), with no public getter under any name, not
+constant/immutable, at storage offset 0 (the resolver decodes the low 20 bytes).
 """
 
 from __future__ import annotations
@@ -40,10 +21,7 @@ _ADDRESS_ELEMENTARY = {"address", "address payable"}
 
 
 def _is_address_like_type(var_type: Any) -> bool:
-    """True for a type stored as a 20-byte address: an elementary ``address`` /
-    ``address payable``, or a contract/interface reference (an
-    ``IMembershipManager`` field holds the contract's address). A mapping, struct,
-    array, enum, or user-defined value type is not."""
+    """True for a type stored as an address: ``address``/``address payable`` or a contract/interface reference."""
     try:
         from slither.core.declarations.contract import Contract
         from slither.core.solidity_types.elementary_type import ElementaryType
@@ -58,9 +36,7 @@ def _is_address_like_type(var_type: Any) -> bool:
 
 
 def _public_nullary_function_names(contract: Any) -> set[str]:
-    """Names of the contract's public/external nullary functions — the getters a
-    caller-equality var could be read through (``owner()`` for ``_owner``). A var
-    whose name (or de-underscored name) is here is NOT getter-less."""
+    """Public/external nullary function names; a var matching one (or its de-underscored name) isn't getter-less."""
     names: set[str] = set()
     for fn in getattr(contract, "functions_entry_points", []) or []:
         if getattr(fn, "visibility", None) not in ("public", "external"):
@@ -74,24 +50,13 @@ def _public_nullary_function_names(contract: Any) -> set[str]:
 
 
 def _slots_for_vars(contract: Any, wanted: set[str]) -> dict[str, str]:
-    """``{var_name: 0x-padded-32-byte-slot}`` for each *wanted* var that is a
-    getter-less, non-constant, address-typed scalar of ``contract`` sitting at
-    storage offset 0. Computes layout slots only for the names a gate actually
-    reads, so a contract with no getter-less authority gate pays nothing.
-
-    "Getter-less" means *no public getter under any name* — not merely a private
-    var. OZ Ownable's ``_owner`` is private but the contract exposes ``owner()``;
-    such a var must resolve through that getter (layout-independent, the canonical
-    path), never through a layout-sensitive slot read. So a var is excluded when
-    the contract has a public/external nullary function named after it (its own
-    name or the de-underscored name). What's left is the genuine target: an
-    address authority whose value cannot be read by any call (ether.fi
-    ``MembershipNFT.membershipManager``)."""
+    """``{var: 32-byte slot}`` for wanted vars that are getter-less, non-constant address scalars at offset 0,
+    computed only for names a gate reads. Getter-less means no public getter by any name: OZ ``_owner`` is private
+    but has ``owner()``, which is layout-independent and preferred.
+    """
     getters = _public_nullary_function_names(contract)
     eligible: list[tuple[str, Any]] = []
-    # ``state_variables_ordered`` is the full storage-layout list (inherited +
-    # declared, including private base vars); ``state_variables`` drops inherited
-    # ones, so an authority var declared in a base contract would be missed.
+    # ``state_variables_ordered`` includes inherited vars; ``state_variables`` drops them.
     variables = getattr(contract, "state_variables_ordered", None) or getattr(contract, "state_variables", []) or []
     for var in variables:
         name = getattr(var, "name", None)
@@ -133,8 +98,7 @@ def _walk_leaves(node: Any, callback: Callable[[dict[str, Any]], None]) -> None:
 
 
 def _is_target_operand(op: Any) -> bool:
-    """A bare (non-struct-member) ``state_variable`` operand with no slot yet —
-    the only shape this pass stamps."""
+    """A bare state-variable operand without a slot yet."""
     return (
         isinstance(op, dict)
         and op.get("source") == "state_variable"
@@ -145,8 +109,7 @@ def _is_target_operand(op: Any) -> bool:
 
 
 def apply_internal_authority_slot_pass(contract: Any, trees: dict[str, PredicateTree]) -> None:
-    """Stamp ``storage_slot`` onto each ``msg.sender == <getter-less address var>``
-    caller-equality operand so the resolver can read it via ``eth_getStorageAt``."""
+    """Stamp ``storage_slot`` onto each ``msg.sender == <getter-less address var>`` operand."""
     wanted: set[str] = set()
 
     def collect(leaf: dict[str, Any]) -> None:

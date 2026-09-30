@@ -42,35 +42,25 @@ from utils.scoring_status import NOT_DETERMINED
 
 logger = logging.getLogger(__name__)
 
-# Distinguishes "RPC succeeded, function absent" (None) from "RPC raised" — caching the latter would cement
-# misclassification.
+# Distinguishes "function absent" (None) from "RPC raised"; caching the latter would cement misclassification.
 _PROBE_ERROR = object()
 
-# Process-wide classify cache keyed on (rpc_url, address, block_tag); skips error returns. Immutable classifications
-# (eoa/proxy/plain contract) keep the long TTL; entries whose details carry mutable Safe owners/threshold or timelock
-# delay use a short TTL at block_tag='latest' so a changed owner-set / delay re-probes sooner.
+# Keyed on (rpc_url, address, block_tag); error results aren't cached. 'latest' entries with mutable details (Safe
+# owners, timelock delay) use a short TTL.
 _CLASSIFY_CACHE: dict[tuple[str, str, str], tuple[ResolvedControllerType, dict[str, object], float]] = {}
 _CLASSIFY_CACHE_LOCK = threading.Lock()
 _CLASSIFY_CACHE_MAX = 4096
 _CLASSIFY_CACHE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_TTL_S", "1800"))
 _CLASSIFY_CACHE_MUTABLE_TTL_S = float(os.getenv("PSAT_CLASSIFY_CACHE_MUTABLE_TTL_S", "60"))
 
-# Detail keys that change on-chain (Safe owner-set/threshold, timelock delay,
-# a proxy's ERC-1967 implementation) — a 'latest' classification carrying any
-# of them is served only briefly.
 _MUTABLE_DETAIL_KEYS = frozenset({"owners", "threshold", "delay", "min_delay", "erc1967_implementation"})
 
-# Single-batch classify probes (default ON); falls back to sequential on whole-batch failure. Toggle
-# PSAT_CLASSIFY_BATCH=0 to force sequential.
+# Falls back to sequential on whole-batch failure; PSAT_CLASSIFY_BATCH=0 forces sequential.
 _CLASSIFY_BATCH_ENABLED = os.getenv("PSAT_CLASSIFY_BATCH", "1").lower() in ("1", "true", "yes")
 
-# Collapse the 6 classify probes (and the per-contract snapshot getters) into ONE billable eth_call via
-# Multicall3 aggregate3. Both fall back to the existing JSON-RPC-batch / per-controller path on any anomaly
-# (provider rejects Multicall3, chain lacks it, malformed response), so resolution results are byte-identical
-# whether on or off — proven by the parity tests in test_classify_batch_parity / test_control_tracker.
-# Default ON in every real run (no env needed); set PSAT_CLASSIFY_MULTICALL=0 / PSAT_SNAPSHOT_MULTICALL=0 as a
-# kill switch. The offline suite forces these OFF via tests/conftest.py for hermeticity — those tests stub the
-# per-call wire (_rpc_request / _rpc_batch_request_with_status), not Multicall3's eth_call.
+# Collapse the classify probes (and snapshot getters) into one Multicall3 aggregate3 eth_call. Any anomaly falls back to
+# the JSON-RPC path, so results are identical (see the parity tests). PSAT_CLASSIFY_MULTICALL=0 /
+# PSAT_SNAPSHOT_MULTICALL=0 are kill switches; tests/conftest.py forces them off because tests stub the per-call wire.
 _CLASSIFY_MULTICALL_ENABLED = os.getenv("PSAT_CLASSIFY_MULTICALL", "1").lower() in ("1", "true", "yes")
 _SNAPSHOT_MULTICALL_ENABLED = os.getenv("PSAT_SNAPSHOT_MULTICALL", "1").lower() in ("1", "true", "yes")
 
@@ -78,17 +68,12 @@ _SNAPSHOT_MULTICALL_ENABLED = os.getenv("PSAT_SNAPSHOT_MULTICALL", "1").lower() 
 def type_authority_contract(
     rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
 ) -> dict[str, object]:
-    """Compatibility hook for old callers/tests.
-
-    Runtime authority expansion is now handled by semantic predicate
-    capabilities, not by standard-specific controller probes.
-    """
+    """Compatibility hook for old callers; authority expansion now happens via semantic predicate capabilities."""
     del rpc_url, address, block_tag, chain_id
     return {}
 
 
 def clear_classify_cache() -> None:
-    """Clear the process-wide classify cache. For tests + manual reset."""
     from utils.memory import reset_cache_pressure_state
 
     with _CLASSIFY_CACHE_LOCK:
@@ -97,7 +82,6 @@ def clear_classify_cache() -> None:
 
 
 def _log_classify_pressure() -> None:
-    """Log when _CLASSIFY_CACHE crosses 50/75/95% of bound (caller holds the lock)."""
     from utils.memory import cache_pressure_message
 
     msg = cache_pressure_message("classify", len(_CLASSIFY_CACHE), _CLASSIFY_CACHE_MAX)
@@ -106,25 +90,16 @@ def _log_classify_pressure() -> None:
 
 
 def _classify_ttl(block_tag: str, details: dict[str, object]) -> float:
-    """Long TTL for immutable classifications and pinned-block reads; short TTL only for
-    a 'latest' read whose details carry mutable Safe/timelock fields."""
     if block_tag == "latest" and any(key in details for key in _MUTABLE_DETAIL_KEYS):
         return _CLASSIFY_CACHE_MUTABLE_TTL_S
     return _CLASSIFY_CACHE_TTL_S
 
 
-# ``controller_values.value`` is ``String(66)`` (db/models/contracts.py): an address is
-# 42 chars, a single 32-byte word 66. A wider value is not a storable single
-# controller identity — almost always a struct/array getter whose raw multi-word
-# ABI return reaches the fallthrough below with no ``member_path`` to project
-# (e.g. AccountantWithRateProviders.accountantState()), or a projected uint256
-# that stringifies past 66 digits.
+# ``controller_values.value`` is ``String(66)``. Wider values are almost always struct/array getters with no
+# ``member_path`` or huge uint256s, not a single controller identity.
 _CONTROLLER_VALUE_MAX_LEN = 66
 
-# How many reverted controller ids the per-snapshot summary WARNING names. The
-# count is the fact; the sample only makes the line actionable without a
-# stage_errors lookup, and a contract with 200 reverting controllers must not
-# put 200 ids in one log field.
+# Bounded sample of reverted ids for the summary WARNING; the count is the fact.
 _REVERTED_SAMPLE_LIMIT = 10
 
 
@@ -140,10 +115,8 @@ def _decode_controller_value(
         decoded = "0x" + value[-40:]
     else:
         decoded = value
-    # Refuse an unstorable value here rather than letting the resolution
-    # worker's controller_values INSERT raise StringDataRightTruncation
-    # mid-commit (which poisons the worker session). The caller
-    # (build_control_snapshot) turns this into a value=None entry.
+    # Refuse here rather than let the INSERT raise StringDataRightTruncation and poison the worker session; the caller
+    # records value=None.
     if len(decoded) > _CONTROLLER_VALUE_MAX_LEN:
         member_path = read_spec.get("member_path") if isinstance(read_spec, dict) else None
         raise ValueError(
@@ -195,13 +168,8 @@ def _eth_call_raw(
     return raw
 
 
-# Single-word ABI returns must be EXACTLY one 32-byte word. ``eth_abi.decode``
-# reads the first word and silently ignores trailing bytes, so a catch-all
-# fallback (or a struct/tuple getter) answering with a longer blob would still
-# "decode" as a plausible uint256/address — returndata-length discipline is the
-# cheap half of the duck-typing defence (the negative-control probe is the
-# other). ``address`` padding-byte validation is already strict in eth_abi
-# (NonEmptyPaddingBytes); the length check closes the trailing-bytes hole.
+# ``eth_abi.decode`` ignores trailing bytes, so a catch-all fallback or struct getter would still decode as a plausible
+# word. The length check closes that (the negative-control probe is the other defence).
 _EXACT_WORD_ABI_TYPES = frozenset({"address", "uint256", "bytes32"})
 
 
@@ -228,8 +196,7 @@ def _try_eth_call_decoded(
     *,
     chain_id: int | None = None,
 ) -> object | None:
-    """Decoded value, None (function absent / decode failure), or _PROBE_ERROR (transient RPC issue — caller should not
-    cache)."""
+    """Decoded value, None (function absent or decode failure), or _PROBE_ERROR (transient; don't cache)."""
     try:
         raw = _eth_call_raw(rpc_url, contract_address, signature, block_tag, chain_id=chain_id)
         if _normalize_hex(raw) in {"0x", "0x0"}:
@@ -260,7 +227,6 @@ def _coerce_int(value: object) -> int:
 def classify_resolved_address_with_status(
     rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
 ) -> tuple[ResolvedControllerType, dict[str, object], bool]:
-    """Like ``classify_resolved_address`` but also returns a ``cacheable`` flag (False if any probe errored)."""
     normalized = _normalize_hex(address)
     cache_key = (rpc_url, normalized, block_tag)
     now = time.monotonic()
@@ -292,62 +258,37 @@ def classify_resolved_address_with_status(
 def classify_resolved_address(
     rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
 ) -> tuple[ResolvedControllerType, dict[str, object]]:
-    """Backwards-compatible wrapper that drops the cacheable flag; use the ``_with_status`` form if you maintain a
-    downstream cache."""
+    """Drops the cacheable flag; use the ``_with_status`` form if you keep a cache."""
     kind, details, _cacheable = classify_resolved_address_with_status(rpc_url, address, block_tag, chain_id=chain_id)
     return kind, details
 
 
-# Canonical control getters, in precedence order, for reading *who controls* a
-# plain ``contract`` principal. ``classify_resolved_address`` only reads
-# ``owner()`` after it has already matched a timelock/proxy_admin shape, so a
-# generic Ownable/AccessManaged contract falls through untyped — this fills that
-# gap for the contract-principal terminal walk. Each is a
-# caller-independent view getter returning a single address.
+# Canonical control getters in precedence order, for plain ``contract`` principals, since ``classify_resolved_address``
+# only reads ``owner()`` for timelock/proxy_admin shapes.
 _CONTROLLER_GETTER_SIGS: tuple[str, ...] = ("owner()", "authority()", "admin()")
 
 
 def read_contract_controllers(
     rpc_url: str, address: str, block_tag: str = "latest", *, chain_id: int | None = None
 ) -> list[str] | None:
-    """The distinct nonzero controlling addresses of a plain contract, read via
-    the canonical getters ``owner()`` / ``authority()`` / ``admin()`` in that
-    precedence order (deduped case-insensitively), or ``None`` when the set is
-    not dispositively complete.
+    """The distinct nonzero controllers of a plain contract via ``owner()`` / ``authority()`` / ``admin()``, or
+    ``None`` when not dispositively complete.
 
-    Returns the FULL set, not just the first hit: Solmate/Solady ``Auth`` (the
-    motivating world — a BoringVault manager is a ``RolesAuthority``, itself
-    an ``Auth``) exposes ``owner`` AND ``authority`` as PARALLEL live control
-    planes (``requiresAuth`` accepts either). Naming one as THE key would
-    over-claim a settled controller while a second live plane also governs, so
-    the caller must see the whole set and fail closed on ambiguity.
+    Returns the full set: Solmate/Solady ``Auth`` exposes ``owner`` and ``authority`` as parallel control planes, so
+    callers must see both and fail closed on ambiguity.
 
-    **Probe-completeness.** All three getters are probed every call
-    (no early return). A clean ``eth_call`` that reverts / returns absent / zero
-    means "this getter is genuinely not a control plane" — skipped, not an error.
-    But a transient ``_PROBE_ERROR`` on ANY getter means the plane set is NOT
-    dispositively known this round: a real second plane could be hiding behind the
-    erroring getter, so proceeding on the getters that answered would risk a
-    false single-plane terminal. In that case return ``None`` (retryable next
-    run) rather than a partial set. Bounded, read-only, caller-independent, through
-    the same ``rpc_request`` wire the offline suite stubs.
+    All getters are always probed. A clean revert, empty or zero return means "not a control plane"; a transient error
+    on any getter returns ``None`` (retry), since a plane could be hiding behind it.
 
-    ``[]`` means exactly "every canonical getter answered cleanly and named
-    nothing" — probe-set SILENCE. It is NOT proof that the contract has no
-    controller: this probe set is finite, and contracts governed through
-    non-canonical getters (``unpauser()``, ``kernel()``, Curve's ``*_admin()``
-    family) or the ERC-1967 admin slot return the same ``[]`` while
-    demonstrably controlled. The walk publishes it as
-    ``controllers_not_determined`` (basis recorded); see
-    ``services.governance.principals`` for the status vocabulary.
+    ``[]`` means every canonical getter answered and named nothing. It is not proof of no controller (non-canonical
+    getters, the ERC-1967 admin slot); the walk publishes it as ``controllers_not_determined`` (see
+    ``services.governance.principals``).
     """
     controllers: list[str] = []
     seen: set[str] = set()
     had_probe_error = False
-    # The last call is the negative control (same batch — no extra round trip):
-    # an address that ANSWERS a selector nothing implements answers everything,
-    # so its getter "answers" are not evidence of a control plane. See
-    # _negative_control_probe for the same discipline on the classifier.
+    # The last call is the negative control: an address answering an unimplemented selector answers everything, so its
+    # getter answers aren't evidence.
     calls = [{"to": address, "data": _selector(signature)} for signature in _CONTROLLER_GETTER_SIGS]
     calls.append({"to": address, "data": _selector(_NEGATIVE_CONTROL_SIG)})
     try:
@@ -358,63 +299,44 @@ def read_contract_controllers(
         return None
     control = results[-1]
     if control.success and _normalize_hex(control.return_data) not in {"0x", "0x0"}:
-        # Catch-all fallback: the canonical getters cannot be dispositively
-        # read on this address — not determined, never a plane set.
+        # Catch-all fallback: not determined.
         return None
     if not control.success and not _is_definitive_revert(control):
-        # The control itself could not be established — incomplete witness.
         had_probe_error = True
     for outcome in results[: len(_CONTROLLER_GETTER_SIGS)]:
         if not outcome.success:
             if _is_definitive_revert(outcome):
-                # The getter is genuinely not a control plane on this contract.
                 continue
             had_probe_error = True
             continue
         raw = outcome.return_data
         if _normalize_hex(raw) in {"0x", "0x0"}:
-            # A clean empty return: no such getter / no value. Not an error.
             continue
         try:
             decoded = _decode_abi_value(raw, "address")
         except Exception:
-            # A value that will not decode as an address is not a control plane
-            # and not a transport failure — the read succeeded.
+            # Undecodable as an address: not a plane, and not a transport failure.
             continue
         owner = str(decoded).lower()
         if owner.startswith("0x") and len(owner) == 42 and set(owner[2:]) != {"0"} and owner not in seen:
             seen.add(owner)
             controllers.append(owner)
     if had_probe_error:
-        # Incomplete witness — do not proceed on a possibly-partial plane set.
         return None
     return controllers
 
 
-# A node's message for a contract-level revert. ``eth_call_batch`` preserves the
-# revert payload, so a revert WITH data is unambiguous; a bare
-# ``"execution reverted"`` carries no data but is still a definitive answer from
-# the EVM, unlike a transport/OOG failure.
+# A bare ``"execution reverted"`` has no data but is still a definitive EVM answer, unlike a transport/OOG failure.
 _REVERT_MESSAGE_MARKERS = ("execution reverted", "revert")
 
 
 def _is_definitive_revert(outcome: Any) -> bool:
     """Did the EVM answer (a revert), or did the read fail to happen?
 
-    This is the discriminator ``read_contract_controllers``' contract has always
-    claimed and never had: every failure came back as the single
-    ``_PROBE_ERROR``, so a contract with NO ``authority()`` — which is most of
-    them — tripped the incomplete-witness guard and the whole plane set came back
-    ``None``. Measured consequence: ``terminal_principal.status`` is
-    ``unknown_unfetched`` on 180/180 armed rows with the rest of the status
-    vocabulary never firing. Verified against mainnet (see the commit message): both the
-    ownerless Beacon DepositContract AND a contract that demonstrably HAS an
-    owner returned ``None`` before this split.
-
-    A revert with data is definitive. A bare ``execution reverted`` with no data
-    is also the EVM answering — it is how a missing function selector fails —
-    whereas a transport error, timeout or OOG produces neither. Anything
-    unrecognised stays indeterminate (fail closed).
+    Previously every failure was ``_PROBE_ERROR``, so any contract without ``authority()`` tripped the
+    incomplete-witness guard and ``terminal_principal.status`` was ``unknown_unfetched`` on every armed row. A revert
+    (with or without data) is definitive, since that's how a missing selector fails; transport, timeout and OOG are not.
+    Unrecognised stays indeterminate.
     """
     if getattr(outcome, "revert_data", None) is not None:
         return True
@@ -422,21 +344,17 @@ def _is_definitive_revert(outcome: Any) -> bool:
     return any(marker in message for marker in _REVERT_MESSAGE_MARKERS)
 
 
-# A signature no real contract implements (name chosen for selector-collision
-# improbability; selector 0xaa2fed30). Its ONLY use is as a negative control:
-# an address that ANSWERS it answers every selector (an unverified catch-all
-# fallback), so none of its per-selector answers is evidence of an interface.
+# A selector nothing implements (0xaa2fed30). An address that answers it has a catch-all fallback, so its per-selector
+# answers prove no interface.
 _NEGATIVE_CONTROL_SIG = "psatNegativeControlProbeW62()"
 
 
 def _eth_call_tristate(
     rpc_url: str, address: str, signature: str, block_tag: str, *, chain_id: int | None = None
 ) -> tuple[str | None, str]:
-    """One lazy ``eth_call`` with the revert/transport discriminator single
-    probes otherwise lack: ``(raw, "answered")`` on a non-empty return,
-    ``(None, "silent")`` on an empty return or a definitive revert (the EVM
-    answered: the selector is not implemented), ``(None, "error")`` when the
-    read did not dispositively happen (transport/OOG — retryable)."""
+    """One ``eth_call`` with a revert/transport discriminator: ``(raw, "answered")``, ``(None, "silent")`` on empty
+    return or definitive revert, or ``(None, "error")`` when the read didn't dispositively happen (retryable).
+    """
     try:
         raw = _eth_call_raw(rpc_url, address, signature, block_tag, chain_id=chain_id)
     except Exception as exc:
@@ -450,16 +368,11 @@ def _eth_call_tristate(
 
 
 def _negative_control_probe(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> str:
-    """Fire the negative control. ``"passed"`` — the address reverts on (or
-    returns nothing for) a selector nothing implements, so its positive probe
-    answers select real interfaces; ``"failed"`` — it ANSWERS the nonsense
-    selector, so every duck-typed match is worthless (catch-all fallback);
-    ``"error"`` — the control could not be established (not determined:
-    concrete types are withheld and the classification is not cached).
+    """Fire the negative control.
 
-    Invoked lazily, at most once per classification, and only when a
-    duck-typed arm (safe/timelock/UPGRADE_INTERFACE_VERSION) has already
-    matched — the common eoa/plain-contract classifications never pay for it.
+    ``"passed"``: the address rejects the nonsense selector, so positive probes are meaningful. ``"failed"``: it answers
+    everything, so duck-typed matches are worthless. ``"error"``: not determined; concrete types are withheld and the
+    result isn't cached. Called lazily, at most once, only after a duck-typed arm matched.
     """
     raw, state = _eth_call_tristate(rpc_url, address, _NEGATIVE_CONTROL_SIG, block_tag, chain_id=chain_id)
     del raw
@@ -471,41 +384,25 @@ def _negative_control_probe(rpc_url: str, address: str, block_tag: str, *, chain
 
 
 def _get_storage_at(rpc_url: str, address: str, slot: str, block_tag: str, *, chain_id: int | None = None) -> str:
-    """Raw ``eth_getStorageAt``; raises on transport/malformed response.
-    Module-level (like ``_get_code``) so tests can stub the wire."""
+    """Raw ``eth_getStorageAt``; raises on transport or malformed response. Module-level so tests can stub it."""
     raw = _rpc_request(rpc_url, "eth_getStorageAt", [address, slot, block_tag], chain_id=chain_id)
     if not isinstance(raw, str) or not raw.startswith("0x"):
         raise RuntimeError(f"Unexpected eth_getStorageAt result: {raw!r}")
     return raw
 
 
-# --- Safe module / guard protection probe (C1) -----------------------------
-#
-# Every value below is derived from a preimage the deployed Safe singletons
-# contain verbatim, recomputed at import so the constant can never drift from
-# the preimage it claims:
-#
-#   modules head — Safe stores ``mapping(address => address) modules`` at storage
-#     slot 1 and seeds it with ``modules[SENTINEL_MODULES] = SENTINEL_MODULES``
-#     where ``SENTINEL_MODULES == address(0x1)``. The head word therefore lives at
-#     ``keccak256(abi.encode(address(0x1), uint256(1)))``.
-#   guard — ``GUARD_STORAGE_SLOT = keccak256("guard_manager.guard.address")``,
-#     the literal present in the 1.3.0 and 1.4.1 singletons.
-# Canonical values live in ``utils.evm``; tests recompute them from the
-# preimages so they can never drift from what they claim to be.
+# Safe module/guard probe (C1). Modules head: Safe's ``modules`` mapping is at slot 1 seeded with
+# ``modules[address(0x1)] = address(0x1)``, so the head is ``keccak256(abi.encode(address(0x1), uint256(1)))``. Guard:
+# ``keccak256("guard_manager.guard.address")`` (Safe 1.3.0 and 1.4.1). Canonical values live in ``utils.evm``; tests
+# recompute them from the preimages.
 _SAFE_MODULES_HEAD_SLOT = SAFE_MODULES_HEAD_SLOT
 _SAFE_GUARD_SLOT = SAFE_GUARD_SLOT
 _SAFE_SENTINEL_ADDRESS = "0x" + "0" * 39 + "1"
 
-# The largest word value that is still a left-padded address.
 _ADDRESS_WORD_MAX = (1 << 160) - 1
 
-# Safe releases whose DEPLOYED singleton source was read and found to contain (or
-# to lack) ``GUARD_STORAGE_SLOT``. A zero word at the guard slot means "no guard
-# is set" only on a release that HAS the feature; on 1.1.1 the slot is unused
-# storage, and reading its zero as "guard disabled" would be a defaulted witness.
-# Any version outside both sets — including a variant suffix such as ``1.3.0+L2``
-# whose source was not read — is not_determined, never assumed either way.
+# Releases whose singleton source was checked for ``GUARD_STORAGE_SLOT``. A zero word means "no guard" only on releases
+# with the feature; unread variants (e.g. ``1.3.0+L2``) are not_determined.
 _SAFE_VERSIONS_WITH_GUARD = frozenset({"1.3.0", "1.4.1"})
 _SAFE_VERSIONS_WITHOUT_GUARD = frozenset({"1.1.1"})
 
@@ -513,14 +410,11 @@ _BLOCK_TAG_ALIASES = frozenset({"latest", "pending", "earliest", "safe", "finali
 
 
 def _resolve_pinned_block(rpc_url: str, block_tag: str, *, chain_id: int | None = None) -> int | None:
-    """The integer height the protection probe will pin its reads to, or ``None``.
+    """The integer height the protection probe pins its reads to, or ``None``.
 
-    An explicit quantity tag is already the height. A moving alias is resolved to
-    a concrete number FIRST and the reads are then issued against that number, so
-    the published ``probe_block`` is the height the words actually came from
-    rather than whatever ``latest`` meant at each individual read. ``None`` (head
-    read failed) suppresses the probe entirely — a module set observed at an
-    unknown height is a now-fact with no block, which may not be published."""
+    Aliases are resolved to a number first so ``probe_block`` is the height the words came from. ``None`` (head read
+    failed) suppresses the probe: a module set at an unknown height can't be published.
+    """
     tag = (block_tag or "").strip().lower()
     if tag.startswith("0x"):
         try:
@@ -536,13 +430,10 @@ def _resolve_pinned_block(rpc_url: str, block_tag: str, *, chain_id: int | None 
 
 
 def _word_to_address(word: str | None) -> str | None:
-    """The address a 32-byte word holds, or ``None``.
+    """The address a 32-byte word holds, or ``None`` if it isn't exactly 64 nibbles or the top 12 bytes are set.
 
-    ``None`` for anything that is not exactly 64 hex nibbles behind ``0x``, and
-    ``None`` when the top 12 bytes are set (that word is not an address at all).
-    The decode is delegated to ``decode_word`` rather than re-derived: left-pad
-    then length-check cannot reject anything, and under it ``"0x1"`` pads into
-    the modules sentinel — a one-nibble read minting a proven-empty module set."""
+    Uses ``decode_word``; padding first would turn ``"0x1"`` into the modules sentinel.
+    """
     value = _decode_word(word)
     if value is None or value > _ADDRESS_WORD_MAX:
         return None
@@ -552,9 +443,8 @@ def _word_to_address(word: str | None) -> str | None:
 def _safe_guard_state(guard_word: str | None, version: str | None) -> tuple[str, str | None]:
     """``(guard_state, guard_address)`` from the guard slot word and VERSION().
 
-    Four states, and the failure/absence path is ``not_determined`` in every arm:
-    an unread word, an unknown version, or a word that contradicts the version's
-    feature set all land there rather than on a polarity."""
+    Unread words, unknown versions, and words contradicting the version's feature set are all ``not_determined``.
+    """
     if guard_word is None or version is None:
         return NOT_DETERMINED, None
     address = _word_to_address(guard_word)
@@ -564,21 +454,18 @@ def _safe_guard_state(guard_word: str | None, version: str | None) -> tuple[str,
     if version in _SAFE_VERSIONS_WITH_GUARD:
         return ("proven_zero", None) if is_zero else ("proven_address", address)
     if version in _SAFE_VERSIONS_WITHOUT_GUARD:
-        # A nonzero word at a slot the release does not implement is unexplained;
-        # "feature_absent" would be asserting more than the read supports.
+        # A nonzero word at an unimplemented slot is unexplained, not "feature_absent".
         return ("feature_absent", None) if is_zero else (NOT_DETERMINED, None)
     return NOT_DETERMINED, None
 
 
 def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> dict:
-    """The Safe module/guard protection witness, at a pinned height.
+    """The Safe module/guard protection witness at a pinned height.
 
-    Two storage words plus ``VERSION()``. The module linked list is NOT walked, so
-    the head word can only ever prove the list EMPTY (head == sentinel). A
-    non-sentinel head proves a module exists — which makes the k/n signer threshold
-    an upper bound on protection — but says nothing about how many, so the set stays
-    ``not_determined``: publishing ``[head]`` would report a two-module Safe as a
-    one-module Safe. Never raises; every failure arm publishes ``not_determined``."""
+    Two storage words plus ``VERSION()``. The module list isn't walked, so the head only proves emptiness; a
+    non-sentinel head proves at least one module (k/n becomes an upper bound on protection) but the set stays
+    ``not_determined``. Never raises.
+    """
     out: dict[str, object] = {
         "probe_block": NOT_DETERMINED,
         "safe_version": NOT_DETERMINED,
@@ -602,11 +489,9 @@ def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_
     def _word(slot: str) -> str | None:
         """The 32-byte word at ``slot``, or ``None`` for a failed or malformed read.
 
-        Nothing is padded. ``eth_getStorageAt`` answering ``"0x"``, ``"0x1"``, a
-        63-nibble body or whitespace is not a word, and padding one to width
-        before checking it would turn "the node told us nothing" into the
-        sentinel or into a zero — a proven state minted from a non-observation.
-        Every such shape leaves the whole probe ``not_determined``."""
+        Nothing is padded: a short or odd reply isn't a word, and padding it would mint a sentinel or zero from a
+        non-observation.
+        """
         try:
             raw = _get_storage_at(rpc_url, address, slot, pinned, chain_id=chain_id)
         except Exception:
@@ -623,9 +508,7 @@ def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_
             out["module_set"] = []
             out["module_set_basis"] = "storage_linked_list_terminated"
         elif head_address is not None and head_address != "0x" + "0" * 40:
-            # A module is enabled at probe_block; it can act without meeting the
-            # signer threshold, so k/n bounds protection from above. The count
-            # stays unknown — this is the only positive the head word earns.
+            # A module can act without meeting the threshold, so k/n bounds protection from above. Count stays unknown.
             out["protection_is_upper_bound"] = True
             out["modules_head_address"] = head_address
 
@@ -635,9 +518,7 @@ def _probe_safe_protection(rpc_url: str, address: str, block_tag: str, *, chain_
     return out
 
 
-#: The getter the back-link probe reads. A selector, fired with a negative
-#: control — NOT a name match on the principal. The published fact is an address
-#: EQUALITY at a pinned height; the getter's name contributes nothing to it.
+# Read by selector with a negative control, not by name. The published fact is address equality at a pinned height.
 _BACKLINK_GETTER_SIG = "vault()"
 
 
@@ -649,52 +530,24 @@ def probe_declared_vault_backlink(
     *,
     chain_id: int | None = None,
 ) -> dict[str, object] | None:
-    """Does *principal_address* itself declare *gated_contract_address* as its
-    ``vault()``, at a pinned height, with the duck-typing control passed?
+    """Does *principal_address* declare *gated_contract_address* as its ``vault()``, at a pinned height, with the
+    negative control passed?
 
-    The narrow fact this earns, and the only one it may be read as: **M declares
-    V as its vault() at ``probe_block``, with the nonsense-selector control
-    passed.** That corroborates the (M, V) PAIRING the projection already
-    asserts, from a structural read rather than from the
-    ``ManagerWithMerkleVerification`` label string.
+    This corroborates the (M, V) pairing structurally. It says nothing about what M is: half the positive pairs
+    on the corpus are Tellers, solvers and vaults, not managers.
 
-    It earns NOTHING about what M *is*, and on this corpus that is not a corner
-    case: of the 20 pairs that publish ``True`` at 25643300, **10 are not
-    managers at all** — Tellers, solvers and vaults whose ``vault()`` happens to
-    be the contract they gate. Half the positive population would be
-    mis-typed by anyone reading this as "M is the manager".
+    Returns ``None`` when the height can't be pinned. ``declared_vault_matches_gated_contract`` is ``True`` or
+    ``"not_determined"``, never false, since a mismatch doesn't disprove a pairing established otherwise.
 
-    Returns ``None`` — the witness is wholly ABSENT, not falsified — when the
-    height cannot be pinned: two facts on one node row may not carry different
-    unstated heights, so an unpinnable read publishes nothing at all.
-
-    ``declared_vault_matches_gated_contract`` is ``True`` or ``"not_determined"``
-    and has **no false state**, because a mismatch is not a disproof: a pairing
-    established by some other mechanism is not refuted by this getter answering
-    differently.
-
-    **The non-match payload is byte-identical to the never-read payload.** This
-    is load-bearing and was got wrong once. Publishing the control verdict
-    before the equality test made ``negative_control`` a perfect mismatch
-    oracle: the control can only be fired after a decodable address is in hand,
-    so ``negative_control == "passed"`` alongside
-    ``declared_vault_matches_gated_contract == "not_determined"`` was reachable
-    ONLY by "M declares a vault and it is not V" — the earned negative this
-    function refuses, reconstructable one key over. The control verdict is
-    therefore committed to the payload only on the arm that publishes a
-    positive. Withholding it is NOT a claim that the mismatch is unknowable —
-    ``control_graph_edges.relation='controller_value'`` with ``label='vault'``
-    already publishes the raw address for any consumer that wants it (32 rows /
-    25 contracts on this corpus, with ``controller_values.block_number``). It is
-    a statement about what THIS witness asserts.
+    The non-match payload must be byte-identical to the never-read payload. The control only fires after a decodable
+    address, so publishing its verdict on a mismatch would reveal the mismatch. It's recorded only on the positive arm.
+    (The raw ``vault`` address is already published via ``controller_value`` edges.)
     """
     probe_block = _resolve_pinned_block(rpc_url, block_tag, chain_id=chain_id)
     if probe_block is None:
         return None
     pinned = hex(probe_block)
-    # ``gated_contract_address`` is structural — it names the subject of the
-    # verdict, so the row is self-describing and a later graph merge cannot
-    # silently reattribute the witness to a different V.
+    # Names the verdict's subject so a later graph merge can't reattribute it.
     out: dict[str, object] = {
         "probe_block": probe_block,
         "backlink_getter": _BACKLINK_GETTER_SIG,
@@ -708,22 +561,16 @@ def probe_declared_vault_backlink(
         rpc_url, principal_address, _BACKLINK_GETTER_SIG, "address", pinned, chain_id=chain_id
     )
     if not isinstance(declared, str):
-        # Revert, empty return, non-32-byte return, decode failure, transport
-        # error. No control is fired: nothing positive is on the table for it to
-        # gate.
+        # No positive result, so no control is fired.
         return out
 
     if declared.lower() != (gated_contract_address or "").lower():
-        # Byte-identical to the branch above, deliberately. Firing the control
-        # here and recording its verdict would republish the mismatch.
+        # Deliberately identical to the branch above; recording a control verdict here would leak the mismatch.
         return out
 
     control = _negative_control_probe(rpc_url, principal_address, pinned, chain_id=chain_id)
     if control != "passed":
-        # A catch-all fallback answers everything, so the matching vault() answer
-        # is worthless. Recording the verdict is safe on this arm: it is reached
-        # only when the address MATCHED, so it discriminates nothing about the
-        # pairing.
+        # Safe to record here: only reached on a match, so it reveals nothing about the pairing.
         out["negative_control"] = control
         return out
 
@@ -734,13 +581,9 @@ def probe_declared_vault_backlink(
 
 
 def _read_erc1967_implementation(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> object:
-    """The ERC-1967 implementation slot: an implementation address when the
-    slot is nonzero (the address IS a proxy), ``None`` when the slot is zero,
-    ``_PROBE_ERROR`` when the read did not dispositively happen.
-
-    The word must be exactly 64 nibbles before any interpretation: "slot is
-    zero" is a typing verdict (not a proxy), so it is earned only by a full
-    zero word — a short return is a transport artifact and stays an error."""
+    """The ERC-1967 implementation slot: an address when nonzero (a proxy), ``None`` when zero, ``_PROBE_ERROR`` when
+    the read didn't happen. "Zero" requires a full 64-nibble zero word.
+    """
     try:
         raw = _get_storage_at(rpc_url, address, EIP1967_IMPL_SLOT, block_tag, chain_id=chain_id)
     except Exception:
@@ -764,27 +607,13 @@ def _resolve_uiv_shape(
 ) -> tuple[ResolvedControllerType, dict[str, object], bool]:
     """Type an address whose ``UPGRADE_INTERFACE_VERSION()`` answered.
 
-    A successful UIV read selects the OZ-v5 UPGRADE MACHINERY, not a proxy
-    admin: the constant is compiled into ``UUPSUpgradeable`` — so it is
-    answered THROUGH every OZ-v5 UUPS proxy via delegatecall and by every bare
-    UUPS implementation — and into the v5 ``ProxyAdmin`` alike, while the v4
-    ``ProxyAdmin`` (the corpus's genuine one) does not implement it at all.
-    Publishing ``proxy_admin`` off UIV alone therefore typed PROXIES as proxy
-    admins (chain-verified: 5/5 published proxy_admin nodes carried a nonzero
-    ERC-1967 implementation slot; the genuine ProxyAdmin reverts on UIV).
+    UIV is compiled into ``UUPSUpgradeable`` (answered through every OZ-v5 UUPS proxy and by bare implementations) and
+    the v5 ``ProxyAdmin``, but not the v4 ``ProxyAdmin``. Typing on UIV alone labelled proxies as proxy admins.
 
-    Discriminators, each earned per read:
-      * ERC-1967 implementation slot nonzero → the address IS a proxy →
-        ``contract`` (NON-terminal: the terminal-principal walk continues
-        through the proxy — its owner()/authority()/admin() delegatecall to the
-        implementation — to the real upgrade authority), details carry the
-        witnessed ``erc1967_implementation``.
-      * slot zero + ``proxiableUUID()`` answers → a bare UUPS implementation →
-        ``contract`` with ``details.uups_implementation``.
-      * slot zero + no ``proxiableUUID()`` + ``owner()`` answered → the OZ-v5
-        ``ProxyAdmin`` shape → ``proxy_admin``, earned.
-      * any discriminator read failing (transport) → ``contract`` with
-        ``had_error`` so the not-determined classification is never cached.
+    * ERC-1967 slot nonzero: a proxy, ``contract`` (non-terminal) with ``erc1967_implementation``.
+    * Slot zero and ``proxiableUUID()`` answers: bare UUPS implementation, ``contract`` with ``uups_implementation``.
+    * Slot zero, no ``proxiableUUID()``, ``owner()`` answers: v5 ``ProxyAdmin``, ``proxy_admin``.
+    * Any read failing: ``contract`` with ``had_error`` so it isn't cached.
 
     Returns ``(kind, details, had_probe_error)``.
     """
@@ -811,16 +640,14 @@ def _resolve_uiv_shape(
         if decoded is not None:
             details["uups_implementation"] = True
             return "contract", details, False
-        # Answered but not a bytes32 word — not the UUPS shape, and not the
-        # ProxyAdmin shape either (a v5 ProxyAdmin has no proxiableUUID at
-        # all). Stay a plain contract.
+        # Not a bytes32: neither UUPS nor a v5 ProxyAdmin.
         return "contract", details, False
     if owner is not None:
         return "proxy_admin", details, False
     return "contract", details, False
 
 
-# Probe set for the batched classifier; order is load-bearing — `_classify_uncached_batched` unpacks by index.
+# Order matters: ``_classify_uncached_batched`` unpacks by index.
 _CLASSIFY_PROBE_SIGS: tuple[tuple[str, str], ...] = (
     ("getOwners()", "address[]"),  # 0: Safe
     ("getThreshold()", "uint256"),  # 1: Safe
@@ -832,8 +659,7 @@ _CLASSIFY_PROBE_SIGS: tuple[tuple[str, str], ...] = (
 
 
 def _decode_probe_result(raw: object, abi_type: str) -> object | None:
-    """Decode a pre-fetched probe result; returns None on empty/decode-failure (caller maps RPC errors to _PROBE_ERROR
-    before calling)."""
+    """Decode a pre-fetched probe result; None on empty or decode failure."""
     if not isinstance(raw, str):
         return None
     if _normalize_hex(raw) in {"0x", "0x0"}:
@@ -845,7 +671,7 @@ def _decode_probe_result(raw: object, abi_type: str) -> object | None:
 
 
 def _batch_probe(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> list[object]:
-    """Fire all 6 classify probes in one JSON-RPC batch; per-slot errors yield _PROBE_ERROR so callers skip caching."""
+    """Fire all classify probes in one JSON-RPC batch; per-slot errors become _PROBE_ERROR."""
     calls = [("eth_call", [{"to": address, "data": _selector(sig)}, block_tag]) for sig, _abi in _CLASSIFY_PROBE_SIGS]
     raw_results = _rpc_batch_request_with_status(rpc_url, calls, chain_id=chain_id)
     decoded: list[object] = []
@@ -858,10 +684,11 @@ def _batch_probe(rpc_url: str, address: str, block_tag: str, *, chain_id: int | 
 
 
 def _multicall_probe(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> list[object]:
-    """The 6 classify probes as ONE Multicall3 aggregate3 call. These are caller-independent view getters,
-    so routing them through Multicall3 (which becomes msg.sender) returns identical values. A reverting probe
-    → ``success=False`` → ``_PROBE_ERROR``, the same sentinel a JSON-RPC per-call error yields. Raises on
-    transport/malformed response so ``_probe_classify`` can fall back to the JSON-RPC batch."""
+    """The classify probes as one Multicall3 aggregate3 call.
+
+    They're caller-independent view getters, so values are identical; reverts become ``_PROBE_ERROR``. Raises on
+    transport/malformed response so the caller can fall back.
+    """
     from services.clients.rpc import multicall3_aggregate3
 
     calls = [(address, _selector(sig)) for sig, _abi in _CLASSIFY_PROBE_SIGS]
@@ -876,8 +703,7 @@ def _multicall_probe(rpc_url: str, address: str, block_tag: str, *, chain_id: in
 
 
 def _probe_classify(rpc_url: str, address: str, block_tag: str, *, chain_id: int | None = None) -> list[object]:
-    """Multicall3 the classify probes when enabled, falling back to the JSON-RPC array batch (identical
-    decode) on any failure. The downstream all-``_PROBE_ERROR`` → sequential safety net is unchanged."""
+    """Multicall3 when enabled, falling back to the JSON-RPC batch on any failure."""
     if _CLASSIFY_MULTICALL_ENABLED:
         try:
             return _multicall_probe(rpc_url, address, block_tag, chain_id=chain_id)
@@ -889,8 +715,7 @@ def _probe_classify(rpc_url: str, address: str, block_tag: str, *, chain_id: int
 def _classify_uncached_batched(
     rpc_url: str, normalized: str, block_tag: str, *, chain_id: int | None = None
 ) -> tuple[ResolvedControllerType, dict[str, object], bool]:
-    """Same contract as ``_classify_uncached`` but batches the 6 probes upfront, saving 5 RTT in the common generic-
-    contract case."""
+    """``_classify_uncached`` with the probes batched upfront, saving round trips for generic contracts."""
     if normalized == "0x0000000000000000000000000000000000000000":
         return "zero", {"address": normalized}, False
 
@@ -901,7 +726,7 @@ def _classify_uncached_batched(
     if code in {"0x", "0x0"}:
         return "eoa", {"address": normalized}, False
 
-    # Bytecode-keccak shortcut: skip the batch round trip when bytecode matches a canonical impl.
+    # Skip the batch when the bytecode matches a canonical impl.
     if _KNOWN_BYTECODE_IMPLS:
         try:
             from services.clients.rpc import get_code_with_keccak
@@ -918,22 +743,18 @@ def _classify_uncached_batched(
                 return kind, details, False
 
     probes = _probe_classify(rpc_url, normalized, block_tag, chain_id=chain_id)
-    # Whole-batch failure → fall back to sequential so providers that reject batches don't degrade classification
-    # accuracy.
+    # Whole-batch failure: fall back to sequential so batch-rejecting providers aren't degraded.
     if all(p is _PROBE_ERROR for p in probes):
         return _classify_uncached(rpc_url, normalized, block_tag, chain_id=chain_id)
     safe_owners_raw, safe_threshold_raw, min_delay_a, min_delay_b, upgrade_iv, owner_raw = probes
 
     def _ok(v: object) -> object | None:
-        """Map _PROBE_ERROR → None to match the sequential ``_probe()`` shape."""
         if v is _PROBE_ERROR:
             return None
         return v
 
     had_error = any(p is _PROBE_ERROR for p in probes)
-    # Negative control (lazy, at most one extra eth_call): a concrete duck-typed
-    # kind is published only when the address does NOT answer a selector nothing
-    # implements. See _negative_control_probe.
+    # Lazy negative control: publish a duck-typed kind only if the address rejects an unimplemented selector.
     control_state: list[str | None] = [None]
 
     def _duck_type_permitted() -> bool:
@@ -950,8 +771,7 @@ def _classify_uncached_batched(
                 "address": normalized,
                 "owners": [str(item).lower() for item in safe_owners] if isinstance(safe_owners, list) else [],
                 "threshold": _coerce_int(safe_threshold),
-                # Nested so a consumer cannot read module_set without its probe_block:
-                # both are one now-fact and neither means anything alone.
+                # Nested so module_set is never read without its probe_block.
                 "safe_protection": _probe_safe_protection(rpc_url, normalized, block_tag, chain_id=chain_id),
             },
             had_error,
@@ -980,24 +800,21 @@ def _classify_uncached_batched(
     except Exception:
         had_error = True
     if control_state[0] == "failed":
-        # A definitive observation, published so a consumer can tell "plain
-        # contract" from "answers every selector, duck typing withheld".
+        # Published so consumers can tell a plain contract from a catch-all.
         details["duck_type_negative_control"] = "failed"
     elif control_state[0] == "error":
-        # The control could not be established — not determined, uncached.
         had_error = True
     return "contract", details, had_error
 
 
-# Canonical-impl bytecode keccak registry; matches short-circuit the 6-probe classifier (empty by default — populate via
-# follow-up or test monkeypatch).
+# Canonical-impl bytecode keccak registry; empty by default (tests monkeypatch it).
 _KNOWN_BYTECODE_IMPLS: dict[str, tuple[ResolvedControllerType, dict[str, object]]] = {}
 
 
 def _classify_uncached(
     rpc_url: str, normalized: str, block_tag: str, *, chain_id: int | None = None
 ) -> tuple[ResolvedControllerType, dict[str, object], bool]:
-    """The classifier. Returns ``(kind, details, had_rpc_error)``; caller must skip caching on had_rpc_error."""
+    """The classifier. Returns ``(kind, details, had_rpc_error)``; don't cache when had_rpc_error."""
     if normalized == "0x0000000000000000000000000000000000000000":
         return "zero", {"address": normalized}, False
 
@@ -1008,7 +825,7 @@ def _classify_uncached(
     if code in {"0x", "0x0"}:
         return "eoa", {"address": normalized}, False
 
-    # Bytecode-keccak shortcut: skip the 6-probe sequence when bytecode matches a registered canonical impl.
+    # Skip the probe sequence when the bytecode matches a registered canonical impl.
     if _KNOWN_BYTECODE_IMPLS:
         try:
             from services.clients.rpc import get_code_with_keccak
@@ -1034,8 +851,7 @@ def _classify_uncached(
             return None
         return result
 
-    # Same lazy negative-control gate as the batched path (see
-    # _negative_control_probe): no duck-typed concrete kind without it.
+    # Same lazy negative-control gate as the batched path.
     control_state: list[str | None] = [None]
 
     def _duck_type_permitted() -> bool:
@@ -1095,9 +911,9 @@ def _current_block_number(rpc_url: str, *, chain_id: int | None = None) -> int:
 
 
 def _getter_target(source: str, read_spec: ControllerReadSpec | None) -> str:
-    """Getter base name ``_read_polling_source`` reads a controller through: ``source`` unless a
-    ``getter_call`` read_spec overrides the target. Shared with the snapshot Multicall3 prewarm so the two
-    can never compute a different selector for the same controller."""
+    """The getter name ``_read_polling_source`` reads a controller through (``source`` unless a ``getter_call``
+    read_spec overrides it). Shared with the Multicall3 prewarm so selectors agree.
+    """
     target = source
     if isinstance(read_spec, dict) and read_spec.get("strategy") == "getter_call":
         read_target = read_spec.get("target")
@@ -1119,9 +935,7 @@ def _read_polling_source(
 ) -> str:
     signature = f"{_getter_target(source, read_spec)}()"
     if prewarm is not None:
-        # The snapshot pre-read the same getter at the same block_tag in one Multicall3. Only SUCCESSFUL
-        # reads are cached, so a reverting getter is absent here and falls through to the live read (and the
-        # impl getter_fallback) exactly as before — accuracy-neutral, just one fewer billable eth_call.
+        # Only successful prewarm reads are cached, so reverting getters still take the live read and impl fallback.
         cached = prewarm.get((contract_address.lower(), _selector(signature)))
         if cached is not None:
             return _decode_controller_value(cached, controller_kind, read_spec)
@@ -1132,19 +946,17 @@ def _read_polling_source(
 def _prewarm_snapshot_getters(
     rpc_url: str, plan: ControlTrackingPlan, block_tag: str, *, chain_id: int | None = None
 ) -> dict[tuple[str, str], str]:
-    """Pre-read every tracked controller's ``{target}()`` getter on the contract in ONE Multicall3, at the
-    same ``block_tag`` the per-controller path uses.
+    """Pre-read every tracked controller's getter in one Multicall3 at the snapshot's ``block_tag``.
 
-    Returns ``{(contract_addr_lower, selector): raw}`` for SUCCESSFUL reads only — reverting getters are
-    omitted so ``_read_polling_source`` falls through to the live read + impl ``getter_fallback`` unchanged.
-    Best-effort: any failure (Multicall3 absent/rejected, transport error) returns ``{}`` (no prewarm),
-    preserving exact per-controller behavior. These are caller-independent authority view getters."""
+    Returns ``{(contract_addr_lower, selector): raw}`` for successful reads only. Best-effort: any failure returns
+    ``{}``.
+    """
     contract_address = plan["contract_address"]
     selectors: list[str] = []
     seen: set[str] = set()
     for controller in plan.get("tracked_controllers", []):
         read_spec = controller.get("read_spec")
-        # Mirror _compute_controller's skip: primitive-scalar state vars are never read on-chain.
+        # Primitive-scalar state vars are never read on-chain (see _compute_controller).
         if controller.get("kind") == "state_variable" and is_primitive_scalar_read_spec(read_spec):
             continue
         try:
@@ -1184,23 +996,11 @@ def build_control_snapshot(
 ) -> ControlSnapshot:
     """Resolve every tracked controller's value at the given block.
 
-    The classification cache is the process-wide ``_CLASSIFY_CACHE`` (see
-    ``classify_resolved_address``); the previous per-snapshot cache was an
-    unsynchronised dict that becomes a race once the level fan-out runs in
-    threads, and the global cache already handles dedup with a lock.
+    ``getter_fallback_address`` is the implementation to retry a reverting getter against: ``immutable`` authority
+    addresses live in implementation bytecode and revert on beacon/per-instance runtimes.
 
-    ``getter_fallback_address`` — the implementation address to retry a getter
-    against when the primary read (usually a proxy) reverts. Storage-backed
-    state lives in the proxy, but ``immutable`` authority addresses live in the
-    implementation bytecode and revert when the runtime address doesn't
-    delegatecall to that impl (beacon / per-instance patterns). Defaults to
-    ``None`` (no fallback), preserving the prior reverting-getter behavior.
-
-    ``beacon_address`` — the UpgradeableBeacon governing this instance. Its
-    ``owner()`` is the instance's upgrade authority (it can re-point every
-    governed instance at a new implementation) but lives in the beacon, not in
-    the instance's own state, so it is read live here and recorded as a
-    ``beacon_owner`` controller. Defaults to ``None`` (no beacon attribution).
+    ``beacon_address`` is the governing UpgradeableBeacon, whose ``owner()`` is the instance's upgrade authority; it's
+    recorded as a ``beacon_owner`` controller.
     """
     from services.concurrency import parallel_map
 
@@ -1218,27 +1018,20 @@ def build_control_snapshot(
         if block_tag == "latest"
         else int(block_tag, 16)
     )
-    # One Multicall3 of all controller getters up front; _read_polling_source consumes it (successful reads
-    # only). Empty {} when disabled or on any failure → per-controller reads, identical results.
+    # One Multicall3 up front; ``{}`` when disabled or failed.
     prewarm = (
         _prewarm_snapshot_getters(rpc_url, plan, block_tag, chain_id=chain_id) if _SNAPSHOT_MULTICALL_ENABLED else {}
     )
     controller_values: dict[str, Any] = {}
 
     def _compute_controller(controller: TrackedController) -> tuple[str, dict[str, Any] | None]:
-        """Pure function: compute one controller's value dict, or None to skip."""
+        """Compute one controller's value dict, or None to skip."""
         controller_id = controller["controller_id"]
         source = controller["source"]
         read_spec = controller.get("read_spec")
-        # Primitive-scalar state vars are admitted to the plan only so the event
-        # pathway can watch them — the value snapshot is address-only (every
-        # consumer reads ``value`` as a 0x-address). Reading a scalar slot and
-        # classifying it as an address mints phantom EOA principals: a uint
-        # _minDelay==864000 resolves to 0x…0d2f00, has no code, classifies
-        # "eoa", and is promoted to a controller of every contract declaring it.
-        # Skip only primitive scalars — address/contract slots are real
-        # principals, and mapping/array/struct slots are enumerated elsewhere
-        # (a bare getter reverts on them) so they must pass through untouched.
+        # Scalars are in the plan only for event watching. Reading them as addresses mints phantom EOAs (e.g.
+        # ``_minDelay`` 864000 becomes 0x…0d2f00). Mapping/array/struct slots pass through; they're enumerated
+        # elsewhere.
         if controller["kind"] == "state_variable" and is_primitive_scalar_read_spec(read_spec):
             return controller_id, None
         spec = read_spec if isinstance(read_spec, dict) else None
@@ -1264,8 +1057,8 @@ def build_control_snapshot(
                     "details": {
                         "source": source,
                         "role_id": value,
-                        # Membership is enforced at the runtime address even when
-                        # the role-id constant was read from the implementation.
+                        # Membership is enforced at the runtime address even if the role id came from the
+                        # implementation.
                         "authority_contract": plan["contract_address"],
                         "principal_source": "capability_expr",
                     },
@@ -1284,14 +1077,8 @@ def build_control_snapshot(
         try:
             return controller_id, _read_entry(plan["contract_address"], "eth_call")
         except Exception as exc:
-            # Storage-backed getters live in the proxy, but immutable-backed
-            # authority addresses live in the implementation bytecode and revert
-            # when the runtime address doesn't delegatecall to that impl (beacon
-            # / per-instance patterns — e.g. EtherFiNode, whose
-            # etherFiNodesManager/delegationManager are immutable). Retry against
-            # the implementation: impl storage reads as zero so a storage getter
-            # just yields the empty answer, while an immutable getter recovers
-            # its real value instead of being recorded null.
+            # Immutable authority addresses live in implementation bytecode and revert on beacon/per-instance runtimes
+            # (e.g. EtherFiNode). Retrying on the impl recovers them; storage getters just read zero there.
             if getter_fallback_address and getter_fallback_address.lower() != str(plan["contract_address"]).lower():
                 try:
                     entry = _read_entry(getter_fallback_address, "eth_call_impl_fallback")
@@ -1308,13 +1095,8 @@ def build_control_snapshot(
                         },
                     )
                     return controller_id, entry
-            # Both the proxy read and the impl getter-fallback (if any) reverted —
-            # the controller value is recorded NULL. ``record_degraded`` stays
-            # per-occurrence: stage_errors is the durable, per-controller witness
-            # and nothing about it is aggregated away. The log line is DEBUG
-            # because the useful log fact is the per-snapshot count, emitted once
-            # after the fan-out below; per-occurrence it was 492 WARNINGs in one
-            # run, which reads as 492 incidents rather than one shape.
+            # Both reads reverted: record NULL. ``record_degraded`` keeps the per-controller witness; the log is DEBUG
+            # because the per-snapshot count below is the useful line.
             record_degraded(
                 phase="controller_read",
                 exc=exc,
@@ -1343,28 +1125,18 @@ def build_control_snapshot(
     results = parallel_map(_compute_controller, plan["tracked_controllers"], max_workers=8, heartbeat=heartbeat)
     for _controller, outcome in results:
         if isinstance(outcome, BaseException):
-            # parallel_map captures exceptions, but ``_compute_controller``
-            # already converts every internal failure to an error-shaped
-            # entry. Anything reaching here is a genuine bug — surface it.
+            # ``_compute_controller`` converts internal failures to entries, so anything here is a bug.
             raise outcome
         cid, entry = outcome
         if entry is None:
             continue
-        # Carry the static provenance onto the resolved value. Every branch of
-        # ``_compute_controller`` (including the eth_call_error one) gets it:
-        # whether the address gates the caller is a static fact and does not
-        # depend on whether the read succeeded.
+        # Provenance is static, so it applies whether or not the read succeeded.
         provenance = _controller.get("authority_provenance") if isinstance(_controller, dict) else None
         if provenance:
             entry["authority_provenance"] = provenance
         controller_values[cid] = entry
 
-    # One WARNING per snapshot instead of one per reverted controller. The
-    # partition is read back off the entries themselves rather than counted
-    # inside the fan-out: ``observed_via == "eth_call_error"`` is set on exactly
-    # the arm that recorded NULL, so no shared counter has to survive the eight
-    # worker threads. The sample is bounded — the census is the count, and a
-    # per-controller list is what stage_errors already holds.
+    # One WARNING per snapshot, partitioned from the entries themselves so no counter crosses threads.
     reverted = [cid for cid, entry in controller_values.items() if entry.get("observed_via") == "eth_call_error"]
     if reverted:
         logger.warning(
@@ -1374,11 +1146,7 @@ def build_control_snapshot(
             extra={
                 "reverted_controllers": len(reverted),
                 "tracked_controllers": len(controller_values),
-                # NOT ``address``: the resolution worker binds that contextvar
-                # per job, and JsonFormatter writes contextvars first and drops
-                # a colliding extra — so an ``address`` key here would silently
-                # publish the job's address instead of this snapshot's subject.
-                # They usually match; across a nested resolution they need not.
+                # Not ``address``: that contextvar is bound per job and the formatter drops a colliding extra.
                 "contract_address": plan["contract_address"],
                 "block_number": block_number,
                 "reverted_sample": sorted(reverted)[:_REVERTED_SAMPLE_LIMIT],
@@ -1402,10 +1170,9 @@ def build_control_snapshot(
 def _read_beacon_owner(
     rpc_url: str, beacon_address: str, block_tag: str, block_number: int, *, chain_id: int | None = None
 ) -> dict[str, Any] | None:
-    """Read ``owner()`` on the governing UpgradeableBeacon and shape it as an
-    upgrade-authority controller value. Returns ``None`` when the beacon exposes
-    no live owner (read reverts or returns the zero address) so no empty row is
-    minted."""
+    """Read the governing beacon's ``owner()`` as an upgrade-authority controller value, or ``None`` if it reverts or
+    is zero.
+    """
     try:
         raw = _eth_call_raw(rpc_url, beacon_address, "owner()", block_tag, chain_id=chain_id)
         owner = _decode_controller_value(raw, "external_contract")

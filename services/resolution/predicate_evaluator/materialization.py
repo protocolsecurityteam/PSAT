@@ -13,16 +13,11 @@ logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 
 def _public_without_root_cofinites(cap: CapabilityExpr) -> bool:
-    """Would the resolved capability's projected writer surface be public with
-    every root-subject ``cofinite_blacklist`` node counterfactually removed?
+    """Would the projected writer surface be public with every root-subject ``cofinite_blacklist`` removed?
 
-    A cofinite can only arise from a ``negate()`` exclusion arm (which needs
-    falsy polarity — impossible on the guard's truthy path) or the
-    deny-by-exception emission (which needs surviving caller taint plus a
-    proven proceed-relation). Neither is a laundered un-gated allowlist, so a
-    surface that is public ONLY because of a cofinite is legitimately public
-    and must be spared; public via any other kind (a taint-lost opaque leaf
-    folding to ``conditional_universal``) is the fail-open the guard closes."""
+    Cofinites only come from falsy exclusions or proven deny-by-exception, never laundered allowlists, so a surface
+    public only because of one is legitimately public. Public via anything else is the fail-open the guard closes.
+    """
     from services.policy.capability_surface import project_capability_surface
     from services.resolution.capability_resolver import capability_to_dict
 

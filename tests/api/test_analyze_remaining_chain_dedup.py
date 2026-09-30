@@ -51,7 +51,6 @@ def test_null_chain_contract_does_not_adopt_a_base_job(api_client, db_session):
 
     db_session.expire_all()
     row = db_session.query(Contract).filter_by(protocol_id=proto.id, address=addr).one()
-    # It must NOT have been bound to the Base job — dedup is mainnet-scoped now.
     assert row.job_id is not None
     assert row.job_id != base_job.id
     bound = db_session.query(Job).filter_by(id=row.job_id).one()
@@ -106,7 +105,6 @@ def test_off_allowlist_chain_stub_is_not_queued(api_client, db_session, monkeypa
 
 @requires_postgres
 def test_allowlisted_chain_stub_still_queues(api_client, db_session, monkeypatch):
-    """Positive arm: with base allowlisted, the same stub queues a base job."""
     from db.models import Contract, Job, Protocol
 
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")

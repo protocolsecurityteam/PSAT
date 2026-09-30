@@ -1,26 +1,16 @@
-"""Regression: cross-contract inlining of ``canCall`` must NOT preempt the
-Solmate adapter when the inlined delegated check can't be materialized.
+"""Regression: cross-contract inlining of ``canCall`` must NOT preempt the Solmate adapter
+when the inlined delegated check can't be materialized.
 
-PR #104 wired ``SolmateRolesAuthorityAdapter`` into the ``external_set``
-dispatch in ``services/resolution/predicate_evaluator/core.py``, but
-``_maybe_inline_cross_contract_call`` runs first. For a Solmate-
-protected contract analyzed alongside its ``RolesAuthority``, inlining the
-authority's own ``canCall`` produces an ``external_check_only`` that the
-generic materializer can't satisfy — ``canCall`` is a role-mapping join, not
-expressible from event candidates. The pre-fix code returned an
-``external_check_only`` dead-end (``basis=["delegated_check_not_materialized"]``)
-from that branch, which is non-None — so the caller short-circuited and
-the Solmate adapter was never reached. Empirically: zero
-adapter activations across an entire complete run with 15 RolesAuthority +
-52 ``canCall``-protected Veda contracts analyzed.
+PR #104 wired the adapter into the ``external_set`` dispatch (predicate_evaluator.py:317), but
+``_maybe_inline_cross_contract_call`` runs first (312-316). Inlining a RolesAuthority's own
+``canCall`` (a role-mapping join, not expressible from event candidates) produced a non-None
+``external_check_only`` dead-end (``delegated_check_not_materialized``), short-circuiting the
+caller: zero adapter activations across a full run with 15 RolesAuthority + 52 Veda contracts.
 
-``test_solmate_end_to_end.py`` doesn't catch this because it doesn't seed a
-``Job`` / ``Artifact`` for the RolesAuthority — so the inline function's
-session-lookup short-circuits and the adapter wins by default. This test
-drives ``_maybe_inline_cross_contract_call`` into the materialize-fail branch
-(via monkeypatched lookups + a materializer that returns ``None``) and asserts
-the function now returns ``None``, so the caller's ``external_set`` adapter
-dispatch will run instead of being preempted.
+``test_solmate_end_to_end.py`` misses this because it seeds no ``Job`` / ``Artifact`` for the
+RolesAuthority, so the session lookup short-circuits and the adapter wins by default. This test
+drives the materialize-fail branch (monkeypatched lookups + a materializer returning ``None``)
+and asserts the function returns ``None`` so the adapter dispatch runs.
 """
 
 from __future__ import annotations
@@ -39,12 +29,9 @@ _JOB_ID = "00000000-0000-0000-0000-000000000001"
 def _callee_artifact_with_unmaterializable_cancall() -> dict:
     """A ``canCall`` tree the resolver evaluates to ``external_check_only``.
 
-    The LEAF wraps an ``external_set`` descriptor with a callee signature no
-    adapter handles — so the dispatch in ``predicate_evaluator/core.py`` falls
-    through to ``_external_check_from_descriptor`` → ``external_check_only``.
-    ``_inline_result_needs_materialization(external_check_only) == True``
-    so the materializer is invoked next. Stubbing it to
-    ``None`` is what trips the branch this test guards.
+    The LEAF wraps an ``external_set`` descriptor with a callee signature no adapter handles, so
+    dispatch falls through to ``external_check_only``, which needs materialization
+    (``_inline_result_needs_materialization``); stubbing the materializer to ``None`` trips the branch.
     """
     return {
         "schema_version": "semantic",
@@ -64,8 +51,6 @@ def _callee_artifact_with_unmaterializable_cancall() -> dict:
 
 
 def test_inline_returns_none_when_materialization_fails(monkeypatch):
-    """Pre-fix this returned an ``external_check_only`` dead-end (preempting
-    the Solmate adapter); post-fix it returns ``None`` so the adapter runs."""
     fake_job = SimpleNamespace(id=_JOB_ID, address=_ROLES_AUTH)
     fake_lookup = SimpleNamespace(analysis_job=fake_job, runtime_job=fake_job)
 
@@ -73,9 +58,7 @@ def test_inline_returns_none_when_materialization_fails(monkeypatch):
     monkeypatch.setattr(DQ, "get_artifact", lambda *a, **k: _callee_artifact_with_unmaterializable_cancall())
     monkeypatch.setattr(CR, "_load_state_var_values", lambda *a, **k: {})
 
-    # The trigger: generic materializer can't satisfy ``canCall``'s role-mapping
-    # join. Pre-fix the surrounding function dead-ends with
-    # ``delegated_check_not_materialized``; post-fix it returns ``None``.
+    # The trigger: the generic materializer can't satisfy ``canCall``'s role-mapping join.
     monkeypatch.setattr(PE, "_materialize_external_check_from_candidates", lambda **_: None)
 
     descriptor = {
@@ -87,9 +70,8 @@ def test_inline_returns_none_when_materialization_fails(monkeypatch):
     }
     leaf = {"kind": "membership", "set_descriptor": descriptor}
 
-    # Outer ctx exposes the inlining preconditions (session truthy, state-var
-    # resolves the authority address) plus the fields ``child_outer``
-    # construction at line 1111-1126 reads directly.
+    # Outer ctx exposes the inlining preconditions (session truthy, state-var resolves the
+    # authority address) plus fields the ``child_outer`` construction reads directly.
     outer = SimpleNamespace(
         chain_id=1,
         state_var_values={"authority": _ROLES_AUTH},
@@ -107,10 +89,8 @@ def test_inline_returns_none_when_materialization_fails(monkeypatch):
     )
     ctx = SimpleNamespace(adapter=SimpleNamespace(_outer_ctx=outer))
 
-    # Intentional duck-typing: the function uses ``.get`` on the leaf/descriptor
-    # dicts and ``getattr`` on the ctx, so passing plain dicts + a SimpleNamespace
-    # exercises the production code paths without instantiating the real
-    # ``LeafPredicate`` / ``SetDescriptor`` / ``EvaluationContext`` classes.
+    # Intentional duck-typing: plain dicts + a SimpleNamespace exercise the production paths
+    # (``.get`` on leaf/descriptor, ``getattr`` on ctx) without the real classes.
     result = PE._maybe_inline_cross_contract_call(leaf, descriptor, ctx)  # pyright: ignore[reportArgumentType]
     assert result is None, (
         "Inlining must return None when the delegated check can't be materialized, "

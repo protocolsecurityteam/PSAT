@@ -1,5 +1,3 @@
-"""Typed schemas for runtime control tracking plans and change events."""
-
 from __future__ import annotations
 
 from typing import Literal, TypedDict, cast, get_args
@@ -25,26 +23,19 @@ ResolvedControllerType = Literal[
     "proxy_admin",
     "contract",
     "unknown",
-    # Signature- and Merkle-gated functions: no finite on-chain
-    # principal set (whoever holds the signer key / matching proof).
+    # No finite on-chain principal set.
     "off_chain_witness",
-    # L2 principal that is an aliased L1 owner or an OP-stack bridge predeploy.
-    # A label, not a cross-chain control edge.
+    # Aliased L1 owner or OP-stack bridge predeploy. A label, not a cross-chain control edge.
     "cross_chain_authority",
 ]
 
-# Derived from the Literal so a membership set can never drift from the type.
 RESOLVED_CONTROLLER_TYPES: frozenset[str] = frozenset(get_args(ResolvedControllerType))
 
 
 def coerce_resolved_controller_type(value: object) -> ResolvedControllerType:
-    """Boundary validator for ``resolved_type`` values of unproven provenance
-    (persisted artifacts, pre-seeded caches, JSONB rows).
+    """Validate ``resolved_type`` from untrusted stores (artifacts, caches, JSONB).
 
-    Only a proven vocabulary member passes through; ``None``, the stringified
-    ``"None"`` a legacy store could carry, and any out-of-vocabulary token all
-    surface as ``"unknown"`` — the vocabulary's not-determined arm — because a
-    token nothing downstream knows licenses no concrete branch.
+    ``None``, legacy ``"None"`` and unknown tokens become ``"unknown"``.
     """
     if value is None:
         return "unknown"
@@ -54,11 +45,8 @@ def coerce_resolved_controller_type(value: object) -> ResolvedControllerType:
     return "unknown"
 
 
-# ``monitored_contracts.contract_type``. ``proxy_admin`` controllers are stored
-# as ``"proxy"`` (the historical mapping in ``controllers_for_protocol``).
-# ``role_control`` and ``contract`` are legacy-row shapes no producer mints today
-# (watcher tests register them directly); both stay admissible so re-upserts of
-# such rows cannot 422 and the DB CHECK admits the test-planted states.
+# ``proxy_admin`` is stored as ``"proxy"``. ``role_control`` / ``contract`` are legacy shapes no producer mints; kept so
+# re-upserts can't 422.
 MonitoredContractType = Literal["regular", "proxy", "safe", "timelock", "pausable", "role_control", "contract"]
 MONITORED_CONTRACT_TYPES: frozenset[str] = frozenset(get_args(MonitoredContractType))
 
@@ -87,7 +75,6 @@ class TrackedController(TypedDict):
     event_watch: EventWatch | None
     polling_fallback: PollingFallback
     notes: list[str]
-    # Absent = not determined. See ``ControllerProvenance``.
     authority_provenance: NotRequired[ControllerProvenance]
 
 
@@ -96,8 +83,7 @@ class ControlTrackingPlan(TypedDict):
     contract_address: str
     contract_name: str
     tracking_strategy: TrackingStrategy
-    # Required on every fresh build; legacy persisted artifacts may lack it,
-    # but those are read as untyped JSONB (``.get``), never as this type.
+    # Legacy artifacts lacking it are read as untyped JSONB, never as this type.
     tracked_controllers: list[TrackedController]
 
 
@@ -108,18 +94,14 @@ class ControlSnapshotValue(TypedDict):
     observed_via: str
     resolved_type: ResolvedControllerType
     details: dict[str, object]
-    # Carried from the tracked controller so the resolution stage can tell a
-    # gate from a callee without re-reading the static artifacts. Absent = not
-    # determined. See ``ControllerProvenance``.
+    # Lets resolution tell a gate from a callee without re-reading static artifacts.
     authority_provenance: NotRequired[ControllerProvenance]
 
 
 class ControlSnapshot(TypedDict):
     schema_version: str
     contract_address: str
-    # contract_name/controller_values: required on every fresh build; legacy
-    # persisted artifacts may lack them, but those are read as untyped JSONB
-    # (``.get``), never as this type.
+    # Legacy artifacts lacking these are read as untyped JSONB, never as this type.
     contract_name: str
     block_number: int
     controller_values: dict[str, ControlSnapshotValue]

@@ -1,25 +1,9 @@
 """Regression tests for the whole-protocol enrollment race (PR #139 live errors).
 
-Two independent failures combined to mark a *completed* policy job
-``failed_terminal`` when several policy workers enrolled the same protocol
-concurrently:
-
-1. ``enroll_protocol_contracts`` did a check-then-insert per contract, so two
-   workers that both passed the existence check raced to ``flush()`` and the
-   loser hit ``uq_monitored_contract_address_chain`` — a ``UniqueViolation``
-   that poisoned the SQLAlchemy session.
-
-2. ``PolicyWorker.process`` swallowed that ``IntegrityError`` but never rolled
-   the session back, so the poisoned session escaped ``process()`` and the
-   worker's success path (advance/complete job) re-raised
-   ``PendingRollbackError`` → terminal failure.
-
-The fixes: a race-safe ``ON CONFLICT DO NOTHING`` insert (so a concurrent
-loser is a no-op, never a violation), and a ``session.rollback()`` in the
-auto-enroll failure handler (so any benign enroll hiccup degrades instead of
-killing the job). Both are exercised against a real Postgres — the race lives
-in the unique index and the session-poisoning semantics, which SQLite can't
-reproduce.
+Concurrent enrolls raced on ``uq_monitored_contract_address_chain`` and left the session
+pending-rollback, marking a completed policy job ``failed_terminal``. Fixed by
+``ON CONFLICT DO NOTHING`` plus a rollback in the auto-enroll handler. Needs real Postgres:
+SQLite can't reproduce the unique-index race or session poisoning.
 """
 
 from __future__ import annotations
@@ -158,14 +142,8 @@ def _stub_policy_internals(monkeypatch, job_address):
 
 
 def test_concurrent_enroll_insert_is_race_safe(race_session):
-    """A concurrent enroll of the same ``(address, chain)`` landing in the
-    window between the existence check and the insert must be a no-op, not a
-    session-poisoning ``UniqueViolation``.
-
-    Pre-fix (``session.add`` + ``flush``) this raised ``IntegrityError`` out of
-    ``enroll_protocol_contracts``; post-fix ``ON CONFLICT DO NOTHING`` swallows
-    only the unique conflict and the run completes with exactly one row.
-    """
+    """A concurrent enroll landing between the existence check and the insert must be a
+    no-op, not a session-poisoning ``UniqueViolation`` (pre-fix: ``IntegrityError`` escaped)."""
     from services.monitoring.enrollment import maybe_enroll_protocol
 
     proto = Protocol(name=PROTO_NAME)
@@ -209,15 +187,9 @@ def test_concurrent_enroll_insert_is_race_safe(race_session):
 
 
 def test_benign_enroll_race_does_not_poison_policy_job(race_session, monkeypatch):
-    """A failed auto-enroll (here the same unique-violation that poisons the
-    session) must be rolled back inside ``PolicyWorker.process`` so the worker's
-    success path can still complete the job.
-
-    Pre-fix the poisoned session escaped ``process()`` and the next statement
-    raised ``PendingRollbackError`` → ``failed_terminal``. Post-fix the handler
-    rolls back, so the session is usable again afterwards. The live SELECT below
-    is the assertion that fails without the rollback.
-    """
+    """A failed auto-enroll must be rolled back inside ``PolicyWorker.process``; pre-fix the
+    poisoned session made the success path raise ``PendingRollbackError``. The live SELECT
+    below is the assertion that fails without the rollback."""
     from workers.policy_worker import PolicyWorker
 
     job = _seed_policy_job(race_session)
@@ -225,11 +197,8 @@ def test_benign_enroll_race_does_not_poison_policy_job(race_session, monkeypatch
 
     PolicyWorker().process(race_session, job)  # must not raise
 
-    # The poisoned session was rolled back inside the handler, so it is usable
-    # for the post-process success path. Without the fix this SELECT raises
-    # PendingRollbackError.
+    # Usable only if the handler rolled back; otherwise raises PendingRollbackError.
     assert race_session.execute(select(func.count()).select_from(Job)).scalar() >= 1
-    # And the doomed enroll rows were discarded — nothing leaked.
     leaked = race_session.execute(
         select(func.count()).select_from(MonitoredContract).where(MonitoredContract.address == DUP_POISON_ADDR)
     ).scalar()

@@ -1,15 +1,11 @@
 """URL↔chain_id guard — threading proof (audit finding F6).
 
-``rpc_request``'s runtime guard (``_assert_url_chain_id``) is a no-op unless the
-caller declares ``chain_id``. These tests drive each threaded production path with
-a non-mainnet chain (base = 8453) and assert the *declared* chain_id actually
-reaches the wire — so a silent ``=1`` default (or a dropped declaration) fails
-here, not in prod. Only the wire (``rpc_request`` / ``get_code`` / the batch
-helper) is stubbed at each consuming module's import site; the production
-functions run unmodified, matching the hermetic offline suite.
+``rpc_request``'s guard (``_assert_url_chain_id``) is a no-op unless the caller declares ``chain_id``. These
+tests drive each threaded production path with base (8453) and assert the *declared* chain_id reaches the
+wire, so a silent ``=1`` default fails here, not in prod. Only the wire (``rpc_request`` / ``get_code`` /
+batch helper) is stubbed at each consumer's import site.
 
-The negative case proves the guard genuinely fires *through* the threading: an
-eRPC-shaped URL for one chain paired with a different declared chain_id raises.
+The negative case proves the guard fires *through* the threading.
 """
 
 from __future__ import annotations
@@ -240,7 +236,6 @@ def test_enrollment_seed_block_threads_chain_id(db_session, monkeypatch):
     mc = db_session.execute(select(MonitoredContract).where(MonitoredContract.address == proxy_addr)).scalar_one()
     assert mc.chain == "base"
 
-    # The seed-block read declared base's chain id, never a mainnet default.
     assert seen and all(c == BASE_CHAIN_ID for c in seen)
 
 
@@ -250,9 +245,8 @@ def test_enrollment_seed_block_threads_chain_id(db_session, monkeypatch):
 
 
 def test_threaded_path_guard_raises_on_mismatch(monkeypatch):
-    """A fetcher constructed for chain 1 but handed a base-routed eRPC URL must
-    raise via ``_assert_url_chain_id`` — proving the declaration reaches the guard
-    (not just that the guard exists in isolation)."""
+    """A fetcher for chain 1 handed a base-routed eRPC URL must raise via ``_assert_url_chain_id`` — the
+    declaration reaches the guard, not just the guard in isolation."""
     from services.resolution.repos.event_logs_rpc import RpcEventLogFetcher
 
     monkeypatch.setenv("ERPC_BASE_URL", ERPC_BASE)

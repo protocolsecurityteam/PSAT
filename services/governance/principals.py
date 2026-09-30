@@ -1,5 +1,3 @@
-"""Principal/effective-function shaping for governance views."""
-
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
@@ -8,48 +6,26 @@ from typing import Any
 from db.models import EffectiveFunction, FunctionPrincipal
 from schemas.control_tracking import ResolvedControllerType
 
-# A principal is *terminal* when its resolved_type names a settled controlling
-# key or a recognized governance primitive (Safe / EOA / zero / timelock /
-# proxy_admin / cross-chain authority). A plain ``contract`` — and any unresolved
-# (``unknown``/``None``) — is NON-terminal: a way-point whose ultimate controlling
-# key is not yet established. Marking these non-terminal is the guard against the
-# over-claim bug where a ``resolved_type=contract`` row reads as a *settled*
-# principal to a consumer when the real key is still unknown: the absence of a
-# proven positive is never itself a proven fact.
+# ``contract`` and unresolved types are non-terminal way-points; reading them as settled principals was the over-claim
+# bug.
 TERMINAL_PRINCIPAL_TYPES: frozenset[ResolvedControllerType] = frozenset(
     {"safe", "eoa", "zero", "timelock", "proxy_admin", "cross_chain_authority"}
 )
 
-# Depth bound for the contract-principal terminal walk. A control chain deeper
-# than this in practice signals a loop or a pathological factory graph; we stop
-# and emit ``unknown`` rather than spin. Cycles are caught independently by the
-# seen-set, so this only bounds genuinely-long acyclic chains.
+# Deeper chains signal loops or pathological factories; stop at ``unknown``.
 DEFAULT_TERMINAL_MAX_DEPTH = 4
 
-# Owner/authority/admin — the maximum number of parallel control planes a single
-# contract step can expose. Bounds the shared step budget so multi-plane
-# branching stays linear (pre-branch hops + one bounded walk per plane), never
-# exponential: a plane that itself forks fails closed instead of re-branching.
+# Owner/authority/admin. Bounds branching to stay linear; a plane that forks again fails closed.
 _MAX_CONTROLLER_PLANES = 3
 
-# The canonical control getters the production resolver probes
-# (services/resolution/tracking._CONTROLLER_GETTER_SIGS derives its signatures
-# from these names; a test pins the two in sync). Named here because the walk
-# publishes them as the BASIS of a ``controllers_not_determined`` record:
-# silence from this finite probe set is evidence that THESE getters named
-# nothing — never proof that no controller exists. Chain-verified
-# counterexamples with the same silent-probes outcome: a PauserRegistry
-# controlled via ``unpauser()``, Lido's stETH via ``kernel()``, Curve admin
-# planes via ``ownership_admin()``/``emergency_admin()``, and transparent
-# proxies via the ERC-1967 admin slot — all invisible to this set.
+# Getters the resolver probes (a test pins them to ``tracking._CONTROLLER_GETTER_SIGS``); the basis of
+# ``controllers_not_determined``. Their silence proves nothing: PauserRegistry (``unpauser()``), stETH (``kernel()``),
+# Curve admins and ERC-1967 proxies are invisible to them.
 CANONICAL_CONTROLLER_GETTERS: tuple[str, ...] = ("owner", "authority", "admin")
 
 
 def is_terminal_principal_type(resolved_type: str | None) -> bool:
-    """Whether *resolved_type* names a settled controlling key / recognized
-    governance primitive (see ``TERMINAL_PRINCIPAL_TYPES``). ``contract`` and
-    any unresolved type are non-terminal — they must never read as a resolved
-    key to a grade-bearing consumer."""
+    """``contract`` and unresolved types must never read as a resolved key."""
     return (resolved_type or "").lower() in TERMINAL_PRINCIPAL_TYPES
 
 
@@ -60,69 +36,29 @@ def resolve_terminal_principal(
     resolve_controllers: Callable[[str], Sequence[Mapping[str, Any]] | None],
     max_depth: int = DEFAULT_TERMINAL_MAX_DEPTH,
 ) -> dict[str, Any]:
-    """Walk a ``resolved_type=contract`` principal to its ultimate Safe/EOA key.
+    """Walk a ``resolved_type=contract`` principal to its ultimate Safe/EOA.
 
-    ``resolve_controllers(address)`` returns the *controllers* of ``address`` —
-    a sequence of already-classified ``{"address", "resolved_type", "details"}``
-    mappings (owner/authority/admin order), ``[]`` when every canonical getter
-    (``CANONICAL_CONTROLLER_GETTERS``) answered cleanly and named none
-    (probe-set SILENCE — see below, not proof of absence), or ``None`` when
-    the planes could not be dispositively read (a probe error — not determined).
-    The injected callable is the only wire this function
-    touches (integration callers back it with on-chain owner reads + classify;
-    unit tests stub it), so the walk itself is pure and deterministic.
+    ``resolve_controllers(address)`` returns classified controllers, ``[]`` when every canonical getter named none
+    (silence, not absence), or ``None`` on probe error. It's the only wire, so the walk is pure.
 
-    Returns a terminal record ``{terminal, resolved_type, address, chain,
-    status}``. ``terminal`` is True only when a single-plane walk reached a member
-    of ``TERMINAL_PRINCIPAL_TYPES``; every indeterminate outcome fails closed to
-    ``terminal=False`` / ``resolved_type="unknown"`` — the ``indeterminate ->
-    unknown`` fallback the witness bar requires, never a guessed key.
+    Returns ``{terminal, resolved_type, address, chain, status}``. Every non-``terminated`` outcome fails closed to
+    ``terminal=False`` / ``resolved_type="unknown"``. Statuses:
 
-    **Status taxonomy** (the full vocabulary of ``status``; every consumer of
-    ``terminal_principal`` reads from this list):
+    * ``terminated`` — reached a ``TERMINAL_PRINCIPAL_TYPES`` member.
+    * ``cycle`` / ``depth_exceeded`` — bounded-walk outcomes.
+    * ``multi_plane`` / ``ambiguous_controllers`` — parallel control planes (below).
+    * ``controllers_not_determined`` — all canonical getters silent at ``undetermined_at`` (basis in ``probes_silent``).
+    Retryable only with a wider probe basis.
+    * ``unknown_unfetched`` — probe error or unusable steps; retryable.
+    * ``no_controller`` — proven absence. Declared but unmintable: no available basis can prove it (WETH9 looks like a
+    non-canonically-governed contract). Nothing may mint it until a real proof basis exists.
 
-    * ``terminated`` — the walk reached a ``TERMINAL_PRINCIPAL_TYPES`` member.
-    * ``cycle`` / ``depth_exceeded`` — bounded-walk fail-closed outcomes.
-    * ``multi_plane`` / ``ambiguous_controllers`` — parallel control planes
-      (see below).
-    * ``controllers_not_determined`` — the resolver's canonical getters were
-      ALL silent at the hop named by ``undetermined_at`` (basis recorded in
-      ``probes_silent``). Silence from a finite probe set is evidence those
-      getters named nothing, NEVER proof that no controller exists: contracts
-      governed via non-canonical getters (``unpauser()``, ``kernel()``,
-      Curve's ``*_admin()`` family) or the ERC-1967 admin slot produce exactly
-      this outcome while demonstrably controlled. Not determined — retryable
-      only with a wider probe basis.
-    * ``unknown_unfetched`` — the planes could not be dispositively read (a
-      transient probe error, or steps returned without a usable address) —
-      not determined, retryable next run.
-    * ``no_controller`` — a PROVEN absence of any controlling key. DECLARED
-      BUT CURRENTLY UNMINTABLE: no producer exists, because no basis available
-      to the resolver can earn it — the canonical-getter probe set can prove
-      only what it probed, and a genuinely-ownerless contract (WETH9, the ETH2
-      DepositContract) is indistinguishable from a non-canonically-governed
-      one on that evidence. The member stays documented so a future producer
-      with a real proof basis (and consumers) can adopt it; nothing may mint
-      it until then (zero-realised by design).
-
-    Every non-``terminated`` outcome fails closed to ``terminal=False`` /
-    ``resolved_type="unknown"``, so nothing downstream can read it as a key.
-
-    When a step exposes MORE THAN ONE distinct controller (Solmate/Solady
-    ``Auth`` — ``owner`` AND ``authority`` are parallel live control planes), the
-    walk does NOT name one as THE key; instead it walks EACH plane to its own
-    terminal and returns ``status="multi_plane"``, ``terminal=False``, a flat
-    ``controllers`` list (the immediate distinct controllers), and
-    ``planes=[{"controller", "terminal_record"}, ...]`` carrying each plane's own
-    walk so a weakest-path scorer can consume every plane. Planes are NOT
-    collapsed to one key even when they converge — that's the scorer's call.
-    Branching happens at most once: a plane that itself forks fails closed with
-    ``status="ambiguous_controllers"`` (no sub-plane recursion), keeping total
-    work linear in ``max_depth * (1 + planes)``.
+    Multiple distinct controllers (Solmate ``Auth``: ``owner`` and ``authority``) yield ``multi_plane`` with each plane
+    walked separately in ``planes``, never collapsed (that's the scorer's call). A plane that forks again fails
+    ``ambiguous_controllers``, keeping work linear.
     """
     start = (start_address or "").lower()
     if is_terminal_principal_type(start_type):
-        # Already a settled key — nothing to walk.
         return {
             "terminal": True,
             "resolved_type": str(start_type),
@@ -131,8 +67,7 @@ def resolve_terminal_principal(
             "status": "terminated",
         }
 
-    # Shared step ceiling across the pre-branch walk + every plane walk, so
-    # branching can never blow up total work.
+    # Shared ceiling so branching can't blow up total work.
     budget = [max(1, max_depth) * (1 + _MAX_CONTROLLER_PLANES)]
     return _walk_terminal(
         start,
@@ -146,8 +81,6 @@ def resolve_terminal_principal(
 
 
 def _distinct_controllers(steps: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
-    """Distinct controller steps keyed by lowercased address, preserving the
-    owner/authority/admin probe order (case-insensitive dedup)."""
     distinct: dict[str, Mapping[str, Any]] = {}
     for step in steps:
         if not isinstance(step, Mapping):
@@ -168,10 +101,7 @@ def _walk_terminal(
     budget: list[int],
     allow_branch: bool,
 ) -> dict[str, Any]:
-    """One single-plane walk. ``allow_branch`` gates the ONE multi-plane branch:
-    True on the top-level walk (a fork -> ``multi_plane`` with each plane walked),
-    False inside a plane (a fork -> ``ambiguous_controllers`` fail-closed, no
-    recursion)."""
+    """``allow_branch`` permits the one multi-plane branch at top level; inside a plane a fork fails closed."""
 
     def _unknown(status: str, **extra: Any) -> dict[str, Any]:
         return {
@@ -189,18 +119,10 @@ def _walk_terminal(
         budget[0] -= 1
         steps = resolve_controllers(current)
         if steps is None:
-            # The control planes could not be dispositively read (probe error) —
-            # not-determined, retryable next run.
             return _unknown("unknown_unfetched")
         if not steps:
-            # Every canonical getter answered cleanly and named nothing —
-            # probe-set SILENCE, not proof of absence (see the status taxonomy:
-            # unpauser()/kernel()/*_admin()/ERC-1967-admin contracts produce
-            # exactly this outcome while demonstrably controlled). Published
-            # with its basis, and attributed to the hop whose getters were
-            # silent (``undetermined_at``) — on a multi-hop walk the chain may
-            # already carry REAL controllers, so the status must not read as a
-            # statement about the principal the record is published on.
+            # Silence, not absence (see the status taxonomy). Attributed to the silent hop: earlier hops may carry real
+            # controllers.
             return _unknown(
                 "controllers_not_determined",
                 probes_silent=list(CANONICAL_CONTROLLER_GETTERS),
@@ -208,14 +130,10 @@ def _walk_terminal(
             )
         distinct = _distinct_controllers(steps)
         if not distinct:
-            # Steps were returned but none carried a usable address — fetched,
-            # unusable: not-determined, never a proven absence.
             return _unknown("unknown_unfetched")
         if len(distinct) > 1:
             controllers = list(distinct.keys())
             if not allow_branch:
-                # Nested fork inside a plane — fail this plane closed, do NOT
-                # recurse into sub-planes (keeps total work bounded).
                 return _unknown("ambiguous_controllers", controllers=controllers)
             return _branch_planes(distinct, resolve_controllers, seen, chain, max_depth, budget)
 
@@ -235,8 +153,6 @@ def _walk_terminal(
                 "status": "terminated",
             }
         if next_type != "contract":
-            # An intermediate that is neither a settled key nor a walkable
-            # contract (e.g. an unresolved node) — stop honest, not guessed.
             return _unknown("unknown_unfetched")
         current = next_address
 
@@ -251,8 +167,6 @@ def _branch_planes(
     max_depth: int,
     budget: list[int],
 ) -> dict[str, Any]:
-    """Walk each parallel control plane to its own terminal and package them for a
-    weakest-path scorer — never collapsing to a single "the" key."""
     planes: list[dict[str, Any]] = []
     for controller_address, step in distinct.items():
         controller_type = str(step.get("resolved_type", "unknown") or "unknown")
@@ -265,9 +179,7 @@ def _branch_planes(
                 "status": "terminated",
             }
         elif controller_type == "contract":
-            # Each plane gets its own seen-set (a copy of the pre-branch path) so a
-            # plane can detect a cycle back into the walked prefix, while two planes
-            # reaching the same key independently are NOT treated as a cross-cycle.
+            # Per-plane seen-set so a plane detects cycles into the prefix but two planes converging isn't a cycle.
             record = _walk_terminal(
                 controller_address,
                 resolve_controllers,
@@ -320,13 +232,7 @@ def _function_principal_payload(
         "source_controller_id": fp.origin,
         "principal_type": fp.principal_type,
         "details": details,
-        # A contract (or unresolved) principal is a non-terminal way-point, not a
-        # settled key — consumers must treat it as ``unknown`` terminal, never as
-        # the controlling principal. ``terminal_principal`` is a
-        # forward-compat passthrough: the terminal walk currently persists its
-        # record on ``principal_labels.details`` only (join by address to get the
-        # chain); nothing writes it into ``function_principals.details`` yet, so
-        # this branch stays dormant until a writer merges it there.
+        # ``terminal_principal`` is a dormant passthrough: the walk persists only on ``principal_labels.details`` today.
         "terminal": is_terminal_principal_type(resolved_type),
     }
     terminal_principal = details.get("terminal_principal")
@@ -359,27 +265,14 @@ def _role_value_from_origin(origin: str | None) -> int | str:
 
 
 def _enriched_role_grant(grant: Mapping[str, Any], classified_by_address: Mapping[str, Mapping[str, Any]]) -> dict:
-    """One ``authority_roles`` grant from the COLUMN, with each principal filled
-    in from this row's own classified ``FunctionPrincipal`` payload.
+    """One ``authority_roles`` grant with principals filled from this row's classified FP payload.
 
-    The column's grants carry the role plus bare member ADDRESSES — the capability
-    surface knows who holds the role, not what those addresses are (Safe / EOA /
-    timelock). The same addresses are published under ``controllers`` fully
-    classified, and every consumer that merges the two dedups by address keeping
-    the FIRST record it sees (``protocolScore.collectPrincipals`` reads role
-    grants before controllers). Publishing the bare record first would therefore
-    make a role-granted principal read LESS resolved than the identical address
-    under ``controllers`` — an unresolved-controller reading of an address whose
-    type is known. Classified fields win.
+    Consumers dedup by address keeping the first record (``protocolScore.collectPrincipals`` reads grants first), so a
+    bare grant would make the principal look less resolved.
 
-    ``details`` is merged KEY-WISE with the classified keys on top, never
-    replaced wholesale: the grant's ``details`` is always the non-None
-    ``{"source": "semantic_capability:role_grant"}`` marker, so a blanket
-    "grant's non-null fields override" erased the classified quorum/delay
-    witness (a Safe's ``owners``/``threshold``, a timelock's ``delay``) from
-    the exact record ``protocolScore.safeScore`` / ``principalLabel`` read
-    first — publishing a recorded threshold as "not recorded" and dropping the
-    principal to the 0.55 unknown floor.
+    ``details`` merges key-wise with classified keys on top: the grant always carries a ``source`` marker, and wholesale
+    override erased Safe ``owners``/``threshold`` and timelock ``delay``, dropping the principal to the 0.55 unknown
+    floor.
     """
     principals: list[Any] = []
     for principal in grant.get("principals") or []:
@@ -450,18 +343,8 @@ def _build_company_function_entry(
         )
         controller_entry["principals"].append(principal_dict)
 
-    # Three states out, and the COLUMN decides all three whenever the principal
-    # fold witnesses nothing (``principal_type`` is ``controller`` on 100% of
-    # rows, so that is every row): a non-empty list is witnessed role grants,
-    # ``None`` is role-gated with the role not determined, ``[]`` is proven not
-    # role-gated. ``list(authority_roles_by_key.values())`` is a list on every
-    # path, so seeding the result with it published the column's ``None`` as the
-    # ``[]`` that NEGATES it — /api/company/{name}/functions served 0 nulls over
-    # 1,109 ether.fi rows whose pool holds 324, contradicting
-    # /api/analyses/{job} on the same rows. The two frontend coercers
-    # (the control graph and scoring views) still fold to ``[]``
-    # when they iterate, which is fine — a render loop publishes no verdict —
-    # but the payload has to carry the true value for a scorer to read.
+    # The column decides all three states (principal_type is always ``controller``). Seeding with a list published the
+    # column's ``None`` as ``[]``: /functions served 0 nulls where the pool held 324, contradicting /api/analyses.
     authority_roles: Any
     witnessed_roles = list(authority_roles_by_key.values())
     if witnessed_roles:
@@ -478,11 +361,7 @@ def _build_company_function_entry(
             for grant in ef.authority_roles
             if isinstance(grant, dict)
         ]
-        # A non-empty column that enriches to nothing was unreadable, not proven
-        # absent — the one way this branch could still mint the negating ``[]``.
-        # 0 realised: no persisted row carries a non-object grant (measured
-        # across every effective_functions row, jsonb_typeof(grant) <> 'object'
-        # on 0 of the 210 non-empty ones).
+        # Non-empty but unreadable is not determined, not proven absent.
         authority_roles = enriched or None
     else:
         authority_roles = ef.authority_roles
@@ -500,12 +379,8 @@ def _build_company_function_entry(
             or not all(_is_generic_authority_contract_principal(principal) for principal in entry["principals"])
         ]
 
-    # Imported inside the function, not at module scope: ``services.aggregations``'s
-    # package ``__init__`` imports ``company_overview``, which imports THIS module,
-    # so a top-level import here closes the cycle and kills a fresh interpreter on
-    # ``import services.policy`` (pinned by
-    # tests/test_worker_entrypoint_imports.test_policy_first_import_order, which is
-    # exactly how this was caught).
+    # Function-level: ``services.aggregations`` imports ``company_overview``, which imports this module (pinned by
+    # test_policy_first_import_order).
     from services.aggregations.action_summary import describe_action
 
     _action_summary_text, _action_summary_kind, _action_summary_note = describe_action(
@@ -517,21 +392,15 @@ def _build_company_function_entry(
         "effect_labels": list(ef.effect_labels or []),
         "effect_targets": list(ef.effect_targets or []),
         "claims": list(getattr(ef, "claims", None) or []),
-        # The quotable copy of the structured planes, reconciled against them
-        # and labelled with which shape it is. See
-        # services/aggregations/action_summary — this endpoint and analysis_detail
-        # are the two public surfaces that publish the sentence.
+        # See services/aggregations/action_summary.
         "action_summary": _action_summary_text,
         "action_summary_kind": _action_summary_kind,
         "action_summary_note": _action_summary_note,
         "authority_public": ef.authority_public,
-        # See analysis_detail: the three-state verdict rides alongside the bool,
-        # null when the row predates the column.
+        # Null when the row predates the column.
         "authority_openness": getattr(ef, "authority_openness", None),
         "controllers": controllers,
-        # Three states, same as analysis_detail publishes for the same row: a
-        # non-empty list is witnessed, ``None`` is role-gated with the role not
-        # determined, ``[]`` is proven not role-gated. See the fold above.
+        # Same three states analysis_detail publishes; see the fold above.
         "authority_roles": authority_roles,
         "direct_owner": direct_owner,
         "signature_witnesses": signature_witnesses,

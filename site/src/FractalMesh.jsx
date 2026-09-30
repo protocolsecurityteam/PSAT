@@ -1,18 +1,12 @@
 import React, { useEffect, useRef } from "react";
 
 /*
- * FractalMesh — continuous ASCII minesweeper background that becomes a real
- * playable game when clicked.
+ * ASCII minesweeper background that becomes playable when clicked.
  *
- * Idle mode (default):
- *   PSAT auto-clicks the board; cascades open regions, adjacent mines flag
- *   with ⚑. Old revealed cells slowly re-cover so the loop never finishes.
- *
- * Play mode (after user clicks):
- *   Auto-play stops. Left-click reveals (and cascades), right-click toggles
- *   a flag. Click a mine and it explodes — all mines reveal, the board
- *   resets, and auto-play resumes after a short hold. After 25s of
- *   inactivity, auto-play resumes too.
+ * Idle: auto-clicks, flags mines, and slowly re-covers old cells so it never
+ * finishes.
+ * Play: left-click reveals, right-click flags; a mine resets the board and
+ * auto-play resumes, as it does after 25s idle.
  */
 
 const COLS = 200;
@@ -21,7 +15,6 @@ const CELL_W = 20;
 const CELL_H = 26;
 const MINE_DENSITY = 0.13;
 
-// 2× the original baseline
 const CLICK_INTERVAL_MS = 750;
 const AUTO_CLICKER_COUNT = 2;
 const INITIAL_BURST_COUNT = 5;
@@ -301,7 +294,6 @@ export default function FractalMesh() {
     root.addEventListener("click", handleClick);
     root.addEventListener("contextmenu", handleContextMenu);
 
-    // Multiple concurrent auto-clickers, staggered start
     const autoTimers = [];
     for (let i = 0; i < AUTO_CLICKER_COUNT; i++) {
       const offset = (i * CLICK_INTERVAL_MS) / AUTO_CLICKER_COUNT;
@@ -348,7 +340,7 @@ export default function FractalMesh() {
     };
   }, []);
 
-  // Render grid (once). JS mutates textContent + className via refs.
+  // Rendered once; JS mutates textContent/className via refs.
   const cells = [];
   for (let y = 0; y < ROWS; y++) {
     for (let x = 0; x < COLS; x++) {

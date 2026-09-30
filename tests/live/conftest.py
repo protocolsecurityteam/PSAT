@@ -46,6 +46,9 @@ class LiveClient:
         self._session = requests.Session()
         if admin_key:
             self._session.headers.update({"X-PSAT-Admin-Key": admin_key})
+        # Preparation has its own bounded retry loop, without adapter retries.
+        self._company_session = requests.Session()
+        self._company_session.headers.update(self._session.headers)
         # Retry idempotent reads on transient 5xx. Previews occasionally return
         # a one-shot 500 when a worker commits and the read lands mid-refresh
         # (e.g. ``/api/analyses`` right after a fixture finishes). 3 retries
@@ -174,10 +177,27 @@ class LiveClient:
 
     # -- company -------------------------------------------------------------
 
+    def company_response(self, company: str, section: str = "", *, wait_seconds: float = 60) -> requests.Response:
+        suffix = f"/{section}" if section else ""
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AssertionError(f"Company {company}{suffix} was not prepared within {wait_seconds}s")
+            r = self._company_session.get(self._url(f"/api/company/{company}{suffix}"), timeout=min(30, remaining))
+            if r.status_code != 503:
+                r.raise_for_status()
+                return r
+            try:
+                preparing = r.json().get("code") == "company_preparing"
+            except (ValueError, AttributeError):
+                preparing = False
+            if not preparing:
+                r.raise_for_status()
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+
     def company_overview(self, company: str) -> dict[str, Any]:
-        r = self._session.get(self._url(f"/api/company/{company}"), timeout=30)
-        r.raise_for_status()
-        return r.json()
+        return self.company_response(company).json()
 
     def list_company_audits(self, company: str) -> dict[str, Any]:
         r = self._session.get(self._url(f"/api/company/{company}/audits"), timeout=15)
@@ -533,16 +553,6 @@ def cached_weth(analyzed_weth, live_client: LiveClient) -> dict[str, Any]:
     if job["status"] != "completed":
         pytest.fail(f"Cached WETH run did not complete on {live_client.base_url}: {job.get('error')}")
     return job
-
-
-@pytest.fixture
-def analyze_and_wait(live_client: LiveClient):
-    """Factory for tests that need their own fresh analysis of an address."""
-
-    def _fn(address: str, timeout: float = DEFAULT_SINGLE_TIMEOUT) -> dict[str, Any]:
-        return live_client.submit_and_wait(address, timeout=timeout)
-
-    return _fn
 
 
 # Shared with test_cache.py so its inventory is warm. Queue two candidates so

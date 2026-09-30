@@ -1,26 +1,9 @@
 """Offline regression test for the impl-job race in the live proxy-flow suite.
 
-The live test ``tests/live/test_proxy_flow.py::test_implementation_job_completed``
-asserted ``impl_job['status'] == 'completed'`` synchronously on a job
-fetched from ``live_client.jobs()``. When the impl child was still
-``processing`` at assertion time, the test failed on a healthy pipeline
-that simply hadn't finished yet.
-
-This race didn't fire on the slow live-test runs preceding the
-mapping_enumeration_cache fix (commit e4b95d3) — the surrounding
-concurrency tests took ~50 minutes, which gave the impl plenty of
-wall-clock to settle. After PR-63's cache fix dropped the suite to
-~19 minutes, the impl was no longer guaranteed to be terminal by the
-time this test fired.
-
-Fix: extract the impl-job-resolution-and-wait logic into
-``_resolve_impl_job``; if the matched job isn't terminal, poll. This
-file pins the helper's behaviour against a stub client so the race can
-be reproduced — and a regression detected — without a deployed API.
-
-Marker: offline. Lives at ``tests/`` (not ``tests/live/``) so the
-auto-marker in ``tests/live/conftest.py:pytest_collection_modifyitems``
-does not tag these as live.
+``tests/live/test_proxy_flow.py::test_implementation_job_completed`` asserted ``status == 'completed'``
+synchronously; a still-``processing`` impl child failed a healthy pipeline. The race surfaced after PR-63's cache
+fix cut the suite from ~50 to ~19 min. Fix: ``_resolve_impl_job`` polls when the match isn't terminal; this file
+pins it against a stub client. Lives in ``tests/`` (not ``tests/live/``) so the live auto-marker skips it.
 """
 
 from __future__ import annotations
@@ -32,13 +15,8 @@ from tests.support.live_helpers import _resolve_impl_job
 
 
 class _StubClient:
-    """Minimal LiveClient stand-in for ``_resolve_impl_job``.
-
-    Implements just ``children_of``, ``jobs``, and ``poll_job_until_done``.
-    ``job_states`` lets a test sequence the responses ``poll_job_until_done``
-    receives so a 'processing → processing → completed' transition can be
-    exercised without real time passing.
-    """
+    """Minimal LiveClient stand-in; ``job_states`` sequences ``poll_job_until_done`` responses without real time
+    passing."""
 
     def __init__(
         self,
@@ -83,12 +61,7 @@ class _StubClient:
         raise TimeoutError(f"Job {job_id} did not reach a terminal status within {timeout}s")
 
 
-# --- regression cases -------------------------------------------------------
-
-
 def test_resolve_impl_job_waits_for_processing_to_terminate():
-    """The race fix: when the matched impl_job is 'processing', the helper
-    polls until terminal instead of returning the stale snapshot."""
     impl_addr = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
     impl_job_id = "impl-1"
     client = _StubClient(
@@ -110,8 +83,7 @@ def test_resolve_impl_job_waits_for_processing_to_terminate():
 
 
 def test_resolve_impl_job_returns_immediately_when_already_completed():
-    """Hot path: the parent's child is already completed. No polling
-    overhead, no ``jobs()`` round-trip beyond the ``children_of`` hit."""
+    """Hot path: already completed, so no polling and no ``jobs()`` round-trip beyond ``children_of``."""
     impl_addr = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
     impl_job_id = "impl-2"
     client = _StubClient(
@@ -132,10 +104,8 @@ def test_resolve_impl_job_returns_immediately_when_already_completed():
 
 
 def test_resolve_impl_job_returns_failed_terminal_without_polling():
-    """``failed_terminal`` is its own JobStatus enum value (db/models/jobs.py:JobStatus)
-    and is just as terminal as ``completed``. The helper must not
-    re-classify it as non-terminal and start polling — that was the
-    sibling bug fixed in commit fff4cb2."""
+    """``failed_terminal`` (db/models.py:49) is as terminal as ``completed``; the helper must not poll it
+    (the sibling bug fixed in commit fff4cb2)."""
     impl_addr = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
     impl_job_id = "impl-3"
     client = _StubClient(
@@ -156,9 +126,8 @@ def test_resolve_impl_job_returns_failed_terminal_without_polling():
 
 
 def test_resolve_impl_job_polls_through_processing_to_failed_terminal():
-    """A processing impl that ultimately fails terminally should still
-    return — the live test then surfaces the impl error in its message,
-    rather than masking it as a poll timeout."""
+    """A processing impl that fails terminally must still return, so the live test surfaces the impl error, not a poll
+    timeout."""
     impl_addr = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
     impl_job_id = "impl-4"
     client = _StubClient(
@@ -179,9 +148,7 @@ def test_resolve_impl_job_polls_through_processing_to_failed_terminal():
 
 
 def test_resolve_impl_job_returns_none_when_no_candidate_anywhere():
-    """When no job matches the impl address, return None so the caller
-    can assert with a 'No analysis job of any age found' message rather
-    than blow up on indexing an empty list."""
+    """No match returns None so the caller can assert with a clear message instead of indexing an empty list."""
     client = _StubClient(children=[], all_jobs=[])
 
     result = _resolve_impl_job(
@@ -196,9 +163,8 @@ def test_resolve_impl_job_returns_none_when_no_candidate_anywhere():
 
 
 def test_resolve_impl_job_prefers_terminal_candidate_over_processing():
-    """When ``jobs()`` returns multiple candidates for the same impl
-    address (warm DB with prior runs + a fresh sibling), prefer one
-    that's already terminal so we skip polling entirely."""
+    """With several candidates for one impl address (warm DB + fresh sibling), prefer a terminal one and skip
+    polling."""
     impl_addr = "0x43506849d7c04f9138d1a2050bbf3a0c054402dd"
     client = _StubClient(
         children=[],

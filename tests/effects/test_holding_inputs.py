@@ -46,7 +46,6 @@ def _row(session, contract, fetch, token: str | None, usd, *, observed: str) -> 
 
 @requires_postgres
 def test_unpriced_positive_holdings_remain_observed_assets(db_session):
-    """Unknown price must not erase a witnessed positive token balance."""
     p = _protocol(db_session, "holdings-record")
     deployment = ADDR(0x5101)
     c = _contract(db_session, p.id, deployment)
@@ -63,7 +62,6 @@ def test_unpriced_positive_holdings_remain_observed_assets(db_session):
 
 @requires_postgres
 def test_unpriced_holdings_are_offered_to_security_candidates(db_session):
-    """A missing token price does not suppress a candidate or its asset witnesses."""
     p = _protocol(db_session, "unpriced-holders")
     deployment = ADDR(0x5201)
     c = _contract(db_session, p.id, deployment)
@@ -82,7 +80,6 @@ def test_unpriced_holdings_are_offered_to_security_candidates(db_session):
 
 @requires_postgres
 def test_priced_holdings_are_offered_as_input_tokens_in_value_order(db_session):
-    """Token inputs remain ordered by measured value without a classification pass."""
     p = _protocol(db_session, "priced-inputs")
     deployment = ADDR(0x5301)
     c = _contract(db_session, p.id, deployment)

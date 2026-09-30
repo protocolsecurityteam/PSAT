@@ -39,8 +39,6 @@ def _read_stage_errors(session, job_id):
 
 @requires_postgres
 def test_retry_endpoint_resets_failed_terminal_to_queued(api_client, clean_jobs):
-    """A failed_terminal job is reset to queued with retry_count=0 and a
-    manual_retry artifact entry appended."""
     db_session = clean_jobs
     job = create_job(db_session, {"address": "0xabc", "name": "manual-retry"})
     fail_job_terminal(db_session, job.id, "boom", kind="terminal")
@@ -75,56 +73,30 @@ def test_retry_endpoint_resets_failed_terminal_to_queued(api_client, clean_jobs)
 # ---------------------------------------------------------------------------
 
 
+# done: a real outcome must not be clobbered. queued: already eligible, so a retry would only reset
+# retry_count and mask earlier failures. processing: in flight, clobbering could double-execute work.
+# legacy failed: pre-migration rows must be promoted to failed_terminal first, not retried blindly.
 @requires_postgres
-def test_retry_endpoint_rejects_done_job(api_client, clean_jobs):
-    """A done/completed job must not be retried — that would clobber a real outcome."""
+@pytest.mark.parametrize(
+    ("status", "detail_fragment"),
+    [
+        pytest.param(JobStatus.completed, "completed", id="done"),
+        pytest.param(None, "queued", id="queued"),
+        pytest.param(JobStatus.processing, None, id="processing"),
+        pytest.param(JobStatus.failed, None, id="legacy_failed"),
+    ],
+)
+def test_retry_endpoint_rejects_non_retryable_status(api_client, clean_jobs, status, detail_fragment):
     db_session = clean_jobs
-    job = create_job(db_session, {"address": "0xabc", "name": "completed"})
-    job.status = JobStatus.completed
-    db_session.commit()
+    job = create_job(db_session, {"address": "0xabc", "name": "non-retryable"})
+    if status is not None:
+        job.status = status
+        db_session.commit()
 
     response = api_client.post(f"/api/jobs/{job.id}/retry")
     assert response.status_code == 409
-    assert "completed" in response.json()["detail"]
-
-
-@requires_postgres
-def test_retry_endpoint_rejects_queued_job(api_client, clean_jobs):
-    """A queued job is already eligible to run — retrying it would be a no-op
-    that resets its retry_count, masking earlier failures."""
-    db_session = clean_jobs
-    job = create_job(db_session, {"address": "0xabc", "name": "queued"})
-
-    response = api_client.post(f"/api/jobs/{job.id}/retry")
-    assert response.status_code == 409
-    assert "queued" in response.json()["detail"]
-
-
-@requires_postgres
-def test_retry_endpoint_rejects_processing_job(api_client, clean_jobs):
-    """A processing job is in flight — clobbering it could double-execute work."""
-    db_session = clean_jobs
-    job = create_job(db_session, {"address": "0xabc", "name": "processing"})
-    job.status = JobStatus.processing
-    db_session.commit()
-
-    response = api_client.post(f"/api/jobs/{job.id}/retry")
-    assert response.status_code == 409
-
-
-@requires_postgres
-def test_retry_endpoint_rejects_legacy_failed_job(api_client, clean_jobs):
-    """``status='failed'`` (the legacy state) is not retryable via this
-    endpoint — the operator must promote to ``failed_terminal`` first or
-    use a different mechanism. Avoids accidental retries of pre-migration
-    rows that may have been transient and stayed flapping."""
-    db_session = clean_jobs
-    job = create_job(db_session, {"address": "0xabc", "name": "legacy-failed"})
-    job.status = JobStatus.failed
-    db_session.commit()
-
-    response = api_client.post(f"/api/jobs/{job.id}/retry")
-    assert response.status_code == 409
+    if detail_fragment is not None:
+        assert detail_fragment in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------
@@ -133,41 +105,35 @@ def test_retry_endpoint_rejects_legacy_failed_job(api_client, clean_jobs):
 
 
 @requires_postgres
-def test_retry_endpoint_returns_404_for_missing_job(api_client, clean_jobs):
-    response = api_client.post("/api/jobs/00000000-0000-0000-0000-000000000000/retry")
-    assert response.status_code == 404
-
-
-@requires_postgres
-def test_retry_endpoint_returns_404_for_malformed_uuid(api_client, clean_jobs):
-    response = api_client.post("/api/jobs/not-a-uuid/retry")
+@pytest.mark.parametrize(
+    "job_id",
+    [
+        pytest.param("00000000-0000-0000-0000-000000000000", id="missing_job"),
+        pytest.param("not-a-uuid", id="malformed_uuid"),
+    ],
+)
+def test_retry_endpoint_returns_404(api_client, clean_jobs, job_id):
+    response = api_client.post(f"/api/jobs/{job_id}/retry")
     assert response.status_code == 404
 
 
 # ---------------------------------------------------------------------------
 # Concurrency: two operators hitting /retry simultaneously
 # ---------------------------------------------------------------------------
-#
-# Asserts that ``routers/jobs.py:retry_job`` serializes concurrent admin
-# retries via ``SELECT … FOR UPDATE`` on the row read. Without the lock, two
-# near-simultaneous POSTs both observe ``failed_terminal``, both flip the row
-# to ``queued``, and the second writer's ``store_artifact`` upsert clobbers
-# the first writer's manual_retry entry — losing audit history.
-#
-# With the lock, the second caller blocks until the first commits and then
-# observes ``queued`` status, returning 409.
+# ``routers/jobs.py:retry_job`` must serialize concurrent admin retries via ``SELECT … FOR UPDATE``.
+# Without the lock, two near-simultaneous POSTs both see ``failed_terminal`` and the second
+# ``store_artifact`` upsert clobbers the first's manual_retry entry, losing audit history. With
+# it, the second caller blocks, then sees ``queued`` and returns 409.
 
 
 @requires_postgres
 def test_retry_endpoint_concurrent_operators_serialize_via_row_lock(clean_jobs, monkeypatch):
-    """Two concurrent /retry calls: exactly one returns 200, the other 409.
-    The audit log gets exactly one manual_retry entry — no clobber.
+    """Two concurrent /retry calls: exactly one returns 200, the other 409, and the audit log
+    gets exactly one manual_retry entry.
 
-    Bypasses the shared-session ``api_client`` fixture because that wires
-    every request through one ``Session``, which would serialize at the
-    SQLAlchemy layer and never exercise the DB-level lock. Real production
-    traffic gives each request its own session — replicated here via a real
-    sessionmaker bound to the test DB.
+    Bypasses the shared-session ``api_client`` fixture, which serializes at the SQLAlchemy layer
+    and never exercises the DB-level lock; each request gets its own session from a sessionmaker
+    bound to the test DB, as in production.
     """
     import os
     import threading
@@ -216,8 +182,6 @@ def test_retry_endpoint_concurrent_operators_serialize_via_row_lock(clean_jobs, 
         def execute(self, *args, **kwargs):
             if self._first_execute:
                 self._first_execute = False
-                # Sync both threads at the row-lock attempt so the test
-                # genuinely contends on the lock instead of running serially.
                 started.wait(timeout=10)
             return self._inner.execute(*args, **kwargs)
 
@@ -238,11 +202,9 @@ def test_retry_endpoint_concurrent_operators_serialize_via_row_lock(clean_jobs, 
     # commits, second one wakes up holding the lock, sees queued, returns 409.
     assert statuses == [200, 409], f"expected serialized [200, 409] — got {statuses}"
 
-    # Verify the 409 response carries the post-flip status.
     body_409 = next(r.json() for r in responses if r.status_code == 409)
     assert "queued" in body_409["detail"]
 
-    # Read artifact via a fresh session so we see committed state.
     with real_factory() as verify:
         from db.models import Artifact
 

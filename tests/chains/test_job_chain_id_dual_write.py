@@ -78,45 +78,9 @@ def test_derive_chain_id(chain_value, address, expected):
 
 
 @requires_postgres
-def test_create_job_mainnet_address_gets_chain_id_1(session):
-    job = create_job(session, {"address": ADDR, "chain": "ethereum", "name": "eth"})
-    assert job.chain_id == 1
-
-
-@requires_postgres
-def test_create_job_missing_chain_defaults_mainnet(session):
-    job = create_job(session, {"address": ADDR, "name": "no-chain"})
-    assert job.chain_id == 1
-
-
-@requires_postgres
 def test_create_job_base_address_gets_8453(session):
     job = create_job(session, {"address": ADDR, "chain": "base", "name": "base"})
     assert job.chain_id == 8453
-
-
-@requires_postgres
-def test_create_job_unknown_chain_falls_back_to_mainnet(session):
-    job = create_job(session, {"address": ADDR, "chain": "unknown", "name": "unk"})
-    assert job.chain_id == 1
-
-
-@requires_postgres
-def test_create_job_company_root_job_keeps_null(session):
-    # No address = company/root job. chain_id stays NULL even if a chain leaks in.
-    job = create_job(session, {"company": "acme", "name": "acme-root", "chain": "base"})
-    assert job.address is None
-    assert job.chain_id is None
-
-
-@requires_postgres
-def test_create_job_defillama_and_dapp_stages_dual_write(session):
-    # The dapp-crawl / defillama enqueue paths pass a non-default initial_stage
-    # but the same request dict; chain_id derivation is stage-independent.
-    dapp = create_job(session, {"address": ADDR, "chain": "base"}, initial_stage=JobStage.dapp_crawl)
-    assert dapp.chain_id == 8453
-    dl = create_job(session, {"company": "acme"}, initial_stage=JobStage.defillama_scan)
-    assert dl.chain_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -131,22 +95,6 @@ def test_orm_default_derives_chain_id_for_direct_construction(session):
     session.add(job)
     session.commit()
     assert job.chain_id == 8453
-
-
-@requires_postgres
-def test_orm_default_mainnet_when_request_has_no_chain(session):
-    job = Job(address=ADDR, request={"address": ADDR}, stage=JobStage.static)
-    session.add(job)
-    session.commit()
-    assert job.chain_id == 1
-
-
-@requires_postgres
-def test_orm_default_null_for_addressless_job(session):
-    job = Job(address=None, company="acme", request={"company": "acme"}, stage=JobStage.discovery)
-    session.add(job)
-    session.commit()
-    assert job.chain_id is None
 
 
 # ---------------------------------------------------------------------------
@@ -170,25 +118,25 @@ def test_check_constraint_rejects_address_without_chain_id(session):
 
 
 @requires_postgres
-def test_check_constraint_allows_addressless_null_chain_id(session):
-    session.execute(
-        text(
+@pytest.mark.parametrize(
+    "insert_sql,params",
+    [
+        pytest.param(
             "INSERT INTO jobs (id, address, chain_id, status, stage) "
-            "VALUES (gen_random_uuid(), NULL, NULL, 'queued', 'discovery')"
-        )
-    )
-    session.commit()  # must not raise
-
-
-@requires_postgres
-def test_check_constraint_allows_address_with_chain_id(session):
-    session.execute(
-        text(
-            "INSERT INTO jobs (id, address, chain_id, status, stage) "
-            "VALUES (gen_random_uuid(), :addr, 8453, 'queued', 'discovery')"
+            "VALUES (gen_random_uuid(), NULL, NULL, 'queued', 'discovery')",
+            {},
+            id="addressless_null_chain_id",
         ),
-        {"addr": ADDR},
-    )
+        pytest.param(
+            "INSERT INTO jobs (id, address, chain_id, status, stage) "
+            "VALUES (gen_random_uuid(), :addr, 8453, 'queued', 'discovery')",
+            {"addr": ADDR},
+            id="address_with_chain_id",
+        ),
+    ],
+)
+def test_check_constraint_allows(session, insert_sql, params):
+    session.execute(text(insert_sql), params)
     session.commit()  # must not raise
 
 

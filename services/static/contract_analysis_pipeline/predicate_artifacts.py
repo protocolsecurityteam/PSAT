@@ -1,24 +1,8 @@
-"""Build the semantic predicate-tree artifact for a contract.
+"""Build the predicate-tree artifact: ``build_predicate_tree`` per function plus the contract-wide writer-gate and
+reentrancy/pause passes, keyed by entry-point full name.
 
-Runs the full predicate pipeline (``build_predicate_tree`` per
-function + ``apply_writer_gate_pass`` + ``apply_reentrancy_pause_pass``
-across the contract) and returns a JSON-ready dict keyed on each
-externally-callable function's full name.
-
-The artifact is emitted as the static stage's guard carrier. The
-separate ``effects`` artifact carries sink/effect data for every
-externally-observable function.
-
-Convention:
-  * present + tree → function is guarded by the tree's predicate.
-  * absent → function is unguarded (publicly callable). The
-    resolver maps unguarded to ``CapabilityExpr.public`` /
-    ``conditional_universal`` per its own rules.
-
-External/public visibility is the boundary we report on — internal/
-private functions never appear in the output. We also skip
-constructors and fallback/receive functions (their guard semantics
-are different from ordinary external entry points).
+A present tree means the function is guarded by it; absent means unguarded. Only external/public entry points (plus
+fallback/receive attempts) appear.
 """
 
 from __future__ import annotations
@@ -48,14 +32,9 @@ SCHEMA_VERSION = "semantic"
 
 
 def _slow_function_threshold_ms() -> int:
-    """Per-function log threshold for the predicate-builder profiler.
+    """Functions slower than this log ``predicate_function_slow`` so Loki can rank hot spots.
 
-    Functions whose ``build_predicate_tree`` + ``build_return_predicate_tree``
-    cost more than this are surfaced as ``predicate_function_slow`` lines
-    so a Loki ``top by (function)`` query identifies the per-contract
-    hot spots without needing the aggregate JSON.
-
-    Env: ``PSAT_PREDICATE_FUNCTION_SLOW_MS`` (default 250).
+    Env ``PSAT_PREDICATE_FUNCTION_SLOW_MS`` (default 250).
     """
     try:
         return max(0, int(os.getenv("PSAT_PREDICATE_FUNCTION_SLOW_MS", "250")))
@@ -64,11 +43,7 @@ def _slow_function_threshold_ms() -> int:
 
 
 def _predicate_summary_threshold_ms() -> int:
-    """Aggregate threshold below which the per-contract predicate summary
-    is suppressed. Cheap contracts don't need a line each.
-
-    Env: ``PSAT_PREDICATE_SUMMARY_MS`` (default 500).
-    """
+    """Per-contract summary only above this. Env ``PSAT_PREDICATE_SUMMARY_MS`` (default 500)."""
     try:
         return max(0, int(os.getenv("PSAT_PREDICATE_SUMMARY_MS", "500")))
     except ValueError:
@@ -93,16 +68,11 @@ _EMPTY_PAUSE_INFO: PauseInfo = {
 
 
 def _lower_type_to_abi(t: Any, ancestors: tuple[Any, ...]) -> str:
-    """Lower one Slither parameter ``Type`` to its EVM-canonical ABI string:
-    contract/interface → ``address``, enum → its ``uint<N>`` width, struct →
-    a parenthesised tuple of lowered members, type-alias → its underlying
-    elementary type, array → the lowered element with its ``[]``/``[N]`` suffix.
-
-    ``ancestors`` is the chain of struct types enclosing ``t`` on the current
-    path; a struct that recurses into itself stops there (its name is kept,
-    matching a non-lowerable param so the caller drops it). Tracking the path —
-    not every type seen anywhere — means a user-defined type that appears more
-    than once across sibling fields lowers at every occurrence."""
+    """Lower a Slither parameter type to its canonical ABI string (contract/interface to ``address``, enum to
+    ``uint<N>``, struct to a tuple, alias to its underlying type, arrays keep their suffix). ``ancestors`` is the
+    enclosing struct path, so a self-recursive struct stops (keeping its name for the caller to drop) while a type
+    repeated across siblings still lowers.
+    """
     from slither.core.declarations import Contract, Enum, Structure
     from slither.core.solidity_types import ArrayType, UserDefinedType
     from slither.core.solidity_types.type_alias import TypeAlias
@@ -126,8 +96,7 @@ def _lower_type_to_abi(t: Any, ancestors: tuple[Any, ...]) -> str:
             return f"uint{width}"
         if isinstance(underlying, Structure):
             if underlying in ancestors:
-                # Self-recursive struct (legal only off the external ABI):
-                # un-lowerable, so surface the raw name and let the caller drop it.
+                # Self-recursive struct: unlowerable, surface the name.
                 return str(t)
             members = ",".join(_lower_type_to_abi(e.type, ancestors + (underlying,)) for e in underlying.elems_ordered)
             return f"({members})"
@@ -136,21 +105,12 @@ def _lower_type_to_abi(t: Any, ancestors: tuple[Any, ...]) -> str:
 
 
 def _canonical_signature(fn: Any) -> str | None:
-    """EVM-canonical ABI signature for ``fn`` — contract/interface params
-    lowered to ``address``, enums to ``uint<N>``, structs to their tuple form,
-    arrays preserving their suffix — or ``None`` when it can't be fully lowered.
+    """The canonical ABI signature for ``fn``, or ``None`` if it can't be fully lowered.
 
-    The trees here are keyed on Slither ``full_name``, which keeps user-defined
-    parameter type names (``addAsset(ERC20)``,
-    ``executeTasks(IEtherFiOracle.OracleReport)``). The real EVM selector can't
-    be recovered from that string downstream: a struct's field layout and an
-    enum's ``uint8`` width are already gone, and the name alone can't tell a
-    struct/enum apart from a contract. We walk the parameter ``Type`` objects
-    directly while Slither is live, lowering every occurrence of a user-defined
-    type. A self-recursive struct (legal only off the external ABI) leaves a
-    residual non-elementary token; we reject such a signature so consumers fall
-    back to the string-level normalization (the prior, contract-only-correct
-    behavior)."""
+    Full names keep user-defined types (``addAsset(ERC20)``), and struct layouts and enum widths can't be recovered from
+    the string later, so lower from the live Slither types. A residual non-elementary token rejects the signature
+    (string fallback).
+    """
     try:
         parameters = fn.parameters
         name = fn.name
@@ -163,9 +123,7 @@ def _canonical_signature(fn: Any) -> str | None:
     except (ValueError, AttributeError, KeyError, TypeError):
         return None
     signature = f"{name}({','.join(lowered)})"
-    # A user-defined name surviving the walk means a non-lowerable (recursive)
-    # struct: reject so the selector derivation uses the string fallback rather
-    # than keccak'ing a name that has no on-chain selector.
+    # A surviving user-defined name means an unlowerable recursive struct.
     if any(seg and not _is_elementary_token(seg) for seg in _split_top_level(",".join(lowered))):
         return None
     return signature
@@ -184,9 +142,7 @@ _ELEMENTARY_PREFIXES = (
 
 
 def _is_elementary_token(token: str) -> bool:
-    """True when ``token`` (one top-level tuple member, suffix-stripped) is an
-    EVM elementary type or a tuple thereof — i.e. carries no residual
-    user-defined type name."""
+    """True when ``token`` is an elementary type or a tuple of them."""
     token = token.strip()
     while token.endswith("]"):
         token = token[: token.rindex("[")]
@@ -195,37 +151,24 @@ def _is_elementary_token(token: str) -> bool:
     return token.startswith(_ELEMENTARY_PREFIXES)
 
 
-# Slither renders the two selectorless entry points as ordinary zero-argument
-# signatures, so every string-level canonicality test passed them and hashed
-# them: ``keccak("fallback()")[:4] = 0x552079dc``, ``keccak("receive()")[:4] =
-# 0xa3e76c0f``. Neither is a dispatch — a fallback is reached by calldata that
-# matches nothing, and a contract that really declared ``function fallback()``
-# would own 0x552079dc itself.
+# Slither renders the selectorless entry points as zero-arg signatures whose hashes are no dispatch (a real ``function
+# fallback()`` would own that selector).
 SELECTORLESS_SIGNATURES = frozenset({"fallback()", "receive()"})
 
 
 def has_no_selector(signature: str | None) -> bool:
-    """True for the signatures that PROVABLY have no 4-byte selector.
+    """True for signatures that provably have no selector, unlike an unlowered one (unknown).
 
-    Distinct from ``not is_canonical_abi_signature(...)``, which means "this
-    string was never lowered, so we cannot say". Consumers that need three
-    states publish ``""`` here (the ``effect_verdicts`` identity sentinel in
-    ``db/effect_cache.py``) and ``None`` for the unlowered case."""
+    Consumers publish ``""`` for these (``db/effect_cache.py``'s sentinel) and ``None`` for unlowered.
+    """
     return signature in SELECTORLESS_SIGNATURES
 
 
 def is_canonical_abi_signature(signature: str) -> bool:
-    """True when every parameter token of ``signature`` is an EVM elementary type
-    — i.e. ``keccak(signature)[:4]`` really is the function's ``msg.sig``.
+    """True when every parameter is elementary, so ``keccak(signature)[:4]`` is the real selector.
 
-    A residual user-defined name (``setAuthority(Authority)``,
-    ``f(IFoo.PermitInput)``) means the signature was never lowered, so its hash
-    names a dispatch that does not exist. This is the same rejection
-    :func:`_canonical_signature` applies to its own output, shared so that every
-    consumer deriving a selector from a *string* can fail closed the same way.
-
-    ``fallback()`` / ``receive()`` are rejected for the same reason: they parse
-    as canonical zero-argument signatures but their hash is not reachable."""
+    Shared so every string-based selector derivation fails closed on unlowered names; fallback/receive are rejected too.
+    """
     if has_no_selector(signature):
         return False
     if "(" not in signature or not signature.endswith(")"):
@@ -235,7 +178,6 @@ def is_canonical_abi_signature(signature: str) -> bool:
 
 
 def _split_top_level(s: str) -> list[str]:
-    """Split a comma-joined tuple body at depth-0 commas only."""
     out: list[str] = []
     depth = 0
     start = 0
@@ -252,12 +194,8 @@ def _split_top_level(s: str) -> list[str]:
 
 
 def build_predicate_artifacts(contract: Any) -> dict[str, Any]:
-    """Return a JSON-serializable dict of predicate trees for every
-    external/public function on ``contract``.
-
-    Functions whose tree is ``None`` (no revert paths) are omitted
-    from the output. The resolver treats absent entries as
-    unguarded.
+    """Predicate trees for every external/public function; functions without revert paths are omitted (read as
+    unguarded).
     """
     artifact, _ = build_predicate_artifacts_with_pause_info(contract)
     return artifact
@@ -266,16 +204,8 @@ def build_predicate_artifacts(contract: Any) -> dict[str, Any]:
 def build_predicate_artifacts_with_pause_info(
     contract: Any,
 ) -> tuple[dict[str, Any], PauseInfo]:
-    """Build the predicate artifact and return the structured
-    ``PauseInfo`` from ``apply_reentrancy_pause_pass``. The pipeline
-    consumes the pause info to drive ``_detect_pausability``.
-
-    Emits per-function and per-pass timing logs so the next live run
-    can pinpoint whether the predicate stage's cost is concentrated in
-    a handful of expensive functions or spread evenly across many.
-    Functions slower than ``_slow_function_threshold_ms()`` log their
-    own line; the aggregate summary fires when the whole per-contract
-    cost exceeds ``_predicate_summary_threshold_ms()``.
+    """The predicate artifact plus ``PauseInfo`` for ``_detect_pausability``, with per-function timing logs above
+    ``_slow_function_threshold_ms()`` and a summary above ``_predicate_summary_threshold_ms()``.
     """
     contract_name = getattr(contract, "name", None)
     per_function_ms: list[tuple[str, int]] = []
@@ -284,41 +214,22 @@ def build_predicate_artifacts_with_pause_info(
     fns_attempted = 0
 
     started = time.monotonic()
-    # Scope a per-contract helper-engine cache for the cross-fn
-    # build path. Multiple functions on the same contract often share
-    # helper guards; this cache makes later cross-fn builds effectively
-    # free.
+    # Per-contract helper-engine cache; functions share helper guards.
     cache_token = _helper_engine_cache.set({})
     try:
         trees: dict[str, PredicateTree] = {}
         check_trees: dict[str, PredicateTree] = {}
-        # full_names of entry points whose guard is a caller-authority EQ/NEQ
-        # the builder could not lower into a tree. The policy must NOT default
-        # these to public (they are missed access guards, not unguarded fns).
+        # Entry points whose caller-authority EQ/NEQ guard couldn't be lowered; policy must not default them to public.
         guard_uncertain: set[str] = set()
-        # full_name -> EVM-canonical ABI signature, for every entry point whose
-        # canonical form differs from full_name (i.e. it has a contract/enum/
-        # struct param). Lets the selector consumers key on the true ``msg.sig``
-        # instead of re-deriving it from the lossy full_name string.
+        # full_name -> canonical signature where they differ, so selector consumers key on the real ``msg.sig``.
         canonical_signatures: dict[str, str] = {}
-        # ``functions_entry_points`` is the deduped surface: for an
-        # overridden virtual function (every OZ AccessControl method on a
-        # contract that inherits it), Slither's ``functions`` returns
-        # *both* the shadowed base ``Function`` object and the override
-        # — same ``full_name``, different ``id`` — and the predicate
-        # builder used to run to completion on both, with only the
-        # last-write-wins write to ``trees[full_name]`` surviving.
-        # On CumulativeMerkleDrop that wasted ~146 s per contract
-        # (grantRole base = 69 s + revokeRole base = 77 s, both
-        # discarded). Entry points are the API surface we report on
-        # anyway, so this is the right iteration target.
+        # ``functions_entry_points`` is deduped. ``functions`` includes shadowed bases of overridden virtuals, which the
+        # builder ran fully and then discarded (~146 s per contract on CumulativeMerkleDrop).
         for fn in getattr(contract, "functions_entry_points", []) or []:
             if not _is_predicate_target(fn):
                 continue
             fns_attempted += 1
-            # fallback/receive have no signature to canonicalize and no
-            # selector to key: recording one would mint a dispatch that does
-            # not exist.
+            # No selector to canonicalize.
             if not _is_fallback_or_receive(fn):
                 canonical = _canonical_signature(fn)
                 if canonical is not None and canonical != fn.full_name:
@@ -351,11 +262,8 @@ def build_predicate_artifacts_with_pause_info(
     per_function_total_ms = int((time.monotonic() - started) * 1000)
 
     pause_info = _empty_pause_info()
-    # Cross-contract passes mutate trees in place: writer-gate's
-    # writer-side analysis can promote 1-key membership leaves to
-    # caller_authority once it sees the full set of writers, and
-    # reentrancy/pause analyzers cross-reference state-vars across
-    # the contract's functions.
+    # Contract-wide passes mutate trees: writer-gate promotes single-key membership leaves once all writers are known,
+    # and reentrancy/pause cross-references state vars.
     all_trees: dict[str, PredicateTree] = dict(trees)
     check_tree_keys: dict[str, str] = {}
     for sig, tree in check_trees.items():
@@ -383,8 +291,7 @@ def build_predicate_artifacts_with_pause_info(
         pause_info = apply_reentrancy_pause_pass(contract, all_trees)
         pass_durations_ms["reentrancy_pause"] = int((time.monotonic() - pass_started) * 1000)
 
-        # After reentrancy/pause so an already-claimed guard leaf keeps its
-        # classification (the one-shot pass only touches business leaves).
+        # After reentrancy/pause, so guard leaves they claimed keep their classification.
         pass_started = time.monotonic()
         apply_one_shot_pass(contract, all_trees)
         pass_durations_ms["one_shot"] = int((time.monotonic() - pass_started) * 1000)
@@ -392,21 +299,13 @@ def build_predicate_artifacts_with_pause_info(
         trees = {sig: all_trees[sig] for sig in trees}
         check_trees = {sig: all_trees[check_tree_keys[sig]] for sig in check_trees}
 
-    # Built-vs-attempted split: ``fns_attempted`` is every externally-callable
-    # entry point we ran the builder over; ``len(trees)`` is how many produced a
-    # guard tree. A guard-less function (``build_predicate_tree`` -> ``None``) is
-    # the *normal* unguarded case, so the gap is expected — these are chartable
-    # counts, not a degraded signal, so no WARNING is paired here.
+    # Attempted vs built: unguarded functions produce no tree, so the gap is normal, not degradation.
     record_stage_metric("predicate_fns_attempted", fns_attempted)
     record_stage_metric("predicate_trees_built", len(trees))
 
-    # Stamp the absorbed-operand marker on every finished tree, AFTER the
-    # cross-contract passes (one of them can replace a root, and a replaced root
-    # that lost the marker must read as unmarked rather than inherit it). What the
-    # marker buys a consumer: an operand that is NOT in a leaf's lists is only
-    # evidence of absence on a tree built here. On a tree persisted earlier a
-    # two-slot comparison silently dropped one side, so the same absence is a gap.
-    # ``effects.calldata`` gates its proven-indefinite-freeze state on this.
+    # Mark every finished tree after the contract-wide passes (a replaced root must read as unmarked). An operand
+    # missing from a leaf is only evidence of absence on a marked tree; older persisted trees dropped comparison sides.
+    # ``effects.calldata`` gates its indefinite-freeze state on this.
     for finished_tree in (*trees.values(), *check_trees.values()):
         mark_operand_absorption_recorded(finished_tree)
 
@@ -419,17 +318,14 @@ def build_predicate_artifacts_with_pause_info(
         artifact["canonical_signatures"] = canonical_signatures
     if check_trees:
         artifact["check_trees"] = check_trees
-    # A cross-contract pass can promote an un-modeled guard into ``trees``; only
-    # carry the marker for fns that remain tree-less (the residual missed guards).
+    # Only functions still without a tree after the passes.
     residual_uncertain = sorted(guard_uncertain - set(trees))
     if residual_uncertain:
         artifact["guard_extraction_uncertain"] = residual_uncertain
 
     total_ms = int((time.monotonic() - started) * 1000)
     if total_ms >= _predicate_summary_threshold_ms():
-        # Top 5 slowest functions so a Loki query can rank "which
-        # functions burn predicate-builder budget" without parsing the
-        # full distribution.
+        # Top 5 slowest functions, for Loki ranking.
         top_slow = sorted(per_function_ms, key=lambda kv: kv[1], reverse=True)[:5]
         logger.info(
             "predicate summary for %s: total=%dms fns=%d per_fn=%dms passes=%s",
@@ -454,12 +350,8 @@ def build_predicate_artifacts_with_pause_info(
 
 
 def apply_mapping_event_hint_pass(contract: Any, trees: dict[str, PredicateTree]) -> None:
-    """Attach generic mapping-writer event hints to matching leaves.
-
-    ``discover_mapping_writer_events`` already finds semantic writer
-    evidence like ``wards[user] = 1; emit Rely(user)`` or
-    ``roles[user] = mask; emit RolesUpdated(user, mask)``. This pass
-    copies that evidence onto matching ``mapping_membership`` descriptors.
+    """Copy mapping-writer event evidence (``wards[user] = 1; emit Rely(user)``) onto matching ``mapping_membership``
+    descriptors.
     """
     specs_by_mapping: dict[str, list[WriterEventSpec]] = {}
     for spec in discover_mapping_writer_events(contract):
@@ -481,16 +373,10 @@ def apply_mapping_event_hint_pass(contract: Any, trees: dict[str, PredicateTree]
 def _attach_value_specs_to_param_keyed_operands(
     leaf: dict[str, Any], specs_by_mapping: dict[str, list[WriterEventSpec]]
 ) -> None:
-    """Attach value-enumeration writer specs to a ``msg.sender == mapping[param]``
-    operand (claim #3 group C).
-
-    The builder stamps ``mapping_name`` onto the non-caller operand of such an
-    equality leaf (see ``predicates._stamp_param_keyed_authority_mapping``). Here —
-    where the whole contract's writer events are known — we attach the matching
-    ``set``-direction specs (those carrying a ``value_position``) so resolution can
-    fold the mapping's VALUE set from its setter events. The setter
-    (``setReceiver`` → ``ReceiverSet``) is a *different* function than the gated one,
-    so this evidence is only available at the contract level."""
+    """Attach ``set``-direction writer specs to ``msg.sender == mapping[param]`` operands (``mapping_name`` stamped
+    by the builder), so resolution can fold the mapping's value set. The setter (``setReceiver`` ->
+    ``ReceiverSet``) is another function, so this only works contract-wide.
+    """
     if leaf.get("kind") != "equality":
         return
     for op in leaf.get("operands") or []:
@@ -509,9 +395,9 @@ def _attach_value_specs_to_param_keyed_operands(
 
 
 def _value_writer_spec(spec: WriterEventSpec) -> dict[str, Any]:
-    """JSON-clean WriterEventSpec subset the value enumerator consumes — the
-    ``int``-keyed ``key_positions_by_index`` (unused by the value fold) is dropped so
-    the spec survives the predicate-tree JSONB round-trip without key coercion."""
+    """The WriterEventSpec subset the value enumerator uses, without the int-keyed ``key_positions_by_index`` (JSONB
+    would coerce the keys).
+    """
     return {
         "mapping_name": spec["mapping_name"],
         "event_signature": spec["event_signature"],
@@ -524,14 +410,8 @@ def _value_writer_spec(spec: WriterEventSpec) -> dict[str, Any]:
     }
 
 
-# Solmate ``Auth``/``RolesAuthority``: ``requiresAuth`` authorizes via
-# ``authority.canCall(msg.sender, address(this), msg.sig)``. The static stage
-# already emits this as an ``external_set`` leaf carrying ``authority_contract``
-# but no events. Attach the RolesAuthority role-event topics so the event-log
-# indexer enrolls them (the event address resolves from ``authority_contract``
-# at index time); the Solmate adapter then reconstructs the caller set. canCall
-# is a two-event join (capability ⋈ user-role), so the generic mapping-event
-# path can't cover it.
+# Solmate ``requiresAuth`` checks ``authority.canCall(msg.sender, address(this), msg.sig)``. Attach the RolesAuthority
+# role-event topics so the indexer enrolls them; canCall is a two-event join the generic mapping path can't cover.
 _SOLMATE_CANCALL_SIGNATURE = "canCall(address,address,bytes4)"
 _SOLMATE_ROLE_EVENT_SIGNATURES = (
     "RoleCapabilityUpdated(uint8,address,bytes4,bool)",
@@ -684,19 +564,14 @@ def _is_fallback_or_receive(fn: Any) -> bool:
 
 
 def _is_externally_callable(fn: Any) -> bool:
-    """External or public visibility, AND not a constructor /
-    fallback / receive special function. Modifiers are not
-    functions in this sense.
-
-    This is the *selector-bearing* surface. ``_is_predicate_target`` is the
-    surface a predicate tree is built for, and it is strictly wider."""
+    """External/public and not a constructor, fallback or receive: the selector-bearing surface (narrower than
+    ``_is_predicate_target``).
+    """
     visibility = getattr(fn, "visibility", None)
     if visibility not in ("external", "public"):
         return False
     if getattr(fn, "is_constructor", False):
         return False
-    # Slither tags special functions via name; receive/fallback also
-    # have non-standard signatures.
     if (getattr(fn, "name", "") or "") == "constructor":
         return False
     if _is_fallback_or_receive(fn):
@@ -705,15 +580,11 @@ def _is_externally_callable(fn: Any) -> bool:
 
 
 def _is_predicate_target(fn: Any) -> bool:
-    """Every entry point a predicate tree must be attempted for: the
-    selector-bearing surface PLUS ``fallback`` / ``receive``.
+    """The selector-bearing surface plus fallback/receive.
 
-    Having no selector is not having no caller. Excluding them meant a tree was
-    never *built* for a fallback/receive, and the policy stage reads a missing
-    tree as "no gate found" — so an ``onlyOwner`` fallback published exactly the
-    same evidence as an open one. Absent-because-not-attempted and
-    absent-because-nothing-was-there have to be different states, and the only
-    way to reach the second is to attempt."""
+    They have callers: without a tree, an ``onlyOwner`` fallback looked identical to an open one, so a tree must be
+    attempted to tell "not attempted" from "nothing there".
+    """
     if getattr(fn, "is_constructor", False) or (getattr(fn, "name", "") or "") == "constructor":
         return False
     if _is_fallback_or_receive(fn):

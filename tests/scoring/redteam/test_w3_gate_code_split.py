@@ -43,10 +43,9 @@ KEY_SOLVER = entity_key("ethereum", SOLVER)
 def test_w4a_gate_control_will_not_walk_an_edge_whose_scope_names_nothing(fold):
     """The scope bound, and the class split that makes it apply to one side only.
 
-    Holding a gate over A gives its holder A's existing functions; whether one of
-    them exercises A's authority over B is a question an edge label that names no
-    role and no state variable cannot answer. Controlling A's CODE does not ask
-    it — the code exercises whatever the code is authorized to exercise.
+    A gate over A gives its holder A's existing functions; whether one exercises
+    A's authority over B is a question an edge label naming no role or state
+    variable cannot answer. Controlling A's CODE does not ask it.
     """
     unlabelled = P.ControlClosure(edges=(_role_edge("role principal"),))
     assert not unlabelled.edges[0].scope.is_determined
@@ -67,10 +66,9 @@ def test_w4a_a_role_confers_only_where_the_join_names_a_function_there(fold):
     """The role -> selector join, positive and negative on the same edge.
 
     A ``roles N`` edge is walked where the join names functions role N licenses
-    AT THAT DESTINATION, and those names travel with the reach — they are the
-    answer to "reach to do what", and what a compositional magnitude is later
-    attributed to. Where the join names nothing the hop is not_determined: the
-    label said "role 77" and no witness says what role 77 may do there.
+    AT THAT DESTINATION, and those names travel with the reach (what a
+    compositional magnitude is later attributed to). Where the join names
+    nothing the hop is not_determined.
     """
     closure = P.ControlClosure(edges=(_role_edge("roles 77"),))
     conditions = condition_plane()
@@ -97,12 +95,10 @@ def test_w4a_a_role_confers_only_where_the_join_names_a_function_there(fold):
 def test_w4a_a_gate_does_not_confer_a_variable_it_is_not_witnessed_to_rewrite(fold):
     """ownership.transfer confers an ``owner`` hop and not a ``hook`` one.
 
-    The evidence is the capability's own ``state_writes``: the gate seizes an
-    authority of some kind, the hop runs on an authority of some kind, and the
-    seizure composes down the chain when they are the same kind. Where they
-    differ the hop is NOT disproved — it is not_determined, because whether the
-    seized gate reaches the other authority depends on a function surface
-    nothing witnesses.
+    The evidence is the capability's own ``state_writes``: the seizure composes
+    down the chain when gate and hop are the same kind of authority. Where they
+    differ the hop is NOT disproved but not_determined, since it depends on a
+    function surface nothing witnesses.
     """
     conditions = condition_plane()
     owns = conferral_plane(rewrites=("owner", "_owner")).grant_for("ownership.transfer", None)
@@ -124,9 +120,8 @@ def test_w4a_a_gate_does_not_confer_a_variable_it_is_not_witnessed_to_rewrite(fo
 def test_w4a_a_gate_whose_writes_were_never_extracted_confers_nothing():
     """A coverage gap is not an empty answer and is not a licence.
 
-    A function whose ``state_writes`` never ran rewrites nothing anyone read,
-    which is a different fact from a function proven to rewrite nothing. Both
-    withhold, and the withheld hop says which one it was.
+    A function whose ``state_writes`` never ran is different from one proven to
+    rewrite nothing. Both withhold, and the withheld hop says which.
     """
     conditions = condition_plane()
     plane = P.ConferralPlane()
@@ -149,9 +144,8 @@ def test_w4a_a_gate_whose_writes_were_never_extracted_confers_nothing():
 def test_w4a_conferral_may_only_shrink_a_walk_never_grow_it():
     """The monotone property, over every scope shape in one closure.
 
-    Conferral is a bound and bounds do not add reach. Whatever a gate confers,
-    its walk is a subset of the label-presence walk it replaced — which is the
-    walk code control still performs, since code control asks no scope question.
+    Conferral is a bound and bounds do not add reach: its walk is a subset of
+    the label-presence walk it replaced, which code control still performs.
     """
     conditions = condition_plane()
     closure = P.ControlClosure(
@@ -175,12 +169,11 @@ def test_w4a_conferral_may_only_shrink_a_walk_never_grow_it():
 
 
 def test_w3_case3_a_freeze_charges_no_sheet_and_keeps_its_finding(fold):
-    """Regression case 3 — pause.set leaves the grade.
+    """Regression case 3: pause.set leaves the grade.
 
-    ``pause_effective`` proves the latch takes effect. It proves no FRACTION: how
-    much of a sheet a freeze immobilises is a quantity nothing in this pipeline
-    measures. Charging the whole sheet for it put three quarters of a billion
-    dollars of unwitnessed magnitude into the grade.
+    ``pause_effective`` proves the latch takes effect but no FRACTION; how much
+    of a sheet a freeze immobilises is unmeasured. Charging the whole sheet put
+    three quarters of a billion dollars of unwitnessed magnitude into the grade.
     """
     freeze = pause_sig(
         deployment_address=C,
@@ -212,14 +205,13 @@ def test_w3_case3_a_freeze_charges_no_sheet_and_keeps_its_finding(fold):
 
 
 def test_w3_case4_a_corrected_backlink_licence_carries_no_magnitude(fold):
-    """Regression case 4 — the R3 trap.
+    """Regression case 4: the R3 trap.
 
-    Correcting the backlink join makes a licence that had never once fired admit
-    a foreign entity into a row's reach. Landing that correction WITHOUT the
-    magnitude bound converts a cite/gate object into a dollar figure — the
-    measured shape was one row going from $0.00 to $1,411,758.83 off the
-    destination's whole sheet. The licence proves REACHABILITY; it proves no
-    magnitude, so it supplies none.
+    Correcting the backlink join made a never-fired licence admit a foreign
+    entity into a row's reach. Landing that WITHOUT the magnitude bound converts
+    a cite/gate object into a dollar figure (measured: one row from $0.00 to
+    $1,411,758.83 off the destination's whole sheet). The licence proves
+    REACHABILITY, no magnitude, so it supplies none.
     """
     licensed = sig(
         claim_id="authority.replace",
@@ -249,8 +241,8 @@ def test_w3_case4_a_corrected_backlink_licence_carries_no_magnitude(fold):
 def test_w3_a_reach_key_naming_the_burn_sentinel_is_counted_where_it_is_refused(fold):
     """The fold's own count and gap for a reach key that is the burn sentinel.
 
-    Both are unexercised on every corpus measured, which is exactly why they are
-    pinned: a rule nobody has seen fire is one nobody has seen report either.
+    Unexercised on every corpus measured, which is why they are pinned: a rule
+    nobody has seen fire is one nobody has seen report either.
     """
     signal = sig(
         claim_id="roles.grant",
@@ -283,9 +275,8 @@ def _witnessed_elsewhere(principal_id: int = 2) -> FunctionSignal:
     """One magnitude-witnessed row, so the document has an exposure to publish.
 
     grade, exposure and confidence are determined together, so a population in
-    which NOTHING carries a magnitude witness withholds all three — correctly,
-    since the exposure ratio would have no numerator anyone measured. A test
-    asserting on a per-finding exposure needs the document to be scored at all.
+    which NOTHING carries a magnitude witness withholds all three; a test on a
+    per-finding exposure needs the document to be scored at all.
     """
     return sig(
         claim_id="upgrade.implementation",
@@ -303,16 +294,14 @@ def _witnessed_elsewhere(principal_id: int = 2) -> FunctionSignal:
 
 
 def test_w3_case1_a_destination_guard_disproves_the_hop_that_carried_the_money(fold):
-    """Regression case 1 — AtomicQueue's blocked principal.
+    """Regression case 1: AtomicQueue's blocked principal.
 
-    The EOA owns AtomicQueue, AtomicQueue holds a role on AtomicSolverV3, and the
-    solver's ``finishSolve`` — the only function the role licenses it — reverts
+    The EOA owns AtomicQueue, which holds a role on AtomicSolverV3, and the
+    solver's ``finishSolve`` (the only function the role licenses) reverts
     unless the initiator is the solver itself. No authority relation makes the
-    queue the solver, so the hop is not something this walk can establish, and
-    the solver's balance sheet was never the queue owner's to be charged.
-
-    The finding stays ALIVE at the floor: the capability over the queue is
-    proven, and it is the SIZE of what it reaches that is not.
+    queue the solver, so the solver's sheet was never the queue owner's to
+    charge. The finding stays ALIVE at the floor: the capability is proven, the
+    SIZE of what it reaches is not.
     """
     conditions = condition_plane(
         licensed={(KEY_SOLVER, KEY_C): (("finishSolve", 570, (INITIATOR_GUARD,)),)},
@@ -359,13 +348,11 @@ def test_w3_case1_a_destination_guard_disproves_the_hop_that_carried_the_money(f
 
 
 def test_w3_case2_both_sides_of_the_inversion_fall_to_not_determined(fold):
-    """Regression case 2 — the inversion, at this stage.
+    """Regression case 2: the inversion, at this stage.
 
     The principal that provably CAN reach the money was published at $0.00 while
     two that provably cannot were charged $1.5M and $0.7M. Composing a witnessed
-    magnitude for the reachable one is a later change; what this stage must
-    deliver is that the FAKE attribution is gone — neither side carries a dollar
-    figure nobody witnessed, so the document no longer asserts the inversion.
+    magnitude is a later change; this stage must remove the FAKE attribution.
     """
     conditions = condition_plane(
         licensed={(KEY_SOLVER, KEY_C): (("finishSolve", 570, (INITIATOR_GUARD,)),)},
@@ -414,9 +401,8 @@ def test_w3_a_shared_implementation_folds_onto_no_proxy(fold):
     """R14: two proxies, one implementation, and no coin toss between them.
 
     Pinning either proxy charges a row that reached only the OTHER proxy's
-    implementation with this one's whole sheet, publishes it as an entity nothing
-    reached, and spends its exposure budget. Zero shared implementations exist on
-    any corpus measured, so the rule is pinned here rather than observed.
+    implementation with this one's whole sheet. No corpus measured has a shared
+    implementation, so the rule is pinned rather than observed.
     """
     plane = value_plane({KEY_PROXY: {"usdc": 100_000_000.0}})
     plane.alias_ambiguous = {KEY_IMPL}
@@ -440,8 +426,8 @@ def test_w3_a_shared_implementation_folds_onto_no_proxy(fold):
 def test_w3_an_alias_cycle_fails_loud(fold):
     """R15: ``A -> B`` beside ``B -> A`` is a contradiction, not a fold.
 
-    Resolving it by picking a member would publish a canonical entity chosen by
-    iteration order, and orphan the other one's balances behind it.
+    Picking a member would publish a canonical entity chosen by iteration order
+    and orphan the other one's balances.
     """
     with pytest.raises(P.AliasCycleError):
         P._alias_fixed_point({KEY_PROXY: KEY_IMPL, KEY_IMPL: KEY_PROXY})
@@ -456,10 +442,9 @@ def test_w3_an_alias_cycle_fails_loud(fold):
 def test_w3_a_beacon_is_a_code_control_edge_with_its_own_witness():
     """R16: whoever controls the beacon sets the implementation of every proxy.
 
-    The broadest code-control link there is, and the closure carried no
-    representation of it at all. It is named by its own column rather than
-    borrowing the admin witness — consumers branch on the witness string, and
-    ``relation is None`` is a property both columns share.
+    The broadest code-control link, and the closure had no representation of it.
+    It gets its own column rather than borrowing the admin witness: consumers
+    branch on the witness string, and ``relation is None`` is shared by both.
     """
     assert P.EDGE_WITNESS_BEACON_COLUMN != P.EDGE_WITNESS_ADMIN_COLUMN
     edge = P.ControlEdge(

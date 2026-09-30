@@ -1,28 +1,13 @@
-// Turns the backend `dependency_graph_viz` artifact into the rows the
-// "Depends on" tab renders. The raw graph is a low-level call graph: every
-// target renders as its proxy node with a separate DELEGATES_TO edge to the
-// implementation, self-delegatecalls are noise, and calls repeat per selector.
-// Here we de-noise it the way the tab needs:
-//
-//   - resolve each proxy node to its implementation (so a row reads
-//     "LiquidityPool", not "UUPSProxy"),
-//   - drop DELEGATES_TO/BEACON (redundant with the card header's proxy badge)
-//     and self-calls,
-//   - group the remaining calls by target, splitting function names into
-//     reads (STATICCALL) / writes (CALL) / delegatecall / creates,
-//   - and classify each target as internal (a node on this protocol's canvas)
-//     or external (off-canvas — the trust surface shown nowhere else).
-//
-// Pure + framework-free so it's unit-testable; the fetch helper lives at the
-// bottom.
+// Turns `dependency_graph_viz` into "Depends on" rows: resolve proxies to
+// implementations, drop DELEGATES_TO/BEACON and self-calls, group calls by
+// target into reads / writes / delegatecall / creates, and split internal (on
+// canvas) from external.
 
 import { api } from "../../api/client.js";
 import { shortAddr } from "../format.js";
 
-// op → verb bucket. DELEGATES_TO / BEACON are resolution edges, not calls.
-// STATIC_REF is a bytecode reference the pipeline never saw called — surfaced
-// as a "referenced" dependency so a statically-linked contract the sampled
-// traces didn't exercise still shows on the trust surface.
+// STATIC_REF is a bytecode reference never seen called, still shown on the
+// trust surface.
 const OP_VERB = {
   STATICCALL: "reads",
   CALL: "writes",
@@ -33,8 +18,7 @@ const OP_VERB = {
 };
 const RESOLVE_OPS = new Set(["DELEGATES_TO", "BEACON"]);
 
-// Human provenance from a dependency node's discovery source[]. `static` means
-// found in bytecode (always reachable); `dynamic` means observed in a trace.
+// `static` = in bytecode; `dynamic` = observed in a trace.
 function provenanceLabel(sources) {
   const s = new Set(sources || []);
   const hasStatic = s.has("static");
@@ -45,8 +29,7 @@ function provenanceLabel(sources) {
   return "resolved";
 }
 
-// addr → machine over BOTH the proxy address and the implementation address, so
-// a call edge that lands on either resolves to the same canvas node.
+// Over both proxy and implementation addresses.
 export function buildAddrToMachine(machines) {
   const map = new Map();
   for (const m of machines || []) {
@@ -76,8 +59,6 @@ export function buildDependencyView(graph, { machines = [], targetAddress = "" }
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const addrToMachine = buildAddrToMachine(machines);
 
-  // proxy → impl within the dep graph, so a call to a proxy node resolves to
-  // the implementation whose name we actually want to show.
   const delegatesTo = new Map();
   for (const e of graph.edges || []) {
     if (RESOLVE_OPS.has(e.op)) delegatesTo.set(e.from, e.to);
@@ -91,8 +72,7 @@ export function buildDependencyView(graph, { machines = [], targetAddress = "" }
     return byId.get(id) || null;
   };
 
-  // Addresses that are "self" (the target and its own proxy context) — a
-  // contract calling its own impl via delegatecall isn't a dependency.
+  // A contract delegatecalling its own impl isn't a dependency.
   const selfAddrs = new Set();
   const targetNode = graph.nodes.find((n) => n.is_target);
   if (targetNode?.address) selfAddrs.add(targetNode.address.toLowerCase());
@@ -158,22 +138,18 @@ export function buildDependencyView(graph, { machines = [], targetAddress = "" }
     referenced: g.referencedSeen,
   }));
 
-  // Drop degenerate rows: a call edge with no function_name and no
-  // delegate/create/reference contributes nothing renderable.
   const live = rows.filter((r) => rowFnCount(r) > 0);
   const external = live.filter((r) => r.external).sort((a, b) => rowFnCount(b) - rowFnCount(a));
   const internal = live.filter((r) => !r.external).sort((a, b) => rowFnCount(b) - rowFnCount(a));
   return { external, internal, total: live.length };
 }
 
-// ── Fetch (lean artifact first, cached per session) ──────────────────────────
 
 const _cache = new Map(); // cacheKey → graph|null
 
-// The dependency graph is stored per analysis. A proxy machine's graph lives
-// under its implementation job, so try impl_job_id first, then the proxy job,
-// then the address. Fetches the ~30KB artifact directly rather than the
-// multi-MB merged /api/analyses/{id} blob.
+// A proxy's graph lives under its implementation job: try impl_job_id, then the
+// proxy job, then the address. Fetches the ~30KB artifact, not the merged
+// analysis blob.
 export async function fetchDependencyGraphViz(machine, fetchFn = api) {
   if (!machine) return null;
   const ids = [machine.impl_job_id, machine.job_id, machine.address]
@@ -184,8 +160,8 @@ export async function fetchDependencyGraphViz(machine, fetchFn = api) {
   if (_cache.has(cacheKey)) return _cache.get(cacheKey);
 
   let result = null;
-  let sawResponse = false; // at least one id returned a response (even an empty graph)
-  let sawUnknown = false; // at least one id left the question open
+  let sawResponse = false;
+  let sawUnknown = false;
   let lastError = null;
   for (const id of ids) {
     try {
@@ -195,27 +171,17 @@ export async function fetchDependencyGraphViz(machine, fetchFn = api) {
         result = art;
         break;
       }
-      // A present-but-empty graph is a definitive "no dependencies" — keep
-      // trying the other ids in case one carries the real graph.
+      // An empty graph is definitive for that id; keep trying the others.
     } catch (e) {
-      // Only a 404 is a proven negative — "there is no such artifact under this
-      // id" — and may stay silent while the next id is tried. Every other
-      // non-answer leaves the question open: a 500, a 502/504 from the edge
-      // while a web machine is autostopping, and a network failure, which `api`
-      // rethrows with no `status` at all. Keying this to one code is what let a
-      // failed read stand in as a fact about the contract, so the default is the
-      // hedge and the proven negative is the exception.
+      // Only a 404 is a proven negative; any other failure (5xx, network
+      // without `status`) leaves the question open.
       if (e?.status !== 404) sawUnknown = true;
       lastError = e;
     }
   }
-  // Cache a positive graph or a proven empty; never cache a non-answer, so a
-  // transient failure retries on the next open instead of masquerading as
-  // "no dependencies" for the rest of the session. One id that left the
-  // question open is enough to disqualify an empty sibling: the sibling proves
-  // only that *it* has no graph, not that the contract has no dependencies. In
-  // that case the caller gets the error state ("couldn't load"), and `_cache`
-  // is left unset so a later healthy fetch can still answer.
+  // Cache positives and proven empties only. One open id disqualifies an empty
+  // sibling (it proves only its own absence), so the caller gets the error
+  // state.
   if (result) {
     _cache.set(cacheKey, result);
     return result;

@@ -1,43 +1,23 @@
-"""One-shot backfill: move contract_materializations.{analysis,tracking_plan}
-out of Postgres JSONB into object storage, populating the
-``*_blob_key`` columns and clearing the inline JSONB.
+"""One-shot backfill: move contract_materializations.{analysis,tracking_plan} JSONB into object storage and populate
+``*_blob_key``.
 
-Why: JSONB is fine for storage but gets detoasted on every read,
-inflates page-cache pressure on this hot table, and slows backup /
-dump / restore — a Compound-v3-class analysis bundle is 5-20MB per
-row and the cache can grow to thousands of rows. Moving the bytes to
-Tigris lets the table itself stay tiny while keeping the dedup
-semantics (the row continues to be the source of truth for which
-keccak has been built; only the payload moves).
+Bundles are 5-20MB per row and JSONB is detoasted on every read, bloating page cache and dumps. The row stays the source
+of truth for which keccak was built; only the payload moves.
 
-Idempotent: rows that already have ``analysis_blob_key`` set are
-skipped. Safe to re-run after a partial completion. Exits non-zero
-if any row fails so the operator can re-run targeted at the
-remaining set.
+Idempotent (rows with ``analysis_blob_key`` are skipped); exits non-zero if any row fails.
 
-Usage::
-
-    # dry-run: report what would be written, no Tigris writes, no DB writes
     uv run python -m scripts.backfill_contract_materializations_to_blob --dry-run
-
-    # actual backfill, default chunk size 50
     uv run python -m scripts.backfill_contract_materializations_to_blob
-
-    # tune chunk size / scope to one chain
     uv run python -m scripts.backfill_contract_materializations_to_blob \
         --chunk-size 25 --chain ethereum
 
-The script does NOT clear the inline JSONB columns by default —
-``--clear-jsonb`` opts in. Recommended sequence:
+Inline JSONB is kept unless ``--clear-jsonb``. Sequence:
 
-  1. Deploy the new code (writes blob-only for fresh entries).
-  2. Run this without --clear-jsonb. New rows have blob_key + NULL
-     JSONB; old rows now have BOTH blob_key + JSONB (belt and
-     suspenders for one TTL cycle).
-  3. Verify reads are working via the blob path (``hydrate_*``).
-  4. Re-run with --clear-jsonb to reclaim the JSONB space.
-  5. Optional follow-up migration: drop the ``analysis`` /
-     ``tracking_plan`` columns entirely.
+  1. Deploy the blob-only writer.
+  2. Run without --clear-jsonb (old rows keep both for one TTL cycle).
+  3. Verify reads via ``hydrate_*``.
+  4. Re-run with --clear-jsonb.
+  5. Optionally drop the ``analysis`` / ``tracking_plan`` columns.
 """
 
 from __future__ import annotations
@@ -71,11 +51,7 @@ def _backfill_row(
     dry_run: bool,
     clear_jsonb: bool,
 ) -> tuple[int, int]:
-    """Backfill one row. Returns ``(blobs_written, bytes_uploaded)``.
-
-    Skips per-payload if the corresponding blob_key is already set
-    (idempotent re-run) or the inline JSONB is None (nothing to move).
-    """
+    """Returns ``(blobs_written, bytes_uploaded)``; skips payloads already keyed or absent."""
     blobs_written = 0
     bytes_uploaded = 0
 
@@ -148,9 +124,7 @@ def main(argv: list[str] | None = None) -> int:
 
     session = SessionLocal()
     try:
-        # Iterate by primary key with LIMIT/OFFSET-style chunking via
-        # last-seen-keccak — avoids holding a server-side cursor open
-        # across slow blob uploads.
+        # Keyset by last-seen keccak so no cursor is held open across slow uploads.
         last_chain: str | None = None
         last_keccak: str | None = None
         while True:
@@ -158,8 +132,7 @@ def main(argv: list[str] | None = None) -> int:
                 ContractMaterialization.status == "ready",
             )
             if args.chain:
-                # Rows are keyed by the canonical decimal-id chain token,
-                # so normalize a name/alias/id filter through the same function.
+                # Rows use the decimal-id chain token.
                 from utils.chains import chain_cache_token
 
                 stmt = stmt.where(ContractMaterialization.chain == chain_cache_token(args.chain))
@@ -186,7 +159,6 @@ def main(argv: list[str] | None = None) -> int:
                 last_keccak = row.bytecode_keccak
                 row_id = f"{row.chain}:{row.bytecode_keccak[:18]}"
 
-                # Skip rows that have nothing to move.
                 if (row.analysis_blob_key is not None or row.analysis is None) and (
                     row.tracking_plan_blob_key is not None or row.tracking_plan is None
                 ):
@@ -210,9 +182,7 @@ def main(argv: list[str] | None = None) -> int:
                     session.rollback()
                     continue
                 except Exception as exc:
-                    # Unlike the StorageError arm this one has no known shape, so
-                    # the traceback rides along — at WARNING, since the run
-                    # continues and the summary below is what fails it.
+                    # Unknown shape, so keep the traceback; WARNING because the run continues and the summary fails it.
                     logger.warning(
                         "backfill: row %s unexpected error",
                         row_id,

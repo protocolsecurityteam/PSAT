@@ -7,7 +7,6 @@ import { shortenAddress } from "../../../shared/format.js";
 import { SALIENCE_ROUTINE } from "./eventClass.js";
 import { relativeTime } from "./format.js";
 
-// Lean on blockExplorerAddressUrl's chain mapping by swapping the path segment.
 function txUrl(txHash, chain = "ethereum") {
   if (!txHash) return null;
   const addrUrl = blockExplorerAddressUrl("0x", chain);
@@ -17,7 +16,6 @@ function txUrl(txHash, chain = "ethereum") {
 
 function timeLabel(ms, now) {
   if (!ms) return "—";
-  // Recent events read better relative; older ones as an absolute date.
   if (now - ms < 7 * 86400 * 1000) return relativeTime(new Date(ms).toISOString(), now);
   return new Date(ms).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
 }
@@ -64,11 +62,8 @@ function EventRow({ row, chain, now, onPreview, onNavigate }) {
   );
 }
 
-// Runs of consecutive PROVEN-routine rows collapse into one disclosure row.
-// Only `salience === "routine"` qualifies: `not_determined` is an event no
-// backend rule rated, and collapsing it would be suppression minted from
-// ignorance. A lone routine row renders as itself — a
-// "1 routine event — show" disclosure costs a click and hides nothing useful.
+// Only proven `routine` rows collapse; `not_determined` is unrated, and
+// collapsing it would suppress from ignorance.
 const MIN_COLLAPSE_RUN = 2;
 
 function groupRoutineRuns(rows) {
@@ -94,9 +89,7 @@ function groupRoutineRuns(rows) {
   return out;
 }
 
-// Renders a run of routine rows as a count + reveal, expanding IN PLACE so the
-// revealed rows keep their position in the feed. Disclosure state is
-// component-local; nothing about it needs to persist.
+// Expands in place so revealed rows keep their position.
 function RoutineRun({ group, chain, now, expanded, onToggle, onPreview, onNavigate }) {
   if (expanded) {
     return (
@@ -149,36 +142,20 @@ function TimelineRows({ rows, chain, now, onPreview, onNavigate }) {
   );
 }
 
-// Timeline: `above` rows (live-captured), then the enrollment boundary pill
-// (omitted entirely when boundaryBlock is null — a legacy row with no
-// enrollment_block), then `below` upgrade-only backfill rows or the non-proxy
-// empty state.
+// `above` (live), the enrollment boundary (omitted when boundaryBlock is null),
+// then `below` (upgrade backfill) or the non-proxy empty state.
 //
-// `historyState` says what is known about the upgrade history behind `below`.
-// An empty `below` is produced by four different situations and only one of them
-// is an absence, so a boolean cannot carry it:
+// `historyState` governs only the empty states, because an empty `below` has
+// four causes:
 //
-//   "present"        the history was read; `below` is empty because there is
-//                    nothing before the line. An answer.
-//   "absent"         the server said this entity has no upgrade history (404),
-//                    or there is no back-fill channel at all (non-proxy). Also
-//                    an answer, and the only other one that earns the prose.
-//   "not_determined" a read happened and did not answer, or no read was ever
-//                    issued. Unknown, not absent.
-//   "pending"        a read is in flight. Nothing is known YET — which is not
-//                    the same as not knowable, so it may not borrow either of
-//                    the two answers above nor the hedge.
+// "present" read; nothing before the line.
+// "absent" 404 or no back-fill channel (non-proxy).
+// "not_determined" a read didn't answer, or none was issued.
+// "pending" in flight; may borrow neither answer nor the hedge.
 //
-// It changes nothing drawn from rows we have; it governs only the empty states.
-// The default is "pending" so that a caller who forgets the prop claims nothing.
-//
-// `hiddenAbove` / `hiddenBelow` are the rows the caller's salience threshold
-// removed from each section. They exist because EVERY empty state below is a
-// claim about what exists — an earned negative, a hedge, or an answer — and a
-// section the filter emptied has earned none of them. A filter-emptied list
-// rendered as "no activity" is the same unwitnessed absence claim the
-// monitoring plane was overhauled to stop making, one layer up. Both default
-// to 0 so a caller that does not filter behaves exactly as before.
+// Defaults to "pending" so a forgotten prop claims nothing.
+// `hiddenAbove`/`hiddenBelow` count filtered rows: a filter-emptied section has
+// earned no empty-state claim.
 export function Timeline({
   above,
   below,
@@ -201,9 +178,8 @@ export function Timeline({
   if (!above.length && !below.length && !hasBoundary) {
     const hidden = hiddenAbove + hiddenBelow;
     if (hidden > 0) {
-      // Rows exist and were withheld. Saying "no activity recorded yet" here
-      // would be a statement about the contract; this is a statement about the
-      // filter, which is the only thing that happened.
+      // The filter withheld rows; this says so rather than claiming no
+      // activity.
       return (
         <div className="ps-activity-empty">
           {hidden === 1
@@ -229,7 +205,7 @@ export function Timeline({
 
       {hasBoundary ? (
         <div className="ps-activity-boundary">
-          <span className="ps-activity-boundary-pill">
+          <span className="tag tag-pill ps-activity-boundary-pill">
             ◔ Monitoring started{dateLabel ? ` · ${dateLabel}` : ""}
           </span>
           {isProxy && below.length ? (
@@ -241,10 +217,8 @@ export function Timeline({
       {hasBoundary && below.length ? (
         <TimelineRows rows={below} chain={chain} now={now} onPreview={onPreview} onNavigate={onNavigate} />
       ) : hasBoundary && hiddenBelow > 0 ? (
-        // Back-filled rows exist below the line and the filter withheld them.
-        // Checked BEFORE the historyState chain: the history read answered
-        // (that is where these rows came from), so neither the hedge nor the
-        // absence prose applies — only the filter does.
+        // Checked before historyState: the history answered (these rows came
+        // from it), so only the filter applies.
         <div className="ps-activity-empty">
           {hiddenBelow === 1
             ? "1 back-filled upgrade is hidden by the current filter."

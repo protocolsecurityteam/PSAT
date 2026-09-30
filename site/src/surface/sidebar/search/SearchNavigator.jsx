@@ -4,10 +4,8 @@ import { formatDelay, formatUsd, shortAddr } from "../../format.js";
 import { buildSearchResults } from "../../layout/search.js";
 import { SORT_OPTIONS } from "../../meta.js";
 
-// The unified filter panel's body: search controls (row 1), then whatever
-// filter rows the caller injects as `children` (Type + Roles), then the browse
-// preview (rendered only while a result is in focus). Owns the search/sort/
-// browse state; the injected rows own their own state.
+// Search controls, injected filter rows, then the browse preview. Owns
+// search/sort/browse state.
 export function SearchNavigator({ machines, principals, onPreview, onCommit, mode, children }) {
   const [sortKey, setSortKey] = useState("value");
   const [query, setQuery] = useState("");
@@ -18,10 +16,8 @@ export function SearchNavigator({ machines, principals, onPreview, onCommit, mod
     [machines, principals, mode, sortKey, query]
   );
 
-  // Reset index when results change. Typing/re-sorting only refilters the
-  // preview — it never previews or commits a selection. The null preview
-  // drops any lingering browse marker (gold ring) from the previous result
-  // set; the committed selection is unaffected.
+  // Filtering never previews or commits; the null preview drops a stale browse
+  // ring.
   useEffect(() => { setIndex(0); onPreview(null); }, [results.length, mode, sortKey, query, onPreview]);
 
   const move = (target) => {
@@ -37,8 +33,6 @@ export function SearchNavigator({ machines, principals, onPreview, onCommit, mod
 
   return (
     <div className="ps-filter-bar">
-      {/* Row 1: search + sort + browse nav. Type and Roles rows are injected as
-          `children` between here and the preview; both live in one panel now. */}
       <div className="ps-search-controls">
         <div className="ps-search-field">
           <input
@@ -70,7 +64,6 @@ export function SearchNavigator({ machines, principals, onPreview, onCommit, mod
         </div>
       </div>
 
-      {/* Injected filter rows (Type + Roles). */}
       {children}
 
       {current && (
@@ -85,8 +78,7 @@ export function SearchNavigator({ machines, principals, onPreview, onCommit, mod
           <div className="ps-search-preview-info">
             <span className="ps-search-preview-name">{current.name || shortAddr(current.address)}</span>
             <span className="ps-search-preview-type">{current.type}</span>
-            {/* When the display name already fell back to the short address
-                (a label-less principal), don't repeat it in the addr slot. */}
+            {/* Don't repeat a short-address fallback name. */}
             {current.name !== shortAddr(current.address) && (
               <span className="ps-search-preview-addr">{shortAddr(current.address)}</span>
             )}

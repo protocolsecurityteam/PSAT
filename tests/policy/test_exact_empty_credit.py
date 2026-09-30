@@ -1,20 +1,18 @@
 """A2 — the earned-negative gate, served beside the payload it gates.
 
-An empty caller set is the strongest earned negative the resolver publishes.
-The shipped consumers award it on ``membership_quality == "exact" and members ==
-[]`` alone — a shape a provenance-less empty satisfies exactly as well as a
-read-confirmed one. On the validated corpus 86 rows are ``restricted`` resting
-solely on that branch, 86/86 with no height anywhere in the tree, and 4 of them
-cannot be reconstructed at all.
-
-The gate requires four things TOGETHER, each with an allow-list rather than a
-presence check, because a presence check fails open for any future producer.
-Every test below is a rejecting arm except the two that earn.
+An empty caller set is the strongest earned negative the resolver publishes, but the
+shipped consumers award it on ``membership_quality == "exact" and members == []``
+alone — which a provenance-less empty satisfies as well as a read-confirmed one
+(86 ``restricted`` rows on the validated corpus rest solely on it). The gate requires
+four things TOGETHER, each via allow-list (a presence check fails open for future
+producers). Every test is a rejecting arm except the two that earn.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+import pytest
 
 from services.policy.capability_surface import exact_empty_credit
 
@@ -62,12 +60,10 @@ def test_an_equal_heights_exact_as_of_is_an_admissible_observation_block():
 
 
 def test_last_indexed_block_is_not_an_observation_block():
-    """The MIN over operands at DIFFERENT heights is a staleness floor. Reading
-    it as "the set was empty at that block" is false — both fold families
-    publish state-AT-h with revocations applied, so a member revoked from the
-    later operand is absent from the published set while the true set at MIN
-    still held it. Admitting it here would re-introduce through the consumer the
-    exact claim the producer refuses."""
+    """The MIN over operands at DIFFERENT heights is a staleness floor, not "the set
+    was empty at that block": both fold families publish state-AT-h with revocations
+    applied, so a member revoked from the later operand is absent while the true set
+    at MIN still held it. Admitting it would re-introduce the claim the producer refuses."""
     cap = _empty(
         trace=[{"step": "enumerable_role_store"}],
         last_indexed_block=OTHER_BLOCK,
@@ -89,10 +85,9 @@ def test_a_refused_exact_as_of_is_not_a_block():
 
 
 def test_an_unlisted_trace_step_does_not_prove_coverage():
-    """A step name is not evidence. A future producer appending its own step,
-    with a block and a reason, must not thereby mint an earned negative — the
-    admissible producers are enumerated and each refuses to answer at all
-    without proven coverage of what it read."""
+    """A future producer appending its own step, with a block and a reason, must not
+    mint an earned negative — admissible producers are enumerated and each refuses to
+    answer without proven coverage."""
     cap = _empty(trace=[{"step": "some_new_adapter", "observed_at_block": BLOCK}])
     credit = exact_empty_credit(cap)
     assert credit["verdict"] == "not_determined"
@@ -118,27 +113,27 @@ def test_each_allow_listed_producer_is_accepted():
 # ---------------------------------------------------------------------------
 
 
-def test_empty_by_design_never_earns_the_credit():
-    """Its only surviving producer classifies the gate from the accessor's
-    ``pending`` prefix and records ``basis: "accessor_name"``. A name may not
-    license the strongest negative in the system — and the one persisted row
-    carrying this reason got it from a DEFAULT ARGUMENT VALUE."""
-    cap = _empty(empty_reason="empty_by_design")
-    credit = exact_empty_credit(cap)
+@pytest.mark.parametrize(
+    "reason",
+    [
+        # Its only surviving producer classifies from the accessor's ``pending`` prefix
+        # (``basis: "accessor_name"``). A name may not license the strongest negative — and
+        # the one persisted row with this reason got it from a DEFAULT ARGUMENT VALUE.
+        pytest.param("empty_by_design", id="empty_by_design"),
+        # CRITICAL: failure reasons (and None) must never earn the credit.
+        pytest.param("unreadable_revert", id="unreadable_revert"),
+        pytest.param("unreadable_empty", id="unreadable_empty"),
+        pytest.param("not_read", id="not_read"),
+        pytest.param("bad_input", id="bad_input"),
+        pytest.param(None, id="none"),
+        # ``0x…dEaD`` being unspendable is a convention, not a read.
+        pytest.param("owner_read_burn_address", id="burn_address"),
+    ],
+)
+def test_unconfirmed_empty_reasons_never_earn_the_credit(reason):
+    credit = exact_empty_credit(_empty(empty_reason=reason))
     assert credit["verdict"] == "not_determined"
     assert "read_confirmed_empty_reason" in credit["missing"]
-
-
-def test_failure_reasons_never_earn_the_credit():
-    for reason in ("unreadable_revert", "unreadable_empty", "not_read", "bad_input", None):
-        cap = _empty(empty_reason=reason)
-        assert exact_empty_credit(cap)["verdict"] == "not_determined", reason
-
-
-def test_the_burn_reason_never_earns_the_credit():
-    """``0x…dEaD`` being unspendable is a convention, not a read."""
-    cap = _empty(empty_reason="owner_read_burn_address")
-    assert exact_empty_credit(cap)["verdict"] == "not_determined"
 
 
 # ---------------------------------------------------------------------------
@@ -158,19 +153,13 @@ def test_a_lower_bound_or_partial_empty_can_never_earn():
 # ---------------------------------------------------------------------------
 
 
-def test_a_populated_set_is_not_applicable():
-    assert exact_empty_credit(_empty(members=["0x" + "11" * 20]))["verdict"] == "not_applicable"
-
-
-def test_a_non_finite_set_is_not_applicable():
-    assert exact_empty_credit({"kind": "AND", "children": []})["verdict"] == "not_applicable"
-
-
-def test_a_missing_capability_is_not_determined():
-    assert exact_empty_credit(None)["verdict"] == "not_determined"
-
-
-def test_the_gate_never_returns_a_proven_absent_verdict():
-    """It withholds a credit; it never asserts that a caller exists."""
-    for cap in (_empty(), _empty(trace=[]), None, {"kind": "AND"}):
-        assert exact_empty_credit(cap)["verdict"] in ("earned", "not_determined", "not_applicable")
+@pytest.mark.parametrize(
+    "cap,verdict",
+    [
+        pytest.param(_empty(members=["0x" + "11" * 20]), "not_applicable", id="populated_set"),
+        pytest.param({"kind": "AND", "children": []}, "not_applicable", id="non_finite_set"),
+        pytest.param(None, "not_determined", id="missing_capability"),
+    ],
+)
+def test_shape_guards(cap, verdict):
+    assert exact_empty_credit(cap)["verdict"] == verdict

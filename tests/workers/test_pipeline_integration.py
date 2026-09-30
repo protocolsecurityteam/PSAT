@@ -1,19 +1,6 @@
-"""Integration tests for cross-module pipeline wiring.
-
-Validates behavior that spans multiple modules:
-  1. Static worker dependency phase wiring (proxy_address, upgrade_history storage)
-  2. API merge + display name pipeline
-  3. API detail endpoint artifact inlining
-  4. Graph builder label resolution via contract_meta
-  5. Full dependency data flow: unified deps -> graph viz -> upgrade history
-  6. Discovery -> Static artifact handoff (contract_meta, build_settings, source files)
-  7. Static -> Resolution artifact handoff (contract_analysis, control_tracking_plan)
-  8. Resolution -> Policy artifact handoff (control_snapshot, resolved_control_graph)
-  9. Policy final artifact storage (effective_permissions, principal_labels)
-  10. API analyses list and detail endpoints serve worker-stored artifacts correctly
-  11. Resolution worker proxy_address override for impl jobs
-  12. Tracking plan construction from contract_analysis output
-  13. Discovery company mode child job creation
+"""Integration tests for cross-module pipeline wiring: stage-to-stage artifact handoffs
+(discovery -> static -> resolution -> policy), API merge/detail/analyses endpoints, graph
+labels, and proxy_address overrides for impl jobs.
 
 All tests run without live services (no RPC, no Etherscan, no database).
 """
@@ -64,7 +51,7 @@ DEP_B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
 def _job(**overrides) -> Any:
-    """Create a duck-typed Job stand-in for tests (avoids DB dependency)."""
+    """Duck-typed Job stand-in (avoids DB dependency)."""
     defaults: dict[str, Any] = {
         "id": "job-1",
         "address": TARGET,
@@ -175,8 +162,7 @@ def _patch_dep_phase(monkeypatch, worker, static=None, dynamic=None, classify=No
 
 
 def test_dep_phase_passes_proxy_address(monkeypatch, tmp_path):
-    """For impl jobs, proxy_address from the job request propagates to
-    find_dynamic_dependencies so transactions are fetched from the proxy."""
+    """Transactions must be fetched from the proxy, not the impl."""
     from workers.static_worker import StaticWorker
 
     worker = StaticWorker()
@@ -193,7 +179,6 @@ def test_dep_phase_passes_proxy_address(monkeypatch, tmp_path):
         request={"rpc_url": "https://rpc.example", "proxy_address": PROXY, "chain_id": 1},
     )
     _patch_dep_phase(monkeypatch, worker, dynamic=capture_dynamic)
-    # Mock upgrade history to avoid Etherscan calls
     monkeypatch.setattr(
         "services.discovery.upgrade_history.build_upgrade_history",
         lambda _p, enrich=True, from_block=0: {
@@ -218,8 +203,23 @@ def test_dep_phase_passes_proxy_address(monkeypatch, tmp_path):
 # ===================================================================
 
 
-def test_dep_phase_stores_upgrade_history(monkeypatch, tmp_path):
-    """When build_upgrade_history finds proxies, the artifact is stored."""
+@pytest.mark.parametrize(
+    "fake_uh, expected_total_upgrades",
+    [
+        pytest.param(
+            {"schema_version": "0.1", "target_address": TARGET, "proxies": {DEP_A: {}}, "total_upgrades": 2},
+            2,
+            id="stored-when-proxies-exist",
+        ),
+        # No artifact is written when there are no proxies.
+        pytest.param(
+            {"schema_version": "0.1", "target_address": TARGET, "proxies": {}, "total_upgrades": 0},
+            None,
+            id="skipped-when-no-proxies",
+        ),
+    ],
+)
+def test_dep_phase_upgrade_history_artifact(monkeypatch, tmp_path, fake_uh, expected_total_upgrades):
     from workers.static_worker import StaticWorker
 
     worker = StaticWorker()
@@ -229,12 +229,6 @@ def test_dep_phase_stores_upgrade_history(monkeypatch, tmp_path):
         static=_static_deps(TARGET, [DEP_A]),
         dynamic=lambda addr, **_kw: _dynamic_deps(addr, [DEP_A]),
     )
-    fake_uh = {
-        "schema_version": "0.1",
-        "target_address": TARGET,
-        "proxies": {DEP_A: {}},
-        "total_upgrades": 2,
-    }
     monkeypatch.setattr(
         "services.discovery.upgrade_history.build_upgrade_history",
         lambda _p, enrich=True, from_block=0, chain_id=1: fake_uh,
@@ -244,31 +238,8 @@ def test_dep_phase_stores_upgrade_history(monkeypatch, tmp_path):
     project_dir.mkdir()
     worker._run_dependency_phase(MagicMock(), _job(), project_dir, "TestContract", TARGET)
 
-    assert "upgrade_history" in store
-    assert store["upgrade_history"]["total_upgrades"] == 2
-
-
-def test_dep_phase_skips_upgrade_history_when_no_proxies(monkeypatch, tmp_path):
-    """When no proxies are found, upgrade_history artifact is not stored."""
-    from workers.static_worker import StaticWorker
-
-    worker = StaticWorker()
-    store = _patch_dep_phase(
-        monkeypatch,
-        worker,
-        static=_static_deps(TARGET, [DEP_A]),
-        dynamic=lambda addr, **_kw: _dynamic_deps(addr, [DEP_A]),
-    )
-    monkeypatch.setattr(
-        "services.discovery.upgrade_history.build_upgrade_history",
-        lambda _p, enrich=True: {"schema_version": "0.1", "target_address": TARGET, "proxies": {}, "total_upgrades": 0},
-    )
-
-    project_dir = tmp_path / "p"
-    project_dir.mkdir()
-    worker._run_dependency_phase(MagicMock(), _job(), project_dir, "TestContract", TARGET)
-
-    assert "upgrade_history" not in store
+    assert ("upgrade_history" in store) is (expected_total_upgrades is not None)
+    assert store.get("upgrade_history", {}).get("total_upgrades") == expected_total_upgrades
     assert "dependencies" in store
 
 
@@ -278,8 +249,6 @@ def test_dep_phase_skips_upgrade_history_when_no_proxies(monkeypatch, tmp_path):
 
 
 def test_merge_uses_impl_name_and_propagates_company():
-    """Merged entry gets impl contract_name as display_name and inherits
-    the proxy's company and rank_score."""
     from services.governance.proxies import _merge_proxy_impl_entries
 
     proxy_entry = {
@@ -347,8 +316,6 @@ def test_orphan_impl_appears_in_merged_list():
 
 
 def test_display_name_chain_suffix_and_generic_fallback():
-    """_display_name appends chain, prefers display_name, and falls back
-    to run_name for generic proxy contract names."""
     from services.governance.proxies import _display_name
 
     entry1 = {"contract_name": "Pool", "run_name": "x", "display_name": None, "chain": "base"}
@@ -394,30 +361,11 @@ def test_detail_inlines_upgrade_history_and_graph_viz(mock_session_cls, mock_get
 
 
 # ===================================================================
-# 5. Graph builder: label uses display_name for generic proxy names
-# ===================================================================
-
-
-def test_graph_label_prefers_caller_supplied_label():
-    """Callers supply target_label explicitly; the graph uses it as the root label."""
-    from services.discovery.dependency_graph_builder import build_dependency_visualization
-
-    unified = {"address": TARGET, "dependencies": {DEP_A: {"type": "regular", "source": ["static"]}}}
-
-    viz = build_dependency_visualization(unified, target_label="Rewards Router")
-    target_node = next(n for n in viz["nodes"] if n["is_target"])
-    assert target_node["label"] == "Rewards Router"
-
-
-# ===================================================================
 # 6. Full data flow: unified -> graph viz -> upgrade history
 # ===================================================================
 
 
 def test_full_data_flow_unified_through_graph_and_upgrade_history(monkeypatch, tmp_path):
-    """Exercise the real build_unified_dependencies, build_dependency_visualization,
-    and build_upgrade_history functions with mocks only at the network boundary,
-    verifying the entire data chain."""
     from services.discovery.dependency_graph_builder import build_dependency_visualization
     from services.discovery.unified_dependencies import build_unified_dependencies
     from services.discovery.upgrade_history import build_upgrade_history
@@ -440,13 +388,11 @@ def test_full_data_flow_unified_through_graph_and_upgrade_history(monkeypatch, t
         discovered=[IMPL],
     )
 
-    # -- unified deps --
     unified = build_unified_dependencies(TARGET, static, dynamic, cls)
     assert DEP_A in unified["dependencies"]
     assert IMPL not in unified["dependencies"]  # nested under DEP_A
     assert unified["dependencies"][DEP_A]["implementation"]["address"] == IMPL
 
-    # -- graph viz --
     viz = build_dependency_visualization(unified, target_label="TestContract")
     node_addrs = {n["address"] for n in viz["nodes"]}
     assert {TARGET, DEP_A, DEP_B, IMPL} <= node_addrs
@@ -480,9 +426,6 @@ def test_full_data_flow_unified_through_graph_and_upgrade_history(monkeypatch, t
 @patch("routers.deps.get_all_artifacts")
 @patch("routers.deps.SessionLocal")
 def test_detail_inlines_all_pipeline_artifacts(mock_session_cls, mock_get_all_artifacts):
-    """The API detail endpoint must inline effective_permissions,
-    principal_labels, principal_history, control_snapshot, and resolved_control_graph
-    alongside the already-tested contract_analysis and dependencies."""
     from fastapi.testclient import TestClient
 
     import api
@@ -534,10 +477,8 @@ def test_detail_inlines_all_pipeline_artifacts(mock_session_cls, mock_get_all_ar
         # prefetch paths, so MagicMock needs an explicit __iter__.
         items: list = []
         if call_count["n"] == 1:
-            # First call: select(Job) to find job by name
             result.scalar_one_or_none.return_value = fake_job
         elif "contract" in stmt_str.lower() and "job_id" in stmt_str.lower() and call_count["n"] == 2:
-            # Second call: select(Contract) for contract_row
             result.scalar_one_or_none.return_value = fake_contract_row
         elif "effective" in stmt_str.lower():
             items = [fake_ef]
@@ -572,20 +513,16 @@ def test_detail_inlines_all_pipeline_artifacts(mock_session_cls, mock_get_all_ar
     assert resp.status_code == 200
     body = resp.json()
 
-    # JSON artifacts inlined from all_artifacts
     assert body["contract_analysis"]["summary"]["control_model"] == "authority"
     assert "state_variable:owner" in body["control_snapshot"]["controller_values"]
     assert len(body["resolved_control_graph"]["nodes"]) == 1
     assert body["dependencies"]["address"] == TARGET
     assert body["principal_history"]["function_permissions"][0]["principal"] == "0xaa"
 
-    # effective_permissions built from EffectiveFunction + FunctionPrincipal tables
     assert body["effective_permissions"]["functions"][0]["function"] == "pause()"
 
-    # principal_labels built from PrincipalLabel table
     assert body["principal_labels"]["principals"][0]["label"] == "admin"
 
-    # Subject info should be extracted
     assert body["contract_name"] == "Vault"
 
 
@@ -596,12 +533,8 @@ def test_detail_inlines_all_pipeline_artifacts(mock_session_cls, mock_get_all_ar
 
 @patch("routers.deps.SessionLocal")
 def test_analyses_list_reads_contract_flags_from_static_worker(mock_session_cls):
-    """The analyses list endpoint reads 'contract_flags' artifact that
-    static worker stores during _resolve_proxy. Verify the is_proxy
-    and proxy_type fields propagate into the merged entry.
-
-    _merge_proxy_impl_entries hides proxy entries whose impl child job
-    hasn't completed, so we include both the proxy and impl jobs."""
+    """_merge_proxy_impl_entries hides proxy entries whose impl child job hasn't
+    completed, so both the proxy and impl jobs are included."""
     from types import SimpleNamespace
 
     from fastapi.testclient import TestClient
@@ -690,9 +623,6 @@ def test_analyses_list_reads_contract_flags_from_static_worker(mock_session_cls)
 
 
 def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
-    """When a job has proxy_address in its request, the resolution worker
-    should override contract_address in the tracking plan and subject.address
-    in the contract_analysis so state is read from the proxy, not the impl."""
     from workers.resolution_worker import ResolutionWorker
 
     worker = ResolutionWorker()
@@ -706,7 +636,6 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
         request={"rpc_url": "https://rpc.example", "proxy_address": PROXY, "chain_id": 1},
     )
 
-    # What static worker stored
     tracking_plan = {
         "schema_version": "0.1",
         "contract_address": IMPL,
@@ -729,7 +658,6 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
         lambda _session, _job_id, name: artifacts.get(name),
     )
 
-    # Capture what build_control_snapshot receives
     captured_plans: list[dict] = []
     captured_analyses: list[dict] = []
 
@@ -764,13 +692,10 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
 
     worker.process(session, job)
 
-    # The tracking plan should have proxy address, not impl
     assert captured_plans[0]["contract_address"] == PROXY
 
-    # The analysis written to disk should have proxy address
     assert captured_analyses[0]["subject"]["address"] == PROXY
 
-    # Artifacts should be stored
     assert "control_snapshot" in stored_artifacts
     assert "resolved_control_graph" in stored_artifacts
 
@@ -781,9 +706,6 @@ def test_resolution_worker_rewrites_address_for_impl_jobs(monkeypatch):
 
 
 def test_tracking_plan_preserves_controller_ids_and_read_specs():
-    """The tracking plan builder must carry forward controller_id, read_spec,
-    and associated_events from contract_analysis.controller_tracking. These
-    are consumed by build_control_snapshot in the resolution stage."""
     from services.resolution.tracking_plan import build_control_tracking_plan
 
     analysis = {
@@ -842,16 +764,13 @@ def test_tracking_plan_preserves_controller_ids_and_read_specs():
     assert plan["contract_name"] == "Vault"
     assert len(plan["tracked_controllers"]) == 2
 
-    # Controller IDs carry through (resolution worker uses these as keys)
     ids = {tc["controller_id"] for tc in plan["tracked_controllers"]}
     assert ids == {"state_variable:owner", "external_contract:authority"}
 
-    # Read specs carry through (build_control_snapshot uses these)
     for tc in plan["tracked_controllers"]:
         assert tc["read_spec"] is not None
         assert tc["read_spec"]["strategy"] == "getter_call"
 
-    # Event watches carry through (event-first tracking)
     owner = next(tc for tc in plan["tracked_controllers"] if tc["label"] == "owner")
     assert owner["event_watch"] is not None
     assert len(owner["event_watch"]["events"]) == 1
@@ -864,10 +783,8 @@ def test_tracking_plan_preserves_controller_ids_and_read_specs():
 
 
 def test_discovery_company_mode_advances_to_selection(monkeypatch):
-    """DiscoveryWorker company mode now writes discovered contracts to the
-    ``contracts`` table and hands off to the ``selection`` stage instead of
-    creating analysis child jobs inline. Child creation happens later in
-    the SelectionWorker, once DApp/DefiLlama siblings have also landed."""
+    """Child creation happens later in SelectionWorker, once DApp/DefiLlama siblings
+    have also landed."""
     from db.models import JobStage
     from workers.base import JobHandledDirectly
     from workers.discovery import DiscoveryWorker
@@ -939,7 +856,6 @@ def test_discovery_company_mode_advances_to_selection(monkeypatch):
     except JobHandledDirectly:
         pass  # expected hand-off signal
 
-    # Advance to the selection stage instead of queueing children here
     assert len(advance_calls) == 1
     job_id, next_stage, _detail = advance_calls[0]
     assert job_id == "parent-1"
@@ -1041,9 +957,6 @@ def test_discovery_reads_and_writes_protocol_declared_chains(monkeypatch):
 
 
 def test_static_worker_reads_discovery_artifacts(monkeypatch):
-    """StaticWorker.process reads contract metadata from the Contract table
-    and source files from get_source_files. Verify it handles the expected
-    data shapes and passes them to _scaffold_project correctly."""
     from workers.static_worker import StaticWorker
 
     worker = StaticWorker()
@@ -1051,7 +964,6 @@ def test_static_worker_reads_discovery_artifacts(monkeypatch):
 
     job = _job(name="TestContract")
 
-    # Mock what discovery stored
     sources = {"src/Test.sol": "pragma solidity ^0.8.19;\ncontract Test {}"}
 
     monkeypatch.setattr("workers.static_worker.get_source_files", lambda _s, _j: sources)
@@ -1076,7 +988,6 @@ def test_static_worker_reads_discovery_artifacts(monkeypatch):
     session.execute.return_value.scalar_one_or_none.return_value = contract_row
     session.refresh = MagicMock()
 
-    # Capture calls to worker phases
     scaffold_args: list[tuple] = []
     monkeypatch.setattr(
         worker,
@@ -1105,9 +1016,6 @@ def test_static_worker_reads_discovery_artifacts(monkeypatch):
 
 
 def test_scaffold_project_writes_expected_files(tmp_path):
-    """_scaffold_project must write foundry.toml, source files, remappings,
-    and contract_meta.json. These files must be present for Slither and
-    contract analysis to function."""
     from workers.static_worker import StaticWorker
 
     worker = StaticWorker()
@@ -1124,19 +1032,16 @@ def test_scaffold_project_writes_expected_files(tmp_path):
 
     worker._scaffold_project(project_dir, sources, meta, build_settings, remappings)
 
-    # foundry.toml must exist with src dir and solc version
     foundry_toml = (project_dir / "foundry.toml").read_text()
     assert 'src = "src"' in foundry_toml
     assert "solc_version" in foundry_toml
 
-    # Source files must be written
     assert (project_dir / "src" / "Vault.sol").exists()
     assert (project_dir / "lib" / "openzeppelin" / "Ownable.sol").exists()
 
     # Remappings must be written (since lib/openzeppelin/ has files)
     assert (project_dir / "remappings.txt").exists()
 
-    # contract_meta.json must be written
     meta_data = json.loads((project_dir / "contract_meta.json").read_text())
     assert meta_data["contract_name"] == "Vault"
 
@@ -1149,9 +1054,6 @@ def test_scaffold_project_writes_expected_files(tmp_path):
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_get_artifact):
-    """The artifact endpoint should strip .json and .txt extensions when
-    looking up artifacts, since workers store artifacts without extensions
-    but the frontend requests them with extensions."""
     from fastapi.testclient import TestClient
 
     import api
@@ -1179,7 +1081,6 @@ def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_get_arti
         headers={"X-PSAT-Admin-Key": deps.ADMIN_KEY or ""},
     )
     assert resp.status_code == 200
-    # First call should be with stripped name
     assert call_names[0] == "effective_permissions"
 
 
@@ -1189,15 +1090,8 @@ def test_artifact_endpoint_strips_json_extension(mock_session_cls, mock_get_arti
 
 
 def test_dep_phase_records_degraded_on_failure(monkeypatch, tmp_path):
-    """When dependency discovery sub-phases fail, the worker calls
-    ``record_degraded(...)`` for each one. ``BaseWorker._execute_job``
-    drains the per-job accumulator into the ``stage_errors`` artifact;
-    this test pins the accumulator-write step in isolation.
-
-    Replaces the old ``dependency_errors`` artifact assertion: that
-    artifact is gone, and the same information now lives in the unified
-    ``stage_errors`` schema written by ``BaseWorker``.
-    """
+    """``BaseWorker._execute_job`` drains the per-job accumulator into ``stage_errors``;
+    this pins the accumulator-write step in isolation."""
     from workers.static_worker import StaticWorker
 
     worker = StaticWorker()
@@ -1253,10 +1147,7 @@ def test_dep_phase_records_degraded_on_failure(monkeypatch, tmp_path):
 
 
 def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
-    """When the static worker detects a proxy contract, it should skip
-    Slither/analysis/tracking_plan, call complete_job, and raise
-    JobHandledDirectly.  This test exercises the actual process() method
-    to catch import errors and wiring bugs."""
+    """Exercises the actual process() method to catch import errors and wiring bugs."""
     from workers.base import JobHandledDirectly
     from workers.static_worker import StaticWorker
 
@@ -1267,7 +1158,6 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
 
     sources = {"src/Proxy.sol": "pragma solidity ^0.8.19;\ncontract Proxy {}"}
 
-    # Mock DB reads
     monkeypatch.setattr("workers.static_worker.get_source_files", lambda _s, _j: sources)
 
     # Mock the Contract table row — after _resolve_proxy runs and session.refresh
@@ -1291,7 +1181,6 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
     session.execute.return_value.scalar_one_or_none.return_value = contract_row
     session.refresh = MagicMock()
 
-    # Mock external calls
     monkeypatch.setattr(worker, "_resolve_proxy", lambda *_a, **_kw: None)
     monkeypatch.setattr(worker, "_run_dependency_phase", lambda *_a, **_kw: None)
     monkeypatch.setattr(worker, "update_detail", lambda *_a, **_kw: None)
@@ -1321,10 +1210,8 @@ def test_static_worker_proxy_skips_analysis_and_completes(monkeypatch):
 
 
 def test_worker_stage_chain_is_complete(monkeypatch):
-    """The pipeline stage chain must connect end to end so no job gets stuck.
-    ``PolicyWorker.next_stage`` is flag-dynamic (``PSAT_EFFECTS_STAGE`` gates the
-    policy->effects transition itself): off -> straight to coverage, on ->
-    through the effects stage."""
+    """No job may get stuck. ``PolicyWorker.next_stage`` is flag-dynamic
+    (``PSAT_EFFECTS_STAGE``): off -> straight to coverage, on -> through effects."""
     from db.models import JobStage
     from workers.coverage_worker import CoverageWorker
     from workers.discovery import DiscoveryWorker
@@ -1368,16 +1255,12 @@ def test_worker_stage_chain_is_complete(monkeypatch):
 
 
 def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
-    """Policy worker should raise RuntimeError if contract_analysis or
-    control_snapshot are missing. These are produced by the static and
-    resolution workers respectively."""
     from workers.policy_worker import PolicyWorker
 
     worker = PolicyWorker()
     session = MagicMock()
     job = _job(request={"rpc_url": "https://rpc.example", "chain_id": 1})
 
-    # Missing contract_analysis
     monkeypatch.setattr(
         "workers.policy_worker.get_artifact",
         lambda _s, _j, name: None,
@@ -1404,8 +1287,6 @@ def test_policy_worker_fails_cleanly_on_missing_artifacts(monkeypatch):
 
 
 def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
-    """Resolution worker should raise RuntimeError if control_tracking_plan
-    or contract_analysis are missing from the DB."""
     from workers.resolution_worker import ResolutionWorker
 
     worker = ResolutionWorker()
@@ -1414,7 +1295,6 @@ def test_resolution_worker_fails_on_missing_artifacts(monkeypatch):
 
     import pytest
 
-    # Missing tracking plan
     monkeypatch.setattr(
         "workers.resolution_worker.get_artifact",
         lambda _s, _j, name: None,

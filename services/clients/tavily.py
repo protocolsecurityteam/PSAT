@@ -21,11 +21,7 @@ REQUEST_TIMEOUT_SECONDS = 20
 MAX_RETRIES = 2
 BACKOFF_BASE_SECONDS = 0.75
 
-# When ``PSAT_TAVILY_CACHE`` is set, search() looks up the request in the
-# artifact-storage bucket before hitting the network. Misses fall through to a
-# live call whose response is persisted; subsequent identical requests in any
-# environment sharing the bucket skip Tavily entirely. Bump _CACHE_SCHEMA when
-# changing the cache envelope or the canonical request shape to bulk-invalidate.
+# Cache in the artifact bucket, shared across environments. Bump _CACHE_SCHEMA to bulk-invalidate.
 _CACHE_KEY_PREFIX = "tavily-cache"
 _CACHE_SCHEMA = 1
 _CACHE_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
@@ -49,8 +45,6 @@ def normalize_error(
 
 
 class TavilyError(RuntimeError):
-    """Raised when Tavily cannot return a usable response."""
-
     def __init__(self, error: dict[str, Any]):
         super().__init__(error.get("error", "Tavily request failed"))
         self.error = error
@@ -91,7 +85,6 @@ def _build_payload(
 
 
 def _cache_key(payload: dict[str, Any]) -> str:
-    """Hash the request shape (api_key excluded) into a stable storage key."""
     canonical = {k: v for k, v in payload.items() if k != "api_key"}
     canonical["__schema__"] = _CACHE_SCHEMA
     blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
@@ -99,12 +92,7 @@ def _cache_key(payload: dict[str, Any]) -> str:
 
 
 def _cache_read(key: str) -> list[dict[str, Any]] | None:
-    """Return cached results if present, fresh, and well-formed; else None.
-
-    Storage failures (missing bucket creds, transport errors, malformed
-    envelope, expired TTL) all degrade to None — the caller falls through
-    to a live API call.
-    """
+    """Any storage or envelope problem degrades to None (live call)."""
     try:
         from db.storage import StorageKeyMissing, get_storage_client
     except Exception as exc:
@@ -139,8 +127,6 @@ def _cache_read(key: str) -> list[dict[str, Any]] | None:
 
 
 def _cache_write(key: str, results: list[dict[str, Any]]) -> None:
-    """Persist results to the cache. Best-effort: errors are logged, not raised."""
-    # Empty responses would poison the cache; let next attempt re-fetch.
     if not results:
         return
     try:
@@ -171,12 +157,7 @@ def search(
     search_depth: str = "advanced",
     include_raw_content: bool = True,
 ) -> list[dict[str, Any]]:
-    """Search Tavily and return the normalized list of result objects.
-
-    With ``PSAT_TAVILY_CACHE`` set, identical requests are served from
-    artifact storage (keyed by SHA-256 of the request shape) — first miss
-    pays the live call, every subsequent hit is free. Unset in prod.
-    """
+    """With ``PSAT_TAVILY_CACHE``, identical requests are served from artifact storage. Unset in prod."""
     clean_query = query.strip()
     if not clean_query:
         raise ValueError("query must not be empty")

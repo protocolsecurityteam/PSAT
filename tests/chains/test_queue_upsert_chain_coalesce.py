@@ -1,18 +1,11 @@
 """Latent NULL-chain dedup sites in ``db.queue``.
 
-The bulk-discovery fix in #154 updated the writer so a chainless write derives a
-real chain name and dedups against legacy ``chain=NULL`` rows via a mainnet-
-coalesced key. These tests cover the same-class sites left latent at that time:
+Phase 2 (#154) fixed the bulk discovery writer (a chainless write derives a real chain and dedups against
+legacy ``chain=NULL`` rows via a mainnet-coalesced key). These cover the same-class sites left latent:
+``upsert_discovered_contract`` (single-row) and the ``find_completed_static_cache`` / ``is_known_proxy`` /
+``copy_static_cache`` lookups whose ``chain == <value>`` predicate missed NULL rows.
 
-  - ``upsert_discovered_contract`` — the single-row variant, now aligned with
-    ``bulk_upsert_discovered_contracts`` (``default_chain`` + coalesced dedup).
-  - ``find_completed_static_cache`` / ``is_known_proxy`` / ``copy_static_cache``
-    — Contract lookups whose ``chain == <value>`` predicate missed legacy NULL
-    rows.
-
-Each site is proven in both directions: a mainnet lookup now finds legacy
-NULL-chain rows, and a non-mainnet lookup stays isolated (no cross-chain
-bleed). No data backfill — reads keep the NULL≡mainnet convention.
+Each is proven both ways: mainnet finds legacy NULL rows; non-mainnet stays isolated. No backfill.
 """
 
 from __future__ import annotations
@@ -45,9 +38,7 @@ def proto_id(db_session):
 
 @requires_postgres
 def test_single_upsert_dedups_against_legacy_null_row(db_session, proto_id):
-    """A legacy ``chain=NULL`` stub already exists (pre-fix write). A later
-    mainnet single-row upsert must enrich it via the coalesced key, not mint a
-    second row."""
+    """A legacy ``chain=NULL`` stub is enriched by a mainnet single-row upsert via the coalesced key, not duplicated."""
     from db.models import Contract
     from db.queue import upsert_discovered_contract
 
@@ -74,8 +65,6 @@ def test_single_upsert_dedups_against_legacy_null_row(db_session, proto_id):
 
 @requires_postgres
 def test_single_upsert_inherits_default_chain_when_entry_chainless(db_session, proto_id):
-    """No evidence chain on the entry → inherit the job's ``default_chain`` so a
-    fresh row persists ``'ethereum'`` rather than a new NULL stub."""
     from db.models import Contract
     from db.queue import upsert_discovered_contract
 
@@ -125,7 +114,16 @@ def test_single_upsert_base_entry_does_not_collapse_onto_legacy_null(db_session,
 
 
 @requires_postgres
-def test_is_known_proxy_finds_legacy_null_row_on_mainnet_lookup(db_session, proto_id):
+@pytest.mark.parametrize(
+    "chain,expected",
+    [
+        # Mainnet lookup coalesces NULL→'ethereum' and finds the legacy proxy row.
+        pytest.param("ethereum", True, id="mainnet_finds_legacy_null"),
+        # A Base lookup must not see the legacy (mainnet) NULL proxy row.
+        pytest.param("base", False, id="l2_isolated_from_legacy_null"),
+    ],
+)
+def test_is_known_proxy_against_legacy_null_row(db_session, proto_id, chain, expected):
     from db.models import Contract
     from db.queue import is_known_proxy
 
@@ -133,21 +131,7 @@ def test_is_known_proxy_finds_legacy_null_row_on_mainnet_lookup(db_session, prot
     db_session.add(Contract(address=addr, chain=None, protocol_id=proto_id, is_proxy=True))
     db_session.commit()
 
-    # Mainnet lookup coalesces NULL→'ethereum' and finds the legacy proxy row.
-    assert is_known_proxy(db_session, addr, chain="ethereum") is True
-
-
-@requires_postgres
-def test_is_known_proxy_isolated_from_legacy_null_row_on_l2_lookup(db_session, proto_id):
-    from db.models import Contract
-    from db.queue import is_known_proxy
-
-    addr = _addr()
-    db_session.add(Contract(address=addr, chain=None, protocol_id=proto_id, is_proxy=True))
-    db_session.commit()
-
-    # A Base lookup must not see the legacy (mainnet) NULL proxy row.
-    assert is_known_proxy(db_session, addr, chain="base") is False
+    assert is_known_proxy(db_session, addr, chain=chain) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -156,28 +140,22 @@ def test_is_known_proxy_isolated_from_legacy_null_row_on_l2_lookup(db_session, p
 
 
 @requires_postgres
-def test_static_cache_hit_on_legacy_null_chain_contract(db_session):
-    """A completed job (chain_id=1) whose Contract row was persisted
-    ``chain=NULL`` (legacy) is now a mainnet cache hit; the raw
-    ``Contract.chain == 'ethereum'`` predicate previously missed it."""
+@pytest.mark.parametrize(
+    "chain,hit",
+    [
+        # A completed job (chain_id=1) whose Contract row is legacy ``chain=NULL`` is a mainnet cache hit; the raw
+        # ``Contract.chain == 'ethereum'`` predicate used to miss it.
+        pytest.param("ethereum", True, id="mainnet_hit"),
+        pytest.param("base", False, id="l2_miss"),
+    ],
+)
+def test_static_cache_against_legacy_null_chain_contract(db_session, chain, hit):
     from db.queue import find_completed_static_cache
     from tests.cache_helpers import ADDR_A, _create_completed_job_with_static_data
 
-    job = _create_completed_job_with_static_data(db_session)  # Contract.chain is NULL
-    found = find_completed_static_cache(db_session, ADDR_A, chain="ethereum")
-    assert found is not None
-    assert found.id == job.id
-
-
-@requires_postgres
-def test_static_cache_miss_for_l2_against_legacy_null_contract(db_session):
-    """The same legacy mainnet cache must not answer a Base request."""
-    from db.queue import find_completed_static_cache
-    from tests.cache_helpers import ADDR_A, _create_completed_job_with_static_data
-
-    _create_completed_job_with_static_data(db_session)  # mainnet (chain_id=1) job + NULL Contract
-    found = find_completed_static_cache(db_session, ADDR_A, chain="base")
-    assert found is None
+    job = _create_completed_job_with_static_data(db_session)  # mainnet (chain_id=1) job, Contract.chain is NULL
+    found = find_completed_static_cache(db_session, ADDR_A, chain=chain)
+    assert (found.id if found is not None else None) == (job.id if hit else None)
 
 
 # ---------------------------------------------------------------------------
@@ -220,9 +198,7 @@ def _completed_source_with_null_contract(session, address, request_chain):
 
 @requires_postgres
 def test_copy_static_cache_matches_legacy_null_source_row(db_session):
-    """``copy_static_cache`` resolves the source Contract by (address, chain).
-    With the source request on mainnet but the row persisted ``chain=NULL``,
-    the coalesced predicate finds it; the raw equality previously returned
+    """The coalesced predicate finds a ``chain=NULL`` source row for a mainnet request; the raw equality returned
     None and the copy silently produced nothing."""
     from db.models import Contract
     from db.queue import copy_static_cache, create_job

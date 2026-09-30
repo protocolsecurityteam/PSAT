@@ -1,26 +1,12 @@
-"""Getter-less ``pending`` authority gates resolve by reading the live storage
-slot — not by guessing ``resolved_empty`` from the accessor name.
+"""Getter-less ``pending`` authority gates resolve by reading the live storage slot,
+not by guessing ``resolved_empty`` from the accessor name.
 
-Governable ``claimGovernance`` is gated by ``msg.sender == _pendingGovernor()``,
-an INTERNAL accessor that ``sload``s ``keccak256("LRTSquare.pending.governor")``
-and has NO public getter. The audited interim fix lowered any ``pending``-named
-accessor whose getter reverts to ``finite_set([], exact, empty_by_design)`` —
-i.e. "provably nobody" — *without reading the slot*. On the live LRTSquared proxy
-that slot is **non-zero** (it equals ``governor()``: ``_changeGovernor`` never
-clears the pending slot, so after a completed transfer it stays == governor and
-the accept gate is satisfiable by the sitting governor), so ``claimGovernance``
-is actually callable and the label was a false negative.
-
-The fix: the static stage carries the keccak slot on the operand
-(``storage_slot``), and resolution reads it with ``eth_getStorageAt``:
-  * non-zero slot  → ``finite_set([pendingGovernor], exact)`` (the real caller),
-  * confirmed-zero → ``resolved_empty`` (read-confirmed accept-side ceiling),
-  * unreadable     → honest ``lower_bound`` (never a fabricated resolved_empty).
-
-Layered like ``test_canonical_authority_getter_resolution.py``: literal-dict unit
-tests pin the resolver and always run; the integration test compiles the verbatim
-on-chain Governable source and proves the operand carries the slot end-to-end.
-The global ``_stub_live_authority`` fixture is deliberately not used.
+LRTSquared ``claimGovernance`` is gated by INTERNAL ``_pendingGovernor()`` (an sload of a
+keccak slot, no public getter). The old name-based guess lowered it to "provably nobody",
+but the live slot is non-zero (== governor(); never cleared), so it is callable.
+Resolution reads the slot: non-zero -> finite_set, zero -> resolved_empty, unreadable ->
+lower_bound (never a fabricated resolved_empty). The global ``_stub_live_authority``
+fixture is deliberately not used.
 """
 
 from __future__ import annotations
@@ -117,8 +103,7 @@ def _status(cap: CapabilityExpr) -> str | None:
 
 
 def test_nonzero_slot_resolves_to_pending_governor(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The live (non-empty) pending slot IS the authorized caller — the
-    LRTSquared reality the name-guess mislabeled as 'provably nobody'."""
+    """The live (non-empty) pending slot IS the authorized caller, not 'provably nobody'."""
     recorder: list = []
     _stub(monkeypatch, slot=_word(PENDING_GOVERNOR), recorder=recorder)
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
@@ -128,21 +113,16 @@ def test_nonzero_slot_resolves_to_pending_governor(monkeypatch: pytest.MonkeyPat
     assert cap.membership_quality == "exact"
     assert cap.empty_reason is None
     assert _status(cap) != "resolved_empty"
-    # The getter is tried first (and reverts) before the slot is read.
     assert ("eth_getStorageAt", [CONTRACT.lower(), PENDING_GOVERNOR_SLOT, "latest"]) in recorder
 
 
 def test_confirmed_zero_slot_is_resolved_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A read-confirmed zero slot (no transfer pending — PriceProvider reality)
-    is a genuine accept-side ceiling, and the verdict (``resolved_empty``) is
-    unchanged.
+    """A read-confirmed zero slot (PriceProvider reality) is a genuine accept-side ceiling.
 
-    What it publishes as its REASON changed with A2: ``slot_read_zero``, which
-    reports the read that happened, rather than ``empty_by_design``, which came
-    from a default argument value and asserted a classification. The
-    accept-side-ceiling claim rests on the accessor's ``pending`` prefix — an
-    identifier — and now lives only where it discloses that basis
-    (``_pending_ceiling_capability``)."""
+    The reason is ``slot_read_zero`` (the read that happened), not ``empty_by_design``
+    (a default-argument classification); the ``pending``-prefix basis lives only in
+    ``_pending_ceiling_capability``.
+    """
     _stub(monkeypatch, slot="0x" + "00" * 32)
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
 
@@ -157,9 +137,7 @@ def test_confirmed_zero_slot_is_resolved_empty(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_unreadable_slot_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The anti-regression: when BOTH the getter and the slot are unreadable, the
-    honest answer is ``lower_bound`` (unknown), never a fabricated resolved_empty.
-    This is the exact failure the name-based guess introduced."""
+    """Anti-regression: getter AND slot unreadable -> ``lower_bound``, never a fabricated resolved_empty."""
     _stub(monkeypatch, slot="revert")
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
 
@@ -182,10 +160,8 @@ def test_no_rpc_with_slot_is_lower_bound_not_guess(monkeypatch: pytest.MonkeyPat
 
 
 def test_slotless_pending_operand_keeps_empty_by_design_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The narrowed fallback: a getter-less, slot-less ``pending`` accessor (the
-    OZ ``_pendingDefaultAdmin.newAdmin`` struct member) still lowers to
-    empty-by-design — the slot read above guarantees this only fires when there is
-    genuinely nothing to read."""
+    """A getter-less, slot-less ``pending`` accessor (OZ ``_pendingDefaultAdmin.newAdmin``) still lowers to empty-by-
+    design."""
     _stub(monkeypatch, slot="revert")  # eth_call getter reverts; no slot on the operand
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_NO_SLOT), _ctx_with_rpc())
 
@@ -195,8 +171,7 @@ def test_slotless_pending_operand_keeps_empty_by_design_fallback(monkeypatch: py
 
 
 # --------------------------------------------------------------------------
-# Integration: compile the verbatim on-chain Governable and prove the slot is
-# carried + read end-to-end. Skips when no compatible solc is installed.
+# Integration: compile the verbatim on-chain Governable. Skips without solc.
 # --------------------------------------------------------------------------
 
 pytest.importorskip("slither")
@@ -222,8 +197,6 @@ def _claim_governance_tree() -> Any:
 
 class TestGovernableClaimGovernanceSlot:
     def test_operand_carries_keccak_slot(self) -> None:
-        """The static stage recovers the keccak slot the accessor sload()s and
-        attaches it to the (getter-less) view_call operand."""
         tree = _claim_governance_tree()
         leaf = next(
             child["leaf"] for child in tree["children"] if child["leaf"]["authority_role"] == "caller_authority"
@@ -232,25 +205,21 @@ class TestGovernableClaimGovernanceSlot:
         assert view_op["callee_signature"] == "_pendingGovernor()"
         assert view_op.get("storage_slot") == PENDING_GOVERNOR_SLOT
 
-    def test_resolves_live_pending_governor(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """End-to-end: getter reverts, the carried slot is read, the live value is
-        the principal — claimGovernance is NOT resolved_empty (the LRTSquared fix)."""
-        _stub(monkeypatch, slot=_word(PENDING_GOVERNOR))
+    @pytest.mark.parametrize(
+        ("slot", "expected_rows", "resolved_empty"),
+        [
+            # End-to-end: getter reverts, the carried slot is read, claimGovernance is NOT resolved_empty.
+            pytest.param(_word(PENDING_GOVERNOR), [PENDING_GOVERNOR], False, id="live_pending_governor"),
+            pytest.param("0x" + "00" * 32, [], True, id="confirmed_zero_slot"),
+            pytest.param("revert", [], False, id="unreadable_slot"),
+        ],
+    )
+    def test_slot_states_resolve_claim_governance(
+        self, monkeypatch: pytest.MonkeyPatch, slot: str, expected_rows: list[str], resolved_empty: bool
+    ) -> None:
+        _stub(monkeypatch, slot=slot)
         cap = evaluate_tree(_claim_governance_tree(), _ctx_with_rpc())
         surface = project_capability_surface(capability_to_dict(cap))
 
-        assert [r["address"] for r in surface.principal_rows] == [PENDING_GOVERNOR]
-        assert _status(cap) != "resolved_empty"
-
-    def test_confirmed_zero_slot_is_resolved_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _stub(monkeypatch, slot="0x" + "00" * 32)
-        cap = evaluate_tree(_claim_governance_tree(), _ctx_with_rpc())
-
-        assert project_capability_surface(capability_to_dict(cap)).principal_rows == []
-        assert _status(cap) == "resolved_empty"
-
-    def test_unreadable_slot_is_not_resolved_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _stub(monkeypatch, slot="revert")
-        cap = evaluate_tree(_claim_governance_tree(), _ctx_with_rpc())
-
-        assert _status(cap) != "resolved_empty"
+        assert [r["address"] for r in surface.principal_rows] == expected_rows
+        assert (_status(cap) == "resolved_empty") is resolved_empty

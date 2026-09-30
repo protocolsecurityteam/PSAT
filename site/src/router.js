@@ -1,5 +1,3 @@
-// Pure URL parsing/building used by App + page-level components.
-// Pure JS — no React imports.
 
 const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 

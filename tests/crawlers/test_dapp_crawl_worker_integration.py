@@ -1,11 +1,8 @@
 """Integration tests for DAppCrawlWorker with a real Postgres-backed queue.
 
-These tests deliberately stop short of the browser: they serve a local fake DApp
-page over HTTP and patch only the crawler entrypoint, so the worker still runs
-against the real queue, job, artifact and completion code paths. The browser leg
-itself is covered by ``test_dapp_browser_integration.py``, which drives real
-Playwright — it is provisioned in the offline CI job
-(``.github/workflows/_ci-checks.yml``, cached + retried + hard-failing).
+Stops short of the browser: serves a local fake DApp over HTTP and patches only the crawler entrypoint, so the
+queue/job/artifact/completion paths are real. The browser leg is ``test_dapp_browser_integration.py`` (real
+Playwright, provisioned in the offline CI job ``.github/workflows/_ci-checks.yml``).
 """
 
 from __future__ import annotations
@@ -203,14 +200,10 @@ def test_process_runs_against_real_queue_and_fake_dapp(
     assert isinstance(summary, dict)
     assert summary["mode"] == "dapp_crawl"
     assert summary["discovered_count"] == 4
-    # DAppCrawlWorker no longer creates analysis child jobs — SelectionWorker
-    # ranks across all discovery sources after they've settled, so the
-    # crawl summary is intentionally address-only.
+    # Crawl summary is address-only: SelectionWorker ranks across all discovery sources after they settle.
     assert "analyzed_count" not in summary
     assert "child_jobs" not in summary
 
-    # No analysis child jobs created from this stage — ranking/queueing
-    # moved to SelectionWorker.
     child_jobs = (
         db_session.execute(
             select(Job).where(
@@ -223,7 +216,6 @@ def test_process_runs_against_real_queue_and_fake_dapp(
     )
     assert child_jobs == []
 
-    # Protocol row created from hostname, job tagged with its id
     assert job.protocol_id is not None
     protocol_row = db_session.get(Protocol, job.protocol_id)
     assert protocol_row is not None
@@ -256,7 +248,6 @@ def test_persists_dapp_interactions(
     dapp_worker_module,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Full interaction log is persisted to the dapp_interactions table."""
 
     def fake_crawl(urls, *, chain_id=1, wait=10, progress=None):
         return {

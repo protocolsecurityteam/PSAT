@@ -48,8 +48,7 @@ def _value_out(chain, *, contract_holdings, store=None):
         calldata=SWEEP + (5).to_bytes(32, "big").hex(),
         simulate_supported=True,
         gate_ref="gate:none",
-        # A token pull the caller cannot satisfy is not the point here; the payout
-        # is gated on the CONTRACT's balance, so only a contract-side seed helps.
+        # Payout is gated on the CONTRACT's balance, so only a contract-side seed helps.
         seeded_calldata={18: SWEEP + (5).to_bytes(32, "big").hex()},
         seeder=SimulateSeeder(
             chain, chain_id=1, budget=SeedBudget(max_identity_probes=9, max_layout_discoveries=9, max_probe_retries=9)
@@ -66,7 +65,6 @@ def test_contract_side_seed_flips_a_balance_gated_payout_and_marks_the_capabilit
     eff = _value_out(SweepChain(), contract_holdings=(ASSET,), store=store)
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["value_moved"] is True
-    # The weaker-claim qualifier travels with the verdict, same as the ETH seed.
     assert eff.details["contract_balance_seeded"] is True
 
 

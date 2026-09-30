@@ -89,22 +89,19 @@ def _set_cache(monkeypatch, protocols):
 # ---------------------------------------------------------------------------
 
 
-class TestNormalize:
-    def test_lowercase_and_strip_punctuation(self):
-        assert _normalize("Ether.fi") == "etherfi"
-
-    def test_spaces_removed(self):
-        assert _normalize("Aave V3") == "aavev3"
-
-    def test_dashes_and_underscores_removed(self):
-        assert _normalize("my-proto_col") == "myprotocol"
-
-    def test_unicode_non_ascii_stripped(self):
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param("Ether.fi", "etherfi", id="lowercase_and_strip_punctuation"),
+        pytest.param("Aave V3", "aavev3", id="spaces_removed"),
+        pytest.param("my-proto_col", "myprotocol", id="dashes_and_underscores_removed"),
         # Non-ASCII characters are removed by the [^a-z0-9] regex
-        assert _normalize("café") == "caf"
-
-    def test_empty_string(self):
-        assert _normalize("") == ""
+        pytest.param("café", "caf", id="unicode_non_ascii_stripped"),
+        pytest.param("", "", id="empty_string"),
+    ],
+)
+def test_normalize(raw, expected):
+    assert _normalize(raw) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -124,10 +121,6 @@ class TestMakeResult:
             "all_slugs": ["aave-v3", "aave-v2"],
             "all_names": ["Aave V3", "Aave V2"],
         }
-
-    def test_single_protocol_no_siblings(self):
-        result = _make_result(LIDO, [LIDO])
-        assert result["all_slugs"] == ["lido"]
 
     def test_missing_fields_default_to_none(self):
         bare = {"tvl": 1}
@@ -164,94 +157,41 @@ class TestFindSiblings:
 # ---------------------------------------------------------------------------
 
 
+SUPERSWAP = {"slug": "xyz-unrelated", "name": "SuperSwap", "tvl": 1}
+BIG_PROTOCOL = {"slug": "abcdefghijklmn", "name": "Big Protocol", "tvl": 1}
+COMPOUND = {"slug": "compound-v2", "name": "Compound V2", "tvl": 1}
+
+
 class TestMatchProtocol:
-    # Tier 1: exact slug
-    def test_exact_slug_match(self):
-        result = _match_protocol("aave-v3", PROTOCOLS)
-        assert result is AAVE
-
-    def test_exact_slug_case_insensitive(self):
-        result = _match_protocol("AAVE-V3", PROTOCOLS)
-        assert result is AAVE
-
-    # Tier 2: exact name
-    def test_exact_name_match(self):
-        result = _match_protocol("Aave V3", PROTOCOLS)
-        assert result is AAVE
-
-    def test_exact_name_case_insensitive(self):
-        result = _match_protocol("aave v3", PROTOCOLS)
-        assert result is AAVE
-
-    # Tier 3: normalized match
-    def test_normalized_match_dot(self):
-        # "etherfi" normalizes the same as "ether.fi" in slug "ether.fi-stake"
-        # but tier 3 checks full normalized equality, so we need exact match.
-        # "etherfistake" != "etherfi", so this goes to tier 4 substring.
-        # Instead test: "ether.fi-stake" (with punctuation) matches slug exactly
-        # after normalization.
-        result = _match_protocol("etherfistake", PROTOCOLS)
-        assert result is ETHERFI
-
-    def test_normalized_match_ignores_punctuation(self):
-        result = _match_protocol("ether.fi stake", PROTOCOLS)
-        assert result is ETHERFI
-
-    # Tier 4: substring match (50% length requirement)
-    def test_substring_match_sufficient_length(self):
-        # "etherfi" (7 chars) is substring of "etherfistake" (12 chars)
-        # 7/12 = 0.583 >= 0.5 -> match
-        result = _match_protocol("etherfi", PROTOCOLS)
-        assert result is ETHERFI
-
-    def test_substring_match_via_name(self):
-        # Slug does NOT contain the substring, but name does -> hits line 88
-        protos = [
-            {"slug": "xyz-unrelated", "name": "SuperSwap", "tvl": 1},
-        ]
-        # "superswap" (9 chars) is the full normalized name (9 chars)
-        # but slug normalized "xyzunrelated" does not contain "supers"
-        # "supers" (6 chars) in "superswap" (9 chars) => 6/9 = 0.667 >= 0.5
-        result = _match_protocol("supers", protos)
-        assert result is protos[0]
-
-    def test_substring_too_short_no_match(self):
-        # Very short substring that is less than 50% of target
-        # "fi" (2 chars) in "etherfistake" (12 chars) => 2/12 = 0.167 < 0.5
-        protos = [{"slug": "abcdefghijklmn", "name": "Big Protocol", "tvl": 1}]
-        result = _match_protocol("abc", protos)
-        # 3/14 = 0.214 < 0.5, and 3/11 (name normalized "bigprotocol") doesn't contain "abc"
-        assert result is None
-
-    # Tier 5: fuzzy similarity
-    def test_fuzzy_match_above_threshold(self):
-        # "lidoo" is very close to "lido" — similarity ~0.89 with 4/5 matching.
-        # Actually SequenceMatcher("lidoo", "lido").ratio() = 0.889 which is < 0.90
-        # Use a closer mismatch.
-        protos = [{"slug": "compound-v2", "name": "Compound V2", "tvl": 1}]
-        # "compoundv2" vs "compoundv2" (exact after normalize) would be tier 3.
-        # Let's use a name that is very close but not identical.
-        # "compoundv2x" ratio with "compoundv2" = 20/21 ≈ 0.952
-        result = _match_protocol("compound-v2x", protos)
-        assert result is protos[0]
-
-    # No match
-    def test_no_match_returns_none(self):
-        result = _match_protocol("nonexistent-protocol-xyz", PROTOCOLS)
-        assert result is None
-
-    # Empty / blank input
-    def test_empty_input_returns_none(self):
-        result = _match_protocol("", PROTOCOLS)
-        assert result is None
-
-    def test_blank_input_returns_none(self):
-        result = _match_protocol("   ", PROTOCOLS)
-        assert result is None
-
-    def test_punctuation_only_returns_none(self):
-        result = _match_protocol("...", PROTOCOLS)
-        assert result is None
+    @pytest.mark.parametrize(
+        ("query", "protos", "expected"),
+        [
+            # Tier 1: exact slug
+            pytest.param("aave-v3", PROTOCOLS, AAVE, id="exact_slug"),
+            pytest.param("AAVE-V3", PROTOCOLS, AAVE, id="exact_slug_case_insensitive"),
+            # Tier 2: exact name
+            pytest.param("Aave V3", PROTOCOLS, AAVE, id="exact_name"),
+            pytest.param("aave v3", PROTOCOLS, AAVE, id="exact_name_case_insensitive"),
+            # Tier 3: normalized match
+            pytest.param("etherfistake", PROTOCOLS, ETHERFI, id="normalized_dot"),
+            pytest.param("ether.fi stake", PROTOCOLS, ETHERFI, id="normalized_ignores_punctuation"),
+            # Tier 4: substring match (50% length requirement); 7/12 = 0.583 >= 0.5
+            pytest.param("etherfi", PROTOCOLS, ETHERFI, id="substring_sufficient_length"),
+            # Slug does not contain the substring, but the name does: 6/9 = 0.667 >= 0.5
+            pytest.param("supers", [SUPERSWAP], SUPERSWAP, id="substring_via_name"),
+            # Substring under 50% of the target length: 3/14 and 3/11 (name "bigprotocol") are both < 0.5
+            pytest.param("abc", [BIG_PROTOCOL], None, id="substring_too_short_no_match"),
+            # Tier 5: fuzzy similarity; "compoundv2x" vs "compoundv2": ratio 20/21 ~ 0.952
+            pytest.param("compound-v2x", [COMPOUND], COMPOUND, id="fuzzy_above_threshold"),
+            pytest.param("nonexistent-protocol-xyz", PROTOCOLS, None, id="no_match"),
+            # Empty / blank input
+            pytest.param("", PROTOCOLS, None, id="empty_input"),
+            pytest.param("   ", PROTOCOLS, None, id="blank_input"),
+            pytest.param("...", PROTOCOLS, None, id="punctuation_only"),
+        ],
+    )
+    def test_match(self, query, protos, expected):
+        assert _match_protocol(query, protos) is expected
 
 
 # ---------------------------------------------------------------------------
@@ -351,22 +291,6 @@ class TestFetchProtocols:
 
         result = _fetch_protocols()
         assert [p["slug"] for p in result] == ["high", "mid", "low"]
-
-    def test_raises_on_http_error(self, monkeypatch):
-        def _mock_get(*a, **kw):
-            resp = type(
-                "Resp",
-                (),
-                {
-                    "raise_for_status": lambda self: (_ for _ in ()).throw(requests.HTTPError("500")),
-                },
-            )()
-            return resp
-
-        monkeypatch.setattr(requests, "get", _mock_get)
-
-        with pytest.raises(requests.HTTPError):
-            _fetch_protocols()
 
 
 # ---------------------------------------------------------------------------

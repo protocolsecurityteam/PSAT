@@ -1,22 +1,13 @@
-"""Contract-membership gate — sole writer of ``Contract.protocol_id``.
+"""Contract-membership gate, the sole writer of ``Contract.protocol_id``.
 
-Membership is an earned fact with a recorded witness: no discovery source's
-identity confers it, and no witness field may contain or be derived from LLM
-output. Every function here mutates the session without
-committing — the caller commits so the gate write lands atomically with the
-triggering fact.
+Membership is earned with a recorded witness; no source's identity confers it, and no witness may derive from LLM
+output.
+Functions mutate the session without committing so the gate write lands with the triggering fact.
 
-Package layout: ``rules`` (witness vocabulary, evidence constructors,
-witness-row primitives), ``readers`` (evidence predicates and stored-fact
-readers), ``deployers`` (the trust ladder and its registry rows),
-``transitivity`` (W3 anchor chains, exclusivity, via-fact re-verification),
-``admission`` (nomination, promotion/demotion primitives, stratum-(iii)
-derivation), ``revocation`` (the demotion cascade),
-``heuristics`` (W4-H affinity and its trailing stratum), ``fixpoint``
-(fact deltas, targeting, the stratified fixpoint). This ``__init__``
-re-exports the full pre-split module surface — including the private names
-tests and scripts import — so ``services.discovery.membership_gate.X`` keeps
-resolving unchanged.
+Modules: ``rules`` (witness vocabulary and constructors), ``readers`` (evidence predicates), ``deployers`` (trust
+ladder), ``transitivity`` (W3 anchor chains, exclusivity, re-verification), ``admission`` (nomination,
+promotion/demotion, stratum iii), ``revocation`` (demotion cascade), ``heuristics`` (W4-H), ``fixpoint`` (deltas,
+targeting, the stratified fixpoint). This module re-exports the pre-split surface, private names included.
 """
 
 from .admission import (
@@ -185,7 +176,6 @@ from .transitivity import (
     _own_controller_links,
     _perimeter_anchor,
     _role_hash_anchors,
-    _via_is_transitive,
     _via_transitivity,
     _witness_fact_holds,
 )
@@ -300,7 +290,6 @@ __all__ = [
     "_target_candidates",
     "_utcnow",
     "_validate_evidence",
-    "_via_is_transitive",
     "_via_transitivity",
     "_vias_citing_evidence_address",
     "_w2_edge_holds",

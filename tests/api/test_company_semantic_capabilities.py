@@ -1,9 +1,7 @@
-"""End-to-end tests for ``GET /api/company/{name}/semantic_capabilities``.
+"""End-to-end tests for ``GET /api/company/{name}/semantic_capabilities`` (read-only, not admin-gated).
 
-Read-only, not admin-gated. Returns the per-contract semantic
-capability map for every analyzed contract in the company,
-distinguishing "no predicate-tree artifact" (``null``) from "semantically analyzed
-with no guarded functions" (``{}``).
+Returns the per-contract capability map, distinguishing "no predicate-tree artifact" (``null``)
+from "semantically analyzed with no guarded functions" (``{}``).
 """
 
 from __future__ import annotations
@@ -79,9 +77,6 @@ def _semantic_artifact_unguarded_only() -> dict:
 
 @requires_postgres
 def test_company_semantic_capabilities_per_contract_map(api_client, db_session):
-    """Three contracts in the company: one with semantic guards, one
-    semantically analyzed but unguarded, one legacy pre-semantic. Each maps
-    distinguishably."""
     name = f"company_semantic_{uuid.uuid4().hex[:6]}"
     addr_guarded = "0x" + uuid.uuid4().hex[:8] + "11" * 16
     addr_unguarded = "0x" + uuid.uuid4().hex[:8] + "22" * 16
@@ -195,8 +190,6 @@ def test_company_semantic_capabilities_empty_when_no_completed_jobs(api_client, 
 
 @requires_postgres
 def test_company_semantic_capabilities_resolver_failure_treated_as_missing(api_client, db_session, monkeypatch):
-    """If the resolver raises for a contract, that contract is
-    counted as missing rather than 500ing the whole endpoint."""
     name = f"company_failsafe_{uuid.uuid4().hex[:6]}"
     addr = "0x" + uuid.uuid4().hex[:8] + "44" * 16
     _seed_protocol_with_jobs(
@@ -211,7 +204,6 @@ def test_company_semantic_capabilities_resolver_failure_treated_as_missing(api_c
     monkeypatch.setattr("services.resolution.capability_resolver.resolve_contract_capabilities", _boom)
     # The api module imported the function lazily inside the
     # handler, so monkeypatching the module-level export is enough.
-    # Ensure the api module also picks up the patch on the next call.
     import services.resolution.capability_resolver as cr_mod
 
     monkeypatch.setattr(cr_mod, "resolve_contract_capabilities", _boom)

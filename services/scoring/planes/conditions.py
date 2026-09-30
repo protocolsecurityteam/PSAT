@@ -11,49 +11,16 @@ from sqlalchemy.orm import Session
 
 from services.scoring.schema import coalesce_chain, entity_key
 
-# --- what a destination's own conditions say about who may call it -----------
-#
-# A control edge proves AUTHORITY over an entity. It does not prove that the
-# entity's own code will accept the controlled node as caller: a destination may
-# pin its caller to itself, and no authority relation makes one address another.
-# ``effective_functions.conditions`` carries those guards verbatim; the fold read
-# none of them, so every hop walked as if the destination had no opinion.
-#
-# Only ONE shape is recognised as a proven disproof, and it is recognised from
-# the verbatim text: a caller-or-initiator identity compared against
-# ``address(this)``. Everything else — a balance check, a business predicate, an
-# authorization call whose passing is exactly what the control edge witnesses —
-# bears on the caller not at all and is not read as one. A recogniser that
-# guessed more would turn every unparsed predicate into a refusal and delete a
-# proven authority relation on the strength of a string nobody analysed.
+# What a destination's own conditions say about who may call it. Authority over an entity doesn't mean its code accepts
+# the controlled node as caller (a destination may pin its caller to itself). Only one shape is recognised as a
+# disproof, from the verbatim text: a caller or initiator identity compared against ``address(this)``. Recognising more
+# would delete proven authority relations on unanalysed strings.
 HOP_WALKED = "walked"
 HOP_NOT_DETERMINED = "not_determined"
 
-# Whose identity the guard pins. ``msg.sender`` is the caller itself; the named
-# parameters are the caller as the destination's own callee convention passes it
-# on (``initiator`` in a solver callback), which is the same question one frame
-# out.
-#
-# The recogniser is deliberately BROAD on two axes, and both are safe in exactly
-# one direction:
-#
-#   comparator  ``!=`` and ``==`` are both read as a pin. The stored
-#               ``description`` is a verbatim predicate with no polarity: the
-#               same text is a require-condition in one function and a
-#               revert-condition in another, so which comparator means "the
-#               caller must be the destination" is not recoverable from it.
-#   term        ``sender``/``caller``/``initiator`` (with or without a leading
-#               underscore) are read as the caller. A parameter so named is the
-#               caller under every callee convention this corpus uses, but the
-#               name is the whole evidence — a parameter named ``initiator`` that
-#               carried something else would be read as a caller pin here.
-#
-# Both over-reads land on the same side: a recognised pin only ever moves a hop
-# from walked to ``not_determined``. Nothing in this module can turn a pin into a
-# proven-clear, so breadth costs withheld reach and never mints reach. The
-# reverse error — a pin this regex misses — is the one that would over-claim, and
-# it is why the shape is not narrowed further. ``(?<![\w$])`` keeps the terms
-# whole, so ``spender``/``resender`` are not caller terms.
+# The caller terms. Deliberately broad: ``!=`` and ``==`` both count (stored text has no polarity), and
+# ``sender``/``caller``/``initiator`` parameters are read as the caller by name. Over-reads only move a hop to
+# ``not_determined``, never mint reach; a missed pin is what would over-claim. ``(?<![\w$])`` keeps ``spender`` out.
 _CALLER_TERM = r"(?:msg\.sender|_?sender|_?caller|_?initiator)"
 _SELF_PIN = re.compile(
     rf"(?<![\w$])(?:{_CALLER_TERM}\s*[!=]=\s*address\(this\)|address\(this\)\s*[!=]=\s*{_CALLER_TERM}(?![\w$]))"
@@ -63,26 +30,9 @@ SURFACE_FUNCTION_PRINCIPAL = "function_principal_witness"
 SURFACE_DESTINATION_FUNCTIONS = "destination_functions"
 SURFACE_NONE = "destination_functions_not_analysed"
 
-# On what a walked hop was walked. "No condition disproved the caller" is three
-# different facts, and only the first of them is a read of any condition:
-#
-#   FULLY          every function consulted at the destination had its
-#                  conditions extracted, so the read is complete: a guard was
-#                  there to find on all of them and was found on none.
-#   PARTLY         at least one permitting function had its conditions
-#                  extracted and at least one consulted function did not. A
-#                  guard was found on none, but the surface the answer rests on
-#                  is not the surface that was consulted.
-#   UNANALYSED     every function that permits the caller has ``conditions``
-#                  NULL — the extraction never ran there, so "no guard" is a
-#                  coverage gap wearing the shape of a clean read.
-#   NO_FUNCTION    the destination has no analysed function at all; nothing was
-#                  consulted, and the hop stands on the edge alone.
-#
-# The hop is walked in all three (refusing on an absence would let a coverage
-# gap overturn a proven authority relation), so the distinction is a DISCLOSURE
-# and not a bound — but a consumer cannot tell a checked hop from an unchecked
-# one unless the counts are published apart.
+# What a walked hop was walked on: every consulted function's conditions extracted (fully), some extracted (partly),
+# none of the permitting ones extracted (unanalysed), or no analysed function at all. The hop is walked in every case;
+# the counts are published apart so checked and unchecked hops are distinguishable.
 WALKED_ON_ANALYSED_FULLY = "walked_on_fully_analysed_conditions"
 WALKED_ON_ANALYSED_PARTLY = "walked_on_partly_analysed_conditions"
 WALKED_ON_UNANALYSED = "walked_on_unanalysed_conditions"
@@ -97,44 +47,26 @@ WALKED_COVERAGE = (
 
 @dataclass(frozen=True)
 class DestinationFunction:
-    """One function of a destination entity, and the caller guards it carries.
+    """One destination function and its caller guards.
 
-    ``analysed`` separates "conditions were extracted and none pins the caller"
-    from "the column holds no array and nothing was extracted". Both reach
-    ``caller_pinned_to_self == ()``, and reading the second as the first is the
-    absence-as-a-witness move at the coverage level. The discriminator is
-    ``isinstance(conditions, list)``, which is what puts a SQL null and the
-    jsonb scalar null on the same side as each other and the opposite side from
-    an empty array — the three-state this column's own read has to make.
+    ``analysed`` separates "extracted, none pins the caller" from "nothing extracted" (``isinstance(conditions, list)``
+    puts SQL and jsonb nulls together, apart from an empty array).
     """
 
     function_id: int
     name: str
     caller_pinned_to_self: tuple[str, ...] = ()
     analysed: bool = False
-    # This function's own selector, so a consumer can join to it on the four
-    # bytes a licence names rather than on a name — 32 ``(entity, name)`` pairs
-    # on the reference corpus carry more than one selector. ``None`` is a
-    # function whose selector was never extracted, and it matches nothing.
+    # Its own selector for joins (names aren't unique); ``None`` matches nothing.
     selector: str | None = None
-    # Every predicate text the column holds, in stored order, verbatim and
-    # UNFILTERED. ``caller_pinned_to_self`` above is the one recognised shape;
-    # this is the whole population it was recognised out of, kept so a
-    # disclosure can point at the evidence. Nothing here is evaluated: the text
-    # carries no polarity (see ``_SELF_PIN``), so it is not readable as a
-    # condition that must hold or must not.
+    # Every stored predicate text, verbatim and unfiltered, for disclosure; nothing is evaluated (no polarity).
     predicates: tuple[str, ...] = ()
-    # Entries the stored array held. Larger than ``len(predicates)`` when an
-    # entry carried no string ``description``, which is a shortfall in the
-    # disclosure and not a predicate that is absent.
+    # Stored entries, including those without a string description.
     predicate_entries_stored: int = 0
 
 
-# The three states a predicate lookup can land in, kept apart because "the
-# column held an empty array" is an extraction that RAN and found nothing, "the
-# column holds no array" is one that never ran, and "no function of this entity
-# carries that selector" is a join that missed. Collapsing any two of them would
-# publish a coverage gap as a proven absence of predicates.
+# Extraction ran and found nothing, never ran, or no function has that selector: kept apart so a coverage gap isn't a
+# proven absence.
 PREDICATES_EXTRACTED = "extracted"
 PREDICATES_COLUMN_HOLDS_NO_ARRAY = "column_holds_no_array"
 PREDICATES_FUNCTION_NOT_LOCATED = "destination_function_not_located"
@@ -142,18 +74,10 @@ PREDICATES_FUNCTION_NOT_LOCATED = "destination_function_not_located"
 
 @dataclass(frozen=True)
 class DestinationPredicates:
-    """The verbatim predicate texts one destination function's body carries.
+    """The verbatim predicate texts of one destination function.
 
-    A DISCLOSURE and nothing else. The texts are stored without polarity — the
-    same string is a require-condition in one function and a revert-condition in
-    another — so no consumer of this can tell whether any of them must hold or
-    must not, and none of them is evaluated anywhere. It exists so a reader can
-    see the evidence a claim about that function was NOT made against.
-
-    ``functions_matching`` is published because a selector is not guaranteed
-    unique within an entity: an entity that folds a proxy and its implementation
-    can carry two rows under one selector, and a reader is owed the fact that
-    the texts below are one of them rather than the whole surface.
+    Disclosure only: without polarity none of them can be evaluated. ``functions_matching`` is published because a
+    selector can repeat within an entity (proxy and implementation folded).
     """
 
     state: str
@@ -166,26 +90,21 @@ class DestinationPredicates:
 
 @dataclass(frozen=True)
 class HopConditions:
-    """What the destination's conditions say about one caller reaching it."""
-
     state: str
     basis: str
     surface: str
     functions_consulted: int
     disproving: tuple[dict[str, Any], ...] = ()
-    # For a walked hop, which of the three readings above licensed it. ``None``
-    # on a hop that was not walked.
+    # For a walked hop, which coverage reading licensed it; ``None`` otherwise.
     coverage: str | None = None
 
 
 @dataclass
 class ConditionPlane:
-    """``effective_functions.conditions``, indexed for the closure walk.
+    """``effective_functions.conditions`` indexed for the closure walk.
 
-    ``by_entity`` is every analysed function of an entity. ``licensed`` is the
-    narrower and better-evidenced surface: the functions of that entity on which
-    a given address is a RESOLVED principal, which is the only positive witness
-    this plane has of what one caller may do at one destination.
+    ``by_entity`` is every analysed function; ``licensed`` narrows to functions where the address is a resolved
+    principal, the only positive witness of what a caller may do at a destination.
     """
 
     by_entity: dict[str, tuple[DestinationFunction, ...]] = field(default_factory=dict)
@@ -193,25 +112,12 @@ class ConditionPlane:
     provenance: dict[str, Any] = field(default_factory=dict)
 
     def predicates(self, destination: str, selector: str) -> DestinationPredicates:
-        """Every predicate text stored for ``destination``'s function ``selector``.
-
-        Read-only, from ``effective_functions.conditions`` — the CANONICAL
-        column, which is the one this plane loads. It is never read from
-        ``function_principals.details.conditions``: that copy disagrees with the
-        column on 270 of 1593 protocol-1 controller rows and nothing reconciles
-        them, so a consumer that read it would be publishing a second, unowned
-        extraction as this one.
-
-        Nothing here filters, orders, evaluates or classifies. ``kind`` on the
-        stored entry is not read: the label is applied to every entry the
-        extractor emits — authorization guards, transfer post-conditions and
-        decompiler temporaries all arrive as ``business`` — so branching on it
-        would sort by a field that carries no information.
+        """Every predicate text stored for ``destination``'s ``selector``, from the canonical
+        ``effective_functions.conditions`` column (the copy in ``function_principals.details`` disagrees on 270 of
+        1593 rows). Not filtered or classified: ``kind`` is ``business`` on everything.
         """
         wanted = (selector or "").lower()
-        # A function whose own selector was never extracted matches nothing:
-        # four bytes nobody recorded do not name a function, and joining on the
-        # empty string would hand back an arbitrary row's predicates.
+        # An unextracted selector matches nothing.
         matching = (
             [fn for fn in self.by_entity.get(destination, ()) if fn.selector and fn.selector.lower() == wanted]
             if wanted
@@ -219,8 +125,7 @@ class ConditionPlane:
         )
         if not matching:
             return DestinationPredicates(PREDICATES_FUNCTION_NOT_LOCATED, None, None, None, None, 0)
-        # Lowest ``function_id`` where a selector is carried twice: arbitrary,
-        # deterministic, and disclosed through ``functions_matching``.
+        # Lowest ``function_id`` when a selector repeats; disclosed via ``functions_matching``.
         function = min(matching, key=lambda fn: fn.function_id)
         if not function.analysed:
             return DestinationPredicates(
@@ -236,24 +141,12 @@ class ConditionPlane:
         )
 
     def hop(self, caller: str, destination: str) -> HopConditions:
-        """Whether ``destination``'s own guards permit ``caller`` to act there.
+        """Whether ``destination``'s own guards permit ``caller``.
 
-        The consulted surface is the function-level witness where one exists and
-        the destination's whole analysed function set otherwise. A hop is walked
-        when at least one consulted function carries no guard pinning its caller
-        to the destination itself; it is ``not_determined`` when every consulted
-        function does. It is never published as a proven negative: the principal
-        enumeration behind the licensed surface is a documented LOWER bound, so
-        "no function we witnessed is callable" is not "no function is".
-
-        A destination with no analysed function at all consults nothing, and
-        nothing is not a disproof — the edge remains the witness and the
-        shortfall is counted rather than converted into a refusal.
-
-        A walked hop carries WHICH of the three coverage readings licensed it,
-        because "no condition disproved this caller" over a function whose
-        conditions were never extracted is not the same fact as over one whose
-        were.
+        The consulted surface is the licensed functions if any, else every analysed function. Walked if some consulted
+        function doesn't pin its caller to the destination; ``not_determined`` if all do. Never a proven negative (the
+        principal enumeration is a lower bound). No analysed functions is not a disproof. Walked hops carry which
+        coverage reading licensed them.
         """
         if caller == destination:
             return HopConditions(HOP_WALKED, "caller_is_the_destination", SURFACE_NONE, 0, coverage=WALKED_NO_FUNCTION)
@@ -301,7 +194,6 @@ class ConditionPlane:
 
 
 def _caller_self_pins(conditions: Any) -> tuple[str, ...]:
-    """The verbatim conditions that pin this function's caller to itself."""
     if not isinstance(conditions, list):
         return ()
     out: list[str] = []
@@ -313,13 +205,8 @@ def _caller_self_pins(conditions: Any) -> tuple[str, ...]:
 
 
 def _stored_predicates(conditions: Any) -> tuple[tuple[str, ...], int]:
-    """Every stored predicate text, verbatim and in stored order, and the entry count.
-
-    The whole array, unfiltered: this is the population ``_caller_self_pins``
-    recognises one shape out of, kept so a disclosure can point at what was not
-    read rather than assert it was not read. An entry carrying no string
-    ``description`` contributes to the count and not to the texts, so the two
-    disagreeing is visible instead of silent.
+    """Every stored predicate text and the entry count; entries without a description count but add no text, so the
+    mismatch is visible.
     """
     if not isinstance(conditions, list):
         return (), 0
@@ -332,7 +219,6 @@ def _stored_predicates(conditions: Any) -> tuple[tuple[str, ...], int]:
 
 
 def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
-    """The destination-side caller guards the closure walk is bounded by."""
     from db.models import Contract, EffectiveFunction, FunctionPrincipal
 
     plane = ConditionPlane()
@@ -361,10 +247,7 @@ def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
         key = entity_key(chain_name, deployment or address)
         pins = _caller_self_pins(conditions)
         texts, entries = _stored_predicates(conditions)
-        # An ARRAY is an extraction that ran, empty or not. Anything else — a SQL
-        # null, the jsonb scalar null a Python ``None`` write stores — is one
-        # that never did, and the two are indistinguishable downstream unless
-        # they are separated here.
+        # An array is an extraction that ran; SQL or jsonb null never ran.
         analysed = isinstance(conditions, list)
         pinned_functions += 1 if pins else 0
         analysed_functions += 1 if analysed else 0
@@ -406,19 +289,12 @@ def load_condition_plane(session: Session, protocol_id: int) -> ConditionPlane:
     plane.provenance = {
         "functions": len(functions),
         "entities_with_analysed_functions": len(plane.by_entity),
-        # The coverage this recogniser actually had. A function whose
-        # ``conditions`` column is NULL carries no guard to find, so it can only
-        # ever report "nothing disproves this caller" — which is the answer a
-        # clean read gives too. Published apart, because a hop walked over
-        # nothing but unextracted functions is not a checked hop.
+        # Functions whose conditions were extracted; NULL ones can only ever report "nothing disproves", so a hop over
+        # them alone isn't checked.
         "functions_with_conditions_extracted": analysed_functions,
         "functions_with_no_conditions_recorded": len(functions) - analysed_functions,
         "functions_pinning_caller_to_self": pinned_functions,
-        # The whole predicate population the recogniser above ran over, counted
-        # so the one shape it recognises is readable against a denominator. None
-        # of these is evaluated anywhere; they are retained per function only so
-        # a composed magnitude can point a reader at the destination body's own
-        # guards instead of asserting they were not read.
+        # The predicate population the recogniser ran over, as a denominator; none is evaluated.
         "predicate_entries_stored": stored_predicates,
         "caller_licensed_pairs": len(plane.licensed),
         "recognised_shape": (

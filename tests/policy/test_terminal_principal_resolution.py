@@ -9,6 +9,8 @@ injected ``resolve_controllers`` callable, so every case here stubs it.
 from types import SimpleNamespace
 from typing import Any, cast
 
+import pytest
+
 from services.governance.principals import (
     _build_company_function_entry,
     _function_principal_payload,
@@ -24,9 +26,8 @@ CONTRACT_C = "0x" + "3" * 40
 
 
 def _dict_resolver(edges):
-    """address -> list[controller-step] from a plain adjacency dict; None when
-    absent. A single-step value is wrapped so tests stay terse; a list value
-    models parallel control planes."""
+    """address -> list[controller-step] from a plain adjacency dict (None when absent);
+    a single-step value is wrapped, a list value models parallel control planes."""
 
     def _resolve(address):
         val = edges.get(address.lower())
@@ -44,28 +45,35 @@ def test_is_terminal_principal_type():
         assert is_terminal_principal_type(non_terminal) is False
 
 
-def test_terminates_at_safe_controller():
-    resolver = _dict_resolver({CONTRACT_A: {"address": SAFE, "resolved_type": "safe", "details": {"threshold": 2}}})
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
+@pytest.mark.parametrize(
+    "edges, resolved_type, address, chain",
+    [
+        pytest.param(
+            {CONTRACT_A: {"address": SAFE, "resolved_type": "safe", "details": {"threshold": 2}}},
+            "safe",
+            SAFE,
+            [CONTRACT_A, SAFE],
+            id="safe-controller",
+        ),
+        pytest.param(
+            {
+                CONTRACT_A: {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
+                CONTRACT_B: {"address": EOA, "resolved_type": "eoa", "details": {}},
+            },
+            "eoa",
+            EOA,
+            [CONTRACT_A, CONTRACT_B, EOA],
+            id="multi-hop-contract-chain",
+        ),
+    ],
+)
+def test_walk_terminates(edges, resolved_type, address, chain):
+    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=_dict_resolver(edges))
     assert record["terminal"] is True
-    assert record["resolved_type"] == "safe"
-    assert record["address"] == SAFE
+    assert record["resolved_type"] == resolved_type
+    assert record["address"] == address
     assert record["status"] == "terminated"
-    assert record["chain"] == [CONTRACT_A, SAFE]
-
-
-def test_multi_hop_contract_chain_terminates():
-    resolver = _dict_resolver(
-        {
-            CONTRACT_A: {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
-            CONTRACT_B: {"address": EOA, "resolved_type": "eoa", "details": {}},
-        }
-    )
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
-    assert record["terminal"] is True
-    assert record["resolved_type"] == "eoa"
-    assert record["address"] == EOA
-    assert record["chain"] == [CONTRACT_A, CONTRACT_B, EOA]
+    assert record["chain"] == chain
 
 
 def test_unfetched_controller_is_unknown_not_resolved():
@@ -244,15 +252,6 @@ def test_two_getters_same_controller_not_ambiguous():
     assert "controllers" not in record
 
 
-def test_single_controller_plane_proceeds():
-    # Regression guard for the sound single-plane case (owner only, no authority).
-    resolver = _dict_resolver({CONTRACT_A: [{"address": SAFE, "resolved_type": "safe", "details": {}}]})
-    record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=resolver)
-    assert record["terminal"] is True
-    assert record["address"] == SAFE
-    assert "controllers" not in record
-
-
 def test_already_terminal_start_short_circuits():
     called = {"n": 0}
 
@@ -279,19 +278,17 @@ def _fp(address, resolved_type, *, details=None, principal_type="authority_role"
     )
 
 
-def test_contract_principal_marked_non_terminal():
-    payload = _function_principal_payload(_fp(CONTRACT_A, "contract"))
-    assert payload["terminal"] is False
-
-
-def test_safe_principal_marked_terminal():
-    payload = _function_principal_payload(_fp(SAFE, "safe", details={"threshold": 2}))
-    assert payload["terminal"] is True
-
-
-def test_unknown_principal_marked_non_terminal():
-    payload = _function_principal_payload(_fp(CONTRACT_A, None))
-    assert payload["terminal"] is False
+@pytest.mark.parametrize(
+    "fp, expected_terminal",
+    [
+        pytest.param(_fp(CONTRACT_A, "contract"), False, id="contract-non-terminal"),
+        pytest.param(_fp(SAFE, "safe", details={"threshold": 2}), True, id="safe-terminal"),
+        # A None type fails closed.
+        pytest.param(_fp(CONTRACT_A, None), False, id="unknown-non-terminal"),
+    ],
+)
+def test_principal_payload_terminal_flag(fp, expected_terminal):
+    assert _function_principal_payload(fp)["terminal"] is expected_terminal
 
 
 def test_terminal_principal_chain_surfaced_from_details():
@@ -318,30 +315,24 @@ def test_lzcompose_style_permissionless_stays_blank_without_failure():
     entry = _build_company_function_entry(cast(Any, ef), [])
     assert entry["authority_public"] is True
     assert entry["controllers"] == []
-    # The column's ``None`` rides through. (Inverts the earlier ``== []`` pin,
-    # which asserted the very fold that erased the three states — ``[]`` is
-    # "proven not role-gated", the NEGATION of the column's "role not
-    # determined", not a coarsening of it.)
+    # The column's ``None`` rides through: ``[]`` is "proven not role-gated", the
+    # NEGATION of "role not determined", not a coarsening of it.
     assert entry["authority_roles"] is None
     assert entry["direct_owner"] is None
     # No principals, so no terminal marking is fabricated at the function level.
     assert "terminal" not in entry
 
 
-# ---------------------------------------------------------------------------
-# The producer half: "no such controller" and "the read failed" were one
-# answer. Only one status ever fired; 1,556 rows were written.
-# (Consumer wiring lives elsewhere and is deliberately NOT covered here.)
-# ---------------------------------------------------------------------------
+# The producer half: "no such controller" and "the read failed" were one answer, so
+# only one status ever fired (1,556 rows). Consumer wiring is deliberately NOT covered here.
 
 
 def test_probed_clean_silence_is_controllers_not_determined_with_basis():
-    """INVERTED from ``test_probed_clean_with_no_controller_is_a_proven_absence
-    _not_unfetched`` (which pinned ``no_controller``): ``[]`` from the resolver
-    means the canonical getters were SILENT — evidence those three getters
-    named nothing, never proof that no controller exists (unpauser()/kernel()/
-    *_admin()/ERC-1967-admin contracts produce the same [] while demonstrably
-    controlled). The record carries its basis and stays not-determined."""
+    """``[]`` from the resolver means the canonical getters were SILENT — evidence
+    only that those getters named nothing, never proof of no controller
+    (unpauser()/kernel()/*_admin()/ERC-1967 admins produce the same [] while controlled).
+    The record carries its basis and stays not-determined. Inverts the old
+    ``no_controller`` pin."""
     record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=lambda _address: [])
     assert record["status"] == "controllers_not_determined"
     assert record["probes_silent"] == ["owner", "authority", "admin"]
@@ -353,9 +344,8 @@ def test_probed_clean_silence_is_controllers_not_determined_with_basis():
 
 
 def test_no_controller_token_has_no_producer():
-    """R2 zero-realised statement: ``no_controller`` (a PROVEN absence) remains
-    a declared vocabulary member with NO producer — no basis available to the
-    walk can earn it. Sweep every resolver answer shape; none may mint it."""
+    """R2: ``no_controller`` (a PROVEN absence) stays a declared vocabulary member with
+    NO producer. Sweep every resolver answer shape; none may mint it."""
     shapes = [
         lambda _a: [],
         lambda _a: None,
@@ -368,10 +358,9 @@ def test_no_controller_token_has_no_producer():
 
 
 def test_multi_hop_silence_is_attributed_to_the_silent_hop():
-    """The Curve-pool shape: the walk finds a REAL controller at depth 1
-    (owner() answered) and only THEN goes silent. The record's status must not
-    read as a statement about the starting principal — it names the hop whose
-    getters were silent, while the chain keeps the real controller it found."""
+    """The Curve-pool shape: a REAL controller at depth 1, then silence. The status must
+    name the silent hop, not read as a statement about the starting principal, while
+    the chain keeps the controller it found."""
     resolver = _dict_resolver(
         {
             CONTRACT_A.lower(): {"address": CONTRACT_B, "resolved_type": "contract", "details": {}},
@@ -386,9 +375,8 @@ def test_multi_hop_silence_is_attributed_to_the_silent_hop():
 
 
 def test_canonical_getter_names_pin_the_production_probe_set():
-    """The walk publishes CANONICAL_CONTROLLER_GETTERS as the basis of a
-    controllers_not_determined record; the production resolver's probe set
-    (tracking._CONTROLLER_GETTER_SIGS) must be exactly those getters."""
+    """The walk publishes CANONICAL_CONTROLLER_GETTERS as its not-determined basis; the
+    production probe set (tracking._CONTROLLER_GETTER_SIGS) must be exactly those."""
     from services.governance.principals import CANONICAL_CONTROLLER_GETTERS
     from services.resolution.tracking import _CONTROLLER_GETTER_SIGS
 
@@ -396,16 +384,15 @@ def test_canonical_getter_names_pin_the_production_probe_set():
 
 
 def test_probe_error_stays_unknown_unfetched():
-    """``None`` means the plane set was NOT dispositively read (a transient
-    probe error — retryable). It must stay distinguishable from the above."""
+    """``None`` = plane set NOT dispositively read (transient, retryable); must stay
+    distinguishable from clean silence."""
     record = resolve_terminal_principal(CONTRACT_A, "contract", resolve_controllers=lambda _address: None)
     assert record["status"] == "unknown_unfetched"
     assert record["terminal"] is False
 
 
 def test_steps_returned_but_unusable_is_not_a_proven_absence():
-    """Fetched-but-unusable (no step carries a valid address) is not-determined:
-    something answered, we just cannot use it. Never ``no_controller``."""
+    """Fetched-but-unusable (no valid address) is not-determined, never ``no_controller``."""
     record = resolve_terminal_principal(
         CONTRACT_A, "contract", resolve_controllers=lambda _address: [{"resolved_type": "contract"}]
     )
@@ -413,8 +400,8 @@ def test_steps_returned_but_unusable_is_not_a_proven_absence():
 
 
 def test_policy_worker_resolver_keeps_error_and_absence_apart():
-    """The collapse was at the CALL SITE: ``if not controllers: return None``
-    mapped both ``read_contract_controllers`` answers onto ``None``."""
+    """The collapse was at the CALL SITE: ``if not controllers: return None`` mapped both
+    ``read_contract_controllers`` answers onto ``None``."""
     import workers.policy_worker as pw
 
     calls: dict[str, object] = {}
@@ -446,10 +433,8 @@ def test_policy_worker_resolver_keeps_error_and_absence_apart():
 
 
 def test_multi_plane_records_silence_per_plane():
-    """A plane whose own walk goes canonical-getter-silent reports the
-    not-determined state (with its basis) on THAT plane, so a weakest-path
-    scorer sees "this plane's controllers were not determined" rather than a
-    fabricated proven absence."""
+    """A plane whose own walk goes canonical-getter-silent reports not-determined (with
+    basis) on THAT plane, so a weakest-path scorer never sees a fabricated absence."""
     resolver_map = {
         CONTRACT_A: [
             {"address": SAFE, "resolved_type": "safe", "details": {}},

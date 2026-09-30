@@ -39,7 +39,6 @@ KEY_OUTSIDER = entity_key("ethereum", OUTSIDER)
 
 
 def _merged_unit_signals(claim: str = "upgrade.implementation"):
-    """Two upgrade witnesses on two entities, one per member of a merged Safe unit."""
     return [
         sig(
             function_name=f"upgradeTo{index}",
@@ -82,10 +81,10 @@ def _merged_unit_principals(strong_threshold: int = 4):
 def test_r9_a_merged_units_weakness_is_per_reached_entity(fold):
     """Value only the 4/8 member reaches is not priced at the 3/7 member's rung.
 
-    ``_row_for`` keeps the max weakness over the unit's members while the row
-    folds the UNION of their reach. The weakest path is the weakest path TO
-    THAT ENTITY, and the published union — which no single member reaches — is
-    priced at the coalition able to act as every contributing member.
+    ``_row_for`` keeps the max weakness over members while the row folds the
+    UNION of their reach. Each entity's weakest path is the weakest path TO THAT
+    ENTITY; the union, which no single member reaches, is priced at the
+    coalition able to act as every contributing member.
     """
     document = fold(
         _merged_unit_signals(),
@@ -109,7 +108,6 @@ def test_r9_a_merged_units_weakness_is_per_reached_entity(fold):
 
 
 def test_r9_members_at_one_rung_leave_the_row_untouched(fold):
-    """The re-attribution fires on a DISAGREEMENT, never as a blanket rewrite."""
     document = fold(
         _merged_unit_signals(),
         # Both members 4/8-equivalent: 4/8 and 3/7 disagree, 4/8 and 4/8 do not.
@@ -128,10 +126,10 @@ def test_r9_members_at_one_rung_leave_the_row_untouched(fold):
 def test_r10_the_burn_sentinel_is_never_charged_a_sheet(fold):
     """A witness that names ``0x0`` has proved no reach, and routes none.
 
-    Ownership renounced to the zero address makes it the single largest fan-out
-    in the graph; a repoint witness naming it would otherwise hand one finding
-    everything the sentinel "controls". The perimeter refuses it as an entity and
-    the fold refuses it as a reach key, so nothing behind it is reachable.
+    Renounced ownership makes the zero address the largest fan-out in the
+    graph; a repoint naming it would hand one finding everything the sentinel
+    "controls". The perimeter refuses it as an entity and the fold as a reach
+    key.
     """
     signal = sig(
         authority_openness="restricted",
@@ -168,9 +166,9 @@ def test_r10_the_burn_sentinel_is_never_charged_a_sheet(fold):
 def _magnitude_document(fold, *, witnessed: bool):
     """One reach, with and without a magnitude witness on it.
 
-    GATE control, which is the class whose magnitude question only a witness can
-    answer: the unwitnessed document has to publish a genuinely unanswered term,
-    and code control over a priced node is answered by its own sheet ceiling.
+    GATE control, whose magnitude question only a witness can answer: the
+    unwitnessed document must publish a genuinely unanswered term (code control
+    over a priced node is answered by its own sheet ceiling).
     """
     gates = (
         {"reach_magnitude_usd": Tri.proven("proven_exact", 250_000.0).to_json()}
@@ -196,9 +194,8 @@ def _magnitude_document(fold, *, witnessed: bool):
 def test_r11_a_proven_reach_with_no_magnitude_witness_is_unanswered(fold):
     """The confidence axis grows the term the unknown magnitude belongs in.
 
-    Without it a gate-control reach counts as fully answered, fully scored and
-    priced, so "we could not prove how much this moves" had nowhere to land but
-    the grade.
+    Without it a gate-control reach counts as fully answered, so "we could not
+    prove how much this moves" had nowhere to land but the grade.
     """
     unwitnessed_doc = _magnitude_document(fold, witnessed=False)
     witnessed_doc = _magnitude_document(fold, witnessed=True)
@@ -235,12 +232,11 @@ def test_r11_a_proven_reach_with_no_magnitude_witness_is_unanswered(fold):
 def test_r11_every_proven_reach_capability_is_in_the_denominator(fold):
     """No capability buys its way out of "how much does this move?".
 
-    A per-capability exclusion list reads as relief for a reach with no magnitude
-    concept, but its only live effect is on an entity carrying BOTH an excluded
-    and an admitted signal: dropping the excluded one RAISES the term by
-    discarding a real unanswered question. Here one witnessed ``flow.out`` and one
-    unwitnessed ``timelock.set_delay`` share an entity — the honest answer is 50%,
-    and an exclusion list would publish 100%.
+    A per-capability exclusion list only matters on an entity carrying BOTH an
+    excluded and an admitted signal, where dropping the excluded one RAISES the
+    term by discarding a real unanswered question. One witnessed ``flow.out``
+    and one unwitnessed ``timelock.set_delay`` share an entity: the honest
+    answer is 50%, an exclusion list would publish 100%.
     """
     signals = [
         flow_sig(
@@ -281,9 +277,9 @@ def test_r11_every_proven_reach_capability_is_in_the_denominator(fold):
 def test_r12_consuming_a_relation_may_not_raise_confidence(fold):
     """Monotonicity: declining to walk a relation CHARGES confidence, never frees it.
 
-    The perimeter was seeded from the relations the scorer consumed, so entities
-    a declined relation proved are principals of gated functions never entered
-    the denominator — and the published figure was HIGHER for walking less.
+    The perimeter was seeded from consumed relations, so entities a declined
+    relation proved never entered the denominator and the figure was HIGHER for
+    walking less.
     """
     discovery = {"capability_principal": {KEY_OUTSIDER, KEY_C}}
     shared = dict(
@@ -306,7 +302,6 @@ def test_r12_consuming_a_relation_may_not_raise_confidence(fold):
 
 
 def test_r12_a_declined_relations_entities_lower_confidence(fold):
-    """The charge is real: the same analysis over a wider proven graph scores lower."""
     shared = dict(
         principals={1: facts(1, EOA, "eoa")},
         value=value_plane({KEY_C: {"usdc": 1_000_000.0}}),
@@ -322,7 +317,6 @@ def test_r12_a_declined_relations_entities_lower_confidence(fold):
 
 
 def test_r17_contradictory_owner_sets_are_disclosed_not_silently_arbitrated(fold):
-    """Two ``exact`` owner witnesses for one Safe: the disagreement is published."""
     document = fold(
         [_merged_unit_signals()[0]],
         principals={
@@ -340,12 +334,11 @@ def test_r17_contradictory_owner_sets_are_disclosed_not_silently_arbitrated(fold
 def test_r9_a_capped_magnitude_does_not_move_per_member_reach(fold):
     """W2b's per-call cap scales what a member is charged, never what it reaches.
 
-    ``_member_weakness`` re-folds each member's own instances to ask which
-    entities that member is proven to reach. That re-fold runs through the same
+    ``_member_weakness`` re-folds each member's instances through the same
     ``_row_value`` the cap lives in, so a cap that removed an entity from a
     member's reach would silently drop the member from that entity's rung and
     fall back to the unit-level weakness. Reach is read off witnessed membership
-    for exactly this reason, and the invariant is pinned here.
+    for exactly this reason.
     """
     signals = [
         sig(
@@ -427,18 +420,16 @@ def _repoint_facts() -> Any:
     ],
 )
 def test_w3_a_repoint_is_admitted_only_on_a_validated_value_witness(named, tier, why):
-    """R2 — a repoint adds a foreign entity to a reach set, and must earn it.
+    """R2: a repoint adds a foreign entity to a reach set, and must earn it.
 
-    It did the same job as the backlink licence with none of that function's
-    checks: no protocol, no chain, no existence, and no check that the witness
-    naming the entity proved anything about value. The burn-sentinel arm in
-    particular has never fired on any corpus, which is why it is pinned rather
-    than observed.
+    It did the backlink licence's job with none of its checks (protocol, chain,
+    existence, value witness). The burn-sentinel arm has never fired on any
+    corpus, so it is pinned rather than observed.
 
     The tier test is an ALLOWLIST, and the last two cases are why: a denylist of
-    ``policy_derived`` passes every tier nobody classified, and an absent or
-    unrecognised token resolves to ``not_determined`` — the weakest witness
-    there is, admitted by the gate meant to demand the strongest.
+    ``policy_derived`` passes every unclassified tier, and an absent or
+    unrecognised token resolves to ``not_determined``, the weakest witness,
+    admitted by the gate meant to demand the strongest.
     """
     entry: dict[str, Any] = {"witness": {"callee": named}}
     if tier is not None:
@@ -459,8 +450,7 @@ def test_w3_a_repoint_never_upgrades_an_unscored_capability():
     """The second half of R2: naming a callee is not proving a capability.
 
     Six ``flow.in`` rows were promoted from ``capability_not_scored`` to
-    ``proven_reach`` purely because a witness named an address — an upgrade of
-    the reach STATE out of a fact about call structure.
+    ``proven_reach`` purely because a witness named an address.
     """
     facts_ = _repoint_facts()
     reach = D._reach_for_claim(

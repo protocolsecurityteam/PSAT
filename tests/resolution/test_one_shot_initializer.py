@@ -1,24 +1,14 @@
 """Real-Slither integration tests for the one-shot initializer projection.
 
-Compiles minimal fixtures with the production Slither toolchain and drives the
-real ``build_predicate_artifacts`` → evaluator → policy-surface stack (the same
-calls the static worker and resolver make). Pins:
-
-  * the A-spine: an OZ v4 ``initializer`` and an OZ v5 ERC-7201 ``initializer``
-    both surface a ``one_shot`` condition kind and stamp a latch location;
-  * the transient ``_initializing`` flag — the v5 struct member read through
-    the real ``onlyInitializing``/``_isInitializing`` chain — keeps the badge
-    role but never carries a latch location (it reads 0 at rest on consumed
-    and live deployments alike, so a latch there can only mislead);
-  * the structural recall net: a custom ``require(!initialized)`` bool latch is
-    a one-shot CANDIDATE (carrying a latch), while a reentrancy guard and a
-    capped counter are NOT — the counter/guard FP classes the candidate must
-    exclude;
-  * polarity: a re-armable toggle (``require(paused); paused = false``) never
-    reads as a latch.
-
-Hermetic: no live marker, no RPC. The on-chain consumed/live read is tested
-separately (``test_one_shot_probe``) with a stubbed wire.
+Drives the real ``build_predicate_artifacts`` -> evaluator -> policy-surface stack. Pins:
+  * the A-spine: an OZ v4 ``initializer`` and an OZ v5 ERC-7201 ``initializer`` both
+    surface a ``one_shot`` condition and stamp a latch location;
+  * the transient ``_initializing`` flag keeps the badge role but never a latch location
+    (it reads 0 at rest on consumed and live deployments alike, so a latch would mislead);
+  * structural recall: a custom ``require(!initialized)`` bool latch is a one-shot
+    CANDIDATE, while a reentrancy guard and a capped counter are NOT;
+  * polarity: a re-armable toggle (``require(paused); paused = false``) is never a latch.
+Hermetic: the on-chain consumed/live read is in ``test_one_shot_probe`` with a stubbed wire.
 """
 
 from __future__ import annotations
@@ -292,34 +282,27 @@ def test_custom_bool_latch_is_candidate_not_standard(artifacts):
     assert not latches["standard"], "custom latch must not be an A-spine standard"
     assert latches["candidate"], "custom bool latch should be a candidate"
     assert latches["candidate"][0]["standard"] == "structural_scalar_latch"
-    # Candidates decide via their guard, never via the version anchor.
     assert "role" not in latches["candidate"][0]
-    # Static badge stays generic — no one_shot CONDITION until confirmed.
     assert "one_shot" not in _surface_condition_kinds(tree)
 
 
-def test_capped_counter_is_not_a_one_shot(artifacts):
-    """``require(depositCount < 100); depositCount += 1`` must NOT be flagged —
-    the write is not a constant that permanently falsifies the guard."""
-    tree = _fn_tree(artifacts["Custom"], "deposit")
+@pytest.mark.parametrize(
+    ("fn_name", "expected_kinds"),
+    [
+        # ``require(depositCount < 100); depositCount += 1``: the write is not a constant that
+        # permanently falsifies the guard.
+        pytest.param("deposit", (), id="capped-counter"),
+        pytest.param("swap", ("reentrancy",), id="reentrancy-guard-keeps-reentrancy-kind"),
+        # ``require(paused); paused = false``: a setter re-arms it, so it is not a consuming
+        # one-shot (the monotonic-ascent requirement).
+        pytest.param("unpause", (), id="rearmable-toggle"),
+    ],
+)
+def test_custom_non_latches_are_not_a_one_shot(artifacts, fn_name, expected_kinds):
+    tree = _fn_tree(artifacts["Custom"], fn_name)
     latches = collect_one_shot_latches(tree)
     assert not latches["standard"] and not latches["candidate"]
-
-
-def test_reentrancy_guard_is_not_a_one_shot(artifacts):
-    tree = _fn_tree(artifacts["Custom"], "swap")
-    latches = collect_one_shot_latches(tree)
-    assert not latches["standard"] and not latches["candidate"]
-    # It keeps its reentrancy classification.
-    assert "reentrancy" in _surface_condition_kinds(tree)
-
-
-def test_rearmable_toggle_is_not_a_latch(artifacts):
-    """``require(paused); paused = false`` — a setter re-arms it, so it is not a
-    consuming one-shot (the monotonic-ascent requirement)."""
-    tree = _fn_tree(artifacts["Custom"], "unpause")
-    latches = collect_one_shot_latches(tree)
-    assert not latches["standard"] and not latches["candidate"]
+    assert set(expected_kinds) <= _surface_condition_kinds(tree)
 
 
 def test_unstructured_storage_getter_link_candidate(artifacts):
@@ -331,7 +314,6 @@ def test_unstructured_storage_getter_link_candidate(artifacts):
     assert latches["candidate"], "unstructured-storage init should be a candidate"
     latch = latches["candidate"][0]
     assert latch["standard"] == "unstructured_slot_latch"
-    # The slot is the keccak constant, not slot-0.
     assert latch["slot"] == "0x" + keccak(text="fixture.version").hex()
 
 

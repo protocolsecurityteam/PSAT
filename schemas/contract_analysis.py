@@ -1,5 +1,3 @@
-"""Typed schemas for contract analysis output."""
-
 from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
@@ -21,21 +19,12 @@ ControllerKind = Literal[
     "computed",
     "unknown",
 ]
-# Why an address is attached to a contract at all. "The caller is checked
-# against this address" and "this address gets called" are different facts and
-# only the first is a control claim; a single set that unions them cannot say
-# which one a row came from.
+# Why an address is attached to a contract; only ``caller_gate`` is a control claim.
 #
-#   caller_gate  — proven: a predicate leaf requires the caller to equal / be a
-#                  member of this address, or the leaf delegates its authority
-#                  check to it (``authority_contract.address_source``).
-#   call_target  — proven: an ``external_call`` sink invokes this address. NOT a
-#                  claim that it is proven *not* to be a gate; it is "called,
-#                  and no gate was proven".
+#   caller_gate  — a predicate requires the caller to equal / be in this address, or delegates its check to it.
+#   call_target  — an ``external_call`` sink invokes it. Not proof it isn't a gate.
 #
-# Absent/NULL is the third state — not determined (no provenance was computed
-# for this target, or the row predates the field). A consumer must not read it
-# as either value.
+# Absent is not determined; never read it as either value.
 ControllerProvenance = Literal["caller_gate", "call_target"]
 GuardKind = Literal[
     "caller_equals_storage",
@@ -60,32 +49,19 @@ class Subject(TypedDict):
     address: str
     name: str
     compiler_version: str
-    # THREE STATES. ``True``/``False`` are the fetch's answer about this address
-    # (Etherscan served verified source, or it did not); ``None`` is "the fetch fact
-    # did not reach this pipeline run", which is not the same claim and must not be
-    # rendered as one. It rides straight into the nullable
-    # ``contract_summaries.source_verified`` column and out onto
-    # ``/api/company/<slug>``.
+    # Three states: ``None`` means the fetch fact didn't reach this run, which differs from ``False``. Flows to
+    # ``contract_summaries.source_verified`` and the company API.
     source_verified: bool | None
 
 
 class AnalysisStatus(TypedDict):
-    # The IR-derived analysis (predicates, effects, claims, classification) is
-    # the whole of the static stage; there is no detector pass behind this flag.
     static_analysis_completed: bool
     errors: list[str]
 
 
 class Summary(TypedDict):
-    # Every evidence field here is nullable, and ``None`` means the detector
-    # did not run, or ran on inputs a degraded upstream stage had already
-    # emptied. ``False`` / ``[]`` is the positive claim "it ran and found
-    # nothing" — but only as strong as the producer's own ran-check: it is an
-    # absence proof exactly to the extent that the producer tests every plane
-    # its evidence travels through, which is per-field (see
-    # ``_detect_pausability``, which tests two). ``contract_summaries`` has
-    # been nullable on all of them since the baseline migration; the producer
-    # is what emitted a proven-absence on 100% of rows regardless.
+    # ``None`` = the detector didn't run or ran on emptied inputs. ``False``/``[]`` is a proven absence only as far as
+    # the producer's ran-check covers every plane (per field; see ``_detect_pausability``).
     control_model: ControlModel
     is_upgradeable: bool
     is_pausable: bool | None
@@ -96,16 +72,13 @@ class Summary(TypedDict):
 
 
 class ContractClassification(TypedDict):
-    # ``standards`` / ``is_erc*`` / ``is_nft`` are IR-derived (``contract.ercs()``
-    # plus a signature+event match) and run on every parse, so ``[]`` / ``False``
-    # here are MEASURED absences, independent of the Slither detector pass.
+    # IR-derived and run on every parse, so ``[]``/``False`` are measured absences.
     standards: list[str]
     is_erc20: bool
     is_erc721: bool
     is_erc1155: bool
     is_nft: bool
-    # ``is_factory`` alone reads the effects artifact's ``contract_creation``
-    # sinks: ``None`` when that artifact is degraded, i.e. not determined.
+    # ``None`` when the effects artifact is degraded.
     is_factory: bool | None
     factory_functions: list[str] | None
     evidence: list[Evidence]
@@ -143,8 +116,7 @@ class SemanticControlAnalysis(TypedDict):
     role_definitions: list[RoleDefinition]
     semantic_functions: list[SemanticFunctionSummary]
     current_holders: CurrentHolders
-    # WriterEventSpec entries (shape in mapping_events.py). Kept as
-    # list[dict] because TypedDict can't forward-ref a sibling module.
+    # TypedDict can't forward-ref a sibling module.
     mapping_writer_events: NotRequired[list[dict]]
 
 
@@ -159,9 +131,7 @@ class UpgradeabilityAnalysis(TypedDict):
 
 
 class PausabilityAnalysis(TypedDict):
-    # ``None`` = not determined (the claims plane, the only detector that
-    # resolves a struct-member / namespaced latch, did not run). Distinct from
-    # ``False``, which is a proven absence.
+    # ``None`` when the claims plane (the only detector for struct/namespaced latches) didn't run.
     is_pausable: bool | None
     pause_functions: list[str]
     unpause_functions: list[str]
@@ -172,15 +142,11 @@ class PausabilityAnalysis(TypedDict):
 
 
 class TimelockAnalysis(TypedDict):
-    # ``None`` = not determined (no IR to walk). Never ``False`` for "we did
-    # not look".
+    # ``None`` when there's no IR; never ``False`` for "didn't look".
     has_timelock: bool | None
     pattern: TimelockPattern
-    # The delay VALUE is a live read (``getMinDelay()``) and this module has no
-    # chain: ``delay`` is always ``None`` with ``delay_source: "not_read"``
-    # until one is threaded. A defaulted delay would fabricate a protective
-    # credit. ``delay_variables`` names where the value lives, which is what
-    # source alone can prove.
+    # The value is a live read and this module has no chain, so always ``None`` with ``delay_source: "not_read"``; a
+    # default would fabricate a protective credit.
     delay: int | None
     delay_source: Literal["not_read", "chain_read"]
     delay_variables: list[str]
@@ -208,18 +174,9 @@ class AssociatedEventInput(TypedDict):
 
 
 class EffectTags(TypedDict, total=False):
-    """Structural side-effect summary for the union of functions that emit
-    an event. Populated by ``_writer_records_from_effects`` from the
-    ``effects`` artifact.
-
-    The watcher uses these tags to classify events without relying on a
-    controller_id → event_type lookup. ``writes`` is the union of
-    state-variable names mutated by any emitter; ``delegates`` is True
-    when any emitter contains a DELEGATECALL sink (i.e. the event signals
-    a delegate-target swap). ``is_initializer`` flags the OZ
-    Initializable pattern — any emitter modified by ``initializer`` /
-    ``reinitializer`` — so the watcher can fire reanalysis on unexpected
-    re-inits without a hand-rolled Initialized topic.
+    """Structural side-effects over every emitter of an event, so the watcher classifies events without a
+    controller_id lookup. ``delegates``: some emitter delegatecalls. ``is_initializer``: some emitter is
+    ``initializer``/``reinitializer``, so unexpected re-inits trigger reanalysis.
     """
 
     writes: list[str]
@@ -236,22 +193,13 @@ class AssociatedEventRequired(TypedDict):
 
 class AssociatedEvent(AssociatedEventRequired, total=False):
     effect_tags: EffectTags
-    # F3 qualification, both absent unless PROVEN
-    # (services/static/contract_analysis_pipeline/writer_openness.py):
+    # Both absent unless proven (writer_openness.py):
     #
-    #   member_witness   — the emit-write correspondence record proving this
-    #                      event's args carry the written entry's key (and,
-    #                      when the event states one, its value + direction).
-    #   writer_openness  — ``"restricted"`` when every externally-callable path
-    #                      that can emit this event is proven to restrict its
-    #                      caller. Never ``"open"``: proving that needs the
-    #                      resolution plane's earned-public projection, and the
-    #                      monitoring plane reads an absent key as the
-    #                      not-determined third state either way.
+    #   member_witness   — proves the event's args carry the written entry's key (and value/direction if stated).
+    #   writer_openness  — ``"restricted"`` when every path emitting it restricts the caller. Never ``"open"``: that
+    # needs the resolution plane's earned-public projection.
     #
-    # Together they are what lets the watcher publish a mapping/struct member
-    # change directly (``member_changed:<mapping_var>``) instead of treating an
-    # occurrence as bare activity.
+    # Together they let the watcher publish ``member_changed:<mapping_var>`` instead of bare activity.
     member_witness: dict[str, Any]
     writer_openness: str
 
@@ -299,18 +247,15 @@ class ControllerTrackingTarget(TypedDict):
     associated_events: list[AssociatedEvent]
     polling_sources: list[str]
     notes: list[str]
-    # Absent = not determined. See ``ControllerProvenance``.
     authority_provenance: NotRequired[ControllerProvenance]
 
 
 class SecondaryImplPointer(TypedDict):
-    """A storage slot the primary impl's fallback/receive delegatecalls the value
-    of — the split-proxy / admin-impl pattern (e.g. LRTSquared's ``adminImpl``).
-    ``slot``/``offset`` locate it in the proxy's storage so the value (the
-    secondary impl address) can be read from there. ``slot`` is an ``int``: a
-    small sequential layout slot for a named ``address`` var, or the full 256-bit
-    constant for an unstructured (EIP-1967-style) slot. See
-    services/static/contract_analysis_pipeline/secondary_impl.py."""
+    """A proxy-storage slot the primary impl's fallback delegatecalls to (split-proxy, e.g.
+
+    LRTSquared's ``adminImpl``). ``slot`` is a sequential layout slot or a full 256-bit unstructured constant. See
+    secondary_impl.py.
+    """
 
     name: str
     slot: int
@@ -330,8 +275,5 @@ class ContractAnalysis(TypedDict):
     audit_alignment: AuditAlignment
     tracking_hints: list[TrackingHint]
     controller_tracking: list[ControllerTrackingTarget]
-    # Split-proxy secondary-impl pointers detected on the primary impl. Optional
-    # (present only for the rare fallback-delegatecall-to-state-var shape);
-    # consumed by the static worker to analyse those logic contracts against
-    # proxy storage.
+    # Present only for the rare fallback-delegatecall-to-state-var shape.
     secondary_impl_pointers: NotRequired[list[SecondaryImplPointer]]

@@ -1,17 +1,7 @@
-"""``authority.replace`` — swapping the external authority contract.
+"""``authority.replace``: swapping the external authority contract.
 
-Standard-exact: the canonical ``setAuthority(address)`` selector (``0x7a9e5e4b``,
-computed from the *canonical* signature so a ``setAuthority(Authority)``
-interface param still resolves) plus the authority write-target gate — the
-function writes the very state variable a ``delegated_authority`` gate leaf names
-as the contract its permission checks consult. Both halves are on-chain facts:
-the selector the chain dispatches on, and the address source the predicate tree
-recorded for the guard's external call.
-
-The gate is what keeps this off the retired ``dest:{name}`` substring detector's
-false positives (a data-freshness call inside a modifier, e.g.
-``registerEth2DepositContract`` / LayerZero ``registerLibrary``): those never
-bear the ``setAuthority`` selector.
+Requires the canonical ``setAuthority(address)`` selector and a write to the variable a ``delegated_authority`` gate
+leaf consults, so data-freshness calls in modifiers (``registerLibrary``) don't match.
 """
 
 from __future__ import annotations

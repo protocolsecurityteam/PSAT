@@ -1,20 +1,10 @@
-"""Upgrade-history merge helpers (pure dict transforms).
-
-The persist/project step (``_finalize_upgrade_history``) stays in
-``static_worker``: it calls ``store_artifact``, which tests patch as a
-``workers.static_worker`` attribute.
-"""
+"""Upgrade-history merge helpers. Persisting stays in ``static_worker`` because tests patch ``store_artifact`` there."""
 
 from __future__ import annotations
 
 
 def _merge_upgrade_history(prev: dict, new: dict) -> dict:
-    """Merge previous and new upgrade history results (append-only).
-
-    For each proxy present in both, events are unioned (deduplicated by
-    block_number + tx_hash + event_type) and timelines rebuilt.  Proxies
-    appearing in only one side are kept as-is.
-    """
+    """Append-only merge; events deduped by (block, tx, type) and timelines rebuilt."""
     from services.discovery.upgrade_history import _build_implementation_timeline
 
     merged_proxies: dict[str, dict] = {}
@@ -35,11 +25,9 @@ def _merge_upgrade_history(prev: dict, new: dict) -> dict:
             total_upgrades += new_proxy.get("upgrade_count", 0)
             continue
 
-        # Both exist — merge events
         prev_events = prev_proxy.get("events", [])
         new_events = new_proxy.get("events", [])
 
-        # Deduplicate by (block_number, tx_hash, event_type)
         seen: set[tuple[int, str, str]] = set()
         merged_events: list[dict] = []
         for event in prev_events + new_events:
@@ -50,7 +38,6 @@ def _merge_upgrade_history(prev: dict, new: dict) -> dict:
 
         merged_events.sort(key=lambda e: (e.get("block_number", 0), e.get("log_index", 0)))
 
-        # Rebuild timeline from merged events
         current_impl = new_proxy.get("current_implementation") or prev_proxy.get("current_implementation")
         implementations = _build_implementation_timeline(merged_events, current_impl)
         upgrade_events = [e for e in merged_events if e["event_type"] == "upgraded"]
@@ -76,7 +63,6 @@ def _merge_upgrade_history(prev: dict, new: dict) -> dict:
 
 
 def _from_block_for_upgrade_history(prev_uh: dict | None) -> int:
-    """Compute the next-block start point for an incremental upgrade-history fetch."""
     if not prev_uh or not prev_uh.get("proxies"):
         return 0
     max_block = 0
@@ -89,11 +75,8 @@ def _from_block_for_upgrade_history(prev_uh: dict | None) -> int:
 
 
 def _apply_known_names_to_uh(uh: dict, unified: dict) -> None:
-    """Backfill ``contract_name`` on historical implementations using the unified deps' name lookup.
-
-    The parallel ``build_upgrade_history`` call ran with an empty deps dict, so
-    impl names that were already known via the static/dynamic deps are missing
-    here. Apply them in place to avoid per-impl Etherscan lookups downstream.
+    """The parallel ``build_upgrade_history`` ran with empty deps, so backfill names from the unified deps to avoid
+    per-impl Etherscan lookups.
     """
     known_names: dict[str, str] = {}
     for addr, info in unified.get("dependencies", {}).items():

@@ -1,9 +1,7 @@
 """Adapter framework for semantic predicate resolution.
 
-Adapters consume structural ``SetDescriptor`` payloads emitted by the
-static stage. The durable backend is intentionally generic: event
-enumeration is driven by ``enumeration_hint`` records instead of named
-protocol standards.
+Adapters consume the static stage's ``SetDescriptor``; event enumeration is driven by ``enumeration_hint`` records
+rather than named standards.
 """
 
 from __future__ import annotations
@@ -14,7 +12,6 @@ from typing import Any, Protocol
 
 from ..capabilities import CapabilityConfidence, CapabilityExpr
 
-# Convenience re-export for adapters that need to construct caps.
 __all__ = [
     "AdapterRegistry",
     "CallFrame",
@@ -26,26 +23,14 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Trit
-# ---------------------------------------------------------------------------
-
-
 class Trit(Enum):
     YES = "yes"
     NO = "no"
     UNKNOWN = "unknown"
 
 
-# ---------------------------------------------------------------------------
-# EnumerationResult
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class EnumerationResult:
-    """Adapter output for enumerate()."""
-
     members: list[str] = field(default_factory=list)
     confidence: CapabilityConfidence = "enumerable"
     partial_reason: str | None = None
@@ -56,11 +41,8 @@ class EnumerationResult:
 class CallFrame:
     """Execution frame for recursive predicate evaluation.
 
-    ``protected_contract_address`` is the root contract whose
-    function we are resolving. ``executing_contract_address`` is the
-    contract whose predicate tree is currently being evaluated.
-    Those differ when a guarded function delegates authorization to
-    an external checker.
+    ``protected_contract_address`` is the root contract; ``executing_contract_address`` is whose tree is being evaluated
+    (they differ when authorization is delegated).
     """
 
     protected_contract_address: str | None = None
@@ -92,14 +74,7 @@ class CallFrame:
         )
 
 
-# ---------------------------------------------------------------------------
-# Repo Protocols (backends)
-# ---------------------------------------------------------------------------
-
-
 class EventLogRepo(Protocol):
-    """Reads generic indexed logs and folds them into a member set."""
-
     def fold_event_writes(
         self,
         *,
@@ -115,26 +90,16 @@ class EventLogRepo(Protocol):
 
 
 class BytecodeRepo(Protocol):
-    """Reads contract code metadata an adapter uses to score
-    matches() — selectors present in the bytecode, declared events,
-    inherited interfaces. Adapters can also inspect descriptor
-    fields directly."""
+    """Contract code metadata (selectors, events, interfaces) adapters use to score matches()."""
 
     def has_selector(self, *, chain_id: int, contract_address: str, selector: str) -> bool: ...
 
     def declares_event(self, *, chain_id: int, contract_address: str, topic0: str) -> bool: ...
 
 
-# ---------------------------------------------------------------------------
-# EvaluationContext
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class EvaluationContext:
-    # Required: the chain the evaluator binds its event/bytecode/RPC
-    # reads to. No mainnet default — a contextless walk can no longer run as
-    # chain 1. Callers thread the job's chain_id.
+    # Required; no mainnet default.
     chain_id: int
     rpc_url: str | None = None
     block: int | None = None
@@ -143,75 +108,50 @@ class EvaluationContext:
     event_log_repo: EventLogRepo | None = None
     bytecode: BytecodeRepo | None = None
     recursive_resolver: Any = None
-    # Persisted state-variable values keyed by storage-var name (e.g.
-    # ``"_owner" → "0xabc..."``). Populated by the resolver from the
-    # ``controller_values`` table so the predicate evaluator can
-    # enumerate ``state_variable`` operands into concrete addresses
-    # without hitting the chain. ``None`` falls back to the
-    # lower_bound/partial placeholder behavior.
+    # Persisted ``controller_values`` by var name, so ``state_variable`` operands resolve without the chain. ``None``
+    # gives the lower_bound placeholder.
     state_var_values: dict[str, str] | None = None
-    # SQLAlchemy Session — needed for cross-contract evaluator inlining
-    # (loading the registry contract's predicate_trees artifact when an
-    # external_bool leaf carries a callee signature/selector). Optional
-    # so call sites that build the context inline can keep working
-    # without a DB.
+    # For cross-contract inlining (loading the registry's predicate_trees). Optional for DB-less call sites.
     session: Any = None
-    # Recursion guard for cross-contract inlining. Keys are
-    # ``(chain_id, address.lower(), function_signature)``. The evaluator
-    # adds an entry before recursing into B's tree and removes it after;
-    # encountering an already-visited entry short-circuits to
-    # external_check_only so a malformed dep graph can't loop.
+    # Recursion guard for inlining, keyed ``(chain_id, address, function_signature)``; a revisit short-circuits to
+    # external_check_only.
     evaluation_stack: set[tuple[int, str, str]] = field(default_factory=set)
     call_frame: CallFrame | None = None
-    # Free-form metadata bag for adapter-specific state; avoid using
-    # for general-purpose data.
+    # Adapter-specific state only.
     meta: dict[str, Any] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# SetAdapter Protocol
-# ---------------------------------------------------------------------------
 
 
 SetDescriptor = dict  # forward-import-light alias; full type lives in predicate_types
 
 
 class SetAdapter(Protocol):
-    """Standard-ABI adapter for resolving a set descriptor's members."""
-
     @classmethod
     def matches(cls, descriptor: SetDescriptor, ctx: EvaluationContext) -> int:
-        """Return 0-100. 0 means definitely not this adapter; 100
-        means definitely yes. Ties at the registry level are broken
-        by registration order. Score 0 from all → unsupported."""
+        """0-100: 0 means definitely not, 100 definitely yes.
+
+        Ties go to registration order; all zero means unsupported.
+        """
         ...
 
     @classmethod
     def supports_external_check_only(cls) -> bool:
-        """True iff the adapter can answer membership() against a
-        live backend (used by the predicate evaluator to decide
-        whether to emit external_check_only vs lower_bound finite_set
-        when enumerate returns partial)."""
+        """Whether the adapter can answer membership() live, deciding between external_check_only and a lower_bound
+        finite_set on partial enumeration.
+        """
         ...
 
     def enumerate(self, descriptor: SetDescriptor, ctx: EvaluationContext) -> CapabilityExpr:
-        """Populate the capability — finite_set for enumerable, or
-        partial / external_check_only when the adapter can't fully
-        list members."""
+        """A finite_set when enumerable, else partial or external_check_only."""
         ...
-
-
-# ---------------------------------------------------------------------------
-# AdapterRegistry
-# ---------------------------------------------------------------------------
 
 
 @dataclass
 class AdapterRegistry:
-    """Ordered list of adapters. ``pick()`` returns the highest-
-    scoring adapter for a descriptor; on a tie, registration order
-    wins. Score 0 from all → returns None and the caller emits
-    unsupported(no_adapter)."""
+    """Ordered adapters.
+
+    ``pick()`` returns the highest scorer (ties by registration order), or None so the caller emits
+    unsupported(no_adapter).
+    """
 
     adapters: list[type[SetAdapter]] = field(default_factory=list)
 
@@ -232,12 +172,8 @@ class AdapterRegistry:
 
     def enumerate(self, descriptor: SetDescriptor, ctx: EvaluationContext) -> CapabilityExpr:
         adapter_cls = self.pick(descriptor, ctx)
-        # Tally which adapter claimed each descriptor onto the resolve-level
-        # counter (when the capability resolver wired one onto ``ctx.meta``), so
-        # a per-job ``adapter_match`` breakdown surfaces — Solmate vs generic
-        # event-indexed vs ``no_adapter``. A standard adapter that silently
-        # stops matching (e.g. the Veda RolesAuthority cold-index race) shows up
-        # as a shift in this distribution run-over-run.
+        # Tally which adapter claimed each descriptor, so an adapter that silently stops matching shows as a
+        # distribution shift.
         counters = ctx.meta.get("resolve_counters") if isinstance(ctx.meta, dict) else None
         if isinstance(counters, dict):
             name = adapter_cls.__name__ if adapter_cls is not None else "no_adapter"

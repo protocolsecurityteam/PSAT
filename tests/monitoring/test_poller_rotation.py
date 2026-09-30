@@ -1,24 +1,11 @@
 """Integration tests for the poller rotation + chunked-commit driver.
 
-Exercises the real ``poll_for_state_changes`` production path against the real
-test DB (via the shared ``db_session`` fixture) with only the RPC wire
-(``rpc_batch_request_classified``) stubbed — never the repo classes. Covers:
-
-  - rotation order (``last_polled_at ASC NULLS FIRST``) + slice cap
-  - chunk packing at ``MAX_BATCH_SIZE`` keeping a contract's calls together
-  - per-entry poll status: an answered call publishes ``ok`` / ``error``
-    (per-call JSON-RPC error, e.g. a revert) / ``no_value`` (answered but
-    nothing parseable) in ``last_poll_status``; an answered zero word on
-    an address getter parses to the type's conventional empty and is
-    ``ok`` (an observed value), not ``no_value``; only non-empty values
-    touch ``last_known_state``; errored chunks stamp and rotate normally
-    (NOT retry-first — always-reverting entries exist in persisted plans
-    and would otherwise pin the rotation); a transport-failed chunk
-    publishes NOTHING and is left unstamped (retry-first for outages);
-    any errored / unparseable / unanswered entry marks the pass
-    ``partial`` — an observed value never does
-  - scanner-duplicate suppression, first-observation baseline, and
-    ``last_known_state`` updates surviving the driver rewrite
+Exercises the real ``poll_for_state_changes`` against the test DB, stubbing only the RPC
+wire (``rpc_batch_request_classified``). Per-entry ``last_poll_status`` is ``ok`` / ``error``
+(per-call revert) / ``no_value``; errored chunks stamp and rotate normally (always-reverting
+entries exist in persisted plans and would pin the rotation), while a transport-failed
+chunk publishes nothing and stays unstamped (retry-first for outages). Any non-observed
+entry marks the pass ``partial``; an observed value never does.
 """
 
 from __future__ import annotations
@@ -92,16 +79,12 @@ def _make_mock(
     error_on: set[int] | None = None,
     transport_on: set[int] | None = None,
 ):
-    """Build a ``rpc_batch_request_classified`` stub that records each
-    batch's calls and returns per-``to``-address ``(value, "ok")`` slots
-    from *returns*.
+    """Build a ``rpc_batch_request_classified`` stub that records batches and returns
+    per-``to``-address ``(value, "ok")`` slots from *returns*.
 
-    *error_on* / *transport_on* are sets of 1-based invocation indexes
-    whose whole batch comes back as ``(None, "error")`` (the node answered
-    every call with a per-call JSON-RPC error, e.g. reverts) or
-    ``(None, "transport")`` (the node never answered; the real helper
-    never raises) — its two distinct failure shapes.
-    """
+    *error_on* / *transport_on* are 1-based invocation indexes whose whole batch comes back
+    as ``(None, "error")`` (per-call JSON-RPC errors) or ``(None, "transport")`` (node never
+    answered; the real helper never raises)."""
     batches: list[list] = []
     state = {"n": 0}
 
@@ -226,8 +209,7 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
 
     returns = {ADDR(1): _word(ADDR(190)), ADDR(3): _word(ADDR(192))}
     # Order is a, b, c (by last_polled_at); MAX_BATCH_SIZE=1 -> one chunk each.
-    # Chunk 2 (contract b): the node answers every call with a per-call
-    # JSON-RPC error (a revert) — an observed outcome, unlike transport.
+    # Chunk 2 (b): every call gets a per-call JSON-RPC error (revert), an observed outcome.
     mock, _ = _make_mock(returns, error_on={2})
     captured: list[tuple] = []
 
@@ -242,8 +224,7 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
 
     assert len(events) == 2  # a and c detected; b's call errored
 
-    # Durability: a fresh connection sees each chunk's committed rows,
-    # proving the commit happened per chunk and not as one pass-wide transaction.
+    # A fresh connection sees each chunk's rows: the commit was per chunk, not pass-wide.
     engine = create_engine(os.environ["TEST_DATABASE_URL"])
     with SASession(engine) as fresh:
         ra = fresh.get(MonitoredContract, a.id)
@@ -253,10 +234,7 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
         assert ra.last_polled_at is not None and ra.last_polled_at > RECENT  # chunk 1 stamped + persisted
         assert ra.last_known_state and ra.last_known_state["trackedAddr"] == ADDR(190)
         assert ra.last_poll_status == {"trackedAddr": "ok"}
-        # The errored chunk is stamped too — the outcome is published as
-        # per-entry status, not silence, and the contract rotates normally
-        # (an unstamped-on-error rule would pin always-reverting entries
-        # to the front of the rotation forever).
+        # The errored chunk is stamped too, else always-reverting entries would pin the front.
         assert rb.last_polled_at is not None and rb.last_polled_at > RECENT
         assert rb.last_known_state and rb.last_known_state["trackedAddr"] == ADDR(91)  # value plane untouched
         assert rb.last_poll_status == {"trackedAddr": "error"}
@@ -283,11 +261,8 @@ def test_failed_chunk_is_durable_partial_and_leaves_others_intact(db_session, mo
 
 
 def test_errored_chunk_contracts_rotate_normally_not_retry_first(db_session, monkeypatch):
-    """A chunk the node answered with per-call errors stamps its contracts
-    (statuses ``error``) instead of holding them at the front of the
-    rotation — persisted plans contain always-reverting entries, and
-    retry-first on an answered error would let them crowd out every other
-    contract's slot."""
+    """A chunk answered with per-call errors stamps its contracts (status ``error``) instead
+    of holding them at the front, where always-reverting entries would crowd out the rest."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
     monkeypatch.setattr("services.monitoring.unified_watcher.MAX_BATCH_SIZE", 1)
 
@@ -321,11 +296,9 @@ def test_errored_chunk_contracts_rotate_normally_not_retry_first(db_session, mon
 
 
 def test_transport_failed_chunk_publishes_nothing_and_is_retry_first(db_session, monkeypatch):
-    """A batch the node never answered observed nothing: the chunk's
-    contracts keep their prior ``last_poll_status`` (here: never written,
-    NULL), keep their ``last_polled_at`` (so they sort first next pass),
-    and the pass reports partial with a ``chunks_transport_failed`` count —
-    an outage never publishes an earned-looking per-entry ``error``."""
+    """A batch the node never answered observed nothing: contracts keep their prior
+    ``last_poll_status`` and ``last_polled_at`` (sort first next pass) and the pass reports
+    partial with ``chunks_transport_failed``; an outage never publishes an ``error``."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "2")
     monkeypatch.setattr("services.monitoring.unified_watcher.MAX_BATCH_SIZE", 1)
 
@@ -371,9 +344,8 @@ def test_transport_failed_chunk_publishes_nothing_and_is_retry_first(db_session,
 
 
 def test_transport_outage_with_real_helper_publishes_nothing(db_session, monkeypatch):
-    """Same invariant with the REAL ``rpc_batch_request_classified`` running
-    and only the HTTP wire broken (connection error): a provider outage must
-    not write per-entry statuses or stamp the contract."""
+    """Same invariant with the REAL ``rpc_batch_request_classified`` and only the HTTP wire
+    broken: an outage writes no per-entry status and doesn't stamp."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     seeded = datetime(2020, 1, 1, tzinfo=timezone.utc)
     mc = _seed(db_session, 1, plan=[_entry("trackedAddr", "0xaa01")], last_polled_at=seeded)
@@ -395,10 +367,8 @@ def test_transport_outage_with_real_helper_publishes_nothing(db_session, monkeyp
 
 
 def test_answered_empty_return_publishes_no_value_not_ok(db_session, monkeypatch):
-    """A call the node answers with ``0x`` (codeless address / permissive
-    fallback — the fabricated-getter shape of stale persisted plans)
-    publishes ``no_value``: never ``ok`` (it yielded nothing), never
-    ``error`` (nothing reverted), and the pass reports partial."""
+    """A ``0x`` answer (codeless address / stale fabricated getter) publishes ``no_value``:
+    not ``ok`` (nothing yielded), not ``error`` (nothing reverted); the pass is partial."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     mc = _seed(db_session, 1, plan=[_entry("_initialized", "0xdeadbeef")], last_polled_at=RECENT)
 
@@ -429,14 +399,10 @@ def test_answered_empty_return_publishes_no_value_not_ok(db_session, monkeypatch
 
 
 def test_answered_zero_word_is_ok_and_pass_is_not_partial(db_session, monkeypatch):
-    """A call the node answers with a 32-byte zero word on an address
-    getter (``owner()`` on a renounced contract) is an OBSERVED value:
-    published ``ok``, never ``no_value``, and a pass made only of such
-    reads is healthy — ``partial`` False, heartbeat ``running``, never
-    ``degraded``. The basis for a negative must be a failure to observe,
-    not the decoder's convention about the value zero. The zero itself
-    still stays out of ``last_known_state`` (``decode_poll_outcome``'s
-    inherited storage convention — the value plane is unchanged)."""
+    """A 32-byte zero word on an address getter (``owner()`` on a renounced contract) is an
+    OBSERVED value: ``ok``, and a pass of such reads is healthy (not ``partial``/``degraded``).
+    A negative must come from failing to observe, not the decoder's zero convention; the zero
+    itself stays out of ``last_known_state``."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     plan = [_entry("owner", "0x8da5cb5b"), _entry("guardian", "0xaa02")]
     mc = _seed(db_session, 1, plan=plan, last_polled_at=RECENT)
@@ -447,8 +413,7 @@ def test_answered_zero_word_is_ok_and_pass_is_not_partial(db_session, monkeypatc
         captured.append((process, status, detail))
 
     def _mock(url, calls):
-        # Plan order: owner (answered zero word), guardian (nonzero) —
-        # the nonzero control proves the same pass tells the two apart.
+        # Plan order: owner (zero word), guardian (nonzero control).
         assert len(calls) == 2
         return [("0x" + "0" * 64, "ok"), (_word(ADDR(190)), "ok")]
 
@@ -472,10 +437,8 @@ def test_answered_zero_word_is_ok_and_pass_is_not_partial(db_session, monkeypatc
 
 
 def test_entry_not_dispatched_is_absent_from_status_map(db_session, monkeypatch):
-    """The published shapes end-to-end: a decoded entry is ``ok``, a
-    reverting one is ``error``, an answered-but-empty one is ``no_value``,
-    and an entry the loop can't dispatch (unrecognized kind) stays absent
-    from the map — not-polled, never conflated with any of them."""
+    """Published shapes: decoded ``ok``, reverting ``error``, answered-empty ``no_value``; an
+    undispatchable (unrecognized kind) entry stays absent, never conflated with these."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     plan = [
         _entry("good", "0xaa01"),
@@ -501,9 +464,7 @@ def test_entry_not_dispatched_is_absent_from_status_map(db_session, monkeypatch)
 
 
 def test_last_poll_status_is_served_on_monitored_contracts(db_session, api_client, monkeypatch):
-    """The status map reaches the published surface: GET
-    /api/monitored-contracts serves per-entry ok/error/no_value alongside
-    the value plane, so a dead entry is visible as such."""
+    """GET /api/monitored-contracts serves per-entry status beside the value plane."""
     monkeypatch.setenv("PSAT_POLL_CONTRACTS_PER_PASS", "5")
     plan = [_entry("good", "0xaa01"), _entry("dead", "0xaa02"), _entry("hollow", "0xaa03")]
     mc = _seed(db_session, 1, plan=plan, last_polled_at=datetime(2020, 1, 1, tzinfo=timezone.utc))

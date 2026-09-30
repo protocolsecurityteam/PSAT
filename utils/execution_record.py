@@ -1,45 +1,13 @@
-"""The execution that PROVED a magnitude — one closed shape, read by two planes.
+"""The execution that proved a magnitude: one closed shape shared by the producer (``services.effects.recipes`` ->
+``observed_residue``) and the consumer (``services.scoring.distill``).
 
-A published magnitude has to carry the execution that produced it: caller,
-target, selector, calldata, block, seeded-or-not. Today that execution exists
-only inside the transcript blob in object storage — ``harness.record_calls``
-writes it and nothing downstream can reach it, so every consumer of the figure
-sees a number with no account of the call that proved it.
+State plane only: the record must never enter ``effect_behavior_cache`` (keyed without address), or a cache hit would
+republish another deployment's caller as proof.
 
-This module is the one place the record's field names, its closed reason
-vocabulary and its three-state reading are written down. Two planes import it
-and neither imports the other:
+An absent record reads as :data:`REASON_NOT_PERSISTED`, and absent seeding keys as :data:`SEEDING_NOT_DETERMINED`, never
+as "no caller" or ``False``.
 
-* the PRODUCER (``services.effects.recipes``) builds :func:`residue_payload`
-  from the call it actually issued and hands it back on
-  ``ObservedEffect.concrete``, the half the worker routes to
-  ``effect_verdicts.observed_residue``;
-* the CONSUMER (``services.scoring.distill``) reads it back off the claim
-  witness the effects→claims bridge projects, and hands the fold a
-  :class:`ProvingExecution`.
-
-**State plane, never the code plane.** A caller address, a block height and a
-seeding decision are one deployment's observation of one fork. The record must
-never enter ``effect_behavior_cache`` (``db/models/ops.py``), which is keyed on
-``behavior_hash`` with no address by design — a cache hit would republish some
-OTHER deployment's caller as this one's proof. ``concrete`` is the half that
-never reaches that table, which is why the payload rides there and not on
-``details``.
-
-**Absence is the third state, and it is the common one.** Every verdict written
-before this record existed carries no key at all. A consumer must read that as
-:data:`REASON_NOT_PERSISTED` — never as "there was no caller", never as an
-unseeded probe, and never as licence to publish the figure as if the execution
-were known. The same rule governs ``input_seeded`` /
-``contract_balance_seeded``: the harness writes those keys only on the recipes
-that consider seeding, so an absent key conflates "not seeded" with "seeding was
-never a question here" and must read as :data:`SEEDING_NOT_DETERMINED`.
-
-**Nothing here decodes calldata.** ``calldata`` is published raw, always. A
-decoded argument list is only honest against the destination selector's own
-stored ABI signature, and a positional guess off a byte slice is the same
-laundering this record exists to stop — so ``decoded`` is a separate, later
-question and this shape carries the bytes.
+``calldata`` is published raw: decoding is only honest against the destination's own ABI.
 """
 
 from __future__ import annotations
@@ -47,30 +15,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
-# The ``effect_verdicts.observed_residue`` key, and the ``gate_inputs`` name the
-# distiller writes it under. One string, so a rename cannot desynchronise the
-# two ends.
+# One string so the two ends can't desynchronize.
 PROVING_EXECUTION_KEY = "proving_execution"
 
-# The record's own three-state answer to "what execution proved this figure".
 EXECUTION_RECORDED = "recorded"
 EXECUTION_NOT_DETERMINED = "not_determined"
 
-# The gate's answer to a DIFFERENT question — "does a persisted record exist for
-# this signal" — which the distiller can always answer because it performed the
-# lookup. Both tokens are proven; the earned negative carries the typed reason
-# as its payload, which a ``Tri.not_determined()`` envelope could not (it is
-# forbidden to carry a value at all). The two vocabularies are kept apart on
-# purpose: "we looked and there is none" is not "the execution is unknown for a
-# reason we did not record".
+# The gate's answer to "does a persisted record exist", which the distiller can always answer. Kept separate from the
+# record's own states: "none exists" is not "unknown".
 GATE_STATE_RECORDED = EXECUTION_RECORDED
 GATE_STATE_NOT_RECORDED = "not_recorded"
 GATE_STATES = (GATE_STATE_RECORDED, GATE_STATE_NOT_RECORDED)
 
-# Why no execution is determined. Closed, and every member names a DIFFERENT
-# evidential situation — a reader that cannot tell "this row predates the
-# record" from "the transcript could not be fetched" cannot tell a backfill gap
-# from a storage fault.
+# Closed; each member names a different evidential situation (a backfill gap vs a storage fault).
 REASON_NOT_PERSISTED = "execution_record_not_persisted"
 REASON_NO_VERDICT = "no_effect_verdict_on_the_claim"
 REASON_VERDICT_NOT_LOCATED = "effect_verdict_row_not_located"
@@ -79,13 +36,7 @@ REASON_STORAGE_KEY_MISSING = "storage_key_missing"
 REASON_FETCH_FAILED = "fetch_failed"
 REASON_PTR_UNRESOLVABLE = "ptr_unresolvable"
 REASON_NO_PROVING_CALL = "transcript_names_no_proving_call"
-# The one reason that is not a gap in the evidence but the SHAPE of it. Every
-# other member says a call was made and its record could not be reached; this
-# one says the figure was never a call's magnitude at all — it is a balance
-# observation, and looking for an execution behind it would be looking for the
-# wrong kind of proof. Registered here rather than left to a bare absence
-# because a published magnitude with no ``proving_execution`` key would read as
-# a figure whose execution nobody asked about.
+# Not a gap but the shape of the evidence: the figure is a balance observation, never a call's magnitude.
 REASON_NOT_PROVEN_BY_A_CALL = "magnitude_not_proven_by_a_call"
 NOT_DETERMINED_REASONS = (
     REASON_NOT_PERSISTED,
@@ -99,17 +50,8 @@ NOT_DETERMINED_REASONS = (
     REASON_NOT_PROVEN_BY_A_CALL,
 )
 
-# The reasons that are a FAULT in reaching the evidence rather than a gap in what
-# was recorded — we asked the transcript and could not be answered. These are the
-# ones "no execution, no figure" is scoped to.
-#
-# The scoping is load-bearing and was measured: applied to the whole vocabulary
-# it withholds every composed figure in the reference corpus, because every
-# verdict there predates the record and reads REASON_NOT_PERSISTED. That is the
-# blanket refusal an earlier pass already measured and refuted (it deletes the
-# real $44.35M finding and leaves the document with zero composed entries). A
-# record that was never persisted but IS derivable must be derived; a transcript
-# that cannot be read at all is the one that refuses.
+# Faults reaching the evidence; "no execution, no figure" applies only to these. Applied to every reason it would
+# withhold every composed figure in the corpus (all predate the record), including the real $44.35M finding.
 FAULT_REASONS = (
     REASON_TRANSCRIPT_UNSTORED,
     REASON_STORAGE_KEY_MISSING,
@@ -117,17 +59,7 @@ FAULT_REASONS = (
     REASON_PTR_UNRESOLVABLE,
 )
 
-# What each reason MEANS, one sentence per reason, because a single sentence for
-# all seven would be a data-claim that is false on most of them. The pattern is
-# the one C15/F7 measures: a string DESCRIBING what a field means may be constant
-# (it is documentation), a string making a claim ABOUT THE ROW's data must be
-# derived, because it can be false for the row carrying it. "The execution exists
-# in the transcript the pointer names" is a claim about the row, and it is false
-# for every reason below whose row has no transcript to name.
-#
-# Each sentence is written to be true of EVERY row that can carry it — including
-# what it does NOT assert, which is the half that matters here: none of them says
-# a call was absent, and none of them says a pointer resolves.
+# Per-reason readings: a sentence claiming something about the row must be true of every row carrying that reason.
 _REASON_READINGS = {
     REASON_NOT_PERSISTED: (
         "the verdict this figure was read from carries no stored execution record, so the call that "
@@ -178,44 +110,28 @@ _REASON_READINGS = {
     ),
 }
 
-# Appended only where it is TRUE — a pointer was carried through. On the
-# backfill-gap reason the transcript really does hold the execution, and saying
-# so is what turns a gap into something a reader can close; on a row with no
-# pointer the same sentence would name a transcript that is not there.
+# Appended only where a pointer was actually carried.
 _POINTER_CLAUSE = (
     ". The transcript_ptr beside this names the stored transcript the execution was recorded in, "
     "so the call is recoverable by reading it"
 )
 
-# A field-description, true of every carrier by construction: it says what a
-# consumer may not conclude, and asserts nothing about the row.
 _ABSENCE_CLAUSE = (
     ". A consumer must not read this absence as an unseeded probe, as an absent caller, or as a route that matches"
 )
 
-# The third state of the two seeding qualifiers. Spelled, never ``None``: a
-# ``None`` in a JSON payload is one ``or False`` away from reading as an earned
-# negative.
+# Spelled, never ``None``: ``None`` is one ``or False`` from an earned negative.
 SEEDING_NOT_DETERMINED = "not_determined"
 
 
 def undetermined_reading(reason: str, transcript_ptr: str | None) -> str:
-    """The reading for one undetermined record, derived from its own reason.
-
-    Three parts, and only the middle one is conditional: what this reason means,
-    the pointer clause where a pointer was actually carried, and the invariant a
-    consumer must not violate. An unregistered reason cannot reach here —
-    :meth:`ProvingExecution.__post_init__` rejects it — so there is no default
-    sentence standing in for a fact nobody stated.
-    """
+    """Reason meaning, pointer clause if a pointer was carried, then the consumer invariant."""
     body = _REASON_READINGS[reason]
     pointer = _POINTER_CLAUSE if reason == REASON_NOT_PERSISTED and transcript_ptr else ""
     return body + pointer + _ABSENCE_CLAUSE
 
 
-# The route comparison's three states. ``route_match`` and ``route_mismatch``
-# are each earned from a record; with no record neither is, and there is no
-# fall-through arm.
+# No record means neither match nor mismatch was earned.
 ROUTE_MATCH = "route_match"
 ROUTE_MISMATCH = "route_mismatch"
 ROUTE_NOT_DETERMINED = "not_determined"
@@ -223,17 +139,14 @@ ROUTE_VERDICTS = (ROUTE_MATCH, ROUTE_MISMATCH, ROUTE_NOT_DETERMINED)
 
 
 def _selector_of(calldata: str | None) -> str | None:
-    """The 4-byte selector, or ``None`` when the calldata is too short to hold
-    one. Never a padded or truncated guess."""
+    """The 4-byte selector, or ``None`` when calldata is too short. Never padded."""
     if not isinstance(calldata, str) or not calldata.startswith("0x") or len(calldata) < 10:
         return None
     return calldata[:10].lower()
 
 
 def _seeding(value: Any) -> bool | str:
-    """A seeding qualifier as its three states. Anything that is not a real
-    boolean is the third state — an absent key and a malformed one are both
-    "this was not established", and neither may read as ``False``."""
+    """Anything but a real bool is the third state."""
     return value if isinstance(value, bool) else SEEDING_NOT_DETERMINED
 
 
@@ -241,15 +154,8 @@ def _seeding(value: Any) -> bool | str:
 class ProvingExecution:
     """One magnitude's proving execution, or the typed reason there is none.
 
-    Every field outside ``state``/``reason`` is populated only in the
-    ``recorded`` state. ``reason`` is populated only in the ``not_determined``
-    one. The pairing is checked in ``__post_init__`` so a block cannot claim a
-    caller it has no record of, and cannot go undetermined without saying why.
-
-    ``transcript_ptr`` and ``effect_verdict_id`` are the exception and ride in
-    BOTH states: they are the row's own identity, read off ``effect_verdicts``
-    rather than out of the record, and they are exactly what a reader needs in
-    order to go and look when the record itself is missing.
+    ``__post_init__`` checks the pairing. ``transcript_ptr`` and ``effect_verdict_id`` ride in both states: they are
+    what a reader needs to go look.
     """
 
     state: str
@@ -286,17 +192,7 @@ class ProvingExecution:
     def as_json(self) -> dict[str, Any]:
         """The published block.
 
-        The undetermined form is deliberately SHORT — state, reason and the two
-        pointers — rather than the full field list with nulls in it. A block of
-        nulls reads as an execution whose every field came back empty, which is
-        a stronger and false claim about how far the lookup got.
-
-        Its ``reading`` is DERIVED from the reason (:func:`undetermined_reading`)
-        and not a constant. One sentence for all seven reasons would be a claim
-        about the row that is false on most of them — "the execution exists in
-        the transcript the pointer names" is not true of a row that has no
-        verdict and therefore no pointer — which is the authored-string defect
-        class this record exists on the other side of.
+        The undetermined form is short: a block of nulls would falsely claim the lookup got that far.
         """
         if not self.is_recorded:
             return {
@@ -313,9 +209,7 @@ class ProvingExecution:
             "caller": self.caller,
             "target": self.target,
             "selector": self.selector,
-            # Raw, always. See the module docstring: a decoded argument list is
-            # honest only against the destination selector's own stored ABI
-            # signature, and is a separate question from this one.
+            # Raw, always (see the module docstring).
             "calldata": self.calldata,
             "arguments_decoded": None,
             "probe_label": self.probe_label,
@@ -324,8 +218,6 @@ class ProvingExecution:
             "block_source": self.block_source,
             "chain_id": self.chain_id,
             "tier": self.tier,
-            # Three-state, and the third state is spelled. Neither is a boolean
-            # a consumer may default to False.
             "input_seeded": self.input_seeded,
             "contract_balance_seeded": self.contract_balance_seeded,
             "reading": (
@@ -347,8 +239,7 @@ def not_determined(
     transcript_ptr: str | None = None,
     effect_verdict_id: int | None = None,
 ) -> ProvingExecution:
-    """The undetermined record, with its reason. Spelled at every call site so
-    an unread execution is greppable."""
+    """Spelled at each call site so an unread execution is greppable."""
     return ProvingExecution(
         state=EXECUTION_NOT_DETERMINED,
         reason=reason,
@@ -371,19 +262,8 @@ def residue_payload(
     input_seeded: bool,
     contract_balance_seeded: bool,
 ) -> dict[str, Any]:
-    """The producer-side payload, JSON-ready for ``observed_residue``.
-
-    Written from the call the recipe ACTUALLY ISSUED — the seeded retry where
-    one landed, the unseeded probe where it did not — never from the arguments
-    the recipe was asked for. The two differ exactly where it matters: on a
-    seeded retry the unseeded call reverted, and recording it would name an
-    execution that proved nothing.
-
-    ``block_number`` / ``block_source`` are copied only when the transcript
-    certified the height (:func:`services.effects.harness.new_transcript` writes
-    ``block_source`` only for a positive, named pin). An uncertified height is
-    dropped rather than published: a bystander height read as the observation's
-    is the same over-claim one field over.
+    """The producer-side payload for ``observed_residue``, from the call the recipe actually issued (the seeded retry
+    if it landed). The block is copied only when the transcript certified the height.
     """
     pinned = isinstance(block_source, str) and isinstance(block_number, int) and not isinstance(block_number, bool)
     return {
@@ -408,9 +288,7 @@ def from_residue(
     transcript_ptr: str | None,
     effect_verdict_id: int | None,
 ) -> ProvingExecution:
-    """The consumer-side read. A payload that is not a dict is an absent record,
-    not an empty one — and ``target``/``calldata`` are REQUIRED, because a
-    record naming no call is not a record of an execution."""
+    """A non-dict is an absent record; ``target``/``calldata`` are required."""
     if not isinstance(payload, dict):
         return not_determined(REASON_NOT_PERSISTED, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id)
     target = payload.get("target")
@@ -425,9 +303,7 @@ def from_residue(
         effect_verdict_id=effect_verdict_id,
         caller=caller if isinstance(caller, str) else None,
         target=target,
-        # Re-derived from the bytes rather than trusted from the payload: the
-        # selector IS the first four bytes, and a stored disagreement is a
-        # producer bug that must not travel.
+        # Re-derived from the bytes: a stored disagreement is a producer bug.
         selector=_selector_of(calldata),
         calldata=calldata,
         probe_label=payload.get("probe_label") if isinstance(payload.get("probe_label"), str) else None,
@@ -441,28 +317,15 @@ def from_residue(
     )
 
 
-# How ``effect_verdicts.transcript_ptr`` is spelled: ``"{job_id}::{artifact_name}"``
-# (``workers/effects_worker.py``). Split here rather than at each reader so the
-# two ends cannot drift.
+# ``"{job_id}::{artifact_name}"`` (``workers/effects_worker.py``).
 _POINTER_SEPARATOR = "::"
 
-# The label :func:`services.effects.recipes.value_out` gives its UNSEEDED probe,
-# and the outcome ``_record_seed_outcome`` writes for the seeded attempt that
-# LANDED. Both are the producer's own vocabulary, read back rather than guessed:
-# the recipe keeps a seeded attempt only when its read-back held and the target
-# call succeeded, and it records exactly that attempt as ``executed`` and returns
-# immediately — so at most one attempt bears it.
+# The producer's own labels: at most one seeded attempt is recorded ``executed``.
 _BASE_PROBE_LABEL = "value_probe"
 _SEED_OUTCOME_EXECUTED = "executed"
 
 
 def pointer_parts(transcript_ptr: Any) -> tuple[str, str] | None:
-    """``(job_id, artifact_name)`` for a well-formed pointer, else ``None``.
-
-    Both halves must be non-empty. A pointer that does not split is not a
-    pointer to anything, and coercing it into one would send the reader after an
-    artifact nobody named.
-    """
     if not isinstance(transcript_ptr, str):
         return None
     job_id, separator, name = transcript_ptr.partition(_POINTER_SEPARATOR)
@@ -477,29 +340,11 @@ def from_transcript(
     transcript_ptr: str | None,
     effect_verdict_id: int | None,
 ) -> ProvingExecution:
-    """The record derived from the stored transcript, for a verdict that predates it.
+    """Recover the record from the transcript for verdicts that predate it.
 
-    The record is written at production time onto ``observed_residue``; every
-    verdict produced before that write existed carries none. The transcript it
-    points at, however, holds the same call — so the record is RECOVERABLE, and a
-    reader that refuses it because the column is empty would publish "the
-    execution is unknown" about a call it can read.
-
-    Which call is the proving one is the recipe's decision, not this reader's,
-    and it is re-derived from the producer's own markers rather than guessed at:
-    the seeded retry where ``seed_attempts`` records one as ``executed`` (the
-    recipe writes that outcome only when the read-back held AND the target call
-    succeeded, and returns on the spot), and the unseeded ``value_probe``
-    otherwise. Where neither marker is present the transcript is intact and the
-    proving call is simply not identifiable, which is its own reason —
-    picking the largest, the last or the first call would name an execution the
-    verdict never rested on.
-
-    The seeding qualifiers are EARNED from the same choice: taking the unseeded
-    probe means no attempt landed, which is what ``input_seeded: false`` asserts.
-    Where a seeded call is the proving one, ``contract_balance_seeded`` is read
-    off the transcript and is ``not_determined`` if the transcript does not say —
-    never ``False``.
+    The proving call follows the producer's markers: the seeded attempt recorded ``executed``, else the unseeded
+    ``value_probe``; otherwise it's unidentifiable (never guess largest/last/first). Seeding qualifiers follow from that
+    choice; ``contract_balance_seeded`` is ``not_determined`` when the transcript doesn't say.
     """
     if not isinstance(blob, dict):
         return not_determined(REASON_FETCH_FAILED, transcript_ptr=transcript_ptr, effect_verdict_id=effect_verdict_id)
@@ -526,9 +371,7 @@ def from_transcript(
     seeded = call.get("label") != _BASE_PROBE_LABEL
     balance_seeded: bool | str
     if not seeded:
-        # The unseeded probe is the one that proved it, so nothing was seeded and
-        # nothing was overridden. Both negatives are the producer's own and are
-        # earned by the choice above, not defaulted.
+        # The unseeded probe proved it, so both negatives are earned.
         balance_seeded = False
     else:
         balance_seeded = _seeding(blob.get("contract_balance_seeded"))
@@ -552,12 +395,7 @@ def from_transcript(
 
 
 def _pinned_height(blob: dict[str, Any]) -> int | None:
-    """The observed height, only where the transcript CERTIFIED it.
-
-    ``new_transcript`` writes ``block_source`` for a positive, named pin and for
-    nothing else, so a height with no source beside it is a bystander — the same
-    rule :func:`residue_payload` applies on the producer side.
-    """
+    """Only a certified height (``block_source`` present); mirrors :func:`residue_payload`."""
     source = blob.get("block_source")
     height = blob.get("block_number")
     if not isinstance(source, str) or not isinstance(height, int) or isinstance(height, bool):
@@ -566,15 +404,12 @@ def _pinned_height(blob: dict[str, Any]) -> int | None:
 
 
 def _proving_call_index(blob: dict[str, Any], calls: list[Any]) -> int | None:
-    """Which recorded call the figure was read off, by the producer's own markers."""
     landed = None
     for attempt in blob.get("seed_attempts") or []:
         if isinstance(attempt, dict) and attempt.get("outcome") == _SEED_OUTCOME_EXECUTED:
             landed = attempt.get("label")
     label = landed if isinstance(landed, str) else _BASE_PROBE_LABEL
-    # The LAST call under the label: ``_run`` appends an attempt's read-backs and
-    # its target call under one label, and the target is the last of them. The
-    # unseeded probe is a single call, so the rule is the same read either way.
+    # The target call is the last under its label.
     for index in range(len(calls) - 1, -1, -1):
         call = calls[index]
         if isinstance(call, dict) and call.get("label") == label:
@@ -591,14 +426,8 @@ def route_comparison(
 ) -> dict[str, Any]:
     """Whether the published route is the one the probe took.
 
-    Three states and no fall-through: with no execution record nothing is
-    compared and the verdict is ``not_determined`` — never ``route_match`` on
-    the grounds that no mismatch was found. The three booleans are three-valued
-    for the same reason and go ``None`` where either side is missing.
-
-    Addresses are compared on their bare form: the claimed side is chain-scoped
-    (``<chain>::<address>``) and the recorded side is the raw address the probe
-    called, so comparing them verbatim would report a mismatch on every row.
+    No record means ``not_determined``, never a match by absence. Addresses compare bare: the claimed side is
+    chain-scoped.
     """
     if not execution.is_recorded:
         return {
@@ -645,27 +474,11 @@ def route_comparison(
     }
 
 
-# The caller-match gate's conjunct, as a published outcome rather than a field a consumer
-# has to evaluate for itself.
+# Caller-match arm: gate claims transfer on CALLER match. ``isAuthorized(msg.sender, msg.sig)`` reads no argument,
+# so routing is irrelevant. It reads the caller, so an execution for X proves the gate for X only.
 #
-# The arm reads "gate claims transfer ON CALLER MATCH; routing is irrelevant to
-# them", and the two halves have different justifications that must not be
-# swapped. Routing is irrelevant because ``isAuthorized(msg.sender, msg.sig)``
-# reads no ARGUMENT — so a proof that entered the destination by a different
-# path still exercised the same check. That argument says nothing whatever about
-# a different CALLER: ``msg.sender`` is precisely what the check reads, so an
-# execution admitted for address X establishes the gate for X and for nobody
-# else. Re-using the routing argument to cover a caller mismatch would publish a
-# claim broader than the execution proves, which is the defect class the whole
-# execution record exists to close.
-#
-# What a mismatch does NOT do is retract the act-as chain. The chain is the
-# ACT-AS PLANE's witness — a state variable read on-chain, or the destination's
-# own access-control list naming the caller by an enumerated role — and it is
-# established without reference to any transcript. So the honest outcome is a
-# qualification and not a withdrawal: the chain stands on its own witness, and
-# what the execution adds to it (corroboration by a call the destination
-# actually admitted) is present, absent or unasked, and is said out loud.
+# A mismatch doesn't retract the act-as chain (it stands on its own witness); it removes the corroboration, and the
+# outcome says so.
 GATE_CLAIM_CORROBORATED = "corroborated"
 GATE_CLAIM_NOT_CORROBORATED = "not_corroborated"
 GATE_CLAIM_NOT_DETERMINED = "not_determined"
@@ -675,9 +488,6 @@ GATE_CLAIM_REASON_SAME_CALLER = "the_proving_execution_was_admitted_for_the_call
 GATE_CLAIM_REASON_OTHER_CALLER = "the_proving_execution_was_admitted_for_a_different_caller"
 GATE_CLAIM_REASON_NOT_COMPARED = "no_execution_record_reached_this_entry_to_compare_a_caller_against"
 
-# A field-description under ruling 7: true of every carrier, and it asserts
-# nothing about the row it rides on. What the row DOES assert is composed per
-# entry below, out of the two addresses.
 _GATE_CLAIM_INVARIANT = (
     " The act-as chain beside this is the ACT-AS PLANE's own witness and is not retracted by "
     "anything here: this block says only what the proving execution adds to it."
@@ -685,13 +495,7 @@ _GATE_CLAIM_INVARIANT = (
 
 
 def gate_claim(execution: ProvingExecution, *, claimed_caller: str | None) -> dict[str, Any]:
-    """Whether the proving execution corroborates the caller this entry claims.
-
-    Three states and no fall-through, one per value ``caller_matches`` can take.
-    The reading is DERIVED — a mismatch names both addresses, because "a
-    different caller" is a claim about this row and a constant sentence could
-    not name which one.
-    """
+    """Whether the proving execution corroborates this entry's caller. A mismatch names both addresses."""
     matches = _addr_matches(claimed_caller, execution.caller)
     if matches is None:
         return {

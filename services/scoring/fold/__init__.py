@@ -1,31 +1,11 @@
-"""Layer 2 — the whole-protocol grade fold. Pure, read-only, deterministic.
+"""Layer 2: the whole-protocol grade fold. Pure, read-only, deterministic.
 
-The fold is a recompute, never an accumulator. Three facts make a running total
-wrong: value is MAX per (entity, asset) so two contracts reaching one vault must
-charge it once; principal units are cross-contract and get RE-KEYED when a later
-contract reveals an owner overlap; and which finding subsumes which is only
-decidable with the whole finding set present.
+A recompute, never an accumulator: value is max per (entity, asset), principal units re-key when a later contract
+reveals owner overlap, and subsumption needs the whole finding set.
 
-Its population is the signal plane and nothing else — read through the one
-pinned, totally ordered query — plus the resolution planes in
-:mod:`services.scoring.planes`, which is where a reference becomes a unit, a
-dollar or a breadth floor.
-
-THE ROOT RULE
--------------
-**Never substitute an available field for an unread one.** Every ``x or y`` on a
-nullable or three-state expression is that substitution written as an idiom: an
-owner set that did not resolve is not the threshold, an unread delay is not zero,
-an unpriced entity is not ``$0.00``, and a principal address is not its own owner
-set unless the principal IS a key. Where a witness is missing the answer is the
-uncredited rung, an explicit ``None``, or a withheld row — chosen so the mistake
-costs a credit rather than fabricating one. Every remaining fallback in this
-module is guarded by a proof that the substituted value IS the fact.
-
-Every arithmetic branch fails closed. A signal whose severity was not proven is
-not scored; a value that could not be priced falls to the unpriced branch rather
-than to zero; a malformed gate envelope withholds its own row rather than
-raising out of the whole fold.
+Root rule: never substitute an available field for an unread one. ``x or y`` on a nullable or three-state value is that
+substitution; a missing witness yields the uncredited rung, ``None``, or a withheld row. Every arithmetic branch fails
+closed.
 """
 
 from __future__ import annotations

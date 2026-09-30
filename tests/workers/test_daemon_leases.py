@@ -1,9 +1,8 @@
 """Daemon-lease primitive against the real test Postgres.
 
-No fakes: these drive ``db.queue.try_acquire_daemon_lease`` /
-``renew_daemon_lease`` over the real ``daemon_leases`` table. The exclusivity guarantee lives in the
-``INSERT ... ON CONFLICT (name) DO UPDATE ... WHERE`` statement, so the
-contention case exercises it through two independent connections.
+No fakes: drives ``db.queue.try_acquire_daemon_lease`` / ``renew_daemon_lease``. Exclusivity
+lives in the ``INSERT ... ON CONFLICT (name) DO UPDATE ... WHERE`` statement, so the
+contention case uses two independent connections.
 """
 
 from __future__ import annotations
@@ -96,8 +95,7 @@ def test_holder_reacquire_extends_expiry(lease_session):
 
 
 def test_contention_two_connections(lease_session):
-    """Two independent sessions prove the ON CONFLICT WHERE is the exclusivity
-    guarantee — not any in-process coordination."""
+    """Two sessions prove the ON CONFLICT WHERE, not in-process coordination, gives exclusivity."""
     session_a, created = lease_session
     name = _lease_name()
     created.append(name)

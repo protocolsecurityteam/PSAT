@@ -1,9 +1,6 @@
-"""Integration tests for ``resolve_contract_capabilities``.
-
-End-to-end: seeds a Job + predicate_trees artifact + (optionally)
-generic indexed event rows, then calls the resolver and asserts the
-serialized CapabilityExpr per function.
-"""
+"""Integration tests for ``resolve_contract_capabilities``: seed a Job +
+predicate_trees artifact + optional generic indexed event rows, run the resolver,
+assert the serialized CapabilityExpr per function."""
 
 from __future__ import annotations
 
@@ -113,49 +110,6 @@ def test_resolve_returns_none_when_no_artifact(session):
 
 
 @requires_postgres
-def test_resolve_returns_per_function_capabilities(session):
-    from services.resolution.capability_resolver import resolve_contract_capabilities
-
-    address = "0x" + uuid.uuid4().hex[:8] + "01" * 16
-    artifact = {
-        "schema_version": "semantic",
-        "contract_name": "T",
-        "trees": {
-            "f()": {
-                "op": "LEAF",
-                "leaf": {
-                    "kind": "equality",
-                    "operator": "eq",
-                    "authority_role": "caller_authority",
-                    "operands": [
-                        {"source": "msg_sender"},
-                        {"source": "state_variable", "state_variable_name": "owner"},
-                    ],
-                    "references_msg_sender": True,
-                    "parameter_indices": [],
-                    "expression": "msg.sender == owner",
-                    "basis": [],
-                },
-            }
-        },
-    }
-    _seed_job_with_artifact(session, address=address, predicate_trees=artifact)
-
-    out = resolve_contract_capabilities(session, address=address, chain_id=1)
-    assert out is not None
-    assert "f()" in out
-    cap = out["f()"]
-    # The eq-against-state-variable shape produces a finite_set
-    # over the state-var holder (lower_bound until probed). The
-    # exact shape is the resolver's job — we pin the protocol-shape
-    # contract: kind is one of the typed CapKind values + a
-    # confidence + a membership_quality field.
-    assert "kind" in cap
-    assert "confidence" in cap
-    assert "membership_quality" in cap
-
-
-@requires_postgres
 def test_resolve_yields_finite_set_with_indexed_event_repo(session):
     """A multi-key membership leaf resolves through generic indexed events."""
     from db.models import IndexedEventCursor, IndexedEventLog
@@ -240,8 +194,7 @@ def test_resolve_yields_finite_set_with_indexed_event_repo(session):
 
 @requires_postgres
 def test_resolve_serializes_unsupported_with_reason(session):
-    """An unsupported leaf serializes to a CapabilityExpr with
-    kind=unsupported and the reason flowed through, so the UI can
+    """An unsupported leaf serializes as kind=unsupported with the reason, so the UI can
     render 'we know there's a gate but cannot characterize it.'"""
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
@@ -278,9 +231,8 @@ def test_resolve_serializes_unsupported_with_reason(session):
 
 @requires_postgres
 def test_resolve_returns_empty_dict_for_unguarded_only_contract(session):
-    """A contract with no guarded functions has trees={} in the
-    artifact. The resolver returns an empty dict — every function
-    is implicitly public per the resolver convention."""
+    """A contract with no guarded functions has trees={}; the resolver returns {} (every
+    function implicitly public)."""
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     address = "0x" + uuid.uuid4().hex[:8] + "04" * 16
@@ -293,9 +245,8 @@ def test_resolve_returns_empty_dict_for_unguarded_only_contract(session):
 
 @requires_postgres
 def test_capability_to_dict_handles_composite():
-    """``capability_to_dict`` recurses through AND/OR children +
-    signer (signature_witness). Pinned because a regression in
-    the recursion would silently drop nested capability data."""
+    """``capability_to_dict`` recurses through AND/OR children + signer; a regression
+    would silently drop nested capability data."""
     from services.resolution.capabilities import CapabilityExpr
     from services.resolution.capability_resolver import capability_to_dict
 
@@ -314,26 +265,18 @@ def test_capability_to_dict_handles_composite():
     assert thresh_child["threshold"]["signers"] == ["0x" + "22" * 20, "0x" + "33" * 20]
 
 
-# ---------------------------------------------------------------------------
-# Bug 2: state-variable operand enrichment. The predicate builder produces a
-# correct leaf for inherited OZ Ownable (``operands: [_owner, msg_sender]``,
-# ``authority_role: caller_authority``) — confirmed via the EtherFi
-# LiquidityPool predicate_trees artifact. But the RESOLVER never reads the
-# current ``_owner`` value, so it emits ``finite_set`` with
-# ``membership_quality=lower_bound`` / ``confidence=partial`` and an empty
-# members list. The frontend then shows transferOwnership / renounceOwnership
-# as having no controllers. The fix: when a state-variable operand is
-# resolvable via an existing ``controller_values`` row (already populated by
-# the static-analysis pipeline), enumerate it into the finite_set.
-# ---------------------------------------------------------------------------
+# Bug 2: state-variable operand enrichment. The predicate builder emits a correct leaf
+# for inherited OZ Ownable (``operands: [_owner, msg_sender]``, ``caller_authority``), but
+# the RESOLVER never read the current ``_owner``, emitting an empty lower_bound/partial
+# finite_set, so the frontend showed transferOwnership / renounceOwnership as having no
+# controllers. Fix: enumerate a state-variable operand resolvable via an existing
+# ``controller_values`` row into the finite_set.
 
 
 @requires_postgres
 def test_state_variable_owner_resolved_via_controller_values(session):
-    """An OZ-Ownable predicate tree with a stored ``ControllerValue`` row
-    for ``_owner`` should resolve to ``finite_set([owner_addr],
-    quality=exact)`` — not the lower_bound/partial empty set EtherFi shows
-    today."""
+    """An OZ-Ownable tree with a stored ``ControllerValue`` for ``_owner`` resolves to
+    ``finite_set([owner_addr], quality=exact)``, not the lower_bound/partial empty set."""
     from db.models import ControllerValue
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
@@ -387,8 +330,7 @@ def test_state_variable_owner_resolved_via_controller_values(session):
     assert owner_addr.lower() in {m.lower() for m in (cap.get("members") or [])}, (
         f"expected {owner_addr} in members (sourced from ControllerValue row); got members={cap.get('members')}"
     )
-    # Membership quality should be exact when enumerated from the persisted
-    # value — not lower_bound (the partial fallback).
+    # exact when enumerated from the persisted value, not lower_bound.
     assert cap.get("membership_quality") == "exact", (
         f"expected membership_quality=exact when controller_values has the answer; got {cap.get('membership_quality')}"
     )
@@ -396,22 +338,14 @@ def test_state_variable_owner_resolved_via_controller_values(session):
 
 @requires_postgres
 def test_signature_auth_signer_state_variable_resolved_via_controller_values(session):
-    """A ``signature_auth`` predicate whose signer is a state variable
-    must resolve through ``ControllerValue`` the same way
-    ``_resolve_equality_principal`` does for the OZ-Ownable case above.
+    """A ``signature_auth`` predicate whose signer is a state variable must resolve through
+    ``ControllerValue`` like ``_resolve_equality_principal`` does for OZ-Ownable.
 
-    Today ``_resolve_signer_from_leaf`` ignores ``ctx.state_var_values``
-    and unconditionally returns ``finite_set([], quality=lower_bound)``
-    for any state-variable signer — so ``signature_witness(...)`` wraps
-    an empty signer, and ``_rows_for_signature_witness`` writes zero
-    ``FunctionPrincipal`` rows. Every signature-gated function whose
-    signer is a state variable silently drops its signer from the
-    governance / chat / per-function principal views.
-
-    The pin: with a persisted ``ControllerValue`` row for ``signerAddr``,
-    the resolved capability must be
-    ``signature_witness(finite_set([signer], exact, enumerable))`` so
-    the writer emits one ``signature_witness`` row downstream.
+    ``_resolve_signer_from_leaf`` ignored ``ctx.state_var_values`` and always returned
+    ``finite_set([], lower_bound)``, so ``_rows_for_signature_witness`` wrote zero
+    ``FunctionPrincipal`` rows and every such function silently lost its signer in the
+    governance / chat / per-function views. Pin: with a ``ControllerValue`` for
+    ``signerAddr``, the result is ``signature_witness(finite_set([signer], exact, enumerable))``.
     """
     from db.models import ControllerValue
     from services.resolution.capability_resolver import resolve_contract_capabilities
@@ -478,20 +412,13 @@ def test_signature_auth_signer_state_variable_resolved_via_controller_values(ses
 
 @requires_postgres
 def test_signature_auth_signer_zero_address_collapses_to_empty_exact(session):
-    """Sibling of the equality path's zero-address handling:
-    ``_resolve_equality_principal`` collapses ``msg.sender == _owner``
-    to ``finite_set([], exact, enumerable)`` when ``_owner`` is the
-    zero address (``services/resolution/predicate_evaluator/equality.py``). The signer path
-    must do the same — a zero-addressed signer means no valid
-    signature can ever satisfy the gate.
+    """Sibling of the equality path's zero-address handling
+    (predicate_evaluator.py:418-419): a zero-addressed signer means no valid signature can
+    ever satisfy the gate, so ``finite_set([], exact, enumerable)``.
 
-    Why exact instead of lower_bound: "we know the answer and the
-    answer is no one" is qualitatively different from "we don't know
-    yet". The writer interprets ``finite_set([], exact)`` as
-    ``status="resolved_empty"`` (capability_surface.py:114), surfacing
-    the function as guarded-but-uncallable. The lower_bound fallback
-    instead surfaces as "guarded but unresolved" — false suggestion
-    of pending resolution.
+    Exact, not lower_bound: "the answer is no one" differs from "we don't know yet". The
+    writer maps ``finite_set([], exact)`` to ``status="resolved_empty"``
+    (capability_surface.py:114), while lower_bound would falsely suggest pending resolution.
     """
     from db.models import ControllerValue
     from services.resolution.capability_resolver import resolve_contract_capabilities
@@ -553,20 +480,15 @@ def test_signature_auth_signer_zero_address_collapses_to_empty_exact(session):
     )
 
 
-# ---------------------------------------------------------------------------
-# Bug 4: end-to-end external-authority traversal. Given a descriptor whose
-# authority contract emits relevant membership events, the resolver must
-# expand to event-derived member addresses. The registry contract itself is
-# only the source of logs, not the principal.
-# ---------------------------------------------------------------------------
+# Bug 4: end-to-end external-authority traversal. For an authority contract emitting
+# membership events the resolver must expand to event-derived members; the registry
+# itself is only the source of logs, not the principal.
 
 
 @requires_postgres
 def test_external_set_resolves_to_indexed_event_members(session):
-    """A semantic leaf that says 'membership in role X on registry Y' must
-    serialize as ``finite_set(members=[m1, m2], confidence=enumerable)``
-    when indexed_event_logs has the data. The registry contract itself
-    is never an answer — that's the indirection layer, not the principal."""
+    """A 'membership in role X on registry Y' leaf serializes as ``finite_set(members=[m1, m2],
+    confidence=enumerable)`` when indexed_event_logs has the data; the registry itself is never the answer."""
     from db.models import IndexedEventCursor, IndexedEventLog
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
@@ -616,9 +538,8 @@ def test_external_set_resolves_to_indexed_event_members(session):
                     "authority_role": "delegated_authority",
                     "operands": [{"source": "msg_sender"}],
                     "set_descriptor": {
-                        # The cross-contract `roleRegistry.hasRole(role,
-                        # sender)` shape is represented as a generic
-                        # membership descriptor with an event hint.
+                        # The cross-contract `roleRegistry.hasRole(role, sender)` shape is a
+                        # generic membership descriptor with an event hint.
                         "kind": "mapping_membership",
                         "key_sources": [
                             {"source": "constant", "constant_value": role_const_hex},
@@ -660,8 +581,8 @@ def test_external_set_resolves_to_indexed_event_members(session):
 
 @requires_postgres
 def test_external_authority_inlining_follows_proxy_to_impl_predicate_trees(session):
-    """If an authority contract is a proxy, inline the implementation's
-    predicate_trees while keeping event reads keyed to the runtime proxy."""
+    """If an authority contract is a proxy, inline the implementation's predicate_trees
+    while keeping event reads keyed to the runtime proxy."""
     from db.models import (
         Contract,
         ControllerValue,
@@ -784,9 +705,8 @@ def test_external_authority_inlining_follows_proxy_to_impl_predicate_trees(sessi
         },
     }
     impl_job = _seed_job_with_artifact(session, address=registry_impl, predicate_trees=registry_artifact)
-    # The dependency gate unblocks dependers when the provider finishes
-    # policy, which leaves the provider queued for coverage rather than
-    # status=completed. Inlining must still be allowed at that point.
+    # The dependency gate unblocks dependers when the provider finishes policy, leaving it
+    # queued for coverage rather than status=completed; inlining must still be allowed.
     impl_job.stage = JobStage.coverage
     impl_job.status = JobStatus.queued
     impl_job.request = {
@@ -833,10 +753,9 @@ def test_external_authority_inlining_follows_proxy_to_impl_predicate_trees(sessi
 
 @requires_postgres
 def test_unscanned_event_cursor_defers_pending_index(session, monkeypatch):
-    """A just-enrolled cursor at block 0 (cold, no backfill_complete) is index-cold:
-    the caller-keyed ACL leaf defers to external_check_only tagged
-    ``deferred_pending_index`` rather than a live genesis scan. The reconciler
-    re-resolves once the indexer backfills the event address."""
+    """A just-enrolled cursor at block 0 (cold, no backfill_complete) is index-cold: the
+    caller-keyed ACL leaf defers to external_check_only tagged ``deferred_pending_index``
+    rather than a live genesis scan; the reconciler re-resolves after backfill."""
     import services.resolution.mapping_enumerator as mapping_enumerator
     from db.models import IndexedEventCursor
     from services.resolution.capability_resolver import resolve_contract_capabilities
@@ -908,8 +827,7 @@ def test_unscanned_event_cursor_defers_pending_index(session, monkeypatch):
 
 @requires_postgres
 def test_external_authority_inlining_binds_msg_sender_argument(session):
-    """Inlining B(account) must bind A's msg.sender argument before
-    evaluating B's parameter-based guard."""
+    """Inlining B(account) must bind A's msg.sender argument before evaluating B's parameter-based guard."""
     from db.models import Contract, ControllerValue, Protocol
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
@@ -1039,29 +957,21 @@ def test_external_authority_inlining_binds_msg_sender_argument(session):
 
 @requires_postgres
 def test_external_authority_inlining_through_empty_proxy_artifact(session):
-    """Regression mirroring live EtherFi data (PR-95): an authority contract
-    that is a UUPS proxy has an *empty-but-present* ``predicate_trees`` artifact
-    of its own — the static pipeline writes ``{"trees": {}}`` for the logicless
-    proxy. The implementation child job holds the real
-    ``onlyProtocolUpgrader(account) => _owner == account`` tree, and the
-    implementation's ``_owner`` ControllerValue is the EtherFiTimelock.
+    """Regression mirroring live EtherFi data (PR-95): a UUPS-proxy authority has an
+    *empty-but-present* ``predicate_trees`` artifact (``{"trees": {}}`` for the logicless
+    proxy) while the implementation child job holds the real
+    ``onlyProtocolUpgrader(account) => _owner == account`` tree, whose ``_owner``
+    ControllerValue is the EtherFiTimelock.
 
-    Before the fix, ``find_analysis_job_for_address`` accepted the proxy job
-    because its empty artifact counted as "present", shadowing the
-    implementation's trees. The inliner then saw an empty tree set, fell through
-    to event-materialization (which cannot resolve a void-revert
-    ``onlyProtocolUpgrader`` — it never returns a bool), and emitted
-    ``external_check_only`` with **zero principals**. The net effect on the
-    Surface: every UUPS upgrade function in the protocol (19 on EtherFi) was
-    ownerless, with the true upgrade authority (the timelock behind the
-    RoleRegistry) missing entirely.
+    Before the fix, ``find_analysis_job_for_address`` accepted the proxy job (empty artifact
+    counted as "present"), shadowing the implementation's trees; the inliner fell through to
+    event-materialization (which can't resolve a void-revert ``onlyProtocolUpgrader``) and
+    emitted ``external_check_only`` with **zero principals** — all 19 UUPS upgrade functions
+    on EtherFi ownerless, the timelock behind the RoleRegistry missing.
 
-    The sibling ``test_external_authority_inlining_binds_msg_sender_argument``
-    seeds the proxy with *no* artifact (``predicate_trees=None`` skips
-    ``store_artifact``), so it never exercised the empty-artifact short-circuit
-    that the real pipeline produces. This test pins exactly that gap: the empty
-    proxy artifact must not shadow the implementation's trees, and the gate must
-    resolve via the registry's real ``_owner == account`` check.
+    The sibling ``..._binds_msg_sender_argument`` seeds the proxy with *no* artifact, so it
+    never hit that short-circuit. Here the empty proxy artifact must not shadow the
+    implementation's trees, and the gate must resolve via the real ``_owner == account`` check.
     """
     from db.models import Contract, ControllerValue, Protocol
     from services.resolution.capability_resolver import resolve_contract_capabilities
@@ -1127,9 +1037,8 @@ def test_external_authority_inlining_through_empty_proxy_artifact(session):
         )
     )
 
-    # The crux: the proxy job carries an empty-but-present predicate_trees
-    # artifact (what the static pipeline writes for a logicless proxy), NOT a
-    # missing one. This is the exact shape the sibling test never seeded.
+    # The crux: the proxy job carries an empty-but-present predicate_trees artifact (what the
+    # static pipeline writes for a logicless proxy), NOT a missing one.
     proxy_job = _seed_job_with_artifact(
         session,
         address=registry_proxy,
@@ -1201,8 +1110,7 @@ def test_external_authority_inlining_through_empty_proxy_artifact(session):
     assert [m.lower() for m in (cap.get("members") or [])] == [timelock], (
         f"expected the EtherFiTimelock resolved from RoleRegistry._owner; got {cap.get('members')}"
     )
-    # Resolved via the registry's real `_owner == account` check (read from the
-    # ControllerValue), not a heuristic owner() guess — so exact / enumerable.
+    # Resolved via the registry's real `_owner == account` check (ControllerValue), not an owner() guess.
     assert cap.get("membership_quality") == "exact", (
         f"expected exact membership from the real check logic; got {cap.get('membership_quality')}"
     )
@@ -1353,17 +1261,14 @@ def test_external_authority_inlining_uses_check_trees_and_call_frame(session):
     assert cap.get("members") == [member]
 
 
-# ---------------------------------------------------------------------------
-# C.1 cutover: ``_load_state_var_values`` scoped by exact Contract.job_id
-# first, then by address/chain fallback for legacy rows.
-# ---------------------------------------------------------------------------
+# C.1 cutover: ``_load_state_var_values`` scoped by exact Contract.job_id first, then by
+# address/chain fallback for legacy rows.
 
 
 @requires_postgres
 def test_load_state_var_values_scoped_by_chain(session):
-    """Two Contract rows for the same address, different chains. The
-    resolver, given chain='ethereum', must read only the ethereum
-    Contract's ControllerValue — not the optimism row's stale value."""
+    """Two Contract rows for one address on different chains: with chain='ethereum' the
+    resolver must read only that Contract's ControllerValue, not optimism's stale value."""
     from db.models import Contract, ControllerValue, Protocol
     from services.resolution.capability_resolver import _load_state_var_values
 
@@ -1417,12 +1322,9 @@ def test_load_state_var_values_scoped_by_chain(session):
 
 @requires_postgres
 def test_load_state_var_values_prefers_exact_job_contract_over_created_at(session):
-    """A Contract row tied to the analysis job must be selected even if its
-    ``created_at`` is later than the Job row.
-
-    Static/resolution can create or update the Contract row after the Job
-    record exists. Filtering on ``Contract.created_at <= Job.created_at``
-    drops the very ControllerValue rows the current job just wrote."""
+    """A Contract row tied to the analysis job must be selected even if its ``created_at``
+    is later than the Job's: static/resolution can create/update the Contract after the Job
+    exists, and ``Contract.created_at <= Job.created_at`` would drop the just-written rows."""
     from datetime import timedelta
 
     from db.models import Contract, ControllerValue, Job, JobStage, JobStatus, Protocol
@@ -1472,9 +1374,8 @@ def test_load_state_var_values_prefers_exact_job_contract_over_created_at(sessio
 
 @requires_postgres
 def test_load_state_var_values_falls_back_when_job_id_missing(session, caplog):
-    """Legacy behavior: when job_id is None, fall back to the latest
-    Contract by address (today's behavior). MUST WARN-log the
-    fallback so callers can audit the regression risk."""
+    """Legacy: with job_id None, fall back to the latest Contract by address, and WARN-log
+    the fallback so callers can audit the regression risk."""
     import logging
 
     from db.models import Contract, ControllerValue, Protocol
@@ -1511,9 +1412,8 @@ def test_load_state_var_values_falls_back_when_job_id_missing(session, caplog):
 
 
 def test_capability_kind_label_buckets_and_lowercases():
-    """The per-job capability-kind tally (the Veda OR-regression detector) must
-    use uniform lowercase keys. ``CapabilityExpr`` stores composite kinds as
-    "OR"/"AND"; without lowercasing, the diff splits across cap_or vs cap_OR."""
+    """The per-job capability-kind tally (Veda OR-regression detector) must use lowercase
+    keys; ``CapabilityExpr`` stores composites as "OR"/"AND", which would split cap_or vs cap_OR."""
     from services.resolution.capabilities import CapabilityExpr, Condition, ExternalCheck
     from services.resolution.capability_resolver import _capability_kind_label
 

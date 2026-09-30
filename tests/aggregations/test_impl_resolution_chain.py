@@ -1,32 +1,23 @@
-"""Chain-threading regression tests for the proxy→implementation resolution
-layer (``resolve_implementation_contracts`` + its consumers).
+"""Chain-threading regression tests for proxy→implementation resolution
+(``resolve_implementation_contracts`` + its consumers).
 
-PR #157 made the ``/functions`` payload's *output keys* chain-composite, but the
-internal proxy→impl linkage (``impl_job_by_entity``, the secondary-impl
-suppression set, and the overview dedup) still ran on chainless bare addresses.
-Two failure modes on multichain protocols with the same address on ≥2 chains
-where one side is an implementation:
+PR #157 made the ``/functions`` output keys chain-composite, but the internal proxy→impl linkage
+(``impl_job_by_entity``, the secondary-impl suppression set, the overview dedup) still ran on
+chainless bare addresses. With one address on ≥2 chains where one side is an implementation:
 
-  * **Mode 1 (cross-attach)**: an impl address deployed behind a proxy on two
-    chains — one chain's impl job wins the bare map, so the other chain's proxy
-    gets the winner chain's function verdicts.
-  * **Mode 2 (drop-entry)**: a standalone contract on chain B sharing an address
-    with a chain-A proxy's secondary impl is swallowed by the chainless
-    suppression set → no entry at all.
+  * **Mode 1 (cross-attach)**: an impl behind a proxy on two chains — one chain's impl job wins
+    the bare map, so the other chain's proxy gets the winner's function verdicts.
+  * **Mode 2 (drop-entry)**: a standalone contract on chain B sharing an address with a chain-A
+    proxy's secondary impl is swallowed by the chainless suppression set.
 
-Each test below fails against the pre-fix bare-address code (verified by forcing
-iteration order so the wrong chain wins the bare pick) and passes once the
-resolution layer keys by the composite entity token.
+Each test fails against the pre-fix code (verified by forcing iteration order so the wrong chain
+wins the bare pick) and passes once resolution keys by the composite entity token.
 """
 
 from __future__ import annotations
 
-import sys
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from db.models import FunctionPrincipal
 from services.aggregations.company_overview import (
@@ -54,14 +45,12 @@ def _newer(job, when=datetime(2030, 1, 1, tzinfo=timezone.utc)):
 
 
 def test_mode1_cross_attach_functions(db_session):
-    """Mode 1 via ``build_functions_for_protocol``: an impl address ``0xI`` sits
-    behind a proxy on BOTH ethereum and base (CREATE2 impl twin), each analysed
-    with different functions. Each proxy's entry must carry ITS OWN chain's impl
-    verdicts.
+    """Mode 1 via ``build_functions_for_protocol``: impl ``0xI`` sits behind a proxy on BOTH
+    ethereum and base (CREATE2 impl twin) with different functions; each proxy's entry must
+    carry ITS OWN chain's verdicts.
 
-    Pre-fix: the base impl job (forced newest) wins the bare ``impl_job_by_addr``
-    for ``0xI``, so the ethereum proxy's entry carries base's function — fails
-    the ``ethOnly`` assertion below.
+    Pre-fix: the base impl job (forced newest) wins the bare ``impl_job_by_addr``, so the
+    ethereum proxy carries base's function and fails the ``ethOnly`` assertion.
     """
     s = db_session
     p = _add_protocol(s, f"m1fn-{uuid.uuid4().hex[:8]}")
@@ -69,7 +58,6 @@ def test_mode1_cross_attach_functions(db_session):
     proxy_base = _addr("pxbase")
     impl = _addr("impl")  # same impl address on both chains (CREATE2 twin)
 
-    # Ethereum proxy → impl 0xI, impl analysed as a proxy-child on ethereum.
     proxy_eth_job = _add_job(s, address=proxy_eth, protocol_id=p.id, is_proxy=True)
     _add_contract(
         s, address=proxy_eth, job=proxy_eth_job, protocol_id=p.id, chain="ethereum", is_proxy=True, implementation=impl
@@ -118,13 +106,10 @@ def test_mode1_cross_attach_functions(db_session):
 
 
 def test_mode2_drop_entry_functions(db_session):
-    """Mode 2 via ``build_functions_for_protocol``: an ethereum proxy has a
-    SECONDARY impl ``0xI``; base has an unrelated standalone contract at ``0xI``
-    with its own functions. The payload must contain BOTH the ethereum proxy
-    entry (folding the secondary impl's functions) AND the base standalone entry.
+    """Mode 2 via ``build_functions_for_protocol``: an ethereum proxy has SECONDARY impl ``0xI``
+    while base has an unrelated standalone at ``0xI``; the payload must contain BOTH entries.
 
-    Pre-fix: ``secondary_impl_addrs`` holds bare ``0xI``, so the base standalone
-    is suppressed entirely — ``base::0xI`` never appears.
+    Pre-fix: ``secondary_impl_addrs`` holds bare ``0xI``, so ``base::0xI`` never appears.
     """
     s = db_session
     p = _add_protocol(s, f"m2fn-{uuid.uuid4().hex[:8]}")
@@ -176,12 +161,11 @@ def test_mode2_drop_entry_functions(db_session):
 
 
 def test_mode1_cross_attach_overview(db_session):
-    """Mode 1 via ``build_company_overview``: same twin-impl shape as the
-    functions test, asserted on the overview contract entries' ``value_effects``
-    (which read from the resolved impl contract).
+    """Mode 1 via ``build_company_overview``: the twin-impl shape asserted on the overview
+    entries' ``value_effects`` (read from the resolved impl contract).
 
-    Pre-fix: the ethereum proxy resolves to base's impl and surfaces base's
-    ``mint`` effect instead of ethereum's ``asset_pull``.
+    Pre-fix: the ethereum proxy resolves to base's impl and surfaces base's ``mint`` instead of
+    ethereum's ``asset_pull``.
     """
     s = db_session
     p = _add_protocol(s, f"m1ov-{uuid.uuid4().hex[:8]}")
@@ -232,12 +216,10 @@ def test_mode1_cross_attach_overview(db_session):
 
 
 def test_mode2_drop_entry_overview(db_session):
-    """Mode 2 via ``build_company_overview``: the base standalone sharing an
-    address with an ethereum proxy's secondary impl must still render as its own
-    contract entry (it is on a different chain).
+    """Mode 2 via ``build_company_overview``: the base standalone sharing an address with an
+    ethereum proxy's secondary impl must still render as its own entry (different chain).
 
-    Pre-fix: the overview dedup's bare ``impl_addresses`` set drops the base
-    standalone because its address matches the ethereum secondary impl.
+    Pre-fix: the overview dedup's bare ``impl_addresses`` set dropped it.
     """
     s = db_session
     p = _add_protocol(s, f"m2ov-{uuid.uuid4().hex[:8]}")
@@ -325,15 +307,12 @@ def _fp_safe(session, ef, safe_addr):
 
 
 def test_f1_controller_attribution_no_cross_chain_fold(db_session):
-    """F1: an ethereum proxy with impl ``0xI`` and an UNRELATED base standalone at
-    ``0xI`` (each gated by a different Safe). The base standalone's principal must
-    NOT be folded under the ethereum proxy's rendered address — controller
-    attribution (``impl_to_proxy`` / ``contract_addr_by_cid``) must resolve the
-    impl on the PROXY's own chain.
+    """F1: an ethereum proxy with impl ``0xI`` and an UNRELATED base standalone at ``0xI`` (each
+    gated by a different Safe). The base standalone's principal must NOT fold under the
+    ethereum proxy: controller attribution (``impl_to_proxy`` / ``contract_addr_by_cid``) must
+    resolve the impl on the PROXY's own chain.
 
-    Pre-fix (bare ``impl_to_proxy``): the base Safe's FP authority attributes to
-    the ethereum proxy, so the base Safe appears among the ethereum proxy's
-    controllers.
+    Pre-fix (bare ``impl_to_proxy``): the base Safe appeared among the ethereum proxy's controllers.
     """
     s = db_session
     p = _add_protocol(s, f"f1-{uuid.uuid4().hex[:8]}")
@@ -372,20 +351,17 @@ def test_f1_controller_attribution_no_cross_chain_fold(db_session):
     assert proxy_eth.lower() not in {a.lower() for a in base_attr}, (
         f"base standalone's Safe must NOT govern the ethereum proxy (cross-chain fold), got {base_attr}"
     )
-    # Positive side: each Safe governs its own chain's entity.
     assert impl.lower() in {a.lower() for a in base_attr}, "base Safe must govern the base standalone (0xI)"
     eth_attr = {a.lower() for a in (principals.get(eth_safe.lower(), {}).get("primary_for") or [])}
     assert proxy_eth.lower() in eth_attr, "ethereum Safe must govern the ethereum proxy"
 
 
 def test_f3_implementation_name_chain_scoped(db_session):
-    """F3: a proxy on each of ethereum + base points at impl ``0xI``, whose
-    contract rows carry DIFFERENT names per chain. Each proxy's
-    ``implementation_name`` in the /addresses payload must be its own chain's
-    impl name.
+    """F3: a proxy on each of ethereum + base points at impl ``0xI`` whose contract rows carry
+    DIFFERENT names per chain; each proxy's ``implementation_name`` in /addresses must be its own
+    chain's.
 
-    Pre-fix (bare ``impl_name_by_addr``): both proxies resolve to whichever
-    chain's row won the last-wins dict build — one proxy shows the wrong name.
+    Pre-fix (bare ``impl_name_by_addr``): last-wins, so one proxy showed the wrong name.
     """
     s = db_session
     p = _add_protocol(s, f"f3-{uuid.uuid4().hex[:8]}")
@@ -426,7 +402,7 @@ def test_f3_implementation_name_chain_scoped(db_session):
     _add_contract(s, address=impl, job=base_impl_job, protocol_id=p.id, chain="base", contract_name="BaseImplName")
     s.commit()
 
-    rows = all_addresses_for_protocol(s, p, [])
+    rows = all_addresses_for_protocol(s, p)
     by_key = {(r["address"].lower(), (r.get("chain") or "").lower()): r for r in rows}
     eth_row = by_key[(proxy_eth.lower(), "ethereum")]
     base_row = by_key[(proxy_base.lower(), "base")]

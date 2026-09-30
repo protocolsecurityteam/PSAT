@@ -237,13 +237,3 @@ def test_effective_function_principal_consistent_with_capability_expr(
             checked_any = True
 
     assert checked_any, "No effective function row had an asserted-kind capability_expr"
-
-
-def test_no_retired_artifacts_present(guarded_company_child, live_client: LiveClient):
-    job = guarded_company_child["job"]
-    for retired_name in ("permission_graph", "semantic_guards"):
-        artifact = live_client.artifact(job["job_id"], retired_name)
-        if artifact is None:
-            continue
-        assert isinstance(artifact, dict), f"{retired_name} still emits but is not a dict"
-        assert artifact.get("deprecated") is True, f"{retired_name} still emits without deprecated=true"

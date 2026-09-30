@@ -1,19 +1,10 @@
-"""Pure URL helpers for GitHub file links."""
-
 from __future__ import annotations
 
 from urllib.parse import urlparse
 
 
 def github_blob_to_raw(url: str) -> str:
-    """Convert a GitHub ``/blob/`` file URL into its raw-content URL.
-
-    ``https://github.com/<owner>/<repo>/blob/<ref>/<path>`` becomes
-    ``https://raw.githubusercontent.com/<owner>/<repo>/<ref>/<path>``.
-
-    Non-GitHub URLs and URLs that do not match the blob-file shape pass
-    through unchanged.
-    """
+    """Convert a GitHub ``/blob/`` URL to raw.githubusercontent.com; anything else passes through."""
     try:
         parsed = urlparse(url)
     except Exception:

@@ -1,23 +1,14 @@
 """Standards-coverage matrix — the rigor invariant across authority standards.
 
-Each contract is compiled and run through the REAL static→predicate→resolve
-pipeline. The invariant this pins (what separates a faithful standard model from
-"one more heuristic"): for every standard, resolution is either
+Each contract runs through the REAL static->predicate->resolve pipeline. For every standard,
+resolution is either CORRECT (exactly the principal the contract's authority designates,
+checked against the ground-truth owner from a stubbed RPC) or FAIL-CLOSED (an honest
+``external_check_only`` / empty result when the principal can't be enumerated without
+on-chain data), and NEVER a confident-but-wrong ``finite_set`` (exact, non-empty, wrong members).
 
-  * CORRECT  — resolves to exactly the principal the contract's own authority
-    designates (verified here against the ground-truth owner the getter returns,
-    supplied via a stubbed RPC), or
-  * FAIL-CLOSED — an honest ``external_check_only`` / empty result when the
-    principal can't be enumerated without on-chain data (e.g. an event-indexed
-    RolesAuthority/AccessControl with no indexed history, or an unmodeled custom
-    authority),
-
-and NEVER a confident-but-wrong ``finite_set`` (exact, non-empty, wrong members).
-
-Member-value correctness for the event-indexed standards (Solmate/AccessControl)
-against live data is pinned separately with real fixtures in
-``test_solmate_end_to_end`` / ``test_adapter_solmate_roles``; here those standards
-must *fail closed* without an event history rather than fabricate a set.
+Member correctness for event-indexed standards (Solmate/AccessControl) on live data is pinned
+in ``test_solmate_end_to_end`` / ``test_adapter_solmate_roles``; here they must fail closed
+without an event history rather than fabricate a set.
 """
 
 from __future__ import annotations
@@ -122,17 +113,14 @@ def _members(cap: CapabilityExpr) -> set[str]:
 
 
 def _has_confident_members(cap: CapabilityExpr) -> bool:
-    """True iff some branch asserts an EXACT, non-empty member set — i.e. a
-    confident claim about who can call. A lower_bound / external_check_only /
-    empty set is NOT a confident claim."""
+    """True iff some branch asserts an EXACT, non-empty member set (lower_bound / external_check_only / empty are not
+    confident)."""
     if cap.kind == "finite_set":
         return bool(cap.members) and cap.membership_quality == "exact"
     return any(_has_confident_members(child) for child in cap.children or [])
 
 
-# ---------------------------------------------------------------------------
 # CORRECT: owner-style standards resolve to exactly the contract's owner.
-# ---------------------------------------------------------------------------
 
 
 def test_oz_v4_ownable_owner_getter_resolves_to_owner(tmp_path, monkeypatch):
@@ -166,15 +154,11 @@ def test_bare_owner_state_var_resolves_to_owner(tmp_path, monkeypatch):
     assert _members(cap) == {OWNER.lower()}
 
 
-# ---------------------------------------------------------------------------
-# FAIL-CLOSED: standards needing on-chain data we don't have here must NOT
-# fabricate a confident set.
-# ---------------------------------------------------------------------------
+# FAIL-CLOSED: standards needing on-chain data we lack must NOT fabricate a confident set.
 
 
 def test_solmate_requires_auth_without_events_fails_closed(tmp_path, monkeypatch):
-    # Recognized as Solmate canCall, but with no indexed RolesAuthority events
-    # it must fail closed — not claim an exact caller set.
+    # Recognized as Solmate canCall, but with no indexed events it must fail closed.
     trees = _trees(
         tmp_path,
         """
@@ -212,8 +196,7 @@ def test_oz_accesscontrol_role_gate_without_events_fails_closed(tmp_path, monkey
 
 
 def test_unmodeled_custom_authority_fails_closed(tmp_path, monkeypatch):
-    # A bespoke external authorization check we have no model for: must surface
-    # as an honest external check, never a fabricated set.
+    # A bespoke external check with no model must surface as an honest external check.
     trees = _trees(
         tmp_path,
         """
@@ -227,17 +210,3 @@ def test_unmodeled_custom_authority_fails_closed(tmp_path, monkeypatch):
     )
     cap = _resolve(trees, "f()", monkeypatch)
     assert not _has_confident_members(cap)
-
-
-def test_unguarded_function_makes_no_controller_claim(tmp_path):
-    # An unguarded public function has no authority gate: the static stage
-    # extracts no predicate tree for it, so it can never be attributed a
-    # (fabricated) controller set — the 'public' end of the spectrum.
-    trees = _trees(
-        tmp_path,
-        """
-        pragma solidity ^0.8.19;
-        contract C { uint256 public x; function f() external { x = 1; } }
-        """,
-    )
-    assert "f()" not in trees

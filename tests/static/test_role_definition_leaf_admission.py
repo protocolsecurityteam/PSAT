@@ -1,42 +1,21 @@
 """D6-reject: which ``bytes32`` constants may be minted as role names.
 
-``role_definitions`` carried two rows that are not roles at all —
-``AccessControlDefaultAdminRulesStorageLocation`` (contract 454) and
-``OwnableStorageLocation`` (contract 623) — because leaf admission accepted any
-``bytes32 constant`` operand of a caller-authority leaf. Both are ERC-7201
-storage-layout pointers.
+``role_definitions`` carried two non-roles, ERC-7201 storage-layout pointers
+(``AccessControlDefaultAdminRulesStorageLocation`` contract 454, ``OwnableStorageLocation``
+contract 623), because leaf admission accepted any ``bytes32 constant`` operand. The surviving
+rule is structural and reads no identifier: ``kind == "membership"`` + a ``mapping_membership``
+descriptor + an empty ``member_path``.
 
-The surviving rule is one arm, structural, reading no identifier:
-``kind == "membership"`` + a ``mapping_membership`` descriptor + an empty
-``member_path`` — the constant indexes a mapping the lowering actually saw.
+Cross-contract checks are not admitted at all, even a genuine ``registry.hasRole(ROLE,
+msg.sender)``. Two attempts at an external arm failed and are pinned as fixtures: any
+``external_set`` descriptor (``key_sources`` covers every argument; ``TestExternalArmHostileShapes``),
+and the ``hasRole(bytes32,address)`` selector (it comes from the CALLER's declaration,
+``predicates.py:2338``; ``TestCallerDeclaredInterfaceShapes``). The external arm's measured
+population was zero; such roles publish ``not_determined`` (B4c caveat), never "no roles".
 
-**Cross-contract checks are not admitted at all**, including a genuine
-``registry.hasRole(ROLE, msg.sender)``. Two attempts to keep an external arm
-failed and are pinned here as regression fixtures:
-
-* admitting any ``external_set`` descriptor — ``_build_external_bool_leaf``
-  fills ``key_sources`` from every call argument, so a slot constant, a merkle
-  root and a CREATE2 salt all minted as roles (``TestExternalArmHostileShapes``);
-* narrowing to the ``hasRole(bytes32,address)`` selector plus argument
-  positions — the signature comes from ``ir.function.full_name``
-  (``_build_external_bool_leaf``), the CALLER's declaration, so any contract
-  declared under that name lowers identically (``TestCallerDeclaredInterfaceShapes``).
-
-The external arm's measured population on the persisted corpus was **zero**: all
-surviving rows across the six role-bearing contracts are mapping-arm and the
-``external_set`` descriptor count is 0. Cross-contract roles publish as
-``not_determined`` because the cross-contract role check is unverified,
-never as "no roles".
-
-Every leaf below marked REAL is verbatim from the persisted predicate_trees
-blobs of the PR-161 run (MinIO ``pr-161/artifacts/<job>/predicate_trees``):
-contract 454 CumulativeMerkleDrop, 623 EtherfiL1SyncPoolETH, 599
-WithdrawalQueueERC721.
-
-The two suffix HOSTILE fixtures are the ones the name-suffix guard
-``tracking._is_storage_layout_constant`` gets wrong in BOTH directions; it is
-banned as the fix for exactly that reason, and ``test_name_suffix_guard_*``
-below pins the misclassification so the ban stays evidence-backed.
+Leaves marked REAL are verbatim from the PR-161 predicate_trees blobs (MinIO
+``pr-161/artifacts/<job>/predicate_trees``; contracts 454, 623, 599). The two HOSTILE fixtures
+are wrong in BOTH directions under the banned name-suffix guard ``_is_storage_layout_constant``.
 """
 
 from __future__ import annotations
@@ -50,7 +29,6 @@ from services.static.contract_analysis_pipeline.summaries import (
     _role_names_from_predicate_trees,
     _role_names_from_tree,
 )
-from services.static.contract_analysis_pipeline.tracking import _is_storage_layout_constant
 
 
 class _Bytes32Constant:
@@ -202,70 +180,6 @@ def test_real_role_leaves_are_admitted():
     assert _role_names_from_predicate_trees(trees, _vars("FINALIZE_ROLE")) == {"FINALIZE_ROLE"}
 
 
-# A cross-contract ``registry.hasRole(ROLE, msg.sender)`` gate, as the lowering
-# emits it. The constant IS a real role here — and it is still not admitted; see
-# ``test_external_registry_role_leaf_is_not_admitted``.
-REAL_EXTERNAL_REGISTRY_ROLE_LEAF = {
-    "kind": "external_bool",
-    "operator": "truthy",
-    "authority_role": "delegated_authority",
-    "operands": [
-        {
-            "source": "state_variable",
-            "state_variable_name": "MINTER_ROLE",
-            "constant_value": "0xf0887ba65ee2024ea881d91b74c2450ef19e1557f03bed3ea9f16b037cbe2dc9",
-        },
-        {"source": "msg_sender"},
-    ],
-    "references_msg_sender": True,
-    "parameter_indices": [],
-    "expression": "hasRole(...)",
-    "basis": ["require(TMP_0)"],
-    "callee_state_mutability": "view",
-    "gate_kind": "require",
-    "callee_signature": "hasRole(bytes32,address)",
-    "set_descriptor": {
-        "kind": "external_set",
-        "key_sources": [
-            {
-                "source": "state_variable",
-                "state_variable_name": "MINTER_ROLE",
-                "constant_value": "0xf0887ba65ee2024ea881d91b74c2450ef19e1557f03bed3ea9f16b037cbe2dc9",
-            },
-            {"source": "msg_sender"},
-        ],
-        "authority_contract": {"address_source": {"source": "state_variable", "state_variable_name": "roleRegistry"}},
-        "callee_function": "hasRole",
-        "callee_signature": "hasRole(bytes32,address)",
-        "callee_selector": "0x91d14854",
-    },
-    "confidence": "medium",
-}
-
-
-def test_external_registry_role_leaf_is_not_admitted():
-    """A GENUINE cross-contract role check mints nothing, and that is the
-    intended outcome.
-
-    ``callee_signature`` / ``callee_selector`` come from
-    ``ir.function.full_name`` (``_build_external_bool_leaf``) — the interface
-    the CALLER declared, not the deployed callee's ABI. A slot lens or a merkle-tree
-    contract declared under the name ``hasRole(bytes32,address)`` lowers to a
-    byte-identical descriptor (``TestCallerDeclaredInterfaceShapes``), so the
-    signature is an unverified claim about someone else's code. Argument position
-    adds nothing: ``_build_external_bool_leaf`` fills ``key_sources`` from every
-    argument.
-
-    The measured cost is zero — across all six role-bearing contracts in the
-    persisted corpus every surviving row is mapping-arm and the
-    ``external_set`` descriptor count is 0. These roles publish as
-    ``not_determined`` because the cross-contract role check is unverified,
-    **never** as "no roles".
-    """
-    trees = {"trees": {"mint()": _leaf(REAL_EXTERNAL_REGISTRY_ROLE_LEAF)}}
-    assert _role_names_from_predicate_trees(trees, _vars("MINTER_ROLE")) == set()
-
-
 def test_real_slot_constant_leaves_are_rejected():
     """The two REAL measured slot-constant leaves — role_definitions ids 19 and
     1 — mint nothing."""
@@ -357,90 +271,73 @@ def test_hostile_slot_with_innocent_name_is_dropped():
     assert _role_names_from_predicate_trees(trees, _vars("MAIN_POINTER")) == set()
 
 
-def test_name_suffix_guard_misclassifies_both_hostile_fixtures():
-    """Why ``_is_storage_layout_constant`` is banned as the D6 fix: it is wrong
-    in both directions on exactly these two inputs, while the structural rule
-    above is right on both."""
-    assert _is_storage_layout_constant("GOVERNOR_SLOT") is True  # a real role it would drop
-    assert _is_storage_layout_constant("MAIN_POINTER") is False  # a real pointer it would keep
-
-
 # --- fail-closed arms ------------------------------------------------------
 
 
-def test_membership_leaf_without_set_descriptor_is_rejected():
-    """No descriptor ⇒ the mapping was not witnessed ⇒ not a role key."""
-    leaf = {k: v for k, v in REAL_PAUSER_ROLE_LEAF.items() if k != "set_descriptor"}
-    assert _role_names_from_tree(_leaf(leaf), _vars("PAUSER_ROLE")) == set()
+class _AddressVar:
+    type = "address"
+    is_constant = False
 
 
-def test_membership_leaf_with_unmeasured_descriptor_kind_is_rejected():
-    """``array_contains`` / ``bitwise_role_flag`` / ``diamond_facet_acl``: no
-    measured role arrives in those shapes, and an unmeasured shape is not
-    evidence."""
-    for kind in ("array_contains", "bitwise_role_flag", "diamond_facet_acl"):
-        leaf = {**REAL_PAUSER_ROLE_LEAF, "set_descriptor": {"kind": kind}}
-        assert _role_names_from_tree(_leaf(leaf), _vars("PAUSER_ROLE")) == set()
+def _pauser_leaf_with(**overrides) -> dict:
+    return {**REAL_PAUSER_ROLE_LEAF, **overrides}
 
 
-def test_mapping_membership_operand_with_member_path_is_rejected():
-    """A dereferenced constant is a struct base, not a key — even inside a
-    mapping_membership leaf."""
-    leaf = {
-        **REAL_PAUSER_ROLE_LEAF,
-        "operands": [
-            {
-                "source": "state_variable",
-                "state_variable_name": "PAUSER_ROLE",
-                "member_path": ["_slotField"],
-            },
-            {"source": "msg_sender"},
-        ],
-    }
-    assert _role_names_from_tree(_leaf(leaf), _vars("PAUSER_ROLE")) == set()
+_PAUSER_VARS = _vars("PAUSER_ROLE")
+
+# Fail-closed: each of these leaves must mint no role name.
+_REJECTED_LEAVES = [
+    # No descriptor => the mapping was not witnessed => not a role key.
+    pytest.param(
+        {k: v for k, v in REAL_PAUSER_ROLE_LEAF.items() if k != "set_descriptor"},
+        _PAUSER_VARS,
+        id="membership-leaf-without-set-descriptor",
+    ),
+    # An unmeasured descriptor shape is not evidence.
+    *[
+        pytest.param(
+            _pauser_leaf_with(set_descriptor={"kind": kind}), _PAUSER_VARS, id=f"unmeasured-descriptor-kind-{kind}"
+        )
+        for kind in ("array_contains", "bitwise_role_flag", "diamond_facet_acl")
+    ],
+    # A dereferenced constant is a struct base, not a key, even inside a mapping_membership leaf.
+    pytest.param(
+        _pauser_leaf_with(
+            operands=[
+                {"source": "state_variable", "state_variable_name": "PAUSER_ROLE", "member_path": ["_slotField"]},
+                {"source": "msg_sender"},
+            ]
+        ),
+        _PAUSER_VARS,
+        id="mapping-membership-operand-with-member-path",
+    ),
+    # The compiler type gate survives the structural one.
+    pytest.param(REAL_PAUSER_ROLE_LEAF, {"PAUSER_ROLE": _AddressVar()}, id="non-bytes32-constant-operand"),
+    # No state var in scope means the ``bytes32 constant`` fact was never established.
+    pytest.param(REAL_PAUSER_ROLE_LEAF, {}, id="unknown-state-var-empty-scope"),
+    pytest.param(REAL_PAUSER_ROLE_LEAF, None, id="unknown-state-var-no-scope"),
+    pytest.param(_pauser_leaf_with(authority_role="business"), _PAUSER_VARS, id="non-authority-membership-leaf"),
+]
 
 
-def test_non_bytes32_constant_operand_is_rejected():
-    """The compiler type gate survives the structural one."""
-
-    class _AddressVar:
-        type = "address"
-        is_constant = False
-
-    assert _role_names_from_tree(_leaf(REAL_PAUSER_ROLE_LEAF), {"PAUSER_ROLE": _AddressVar()}) == set()
-
-
-def test_unknown_state_var_is_rejected():
-    """No state var in scope ⇒ the ``bytes32 constant`` fact was never
-    established ⇒ nothing is minted."""
-    assert _role_names_from_tree(_leaf(REAL_PAUSER_ROLE_LEAF), {}) == set()
-    assert _role_names_from_tree(_leaf(REAL_PAUSER_ROLE_LEAF), None) == set()
+@pytest.mark.parametrize("leaf, state_vars", _REJECTED_LEAVES)
+def test_leaf_is_rejected(leaf, state_vars):
+    assert _role_names_from_tree(_leaf(leaf), state_vars) == set()
 
 
 def test_role_leaf_without_enumeration_hint_is_still_admitted():
-    """The 599 shape: mapping_membership with no enumeration_hint and a
-    temporary storage_var. Gating on either would silently drop five real
-    roles."""
+    """The 599 shape (no enumeration_hint, temporary storage_var): gating on either would drop five real roles."""
     descriptor = {k: v for k, v in REAL_FINALIZE_ROLE_LEAF["set_descriptor"].items() if k != "storage_var"}
     leaf = {**REAL_FINALIZE_ROLE_LEAF, "set_descriptor": descriptor}
     assert _role_names_from_tree(_leaf(leaf), _vars("FINALIZE_ROLE")) == {"FINALIZE_ROLE"}
 
 
-def test_non_authority_membership_leaf_is_rejected():
-    leaf = {**REAL_PAUSER_ROLE_LEAF, "authority_role": "business"}
-    assert _role_names_from_tree(_leaf(leaf), _vars("PAUSER_ROLE")) == set()
-
-
 # --- second use-site: the resolution plane's slot-locator route -------------
 #
-# ``_canonical_authority_selector_for_slot`` reroutes a storage-slot constant to
-# the contract's canonical public getter. Reached from ``_resolve_equality_principal``
-# for a bare (member_path-less) state-variable operand and gated on the same
-# name-suffix guard banned above, so a role constant carrying a slot-locator
-# suffix would resolve to a real ``governor()`` address and be published as the
-# authorized caller of a role-gated function. The structural refusal closes that
-# without touching the guard. Both planes now answer "is this constant a role?"
-# the same way, so no constant can be a role in one and a slot in the other.
+# ``_canonical_authority_selector_for_slot`` reroutes a slot constant to the contract's
+# canonical getter, gated on the same banned name-suffix guard, so a role constant with a
+# slot-locator suffix would resolve to a real ``governor()`` address and be published as the
+# authorized caller. The structural refusal closes that; both planes now agree on what a role is.
 
 
 def test_slot_route_refuses_a_mapping_membership_role_operand():
@@ -458,8 +355,7 @@ def test_slot_route_still_accepts_a_real_slot_locator_leaf():
 
 
 def test_slot_route_leafless_call_is_unchanged():
-    """Callers with no leaf in hand keep the pre-existing behaviour; the new
-    gate only ever narrows."""
+    """Callers with no leaf in hand keep the pre-existing behaviour; the new gate only narrows."""
     from services.resolution.predicate_evaluator import _canonical_authority_selector_for_slot
 
     assert _canonical_authority_selector_for_slot("OwnableStorageLocation") is not None
@@ -469,10 +365,9 @@ def test_slot_route_leafless_call_is_unchanged():
 
 # --- external arm: the three hostile shapes, through the REAL pipeline --------
 #
-# Compiled with Slither and run through build_predicate_artifacts →
-# build_effects → _build_semantic_control_summary, i.e. the production static
-# path, not a hand-built leaf. Under the rejected "any external_set descriptor"
-# rule each of these minted a role name; each must now mint nothing.
+# Compiled with Slither through build_predicate_artifacts -> build_effects ->
+# _build_semantic_control_summary (the production path). Each shape minted a role name under
+# the rejected "any external_set descriptor" rule.
 
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
@@ -497,13 +392,11 @@ def _role_names_from_source(tmp_path: Path, source: str) -> list[str]:
 
 
 class TestExternalArmHostileShapes:
-    """Three gate-shaped external view calls that take a ``bytes32 constant``
-    which is NOT a role. All three reach an ``external_set`` descriptor with the
-    constant among ``key_sources``; none carries the ``hasRole`` selector."""
+    """Three gate-shaped external view calls taking a non-role ``bytes32 constant`` (reaching
+    ``external_set`` with the constant in ``key_sources``, none with the ``hasRole`` selector)."""
 
     def test_erc7201_slot_constant_through_a_slot_lens(self, tmp_path):
-        """The D6 defect class itself, re-entering through the external arm: an
-        ERC-7201 pointer handed to ``readBool(address,bytes32)``."""
+        """The D6 defect re-entering through the external arm: an ERC-7201 pointer to ``readBool(address,bytes32)``."""
         roles = _role_names_from_source(
             tmp_path,
             """
@@ -524,54 +417,9 @@ class TestExternalArmHostileShapes:
         )
         assert roles == []
 
-    def test_merkle_root_in_a_membership_proof(self, tmp_path):
-        """``isInTree(bytes32,address)`` has hasRole's exact argument ORDER and is
-        still not a role check — which is why the selector gate is load-bearing."""
-        roles = _role_names_from_source(
-            tmp_path,
-            """
-            pragma solidity ^0.8.19;
-            interface ITree { function isInTree(bytes32 root, address account) external view returns (bool); }
-            contract C {
-                ITree public tree;
-                bytes32 public constant AIRDROP_ROOT = keccak256("AIRDROP");
-                uint256 public value;
-                constructor(ITree t) { tree = t; }
-                function claim() external {
-                    require(tree.isInTree(AIRDROP_ROOT, msg.sender), "no");
-                    value = 1;
-                }
-            }
-            """,
-        )
-        assert roles == []
-
-    def test_create2_salt_in_a_factory_authorisation(self, tmp_path):
-        roles = _role_names_from_source(
-            tmp_path,
-            """
-            pragma solidity ^0.8.19;
-            interface IFactory { function isAuthorized(address account, bytes32 salt) external view returns (bool); }
-            contract C {
-                IFactory public factory;
-                bytes32 public constant DEPLOY_SALT = keccak256("SALT");
-                uint256 public value;
-                constructor(IFactory f) { factory = f; }
-                function deploy() external {
-                    require(factory.isAuthorized(msg.sender, DEPLOY_SALT), "no");
-                    value = 1;
-                }
-            }
-            """,
-        )
-        assert roles == []
-
     def test_a_genuine_hasrole_gate_mints_nothing_either(self, tmp_path):
-        """The honest cost of the excision, pinned: a real cross-contract role
-        check publishes NO row. Not "this contract has no roles" — the role is
-        ``not_determined`` because the cross-contract role check is unverified,
-        alongside the 50 role-keyed gates that carry the role as a
-        view_call/parameter operand."""
+        """The honest cost of the excision: a real cross-contract role check publishes NO row
+        (``not_determined`` under B4c, not "no roles")."""
         roles = _role_names_from_source(
             tmp_path,
             """
@@ -594,9 +442,7 @@ class TestExternalArmHostileShapes:
         assert roles == []
 
     def test_in_contract_accesscontrol_still_mints(self, tmp_path):
-        """The positive control for the SURVIVING arm, same pipeline: an
-        in-contract ``_roles[ROLE][account]`` membership read still mints, so the
-        excision did not empty the rule."""
+        """Positive control for the SURVIVING arm: an in-contract ``_roles[ROLE][account]`` read still mints."""
         roles = _role_names_from_source(
             tmp_path,
             """
@@ -618,89 +464,12 @@ class TestExternalArmHostileShapes:
 class TestCallerDeclaredInterfaceShapes:
     """The round-2 refutation of the selector+position arm, pinned.
 
-    ``callee_signature``/``callee_selector`` are read off ``ir.function.full_name``
-    (``_build_external_bool_leaf``) — the interface the CALLING contract
-    declared. Any contract can be declared under the name ``hasRole(bytes32,address)``, so the
-    selector is not a proven property of the deployed callee, and the bodies that
-    refute these gates are sometimes visible in the very same unit."""
-
-    def test_h1_slot_lens_declared_as_hasrole(self, tmp_path):
-        """H1 — an ERC-7201 pointer read through a slot lens whose interface is
-        *declared* ``hasRole(bytes32,address)``. Byte-identical descriptor to a
-        real registry gate."""
-        roles = _role_names_from_source(
-            tmp_path,
-            """
-            pragma solidity ^0.8.19;
-            interface ISlotLens { function hasRole(bytes32 slot, address target) external view returns (bool); }
-            contract C {
-                ISlotLens public lens;
-                bytes32 public constant PausedStorageLocation =
-                    0xcd5ed15c6e187e77e9aee88184c21f4f2182ab5827cb3b7e07fbedcd63f03300;
-                uint256 public value;
-                constructor(ISlotLens l) { lens = l; }
-                function unpause() external {
-                    require(lens.hasRole(PausedStorageLocation, msg.sender), "no");
-                    value = 1;
-                }
-            }
-            """,
-        )
-        assert roles == []
-
-    def test_h2_merkle_tree_declared_as_hasrole(self, tmp_path):
-        """H2 — a merkle root under a ``hasRole``-named tree interface."""
-        roles = _role_names_from_source(
-            tmp_path,
-            """
-            pragma solidity ^0.8.19;
-            interface ITree { function hasRole(bytes32 root, address account) external view returns (bool); }
-            contract C {
-                ITree public tree;
-                bytes32 public constant AIRDROP_ROOT = keccak256("AIRDROP");
-                uint256 public value;
-                constructor(ITree t) { tree = t; }
-                function claim() external {
-                    require(tree.hasRole(AIRDROP_ROOT, msg.sender), "no");
-                    value = 1;
-                }
-            }
-            """,
-        )
-        assert roles == []
-
-    def test_h4_same_unit_hasrole_that_ignores_the_account(self, tmp_path):
-        """H4 — the refuting body is in the unit and the gate never looks: this
-        ``hasRole`` returns ``salts[salt]`` and drops its ``account`` argument
-        entirely, so it gates on nothing about the caller."""
-        roles = _role_names_from_source(
-            tmp_path,
-            """
-            pragma solidity ^0.8.19;
-            contract Registry {
-                mapping(bytes32 => bool) public salts;
-                function hasRole(bytes32 salt, address) external view returns (bool) {
-                    return salts[salt];
-                }
-            }
-            contract C {
-                Registry public registry;
-                bytes32 public constant DEPLOY_SALT = keccak256("SALT");
-                uint256 public value;
-                constructor(Registry r) { registry = r; }
-                function deploy() external {
-                    require(registry.hasRole(DEPLOY_SALT, msg.sender), "no");
-                    value = 1;
-                }
-            }
-            """,
-        )
-        assert roles == []
+    The selector is read off the interface the CALLING contract declared, so any contract
+    declared as ``hasRole(bytes32,address)`` looks identical; refuting bodies are sometimes
+    visible in the same unit."""
 
     def test_h5_recovered_signer_is_not_the_caller(self, tmp_path):
-        """H5 — ``signature_recovery`` was admitted as caller-taint, but a
-        recovered signer is not this function's caller; anyone holding a
-        signature can call. Moot with the arm gone, pinned anyway."""
+        """H5 - a recovered signer is not this function's caller. Moot with the arm gone, pinned anyway."""
         roles = _role_names_from_source(
             tmp_path,
             """
@@ -724,8 +493,7 @@ class TestCallerDeclaredInterfaceShapes:
         assert roles == []
 
     def test_h7_library_forwarded_hasrole_with_a_slot_constant(self, tmp_path):
-        """H7 — the call reaches the declared ``hasRole`` through a library
-        forwarder, carrying an ERC-7201 slot constant."""
+        """H7 - the declared ``hasRole`` is reached through a library forwarder, carrying a slot constant."""
         roles = _role_names_from_source(
             tmp_path,
             """

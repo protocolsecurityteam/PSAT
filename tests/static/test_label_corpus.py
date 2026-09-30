@@ -1,16 +1,10 @@
 """A/B golden gate for effect labels over the frozen fixture corpus.
 
-Drives the real static pipeline (compile with Slither, run
-``build_predicate_artifacts_with_pause_info`` -> ``build_effects`` ->
-``build_claims`` -> ``project_effect_labels``) over every corpus contract and
-compares the flattened ``(contract, address, function, selector, effect_labels,
-claims)`` tuples against the checked-in golden. The whole corpus pins solc
-``0.8.27`` (the version the offline CI ``test`` job installs), so a producer
-change that silently relabels a corpus function fails here in the default suite
-unless the PR carries the regenerated, reviewed golden diff.
-
-Regenerate the golden for an intended, reviewed change with
-``tests/regenerate_label_golden.py``.
+Drives the real static pipeline over every corpus contract and compares the
+flattened ``(contract, address, function, selector, effect_labels, claims)`` tuples
+against the checked-in golden. The corpus pins solc ``0.8.27`` (the offline CI
+version), so a producer change that silently relabels a function fails here unless
+the PR carries the regenerated golden (``tests/regenerate_label_golden.py``).
 """
 
 from __future__ import annotations

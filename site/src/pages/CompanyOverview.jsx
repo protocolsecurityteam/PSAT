@@ -1,6 +1,6 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { api } from "../api/client.js";
+import { api, companyApi } from "../api/client.js";
 import { useIsAdmin } from "../api/useIsAdmin.js";
 import { chainLabel } from "../surface/chainMeta.js";
 import { entityKey } from "../surface/entityKey.js";
@@ -8,6 +8,7 @@ import { bytecodeVerifiedAudits } from "../audits/auditCoverage.js";
 import LoadingFallback from "../LoadingFallback.jsx";
 import ProtocolLogo from "../ProtocolLogo.jsx";
 import ScoreBand from "../score/ScoreBand.jsx";
+import StaleBanner from "../shared/StaleBanner.jsx";
 
 const ProtocolSurface = lazy(() => import("../surface/ProtocolSurface.jsx"));
 const AddressesModal = lazy(() => import("../addresses/AddressesModal.jsx"));
@@ -15,10 +16,8 @@ const AuditsAdminModal = lazy(() => import("../audits/AuditsAdminModal.jsx"));
 
 const SELECT_NOTICE_MS = 4000;
 
-// The surface's refusal, put into words. "Absent from this graph" and "that
-// name is on several contracts" are separate facts; collapsing them into one
-// message would tell the user something the surface never said. (An entity on
-// another chain is no longer a refusal — the surface switches its scope.)
+// "Absent from this graph" and "name on several contracts" are different facts
+// and get different words.
 function selectMissNotice(result, label) {
   switch (result?.kind) {
     case "ambiguous-function":
@@ -32,12 +31,16 @@ function selectMissNotice(result, label) {
 
 export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const isAdmin = useIsAdmin();
-  const [data, setData] = useState(null);
+  const [structure, setData] = useState(null);
+  const [summary, setSummary] = useState(null);
+  const [summaryError, setSummaryError] = useState(null);
+  const data = useMemo(() => structure ? { ...structure, ...summary } : null, [structure, summary]);
   const [error, setError] = useState(null);
   const [requestAttempt, setRequestAttempt] = useState(0);
   const [auditCoverage, setAuditCoverage] = useState(null);
   const [functionData, setFunctionData] = useState(null);
   const [functionError, setFunctionError] = useState(null);
+  const [sectionMeta, setSectionMeta] = useState({});
   const [addressesModalOpen, setAddressesModalOpen] = useState(false);
   const [auditsAdminOpen, setAuditsAdminOpen] = useState(false);
   const [score, setScore] = useState(null);
@@ -47,53 +50,38 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const surfaceBandRef = useRef(null);
 
   const noticeSeq = useRef(0);
-  // Every notice is a fresh object even when its text repeats: an identical
-  // string would be a no-op state write, so the dismiss timer would never
-  // restart (the previous click's timer could kill the new notice in
-  // milliseconds) and the live region would have nothing to re-announce.
+  // A fresh object each time: identical state wouldn't restart the dismiss
+  // timer or re-announce.
   const showNotice = useCallback((text) => {
     noticeSeq.current += 1;
     setSelectMiss(text ? { text, nonce: noticeSeq.current } : null);
   }, []);
 
-  // A clicked entity on the score page selects that entity on the embedded
-  // surface and brings the surface into view. The selection goes through the
-  // surface's own handle — the same transition a canvas click makes — so the
-  // score page owns no selection logic of its own. Each way the request can
-  // fail to land is a different fact and gets its own words: an entity this
-  // graph does not carry, an entity on another chain, and a function name that
-  // more than one contract answers to are not the same miss.
+  // Score-page clicks select through the surface's own handle, so this page
+  // owns no selection logic. Each failure mode gets its own words.
   const handleSelectEntity = useCallback((target) => {
     const label = target?.label || target?.address || "That entity";
     const select = surfaceRef.current?.selectExample;
-    // The surface is a lazy chunk: no handle yet means "not mounted", which is
-    // not the surface saying the entity is absent.
+    // No handle means the lazy surface isn't mounted, not that the entity is
+    // absent.
     if (!select) {
       showNotice("The control surface is still loading — try that again in a moment.");
       return;
     }
-    // The highlight hint (what the row was about) travels with the request but
-    // is not part of it: the surface marks what its own card carries, and a
-    // hint it could not mark is never a failed click — the entity the user
-    // asked for still landed, so no outcome below is keyed on it.
+    // The hint rides along but is never part of the outcome.
     const result = select({
       chain: target?.chain,
       contractAddress: target?.address || "",
       functionSignature: target?.functionSignature || "",
       ...(target?.highlight ? { highlight: target.highlight } : {}),
-      // Only a transitive target carries this; like the hint it rides along
-      // without being part of the request, so no outcome below is keyed on it.
       ...(target?.reachedFrom ? { reachedFrom: target.reachedFrom } : {}),
     });
     if (!result?.ok) {
       showNotice(selectMissNotice(result, label));
       return;
     }
-    // A contract selected while the function named on it was not found is a
-    // partial landing, not a clean one — say so, but still take the user there.
-    // Likewise an unpaired hint: the card carries a function by that name, but
-    // under a different controller than the deduction charged — silence would
-    // read as a broken highlight rather than a refused one.
+    // A contract landing without its named function, or with an unpaired hint,
+    // is partial; say so, but still go there.
     const hintedFn = target?.highlight?.functionSignature;
     showNotice(
       result.kind === "chain-switch"
@@ -118,35 +106,37 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     const controller = new AbortController();
     const options = { signal: controller.signal };
     setData(null);
+    setSummary(null);
+    setSummaryError(null);
     setError(null);
     setAuditCoverage(null);
     setFunctionData(null);
     setFunctionError(null);
     setScore(null);
     setScoreError(null);
+    setSectionMeta({});
     setSelectMiss(null);
     setAddressesModalOpen(false);
     setAuditsAdminOpen(false);
-    api(`/api/company/${encodeURIComponent(companyName)}`, options)
-      .then((d) => { if (!cancelled) setData(d); })
+    const keepMeta = (section, meta) => setSectionMeta((current) => ({ ...current, [section]: meta }));
+    companyApi(`/api/company/${encodeURIComponent(companyName)}`, options)
+      .then(({ data: d, meta }) => { if (!cancelled) { setData(d); keepMeta("overview", meta); } })
       .catch((e) => { if (!cancelled) setError(e.message); });
-    // Audit coverage is a separate concern — fetching it in parallel means
-    // the overview still renders even if the audits pipeline hasn't been
-    // wired up yet for this protocol. 404 / 500 / network errors are
-    // swallowed; the audit column just stays empty.
+    companyApi(`/api/company/${encodeURIComponent(companyName)}/summary`, options)
+      .then(({ data: s, meta }) => { if (!cancelled) { setSummary(s); keepMeta("summary", meta); } })
+      .catch((e) => { if (!cancelled) setSummaryError(e.message); });
+    // Parallel so the overview renders even without audits; failures leave the
+    // column empty.
     api(`/api/company/${encodeURIComponent(companyName)}/audit_coverage`, options)
       .then((c) => { if (!cancelled) setAuditCoverage(c); })
       .catch(() => { /* audits optional — keep the page usable */ });
-    // Functions moved out of /api/company so the main payload could
-    // drop from ~3.3 MB to ~1.2 MB. Fetched in parallel and threaded
-    // through to ProtocolSurface as initialFunctions so the embedded
-    // surface doesn't have to re-fetch.
-    api(`/api/company/${encodeURIComponent(companyName)}/functions`, options)
-      .then((d) => { if (!cancelled) setFunctionData(d?.functions || {}); })
+    // Threaded into ProtocolSurface as initialFunctions so it doesn't re-fetch.
+    companyApi(`/api/company/${encodeURIComponent(companyName)}/functions`, options)
+      .then(({ data: d, meta }) => {
+        if (!cancelled) { setFunctionData(d?.functions || {}); keepMeta("functions", meta); }
+      })
       .catch((e) => { if (!cancelled) setFunctionError(e.message); });
-    // Fetched here rather than inside ScoreBand so it travels in parallel with
-    // the company payload: mounting the band only after /api/company answered
-    // would serialise the two.
+    // Here rather than in ScoreBand so it runs in parallel with /api/company.
     api(`/api/company/${encodeURIComponent(companyName)}/score`, options)
       .then((d) => { if (!cancelled) setScore(d); })
       .catch((e) => { if (!cancelled) setScoreError({ status: e.status, message: e.message }); });
@@ -159,16 +149,14 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   if (error) return (
     <div className="page"><section className="panel">
       <p className="empty" role="alert">Failed to load company overview: {error}</p>
-      <button type="button" onClick={() => setRequestAttempt((attempt) => attempt + 1)}>Retry</button>
+      <button className="btn" type="button" onClick={() => setRequestAttempt((attempt) => attempt + 1)}>Retry</button>
     </section></div>
   );
   if (!data) return <div className="page"><section className="panel"><p className="empty">Loading...</p></section></div>;
 
   const { contracts, ownership_hierarchy: hierarchy } = data;
 
-  // Keyed by the composite (chain, address) entity token: a CREATE2
-  // twin on two chains keeps a coverage row each instead of one overwriting the
-  // other.
+  // Composite keys so CREATE2 twins keep a row each.
   const coverageByAddr = (() => {
     const map = {};
     for (const row of auditCoverage?.coverage || []) {
@@ -177,10 +165,8 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
     return map;
   })();
 
-  // Coverage rows include past implementations linked by audit-matcher even
-  // after a proxy upgrade, so the raw count overshoots the contract count
-  // (e.g. 56 covered of 32 contracts). Intersect with the current contract
-  // set so the denominator and numerator are comparable.
+  // Coverage includes past implementations, so intersect with current contracts
+  // to keep the ratio meaningful.
   const activeAddrs = new Set(contracts.map((c) => entityKey(c.chain, c.address)));
   const coveredContracts = Object.values(coverageByAddr)
     .filter((r) => activeAddrs.has(entityKey(r.chain, r.address)))
@@ -189,7 +175,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
   const proxyCount = contracts.filter((c) => c.is_proxy).length;
   return (
     <div className="company-page">
-      {/* Hero band — edge-to-edge, no card borders */}
       <section className="company-hero-band">
         <div className="company-hero-inner">
           <ProtocolLogo name={companyName} size="xlarge" />
@@ -197,10 +182,10 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
             <p className="company-hero-eyebrow">Protocol</p>
             <h1 className="company-hero-title">{companyName}</h1>
             <p className="company-hero-subtitle">
-              {/* "—" while coverage is unloaded: 0 would assert "no reports
-                  on file" before the fetch has answered. */}
+              {/* "—" while unloaded: 0 would assert no reports. */}
               {contracts.length} contracts mapped · {auditCoverage?.audit_count ?? "—"} reports on file
             </p>
+            <StaleBanner metas={Object.values(sectionMeta)} className="company-hero-subtitle" />
           </div>
           <div className="company-hero-stats">
             {isAdmin ? (
@@ -247,6 +232,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
         </div>
       </section>
 
+      {summaryError && <p role="alert">Company summary unavailable: {summaryError}</p>}
       <ScoreBand
         companyName={companyName}
         contracts={contracts}
@@ -255,7 +241,6 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
         onSelectEntity={handleSelectEntity}
       />
 
-      {/* Inline Control Surface — real ProtocolSurface, not a static preview. */}
       <section className="company-surface-band" ref={surfaceBandRef}>
         <div className="company-surface-band-header">
           <div>
@@ -320,14 +305,14 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
           </div>
         </div>
         <div className="company-surface-embed">
-          {/* Pass the already-fetched companyData + auditCoverage so the
-              embedded surface skips its own /api/company and
-              /audit_coverage fetches — both were previously fired a
-              second time on every overview page-load. */}
+          {/*
+            Pass fetched data so the surface skips duplicate /api/company and
+            /audit_coverage calls.
+          */}
           {functionError ? (
             <div className="panel">
               <p role="alert">Failed to load control surface functions: {functionError}</p>
-              <button type="button" onClick={() => setRequestAttempt((attempt) => attempt + 1)}>Retry</button>
+              <button className="btn" type="button" onClick={() => setRequestAttempt((attempt) => attempt + 1)}>Retry</button>
             </div>
           ) : <Suspense fallback={<LoadingFallback label="Loading control surface..." />}>
             <ProtocolSurface
@@ -336,6 +321,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
               initialData={data}
               initialCoverage={auditCoverage}
               initialFunctions={functionData}
+              initialScore={{ data: score, error: scoreError }}
               embedded
             />
           </Suspense>}
@@ -344,8 +330,7 @@ export default function CompanyOverview({ companyName, onNavigateToSurface }) {
 
       {selectMiss && (
         <div className="company-select-toast" role="status">
-          {/* Keyed by the nonce so a repeated notice is a removal + insertion
-              inside the live region, which is what makes it announce again. */}
+          {/* Keyed by nonce so a repeat re-announces in the live region. */}
           <span key={selectMiss.nonce}>{selectMiss.text}</span>
         </div>
       )}

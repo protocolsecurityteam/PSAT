@@ -1,25 +1,9 @@
 """On-chain activity scoring for contract inventory ranking.
 
-Fetches the most recent transaction timestamp from Etherscan for each
-discovered contract and computes a half-life decay score.  Contracts that
-are actively used rank higher, ensuring the analysis pipeline targets the
-most relevant addresses first.
+``activity_score = 1 / (1 + days_since_last_tx / 30)``: ~1.0 active today, 0.5 after 30 days, ~0.08 after a year.
+Missing data (unsupported chain, Etherscan error) scores a neutral 0.5.
 
-Scoring
--------
-- ``activity_score = 1 / (1 + days_since_last_tx / HALF_LIFE)``
-  with HALF_LIFE = 30 days.  A contract active today scores ~1.0;
-  one inactive for 30 days scores 0.5; one inactive for a year scores ~0.08.
-- When activity data is unavailable (unsupported chain, Etherscan error),
-  the contract receives a neutral score of 0.5 so it is neither penalised
-  nor boosted.
-
-Blended ranking
----------------
-``rank_score = confidence * 0.35 + activity_score * 0.65``
-
-This keeps evidence-quality (confidence) as a factor while letting on-chain
-activity dominate the ordering so the most-used contracts surface first.
+``rank_score = confidence * 0.35 + activity_score * 0.65``, so activity dominates while evidence quality still counts.
 """
 
 from __future__ import annotations
@@ -35,20 +19,12 @@ from .inventory_domain import CHAIN_IDS, CHAIN_SORT_ORDER, _debug_log
 
 logger = logging.getLogger(__name__)
 
-# Half-life in days for the activity decay function.
 _HALF_LIFE_DAYS = 30
 
-# Score assigned when activity data is unavailable (e.g. unsupported chain).
 _NEUTRAL_SCORE = 0.5
 
-# Blended ranking weights.
 _W_CONFIDENCE = 0.35
 _W_ACTIVITY = 0.65
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _fetch_last_active_ts(
@@ -56,11 +32,8 @@ def _fetch_last_active_ts(
     chain_id: int,
     debug: bool = False,
 ) -> tuple[float | None, BaseException | None]:
-    """Return ``(timestamp, exc)`` for the most recent transaction.
-
-    ``exc`` is the explorer failure and is ``None`` when the call succeeded — a
-    miss and an outage both yield a ``None`` timestamp, and only the caller can
-    tell them apart with this second value.
+    """``(timestamp, exc)`` for the most recent tx; ``exc`` distinguishes an outage from a miss (both give a ``None``
+    timestamp).
     """
     try:
         data = etherscan.get(
@@ -86,11 +59,7 @@ def _fetch_last_active_ts(
 
 
 def _activity_score(last_active_ts: float | None) -> float:
-    """Compute an activity score in [0, 1] using half-life decay.
-
-    Returns ``_NEUTRAL_SCORE`` when the timestamp is unknown so that
-    contracts on unsupported chains are neither penalised nor boosted.
-    """
+    """Half-life activity score in [0, 1]; ``_NEUTRAL_SCORE`` when unknown."""
     if last_active_ts is None:
         return _NEUTRAL_SCORE
     now = datetime.now(timezone.utc).timestamp()
@@ -99,38 +68,23 @@ def _activity_score(last_active_ts: float | None) -> float:
 
 
 def _primary_chain(contract: dict[str, Any]) -> str:
-    """Return the first chain from a contract's chains list, or 'unknown'."""
     chains = contract.get("chains", [])
     return chains[0] if chains else "unknown"
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 
 def enrich_with_activity(
     contracts: list[dict[str, Any]],
     debug: bool = False,
 ) -> list[dict[str, Any]]:
-    """Add activity metrics to each contract and re-sort by blended rank score.
-
-    Mutates the contract dicts in-place (adds ``activity`` and ``rank_score``
-    keys) and returns the list sorted by ``rank_score`` descending.
-
-    Rate-limited centrally by ``services.clients.etherscan``.
+    """Add ``activity`` and ``rank_score`` to each contract (in place) and return them sorted by ``rank_score``
+    descending. Rate-limited by ``services.clients.etherscan``.
     """
     if not contracts:
         return contracts
 
     _debug_log(debug, f"Fetching on-chain activity for {len(contracts)} contract(s)")
 
-    # Explorer failures are counted and reported once per pass rather than per
-    # contract: an outage hits every address in the inventory, and the fact
-    # worth surfacing is how much of the ranking ran on the neutral score.
-    # Only the last exception is held — keeping one per contract would pin every
-    # failed call's traceback frames (and the response bodies inside them) for
-    # the whole pass.
+    # Counted once per pass (an outage hits every address), keeping only the last exception to avoid pinning tracebacks.
     fetch_failures = 0
     last_failure: BaseException | None = None
     failure_types: set[str] = set()
@@ -139,9 +93,8 @@ def enrich_with_activity(
         address = contract["address"]
         chain = _primary_chain(contract)
         if chain not in CHAIN_IDS:
-            # Unregistered/unknown chain: we can't query the right explorer, and
-            # defaulting to mainnet would rank this contract by an unrelated
-            # address's mainnet activity. Skip the fetch and floor it.
+            # Unknown chain: can't query the right explorer, and mainnet would rank it by an unrelated address's
+            # activity.
             last_ts = None
             score = 0.0
         else:
@@ -166,8 +119,7 @@ def enrich_with_activity(
         )
 
     if last_failure is not None:
-        # The last failure carries the provider's own error text into the
-        # StageError; the count says how much of the ranking it moved.
+        # The last error carries the provider's text; the count says how much of the ranking it affected.
         record_degraded(
             phase="activity_enrichment",
             exc=last_failure,

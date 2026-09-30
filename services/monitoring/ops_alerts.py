@@ -1,24 +1,9 @@
-"""Ops watchdog: a consumer for ``worker_heartbeats``.
+"""Ops watchdog over ``worker_heartbeats``: a dead daemon otherwise produces only silence.
 
-The monitoring loops emit heartbeats (``db.queue.record_heartbeat``) but nothing
-routes on their silence — a dead scanner or a stopped monitor VM produces no
-page, only an absence. This module closes that blind spot. It runs as a task in
-the web app's lifespan (``api.py``) — web is the only fly group that is
-health-checked and auto-started, so it is the one process guaranteed to be up to
-watch the others.
-
-Every ``PSAT_OPS_ALERT_INTERVAL_S`` it classifies each :data:`PROCESS_META`
-process fresh/stale/error off the same staleness rule the fleet view uses (one
-rule, one module — :mod:`services.monitoring.process_meta`), and on a
-``fresh → stale/error`` transition emits exactly one ERROR log (→ a Loki alert
-rule) plus one Discord post to ``PSAT_OPS_WEBHOOK_URL``; on recovery, one of each.
-
-Dedupe/cooldown state lives in the alerter's own ``ops_alerter`` heartbeat row
-detail (which doubles as this task's heartbeat), written under a compare-and-swap
-guard so two web machines racing the same tick rarely double-post.
-
-Only the wire is external here — ``_send_discord`` (reused from
-:mod:`services.monitoring.notifier`) is the single HTTP call.
+Runs in the web app's lifespan (the only health-checked, auto-started group). On a fresh-to-stale/error transition it
+emits one ERROR log (the Loki alert hook) and one Discord post, and one of each on recovery, using the fleet view's
+staleness rule. Dedupe state lives in its own heartbeat row, written by compare-and-swap so racing web machines rarely
+double-post.
 """
 
 from __future__ import annotations
@@ -54,24 +39,20 @@ DEFAULT_INTERVAL_S = 120
 DEFAULT_COOLDOWN_S = 3600
 DEFAULT_SCAN_LAG_ALERT = 50_000
 
-# Distinct dedupe-key suffix for the scanner "behind" (lagging) alert so it never
-# collides with the scanner "dead" (stale) alert — they are independent alarms.
+# Independent of the scanner "dead" alarm.
 _BEHIND_SUFFIX = ":behind"
 
-# Third alarm family: monitored contracts watching without a current tracking
-# plan (dated, or none at all). Not a daemon — the processes are all fresh; the
-# thing that has degraded is what they are watching FOR.
+# Contracts watching without a current tracking plan; the daemons are fresh, what they watch for has degraded.
 _COVERAGE_KEY = "tracking_plan_coverage"
 
-# Log-only, never an alert dedupe key — see :func:`collect_verification_gaps`.
+# Log-only; see :func:`collect_verification_gaps`.
 _VERIFICATION_GAP_KEY = "verification_read_gaps"
 
-# Log-only for the same reason — see :func:`collect_materialization_backlog`.
+# Log-only; see :func:`collect_materialization_backlog`.
 _MATERIALIZATION_BACKLOG_KEY = "materialization_backlog"
 
 
-# When this process started watching. A heartbeat older than this cannot have
-# gone stale on our watch, which is what tells a cold start apart from a death.
+# A beat older than this can't have gone stale on our watch: cold start, not death.
 _STARTED_MONOTONIC = time.monotonic()
 
 
@@ -92,13 +73,9 @@ def _scan_lag_alert() -> int:
 
 
 def _coverage_alert_threshold() -> int:
-    """How many contracts may watch without a current plan before it pages.
+    """Contracts allowed to watch without a current plan before paging.
 
-    Default 0 = **no threshold asserted**, so the alarm is silent until an
-    operator sets one. What counts as an acceptable coverage shortfall is a
-    policy nobody has decided yet, and a built-in default would be this module
-    inventing one. The census itself is published unconditionally (``/api/fleet``
-    and :func:`collect_plan_coverage`) — visibility is not gated on the alarm.
+    Default 0 means no threshold (silent) until an operator decides the policy; the census is published regardless.
     """
     try:
         return max(0, int(os.getenv("PSAT_PLAN_COVERAGE_ALERT", "0")))
@@ -120,10 +97,9 @@ def _age_seconds(ts: datetime | None, now: datetime) -> float | None:
 
 
 def _read_heartbeats(session: Session, now: datetime) -> dict[str, dict[str, Any]]:
-    """Every ``worker_heartbeats`` row as ``{process: {status, beat_age_s, detail}}``.
-
-    Read via raw SQL rather than the ORM so a long-lived session's identity map
-    can't hand back a stale in-flight object (each tick wants committed truth)."""
+    """Every heartbeat row as ``{process: {status, beat_age_s, detail}}``, via raw SQL so a long-lived identity map
+    can't return stale objects.
+    """
     rows = session.execute(text("SELECT process, status, detail, beat_at FROM worker_heartbeats")).all()
     out: dict[str, dict[str, Any]] = {}
     for process, status, detail, beat_at in rows:
@@ -136,12 +112,9 @@ def _read_heartbeats(session: Session, now: datetime) -> dict[str, dict[str, Any
 
 
 def collect_stale_processes(session: Session, *, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Every :data:`PROCESS_META` process currently stale or errored.
+    """Every :data:`PROCESS_META` process stale or errored (no row counts as stale).
 
-    The single source of truth behind both the watchdog's down-detection and
-    the ``GET /api/health/monitoring`` endpoint, so the page an external uptime
-    checker sees and the page the alerter acts on can't disagree. A process with
-    no heartbeat row (``beat_age_s is None``) classifies stale.
+    Shared with ``GET /api/health/monitoring`` so they can't disagree.
     """
     now = now or datetime.now(timezone.utc)
     beats = _read_heartbeats(session, now)
@@ -159,8 +132,7 @@ def collect_stale_processes(session: Session, *, now: datetime | None = None) ->
 
 
 def _chain_name_for_token(token: str) -> str:
-    """Registry canonical name for a decimal chain-id *token*, else the token
-    itself — a health read must never raise on a legacy/unregistered chain."""
+    """Canonical name for a chain-id *token*, else the token; never raises on unregistered chains."""
     if token.isdigit():
         try:
             return chain_by_id(int(token)).name
@@ -170,17 +142,8 @@ def _chain_name_for_token(token: str) -> str:
 
 
 def collect_chain_health(session: Session, *, now: datetime | None = None) -> list[dict[str, Any]]:
-    """Per-chain staleness for the chain-scoped subsystems.
-
-    A fleet-global "monitoring OK" hides a chain whose indexer or scanner has
-    stalled while another chain stays fresh. This reads the freshness of the
-    per-chain rows those subsystems already write — indexer cursors carry
-    ``chain_id``; monitored contracts carry ``chain`` — and flags a chain stale
-    on the same ``stale_after_seconds`` rule the process-level check uses. A
-    subsystem with no rows on a chain is ``idle`` (not a fault).
-
-    Returns one entry per chain, keyed by canonical chain-id token, each with
-    the two subsystems' status and an aggregate ``stale`` flag.
+    """Per-chain indexer and scanner staleness, keyed by chain-id token, so one stalled chain isn't hidden by a fresh
+    one. No rows on a chain is ``idle``, not a fault.
     """
     now = now or datetime.now(timezone.utc)
     indexer_window = stale_after_seconds(PROCESS_META[HEARTBEAT_EVENT_INDEXER]["interval_s"])
@@ -199,8 +162,6 @@ def collect_chain_health(session: Session, *, now: datetime | None = None) -> li
             },
         )
 
-    # Indexer: stalest cursor run per chain. A chain whose cursors haven't been
-    # scanned within the indexer window is a stalled per-chain indexer.
     for chain_id, cursors, oldest_run in session.execute(
         select(
             IndexedEventCursor.chain_id,
@@ -214,9 +175,6 @@ def collect_chain_health(session: Session, *, now: datetime | None = None) -> li
         entry = _entry(chain_cache_token(chain_id))
         entry["indexer"] = STALE if (age is None or age >= indexer_window) else "fresh"
 
-    # Monitoring: freshest scan-frontier advance per chain among active
-    # contracts. A chain enrolled but not advancing within the scanner window is
-    # a stalled per-chain scanner.
     for chain, active, latest in session.execute(
         select(
             MonitoredContract.chain,
@@ -240,44 +198,25 @@ def collect_chain_health(session: Session, *, now: datetime | None = None) -> li
 
 
 def collect_plan_coverage(session: Session) -> dict[str, Any]:
-    """Tracking-plan census for the monitored fleet.
-
-    Thin pass-through to :func:`plan_coverage_counts` so the watchdog and the
-    fleet view read one implementation — "quiet because nothing happened" and
-    "quiet because nothing is being watched" must not be a per-surface judgment.
-    """
+    """Pass-through to :func:`plan_coverage_counts` so watchdog and fleet view share one implementation."""
     return plan_coverage_counts(session)
 
 
 def collect_verification_gaps(session: Session) -> dict[str, Any]:
-    """Verification-read gap census for the monitored fleet health surface.
+    """Verification-read gap census.
 
-    Same pass-through role :func:`collect_plan_coverage` plays, and deliberately
-    **not** a fourth alarm family: the census counts markers present at read
-    time, not gaps that occurred, so a threshold over it would fire on when the
-    poller last rewrote a status map as much as on anything about the reads. The
-    counts are published unconditionally instead — here, on ``/api/fleet``, and
-    per-pass on the scanner heartbeat — and the tick logs them when non-zero so
-    the condition has a timestamped record even after the markers are erased.
+    Deliberately not an alarm: it counts markers present now, not gaps that happened. Logged when non-zero so the
+    condition has a timestamp.
     """
     return count_verification_read_gaps(session)
 
 
 def collect_materialization_backlog(session: Session) -> dict[str, Any]:
-    """Materialization-supply backlog for the monitored fleet.
-
-    The same pass-through role :func:`collect_plan_coverage` plays, and the same
-    deliberate non-alarm: the existing coverage alarm already fires on contracts
-    watching without a current plan, and this counts the rebuild work behind
-    that number. A second threshold over the same condition would double-alert
-    on one fact, so the counts are published unconditionally instead — here, on
-    ``/api/fleet``, and in the tick log while the backlog is non-empty.
-    """
+    """Materialization backlog census. Not an alarm: the coverage alarm already covers this condition."""
     return materialization_backlog(session)
 
 
 def _log_materialization_backlog(backlog: dict[str, Any]) -> None:
-    """One INFO per tick while any monitored contract lacks a current row."""
     contracts = backlog.get("contracts")
     if not isinstance(contracts, int) or contracts <= 0:
         return
@@ -290,11 +229,7 @@ def _log_materialization_backlog(backlog: dict[str, Any]) -> None:
 
 
 def _log_verification_gaps(gaps: dict[str, Any]) -> None:
-    """One INFO per tick carrying the census, only when something is marked.
-
-    Sums every marker bucket — ``contracts_affected`` is excluded because it
-    counts contracts, not markers.
-    """
+    """One INFO per tick when any marker exists; ``contracts_affected`` isn't summed (it counts contracts)."""
     marked = sum(v for key, v in gaps.items() if isinstance(v, int) and key != "contracts_affected")
     if not marked:
         return
@@ -310,14 +245,8 @@ def _current_problems(
     now: datetime,
     coverage: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Map dedupe-key → problem info for every process currently in trouble.
-
-    Three independent alarm families, each its own key:
-      * ``<process>``               — a daemon gone stale/error ("dead").
-      * ``<scanner>:behind``        — the scanner's head-lag over threshold.
-      * ``tracking_plan_coverage``  — contracts watching without a current plan,
-        over an operator-set threshold (off by default).
-    The alerter never pages on its own silence (it is the thing running).
+    """Dedupe key -> problem for everything in trouble: ``<process>`` (dead), ``<scanner>:behind`` (lag),
+    ``tracking_plan_coverage`` (over an operator threshold). The alerter never pages on itself.
     """
     problems: dict[str, dict[str, Any]] = {}
     for process, meta in PROCESS_META.items():
@@ -349,11 +278,8 @@ def _current_problems(
 
     threshold = _coverage_alert_threshold()
     if threshold and coverage:
-        # Dated plans and no plan at all are both "not watching what the
-        # analysis says to watch"; they are counted together for the alarm and
-        # stay separate in the payload. A caller-authored config is excluded: an
-        # operator chose it, so paging on it would page them for their own
-        # decision (the bucket stays in the payload either way).
+        # Dated and missing plans count together for the alarm. Caller-authored configs are excluded: operators
+        # shouldn't be paged for their own choice.
         not_determined = coverage.get("not_determined") or {}
         uncovered = int(coverage.get("ready_stale", 0)) + sum(
             int(n) for token, n in not_determined.items() if token != CONFIG_SUPPLIED_BY_CALLER
@@ -370,15 +296,9 @@ def _current_problems(
 
 
 def _post_discord(webhook_url: str, embed: dict[str, Any]) -> None:
-    """Send one Discord embed, swallowing transport failures.
-
-    ``_send_discord`` only handles a non-ok HTTP *response*; a ConnectionError /
-    Timeout from ``requests.post`` still propagates. The emit loops iterate one
-    problem per daemon, so an unguarded raise here would abort mid-loop and leave
-    every later daemon un-logged and un-posted while their state is already
-    persisted as notified — they'd stay silent until the cooldown. Contain the
-    wire failure to its own problem: the per-problem ERROR log already fired
-    before this call, so the belt-and-braces Loki alert survives for all."""
+    """Send one Discord embed, swallowing transport errors so one failure can't silence the remaining problems
+    (already marked notified). The ERROR log has already fired.
+    """
     try:
         _send_discord(webhook_url, embed)
     except Exception:
@@ -386,7 +306,6 @@ def _post_discord(webhook_url: str, embed: dict[str, Any]) -> None:
 
 
 def _emit_down(problem: dict[str, Any], *, webhook_url: str | None) -> None:
-    """One ERROR log (always) + one Discord post (if a webhook is configured)."""
     daemon = problem["daemon"]
     if problem["kind"] == "coverage":
         logger.error(
@@ -417,19 +336,9 @@ def _emit_down(problem: dict[str, Any], *, webhook_url: str | None) -> None:
         title = f"Monitoring behind: {daemon}"
     else:
         beat_age = problem["beat_age_s"]
-        # A staleness older than this watchdog's own uptime happened while
-        # nothing was running to see it — the routine cold-start condition (ten
-        # daemons "down" the moment the stack comes up), not an incident. The
-        # ERROR is the Loki alert hook and is reserved for a daemon that dies
-        # while we are watching; the cold start still says so, at WARNING, and
-        # still posts.
-        #
-        # The uptime bound is what keeps that from swallowing the alarm: beat
-        # age and uptime grow at the same rate, so the comparison alone is a
-        # constant, and a daemon that died ten minutes before the alerter
-        # restarted would read cold-start forever. Only the first two ticks of
-        # this process count as a cold start; after that a still-dead daemon is
-        # an incident, whatever its beat age (including no heartbeat at all).
+        # A staleness older than this watchdog's uptime is a cold start, not an incident: WARNING instead of ERROR,
+        # still posted. Only the first two ticks count as cold start; otherwise a daemon that died just before a restart
+        # would read cold-start forever.
         watchdog_is_young = _uptime_s() < 2 * _interval_s()
         cold_start = watchdog_is_young and (beat_age is None or beat_age > _uptime_s())
         logger.log(
@@ -457,8 +366,7 @@ def _emit_down(problem: dict[str, Any], *, webhook_url: str | None) -> None:
 
 def _emit_recovery(key: str, prior: dict[str, Any], *, webhook_url: str | None) -> None:
     daemon = prior.get("daemon", key)
-    # The coverage alarm is not a daemon, so it recovers as a subject, not a
-    # process — same machinery, honest wording.
+    # The coverage alarm recovers as a subject, not a process.
     subject = "coverage" if prior.get("kind") == "coverage" else "daemon"
     logger.info("ops: %s %s recovered", subject, daemon, extra={"daemon": daemon})
     if webhook_url:
@@ -473,13 +381,8 @@ def _emit_recovery(key: str, prior: dict[str, Any], *, webhook_url: str | None) 
 
 
 def _cas_write(session: Session, expected_beat_at: datetime | None, detail: dict[str, Any]) -> bool:
-    """Persist alert state + refresh the alerter's heartbeat, compare-and-swap.
-
-    Returns True iff this caller won the write. When the row is absent an
-    ``INSERT ... ON CONFLICT DO NOTHING`` claims it; otherwise an ``UPDATE``
-    guarded on the ``beat_at`` this tick read wins only if no competitor has
-    bumped the row since — so of two web machines racing the same transition,
-    exactly one advances the row and posts.
+    """Persist alert state and refresh our heartbeat by compare-and-swap on the read ``beat_at``; returns whether we
+    won, so one of two racing machines posts.
     """
     payload = json.dumps(detail)
     if expected_beat_at is None:
@@ -505,12 +408,9 @@ def _cas_write(session: Session, expected_beat_at: datetime | None, detail: dict
 
 
 def run_ops_alert_tick(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
-    """One watchdog pass. Returns a summary (posts emitted) for tests/logging.
+    """One watchdog pass; returns posts emitted.
 
-    Reads heartbeats + prior alert state, diffs against the current problem set,
-    and — only if the CAS write of the new state wins — emits the down/recovery
-    events. A tick with nothing to report still refreshes the ``ops_alerter``
-    heartbeat so the watchdog is itself observable.
+    Posts only if the CAS write wins, and always refreshes the ``ops_alerter`` heartbeat.
     """
     now = now or datetime.now(timezone.utc)
     session.expire_all()
@@ -521,7 +421,7 @@ def run_ops_alert_tick(session: Session, *, now: datetime | None = None) -> dict
     prior_alerts: dict[str, Any] = {}
     if own is not None:
         prior_alerts = dict(own["detail"].get("alerts", {}))
-        # Re-read our own beat_at raw for the CAS guard (identity-map-proof).
+        # Raw re-read for the CAS guard (identity-map-proof).
         prior_beat_at = session.execute(
             text("SELECT beat_at FROM worker_heartbeats WHERE process=:p"),
             {"p": HEARTBEAT_OPS_ALERTER},
@@ -559,14 +459,13 @@ def run_ops_alert_tick(session: Session, *, now: datetime | None = None) -> dict
     recovered = [(key, prior_alerts[key]) for key in prior_alerts if key not in problems]
 
     if not to_alert and not recovered and new_alerts == prior_alerts:
-        # Nothing changed — just refresh our own heartbeat (best-effort, no CAS
-        # needed since there is nothing to guard).
+        # Nothing changed; just refresh our heartbeat.
         _cas_write(session, prior_beat_at, {"alerts": new_alerts})
         return {"posted_down": 0, "posted_recovery": 0, "skipped": False}
 
     won = _cas_write(session, prior_beat_at, {"alerts": new_alerts})
     if not won:
-        # A racing web machine advanced the row first; it owns this transition.
+        # A racing machine won; it owns this transition.
         return {"posted_down": 0, "posted_recovery": 0, "skipped": True}
 
     webhook_url = _webhook_url()
@@ -596,11 +495,9 @@ def _tick_once() -> None:
 
 
 async def run_ops_alerter_loop(stop_event: asyncio.Event, *, interval: float | None = None) -> None:
-    """Lifespan task: run :func:`run_ops_alert_tick` every interval until stopped.
-
-    The DB work runs in a worker thread so a slow tick never blocks the event
-    loop; every exception is swallowed so a transient DB hiccup can't kill the
-    watchdog (its own stale heartbeat would then be the alarm)."""
+    """Lifespan task running :func:`run_ops_alert_tick` each interval in a thread, swallowing errors (a dead
+    watchdog's stale heartbeat is its own alarm).
+    """
     interval = interval if interval is not None else _interval_s()
     while not stop_event.is_set():
         try:

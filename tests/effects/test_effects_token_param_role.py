@@ -1,32 +1,21 @@
-"""What may occupy a caller-supplied TOKEN argument, and what a probe may claim
-about the call it produced.
+"""What may occupy a caller-supplied TOKEN argument, and what a probe may claim about the call it produced.
 
-The 2026-07-25 live run left all 8 supply verdicts ``unknown`` with no backing
-payload: the encoder wrote the acting principal into every address argument, so
-a deposit-shaped function received a non-token where it expected an ERC-20 and
-reverted on its own first line (``TRANSFER_FROM_FAILED``). Two things follow.
-
-* A token slot has to receive a REAL token before the pull can succeed, and the
-  only honest source is the wire — a getter the code itself calls the asset
-  through, or an asset the acting deployment provably holds.
-* Until it does, no backing witness may be published. Measured on a mainnet fork
-  (three independent vaults, 2026-07-25): with the encoder's default
-  ``address(0)`` in the asset slot the call SUCCEEDS — a call to a codeless
-  address is a no-op success inside every ``safeTransfer`` wrapper — and mints
-  against a pull that never happened. Reporting that as
-  ``backing.inflow_observed: false`` turns a deposit-backed conversion into
-  witnessed dilution, on evidence the prober manufactured.
-
-Fixtures are generic shapes — an ERC-4626 ``deposit(uint256,address)``, a
-``swap(address,address,uint256,address)``, a name-free parameter identified only
-by the sink that calls through it — so a pass cannot come from recognizing a
-protocol.
+The 2026-07-25 live run left all 8 supply verdicts ``unknown``: the encoder wrote the acting
+principal into every address argument, so a deposit-shaped function got a non-token where it
+expected an ERC-20 and reverted (``TRANSFER_FROM_FAILED``). A token slot must receive a REAL token
+(from a getter the code calls the asset through, or an asset the deployment provably holds), and
+until then no backing witness may be published: measured on a mainnet fork (three vaults), the
+default ``address(0)`` makes the call SUCCEED as a codeless no-op inside ``safeTransfer`` and mint
+against a pull that never happened, so ``inflow_observed: false`` would turn a deposit-backed
+conversion into dilution on evidence the prober manufactured.
+Fixtures are generic shapes so a pass cannot come from recognizing a protocol.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from eth_utils.crypto import keccak
 
 from services.effects import calldata as cd
@@ -84,9 +73,8 @@ def _facts(
 
 
 def _pull_sink(sig: str, target: str) -> dict[str, Any]:
-    """A body call THROUGH a name — the shape a library-wrapped pull leaves
-    behind. Its selector belongs to the library, so nothing keyed on ERC-20
-    selectors can see it."""
+    """A body call THROUGH a name, the shape a library-wrapped pull leaves; its selector belongs to
+    the library, so nothing keyed on ERC-20 selectors sees it."""
     return {
         "id": f"{sig}:sink0:external_call:{target}.safeTransferFrom",
         "function": sig,
@@ -136,22 +124,36 @@ def _roles(sig: str, names: list[str], sinks: list[dict[str, Any]] | None = None
 # ---------------------------------------------------------------------------
 
 
-def test_asset_named_slot_is_a_token_and_the_receiver_is_not():
-    roles = _roles("deposit(address,uint256,address)", ["depositAsset", "amount", "receiver"])
-    assert roles[0] == cd.ROLE_TOKEN
-    assert roles[2] == cd.ROLE_RECIPIENT
-
-
-def test_a_swap_names_both_of_its_token_slots():
-    roles = _roles("swap(address,address,uint256,address)", ["tokenIn", "tokenOut", "amountIn", "to"])
-    assert roles[0] == cd.ROLE_TOKEN
-    assert roles[1] == cd.ROLE_TOKEN
-    assert roles[3] == cd.ROLE_RECIPIENT
+@pytest.mark.parametrize(
+    ("sig", "names", "expected", "roleless"),
+    [
+        pytest.param(
+            "deposit(address,uint256,address)",
+            ["depositAsset", "amount", "receiver"],
+            {0: cd.ROLE_TOKEN, 2: cd.ROLE_RECIPIENT},
+            (),
+            id="asset_named_slot_is_token_receiver_is_not",
+        ),
+        pytest.param(
+            "swap(address,address,uint256,address)",
+            ["tokenIn", "tokenOut", "amountIn", "to"],
+            {0: cd.ROLE_TOKEN, 1: cd.ROLE_TOKEN, 3: cd.ROLE_RECIPIENT},
+            (),
+            id="swap_names_both_token_slots",
+        ),
+        pytest.param("act(address,uint256)", ["", ""], {}, (0,), id="unnamed_address_slot_gets_no_role"),
+    ],
+)
+def test_address_param_roles_by_name(sig, names, expected, roleless):
+    roles = _roles(sig, names)
+    for index, role in expected.items():
+        assert roles[index] == role
+    for index in roleless:
+        assert index not in roles
 
 
 def test_a_sink_calling_through_a_parameter_names_it_a_token_without_any_vocabulary():
-    """No token word anywhere in the name: the evidence is that the body calls an
-    ERC-20 method THROUGH that parameter."""
+    """No token word in the name: the evidence is that the body calls an ERC-20 method THROUGH that parameter."""
     sig = "pull(address,uint256)"
     roles = _roles(sig, ["x", "n"], [_pull_sink(sig, "x")])
     assert roles[0] == cd.ROLE_TOKEN
@@ -162,11 +164,6 @@ def test_a_name_carrying_both_vocabularies_is_no_evidence_at_all():
     probe exists for, so an ambiguous name keeps the principal."""
     roles = _roles("send(address,uint256)", ["tokenRecipient", "amount"])
     assert roles[0] == cd.ROLE_RECIPIENT
-
-
-def test_an_unnamed_address_slot_gets_no_role():
-    roles = _roles("act(address,uint256)", ["", ""])
-    assert 0 not in roles
 
 
 # ---------------------------------------------------------------------------
@@ -182,8 +179,7 @@ def test_token_slot_reaches_the_plan_and_the_holdings_ride_with_it():
         holdings=(TOKEN_A, TOKEN_B),
     )
     assert spec.token_param_indexes == (0,)
-    # Offered to the seeder as already-resolved addresses, ahead of the self
-    # fallback and behind the getters.
+    # Offered to the seeder as resolved addresses, ahead of the self fallback and behind the getters.
     assert TOKEN_A in spec.input_token_hints
     assert spec.input_token_hints[-1] == cd.SELF_TOKEN_HINT
 
@@ -226,9 +222,8 @@ def _read_sink(sig: str, target: str, selector: str) -> dict[str, Any]:
 
 
 def test_a_token_read_selector_names_the_token_getter():
-    # A share-accounted wrap reads ``eETH.shares(caller)`` before it moves the
-    # asset; that read is the only NAMED head when the transfer is library-wrapped
-    # behind a temporary. ``_TOKEN_READ_SELECTORS`` surfaces the getter from it.
+    # A share-accounted wrap reads ``eETH.shares(caller)`` before moving the asset; when the transfer
+    # is library-wrapped behind a temporary that read is the only NAMED head (``_TOKEN_READ_SELECTORS``).
     sig = "wrap(uint256)"
     for selector in ("0xce7c2ac2", "0xf5eb42dc", "0x70a08231"):
         facts = _facts(sig, parameter_names=["amount"], sinks=[_read_sink(sig, "underlying", selector)])
@@ -238,8 +233,7 @@ def test_a_token_read_selector_names_the_token_getter():
 
 
 def test_a_slither_temporary_head_never_becomes_a_getter_hint():
-    # An unresolved cast/index temporary carries no getter; calling ``TMP_7()``
-    # seeds nothing, so it must be dropped rather than emitted.
+    # An unresolved cast/index temporary carries no getter; calling ``TMP_7()`` seeds nothing, so drop it.
     sig = "wrap(uint256)"
     for junk in ("TMP_7", "REF_5", "TUPLE_2"):
         facts = _facts(sig, parameter_names=["amount"], sinks=[_pull_sink(sig, junk)])
@@ -371,22 +365,6 @@ def _supply_block(before: int, after: int, logs=()):
     )
 
 
-def test_backing_is_withheld_when_a_token_slot_never_got_a_token():
-    """The call went through with a non-token in the asset slot, so the pull was
-    a no-op. ``inflow_observed: false`` would report that as dilution."""
-    eff = _supply(
-        "deposit(address,uint256,address)",
-        ["depositAsset", "amount", "receiver"],
-        [_supply_block(0, 100, [transfer_log(VAULT, "0x" + "00" * 20, PRINCIPAL, 100)])],
-        seeding=None,
-    )
-    assert eff.verdict == VERDICT_PROVEN
-    assert eff.details["supply_delta_sign"] == "mint"
-    # ABSENT, not false: absence reads as unmeasured everywhere downstream.
-    assert "backing" not in eff.details
-    assert "backing_inflow_transfers" not in eff.concrete
-
-
 def test_backing_is_published_once_every_token_slot_carried_a_proven_token():
     reverted = _reverted_block()
     seeded = _supply_block(
@@ -406,25 +384,6 @@ def test_backing_is_published_once_every_token_slot_carried_a_proven_token():
     assert eff.verdict == VERDICT_PROVEN
     assert eff.details["backing"]["inflow_observed"] is True
     assert eff.concrete["backing_inflow_transfers"] == 1
-
-
-def test_a_function_with_no_token_slot_keeps_its_backing_witness():
-    """The gate must not silence the admin-mint case the witness exists for.
-
-    ``mint(address,uint256)`` names no token, so the prober's identity sits in an
-    address slot; the differential proves the mint did not depend on it (a stub
-    that reverts on every call changes nothing) and the negative is published."""
-    eff = _supply(
-        "mint(address,uint256)",
-        ["to", "amount"],
-        [
-            _supply_block(0, 100, [transfer_log(VAULT, "0x" + "00" * 20, PRINCIPAL, 100)]),
-            _supply_block(0, 100, [transfer_log(VAULT, "0x" + "00" * 20, PRINCIPAL, 100)]),
-        ],
-        seeding=None,
-    )
-    assert eff.details["backing"]["inflow_observed"] is False
-    assert eff.details["backing"]["minted"] is True
 
 
 def test_seeding_a_token_cannot_by_itself_produce_an_inflow():

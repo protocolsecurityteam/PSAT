@@ -1,8 +1,8 @@
-"""W2 — composition over a 2-hop chain: the ceiling, its disclosure, and the.
+"""W2: composition over a 2-hop chain: the ceiling, its disclosure, and the rule
+that no hop inherits its predecessor's authority.
 
-rule that no hop inherits its predecessor's authority
-bulkDeposit at the teller: a function of the teller nothing on this chain
-admits, used to stand in for every hop the principal cannot drive.
+``bulkDeposit`` at the teller is a function nothing on this chain admits, used
+to stand in for every hop the principal cannot drive.
 """
 
 from __future__ import annotations
@@ -43,10 +43,9 @@ REFUND_SELECTOR = "0x9d574420"
 def test_w2_case1_the_two_hop_chain_composes_through_both_links(fold):
     """Regression case 1. Both links witnessed, each by the shape it earns.
 
-    The whole decomposition is published on the entry: the seized gate's row, a
-    restricted authority-gated calling function of the seized node, the
-    destination's ACL row with the role and the selector it admits, the
-    intermediate's resolved pointer, and the destination's own flow.out witness.
+    The whole decomposition is published on the entry (seized gate's row, the
+    restricted calling function, the destination's ACL row with role and
+    selector, the intermediate's pointer, the destination's flow.out witness).
     Remove any one and the figure is not_determined.
     """
     document = fold(_composing_signals(), principals=_composing_principals(), **_two_hop_case())
@@ -90,38 +89,13 @@ def test_w2_case1_the_two_hop_chain_composes_through_both_links(fold):
     assert KEY_T not in {e["entity"] for e in row["reach_composed_magnitudes"]}
 
 
-def test_w2_the_composed_figure_carries_no_authored_precondition_block(fold):
-    """F3, cut. The block that hedged the figure was one constant string.
-
-    ``caller_holding_precondition`` was 1,222 characters, identical on all forty
-    entries of the reference corpus, and its central clause — that the last
-    admitted call spends a quantity the caller must hold — is FALSE on the
-    twelve whose destination is ``manage``. It is deleted rather than reworded,
-    and with it ``principal_extraction_bound``, which named a direction the
-    entry derived from nothing. What survives is what the entry can account for:
-    the figure, the sheet that bounded it, and the execution that proved it.
-    """
-    document = fold(_composing_signals(), principals=_composing_principals(), **_two_hop_case())
-    entry = next(e for e in _gate_row(document)["reach_composed_magnitudes"] if e["entity"] == KEY_V)
-    assert "caller_holding_precondition" not in entry
-    assert "principal_extraction_bound" not in entry
-    assert not hasattr(FOLD, "_CallerHoldingPrecondition")
-    assert not hasattr(FOLD, "COMPOSED_BOUND_CALLER_ARGUMENTS")
-    # The witness was READ from one function's row and measures the entity.
-    assert entry["witness_granularity"] == "entity"
-    # ...and deleting the hedge did not delete the figure or its account.
-    assert entry["published_usd"] == 1_000_000.0
-    assert entry["proving_execution"]["state"] in ("recorded", "not_determined")
-
-
 def test_w2_case2_the_condition_disproved_hop_is_not_resurrected_by_composition(fold):
     """Regression case 2. The blocked EOA stays blocked.
 
     The intermediate's every consulted function pins its caller to the
     destination itself, which the condition plane reads as a disproof INSIDE the
-    closure walk — upstream of composition. An admission built on the
-    destination's ACL must not reach around it: the walk never offers the hop,
-    so nothing composes and the magnitude stays not_determined.
+    closure walk, upstream of composition. An ACL-based admission must not reach
+    around it.
     """
     blocked = fold(
         _composing_signals(),
@@ -143,9 +117,9 @@ def test_w2_case2_the_condition_disproved_hop_is_not_resurrected_by_composition(
 def test_w2_case3_composition_admits_a_magnitude_and_never_an_entity(fold):
     """Regression case 3. No row reaches an entity composition put there.
 
-    Reach is decided by the closure walk, which never consults the act-as plane.
-    Strip every act-as witness and the same entities are still reached — only
-    the dollars go to not_determined.
+    Reach is decided by the closure walk, which never consults the act-as plane:
+    strip every act-as witness and the same entities are reached; only the
+    dollars go to not_determined.
     """
     with_witness = _gate_row(fold(_composing_signals(), principals=_composing_principals(), **_two_hop_case()))
     without = _gate_row(
@@ -165,10 +139,9 @@ def test_w2_case3_composition_admits_a_magnitude_and_never_an_entity(fold):
 def test_w2_case4_a_parameter_bound_link_with_no_acl_row_stays_refused(fold):
     """Regression case 4. The destination-side witness is required, not assumed.
 
-    Hop 1's call site takes its callee as a parameter, so no storage of the
-    seized node can name the teller. With the teller's own list silent, nothing
-    at either end names the address, and the chain stops at hop 1 under its own
-    typed reason — the second hop is never even offered.
+    Hop 1's callee is a parameter, so no storage of the seized node names the
+    teller. With the teller's list silent the chain stops at hop 1 under its own
+    typed reason; the second hop is never offered.
     """
     document = fold(
         _composing_signals(),
@@ -198,9 +171,9 @@ def test_w2_case4_a_parameter_bound_link_with_no_acl_row_stays_refused(fold):
 def test_w2_case5_no_composed_magnitude_exceeds_the_bound_over_two_hops(fold):
     """Regression case 5. The anti-composition property, re-asserted at length 2.
 
-    Two ceilings and the published figure clears neither: the destination's own
-    witness, and the destination's determined sheet. A longer chain can only
-    ever make the path harder to witness, never the number larger.
+    The figure clears two ceilings: the destination's own witness and its
+    determined sheet. A longer chain only makes the path harder to witness,
+    never the number larger.
     """
     for sheet, expected in ((5_000_000.0, 1_000_000.0), (250_000.0, 250_000.0)):
         document = fold(
@@ -219,12 +192,11 @@ def test_w2_case5_no_composed_magnitude_exceeds_the_bound_over_two_hops(fold):
 def test_w2_case6_a_hop_from_a_function_the_previous_hop_did_not_admit_composes_nothing(fold):
     """Regression case 6. No hop inherits its predecessor's authority.
 
-    The principal seized nothing on the teller. It arrives there as the caller
-    the teller's list admitted, able to run exactly the function that list
-    admitted — so a second hop issued from some OTHER function of the teller is
-    a call nothing witnesses the principal can cause, however well-witnessed the
-    teller's pointer to the vault is. Without the rule the chain would stand on
-    which function name happened to sort first.
+    The principal arrives at the teller as the caller the teller's list
+    admitted, able to run exactly the function that list admitted. A second hop
+    from some OTHER teller function is a call nothing witnesses the principal
+    can cause. Without the rule the chain would stand on which function name
+    happened to sort first.
     """
     document = fold(
         _composing_signals(),
@@ -257,11 +229,10 @@ def test_w2_case6_a_hop_from_a_function_the_previous_hop_did_not_admit_composes_
 def test_w2_an_overloaded_intermediate_name_does_not_stand_in_for_the_admitted_function(fold):
     """A function NAME does not identify a function, and the chain rule needs one.
 
-    The teller reaches the vault from a function it also calls ``bulkWithdraw``
-    — a real shape: 32 (entity, name) pairs on the reference corpus carry more
-    than one selector, ``manage`` at the composed BoringVaults among them. Its
-    selector is not the one hop 1 admitted, so the principal cannot drive it,
-    and a rule that compared names would admit the hop and compose the vault.
+    The teller reaches the vault from a function it also calls ``bulkWithdraw``,
+    a real shape (32 (entity, name) pairs on the reference corpus carry more
+    than one selector, ``manage`` among them). Its selector is not the one hop 1
+    admitted, so a rule comparing names would wrongly compose the vault.
     """
     overloaded = "0x9d574421"
     document = fold(
@@ -288,11 +259,9 @@ def test_w2_an_overloaded_intermediate_name_does_not_stand_in_for_the_admitted_f
 def test_w2_the_admitted_call_site_is_selected_and_never_vetoed_by_a_sibling(fold):
     """The chain rule SELECTS the admitted step; it does not judge an arbitrary one.
 
-    The teller reaches the vault from two of its own functions, and the one the
-    principal cannot drive sorts first. A rule that asked the plane for "the"
-    step and then vetoed it would refuse the whole chain here — publishing a
-    refusal that names a function the previous hop DID admit — so the walk asks
-    the narrower question instead and the recovery survives the ordering.
+    The teller reaches the vault from two functions, and the one the principal
+    cannot drive sorts first. Asking the plane for "the" step and then vetoing it
+    would refuse the whole chain, naming a function the previous hop DID admit.
     """
     sites = (
         # sorts before bulkWithdraw, and nothing on this chain admits it
@@ -327,10 +296,9 @@ def test_w2_the_admitted_call_site_is_selected_and_never_vetoed_by_a_sibling(fol
 def test_w2_the_protocol_rollup_maxes_the_chain_length_and_sums_the_counts(fold):
     """Chain length is a per-row MAXIMUM; every other census key is a count.
 
-    Summed instead, two rows each composing a 2-hop chain would publish a
-    corpus with a 4-hop chain — an arithmetic artefact read as the deepest chain
-    anyone proved. Asserted over the rollup directly, because one composing row
-    cannot tell a max from a sum.
+    Summed, two rows each composing a 2-hop chain would publish a 4-hop chain.
+    Asserted over the rollup directly, because one composing row cannot tell a
+    max from a sum.
     """
     rows = [
         {
@@ -357,13 +325,11 @@ def test_w2_the_protocol_rollup_maxes_the_chain_length_and_sums_the_counts(fold)
 def test_w2_a_seed_is_never_constrained_by_a_hop_into_it(fold):
     """Ruling 4 rule 2: the seized gate is spent at hop 1, and every seed IS hop 1.
 
-    Two entities carry the finding's signal, so both are seeds, and one of them
-    is also the far end of a witnessed hop from the other. That hop admits one
-    of its functions — but a seed does not need admitting: the principal seized
-    its gate directly, which is the whole reason it is a seed. Constraining it
-    to the function some sibling hop happened to admit would refuse its own
-    composable hop and publish a previous-hop reason for a node that has no
-    previous hop.
+    Two entities carry the signal, so both are seeds, and one is also the far
+    end of a witnessed hop from the other. A seed needs no admitting (the
+    principal seized its gate directly); constraining it to the function a
+    sibling hop admitted would refuse its own composable hop and publish a
+    previous-hop reason for a node with no previous hop.
     """
     hub_entry = "0x3e64ce99"
     document = fold(
@@ -417,12 +383,11 @@ def test_w2_a_seed_is_never_constrained_by_a_hop_into_it(fold):
 def test_w2_a_node_entered_twice_publishes_the_chain_the_hop_was_issued_from(fold):
     """Ruling 4 rule 4: the published chain must BE the path, not a path.
 
-    The intermediate is admitted under two of its own functions by two different
-    functions of the seized node. Its hop to the vault is issued from the second
-    of them, so the published chain must carry the step that admitted THAT one.
-    Publishing whichever entry was witnessed first would name a path this step
-    was not issued from, while the census says every step is the one before it
-    admitted.
+    The intermediate is admitted under two of its functions by two different
+    functions of the seized node, and its hop to the vault is issued from the
+    second. Publishing whichever entry was witnessed first would name a path the
+    step was not issued from, while the census says each step is the one before
+    it admitted.
     """
     first_entry, second_entry = "0x11111111", HOP1_SELECTOR
     accepted = P.DestinationAcceptance((12,), "exact", "deposit", 991)

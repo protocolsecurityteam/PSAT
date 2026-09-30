@@ -1,11 +1,7 @@
-/* Job monitor (/monitor) — runs-table master-detail + fleet system-health
-   strip + enhanced drill-in dock. Replaces the bespoke SVG pipeline in
-   pipeline-dashboard.css. New classes only; existing .job-panel-*,
-   .window-*, .panel-header, .eyebrow, .chip(s) are reused as-is.
-   Translated verbatim from site/_proto/s0*.html so the live page matches
-   the approved screenshots; tokens used where the prototype used them. */
+/* Job monitor (/monitor), translated from site/_proto/s0*.html to match the
+   approved screenshots. Reuses .job-panel-*, .window-*, .panel-header, .eyebrow
+   and .chip(s). */
 
-/* ── History toolbar: status filters + search ─────────────────────────── */
 .runs-toolbar {
   display: flex;
   gap: 7px;
@@ -21,7 +17,6 @@
   font: 600 11px "Instrument Sans", system-ui;
   padding: 4px 10px;
   border-radius: 999px;
-  cursor: pointer;
   display: inline-flex;
   gap: 5px;
   align-items: center;
@@ -49,7 +44,6 @@
   font: 12.5px "Instrument Sans";
 }
 
-/* ── Split layout: flat bordered tables on the page bg + a docked panel ── */
 .split {
   display: grid;
   grid-template-columns: 1fr 442px;
@@ -197,7 +191,6 @@
   color: var(--amber-deep);
 }
 
-/* ── Dock: the docked drill-in panel (job or process detail) ──────────── */
 .dock {
   position: sticky;
   top: 62px;
@@ -214,7 +207,6 @@
   z-index: 1;
 }
 
-/* ── Enhanced drill-in: live-progress block + stage timeline ──────────── */
 .jp-detail {
   margin: 0;
   padding: 9px 11px;
@@ -346,55 +338,7 @@
   font: 10px "JetBrains Mono", monospace;
   color: #64748b;
 }
-.jp-audit {
-  border-radius: 8px;
-  padding: 9px 11px;
-  border: 1px solid rgba(239, 68, 68, 0.25);
-  background: rgba(239, 68, 68, 0.05);
-}
-.jp-audit + .jp-audit {
-  margin-top: 8px;
-}
-.jp-audit .au-top {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  font: 700 10.5px "JetBrains Mono", monospace;
-}
-.jp-audit .au-name {
-  color: var(--ink);
-}
-.jp-audit .au-badge {
-  font-size: 9px;
-  color: #fca5a5;
-  background: rgba(239, 68, 68, 0.18);
-  border-radius: 3px;
-  padding: 1px 5px;
-  letter-spacing: 0.08em;
-}
-.jp-audit .au-err {
-  margin-top: 6px;
-  font: 11px/1.5 "JetBrains Mono", monospace;
-  color: #fca5a5;
-}
-.jp-audit.ok {
-  border-color: rgba(34, 197, 94, 0.22);
-  background: rgba(34, 197, 94, 0.05);
-}
-.jp-audit.ok .au-badge {
-  color: #86efac;
-  background: rgba(34, 197, 94, 0.16);
-}
-.jp-audit.run {
-  border-color: rgba(251, 191, 36, 0.28);
-  background: rgba(251, 191, 36, 0.05);
-}
-.jp-audit.run .au-badge {
-  color: #fcd34d;
-  background: rgba(251, 191, 36, 0.16);
-}
 
-/* ── Fleet system-health strip ────────────────────────────────────────── */
 .sys-strip {
   display: flex;
   align-items: center;
@@ -421,12 +365,12 @@
   border-radius: 999px;
   border: 1px solid var(--panel-border);
   background: rgba(13, 17, 25, 0.4);
-  cursor: pointer;
   font: 600 11.5px "Instrument Sans", system-ui;
   color: #cbd5e1;
 }
 .sys-pill:hover {
   border-color: rgba(148, 163, 184, 0.3);
+  transform: translateY(-1px);
 }
 .sys-pill .d {
   width: 8px;
@@ -466,15 +410,12 @@
   font: 700 11px "JetBrains Mono", monospace;
 }
 
-/* ── Daemon detail (in the dock) ──────────────────────────────────────── */
 .dmn-kind {
   font: 700 9px "JetBrains Mono", monospace;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: #64748b;
 }
-/* Progress/throughput rate annotation next to a work metric (e.g. "+18/min",
-   "+12.3K blocks/min"). Colored at the call site by direction. */
 .dmn-rate {
   margin-left: 7px;
   font: 600 10px "JetBrains Mono", monospace;
@@ -537,7 +478,6 @@
   vertical-align: middle;
 }
 
-/* ── Empty dock placeholder ───────────────────────────────────────────── */
 .dock-empty {
   display: flex;
   flex-direction: column;
@@ -562,7 +502,6 @@
   max-width: 250px;
 }
 
-/* ── Responsive: below 900px the dock collapses to an overlay drawer ──── */
 .dock-backdrop {
   display: none;
 }
@@ -581,8 +520,7 @@
     z-index: 100;
     box-shadow: -18px 0 40px rgba(0, 0, 0, 0.5);
   }
-  /* With nothing selected the dock would otherwise cover the list as a
-     full-height fixed overlay — hide it until a selection opens it. */
+  /* Otherwise the empty dock covers the list as a full-height overlay. */
   .dock:not(.open) {
     display: none;
   }

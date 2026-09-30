@@ -1,21 +1,13 @@
-"""Tier-2 anvil fork transport + the freeze/pause recipe.
+"""Tier-2 anvil fork transport and the freeze/pause recipe.
 
-Tier 2 is reserved for effects that need SEQUENCING or TIME — proving a freeze's
-blast radius and that it auto-expires at the contract's own
-``MAX_PAUSE_DURATION`` — which ``eth_call``/``eth_simulateV1`` cannot express.
-The fork lives behind the injectable :class:`AnvilTransport` interface, the same
-seam discipline as ``call_batch``/``Simulate``: exactly one place
-(:class:`SubprocessAnvil`) does real subprocess + localhost JSON-RPC I/O;
-everything else takes the transport injected and is tested against a stub.
+Tier 2 is for effects needing sequencing or time (a freeze's blast radius and auto-expiry at the contract's own
+``MAX_PAUSE_DURATION``), which ``eth_call``/``eth_simulateV1`` can't express. Only :class:`SubprocessAnvil` does real
+I/O; everything else takes an injected :class:`AnvilTransport`.
 
-Hard rules honored here: the hardfork is PINNED and ASSERTED and recorded per
-transcript (post-Cancun EIP-6780 is why a stale fork mints wrong witnesses); the
-anvil/foundry version is recorded per transcript; fork access is single-flight
-(snapshot/revert is process-global, the worker runs
-``PSAT_EFFECTS_JOB_CONCURRENCY=1``); ``MAX_PAUSE_DURATION`` is READ FROM SOURCE by
-the caller and passed in, never hardcoded. Agents NEVER run a FORKING
-anvil or real RPC — that is the user's preview step; the offline integration test
-uses a local NON-FORKING anvil with a checked-in fixture.
+The hardfork is pinned, asserted and recorded per transcript (pre-Cancun EIP-6780 semantics mint wrong witnesses), as is
+the anvil version. Fork access is single-flight (snapshot/revert is process-global; ``PSAT_EFFECTS_JOB_CONCURRENCY=1``).
+``MAX_PAUSE_DURATION`` is read from source by the caller. Agents never run a forking anvil or real RPC; the offline test
+uses a local non-forking anvil.
 """
 
 from __future__ import annotations
@@ -57,40 +49,28 @@ from utils.memory import rss_bytes_for_pid
 
 logger = logging.getLogger(__name__)
 
-# How much of anvil's output a spawn/startup failure can quote back, and how long
-# ``close`` waits on the drain thread before giving up on it (the thread is a
-# daemon, so a wedged read can never hold the process open).
+# Output quoted back on spawn failure, and the drain-thread join timeout (the thread is a daemon).
 _OUTPUT_TAIL_LINES = 40
 _DRAIN_JOIN_TIMEOUT_S = 2.0
 _TRANSACTION_RECEIPT_TIMEOUT_S = 15.0
 _TRANSACTION_RECEIPT_POLL_INTERVAL_S = 0.05
 
-# Post-Cancun forks that carry EIP-6780 (and later) semantics. A fork pinned to
-# anything earlier can mint witnesses wrong for the live chain.
+# Forks with EIP-6780 semantics; earlier ones mint witnesses wrong for the live chain.
 POST_CANCUN_HARDFORKS = frozenset({"cancun", "prague", "osaka"})
 
 
 @dataclass(frozen=True)
 class ForkFixture:
-    """One piece of fork state a probe needs before it can be meaningful — a
-    funded caller, a storage slot holding a precondition. Applied INSIDE the
-    recipe's snapshot so it is reverted with everything else.
+    """Fork state a probe needs to be meaningful (a funded caller, a precondition slot), applied inside the recipe's
+    snapshot.
 
-    ``kind`` is ``set_balance`` (``address``/``value``) or ``set_storage_at``
-    (``address``/``slot``/``value``). An unknown kind is ignored, never guessed.
+    ``kind`` is ``set_balance`` (``address``/``value``) or ``set_storage_at`` (``address``/``slot``/``value``); unknown
+    kinds are ignored.
 
-    A ``set_storage_at`` fixture MAY carry a read-back spec (``verify_to`` +
-    ``verify_calldata`` + ``verify_expected``): after the slot is written, the
-    contract's OWN getter is called and its 32-byte word compared to
-    ``verify_expected``. What this proves is that the getter NOW echoes the
-    seeded word — the precondition the probe will read is satisfied. It does
-    not prove the write is what the getter reads: a wrong-slot write is kept
-    when the getter already returned the expected word (e.g. an earlier seed
-    satisfied it). That is safe — seeds are constants of the pre/post diff, so
-    a stray write can only shrink the observed lower bound, never flip an
-    entry point across the pause — but the guarantee is precondition-holds,
-    not write-landed. Absent (all ``None``) ⇒ the fixture is applied as-is,
-    exactly as before."""
+    A ``set_storage_at`` may carry a read-back spec (``verify_to``, ``verify_calldata``, ``verify_expected``): after
+    writing, the contract's own getter must return ``verify_expected``. That proves the precondition holds, not that
+    this write is what the getter reads; a stray write can only shrink the observed lower bound.
+    """
 
     kind: str
     address: str
@@ -105,12 +85,9 @@ class ForkFixture:
 class EntryPoint:
     """One state-changing entry point to probe for the blast-radius diff.
 
-    ``key`` is a stable identity (selector or ``name`` — never used to CLASSIFY,
-    only to label which points reverted); ``calldata`` + ``from_addr`` are the
-    probe call. ``to`` defaults to the recipe's contract when ``None``.
-    ``fixtures`` is the fork state THIS probe needs to be able to succeed
-    pre-pause (gas for its caller, a balance/allowance slot); carried per entry
-    point so it stays inspectable and tunable, applied once with the rest."""
+    ``key`` only labels which points reverted, never classifies. ``to`` defaults to the recipe's contract. ``fixtures``
+    is the state this probe needs to succeed pre-pause, kept per entry point for inspection.
+    """
 
     key: str
     calldata: str
@@ -120,8 +97,7 @@ class EntryPoint:
 
 
 class AnvilTransport(Protocol):
-    """Fork transport seam. ``call`` is read-only (``eth_call``); ``send``
-    executes an impersonated tx against the LOCAL fork only (never mainnet)."""
+    """Fork transport seam. ``call`` is read-only; ``send`` executes an impersonated tx against the local fork only."""
 
     def hardfork(self) -> str: ...
 
@@ -149,15 +125,12 @@ class AnvilTransport(Protocol):
 
 
 def fork_block_pin(transport: AnvilTransport) -> int | None:
-    """The height ``transport``'s fork was PROVABLY pinned at, else ``None``.
+    """The height ``transport``'s fork was provably pinned at, else ``None``.
 
-    Deliberately an optional capability rather than a member of
-    :class:`AnvilTransport`: a transport that cannot answer — any stub, an older
-    forking spawn, a fork taken at the upstream's spawn-time head — yields
-    ``None``, and the recipe then publishes no observation height at all. That is
-    the not_determined state; the alternative (falling back to the preflight pin)
-    is exactly the defect this exists to close, since an unpinned fork's real
-    height is unrecoverable rather than merely unrecorded."""
+    An optional capability, not part of :class:`AnvilTransport`: stubs and unpinned forks return ``None`` and the recipe
+    publishes no height. Falling back to the preflight pin would be wrong, since an unpinned fork's height is
+    unrecoverable.
+    """
     getter = getattr(transport, "fork_block_number", None)
     if not callable(getter):
         return None
@@ -171,9 +144,7 @@ def fork_block_pin(transport: AnvilTransport) -> int | None:
 
 
 def assert_post_cancun(transport: AnvilTransport) -> str:
-    """Assert the fork's hardfork carries post-Cancun semantics and return it for
-    the transcript. Raises ``ValueError`` on a stale fork — a witness minted
-    on pre-Cancun semantics is unsafe, so we fail rather than record it."""
+    """Assert the fork is post-Cancun and return the hardfork for the transcript; raises ``ValueError`` otherwise."""
     hf = transport.hardfork().strip().lower()
     if hf not in POST_CANCUN_HARDFORKS:
         raise ValueError(
@@ -197,19 +168,15 @@ def pause_recipe(
     gate_ref: str = "",
     fixtures: Sequence[ForkFixture] = (),
 ) -> ObservedEffect:
-    """Freeze/pause: snapshot → record the pre-pause SUCCEEDING entry-point
-    set → impersonate principal + call F → re-probe → the newly-reverting set is
-    the OBSERVED blast radius (a LOWER bound) → warp time by the source-read
-    ``max_pause_duration`` → re-probe for auto-expiry. snapshot/revert isolates
-    the probe. The SCORED denominator is static's ``predicted_guard_set``;
-    simulation only upgrades observed members to witnessed tier and
-    NEVER becomes the denominator — the pre-pause succeeding set is recorded so
-    consumers see it."""
+    """Freeze/pause probe.
+
+    Snapshot, record the pre-pause succeeding entry points, call F as the principal, re-probe: the newly reverting set
+    is the observed blast radius (a lower bound). Then warp by the source-read ``max_pause_duration`` and re-probe for
+    auto-expiry. The scored denominator stays static's ``predicted_guard_set``; the observed set only upgrades members
+    to witnessed.
+    """
     hardfork = assert_post_cancun(transport)
-    # The height the FORK was taken at, which is the height this recipe observes —
-    # not the caller's preflight pin, which the fork only shares when it was
-    # actually spawned with it. An unpinned fork therefore records no height and
-    # names no pin scope, and both witness keys stay absent.
+    # The fork's own height, not the preflight pin; an unpinned fork records neither.
     fork_block = fork_block_pin(transport)
     ctx = SimContext(
         chain_id=ctx.chain_id,
@@ -227,24 +194,14 @@ def pause_recipe(
 
     snap = transport.snapshot()
     try:
-        # Fixtures go inside the snapshot and before the pre-pause probe: an entry
-        # point that reverts for an unfunded caller / unmet precondition would
-        # silently shrink the observed blast radius (which the diff treats as
-        # "pause did not freeze it").
+        # Inside the snapshot and before the pre-pause probe, or an unfunded point would silently shrink the blast
+        # radius.
         _apply_fixtures(transport, [*fixtures, *(fx for ep in entry_points for fx in ep.fixtures)], tr)
         pre_succeeding = _succeeding_set(transport, entry_points, contract_address, tr, "pre_pause")
 
-        # Verify the pause can actually take effect before
-        # reading the freeze. An ``eth_call`` of the pauser from the principal runs
-        # the same EVM logic a ``send`` would, so a revert here means the resolved
-        # pauser cannot enact the pause on this forked state (missing authority, an
-        # active per-pauser cooldown, an unmet precondition). The freeze was then
-        # NEVER TESTED, so an empty blast radius would be INDETERMINATE — reported as
-        # its own ``pause_ineffective`` unknown with the raw revert, never conflated
-        # with a genuine "pause froze nothing" (an empty
-        # ``observed_blast_radius`` ≠ no-freeze). This split is what lets the live
-        # cycle tell the recoverable ineffective-pause verdicts from the correct
-        # no-blast ones instead of seeing one undifferentiated pile of empties.
+        # ``eth_call`` the pause first: a revert means the pauser can't enact it on this state, so the freeze was never
+        # tested. That's reported as ``pause_ineffective`` with the raw revert, distinct from a pause that froze
+        # nothing.
         pause_probe = transport.call({"from": principal, "to": contract_address, "data": pause_calldata})
         tr["results"].append(
             {"label": "pause_effectiveness", "success": pause_probe.success, "revert": pause_probe.revert_data}
@@ -262,9 +219,7 @@ def pause_recipe(
                     gate_ref=gate_ref,
                     reason="pause_ineffective",
                     details={
-                        # The pause call itself REVERTED, so the freeze was never
-                        # tested: the empty blast radius below describes a probe
-                        # that did not happen, not a pause that froze nothing.
+                        # The pause reverted, so the empty radius describes a probe that didn't happen.
                         "observation": OBSERVATION_REVERTED,
                         "pause_effective": False,
                         "pre_pause_succeeding": sorted(pre_succeeding),
@@ -288,16 +243,12 @@ def pause_recipe(
 
         auto_expiry: bool | None = None
         if max_pause_duration is not None and observed_blast:
-            # The caller passes the latch's declared MAXIMUM. The live window is
-            # whatever the contract's own duration state (or its MIN fallback)
-            # says, which is always ≤ that maximum — so warping past the max is a
-            # sound over-warp, and a latch that has NOT expired by then is
-            # genuinely indefinite. An indefinite latch passes ``None`` and is
-            # never warped at all.
+            # Warping past the declared maximum is a sound over-warp; a latch still active then is indefinite.
+            # Indefinite latches pass ``None`` and aren't warped.
             transport.increase_time(max_pause_duration + 1)
             transport.mine()
             expiry_succeeding = _succeeding_set(transport, entry_points, contract_address, tr, "post_expiry")
-            # Auto-expiry proven iff every point the pause froze succeeds again.
+            # Auto-expiry is proven iff every frozen point succeeds again.
             auto_expiry = observed_blast.issubset(expiry_succeeding)
     finally:
         transport.revert(snap)
@@ -307,10 +258,8 @@ def pause_recipe(
     tr["auto_expiry"] = auto_expiry
 
     predicted = {str(g) for g in predicted_guard_set}
-    # A member observed reverting that static did NOT predict = static under-
-    # enumerated its guard set: a discrepancy (vocabulary growth), not a
-    # harness failure. The reverse (predicted-but-not-observed) is EXPECTED —
-    # business preconditions hide points from the diff — so it is not flagged.
+    # Observed but unpredicted means static under-enumerated its guard set (a discrepancy). Predicted but unobserved is
+    # expected (business preconditions hide points).
     unpredicted = observed_blast - predicted
     disc = (
         Discrepancy(
@@ -323,19 +272,9 @@ def pause_recipe(
     )
 
     if not pre_succeeding:
-        # NOTHING WAS LIVE TO FREEZE. Every entry point we could synthesize was
-        # already reverting on its own precondition before the pause, so
-        # ``observed_blast = pre - post`` is empty by construction and measures
-        # the probe set, not the pause. Distinct from the branch below, where
-        # points WERE live and the pause left them alone — that is a real
-        # observation about the latch; this is the absence of one.
-        #
-        # Deliberately its own reason so it stays OUT of
-        # ``_CACHEABLE_UNKNOWN_REASONS``: the emptiness is a property of this
-        # deployment's state at this block (an unfunded caller, an unmet
-        # business precondition), not of the bytecode, so transferring it would
-        # publish "this pause froze nothing" to every twin on the strength of a
-        # surface that happened to be dead here.
+        # Nothing was live to freeze: every entry point already reverted on its own precondition, so the empty diff
+        # measures the probe set, not the pause. Its own reason, kept out of ``_CACHEABLE_UNKNOWN_REASONS`` because it's
+        # a property of this deployment's state.
         return emit(
             store,
             unknown(
@@ -365,14 +304,9 @@ def pause_recipe(
                 gate_ref=gate_ref,
                 reason="no_blast_radius_observed",
                 details={
-                    # The pause ran. The empty blast radius below is therefore a
-                    # measurement, which is exactly what separates this row from
-                    # the reverted one above.
+                    # The pause ran, so the empty radius is a measurement.
                     "observation": OBSERVATION_EXECUTED,
-                    # pause_effective True + empty blast = a GENUINE no-blast: the
-                    # pause took effect yet froze nothing observable. This is at the
-                    # bar (correct to leave unknown), and distinct from the
-                    # pause_ineffective branch above where the freeze was untested.
+                    # A genuine no-blast: the pause took effect and froze nothing observable.
                     "pause_effective": True,
                     "pre_pause_succeeding": sorted(pre_succeeding),
                     "observed_blast_radius": [],
@@ -391,9 +325,8 @@ def pause_recipe(
         reason="pause_froze_entry_points",
         details={
             "observation": OBSERVATION_EXECUTED,
-            # Kernel witness (latch flip caused reverts) + projection witness
-            # (which points). The scored denominator stays static's set;
-            # the observed set is a lower bound recorded alongside it.
+            # Kernel witness (latch flip) plus projection witness (which points); the observed set is a lower bound
+            # beside static's denominator.
             "latch_flip": True,
             "pause_effective": True,
             "observed_blast_radius": sorted(observed_blast),
@@ -401,12 +334,8 @@ def pause_recipe(
             "scored_denominator": sorted(predicted),
             "auto_expiry": auto_expiry,
             "duration_bound_seconds": max_pause_duration,
-            # Which of the three states that ``None`` is (see
-            # ``config.DURATION_BOUND_*``). Published on the SAME row as the bound
-            # because the pair is the fact: ``None`` + ``no_time_reference`` is a
-            # proven-indefinite freeze, ``None`` + ``not_determined`` is an
-            # unmeasured window, and while only the bound was published every
-            # unmeasured window rendered as the proven-indefinite one.
+            # Which ``None`` this is (see ``config.DURATION_BOUND_*``): with ``no_time_reference`` it's a
+            # proven-indefinite freeze, with ``not_determined`` an unmeasured window.
             "duration_bound_source": duration_bound_source,
         },
         transcript=tr,
@@ -440,36 +369,21 @@ def timelock_execute_recipe(
     witness_token: str | None = None,
     witness_calldata: str | None = None,
 ) -> ObservedEffect:
-    """Tier-2 timelock: schedule → advance time → execute, the sequence Tier-1
-    cannot reach (``eth_simulateV1`` issues ONE block with no ``blockOverrides``, so
-    it can never satisfy a delayed operation's ``block.timestamp`` gate — every
-    ``execute`` reverts ``TimelockUnexpectedOperationState`` there).
+    """Tier-2 timelock: schedule, advance time, execute.
 
-    Reuses ``pause_recipe``'s fork machinery: snapshot/revert isolation,
-    an impersonated principal, and ``increase_time`` to advance past the operation
-    delay. The scheduled inner operation is an ERC-20 ``transfer`` to a sentinel on
-    a token the timelock provably holds (synthesised upstream from measured
-    holdings), so a positive sentinel-balance delta after ``execute`` proves
-    the timelock forwards value to a PROPOSER-CHOSEN destination — a
-    ``caller_arbitrary`` outflow, the exact shape an arbitrary-call executor has.
+    ``eth_simulateV1`` issues one block with no ``blockOverrides``, so it can never pass a delayed operation's timestamp
+    gate. This reuses ``pause_recipe``'s fork machinery. The inner operation is an ERC-20 ``transfer`` to a sentinel on
+    a token the timelock provably holds, so a sentinel balance gain after ``execute`` proves a proposer-chosen
+    destination (``caller_arbitrary``).
 
-    Fail-closed at every step: a ``schedule`` or ``execute`` revert is its own
-    unknown carrying the raw revert, never conflated with "executes nothing"; an
-    execution that moves no value to the sentinel stays ``no_value_observed``.
+    Fail-closed: ``schedule`` or ``execute`` reverts are their own unknowns with the raw revert; no sentinel movement
+    stays ``no_value_observed``.
 
-    NONE of this recipe's verdicts may be cached or transferred on the behavioural
-    hash — not because of their tier (``_is_cacheable`` excludes only
-    ``TIER_HISTORICAL``, and a proven verdict / a ``no_value_observed`` are
-    otherwise cacheable), but because EVERY one of them is STATE-DEPENDENT: it
-    rests on state this probe manufactured on the fork (the scheduled operation
-    landing, ``block.timestamp`` advancing past the delay), which is not a
-    code-plane structural fact a bytecode twin inherits. So each verdict carries
-    ``state_dependent=True``, which ``_is_cacheable`` refuses outright."""
+    Every verdict sets ``state_dependent=True`` so ``_is_cacheable`` refuses it: they rest on state this probe
+    manufactured (the schedule, the time warp), not on the bytecode.
+    """
     hardfork = assert_post_cancun(transport)
-    # The height the FORK was taken at, which is the height this recipe observes —
-    # not the caller's preflight pin, which the fork only shares when it was
-    # actually spawned with it. An unpinned fork therefore records no height and
-    # names no pin scope, and both witness keys stay absent.
+    # The fork's own height, not the preflight pin; an unpinned fork records neither.
     fork_block = fork_block_pin(transport)
     ctx = SimContext(
         chain_id=ctx.chain_id,
@@ -508,10 +422,8 @@ def timelock_execute_recipe(
 
         transport.impersonate(principal)
         try:
-            # An ``eth_call`` runs the same EVM logic ``send`` would, so a revert here
-            # is the resolved proposer being unable to schedule on this forked state
-            # (missing PROPOSER_ROLE, an operation already pending) — the sequence was
-            # never testable, recorded with its raw revert.
+            # A revert means the proposer can't schedule on this state (no PROPOSER_ROLE, already pending); never
+            # testable.
             schedule_probe = transport.call({"from": principal, "to": contract_address, "data": schedule_calldata})
             tr["results"].append(
                 {"label": "schedule", "success": schedule_probe.success, "revert": schedule_probe.revert_data}
@@ -521,10 +433,8 @@ def timelock_execute_recipe(
             transport.send({"from": principal, "to": contract_address, "data": schedule_calldata})
             transport.mine()
 
-            # THE Tier-1 impossibility: before the delay elapses ``execute`` must
-            # revert on the operation-not-ready gate. Observing that revert here, then
-            # its success after the warp, is what proves the recipe advanced time
-            # rather than side-stepped the gate.
+            # Before the delay, ``execute`` must revert; seeing that and then success after the warp proves the gate was
+            # passed, not side-stepped.
             premature = transport.call({"from": principal, "to": contract_address, "data": execute_calldata})
             tr["results"].append(
                 {"label": "execute_premature", "success": premature.success, "revert": premature.revert_data}
@@ -555,15 +465,11 @@ def timelock_execute_recipe(
             tier=TIER_FORK,
             scope=SCOPE_KERNEL,
             gate_ref=gate_ref,
-            # Two different facts, and a consumer must be able to tell them apart.
-            # With no witness asset the timelock held NOTHING for the operation to
-            # move, so "moved nothing" would be a statement about our inability to
-            # measure rather than about the contract. With
-            # an asset, the operation really did execute and move none of it.
+            # Distinct: with no witness asset the timelock held nothing to move (our inability to measure); with one,
+            # the operation executed and moved none.
             reason="no_value_observed" if witness_token is not None else "timelock_holds_no_witness_asset",
             details={
-                # The delayed operation EXECUTED (the point Tier-1 cannot reach);
-                # it simply moved nothing to the sentinel we could witness.
+                # Executed (unreachable in Tier 1) but moved nothing we could witness.
                 "observation": OBSERVATION_EXECUTED,
                 "value_moved": False,
                 "timelock_executed": True,
@@ -571,8 +477,7 @@ def timelock_execute_recipe(
             },
             transcript=tr,
         )
-        # State-dependent (schedule landed + time advanced): must not transfer on
-        # the kernel hash, even though ``no_value_observed`` is otherwise cacheable.
+        # Rests on the schedule and time warp; must not transfer on the kernel hash.
         eff.state_dependent = True
         return emit(store, eff)
     eff = proven(
@@ -585,17 +490,13 @@ def timelock_execute_recipe(
             "observation": OBSERVATION_EXECUTED,
             "value_moved": True,
             "timelock_executed": True,
-            # The scheduled operation targeted a sentinel the PROPOSER chose, and
-            # the timelock forwarded value to it — a caller/proposer-arbitrary
-            # destination, proved by the sentinel balance delta (simulation).
+            # Proven by the sentinel balance delta.
             "destination_shape": SHAPE_CALLER_ARBITRARY,
             "shape_proved_by": "simulation",
         },
         concrete={"destination": sentinel_address} if sentinel_address else {},
         transcript=tr,
     )
-    # State-dependent: a proven value_moved from schedule→warp→execute is as
-    # untransferable as its reverts — it rests on state THIS probe manufactured.
     eff.state_dependent = True
     return emit(store, eff)
 
@@ -605,16 +506,13 @@ def _has_verify_spec(fx: ForkFixture) -> bool:
 
 
 def _apply_fixtures(transport: AnvilTransport, fixtures: Sequence[ForkFixture], transcript: dict[str, Any]) -> None:
-    """Apply the fork-state fixtures, recording each in the transcript so a replay
-    reproduces the same starting state. A cheatcode that fails is recorded and
-    skipped — a missing fixture can only shrink the observed radius (a lower
-    bound), never manufacture one.
+    """Apply fork-state fixtures, recording each so replays start from the same state.
 
-    Plain fixtures are applied first; storage fixtures carrying a read-back spec
-    are applied AFTER so their getter observes the final gas/balance state. Each
-    verified write goes under an inner snapshot: if the contract's own getter does
-    not echo the seeded word, the write is reverted (never left half-applied) and
-    recorded ``readback: failed``. A kept write records ``readback: ok``."""
+    Failed cheatcodes are recorded and skipped (can only shrink the radius).
+
+    Plain fixtures go first; read-back-verified storage fixtures after, each under an inner snapshot that's reverted if
+    the getter doesn't echo the word (``readback: failed``), else ``readback: ok``.
+    """
     plain = [fx for fx in fixtures if not _has_verify_spec(fx)]
     verified = [fx for fx in fixtures if _has_verify_spec(fx)]
 
@@ -640,11 +538,9 @@ def _apply_fixtures(transport: AnvilTransport, fixtures: Sequence[ForkFixture], 
 
 
 def _apply_verified_fixture(transport: AnvilTransport, fx: ForkFixture) -> dict[str, Any]:
-    """Apply one read-back-verified storage fixture. The write is kept only if the
-    contract's own getter echoes ``verify_expected`` afterwards (the precondition
-    holds — not proof this particular write is what the getter reads; see
-    ``ForkFixture``); otherwise the inner snapshot is reverted so the failed write
-    leaves no state behind. Never raises."""
+    """Apply one read-back-verified storage fixture; kept only if the getter echoes ``verify_expected`` (see
+    ``ForkFixture``), else reverted. Never raises.
+    """
     entry: dict[str, Any] = {"kind": fx.kind, "address": fx.address, "slot": fx.slot, "value": fx.value}
     if fx.kind != "set_storage_at" or fx.slot is None:
         entry["skipped"] = "unknown_kind"
@@ -671,8 +567,7 @@ def _apply_verified_fixture(transport: AnvilTransport, fx: ForkFixture) -> dict[
 
 
 def _word_eq(return_data: str | None, expected: str | None) -> bool:
-    """A direct getter returns exactly one 32-byte word; compare its low 32 bytes
-    to the seeded word, ignoring 0x-prefix and case."""
+    """Compare a getter's 32-byte word to the seeded word, ignoring 0x prefix and case."""
     if not isinstance(return_data, str) or not isinstance(expected, str):
         return False
     got = return_data[2:] if return_data.lower().startswith("0x") else return_data
@@ -703,10 +598,7 @@ def _succeeding_set(
     return succeeding
 
 
-# ---------------------------------------------------------------------------
-# The single real-I/O transport. Spawns a localhost anvil; NEVER a forking anvil
-# or real RPC from an agent (the fork-url path is the user's preview step).
-# ---------------------------------------------------------------------------
+# The single real-I/O transport: a localhost anvil. Forking is the user's preview step, never an agent's.
 
 
 def _build_anvil_cmd(
@@ -717,37 +609,25 @@ def _build_anvil_cmd(
     fork_headers: Mapping[str, str] | None,
     fork_block_number: int | None = None,
 ) -> list[str]:
-    # ``--silent`` stays: measured on anvil 1.5.1 it suppresses the startup banner
-    # and the per-RPC line, NOT the fatal startup errors (a bad fork URL and a
-    # taken port both print verbatim under it). So the failure account this
-    # subprocess is piped for survives, while the tail keeps naming the cause
-    # instead of 40 ``eth_call`` lines — and the banner's dev private keys +
-    # mnemonic never reach a log line or an exception message.
+    # ``--silent`` hides the banner and per-RPC lines but not fatal startup errors (anvil 1.5.1), so the tail names the
+    # cause and the dev keys never reach logs.
     cmd = [anvil_bin, "--port", str(port), "--hardfork", hardfork_name, "--silent"]
     if fork_url is not None:
         cmd += ["--fork-url", fork_url]
-        # Unpinned, anvil forks at whatever head the upstream serves AT SPAWN, so
-        # the state a Tier-2 verdict was observed against is neither recorded nor
-        # reproducible. The pin is the caller's already-resolved preflight height;
-        # ``0`` is that preflight's failure sentinel and would fork at GENESIS, so
-        # only a positive height is ever passed and an unpinnable head leaves the
-        # fork unpinned (and its height unpublished) rather than pinning a lie.
+        # Pin to the caller's preflight height so the observed state is reproducible. ``0`` is the preflight failure
+        # sentinel and would fork at genesis, so only positive heights are passed.
         if isinstance(fork_block_number, int) and not isinstance(fork_block_number, bool) and fork_block_number > 0:
             cmd += ["--fork-block-number", str(fork_block_number)]
-        # eRPC (the production upstream) authenticates via a header, not the URL —
-        # without this the fork upstream is unauthenticated and every lazy
-        # getStorageAt/getCode fails. anvil applies each --fork-header to its fork
-        # RPC requests.
+        # eRPC authenticates via a header; without it every lazy fork read fails.
         for key, value in (fork_headers or {}).items():
             cmd += ["--fork-header", f"{key}: {value}"]
     return cmd
 
 
 class SubprocessAnvil:
-    """Real anvil transport: one subprocess, localhost JSON-RPC (loopback, so the
-    netguard allows it). Non-forking by default (offline integration test); a
-    ``fork_url`` (+ optional ``fork_headers`` for an authenticated upstream like
-    eRPC) is accepted for the user's preview step but agents never pass one.
+    """Real anvil transport: one subprocess on loopback JSON-RPC.
+
+    Non-forking by default; ``fork_url`` (and ``fork_headers``) is for the user's preview step only.
     """
 
     def __init__(
@@ -764,12 +644,9 @@ class SubprocessAnvil:
         self._url = f"http://127.0.0.1:{port}"
         self._hardfork = hardfork_name
         cmd = _build_anvil_cmd(anvil_bin, port, hardfork_name, fork_url, fork_headers, fork_block_number)
-        # The height actually on the command line, not the one asked for: a
-        # non-forking spawn and a rejected (non-positive) pin both leave this
-        # ``None``, and ``fork_block_number()`` is what a recipe publishes from.
+        # The height actually on the command line; ``None`` for non-forking or rejected pins.
         self._fork_block: int | None = fork_block_number if "--fork-block-number" in cmd else None
-        # Bounded so a chatty long-lived fork cannot grow the job's memory; it
-        # holds only what a spawn/startup failure needs to be explainable.
+        # Bounded so a long-lived fork can't grow memory.
         self._output_tail: deque[str] = deque(maxlen=_OUTPUT_TAIL_LINES)
         self._drain: threading.Thread | None = None
         try:
@@ -778,41 +655,32 @@ class SubprocessAnvil:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                # One undecodable byte must not kill the drain: ``text=True``
-                # defaults to strict, and a dead drain leaves the pipe unread
-                # until anvil blocks writing into a full 64K buffer — holding the
-                # port with a process nothing is reading.
+                # Strict decoding would kill the drain on one bad byte, and an unread pipe blocks anvil once the buffer
+                # fills.
                 errors="replace",
                 bufsize=1,
             )
         except (OSError, ValueError) as exc:
             raise AnvilSpawnError(f"failed to spawn anvil: {exc}") from exc
-        # Everything from here on can leave a live process behind, so it all sits
-        # under the cleanup guard: a failed ``Thread.start`` would leave the pipe
-        # undrained (the backpressure deadlock above), and ``_anvil_version`` does
-        # its own subprocess work that can raise.
+        # Everything below can leave a live process behind, so it's all under the cleanup guard.
         try:
             self._drain = threading.Thread(target=self._drain_output, name="anvil-log-drain", daemon=True)
             self._drain.start()
             self._foundry_version = _anvil_version(anvil_bin)
             self._wait_ready(startup_timeout)
         except BaseException:
-            # A fork that never became usable must not leave its process (and the
-            # drain thread reading it) behind for the rest of the job. A cleanup
-            # failure must not replace the startup failure — that one carries the
-            # returncode and the output tail the caller needs.
+            # Don't leave a failed fork's process behind; a cleanup failure mustn't replace the startup error.
             try:
                 self.close()
             except Exception:
                 pass
             raise
 
-    # -- lifecycle ---------------------------------------------------------
-
     def _drain_output(self) -> None:
-        """Read anvil's merged stdout+stderr to EOF, logging each line and keeping
-        the tail for error reporting. Runs for the life of the process: an
-        undrained pipe would block anvil once its 64K buffer filled."""
+        """Drain anvil's merged output to EOF, logging lines and keeping the tail.
+
+        An undrained pipe blocks anvil at 64K.
+        """
         stream = self._proc.stdout
         if stream is None:  # pragma: no cover - stdout is always a pipe here
             return
@@ -824,11 +692,8 @@ class SubprocessAnvil:
                 self._output_tail.append(line)
                 logger.log(logging.DEBUG, "%s", line, extra={"source": "anvil"})
         except BaseException as exc:
-            # Either ``close`` pulled the fd (the normal end) or the read failed
-            # for a reason we did not anticipate. Either way nothing will drain
-            # this pipe again, so the stream is closed rather than left half-read:
-            # anvil's next write then fails loudly instead of blocking forever on
-            # a full buffer with the port still held.
+            # Nothing will drain this pipe again, so close it: anvil's next write fails loudly instead of blocking with
+            # the port held.
             logger.debug("anvil drain stopped", extra={"source": "anvil", "exc_type": type(exc).__name__})
             try:
                 stream.close()
@@ -836,7 +701,6 @@ class SubprocessAnvil:
                 pass
 
     def output_tail(self) -> list[str]:
-        """The most recent drained output lines (bounded); empty before any output."""
         return list(self._output_tail)
 
     def close(self) -> None:
@@ -845,10 +709,8 @@ class SubprocessAnvil:
             try:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                # Deliberately NOT paired with ``record_degraded``: fork-close
-                # cleanup is a resource side-effect (port/memory), not a
-                # degradation of the stage's verdict output — the same exemption
-                # class as ``effects_worker``'s allow-listed close handler.
+                # Not paired with ``record_degraded``: close cleanup is a resource side effect, not a verdict
+                # degradation.
                 logger.warning(
                     "anvil did not exit on SIGTERM; escalating to SIGKILL",
                     extra={"source": "anvil", "pid": self._proc.pid, "terminate_timeout_s": 5},
@@ -857,29 +719,19 @@ class SubprocessAnvil:
                 try:
                     self._proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    # An unreapable process is the caller's problem to notice via
-                    # the port, not a reason for ``close`` itself to raise into a
-                    # finally block.
+                    # Don't raise into a finally block.
                     logger.warning(
                         "anvil still present after SIGKILL",
                         extra={"source": "anvil", "pid": self._proc.pid},
                     )
-        # The pipe hits EOF once the process is gone, so the drain thread ends on
-        # its own; joining bounded (and closing the fd) keeps many open/close
-        # cycles per job from accumulating threads or descriptors.
+        # Bounded join and fd close so repeated open/close doesn't leak threads or descriptors.
         drain = self._drain
         self._drain = None
-        # ``ident`` is None until the thread actually started — joining one that
-        # never started raises, and this must not mask the failure that brought
-        # us here nor skip the fd cleanup below.
+        # Joining a never-started thread raises.
         if drain is not None and drain.ident is not None:
             drain.join(timeout=_DRAIN_JOIN_TIMEOUT_S)
             if drain.is_alive():
-                # The process survived even SIGKILL, so the reader is still
-                # blocked in ``read`` holding the buffer lock: ``close()`` would
-                # wait on that lock forever and hang the job thread. The fd
-                # leaks with the unkillable process — the lesser of the two, and
-                # the WARNING above already named it.
+                # Survived SIGKILL: the reader holds the buffer lock, so ``close()`` would hang. Leak the fd instead.
                 return
         if self._proc.stdout is not None:
             try:
@@ -894,15 +746,11 @@ class SubprocessAnvil:
         self.close()
 
     def rss_mb(self) -> int | None:
-        """Resident set size of the anvil subprocess in whole MB, or ``None``
-        when the answer is NOT KNOWN: the process has exited (poll reaps it, so
-        a reused pid is never sampled) or ``/proc`` did not answer (unreadable,
-        non-Linux host). ``rss_bytes_for_pid`` collapses both of those into
-        ``0``, and publishing that as a measurement would say a fork used no
-        memory when nothing measured it. A live process always reports a
-        positive ``VmRSS``, so a zero read here IS the unreadable case.
+        """Resident set size of the anvil process in MB, or ``None`` when unknown (exited, or ``/proc`` unreadable).
 
-        Never raises — RSS sampling must not fail a probe."""
+        ``rss_bytes_for_pid`` returns ``0`` for those, and a live process always has positive RSS, so zero means
+        unreadable. Never raises.
+        """
         if self._proc.poll() is not None:
             return None
         measured = rss_bytes_for_pid(self._proc.pid)
@@ -914,8 +762,7 @@ class SubprocessAnvil:
         while time.monotonic() < deadline:
             if self._proc.poll() is not None:
                 returncode = self._proc.returncode
-                # The drain thread may still be flushing the dying process's last
-                # lines — those are exactly the ones that name the cause.
+                # The drain may still be flushing the last lines, which name the cause.
                 drain = self._drain
                 if drain is not None:
                     drain.join(timeout=_DRAIN_JOIN_TIMEOUT_S)
@@ -943,13 +790,10 @@ class SubprocessAnvil:
                 "output_tail": tail,
             },
         )
-        # The last probe error is the closest thing to a cause the startup loop
-        # holds; chaining it keeps it out of the discard pile.
+        # Chain the last probe error as the likely cause.
         raise ForkRpcTimeoutError(
             f"anvil did not become ready in time: {' | '.join(tail) or '<no output>'}"
         ) from last_probe_error
-
-    # -- transport surface -------------------------------------------------
 
     def hardfork(self) -> str:
         return self._hardfork
@@ -985,9 +829,7 @@ class SubprocessAnvil:
         return str(self._rpc("eth_sendTransaction", [tx]))
 
     def deploy(self, from_addr: str, creation_bytecode: str) -> str:
-        """Deploy ``creation_bytecode`` from an unlocked account and return the
-        new contract address. Used only by the offline integration test's fixture
-        setup on a non-forking anvil."""
+        """Deploy ``creation_bytecode`` from an unlocked account; for offline test fixtures on a non-forking anvil."""
         tx_hash = self._rpc("eth_sendTransaction", [{"from": from_addr, "data": creation_bytecode}])
         deadline = time.monotonic() + _TRANSACTION_RECEIPT_TIMEOUT_S
         while time.monotonic() < deadline:
@@ -1014,8 +856,6 @@ class SubprocessAnvil:
 
     def mine(self) -> None:
         self._rpc("evm_mine", [])
-
-    # -- wire --------------------------------------------------------------
 
     def _rpc(self, method: str, params: list[Any]) -> Any:
         import requests
@@ -1054,8 +894,7 @@ def _anvil_version(anvil_bin: str) -> str:
 
 
 def anvil_available(anvil_bin: str = "anvil") -> bool:
-    """Whether a local anvil binary exists — gate for the offline integration
-    test so a clone without foundry auto-skips rather than errors."""
+    """Whether a local anvil binary exists, so the offline test skips without foundry."""
     try:
         subprocess.run([anvil_bin, "--version"], capture_output=True, timeout=10, check=True)
         return True

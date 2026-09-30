@@ -31,22 +31,10 @@ if TYPE_CHECKING:
 
 
 def _order_tie_reading(shared_entities: list[str], position_in_tie: int) -> str:
-    """What the tie-break string decided on THIS row, read off what the row holds.
+    """What the tie-break string decided on this row.
 
-    The λ half is true of every carrier — a tied row's index is that string's
-    doing whatever else is true — so it is constant. Two things after it are
-    not, and both are published in the same block a line away.
-
-    ``shared_entities``: the order splits a budget only where an entity is
-    actually held in common, and a row that shares none has no split. Publishing
-    the split sentence there asserts an apportionment that provably did not
-    happen, which is the same defect one level down from the figures.
-
-    ``position_in_tie``: which SIDE of the split this row is on. The first row in
-    a tie group has no tied row ahead of it and is charged FIRST; saying it "is
-    charged the remainder" is false of exactly the carrier the field beside it
-    identifies. The two directions are the same fact told from two ends, and
-    naming the wrong end inverts who the order cost.
+    ``shared_entities``: a split only happens where an entity is shared. ``position_in_tie``: the first row is charged
+    first, later ones the remainder.
     """
     lam = "this row's λ position is decided by that string, not by evidence"
     if not shared_entities:
@@ -77,19 +65,10 @@ def _order_tie_reading(shared_entities: list[str], position_in_tie: int) -> str:
 
 
 def _disclose_order_ties(findings: list[dict[str, Any]]) -> None:
-    """Where rows tie on the sort key, say so: the order decides, and it is a string.
+    """Where rows tie on the sort key, the unit address decides the order (λ position and the exposure budget).
 
-    Two rows with equal points and capability are separated by the unit address
-    alone, and that order is spent twice — on the λ position, which discounts by
-    index, and on the exposure budget, which the earlier row consumes first and
-    the later row gets the remainder of. Splitting the shared entity correctly
-    needs evidence this fold does not have, so the order stays fixed and
-    what it decided is published instead of read as an attribution.
-
-    Findings only. A subsumed row has no λ position and spends no exposure
-    budget — the order decides nothing for it — so its ``exposure_order_tie``
-    stays ``None``, which here is the proven "nothing was decided by order",
-    not an unasked question.
+    Correct splitting needs evidence the fold lacks, so the order stays fixed and is published. Findings only: subsumed
+    rows have no λ position or budget, so ``None``.
     """
     groups: dict[tuple[Any, Any], list[dict[str, Any]]] = defaultdict(list)
     for finding in findings:
@@ -110,8 +89,7 @@ def _disclose_order_ties(findings: list[dict[str, Any]]) -> None:
             }
 
 
-# Every published dollar is rounded to the cent, so a share below half a cent
-# reaches a consumer as $0.00 whatever it really was.
+# Shares below half a cent publish as $0.00.
 _PUBLISHED_CENT = 0.005
 
 
@@ -119,42 +97,19 @@ _UNPRICED_ASSET_STATES = frozenset({P.ASSET_UNPRICED, P.ASSET_BELOW_RESOLUTION})
 
 
 def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]:
-    """What one entity's priced sheet does and does not cover, per asset.
+    """What one entity's priced sheet covers, per asset (the sheet state collapses mixed entities).
 
-    The per-ASSET maps are read and the sheet STATE is not, for the reason
-    :func:`_partially_priced_entities` reads them: the state collapses a mixed
-    entity to whichever fact ranks highest, so an entity with one priced asset
-    and a hundred unanswered ones reads as ``priced`` there and the shortfall
-    disappears. ``below_resolution`` counts as not priced — an asset whose price
-    landed on the storage floor is a holding of at most half a cent that the
-    total does not carry, which is the same shortfall as one nobody priced — and
-    the restaking plane is the second source, with no USD column at all.
+    ``below_resolution`` and restaking positions count as not priced.
 
-    ``complete`` is the conjunct the ceiling claim turns on and it is an EARNED
-    positive: an entity with no observed assets at all does not clear it by
-    having nothing to fail on. Nothing here reads a block height or an observed
-    account: the plane reduces observations to the latest per (entity, asset) at
-    load, so those are gone by the time this runs and are not claimed.
-
-    Two conjuncts of ``complete`` are about the LIST rather than the readings on
-    it, and both are asked because a per-reading answer cannot reach them:
-
-    * a list read AT the endpoint's page cap can never be complete. The stored
-      rows are a prefix of the holdings, so every one of them being answered
-      says nothing about the entries the page never reached.
-    * a DISPOSED reading does not extend coverage over the list. A disposition
-      says one asset's contribution is nil; it does not say the list is whole,
-      and reading it as though it did is how a sheet assembled from a
-      third-party page would come to publish a full-coverage upper bound. So a
-      sheet carrying any disposed asset must have its list separately proven —
-      by the chain's own transfer history — before it clears here.
+    ``complete`` is earned: an entity with no observed assets doesn't clear it. Two list conjuncts: a list at the page
+    cap is never complete, and a disposed reading doesn't extend coverage, so a sheet with disposed assets needs its
+    list proven whole by chain history.
     """
     values = value_plane.per_asset.get(canonical) or {}
     states = value_plane.per_asset_state.get(canonical) or {}
     positions = value_plane.unpriced_positions.get(canonical) or []
     names = sorted(set(values) | set(states))
-    # A key present in ``per_asset`` with no state entry is read as determined,
-    # which is what that map means (see ``ValuePlane``'s docstring).
+    # A ``per_asset`` key without a state entry is determined.
     not_priced = sorted(name for name in names if states.get(name) in _UNPRICED_ASSET_STATES)
     disposed = sorted(name for name in names if states.get(name) == P.ASSET_AIRDROP_DELIVERED)
     list_is_whole = not value_plane.asset_set_is_truncated(canonical) and (
@@ -162,10 +117,7 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
     )
     return {
         "per_asset": [
-            # The evidence a sheet-ceiling record's figure is checked against, so
-            # it carries the same rounding the figure does: per-asset rows that
-            # all read $0.00 under a published $0.00156 would contradict the sum
-            # they are published to support.
+            # Same rounding as the figure, so the evidence doesn't contradict it.
             {
                 "asset": name,
                 "usd": (_round_published(values[name]) if name in values else None),
@@ -174,19 +126,12 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
             for name in names
         ],
         "assets_observed": len(names),
-        # Assets carrying a determined DOLLAR reading — a price, or a quantity
-        # witnessed zero. The three populations partition ``assets_observed``:
-        # a disposed asset carries no dollar figure at all (its ``usd`` is null
-        # in ``per_asset``), so it is counted under ``assets_disposed`` and
-        # under neither of the other two. Folding it in here published a sheet
-        # whose every asset arrived by mass distribution as fully priced.
+        # Assets with a determined dollar reading; with not-priced and disposed they partition ``assets_observed``
+        # (disposed assets have no dollar figure).
         "assets_priced": len(names) - len(not_priced) - len(disposed),
         "assets_not_priced": not_priced,
         "assets_disposed": disposed,
-        # The LIST conjunct of ``complete``, published rather than left inside
-        # it: a reader who sees the direction refused with both asset lists
-        # empty has no other field to read the cause off, and an unpublished
-        # conjunct is one the sentence beside it cannot name.
+        # The list conjunct, published so a refused direction's cause is readable.
         "asset_list_proven_whole": list_is_whole,
         "unpriced_positions": len(positions),
         "complete": bool(names) and not not_priced and not positions and list_is_whole,
@@ -196,32 +141,11 @@ def _asset_coverage(value_plane: P.ValuePlane, canonical: str) -> dict[str, Any]
 def _reconcile_sheet_ceilings(
     ceiling_kinds: dict[str, str], per_entity: dict[str, float], value_plane: P.ValuePlane
 ) -> list[dict[str, Any]]:
-    """Drop any sheet ceiling whose standing figure is not that node's sheet.
+    """Drop sheet ceilings whose standing figure isn't that node's sheet (checked per key, never on the total).
 
-    S6's invariant is PER KEY: a sheet ceiling is capped by its own node's sheet
-    by construction, because it IS that sheet, and the per-entity MAX only ever
-    replaces it with something larger that is no longer a ceiling. It may not be
-    checked on the row's total, which legitimately sums across priced hosts and
-    exceeds any single sheet — $4.217B over eight of them on the reference
-    corpus.
-
-    Checked at the published resolution rather than exactly, because that is the
-    resolution the claim is made at — and the check therefore goes through
-    ``_round_published``, the function that DEFINES that resolution, rather than
-    through a hand-written ``round(x, 2)`` that used to agree with it. The two
-    stopped agreeing in the sub-cent band, where the published resolution is the
-    unrounded figure: at cents a standing $0.004 and a sheet of $0.001 both read
-    0.00, the gate passed, and a figure that is not this node's sheet was
-    labelled its ceiling. The comparison is strictly tighter than the old one and
-    admits nothing it did not admit before.
-
-    Reconciled rather than raised: an
-    unreachable-by-construction mismatch is still a claim this fold cannot
-    support, and the honest response is to withhold the LABEL from that one key —
-    the figure stands, ungraded for direction, and charges the exposure budget
-    like any other — not to take a protocol's whole score down with it. Mutates
-    ``ceiling_kinds`` in place and returns what it withheld, so the caller
-    publishes the refusal rather than a silence.
+    Compared through ``_round_published``, the published resolution (a hand-written ``round(x, 2)`` once let sub-cent
+    mismatches through). Withholds the label from that key rather than raising; the figure stands. Mutates
+    ``ceiling_kinds`` and returns the withheld entries.
     """
     withheld: list[dict[str, Any]] = []
     for entity in sorted(ceiling_kinds):
@@ -234,10 +158,7 @@ def _reconcile_sheet_ceilings(
         withheld.append(
             {
                 "entity": entity,
-                # The two figures the gate above just found unequal, published at
-                # the resolution it compared them at. At cents a pair that
-                # differs only below one would print here as two identical
-                # numbers under a record whose whole claim is that they differ.
+                # Both figures at the resolution they were compared at.
                 "standing_usd": _round_published(per_entity[entity]),
                 "sheet_usd": (_round_published(usd) if usd is not None else None),
                 "ceiling_reason": reason,
@@ -255,33 +176,17 @@ def _reconcile_sheet_ceilings(
 
 
 def _partially_priced_entities(value_plane: P.ValuePlane, keys: set[str]) -> list[str]:
-    """Reached entities whose priced sheet does not cover everything they hold.
+    """Reached entities priced only partly (a total over them is a floor).
 
-    Whole-entity unpricedness already lands in ``undetermined_instances``; this
-    is the case one level in, where the entity IS priced but only partly — ten
-    priced rows beside a hundred unpriced ones answer ten questions, and a total
-    over them is a floor, not the entity's value.
-
-    Two sources, ORed, and the per-ASSET map is read rather than the sheet
-    state: the sheet state collapses a mixed entity to whichever fact ranks
-    highest, so an entity with one priced asset and a hundred unanswered ones
-    reads as ``priced`` there and the shortfall disappears. ``below_resolution``
-    counts as unpriced here — an asset whose price landed on the storage floor
-    is a holding of at most half a cent that the total does not carry, which is
-    the same shortfall as one nobody priced. The restaking plane is the second
-    source: it has no USD column at all, so a position there is unpriced by
-    construction.
+    Read per asset, since sheet state collapses mixed entities; ``below_resolution`` counts as unpriced, and restaking
+    positions have no USD column.
     """
     partial: set[str] = set()
     for key in keys:
         canonical = value_plane.canonical(key)
         if value_plane.total(canonical) is None:
-            # Nothing determined at all: an undetermined entity, not a floor.
             continue
-        # The same predicate the per-entity sheet-ceiling record publishes its
-        # bound direction from, called rather than restated: the row header and
-        # the per-entity record answer the same coverage question, and two
-        # copies of the rule are how they came to answer it differently.
+        # The same predicate the per-entity records use, so the two can't disagree.
         if not _asset_coverage(value_plane, canonical)["complete"]:
             partial.add(canonical)
     return sorted(partial)
@@ -295,57 +200,15 @@ def _bound_direction(
     withheld_reach: bool,
     non_attributed_entities: frozenset[str],
 ) -> str:
-    """Which direction the row's published total bounds this principal in.
+    """Which direction the row's total bounds the principal in.
 
-    Two independent axes, and the header used to publish only one of them. The
-    COVERAGE axis is what ``is_floor`` was designed for: instances that answered
-    nothing and entities holding assets the priced sheet never covered leave
-    value out of the sum, so what is in it is a floor. The BOUND axis is the
-    other one: a composed figure is the DESTINATION function's witness for one
-    call, and it is a ceiling on what this principal extracts because the
-    witness bounds the FUNCTION whoever calls it and carries no model of who
-    calls it.
+    Coverage axis: unanswered instances or partly priced entities make the sum a floor. Bound axis: a composed figure is
+    a ceiling (the destination witness bounds the function, not who calls it), and summing ceilings doesn't make a
+    floor. So ``floor`` requires no composed contribution and every contributing entity proven not attribution-derived,
+    written as membership (a universal over contributions would be vacuously true on an empty row).
 
-    Summing ceilings does not make a floor, so ``floor`` requires that NO
-    contributing entity's figure came through the composed branch — the
-    invariant that keeps a genuinely witnessed floor exactly where it was.
-
-    The composed branch is not the only ceiling in the building, which is the
-    F5 correction. An ATTRIBUTION-DERIVED contribution — a holder's whole priced
-    balance credited off a constant-amount probe — bounds this principal from
-    above too, and it arrives through the instance's OWN witness, where the
-    ceiling test above never looks. So ``floor`` additionally requires that
-    every contributing entity's standing figure be PROVEN not attribution-derived.
-
-    That conjunct is written as a membership test and not as "no contribution is
-    attributed", deliberately. A universal over contributions is VACUOUSLY TRUE
-    on a row with no contributions at all, and a row that lost every figure would
-    then earn a floor over an empty sum — today that is unreachable only because
-    :func:`_row_value` returns early with ``value_usd = None`` when ``per_entity``
-    empties, i.e. because of a guard in a different function. An earned positive
-    does not depend on a guard somewhere else: ``entities`` must be non-empty and
-    every one of its members must be in the proven-not-attributed set.
-
-    ``ceiling`` is the mirror and is earned no more cheaply: EVERY contributing
-    entity's figure must be a proven ceiling (one ungraded contribution and the
-    sum is not bounded above by these), nothing may be missing from the sum (a
-    coverage gap or a withheld hop is value this row reaches that the total does
-    not carry, and either one breaks an at-most while leaving an at-least
-    intact), and the two are checked here rather than asserted in the prose.
-
-    ``ceiling_entities`` carries TWO populations and this function reads neither
-    apart: a composed extraction ceiling and a controlled node's own sheet
-    ceiling are proven differently and narrowed differently, and both bound this
-    principal from above, which is the whole of what direction asks. The
-    per-entity records say which is which, and the coverage conjunct above is
-    what stops a partly priced sheet from being summed into an at-most — the
-    same conjunct the per-entity record derives its own direction from.
-
-    Everything else is ``not_determined``, including a total with no gap and no
-    ceiling in it: the contributions are then a mix this fold does not grade for
-    direction — a priced floor bounded by a sheet is not an exact figure — and
-    the absence of the two signals above is not a witness that the sum is
-    two-sided. It publishes the bare band and claims nothing.
+    ``ceiling`` requires every contribution to be a proven ceiling and nothing missing (gaps or withheld hops). Composed
+    and sheet ceilings both bound from above. Everything else is ``not_determined``.
     """
     if value_usd is None:
         return BOUND_DIRECTION_NOT_DETERMINED
@@ -360,10 +223,7 @@ def _bound_direction(
     return BOUND_DIRECTION_NOT_DETERMINED
 
 
-# One clause per ceiling KIND, each naming the population it counted and the
-# per-entry block a reader can check it against. Assembled per row rather than
-# written once, because a row can carry either ceiling or both and a sentence
-# naming only one of them is false about the figures it does not mention.
+# One clause per ceiling kind present; a sentence naming only one would be false about the other.
 _CEILING_KIND_CLAUSES = {
     CEILING_KIND_COMPOSED: (
         "priced from a composed extraction CEILING — the DESTINATION function's own flow.out "
@@ -378,9 +238,7 @@ _CEILING_KIND_CLAUSES = {
 }
 
 
-# What each kind of ceiling bounds, for the arm that earned a direction. The
-# composed sentence is about one CALL; the sheet sentence is about one NODE, and
-# each is false of the other kind.
+# Composed ceilings bound one call; sheet ceilings one node.
 _CEILING_KIND_BOUNDS = {
     CEILING_KIND_COMPOSED: "Each composed figure bounds ONE call to the destination function",
     CEILING_KIND_SHEET: (
@@ -391,31 +249,16 @@ _CEILING_KIND_BOUNDS = {
 
 
 def _asset_set_completeness(value_plane: P.ValuePlane, entity: str) -> dict[str, Any] | None:
-    """The carrier record proving this entity's asset list whole, or ``None``.
-
-    Copied out of the plane rather than rebuilt: the strings inside are the
-    producer's own ``asset_set_basis`` values, so what the document publishes
-    about a scan is the scan's own record and not a sentence authored at the
-    point of publication.
-    """
+    """The carrier record proving the asset list whole (the producer's own strings), or ``None``."""
     record = value_plane.asset_set_proven_complete.get(value_plane.canonical(entity))
     return dict(record) if record is not None else None
 
 
 def _disposition_carrier(value_plane: P.ValuePlane, entity: str, disposed: list[str]) -> dict[str, Any] | None:
-    """The delivery evidence this entity's disposed readings actually stand on.
+    """The delivery evidence behind this entity's disposed readings, from ``ValuePlane.asset_disposition``, or
+    ``None``.
 
-    Read off ``ValuePlane.asset_disposition`` — the records the plane copied from
-    the producer's own rows — and never re-derived here. ``None`` where nothing
-    at this entity is disposed, which is the third state: a row with no disposed
-    reading has no delivery evidence to publish, and an empty block would read
-    as evidence that came back empty.
-
-    The aggregate takes the WEAKEST end of each field across the readings it
-    folds, for the same reason the plane takes it across accounts: the sentence
-    published beside it is one claim over the whole set, and it holds only where
-    every member holds. So the smallest fan-out any reading measured, the latest
-    block any scan started from, and the earliest block any of them ran through.
+    Aggregated at the weakest end of each field (smallest fan-out, latest start block, earliest end block).
     """
     carriers = [
         record
@@ -429,29 +272,20 @@ def _disposition_carrier(value_plane: P.ValuePlane, entity: str, disposed: list[
         "assets": len(carriers),
         "shapes": sorted({record["shape"] for record in carriers}),
         "fan_out_threshold_k": max(record["fan_out_threshold_k"] for record in carriers),
-        # ``null`` is the honest answer where no reading recorded a fan-out, and
-        # is never read as zero: a delivery nobody measured is not a delivery
-        # that reached nobody.
+        # No recorded fan-out is null, never zero.
         "min_fan_out": (min(fan_outs) if fan_outs else None),
         "delivery_count": sum(record["delivery_count"] for record in carriers),
         "scanned_from_block": max(record["scanned_from_block"] for record in carriers),
         "measured_through_block": min(record["measured_through_block"] for record in carriers),
         "accounts": sorted({account for record in carriers for account in record["accounts"]}),
-        # The producers' own basis strings, deduplicated and otherwise verbatim.
         "basis": sorted({line for record in carriers for line in record["basis"]}),
     }
 
 
 def _disposition_scope(coverage: dict[str, Any], carrier: dict[str, Any]) -> str:
-    """What this entity's figure covers, and what it deliberately does not.
+    """What this entity's figure covers and doesn't, from the row's counts and the carrier's fields.
 
-    Derived from the row's own counts and the carrier's own fields (#171), so
-    the scope a reader checks is the scope the evidence supports rather than a
-    sentence authored beside it. It is written for the figure and not for one of
-    its values: on a sheet whose every reading is disposed the total is $0 and
-    the count it totals over is ZERO, which is the honest way to publish that
-    figure — the difference between "this sheet prices nothing" and "this entity
-    holds nothing", of which only the first is witnessed here.
+    A fully disposed sheet totals $0 over zero priced assets: "prices nothing", not "holds nothing".
     """
     fan_out = carrier["min_fan_out"]
     return (
@@ -470,10 +304,7 @@ def _disposition_scope(coverage: dict[str, Any], carrier: dict[str, Any]) -> str
     )
 
 
-# Where each missing-witness class sits on the proof chain. The frontier is the
-# EARLIEST missing link: a row missing only pricing is one lookup from proven,
-# one missing reach itself is furthest. Unregistered tokens publish a
-# not_determined frontier rather than borrowing a place on the chain.
+# Order of links on the proof chain; the frontier is the earliest missing. Unregistered tokens are not_determined.
 _MISSING_LINK_CHAIN = ("reach", "effect", "magnitude", "value")
 
 
@@ -494,24 +325,13 @@ def _unresolved_stake(
     value_plane: P.ValuePlane,
     hops_not_determined: list[dict[str, Any]] | tuple = (),
 ) -> dict[str, Any]:
-    """The at-most behind this row's unanswered questions. Never enters lambda
-    or exposure: the reach/magnitude is not witnessed, only the entities' own
-    sheets are, so the figure is a ceiling on what resolution could put in play.
+    """The at-most behind unanswered questions, never in lambda or exposure.
 
-    Two bases, disjoint, reached takes precedence: ``reached_unwitnessed`` holds
-    entities the row reaches whose contribution was refused; ``behind_unestablished_hops``
-    holds entities the closure places behind hops the row could not establish —
-    a bound on a bound, since that subtree is itself the widest walk's upper
-    bound. Entities already carrying a published figure on this row are sized,
-    not unresolved, and are excluded. An earned $0 sheet contributes 0.0 and
-    counts as contributing; a refused sheet is counted under its refusal token
-    (the work list), never as a zero. ``missing_witnesses`` counts the witness
-    class each unresolved entity (or hop) waits on, so a consumer reads what
-    closes the gap off the entry instead of re-parsing the instance lists.
+    Two disjoint bases: reached entities whose contribution was refused, and entities behind unestablished hops (a bound
+    on a bound). Already-sized entities are excluded; an earned $0 sheet counts as 0.0; refused sheets are counted under
+    their token. ``missing_witnesses`` counts what each gap waits on.
     """
-    # Canonical keys throughout: an implementation folds onto its proxy, so a
-    # raw impl key would pass the sized-exclusion and then draw the proxy's
-    # sheet out of ``ceiling_for`` — re-counting dollars the row already sized.
+    # Canonical keys, so an implementation key can't slip past the sized check and recount the proxy's sheet.
     sized = {value_plane.canonical(key) for key in sized_entities}
     reached = {value_plane.canonical(str(record["entity"])) for record in undetermined} - sized
     behind = (
@@ -521,8 +341,7 @@ def _unresolved_stake(
     for record in undetermined:
         key = value_plane.canonical(str(record["entity"]))
         if key in reached:
-            # 'token(detail) x qualifier' -> 'token'; the detail and qualifier
-            # stay on the instance record, this is the class count.
+            # The class token; details stay on the instance.
             token = str(record.get("why", "")).partition("(")[0].partition(" x ")[0]
             reached_missing.setdefault(token, set()).add(key)
     hop_missing: dict[str, int] = {}
@@ -587,13 +406,10 @@ def _unresolved_stake(
 
 
 def _unresolved_levers(findings: list[dict[str, Any]]) -> dict[str, Any]:
-    """Document rollup: partial-proof rows ranked by the points ceiling — the
-    proven half's weight times the unresolved ceiling's band, so an almost-
-    proven EOA over $2M outranks a diffuse low-severity gap over similar
-    dollars. Dollar ceiling breaks ties; an unbounded unknown publishes its
-    entity count and refusals instead of a rank it never earned. Carries no
-    lambda figures; join to findings on (principal_unit, capability,
-    principal)."""
+    """Partial-proof rows ranked by points ceiling (proven weight x unresolved band), dollar ceiling breaking ties;
+    unbounded unknowns publish counts instead of a rank. Join to findings on (principal_unit, capability,
+    principal).
+    """
     admitted = [f for f in findings if f.get("partial_proof")]
     ranked = sorted(
         admitted,
@@ -632,35 +448,12 @@ def _sheet_ceiling_records(
     value_plane: P.ValuePlane,
     capability: str,
 ) -> list[dict[str, Any]]:
-    """One published record per entity whose figure is its own sheet.
+    """One record per entity whose standing figure is its own sheet (per-entity MAX survivors only).
 
-    Assembled off the row's STANDING figures rather than at the moment the branch
-    fired, for the same reason the ceiling set is: a row folds several calls and
-    only the figure that survived the per-entity MAX is the one published, so a
-    record written per call would name entities the row does not price this way.
-
-    Each record answers #170 in the only shape that is true here. Every published
-    magnitude carries the execution that proved it; this one was not proven by a
-    call at all, so it carries the registered NON-FAULT reason saying so. That
-    the reason is outside :data:`EX.FAULT_REASONS` is load-bearing rather than
-    incidental: the structural census walks every ``proving_execution`` key in
-    the document and a fault reason here would qualify the whole grade as
-    fault-degraded on the strength of a proof that is intact. The observations
-    the record stands on are PUBLISHED here — the per-asset figures at the
-    canonical key — because a record whose reading names evidence the document
-    does not carry is the authored-string defect one level up from the one the
-    execution block exists to close.
-
-    ``bound_direction`` is DERIVED from this entity's own asset coverage and is
-    not the constant the branch's name suggests. A priced sheet is a floor over
-    what was priced, so on an entity holding assets nobody priced the figure
-    bounds the priced portion and not the move — publishing ``ceiling`` there
-    would claim an at-most over holdings this fold never observed, and would
-    contradict the row header, which refuses a ceiling on exactly this conjunct.
-
-    ``sheet_state`` and ``ceiling_reason`` are read back off the plane instead of
-    carried down from the branch, so the record cannot claim a state the plane
-    would not answer for the same key at the same moment.
+    Proven by an observation, not a call, so it carries a registered non-fault reason (a fault reason would mark the
+    whole grade degraded). The per-asset observations are published with it. ``bound_direction`` is derived from the
+    entity's coverage (``ceiling`` over unpriced holdings would claim an unobserved at-most). ``sheet_state`` and
+    ``ceiling_reason`` are read back from the plane.
     """
     records: list[dict[str, Any]] = []
     for entity in sorted(sheet_ceilings):
@@ -672,48 +465,24 @@ def _sheet_ceiling_records(
             {
                 "entity": entity,
                 "capability": capability,
-                # Both figures, and the per-asset evidence below them, take the
-                # SAME rounding — see ``_round_published``. The two keys are equal
-                # by construction and the ``per_asset`` block is what the sum is
-                # checked against, so a convention that rounded one of them onto
-                # zero would publish a record contradicting itself at exactly the
-                # sub-cent sheets this rounding was hiding.
+                # Both figures and the per-asset evidence share one rounding (``_round_published``).
                 "published_usd": _round_published(per_entity[entity]),
-                # What the plane answers now, beside the figure the fold took.
-                # Equal by construction and RECONCILED before this runs, so an
-                # entry reaching here has been checked rather than asserted —
-                # and checked through the SAME ``_round_published`` these two
-                # keys are printed with, so the equality a reader sees is the
-                # equality the gate tested. They drifted once and the gap was
-                # exactly the sub-cent band.
+                # Equal by construction and reconciled through the same rounding.
                 "sheet_usd": (_round_published(usd) if usd is not None else None),
                 "sheet_state": value_plane.sheet_state(entity),
                 "ceiling_reason": reason,
                 "bound_direction": (BOUND_DIRECTION_CEILING if complete else BOUND_DIRECTION_NOT_DETERMINED),
                 "bound_direction_basis": _sheet_ceiling_direction_basis(coverage, complete),
-                # What proves the asset list this figure is summed over is the
-                # WHOLE list, carried from the observation record rather than
-                # restated here: the source token, the block range the chain's
-                # own transfer history was read across, and the producer's own
-                # basis strings. ``null`` is the third state — no scan on record
-                # — which is every ADMITTED entry on this corpus and is why they
-                # bound the priced portion and not the move.
+                # The carrier record proving the list whole; null means no scan, true of every admitted entry here,
+                # which is why they bound the priced portion only.
                 "asset_set_completeness": _asset_set_completeness(value_plane, entity),
-                # The delivery evidence a disposed reading stands on, carried
-                # from the plane's own records rather than restated: the
-                # sentence below quotes these fields, so a reader checks the
-                # claim against the evidence and not against the prose.
-                # ``null`` where no reading here is disposed.
+                # The delivery evidence the sentence quotes; null where nothing is disposed.
                 "asset_disposition": carrier,
                 **coverage,
                 PROVING_EXECUTION_KEY: EX.not_determined(EX.REASON_NOT_PROVEN_BY_A_CALL).as_json(),
                 "reading": (
                     _CEILING_SOURCE_READINGS[(reason, complete)]
-                    # The shortfall, from the SAME derivation the direction
-                    # basis publishes it from. The stems above may not name a
-                    # cause: on a live carrier two of the three read empty, so a
-                    # stem that presupposed one pointed a reader at fields that
-                    # said nothing while the conjunct that failed went unnamed.
+                    # The shortfall from the same derivation as the direction basis.
                     + (_CEILING_COVERAGE_SHORTFALL_PREFIX + _coverage_shortfall(coverage) if not complete else "")
                     + (_disposition_scope(coverage, carrier) if carrier is not None else "")
                     + _CEILING_CLOSING
@@ -726,12 +495,7 @@ def _sheet_ceiling_records(
 def _ceilings_present(
     composed_ceilings: frozenset[str], sheet_ceilings: frozenset[str]
 ) -> list[tuple[str, frozenset[str]]]:
-    """The ceiling kinds this row actually carries, in a fixed order.
-
-    An empty kind writes no clause anywhere. A row carrying one kind therefore
-    reads exactly as it did before the other existed — which is what keeps a row
-    that did not move from having its prose move.
-    """
+    """Ceiling kinds on this row, in fixed order; absent kinds write no clause."""
     present = ((CEILING_KIND_COMPOSED, composed_ceilings), (CEILING_KIND_SHEET, sheet_ceilings))
     return [(kind, entities) for kind, entities in present if entities]
 
@@ -739,12 +503,8 @@ def _ceilings_present(
 def _ceiling_source_phrase(
     composed_ceilings: frozenset[str], sheet_ceilings: frozenset[str], *, all_of_them: bool
 ) -> str:
-    """Which ceiling(s) the row's figures came from, counted per kind.
-
-    ``all_of_them`` is the arm where every contributing entity is a ceiling, and
-    it is passed rather than inferred from the sets: the caller has already
-    established it against the coverage axes, and re-deriving it here off a
-    length comparison would restate a conclusion this function cannot check.
+    """Which ceiling kinds the figures came from; ``all_of_them`` is passed in (already established against
+    coverage), not inferred.
     """
     parts = _ceilings_present(composed_ceilings, sheet_ceilings)
     if len(parts) == 1:
@@ -754,7 +514,6 @@ def _ceiling_source_phrase(
 
 
 def _ceiling_bound_phrase(composed_ceilings: frozenset[str], sheet_ceilings: frozenset[str]) -> str:
-    """What each kind of ceiling on this row bounds, one sentence per kind."""
     return "; ".join(_CEILING_KIND_BOUNDS[kind] for kind, _ in _ceilings_present(composed_ceilings, sheet_ceilings))
 
 
@@ -763,14 +522,8 @@ def _ceiling_untightened(
     sheet_ceilings: frozenset[str],
     composed: dict[str, _ComposedMagnitude],
 ) -> str:
-    """What, in THIS document, could put the true figure below each ceiling.
-
-    Two different answers, so two clauses. For a COMPOSED ceiling it is the
-    destination function's own stored conditions, counted off the row's own
-    entries rather than named from a field that no longer exists. For a SHEET
-    ceiling it is which of the node's assets replaced code can actually reach —
-    a question nothing here asks, and the reason the figure is typed as a bound
-    and not as an amount.
+    """What could put the true figure below each ceiling: for composed ceilings, the destination's stored conditions
+    (counted); for sheet ceilings, which assets replaced code can actually reach (unasked).
     """
     parts: list[str] = []
     if composed_ceilings:
@@ -799,13 +552,8 @@ def _ceiling_untightened(
 
 
 def _disposed_ceiling_clause(value_plane: P.ValuePlane, sheet_ceilings: frozenset[str]) -> str:
-    """The row-header's scoping clause for a sheet ceiling determined at $0.
-
-    Empty on every row that carries none, so a row nothing moved on keeps its
-    prose. Where one does, the header may not leave the reader with "$0 at a
-    node this principal controls" and nothing else: the assets that sheet holds
-    are still held, and what was proven of them is the shape they arrived in.
-    Counted off the plane's own disposition records, never re-derived.
+    """The header clause for a sheet ceiling determined at $0 (empty otherwise): the assets are still held; what was
+    proven is how they arrived. From the plane's disposition records.
     """
     scoped = [
         entity
@@ -838,36 +586,11 @@ def _ceiling_bearing_basis(
     composed: dict[str, _ComposedMagnitude],
     value_plane: P.ValuePlane,
 ) -> str:
-    """The basis for a row some of whose figures bound the principal from above.
+    """The basis for a row with figures that bound from above, written once coverage is fully known.
 
-    Written here rather than in :func:`_row_value` because the coverage half of
-    the question is only complete once the zero-reach instances and the partly
-    priced entities are known. The floor basis is left untouched: a row whose
-    direction did not move must not have its prose move either.
-
-    TWO ceiling kinds reach this writer and they are counted apart, never summed
-    into one "ceiling" population. A composed extraction ceiling is a
-    destination function's witness for one CALL and what could narrow it is that
-    function's own stored conditions; a sheet ceiling is one NODE's whole priced
-    holdings and what could narrow it is which of those assets replaced code can
-    actually reach. One sentence over both would be a claim about the row that is
-    false of whichever half it was not written for.
-
-    Every clause names the population it counted. The ceiling arm in particular
-    may not say "nothing is missing" as an unchecked flourish — the hops this
-    row could not establish and the graph withheld behind them are value the sum
-    does not carry, and they are named here because they were consulted in
-    :func:`_bound_direction` before the arm was taken.
-
-    ``composed`` is read for one clause only, and it is read rather than
-    asserted: a ceiling can overstate what this principal actually extracts, and
-    the only evidence in this document that could narrow a COMPOSED one is the
-    destination function's OWN stored conditions, which travel with each composed
-    entry and which this fold evaluates none of. How many of the row's
-    ceiling-bearing figures carry that text is a fact about the row and is
-    counted here. It replaces a clause naming an extraction precondition this
-    document no longer publishes — a definite reference to a deleted field, which
-    reads as a constraint that was consulted.
+    Composed and sheet ceilings are counted apart (different evidence could narrow each). Every clause names what it
+    counted; missing hops and withheld graph are named. Stored destination conditions (not evaluated) are counted for
+    composed ceilings.
     """
     ceiling_entities = composed_ceilings | sheet_ceilings
     n_entities = len(per_entity)
@@ -887,9 +610,7 @@ def _ceiling_bearing_basis(
             + scoped
         )
 
-    # Why it is not a ceiling either, counted rather than asserted: value this
-    # row reaches that the sum does not carry, plus contributions that are not
-    # ceilings and that this fold does not grade for direction at all.
+    # Why it isn't a ceiling either, counted.
     missing: list[str] = []
     if undetermined:
         clause = f"{len(undetermined)} instance(s) not_determined"
@@ -927,22 +648,10 @@ def _coverage_bearing_basis(
     proven_no_reach: list[dict[str, Any]],
     zero_reach_stripped: list[dict[str, Any]],
 ) -> str:
-    """The basis for a row with a coverage gap and no ceiling-bearing figure.
+    """The basis for a row with a coverage gap and no ceiling figures.
 
-    The gap is what a floor is made of — value this row reaches that the sum
-    does not carry can only push the truth up — but it is not the whole of it.
-    :func:`_bound_direction` also requires every contributing entity's standing
-    figure to be PROVEN free of an upper-bounding witness, and where that second
-    axis refuses, the row bounds this principal in neither direction. The two
-    arms are written together here so the prose and the header can never come
-    apart: the floor sentence is reachable only from the branch that earned the
-    floor.
-
-    Both arms count the SAME two populations. The gap the floor is earned from
-    is instances that answered nothing AND entities holding assets the priced
-    sheet never covered — the coverage axis reads both, and the floor string
-    used to name only the first, which read as a floor over a fully priced
-    entity set on a row where one entity was partly priced.
+    The gap makes a floor only if every contribution is also proven free of an upper-bounding witness; otherwise the row
+    bounds in neither direction. Both arms count unanswered instances and partly priced entities.
     """
     n_entities = len(per_entity)
     missing: list[str] = []
@@ -956,12 +665,8 @@ def _coverage_bearing_basis(
     if direction == BOUND_DIRECTION_FLOOR:
         basis = f">= proven floor over {n_entities} entity(ies); " + ", ".join(missing)
     else:
-        # Counted off the membership test the direction was refused on, and
-        # named as what that test establishes: NOT proven free of an
-        # upper-bounding witness. The attribution path is the live producer of
-        # this refusal and is glossed, but a sheet ceiling whose label was
-        # withheld lands here too, so the population may not be asserted to be
-        # attribution-derived — only that none of it is proven not to be.
+        # Counted from the failed membership test: not proven free of an upper-bounding witness (attribution-derived or
+        # a withheld ceiling label).
         ungraded = len(set(per_entity) - non_attributed_entities)
         basis = (
             f"bounded in NEITHER direction: {ungraded} of {n_entities} entity(ies) contribute a figure "
@@ -975,19 +680,9 @@ def _coverage_bearing_basis(
 
 
 def _named_zeros(counted: dict[str, set[Any]], vocabulary: tuple[str, ...]) -> dict[str, int]:
-    """Every token in a CLOSED vocabulary, counted, including the ones at zero.
+    """Every token of a closed vocabulary, zeros included, so "didn't fire" and "not in the model" differ.
 
-    A census keyed on a closed set publishes the whole set or it publishes an
-    ambiguity: a token missing from the map reads identically as "this rule did
-    not fire on this corpus" and "this rule is not in the model", and only the
-    first of those is a fact about the protocol. The same rule the credit-path
-    reading follows one level up, and the same one ``planes._REDUCTION_COUNTERS``
-    follows for the value plane's own counters.
-
-    A token OUTSIDE the vocabulary is not silently dropped. It is a fact the
-    document carries and a census that cannot name it would publish a total
-    smaller than its own carriers — so it is counted beside the registered ones
-    and the caller's vocabulary is what needs fixing.
+    Unknown tokens are counted too.
     """
     out = dict.fromkeys(vocabulary, 0)
     for token, members in counted.items():
@@ -1000,30 +695,10 @@ def _sheet_ceiling_totals(
     subsumed: list[dict[str, Any]],
     credited_by_capability: dict[str, int],
 ) -> dict[str, Any]:
-    """The sheet-ceiling population and its dollars, rolled up to the protocol.
-
-    Every figure here is DERIVED from what the rows published — the per-entity
-    records, the refusal tokens in their ``why`` vocabulary, the reconciliation
-    withholdings — and from the confidence pass's own credit census. Nothing is
-    carried down from the branch that fired: a rollup written at the moment of
-    firing would count candidates the per-entity MAX later displaced, which are
-    exactly the figures no row publishes.
-
-    Dollars are summed over DISTINCT ENTITIES and not over rows. A sheet ceiling
-    is a fact about one node's sheet, so two rows pricing the same node this way
-    publish the same number twice and summing them would report twice the money
-    that exists. That the two agree is checked rather than assumed: an entity
-    whose rows disagree is COUNTED and published, because a disagreement here
-    would mean the per-key reconciliation let two different figures stand under
-    one claim.
-
-    ``signals_credited_in_confidence`` is the OTHER meter and is deliberately in
-    a different unit: the confidence term counts SIGNALS whose magnitude question
-    a ceiling answered, while everything above it counts entities and dollars.
-    The two are related but not convertible — one node's sheet can answer several
-    signals — and the credited population is the standing one, so a ceiling
-    displaced by a larger figure or withdrawn by the reconciliation is in neither
-    this block's entity count nor that credit.
+    """Sheet-ceiling population and dollars for the protocol, derived from what rows published (not from branch
+    firings, which include displaced candidates). Dollars sum over distinct entities (two rows pricing one node
+    would double it); disagreeing rows are counted. ``signals_credited_in_confidence`` is a different unit
+    (signals, not entities).
     """
     populations = (("findings", findings), ("subsumed_rows", subsumed))
     figures: dict[str, set[float]] = defaultdict(set)
@@ -1051,15 +726,10 @@ def _sheet_ceiling_totals(
                 if not why.startswith(SHEET_CEILING_REFUSED_PREFIX):
                     continue
                 reason = why[len(SHEET_CEILING_REFUSED_PREFIX) :].removesuffix(")")
-                # Deduped on the CALL, so two rows reaching one call through two
-                # principals report the one refusal that happened rather than two.
+                # One refusal per call.
                 refused[reason].add((str(gap.get("entity")), str(gap.get("function"))))
     disagreeing = sorted(key for key, seen in figures.items() if len(seen) > 1)
-    # An entity reached by two code-control capabilities is priced this way under
-    # BOTH, so the capability buckets sum past the distinct-entity count and a
-    # reader adding them up over-counts the population. Counted rather than left
-    # to be noticed: the dollars are deduped and the breakdown is not, and only
-    # one of those two facts was published.
+    # An entity reached by two code-control capabilities appears in both buckets; counted so buckets aren't summed.
     shared_capability = sorted(
         key for key in figures if sum(1 for members in entities_by_capability.values() if key in members) > 1
     )
@@ -1087,7 +757,6 @@ def _sheet_ceiling_totals_reading(
     disagreeing: list[str],
     shared_capability: list[str],
 ) -> str:
-    """The rollup's account of itself, with every count taken from its own data."""
     admitted = len(figures)
     refusals = sum(len(calls) for calls in refused.values())
     head = (
@@ -1114,10 +783,7 @@ def _sheet_ceiling_totals_reading(
         if disagreeing
         else " No entity publishes two different figures across rows, so the total double-counts nothing"
     )
-    # The dollars are deduped and the capability breakdown is NOT, so the two
-    # answer different questions and only saying so keeps a reader from adding
-    # the buckets up. Every count in the reading is of the entity population;
-    # entities_by_capability counts memberships in it.
+    # Dollars are deduped, the capability breakdown isn't; the reading says so.
     buckets = (
         f" The dollars, not the breakdown: {len(shared_capability)} entity(ies) are priced this way "
         "under MORE THAN ONE code-control capability and appear in that many buckets, so "

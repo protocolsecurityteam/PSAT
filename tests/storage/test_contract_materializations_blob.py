@@ -1,27 +1,13 @@
 """Blob-vs-inline storage paths in ``db.contract_materializations``.
 
-The schema carries paired columns (``analysis`` JSONB +
-``analysis_blob_key`` Text; same for ``tracking_plan``). When
-``ARTIFACT_STORAGE_*`` env vars are set, ``materialize_or_wait``
-writes the payloads to object storage and persists only the keys on
-the row. When unconfigured, it falls back to inline JSONB.
-
-Reads always go through ``hydrate_analysis`` /
-``hydrate_tracking_plan`` which try the blob first and fall back to
-inline JSONB on either a missing key or a transient blob fetch
-error. That fallback is what lets pre-migration rows keep working
-while the backfill catches up — and what insulates the pipeline
-from a transient Tigris outage *when an inline copy exists*. When
-one does not, the read raises ``StorageContentNotDetermined``
-rather than returning the ``None`` that also means "this row stored
+With ``ARTIFACT_STORAGE_*`` set, ``materialize_or_wait`` writes ``analysis`` / ``tracking_plan`` to
+object storage and persists only the keys; unconfigured, it falls back to inline JSONB. Reads go
+through ``hydrate_*``, which try the blob then fall back to inline JSONB (keeping pre-migration rows
+working and insulating from a transient outage *when an inline copy exists*); otherwise the read
+raises ``StorageContentNotDetermined`` rather than returning the ``None`` that also means "stored
 nothing": the pipeline may serve stale, never invented, absence.
 
-These tests mock ``get_storage_client`` rather than spinning up a
-minio container so they stay in the offline tier. The minio-backed
-end-to-end path is exercised by the live test suite.
-
-Marker: offline (``requires_postgres`` for the ones that need the
-real materializations table).
+``get_storage_client`` is mocked to stay in the offline tier; minio end-to-end is in the live suite.
 """
 
 from __future__ import annotations
@@ -42,8 +28,7 @@ from tests.conftest import requires_postgres
 
 
 class _StubStorage:
-    """In-memory ``StorageClient`` substitute. Tracks puts and gets so
-    tests can assert on calls without booting minio."""
+    """In-memory ``StorageClient`` substitute tracking puts and gets."""
 
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
@@ -71,8 +56,7 @@ class _StubStorage:
 
 
 def _row(**kwargs: Any) -> Any:
-    """Build a SimpleNamespace mimicking a ContractMaterialization row.
-    The hydrate helpers use ``getattr`` so duck-typing is sufficient."""
+    """A SimpleNamespace mimicking a ContractMaterialization row (hydrate uses ``getattr``)."""
     defaults = dict(
         chain="1",
         bytecode_keccak="0x" + "ab" * 32,
@@ -85,16 +69,23 @@ def _row(**kwargs: Any) -> Any:
     return SimpleNamespace(**defaults)
 
 
-def test_hydrate_inline_when_no_blob_key():
-    """The legacy path: the row has JSONB but no blob_key."""
-    row = _row(analysis={"controllers": ["a", "b"]})
-    assert cm.hydrate_analysis(row) == {"controllers": ["a", "b"]}
-
-
-def test_hydrate_returns_none_when_neither_set():
-    """A row without either the inline or the blob copy (e.g. a row
-    in ``status='failed'``) returns None rather than crashing."""
-    assert cm.hydrate_analysis(_row()) is None
+@pytest.mark.parametrize(
+    ("row_fields", "expected"),
+    [
+        pytest.param({"analysis": {"controllers": ["a", "b"]}}, {"controllers": ["a", "b"]}, id="inline-no-blob-key"),
+        pytest.param({}, None, id="neither-set-is-none"),
+        # A row with a blob_key written before ARTIFACT_STORAGE_* was turned off still serves inline
+        # JSONB if present.
+        pytest.param(
+            {"analysis_blob_key": "contract_materializations/x/y/analysis.json", "analysis": {"v": 1}},
+            {"v": 1},
+            id="inline-when-blob-key-set-but-storage-unconfigured",
+        ),
+    ],
+)
+def test_hydrate_analysis_without_readable_blob(row_fields, expected):
+    with patch("db.contract_materializations.get_storage_client", return_value=None):
+        assert cm.hydrate_analysis(_row(**row_fields)) == expected
 
 
 def test_hydrate_reads_blob_when_blob_key_set():
@@ -111,9 +102,8 @@ def test_hydrate_reads_blob_when_blob_key_set():
 
 
 def test_hydrate_falls_back_to_inline_on_blob_fetch_error():
-    """A flaky bucket must not break a row that has BOTH a blob_key
-    and inline JSONB (the transition window before backfill clears
-    JSONB). Inline wins, with a warning."""
+    """A flaky bucket must not break a row with BOTH blob_key and inline JSONB (pre-backfill window):
+    inline wins, with a warning."""
     storage = _StubStorage()
     key = "contract_materializations/ethereum/0xab/analysis.json"
     storage.fail_get.add(key)
@@ -126,17 +116,12 @@ def test_hydrate_falls_back_to_inline_on_blob_fetch_error():
 
 
 def test_hydrate_raises_on_blob_fetch_error_with_no_inline():
-    """INVERTED (was ``test_hydrate_returns_none_on_blob_fetch_error_with_no_inline``,
-    which asserted ``got is None``).
+    """INVERTED (was ``..._returns_none_on_blob_fetch_error_with_no_inline``, asserting ``None``).
 
-    That assertion pinned the defect. ``None`` here is the same value the
-    function returns for a row that genuinely stored nothing, and
-    ``services/resolution/recursive`` writes ``or {}`` over it — so an
-    unreadable blob rendered as "this contract has no analysis, no plan and no
-    predicate trees", and that state seeded the effects probe and was cached
-    under the witness schema version. A "clean cache miss" is a claim about the
-    contract; the bucket failing is not.
-    """
+    That pinned the defect: ``None`` equals the value for a row that stored nothing, and
+    ``services/resolution/recursive`` writes ``or {}`` over it, so an unreadable blob rendered as
+    "no analysis, plan or predicate trees", seeded the effects probe and was cached under the
+    witness schema version. A cache miss is a claim about the contract; a bucket failure is not."""
     from db.storage import StorageContentNotDetermined
 
     storage = _StubStorage()
@@ -153,19 +138,7 @@ def test_hydrate_raises_on_blob_fetch_error_with_no_inline():
     assert cm.hydrate_analysis(_row(analysis_blob_key=None, analysis=None)) is None
 
 
-def test_hydrate_returns_inline_when_blob_key_set_but_storage_unconfigured():
-    """An offline test environment that wrote a row with a blob_key but
-    later turned ARTIFACT_STORAGE_* off must still serve inline JSONB
-    if it's there. Operationally rare but keeps the test fixture
-    permutations sane."""
-    row = _row(analysis_blob_key="contract_materializations/x/y/analysis.json", analysis={"v": 1})
-    with patch("db.contract_materializations.get_storage_client", return_value=None):
-        assert cm.hydrate_analysis(row) == {"v": 1}
-
-
 def test_hydrate_tracking_plan_uses_tracking_plan_columns():
-    """Symmetry check: the helper for tracking_plan reads the
-    tracking_plan_* attributes, not analysis_*."""
     storage = _StubStorage()
     key = "contract_materializations/ethereum/0xab/tracking_plan.json"
     storage.objects[key] = json.dumps({"slots": [1, 2]}).encode("utf-8")
@@ -193,8 +166,6 @@ def _clean_cm(db_session):
 
 @pytest.fixture()
 def _route_to_test_db(monkeypatch):
-    """Point db.contract_materializations.SessionLocal at TEST_DATABASE_URL
-    so writes don't leak into the dev DB."""
     import os
 
     from sqlalchemy import create_engine
@@ -213,9 +184,6 @@ def _route_to_test_db(monkeypatch):
 
 @requires_postgres
 def test_materialize_writes_to_blob_when_storage_configured(_route_to_test_db, _clean_cm):
-    """The new path: writes ``analysis`` and ``tracking_plan`` to blob
-    storage, persists only the keys on the row. JSONB columns are NULL.
-    """
     storage = _StubStorage()
 
     def _builder() -> dict[str, Any]:
@@ -251,8 +219,6 @@ def test_materialize_writes_to_blob_when_storage_configured(_route_to_test_db, _
 
 @requires_postgres
 def test_materialize_falls_back_to_inline_when_storage_unconfigured(_route_to_test_db, _clean_cm):
-    """Local dev / offline tests without ARTIFACT_STORAGE_* must keep
-    working — writes go to JSONB inline, blob_key columns stay NULL."""
 
     def _builder() -> dict[str, Any]:
         return {
@@ -278,9 +244,8 @@ def test_materialize_falls_back_to_inline_when_storage_unconfigured(_route_to_te
 
 @requires_postgres
 def test_materialize_rolls_back_when_blob_upload_fails(_route_to_test_db, _clean_cm):
-    """A Tigris transient must not leave a half-written row: the
-    transaction rolls back so the next caller can retry the build
-    cleanly. The advisory lock is released alongside the rollback."""
+    """A Tigris transient must not leave a half-written row: the transaction rolls back (releasing
+    the advisory lock) so the next caller can retry the build."""
     storage = _StubStorage()
     # Pre-compute the blob key that materialize_or_wait will choose so
     # we can mark it as failing.
@@ -313,10 +278,8 @@ def test_materialize_rolls_back_when_blob_upload_fails(_route_to_test_db, _clean
 
 @requires_postgres
 def test_materialize_blob_path_loser_serves_blob_key(_route_to_test_db, _clean_cm):
-    """A second caller after the winner committed sees the row's
-    ``status='ready'`` on its second read inside the lock and returns
-    without re-running the builder. The returned row carries the
-    blob_keys the winner wrote, hydrate works the same way."""
+    """A second caller after the winner commits sees ``status='ready'`` on its second read inside
+    the lock and returns without re-running the builder, carrying the winner's blob_keys."""
     storage = _StubStorage()
 
     def _builder() -> dict[str, Any]:
@@ -358,12 +321,9 @@ def test_materialize_blob_path_loser_serves_blob_key(_route_to_test_db, _clean_c
 
 @requires_postgres
 def test_backfill_skips_already_migrated_rows(_route_to_test_db, _clean_cm, monkeypatch):
-    """Rows that already have ``analysis_blob_key`` are no-ops on
-    re-run. Idempotent."""
     from scripts import backfill_contract_materializations_to_blob as backfill
 
     storage = _StubStorage()
-    # Insert a row that's already fully migrated.
     row = ContractMaterialization(
         chain="1",
         bytecode_keccak="0x" + "aa" * 32,
@@ -398,8 +358,6 @@ def test_backfill_skips_already_migrated_rows(_route_to_test_db, _clean_cm, monk
 
 @requires_postgres
 def test_backfill_dry_run_writes_nothing(_route_to_test_db, _clean_cm):
-    """``--dry-run`` reports counts but performs zero writes (neither
-    Tigris nor DB)."""
     from scripts import backfill_contract_materializations_to_blob as backfill
 
     keccak = "0x" + ("ff" * 32)[:64]
@@ -437,9 +395,7 @@ def test_backfill_dry_run_writes_nothing(_route_to_test_db, _clean_cm):
     engine.dispose()
 
     assert rc == 0
-    # Dry-run writes nothing to the bucket.
     assert storage.put_calls == []
-    # And nothing to the DB (the row is unchanged).
     fresh = cm.find_by_keccak(_clean_cm, chain="1", bytecode_keccak=keccak)
     assert fresh is not None
     assert fresh.analysis_blob_key is None

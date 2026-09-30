@@ -1,7 +1,5 @@
-"""Public evaluator API, per-leaf dispatch, and cross-contract inlining.
-
-The recursion cycle evaluate_tree -> _evaluate_leaf ->
-_maybe_inline_cross_contract_call -> evaluate_tree_with_registry stays here.
+"""Public evaluator API, per-leaf dispatch, and cross-contract inlining (kept together because they recurse into each
+other).
 """
 
 from __future__ import annotations
@@ -74,18 +72,10 @@ from .telemetry import (
 
 logger = logging.getLogger("services.resolution.predicate_evaluator")
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 
 class EvaluationContext:
-    """Resolver-side context for the simple (week-4) evaluator path.
-
-    The full week-5 ``EvaluationContext`` lives in
-    ``services.resolution.adapters`` and carries chain/RPC/repos.
-    Use ``evaluate_tree_with_registry`` to dispatch via that fuller
-    context.
+    """Context for the simple evaluator path; ``evaluate_tree_with_registry`` uses the fuller
+    ``services.resolution.adapters`` context.
     """
 
     def __init__(
@@ -100,9 +90,7 @@ class EvaluationContext:
         self.contract_address = contract_address
         self.adapter: SetAdapter = adapter or _NullAdapter()
         self.block = block
-        # Persisted state-variable values keyed by storage-var name.
-        # Used by ``_resolve_equality_principal`` to enumerate state-variable
-        # authority values into concrete addresses.
+        # Persisted state-variable values by name, for ``_resolve_equality_principal``.
         self.state_var_values = state_var_values or {}
         self.call_frame = call_frame
 
@@ -112,18 +100,11 @@ def evaluate_tree_with_registry(
     registry: Any,  # adapters.AdapterRegistry — typed loosely to avoid circular import
     ctx: Any,  # adapters.EvaluationContext
 ) -> CapabilityExpr:
-    """Like ``evaluate_tree`` but routes membership leaves through the
-    week-5 AdapterRegistry. The registry's ``enumerate(descriptor,
-    ctx)`` returns a CapabilityExpr that may be a populated
-    finite_set, threshold_group, external_check_only, or
-    unsupported(no_adapter)."""
+    """``evaluate_tree`` routing membership leaves through the AdapterRegistry."""
 
     class _RegistryBackedAdapter:
-        # ``_outer_ctx`` exposes the full resolver ctx (session, event logs,
-        # state_var_values, evaluation_stack, …) to leaf evaluators that
-        # need cross-contract inlining. ``_registry`` is the AdapterRegistry
-        # the recursive ``evaluate_tree_with_registry`` re-uses when it
-        # spawns a child ctx for B's tree.
+        # Exposes the outer resolver ctx to leaves that inline cross-contract calls; ``_registry`` is reused for the
+        # child ctx.
         _outer_ctx = ctx
         _registry = registry
 
@@ -146,13 +127,7 @@ def evaluate_tree(
 ) -> CapabilityExpr:
     """Walk a PredicateTree and return its CapabilityExpr.
 
-    None or empty tree → conditional_universal with no conditions
-    (i.e., 'public' / no gating).
-
-    AND / OR nodes recurse via closed combinators.
-
-    LEAF nodes dispatch per the v6 order: unsupported first, then
-    side-condition roles, then caller/delegated auth.
+    A missing or empty tree is public (conditional_universal, no conditions).
     """
     if ctx is None:
         ctx = EvaluationContext()
@@ -197,19 +172,11 @@ def evaluate_tree(
     return CapabilityExpr.unsupported(f"unknown_op_{op}")
 
 
-# ---------------------------------------------------------------------------
-# Per-leaf dispatch
-# ---------------------------------------------------------------------------
-
-
 def _has_caller_keyed_value_predicate(leaf: LeafPredicate) -> bool:
-    """True iff ``leaf.set_descriptor`` carries a ``value_predicate``
-    AND at least one ``key_sources`` entry is ``msg_sender`` (i.e. the
-    threshold is keyed on the caller). Used to upgrade
-    ``business``-flavored thresholds (PR D.1+) into finite-set
-    enumerations when the adapter chain has data, while still letting
-    pure-business thresholds (``amount > 1000``) fall through to
-    ``conditional_universal``.
+    """Whether the descriptor has a ``value_predicate`` keyed on ``msg_sender``.
+
+    Such business thresholds become enumerations when the adapter has data; pure thresholds (``amount > 1000``) stay
+    conditional_universal.
     """
     descriptor = leaf.get("set_descriptor") or {}
     if not descriptor.get("value_predicate"):
@@ -218,9 +185,7 @@ def _has_caller_keyed_value_predicate(leaf: LeafPredicate) -> bool:
     return any(k.get("source") in _CALLER_SOURCES for k in keys)
 
 
-# The E3/E4 allowlist discriminators now live in ``permissionless_shapes``
-# (the caller-taint default subsumes them); these module-level aliases keep
-# the legacy (flag-off) call sites monkeypatchable under their historic names.
+# Aliases kept so legacy call sites stay monkeypatchable under their old names.
 _is_caller_keyed_time_allowlist = is_caller_keyed_time_allowlist
 _is_caller_keyed_membership_allowlist = is_caller_keyed_membership_allowlist
 
@@ -237,18 +202,11 @@ def _is_opaque_bool_return_predicate(leaf: LeafPredicate) -> bool:
 
 
 def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExpr:
-    # 0. unsupported is structural — check first (round-5 #3 fix).
     if leaf.get("kind") == "unsupported":
         return CapabilityExpr.unsupported(leaf.get("unsupported_reason") or "unsupported")
 
-    # 1. Non-authority leaves go to side-conditions — UNLESS the
-    # descriptor carries a caller-keyed value_predicate (PR D.1+).
-    # ``balances[msg.sender] < 10 revert`` is structurally a business
-    # threshold but operationally an authority gate over the set of
-    # callers whose latest mapping value satisfies the predicate.
-    # When the adapter chain has data (durable indexer / on-demand
-    # event replay / trace replay) we get a concrete finite_set;
-    # otherwise the fallback path produces conditional_universal.
+    # Non-authority leaves are side conditions, unless keyed on the caller by a value_predicate (``balances[msg.sender]
+    # < 10 revert``), which is an authority gate enumerable when the adapter has data.
     role = leaf.get("authority_role")
     if role in ("reentrancy", "pause", "business", "time", "one_shot"):
         if _is_opaque_bool_return_predicate(leaf):
@@ -266,27 +224,12 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
             descriptor = leaf.get("set_descriptor")
             if descriptor is not None:
                 cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
-                # Only return the enumerated capability when it has
-                # at least one concrete member. Anything else
-                # (``external_check_only``, ``unsupported``, empty
-                # ``finite_set`` regardless of quality) means "no
-                # useful data" — and a side-condition leaf's
-                # description is more informative than an empty
-                # principal list. Codex review #3 caught the
-                # ``finite_set([], exact)`` case where a genuinely-
-                # business predicate could silently lose its
-                # description; gating on ``cap.members`` fixes it.
+                # Only a populated finite_set beats the side-condition description; an empty one would lose it.
                 if cap.kind == "finite_set" and cap.members:
                     return cap
         if earned_public_enabled():
-            # The caller-taint default: a gate that discriminates on the caller's
-            # identity and matches no known permissionless shape is an
-            # authorization whose principals we couldn't enumerate — fail CLOSED
-            # (gated, principals unknown), never ``conditional_universal``/public.
-            # Permissionless shapes (denylist/claim-once polarity, quantity
-            # thresholds, self-service equality, effectful value-movement calls)
-            # deliberately fall through to open. Subsumes the legacy E3/E4 arms
-            # below.
+            # Caller-taint default: a gate discriminating on caller identity with no known permissionless shape fails
+            # closed. Permissionless shapes fall through to open.
             if leaf_is_caller_tainted(leaf) and not is_permissionless_caller_shape(leaf):
                 return CapabilityExpr.external_check_only(
                     ExternalCheck(
@@ -299,10 +242,7 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                     )
                 )
         elif _is_caller_keyed_time_allowlist(leaf):
-            # A deny-by-default caller-keyed time allowlist authorizes a caller SET (only
-            # the pre-approved, until expiry) — keep it a gated query-only check, never
-            # ``conditional_universal``/public. The share-lock and balance/allowance
-            # conditions deliberately fall through to open (see the helper).
+            # A deny-by-default caller-keyed time allowlist is gated, never public.
             return CapabilityExpr.external_check_only(
                 ExternalCheck(
                     target_address=None,
@@ -314,11 +254,8 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                 )
             )
         elif _is_caller_keyed_membership_allowlist(leaf):
-            # ``require(allowed[msg.sender])`` — a positive caller allowlist. Only
-            # recorded addresses pass, so it's a gated external check, never the
-            # ``conditional_universal``/public a side-condition would emit. The
-            # denylist/claim-once (``falsy``) sibling deliberately falls through to
-            # open below. Mirrors the time-allowlist arm above.
+            # ``require(allowed[msg.sender])`` is a positive allowlist: gated. The falsy denylist sibling falls through
+            # to open.
             return CapabilityExpr.external_check_only(
                 ExternalCheck(
                     target_address=None,
@@ -330,12 +267,8 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                 )
             )
         if leaf_is_caller_tainted(leaf) and is_caller_keyed_time_denylist(leaf):
-            # Deny-by-exception: a caller-keyed time denylist proceeds for the
-            # unset/expired caller, so it is public modulo a finite, time-bounded
-            # exclusion — a cofinite, not a bare open. Emitting it as a
-            # root-subject cofinite is what lets the refine-only inline guard's
-            # counterfactual distinguish it from a laundered allowlist and spare
-            # it (leave it public) instead of gating it.
+            # A caller-keyed time denylist is public minus a time-bounded exclusion: a root cofinite, which the inline
+            # guard's counterfactual spares.
             return CapabilityExpr.cofinite_blacklist(
                 [],
                 blacklist_quality="lower_bound",
@@ -345,7 +278,6 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
         cond = _condition_from_leaf(leaf)
         return CapabilityExpr.conditional_universal(cond)
 
-    # 2. caller_authority / delegated_authority — dispatch on kind.
     kind = leaf.get("kind")
     operator = leaf.get("operator")
 
@@ -358,26 +290,17 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
             cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
         cap = _tag_caller_subject(cap, ctx)
         if operator == "falsy":
-            # A falsy membership leaf is an exclusion gate (``if (set[caller]) revert``).
-            # When the set can't be enumerated, normalize that decline to an external
-            # check so the negate below reaches its cofinite arm and the denylist
-            # resolves to "anyone except an un-enumerated exclusion", rather than being
-            # discarded as ``negate_of_no_adapter``. See the helper.
+            # Normalize an un-enumerable falsy membership decline so negate reaches its cofinite arm instead of
+            # ``negate_of_no_adapter``.
             cap = _normalize_membership_decline_for_negation(cap, leaf, descriptor, ctx)
             cap = negate(cap)
         return cap
 
     if kind == "equality":
         if operator in ("eq", "ne"):
-            # Tag equality the same way membership/external_bool are, so the subject
-            # propagates through an inlined callee's predicate tree. A Solmate function
-            # is OR[canCall(...), msg.sender == owner]; inside an inlined frame the
-            # owner-equality goes through _resolve_contextual_equality (msg.sender is
-            # frame-rewritten, so it has no caller operand). Without a bound tag here,
-            # the OR can't collapse to a single bound capability — the OR container
-            # defaults to root, the cross-subject intersect never fires, and the inner
-            # (intermediate-dimension) members leak to the surface as a competing
-            # principal shape, re-dropping the real callers via and_multiple_principal_shapes.
+            # Tag the subject so an inlined callee's owner-equality (no caller operand after frame rewrite) collapses
+            # with its OR sibling into one bound capability; otherwise the intermediate members leak as a competing
+            # principal shape.
             if not _leaf_has_caller_operand(leaf):
                 return _tag_caller_subject(_resolve_contextual_equality(leaf, ctx, operator), ctx)
             base = _tag_caller_subject(_resolve_equality_principal(leaf, ctx), ctx)
@@ -392,22 +315,11 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
             and leaf_is_caller_tainted(leaf)
             and is_permissionless_caller_shape(leaf)
         ):
-            # Value movement: an effectful EXTERNAL call required to
-            # succeed — ``require(token.transfer(msg.sender, …))`` — moves
-            # the caller's own assets; any caller moves their own. The
-            # static classifier stamps these leaves ``business`` (see
-            # ``external_bool_leaf_is_gate_shape``: real external ACLs are
-            # view/pure), so they normally resolve as side conditions above;
-            # this arm is the resolution plane's own guard for any
-            # delegated_authority-tagged leaf that still arrives with the
-            # value-movement shape. Effectful LIBRARY calls (own-storage
-            # membership consume) and void merkle-witness verifications keep
-            # the gated path — see is_permissionless_caller_shape; they fall
-            # through to the external_set descriptor/adapter resolution below.
+            # Value movement: a required effectful external call moving the caller's own assets is open. Usually
+            # classified ``business`` upstream; this guards delegated-tagged leaves that still arrive. Library calls and
+            # void merkle verifications stay gated.
             if _is_permit_family_signature(leaf.get("callee_signature")):
-                # The void EIP-2612/3009 statement call: still an open
-                # self-auth path, but typed as a permit so the badge can say
-                # "open via signature" instead of a bare self-service open.
+                # Typed as a permit so the badge says "open via signature".
                 return CapabilityExpr.conditional_universal(
                     Condition(
                         kind="permit_sig",
@@ -423,44 +335,26 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
         descriptor = leaf.get("set_descriptor")
         if descriptor is not None:
             if descriptor.get("kind") == "external_set":
-                # Prefer a confirmed standard-aware adapter (e.g. the Solmate
-                # RolesAuthority adapter resolves canCall from indexed role events:
-                # a *public* capability => anyone, else the exact role-holder set)
-                # over the generic cross-contract inline + probe-materializer. The
-                # materializer mis-renders a public capability as an enumerated list
-                # and can admit phantom event-word candidates as principals — so
-                # consulting it before the standard-aware adapter produced false
-                # callers for every Veda Teller. Only when the adapter declines do we
-                # inline the cross-contract call, then fall back to a bare external
-                # check. The adapter's own confidence gating means a decline
-                # (external_check_only / unsupported / non-exact-empty) is exactly
-                # "no standard-aware answer", so this never special-cases by name.
+                # Prefer a standard-aware adapter (e.g. Solmate RolesAuthority from role events) before inlining: the
+                # generic materializer renders public capabilities as lists and admitted phantom callers for every Veda
+                # Teller. A decline falls through to inlining, then a bare external check.
                 cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
                 if _adapter_declined_external_set(cap):
                     if _adapter_deferred_pending_index(cap):
-                        # Cold durable index: keep the adapter's tagged deferral so
-                        # ``deferred_reconciler`` re-resolves this function *exactly* once
-                        # the authority's events backfill. Falling through to the inline
-                        # probe / event-candidate materializer would drop the
-                        # ``deferred_pending_index`` marker and freeze a cold result
-                        # (a lower_bound live probe, or a bare external check that masks a
-                        # role-less owner-renounced gate) that never self-heals — the Veda
-                        # RolesAuthority cold-start race.
+                        # Keep the cold-index deferral so ``deferred_reconciler`` can re-resolve; the inline probe would
+                        # drop the marker and freeze a cold result.
                         cap = _tag_caller_subject(cap, ctx)
                     else:
                         inlined = _maybe_inline_cross_contract_call(leaf, descriptor, ctx)
                         if inlined is not None:
-                            # The inline result carries its own subject — ``bound`` when the
-                            # inlined downstream call's auth keyed on the frame-bound
-                            # intermediate caller (so it stays a side-condition, not a caller
-                            # set). Do NOT re-tag against the (root) outer frame.
+                            # The inline result carries its own subject; don't re-tag.
                             cap = inlined
                         else:
                             cap = _tag_caller_subject(_external_check_from_descriptor(leaf, descriptor, ctx), ctx)
                 else:
                     cap = _tag_caller_subject(cap, ctx)
             else:
-                # Non-external_set: no standard adapter to prefer, keep inline-first.
+                # No standard adapter here, so inline first.
                 inlined = _maybe_inline_cross_contract_call(leaf, descriptor, ctx)
                 if inlined is not None:
                     cap = inlined
@@ -469,10 +363,7 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
                     if cap.kind == "unsupported" and cap.unsupported_reason == "no_adapter":
                         cap = _external_check_from_descriptor(leaf, descriptor, ctx)
                     cap = _tag_caller_subject(cap, ctx)
-            # An unresolved check that IS a caller gate (requiresAuth/ACL
-            # declines) gets the caller-gate basis tag here, where the leaf
-            # is known — the projection blocker keys on it. Inlined results
-            # and enumerations pass through untouched (kind guard).
+            # Tag unresolved caller-gate checks where the leaf is known; the projection blocker keys on the tag.
             cap = _stamp_caller_gate_check(cap, leaf)
             if operator == "falsy":
                 cap = negate(cap)
@@ -484,26 +375,18 @@ def _evaluate_leaf(leaf: LeafPredicate, ctx: EvaluationContext) -> CapabilityExp
         return CapabilityExpr.signature_witness(signer)
 
     if kind == "comparison":
-        # A comparison leaf only reaches here with role caller_authority /
-        # delegated_authority — i.e. the writer-gate already judged the
-        # caller-keyed mapping admin-curated (the value can't be self-
-        # acquired). So this is an authority threshold, NOT a self-service
-        # quantity gate (which stays role=business and opens to public in the
-        # side-condition block above). ``is_permissionless_caller_shape`` is
-        # shape-only and role-blind — consulting it here would re-open a
-        # promoted authority to public, the caller-keyed-threshold fail-open.
+        # A comparison leaf here was already judged admin-curated upstream, so it's an authority threshold.
+        # ``is_permissionless_caller_shape`` is role-blind and would reopen it.
         if earned_public_enabled() and leaf_is_caller_tainted(leaf):
             descriptor = leaf.get("set_descriptor")
             if descriptor is not None and _has_caller_keyed_value_predicate(leaf):
                 cap = ctx.adapter.enumerate(descriptor, ctx.contract_address)
-                # Honor an authoritative enumeration — populated (restricted
-                # holders) OR an authoritative empty (provably nobody now).
+                # Populated or authoritative-empty enumerations stand.
                 if cap.kind == "finite_set" and (
                     cap.members or cap.membership_quality == "exact" or cap.empty_reason == "empty_by_design"
                 ):
                     return _tag_caller_subject(cap, ctx)
-            # No authoritative answer (cold / unsupported / non-exact empty):
-            # fail CLOSED — gated, principals unknown — never public.
+            # No authoritative answer: fail closed.
             return CapabilityExpr.external_check_only(
                 ExternalCheck(
                     target_address=None,
@@ -576,30 +459,12 @@ def _maybe_inline_cross_contract_call(
     descriptor: SetDescriptor,
     ctx: EvaluationContext,
 ) -> CapabilityExpr | None:
-    """Try to resolve a delegated external-check leaf by
-    evaluating the registry contract's predicate trees under the
+    """Resolve a delegated external-check leaf by evaluating the registry contract's predicate trees under the
     caller's context.
 
-    The leaf must carry:
-      * ``set_descriptor.authority_contract.address_source`` — pointing
-        at the state-variable that holds the registry address.
-      * ``set_descriptor.callee_signature`` or ``callee_selector`` — the
-        exact registry function to inline.
-
-    Returns:
-      * a ``CapabilityExpr`` from re-evaluating B's tree under A's
-        sender, OR
-      * ``None`` if any precondition isn't met (no session, no
-        state-var resolution, no Job for the registry, no
-        predicate_trees artifact, no matching function tree, or the
-        recursion guard fires) — caller falls through to the existing
-        adapter path.
-
-    The resolver carries an ``evaluation_stack`` set on the context to
-    short-circuit cycles: ``(chain_id, address.lower(), function_signature)``
-    is added before recursing and removed after. A repeat hit (e.g.
-    A→B→A or B→B) returns ``CapabilityExpr.external_check_only`` so
-    the leaf still surfaces as 'gated' even if we can't resolve.
+    Needs ``set_descriptor.authority_contract.address_source`` and ``callee_signature`` or ``callee_selector``. Returns
+    the re-evaluated capability, or ``None`` if a precondition fails so the caller falls back to adapters. Cycles are
+    caught via ``evaluation_stack`` keyed on ``(chain_id, address, signature)`` and return ``external_check_only``.
     """
     callee_signature = descriptor.get("callee_signature")
     callee_selector = descriptor.get("callee_selector")
@@ -612,8 +477,7 @@ def _maybe_inline_cross_contract_call(
     if callee_selector is None and callee_signature is not None:
         callee_selector = _selector_for_signature(callee_signature)
 
-    # session lives on the OUTER (adapters) context — pulled by the
-    # registry-backed adapter wrapper. Fall back to None gracefully.
+    # The session lives on the outer (adapters) context.
     outer_ctx = getattr(getattr(ctx, "adapter", None), "_outer_ctx", None)
     if outer_ctx is None:
         return None
@@ -636,15 +500,12 @@ def _maybe_inline_cross_contract_call(
 
     chain_id = getattr(outer_ctx, "chain_id", None)
     if not isinstance(chain_id, int):
-        # ctx.chain_id is required; a chainless inline can't key its
-        # recursion stack or resolve the callee on a chain.
+        # Chainless inlining can't key the stack or resolve the callee.
         return None
     stack = outer_ctx.evaluation_stack if hasattr(outer_ctx, "evaluation_stack") else set()
     callee_identity = callee_signature or callee_selector or ""
     key = (chain_id, registry_addr, callee_identity)
     if key in stack:
-        # Cycle: B's resolution depends on its own gate, or we've already
-        # walked through this address+function in this evaluation tree.
         return CapabilityExpr.external_check_only(
             ExternalCheck(
                 target_address=registry_addr,
@@ -653,8 +514,7 @@ def _maybe_inline_cross_contract_call(
             )
         )
 
-    # Look up the registry's semantic artifacts. If the registry address is
-    # a proxy, predicate_trees live on its implementation child job.
+    # A proxy registry's predicate_trees live on its implementation job.
     from db.queue import get_artifact
     from services.resolution.capability_resolver import find_analysis_job_for_address
 
@@ -731,11 +591,7 @@ def _maybe_inline_cross_contract_call(
         call_args,
     )
 
-    # Build a child evaluation context targeting the registry.
-    # Parameter arguments are already bound above. Direct Solidity
-    # globals inside the callee get the child frame: msg.sender is
-    # the calling contract, address(this) is the registry, and
-    # msg.sig is the callee selector.
+    # Child frame: msg.sender is the caller contract, address(this) the registry, msg.sig the callee selector.
     from services.resolution.capability_resolver import _load_state_var_values
 
     state_var_values = _load_state_var_values(
@@ -777,8 +633,6 @@ def _maybe_inline_cross_contract_call(
         meta=dict(outer_ctx.meta),
     )
 
-    # Same registry-backed adapter pattern as evaluate_tree_with_registry,
-    # just keyed on the child outer ctx.
     from services.resolution.adapters import AdapterRegistry as _Reg
 
     registry_adapters = (
@@ -799,14 +653,8 @@ def _maybe_inline_cross_contract_call(
         )
         if materialized is not None:
             return materialized
-        # Fall through to the caller's adapter dispatch instead of dead-ending.
-        # When the inlined delegated check can't be materialized (e.g. canCall's
-        # role-mapping join the generic materializer can't express), the caller's
-        # external_set path can still try a named adapter — SolmateRolesAuthorityAdapter
-        # folds canCall from indexed role events. The old dead-end (an
-        # external_check_only with basis=["delegated_check_not_materialized"])
-        # returned non-None and pre-empted that adapter for every Solmate-protected
-        # contract analyzed alongside its RolesAuthority, so the adapter never ran.
+        # Fall through so a named adapter (e.g. Solmate canCall from role events) can still run; the old dead-end
+        # pre-empted it for every Solmate contract.
         return None
     if (
         leaf.get("operator") == "truthy"
@@ -814,11 +662,8 @@ def _maybe_inline_cross_contract_call(
         and not is_permissionless_caller_shape(leaf)
         and _public_without_root_cofinites(resolved)
     ):
-        # Refine-only invariant: un-inlined, this caller-tainted delegated gate
-        # fails closed; an inline result that projects public would un-gate it,
-        # so keep the outer delegated check. A public verdict that survives
-        # removing root-subject cofinites is a laundered allowlist, not a
-        # legitimate deny-by-exception denylist — only the former fires here.
+        # Refine-only: an inline result that projects public would un-gate a caller-tainted delegated gate, so keep the
+        # outer check. Legitimate deny-by-exception (root cofinites) is exempt.
         cap = _external_check_from_descriptor(leaf, descriptor, ctx)
         if cap.check is not None:
             extra = dict(cap.check.extra or {})

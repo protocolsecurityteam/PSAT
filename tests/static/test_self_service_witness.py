@@ -1,23 +1,14 @@
-"""The self-service payout join — ``_facts.amount_record_constraint`` (W1) and
-``_facts.self_service_payout`` (W1 ∧ W2), plus the ``_flow_entry`` attachment.
+"""The self-service payout join: ``_facts.amount_record_constraint`` (W1),
+``_facts.self_service_payout`` (W1 ∧ W2), and the ``_flow_entry`` attachment.
 
-Two harnesses, both driving production code:
+* **Unit** - hand-built :class:`ClaimContext`, stating every refusal reason and cross-plane
+  reconciliation case against exact input, including ones no corpus contract reaches.
+* **Producer integration** - an inline ``Slither`` contract through ``build_effects`` +
+  ``build_predicate_tree`` + ``build_claims``, proving the join's two walks actually meet on
+  the REAL producers (U1-U4); a unit test supplies both halves itself and cannot.
 
-* **Unit** — a hand-built :class:`ClaimContext` over synthetic predicate trees
-  and flows. This is where every refusal reason and every cross-plane
-  reconciliation case is stated against an exact input, including the ones no
-  corpus contract reaches (``record_mismatch``, ``key_index_disagreement``,
-  param-without-index, the lossy-key asymmetry, the two-declaration plural).
-* **Producer integration** — an inline ``Slither`` contract run through
-  ``build_effects`` + ``build_predicate_tree`` + ``build_claims``, so the join
-  is fed by the REAL amount-record producer (U2), predicate-tree operand
-  widening (U1), ordering prover (U3), and verified-guard arm (U4). This is what
-  proves the two walks actually meet — a unit test alone cannot, because it
-  supplies both halves itself.
-
-Every conjunct has one fixture removing exactly it and asserting
-``not_determined``, paired with a positive sibling differing in one construct;
-assertions are on the whole verdict dict, never ``is not None``.
+Every conjunct has a fixture removing exactly it (asserting ``not_determined``)
+and a positive sibling; assertions are on the whole verdict dict, never ``is not None``.
 """
 
 from __future__ import annotations
@@ -134,7 +125,6 @@ def _ctx(tree: Any, flow: dict) -> ClaimContext:
 
 
 def test_keyed_by_caller_is_constrained_without_a_guard():
-    """A msg_sender key level proves the cell is the caller's; no guard leaf."""
     flow = _flow(
         amount_record_variable="C.balances",
         amount_record_key_kinds=["msg_sender"],
@@ -145,8 +135,7 @@ def test_keyed_by_caller_is_constrained_without_a_guard():
 
 
 def test_keyed_by_caller_survives_a_second_caller_chosen_level():
-    """``withdrawRequests[msg.sender][asset]`` — the outer key is the caller's, so
-    the whole subtree is theirs even though the caller picks ``asset``."""
+    """``withdrawRequests[msg.sender][asset]``: the outer key is the caller's, so the whole subtree is theirs."""
     flow = _flow(
         amount_record_variable="C.withdrawRequests",
         amount_record_key_kinds=["msg_sender", "param"],
@@ -168,9 +157,8 @@ def test_owner_guarded_record_joins_guard_and_amount_on_the_same_cell():
 
 
 def test_owner_guarded_record_compares_canonical_names_across_inheritance():
-    """Both walks name the base off ``StateVariable.canonical_name`` (the
-    declaring contract), so an inherited ``Base.pool`` joins to itself — the
-    highest-probability silent-zero, asserted to JOIN, not vanish."""
+    """Both walks name the base off ``canonical_name``, so an inherited ``Base.pool`` joins to
+    itself (the likeliest silent-zero): asserted to JOIN, not vanish."""
     flow = _flow(
         amount_record_variable="Base.pool",
         amount_record_member_path=["amount"],
@@ -182,7 +170,6 @@ def test_owner_guarded_record_compares_canonical_names_across_inheritance():
 
 
 def test_wrong_record_refuses_record_mismatch():
-    """A8: the guard proves ownership of a DIFFERENT record than the amount reads."""
     flow = _flow(
         amount_record_variable="C.amounts", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[0]
     )
@@ -191,7 +178,6 @@ def test_wrong_record_refuses_record_mismatch():
 
 
 def test_wrong_key_refuses_key_index_disagreement():
-    """A9: same record, but the guard keys on a different entry slot than the pay."""
     flow = _flow(
         amount_record_variable="C.bids", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[1]
     )
@@ -200,7 +186,6 @@ def test_wrong_key_refuses_key_index_disagreement():
 
 
 def test_non_mandatory_guard_refuses_guard_not_mandatory():
-    """A10: the ownership check sits under an OR escape, so it is not mandatory."""
     flow = _flow(
         amount_record_variable="C.bids", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[0]
     )
@@ -209,19 +194,16 @@ def test_non_mandatory_guard_refuses_guard_not_mandatory():
 
 
 def test_param_kind_without_index_refuses_never_kind_alone():
-    """The amount side folds ``key_kinds`` and ``key_param_indexes`` separately,
-    so ``param`` can survive a disagreement that strips the index. The join
-    requires the index PRESENT and equal — never ``kind == param`` alone."""
+    """The amount side folds ``key_kinds`` and ``key_param_indexes`` separately; the join requires
+    the index PRESENT and equal, never ``kind == param`` alone."""
     flow = _flow(amount_record_variable="C.bids", amount_record_key_kinds=["param"])  # no key_param_indexes
     verdict = _facts.amount_record_constraint(_ctx(_ownership_tree("C.bids", 0), flow), _SIG, flow)
     assert verdict == {"state": "not_determined", "reason": "key_index_disagreement"}
 
 
 def test_lossy_key_asymmetry_refuses_on_the_amount_sides_indeterminate():
-    """The guard side does not apply the amount side's lossy-narrowing check, so a
-    guard on ``bids[uint128(id)]`` could stamp slot 0 while the amount side reads
-    the key as indeterminate. The join refuses on that asymmetry rather than
-    trusting the guard's slot — the amount side's ``None`` blocks the proof."""
+    """The guard side lacks the amount side's lossy-narrowing check (``bids[uint128(id)]`` could
+    stamp slot 0 while the amount key is indeterminate); the join refuses on that asymmetry."""
     flow = _flow(
         amount_record_variable="C.bids",
         amount_record_key_kinds=["indeterminate"],
@@ -232,8 +214,6 @@ def test_lossy_key_asymmetry_refuses_on_the_amount_sides_indeterminate():
 
 
 def test_two_declarations_refuses_multiple_record_declarations():
-    """A17: two contracts in the call graph each declare ``bids``, so the amount
-    producer published the honest plural and no scalar."""
     flow = _flow(amount_record_variables=["Base.bids", "Impl.bids"])
     verdict = _facts.amount_record_constraint(_ctx(None, flow), _SIG, flow)
     assert verdict == {"state": "not_determined", "reason": "multiple_record_declarations"}
@@ -248,7 +228,6 @@ def test_no_record_named_refuses_amount_root_not_classifiable():
 
 
 def test_missing_tree_refuses_rather_than_reading_absence_as_no_guard():
-    """No predicate tree is not proof of no guard; a non-keyed record refuses."""
     flow = _flow(
         amount_record_variable="C.bids", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[0]
     )
@@ -257,9 +236,8 @@ def test_missing_tree_refuses_rather_than_reading_absence_as_no_guard():
 
 
 def test_guard_without_msg_sender_operand_does_not_satisfy_w1():
-    """Paired falsifier for conjunct 3: the same shape with the msg_sender operand
-    removed proves nothing — an element read compared to a constant is no
-    ownership proof."""
+    """Paired falsifier for conjunct 3: without the msg_sender operand an element read compared to a
+    constant proves nothing."""
     leaf = _leaf(operands=[_element_op("C.bids", ["bidder"], 0), {"source": "constant"}])
     flow = _flow(
         amount_record_variable="C.bids", amount_record_key_kinds=["param"], amount_record_key_param_indexes=[0]
@@ -307,8 +285,6 @@ def test_proven_owner_guarded_with_ordering():
 
 
 def test_loop_ordering_carries_the_cross_iteration_disclosure():
-    """P2: a per-iteration ordering proof rides ``cross_iteration_ordering_not_proven``
-    beside the two universal disclosures."""
     flow = _flow(
         amount_record_variable="C.balances",
         amount_record_key_kinds=["msg_sender"],
@@ -331,8 +307,6 @@ def test_w1_refusal_propagates_as_the_self_service_reason():
 
 
 def test_ordering_refusal_wins_when_w1_holds():
-    """A1 shape: W1 proven, ordering refuses — the ordering reason (WHY the code
-    order is unsafe) is the self-service refusal reason."""
     flow = _flow(
         amount_record_variable="C.balances",
         amount_record_key_kinds=["msg_sender"],
@@ -489,7 +463,6 @@ def _self_service(contract: Any, sig: str) -> dict:
 
 
 def test_producer_cancel_bid_proves_owner_guarded_and_ordering(_corpus):
-    """P1 — the whole join, fed by all four producers, on a real contract."""
     verdict = _self_service(_corpus, "cancelBid(uint256)")
     assert verdict == {
         "state": "proven_self_service",
@@ -512,10 +485,8 @@ def test_producer_withdraw_proves_keyed_by_caller_on_ordering(_corpus):
 
 
 def test_producer_verified_guard_and_ordering_are_both_earned(_corpus):
-    """P3 — a guarded, clear-after-pay row proves via the verified guard; the
-    ordering-only sibling with no guard proves via ordering. Both W2 bases are
-    reachable, and the guard being unnecessary on ``withdraw`` is what shows the
-    ordering arm survives a guard's removal."""
+    """P3 - a guarded clear-after-pay row proves via the verified guard; the ordering-only
+    sibling proves via ordering. ``withdraw`` needing no guard shows the ordering arm survives its removal."""
     guarded = _self_service(_corpus, "withdrawGuarded()")
     assert guarded["state"] == "proven_self_service"
     assert guarded["w2_basis"] == "verified_guard"
@@ -523,7 +494,6 @@ def test_producer_verified_guard_and_ordering_are_both_earned(_corpus):
 
 
 def test_producer_dao_shape_refuses(_corpus):
-    """A1 — pay then clear; the clearing write does not dominate the call."""
     assert _self_service(_corpus, "badWithdraw()") == {
         "state": "not_determined",
         "reason": "clearing_write_does_not_dominate_calls",
@@ -531,9 +501,8 @@ def test_producer_dao_shape_refuses(_corpus):
 
 
 def test_producer_contract_scoped_guard_licenses_no_unguarded_function(_corpus):
-    """A12 — a real guard exists on the contract but ``badWithdraw`` does not
-    apply it, and its ordering refuses, so the row is NOT cleared. The verified
-    guard arm publishes ``guard_modifier_not_applied`` for it."""
+    """A12 - a real guard exists but ``badWithdraw`` does not apply it and its ordering refuses,
+    so the row is NOT cleared (``guard_modifier_not_applied``)."""
     verdict = _self_service(_corpus, "badWithdraw()")
     assert verdict["state"] == "not_determined"
     guard = verified_guard_verdicts(_corpus)["badWithdraw()"]
@@ -542,17 +511,14 @@ def test_producer_contract_scoped_guard_licenses_no_unguarded_function(_corpus):
 
 
 def test_producer_admin_sweep_param_leaves_the_key_absent(_corpus):
-    """A5 — a param-amount sweep names no record, so the gate never fires and the
-    key stays absent (fail-closed). The discrimination pair with ``cancelBid``:
-    the caller-owned shape proves, the sweep does not exist as a self-service
-    question at all."""
+    """A5 - a param-amount sweep names no record, so the gate never fires and the key stays
+    absent (fail-closed); the discrimination pair with ``cancelBid``."""
     entries = _flow_out_entries(_corpus, "rescueTokens(address,uint256)")
     assert entries
     assert all("self_service_payout" not in e for e in entries)
 
 
 def test_producer_whole_balance_sweep_leaves_the_key_absent(_corpus):
-    """A7 — the amount folds indeterminate, so no record and no key."""
     entries = _flow_out_entries(_corpus, "sweepAll(address)")
     assert entries
     assert all("self_service_payout" not in e for e in entries)
@@ -598,18 +564,14 @@ def _burn(tmp_path_factory):
 
 
 def test_burn_same_value_proves_as_keyed_by_caller(_burn):
-    """P4 (as the shipped producers realize it): a burn whose paid amount is read
-    from the caller's own cell is keyed_by_caller — the distinct
-    ``burn_of_caller_shares`` variant needs a decrement/SSA fact no producer
-    publishes, so the only provable burn is this one."""
+    """P4 (as shipped producers realize it): a burn paid from the caller's own cell is
+    keyed_by_caller; ``burn_of_caller_shares`` needs a decrement/SSA fact no producer publishes."""
     verdict = _self_service(_burn, "redeemSame()")
     assert verdict["state"] == "proven_self_service"
     assert verdict["w1_basis"] == "keyed_by_caller"
 
 
 def test_burn_then_oracle_pay_stays_fail_closed_absent(_burn):
-    """A16 — the oracle-converted payout is param_derived, so the self-service
-    key never attaches and the row is never cleared."""
     entries = _flow_out_entries(_burn, "redeemOracle(uint256)")
     assert entries
     assert all("self_service_payout" not in e for e in entries)

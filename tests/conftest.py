@@ -7,7 +7,6 @@ import sys
 import threading
 import urllib.error
 import urllib.request
-import uuid
 from collections import defaultdict
 from ipaddress import ip_address
 from pathlib import Path
@@ -42,6 +41,9 @@ _STORAGE_ENV_KEYS = (
 from db.models import (  # noqa: E402
     AuditContractCoverage,
     BalanceCollectionState,
+    CompanyPagePurge,
+    CompanyPageRevision,
+    CompanyPageSnapshot,
     Contract,
     ContractBalance,
     ContractBalanceFetch,
@@ -703,7 +705,6 @@ def db_session():
             # live 120s TTL under a per-process holder). Clear them so warm-DB
             # reruns don't couple lease state across unrelated passes.
             DaemonLease,
-            IndexerWork,
             # Balance readings have TWO identity arms, and only one of them is
             # a ``contracts`` FK. An ENTITY-keyed row — a discovery-only
             # principal, ``contract_id`` NULL, named by ``(entity_chain,
@@ -725,52 +726,14 @@ def db_session():
             # not-due, so both arms are swept together.
             RoleHolderPlane,
             RoleHolderPlaneRefresh,
+            # Revision/outbox records intentionally survive source deletion.
+            # Clear after every source-table teardown trigger has fired.
+            IndexerWork,
+            CompanyPageSnapshot,
+            CompanyPagePurge,
+            CompanyPageRevision,
         ]:
             session.query(model).delete()
         session.commit()
         session.close()
         engine.dispose()
-
-
-def _add_proxy(
-    session: Session,
-    address: str,
-    chain: str = "ethereum",
-    label: str | None = None,
-    last_known_impl: str | None = None,
-    last_scanned_block: int = 0,
-    needs_polling: bool = False,
-    proxy_type: str | None = None,
-) -> WatchedProxy:
-    """Insert a WatchedProxy row and return it."""
-    proxy = WatchedProxy(
-        id=uuid.uuid4(),
-        proxy_address=address,
-        chain=chain,
-        label=label,
-        proxy_type=proxy_type,
-        last_known_implementation=last_known_impl,
-        last_scanned_block=last_scanned_block,
-        needs_polling=needs_polling,
-    )
-    session.add(proxy)
-    session.commit()
-    return proxy
-
-
-def _add_subscription(
-    session: Session,
-    proxy: WatchedProxy,
-    discord_url: str,
-    label: str | None = None,
-) -> ProxySubscription:
-    """Insert a ProxySubscription row and return it."""
-    sub = ProxySubscription(
-        id=uuid.uuid4(),
-        watched_proxy_id=proxy.id,
-        discord_webhook_url=discord_url,
-        label=label,
-    )
-    session.add(sub)
-    session.commit()
-    return sub

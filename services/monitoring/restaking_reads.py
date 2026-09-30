@@ -1,45 +1,21 @@
 """Per-node EigenLayer restaking position: the pinned reads and the record.
 
-This plane publishes ONE quantity — a node's EigenLayer beaconChainETH
-withdrawable shares — and it publishes it only where three independent reads
-license it. Everything else about the node's money is ``not_determined`` here.
+Publishes one quantity, a node's EigenLayer beaconChainETH withdrawable shares, and only
+where three independent reads license it; everything else is ``not_determined``. It is not
+"what the node holds": measured nodes read 0 shares while their pods held 374 ETH.
 
-**What a published zero means, and what it does not.** Measured over the 26
-enumerated nodes at block 25643300: every one has an EigenPod, and every one
-reads 0 shares — while those 26 pods hold **374.148164612 ETH** between them at
-that same block, one of them (``0x7474b357106e509918cd1db47c40a7d0d775d4c7``)
-holding **exactly 320 ETH**. Summing ``eigenlayer_beacon_shares_wei`` over the
-whole enumerated set therefore yields 0 wei against 374+ ETH of pod balances.
-The column is named for its scope for that reason: it is not "what this node
-holds", it is the EigenLayer beaconChainETH withdrawable-share accounting, and
-the execution-layer native balances of the node and its pod are
-``not_determined`` on this plane.
+Every decode is strict because the wire lies in measured ways:
 
-**Why every decode here is strict.** Measured at the same block:
+* ``eth_call`` to a codeless address (and EtherFiNode for unknown selectors) returns ``"0x"``
+  with success. Empty is not zero.
+* ``getWithdrawableShares`` answers 0 for a nonexistent staker or a wrong strategy, so the
+  strategy is read from ``beaconChainETHStrategy()`` at the same block, never a literal
+  (``0xbeac0eee...eeee`` is a near-miss of the real ``...ebeac0``).
+* ``podOwnerDepositShares`` is ``int256``; unsigned decoding would publish ~1.15e77.
+* ``getPod`` returns a computed CREATE2 address for any input; ``ownerToPod`` and ``hasPod``
+  are the witnesses.
 
-* ``eth_call`` to a codeless address returns ``"0x"`` WITH success, and the
-  EtherFiNode itself returns ``"0x"`` for any unknown selector. An empty return
-  is not a zero, and a two-of-three reading of the identity legs would mint
-  "proven no eigenpod, 0 shares" for an address whose own state was never read.
-* ``DelegationManager.getWithdrawableShares`` returns ``[0]``/``[0]`` with
-  success for a NONEXISTENT staker and for a WRONG strategy, byte-identical to
-  the real 26/26 answer. The strategy is therefore witnessed from
-  ``EigenPodManager.beaconChainETHStrategy()`` at the same block rather than
-  written as a literal — the near-miss
-  ``0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee`` is eyeball-identical to the true
-  ``0xbeac0eeeeeeeeeeeeeeeeeeeeeeeeeeeeeebeac0`` and answers 0 just as happily.
-* ``EigenPodManager.podOwnerDepositShares`` is ``int256``, not ``uint256``
-  (verified on implementation ``0xd22dd829779adbf3869fb224f703452f7f95e9db``;
-  ``stakerDepositShares`` is the ``uint256`` one). Unsigned decoding of a
-  negative would publish ~1.15e77.
-* ``EigenPodManager.getPod`` returns a COMPUTED CREATE2 address for any input,
-  including ``0x…deadbeef``. It is never used here; ``ownerToPod`` and
-  ``hasPod`` are the mapping-backed witnesses.
-
-The constraints in the migration are a backstop. This module decides the basis
-FIRST and maps every shape that would violate one to NULL / ``not_determined``
-before a row is constructed, so a CHECK firing in production would be a bug
-here, not a guard doing its job.
+Migration CHECKs are a backstop; a CHECK firing in production means a bug here.
 """
 
 from __future__ import annotations
@@ -72,30 +48,23 @@ from utils.restaking_status import (
 
 logger = logging.getLogger(__name__)
 
-# Steps back from head before pinning, matching the balance plane's margin. The
-# reads are ISSUED at this number, which is what lets the height be published as
-# a witness of the read rather than an assumption about when a node answered.
+# Reads are issued at this height, so it is a witness of the read, not an assumption.
 PINNED_FINALITY_MARGIN = 12
 
-# A 32-byte word, hex-encoded with the ``0x`` prefix. ``"0x"`` — which
-# ``aggregate3`` reports with ``success=True`` for a sub-call that returned no
-# data, and which a codeless address returns for ANY selector — is not a word.
+# A 32-byte hex word. ``"0x"`` (empty success) is not a word.
 WORD_HEX_LEN = 66
 
 ZERO_ADDRESS = "0x" + "0" * 40
 
-# Two's-complement bounds for the signed ``int256`` leg.
 _INT256_MODULUS = 1 << 256
 _INT256_MAX = (1 << 255) - 1
 
-# Storage widths of the two pod-derived columns. A word above these is not a
-# smaller number; it is a fact this schema cannot hold, i.e. a non-observation.
+# Column widths; a larger word is a non-observation, not a smaller number.
 _INT32_MAX = (1 << 31) - 1
 _INT64_MAX = (1 << 63) - 1
 
 
 def _bounded(value: int | None, ceiling: int) -> int | None:
-    """``value`` if the column can hold it, else ``None``. Never clamped."""
     if value is None or value > ceiling:
         return None
     return value
@@ -103,13 +72,9 @@ def _bounded(value: int | None, ceiling: int) -> int | None:
 
 @dataclass(frozen=True)
 class NodeReads:
-    """Raw return data of the seven per-node reads, aligned to their selectors.
+    """Raw return data of the seven per-node reads.
 
-    ``None`` means the sub-call FAILED (reverted, ``success=False``, or the
-    transport raised). A string is whatever the node returned, ``"0x"``
-    included — the difference between those two is not meaningful here because
-    both land on the same non-observing states, but keeping the raw value lets
-    every decode be strict in one place.
+    ``None`` means the sub-call failed; ``"0x"`` is kept raw so decoding is strict in one place.
     """
 
     get_eigen_pod: str | None
@@ -122,13 +87,9 @@ class NodeReads:
 
 
 def _hex_word_value(body: str) -> int | None:
-    """64 hex NIBBLES as an unsigned int, or ``None``.
+    """64 hex nibbles as an unsigned int, or ``None``.
 
-    ``bytes.fromhex`` rather than ``int(body, 16)`` because Python's ``int``
-    accepts ``_`` separators and strips surrounding whitespace, so a 63-nibble
-    return with a trailing newline parses as a perfectly clean value. That is a
-    short return decoding to a number — precisely the shape the length check
-    above it exists to reject, arriving through the parser instead of past it.
+    ``bytes.fromhex``, because ``int(body, 16)`` accepts ``_`` and whitespace, letting a short return parse.
     """
     if len(body) != 64:
         return None
@@ -136,8 +97,7 @@ def _hex_word_value(body: str) -> int | None:
         data = bytes.fromhex(body)
     except ValueError:
         return None
-    # ``bytes.fromhex`` ignores ASCII whitespace too, so a 62-nibble body with
-    # two trailing spaces passes the length check above and decodes to 31 bytes.
+    # ``bytes.fromhex`` also skips whitespace, so re-check the decoded length.
     if len(data) != 32:
         return None
     return int.from_bytes(data, "big")
@@ -146,10 +106,7 @@ def _hex_word_value(body: str) -> int | None:
 def decode_word(raw: object) -> int | None:
     """A full 32-byte word as an unsigned int, or ``None``.
 
-    ``None`` for a failed call, a short return, ``"0x"``, or anything that is not
-    64 hex digits. There is deliberately no lenient path: ``int("0x0", 16)`` is 0,
-    so a decoder that tolerated short return data would mint a zero out of an
-    empty return.
+    No lenient path: ``int("0x0", 16)`` would mint a zero from an empty return.
     """
     if not isinstance(raw, str) or len(raw) != WORD_HEX_LEN or not raw.startswith("0x"):
         return None
@@ -157,13 +114,7 @@ def decode_word(raw: object) -> int | None:
 
 
 def decode_int256_word(raw: object) -> int | None:
-    """A full 32-byte word as a SIGNED int, or ``None``.
-
-    ``podOwnerDepositShares`` is ``int256`` and a pod owner's deposit shares can
-    genuinely go negative. The value is stored with its sign and never clamped:
-    clamping to zero would be a default standing in for a witness, and unsigned
-    decoding would publish a number ~1.15e77 times too large.
-    """
+    """A full 32-byte word as a signed int, or ``None``. Deposit shares can go negative; never clamped."""
     value = decode_word(raw)
     if value is None:
         return None
@@ -171,19 +122,10 @@ def decode_int256_word(raw: object) -> int | None:
 
 
 def decode_address_word(raw: object) -> str | None:
-    """A full 32-byte word as a lower-case address, or ``None``.
+    """A full word as a lower-case address, or ``None``.
 
-    Returns the zero address as a VALUE (it is a real answer from a mapping),
-    and ``None`` only where no word was returned at all. Callers must keep those
-    apart: the zero address is half of the proven-absent arm, an absent word is
-    ``not_determined``.
-
-    **The high-order 12 bytes must be zero.** Truncating them instead would read
-    a non-canonical word as a clean address, and this is wire-reachable: an
-    upgraded or non-conformant callee can return one. It is load-bearing twice —
-    the identity cross-read mints ``proven_pod_cross_read`` on two address legs
-    matching, and the witnessed strategy is both published and used to build the
-    shares calldata.
+    The zero address is a real value (half the proven-absent arm); ``None`` is no word. The high 12 bytes must be zero:
+    a non-canonical word must not read as an address, since the cross-read and the shares calldata both depend on it.
     """
     value = decode_word(raw)
     if value is None or value >> 160:
@@ -192,12 +134,10 @@ def decode_address_word(raw: object) -> str | None:
 
 
 def decode_strict_bool_word(raw: object) -> bool | None:
-    """A full 32-byte word that is EXACTLY 0 or EXACTLY 1.
+    """A word that is exactly 0 or 1, else ``None``.
 
-    Any other word is not a bool and yields ``None``. Deliberately NOT
-    ``services.clients.rpc.decode_bool_word``, which answers ``False`` for anything
-    unparseable: here "not a bool" must be distinguishable from "false", because
-    a false ``hasPod`` is one third of a proven-absent witness.
+    Unlike ``rpc.decode_bool_word``, "not a bool" must differ from false: a false ``hasPod`` is a third of the absent
+    witness.
     """
     value = decode_word(raw)
     if value is None or value not in (0, 1):
@@ -206,14 +146,9 @@ def decode_strict_bool_word(raw: object) -> bool | None:
 
 
 def decode_withdrawable_shares(raw: object) -> tuple[int | None, int | None]:
-    """``(withdrawable, deposited)`` from ``getWithdrawableShares``, or ``(None, None)``.
+    """``(withdrawable, deposited)`` for the one queried strategy, or ``(None, None)``.
 
-    The return is ``(uint256[] withdrawable, uint256[] deposited)`` for the ONE
-    strategy queried, so exactly six words in a fixed shape: two head offsets
-    (0x40, 0x80), then each array's length (1) and its single element. Every
-    part of that shape is asserted, because reading the wrong word index here is
-    silent — an offset word decodes to 64 and a length word to 1, both of which
-    are perfectly plausible share quantities.
+    The whole six-word shape is asserted: a misread offset (64) or length (1) would decode as a plausible share count.
     """
     if not isinstance(raw, str) or not raw.startswith("0x"):
         return None, None
@@ -229,20 +164,10 @@ def decode_withdrawable_shares(raw: object) -> tuple[int | None, int | None]:
 
 
 def _eigenpod_basis(reads: NodeReads) -> tuple[str, str | None]:
-    """``(eigenpod_basis, eigenpod)`` from the three identity legs.
+    """``(eigenpod_basis, eigenpod)`` from the three identity legs, all of which must decode.
 
-    All three legs must decode a full word. Two agreeing address legs with a
-    ``hasPod`` that returned ``"0x"``, or a word that is neither 0 nor 1, are
-    ``not_determined`` — ``proven_pod_cross_read`` is requirement (i) of the
-    shares arm and every downstream gate keys off it, so a basis mintable from
-    two of three legs would undo the strictness of the absent arm from the other
-    side.
-
-    The absent arm needs all three legs zero for a concrete reason: before its
-    deployment block a node address is CODELESS, so ``getEigenPod()`` answers
-    ``"0x"`` with success while EigenLayer's mappings answer clean zeros. A
-    one-leg reading would publish "proven no eigenpod" for an address whose own
-    state was never read.
+    Two of three never suffices. The absent arm needs all three zero because a not-yet-deployed node is codeless:
+    ``getEigenPod()`` answers ``"0x"`` while the mappings answer clean zeros.
     """
     pod = decode_address_word(reads.get_eigen_pod)
     owner_pod = decode_address_word(reads.owner_to_pod)
@@ -257,16 +182,10 @@ def _eigenpod_basis(reads: NodeReads) -> tuple[str, str | None]:
 
 
 def _agreement(withdrawable: int, deposits: list[int]) -> str:
-    """Consistency of the withdrawable leg against every deposit leg present.
+    """Withdrawable vs every present deposit leg.
 
-    ``agree`` needs every leg present and equal. ``disagree_within_invariant``
-    is the ordinary slashed / queued-withdrawal shape and publishes with a flag.
-    ``inconsistent`` — withdrawable above a deposit leg, or a negative deposit
-    beside a positive withdrawable — disproves the accounting model that licences
-    the number, so the caller suppresses it.
-
-    An ABSENT deposit leg is ``not_determined``, never ``inconsistent``: absence
-    is not disagreement, and conflating them would suppress a proven read.
+    ``agree``: all present and equal. ``disagree_within_invariant``: slashing or queued withdrawals, published with a
+    flag. ``inconsistent``: disproves the model, suppressed. A missing leg is ``not_determined``, not a disagreement.
     """
     if any(withdrawable > deposit for deposit in deposits):
         return CROSS_READ_INCONSISTENT
@@ -280,17 +199,10 @@ def _agreement(withdrawable: int, deposits: list[int]) -> str:
 
 
 def withdrawable_calldata_operands(calldata: object) -> tuple[str, str] | None:
-    """``(staker, strategy)`` actually encoded in a ``getWithdrawableShares`` call.
+    """``(staker, strategy)`` decoded from issued ``getWithdrawableShares`` calldata, or ``None`` unless it is
+    exactly the one-strategy shape.
 
-    ``None`` unless the bytes are exactly the one-strategy shape this module
-    issues: the right selector, then ``(address staker, address[] strategies)``
-    with head offset ``0x40``, length 1, and one element — every operand a
-    canonical address word.
-
-    This exists so the strategy is read back out of the BYTES THAT WERE SENT
-    rather than taken on the caller's word. A gate that is only a calling
-    convention on an exported function is not a gate: the same function, handed a
-    strategy the answer was not read against, would publish it beside the answer.
+    Reading them back from the bytes sent makes the gate hold for any caller, not just by convention.
     """
     if not isinstance(calldata, str) or not calldata.startswith("0x"):
         return None
@@ -321,19 +233,9 @@ def position_record(
 ) -> dict[str, object]:
     """The published record for one node at one pinned height.
 
-    ``strategy`` is ``EigenPodManager.beaconChainETHStrategy()`` read at the SAME
-    block, or ``None`` if that read failed — in which case no shares read is
-    licensed at all, whatever came back on the wire.
-
-    ``withdrawable_calldata`` is the exact calldata the shares answer was read
-    with. The witnessed strategy alone does not license the quantity: the answer
-    must have been read AGAINST that strategy, and against THIS node. Both are
-    checked out of the issued bytes, so the gate holds for any caller rather than
-    only for the one that happens to use a single variable for both. Omitted
-    (``None``) ⇒ the quantity is ``not_determined``.
-
-    Four bases, disjoint and exhaustive; the two quantity-bearing ones are the
-    only ones a consumer may read as an observation.
+    ``strategy`` is the same-block ``beaconChainETHStrategy()`` read, or ``None`` (no shares licensed). The shares
+    answer only counts if ``withdrawable_calldata`` shows it was read against that strategy and this node. Four disjoint
+    bases; only the two quantity-bearing ones are observations.
     """
     eigenpod_basis, eigenpod = _eigenpod_basis(reads)
     record: dict[str, object] = {
@@ -350,17 +252,14 @@ def position_record(
         "cross_read_agreement": CROSS_READ_NOT_DETERMINED,
         "active_validator_count": None,
         "last_checkpoint_timestamp": None,
-        # Always present as a key, always this value. The residual lives on the
-        # consensus layer and is unbounded above; it is never a number.
+        # Consensus-layer residual is unbounded above; never a number.
         "consensus_layer_residual": CONSENSUS_LAYER_RESIDUAL_NOT_DETERMINED,
-        # The fold proves existence, never absence. One reachable value.
+        # The fold proves existence, never absence.
         "node_set_completeness": NODE_SET_COMPLETENESS_NOT_DETERMINED,
     }
 
     if eigenpod_basis == EIGENPOD_BASIS_NO_EIGENPOD_PROVEN:
-        # A distinct PROVEN ZERO: no pod exists, so there is no EigenLayer
-        # beaconChainETH position to have. This is the beacon-implementation
-        # shape; it was not observed on any enumerated node.
+        # A proven zero: no pod, so no position. Not observed on any enumerated node.
         record["eigenlayer_beacon_shares_wei"] = 0
         record["shares_basis"] = SHARES_BASIS_NO_EIGENPOD_PROVEN
         return record
@@ -368,26 +267,18 @@ def position_record(
     if eigenpod_basis != EIGENPOD_BASIS_PROVEN_CROSS_READ:
         return record
 
-    # Pod-derived facts require the proven pod. Without this gate a
-    # ``lastCheckpointTimestamp`` of 0 — "never checkpointed" — could be minted
-    # against an address never proven to have a pod at all.
-    #
-    # Range-guarded to the storage column's own width. An out-of-range word is a
-    # non-observation of that fact and nothing more; letting it reach the insert
-    # raises NumericValueOutOfRange and aborts the whole batch, so ONE malformed
-    # pod would cost every other node in the cycle its observation.
+    # Pod-derived facts require the proven pod (else a 0 checkpoint could be minted for a podless address).
+    # Range-guarded because one overflowing word would abort the whole batch insert.
     record["active_validator_count"] = _bounded(decode_word(reads.active_validator_count), _INT32_MAX)
     record["last_checkpoint_timestamp"] = _bounded(decode_word(reads.last_checkpoint_timestamp), _INT64_MAX)
 
     if strategy is None:
-        # The strategy is a witness, not a literal. Without it the shares read
-        # is against an unproven input, and a wrong input answers 0 with success.
+        # No witnessed strategy: a wrong strategy answers 0 with success.
         return record
 
     operands = withdrawable_calldata_operands(withdrawable_calldata)
     if operands is None or operands != (node_address.lower(), strategy.lower()):
-        # Either the calldata was not supplied, or the answer was read against a
-        # different strategy or a different staker than the ones being published.
+        # Calldata missing, or read against a different strategy or staker.
         return record
 
     withdrawable, dm_deposit = decode_withdrawable_shares(reads.withdrawable_shares)
@@ -403,11 +294,8 @@ def position_record(
         return record
 
     if withdrawable == 0 and agreement != CROSS_READ_AGREE:
-        # A zero is exactly the answer a wrong strategy and a nonexistent staker
-        # produce, so it is admitted only under full three-way agreement. This
-        # deliberately under-claims the fully-slashed case (withdrawable 0 with
-        # a positive deposit leg), and deliberately refuses to publish a 0 when
-        # the deposit leg failed and (iii) is therefore unevaluable.
+        # Zero is what a wrong strategy or missing staker returns, so it needs full three-way agreement. Deliberately
+        # under-claims fully-slashed nodes.
         return record
 
     record["eigenlayer_beacon_shares_wei"] = withdrawable
@@ -418,8 +306,6 @@ def position_record(
     return record
 
 
-# --- production read path --------------------------------------------------
-
 _SEL_GET_EIGEN_POD = "getEigenPod()"
 _SEL_OWNER_TO_POD = "ownerToPod(address)"
 _SEL_HAS_POD = "hasPod(address)"
@@ -429,8 +315,7 @@ _SEL_ACTIVE_VALIDATOR_COUNT = "activeValidatorCount()"
 _SEL_LAST_CHECKPOINT_TIMESTAMP = "lastCheckpointTimestamp()"
 _SEL_BEACON_CHAIN_ETH_STRATEGY = "beaconChainETHStrategy()"
 
-# Reads per node per cycle. Batched through one ``aggregate3`` per chunk, so the
-# wire cost is ~1 request per 100 nodes rather than 7 per node.
+# Batched through ``aggregate3``: about one request per 100 nodes.
 READS_PER_NODE = 7
 
 
@@ -439,23 +324,19 @@ def _word(address: str) -> str:
 
 
 def _withdrawable_calldata(node: str, strategy: str) -> str:
-    # (address staker, address[] strategies) with a one-element tail.
     return selector(_SEL_GET_WITHDRAWABLE_SHARES) + _word(node) + f"{64:064x}" + f"{1:064x}" + _word(strategy)
 
 
 def pinned_head(chain_id: int, rpc_url: str) -> tuple[int, str] | None:
-    """``(block_number, block_hash)`` to pin every read of one cycle at.
+    """``(block_number, block_hash)`` to pin a cycle's reads at, or ``None``.
 
-    ``None`` when either cannot be established. There is no unpinned fallback on
-    this plane: without a height nothing read here may be published at all, and
-    without the hash a replay cannot tell it is on the same chain history
-    (the reason the event indexer stamps ``last_indexed_block_hash``).
+    No unpinned fallback: without a height nothing may be published, and without the hash a replay can't confirm chain
+    history.
     """
     try:
         head = int(rpc_request(rpc_url, "eth_blockNumber", [], retries=1, chain_id=chain_id), 16)
     except Exception as exc:
-        # Once per chain per cycle. There is no unpinned fallback on this plane,
-        # so a head that will not read withholds every position on the chain.
+        # Once per chain per cycle; a head that won't read withholds the chain's positions.
         logger.warning(
             "restaking position: head read failed; no position on this chain is read this cycle",
             extra={"chain_id": chain_id, "exc_type": type(exc).__name__, "error": str(exc)},
@@ -480,10 +361,7 @@ def pinned_head(chain_id: int, rpc_url: str) -> tuple[int, str] | None:
     block_hash = header.get("hash")
     if not isinstance(block_hash, str) or len(block_hash) != WORD_HEX_LEN:
         return None
-    # The header must be the one that was asked for. A racing or load-balanced
-    # upstream can answer a different height, and pairing that hash with this
-    # number would make the stored reorg witness name a block the reads were not
-    # issued at — which is the replay claim, not a detail.
+    # A racing upstream can answer a different height; pairing that hash with this number would mis-witness the reads.
     number = header.get("number")
     if not isinstance(number, str) or not number.startswith("0x"):
         return None
@@ -500,17 +378,11 @@ def read_positions(
     delegation_manager: str,
     rpc_url: str | None = None,
 ) -> list[dict[str, object]]:
-    """Read every enumerated node's position at ONE pinned height.
+    """Every enumerated node's position at one pinned height; empty means nothing was established, never zero
+    holdings.
 
-    Returns the published records. An empty list means the cycle established no
-    height (or had no nodes) and wrote nothing — never that the nodes hold
-    nothing.
-
-    The pod address is not known before the first read, so this runs in two
-    aggregate3 rounds against the same pinned block: the identity legs and the
-    EigenLayer legs first, then the pod-local legs for the nodes whose pod was
-    proven. Both rounds are issued at the same explicit block, so the record
-    remains a single-height observation.
+    Two aggregate3 rounds at the same block: identity and EigenLayer legs, then pod-local legs for nodes with a proven
+    pod.
     """
     if not node_addresses:
         return []
@@ -534,14 +406,11 @@ def read_positions(
         ok, data = strategy_results[0]
         strategy = decode_address_word(data) if ok else None
     if strategy == ZERO_ADDRESS:
-        # A zero strategy is not a strategy; treat it as unwitnessed rather than
-        # querying shares against the zero address.
+        # A zero strategy is unwitnessed.
         strategy = None
 
     nodes = [a.lower() for a in node_addresses]
-    # Without a witnessed strategy the shares call is not issued at all: its
-    # answer could not license anything, and an unissued call is cheaper than a
-    # discarded one. The stride follows so the windows stay aligned.
+    # No witnessed strategy, so the shares call isn't issued; the stride keeps windows aligned.
     stride = 5 if strategy else 4
     issued: dict[str, str] = {}
     first_calls: list[tuple[str, str]] = []
@@ -563,7 +432,6 @@ def read_positions(
         values = [data if ok else None for ok, data in window]
         partial[node] = values + [None] * (5 - stride)
 
-    # Second round: the pod-local legs, for the nodes whose pod cross-read holds.
     pod_by_node: dict[str, str] = {}
     for node, values in partial.items():
         basis, pod = _eigenpod_basis(
@@ -619,11 +487,9 @@ def read_positions(
 
 
 def restaking_history_depth() -> int:
-    """How many reads per ``(chain, node)`` retention keeps.
+    """Reads kept per ``(chain, node)``.
 
-    Raises below 1. Depth 0 would prune every read, and because the ``latest``
-    view publishes only observing rows, that would make every node vanish — an
-    absence manufactured by a retention policy.
+    Must be at least 1: 0 would prune every row and make nodes vanish from ``latest``.
     """
     raw = os.getenv("PSAT_RESTAKING_HISTORY_DEPTH", "10")
     try:
@@ -636,11 +502,8 @@ def restaking_history_depth() -> int:
 
 
 def prune_positions(session: Session, *, chain_id: int, node_address: str) -> int:
-    """Bound insert-only growth without ever deleting the current observation.
-
-    Keeps the ``depth`` most recent reads AND, unconditionally, the most recent
-    OBSERVING read. Without the second rule ``depth`` consecutive failures would
-    evict exactly the row the view is publishing.
+    """Keep the ``depth`` newest reads and always the newest observing one, so failures can't evict what the view
+    publishes.
     """
     depth = restaking_history_depth()
     rows = session.execute(
@@ -672,11 +535,9 @@ def persist_positions(
     manager_contract_id: int | None,
     protocol_id: int | None,
 ) -> int:
-    """Insert one row per record. Insert-only; nothing is ever overwritten.
+    """Insert one row per record, never overwriting.
 
-    ``manager_contract_id`` is provenance: the ``contracts`` row whose ADDRESS
-    equals the address the enumerating log was emitted at. It never means that
-    contract holds the position.
+    ``manager_contract_id`` is provenance (the emitting contract), not the holder.
     """
     if not records:
         return 0
@@ -704,10 +565,7 @@ def persist_positions(
             )
         )
     session.flush()
-    # One cycle reads one chain, so every record here shares a ``chain_id`` and
-    # the first row's is the batch's. A future multi-chain caller must prune per
-    # (chain, node) instead — pruning node X on the wrong chain would delete
-    # observations that were never in this batch.
+    # One cycle reads one chain; a multi-chain caller must prune per (chain, node).
     chain_ids = {int(str(record["chain_id"])) for record in records}
     for chain_id in chain_ids:
         for node in {str(record["node_address"]) for record in records if int(str(record["chain_id"])) == chain_id}:
@@ -716,13 +574,7 @@ def persist_positions(
 
 
 def manager_contract_id_for(session: Session, *, emitter: str, protocol_id: int) -> int | None:
-    """The ``contracts`` row whose ADDRESS EQUALS the emitting address.
-
-    Never the implementation row that shares the manager's name: the manager's
-    ``contracts`` row is keyed at ``0xcf5928ea…`` while the logs are emitted at
-    the proxy ``0x8b71140a…``, and pinning provenance to the implementation
-    would repeat the keying defect this plane exists to avoid.
-    """
+    """The ``contracts`` row whose address equals the emitter: the proxy, never the same-named implementation row."""
     return session.execute(
         select(Contract.id)
         .where(Contract.protocol_id == protocol_id, func.lower(Contract.address) == emitter.lower())
@@ -731,19 +583,13 @@ def manager_contract_id_for(session: Session, *, emitter: str, protocol_id: int)
 
 
 def _aggregate(url: str, calls: list[tuple[str, str]], block_tag: str, chain_id: int) -> list[tuple[bool, str]]:
-    """``aggregate3`` with a transport failure reported as "nothing read".
-
-    A raised transport error yields an empty list, which every caller maps to
-    the non-observing states — never to a quantity.
-    """
+    """``aggregate3`` with transport failure returned as an empty list, which maps to non-observing states."""
     if not calls:
         return []
     try:
         return multicall3_aggregate3(url, calls, block_tag, chain_id=chain_id)
     except Exception as exc:
-        # Batched ~1 request per 100 nodes, so the level cannot storm on a
-        # per-node failure — an empty list here maps every call in the chunk to
-        # the non-observing states.
+        # Per chunk, so this can't storm per node.
         logger.warning(
             "restaking position: aggregate3 did not answer; the chunk's reads are not determined",
             extra={

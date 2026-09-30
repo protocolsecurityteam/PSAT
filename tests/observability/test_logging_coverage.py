@@ -1,19 +1,15 @@
-"""Offline logging/observability tests for the coverage verify path.
+"""Offline logging tests for the coverage verify path (Backlog #13).
 
-Locks in the Backlog #13 behavior: the source-equivalence verdict and its
-identity fields live in ``extra={}`` (queryable JSON), a benign rebuild
-race is labeled ``row_vanished`` rather than ``github_fetch_failed``, and a
-pass dominated by ``hash_mismatch`` raises a single WARNING with the rate in
-``extra`` plus a heartbeat-detail rollup.
-
-No DB / network: the methods under test are pure log/derivation helpers;
-``record_heartbeat`` is stubbed.
+The source-equivalence verdict and identity fields live in queryable ``extra={}``, a benign
+rebuild race is ``row_vanished`` not ``github_fetch_failed``, and a pass dominated by
+``hash_mismatch`` raises one WARNING plus a heartbeat rollup. Pure log helpers; no DB or network.
 """
 
 from __future__ import annotations
 
 import logging
 
+import pytest
 from sqlalchemy.orm.exc import StaleDataError
 
 import workers.coverage_verify as cv
@@ -22,8 +18,7 @@ LOGGER_NAME = "workers.coverage_verify"
 
 
 def _worker() -> cv.CoverageVerifyWorker:
-    # Bypass __init__ so we don't register signal handlers / reconfigure
-    # logging — these helpers only touch the module logger + globals.
+    # Bypass __init__ to avoid registering signal handlers / reconfiguring logging.
     w = cv.CoverageVerifyWorker.__new__(cv.CoverageVerifyWorker)
     w.worker_id = "CoverageVerify-test"
     return w
@@ -100,24 +95,20 @@ def test_summarize_pass_warns_and_beats_on_high_hash_mismatch_rate(caplog, monke
     assert warn.verdicts_total == 4
 
 
-def test_summarize_pass_quiet_when_rate_below_threshold(caplog, monkeypatch):
+@pytest.mark.parametrize(
+    ("claimed", "verdicts", "expected_rate"),
+    [
+        pytest.param(10, {"hash_mismatch": 1, "proven": 9}, 0.1, id="rate_below_threshold"),
+        # Rate 1.0 but total 1 < warn min: the min-sample guard keeps it quiet.
+        pytest.param(1, {"hash_mismatch": 1}, 1.0, id="small_sample"),
+    ],
+)
+def test_summarize_pass_stays_quiet(caplog, monkeypatch, claimed, verdicts, expected_rate):
     monkeypatch.setattr(cv, "record_heartbeat", lambda *a, **k: None)
     w = _worker()
-    verdicts = {"hash_mismatch": 1, "proven": 9}  # rate 0.1
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
-        rate = w._summarize_pass(10, verdicts)
+        rate = w._summarize_pass(claimed, verdicts)
 
-    assert rate == 0.1
-    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == LOGGER_NAME]
-
-
-def test_summarize_pass_does_not_trip_on_small_sample(caplog, monkeypatch):
-    monkeypatch.setattr(cv, "record_heartbeat", lambda *a, **k: None)
-    w = _worker()
-    verdicts = {"hash_mismatch": 1}  # rate 1.0 but total 1 < warn min
-
-    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
-        w._summarize_pass(1, verdicts)
-
+    assert rate == expected_rate
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING and r.name == LOGGER_NAME]

@@ -4,10 +4,7 @@ renders it, so it is the quotable copy of the structured planes.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import pytest
 
 from services.aggregations.action_summary import (
     ARBITRARY_SUMMARY,
@@ -72,23 +69,23 @@ def test_a_proven_gate_on_the_destination_narrows_the_sentence():
     assert note and "destination_constraint=constrained" in note
 
 
-def test_an_absent_destination_verdict_does_not_publish_arbitrary():
-    """Every persisted ``exec.arbitrary`` claim (20/20 rows) carries NO
-    ``destination_constraint`` key: the verdict predates the key. An absent verdict is
-    the question being unanswered — the same reading ``claimsVocab.constraintText``
-    takes — and "arbitrary" asserts an answer."""
-    summary, _kind, note = describe_action(ARBITRARY_SUMMARY, [_exec_claim()])
+@pytest.mark.parametrize(
+    "constraint,note_fragment",
+    [
+        # Every persisted ``exec.arbitrary`` claim (20/20 rows) carries NO
+        # ``destination_constraint`` key: the verdict predates the key. An absent verdict is
+        # the question being unanswered — the same reading ``claimsVocab.constraintText``
+        # takes — and "arbitrary" asserts an answer.
+        pytest.param(None, "no destination_constraint verdict", id="absent_verdict"),
+        pytest.param({"state": "not_determined"}, "not_determined", id="explicit_not_determined"),
+    ],
+)
+def test_an_undetermined_destination_verdict_does_not_publish_arbitrary(constraint, note_fragment):
+    summary, _kind, note = describe_action(ARBITRARY_SUMMARY, [_exec_claim(constraint)])
     assert summary is not None
     assert "arbitrary" not in summary
     assert "was not determined" in summary
-    assert note and "no destination_constraint verdict" in note
-
-
-def test_an_explicit_not_determined_verdict_also_hedges():
-    summary, _kind, note = describe_action(ARBITRARY_SUMMARY, [_exec_claim({"state": "not_determined"})])
-    assert summary is not None
-    assert "was not determined" in summary
-    assert note and "not_determined" in note
+    assert note and note_fragment in note
 
 
 def test_a_missing_exec_claim_contradicts_the_sentence():

@@ -1,0 +1,8 @@
+{
+  "payload_schema": 1,
+  "skeleton": {
+    "functions": {
+      "<address>": []
+    }
+  }
+}

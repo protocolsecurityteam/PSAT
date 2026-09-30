@@ -1,17 +1,8 @@
-"""Build a visualization-ready dependency graph from pipeline outputs.
-
-Converts the unified dependency dict produced by
-``services.discovery.unified_dependencies.build_unified_dependencies`` into
-a graph structure suitable for the frontend visualization layer.
-"""
+"""Build a visualization graph from ``services.discovery.unified_dependencies.build_unified_dependencies`` output."""
 
 from __future__ import annotations
 
 from typing import Any
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _shorten(address: str) -> str:
@@ -21,7 +12,6 @@ def _shorten(address: str) -> str:
 
 
 def _derive_discovered(unified: dict) -> list[str]:
-    """Derive discovered addresses from deps whose source includes 'classification'."""
     result: list[str] = []
     for addr, info in unified.get("dependencies", {}).items():
         if "classification" in info.get("source", []):
@@ -30,11 +20,6 @@ def _derive_discovered(unified: dict) -> list[str]:
         if isinstance(impl, dict) and "classification" in impl.get("source", []):
             result.append(impl["address"])
     return sorted(result)
-
-
-# ---------------------------------------------------------------------------
-# Node / edge construction
-# ---------------------------------------------------------------------------
 
 
 def _build_nodes(
@@ -47,7 +32,7 @@ def _build_nodes(
 ) -> list[dict]:
     nodes: list[dict] = []
 
-    # Proxy node — shown as context when the target is an implementation
+    # Context node when the target is an implementation.
     if proxy_address:
         nodes.append(
             {
@@ -62,7 +47,6 @@ def _build_nodes(
             }
         )
 
-    # Target (root) node
     target_cls = unified.get("target_classification", {})
     default_type = "implementation" if proxy_address else "target"
     nodes.append(
@@ -98,7 +82,6 @@ def _build_nodes(
             }
         )
 
-        # Nested implementation → separate node for visualization
         if isinstance(impl, dict):
             nodes.append(
                 {
@@ -153,7 +136,7 @@ def _build_edges(
             entry["function_name"] = function_name
         edges.append(entry)
 
-    # Dynamic call-graph edges — supports both keyed dict (new) and flat list (old) formats
+    # Supports keyed dict (new) and flat list (old) formats.
     dep_graph = unified.get("dependency_graph", {})
     if isinstance(dep_graph, dict):
         for graph_key, edge_list in dep_graph.items():
@@ -179,9 +162,7 @@ def _build_edges(
                 function_name=edge.get("function_name"),
             )
 
-    # For deps found via static bytecode scan (not trace or classification),
-    # create implicit edges from target.  Skip classification-only discoveries
-    # — those are reachable through their proxy's DELEGATES_TO / BEACON edge.
+    # Implicit target edges for static-bytecode deps; classification-only deps are reached via their proxy's edge.
     deps_with_edges: set[str] = set()
     if isinstance(dep_graph, dict):
         for graph_key in dep_graph:
@@ -199,7 +180,6 @@ def _build_edges(
         static_root = proxy_address if proxy_address else target
         _add(f"addr:{static_root}", f"addr:{addr}", "STATIC_REF")
 
-    # Proxy relationship edges
     for addr, info in deps.items():
         impl = info.get("implementation")
         if isinstance(impl, dict):
@@ -209,16 +189,10 @@ def _build_edges(
         if info.get("beacon"):
             _add(f"addr:{addr}", f"addr:{info['beacon']}", "BEACON")
 
-    # Proxy → implementation root edge (when this target is behind a proxy)
     if proxy_address:
         _add(f"addr:{proxy_address}", f"addr:{target}", "DELEGATES_TO")
 
     return edges
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 
 def build_dependency_visualization(
@@ -229,16 +203,10 @@ def build_dependency_visualization(
     proxy_name: str | None = None,
     proxy_type: str | None = None,
 ) -> dict:
-    """Build a visualization graph from an in-memory unified dependency dict.
+    """Build a visualization graph (``nodes``, ``edges``, ``metadata``) from a unified dependency dict.
 
-    Returns a dict with ``nodes``, ``edges``, and ``metadata`` keys ready for
-    the JS visualization layer.
-
-    When *proxy_address* is provided, a proxy context node and DELEGATES_TO
-    edge are added so the graph shows the proxy → implementation relationship.
-
-    When the unified payload contains no dependencies, returns an empty graph
-    dict with an ``error`` key in ``metadata``.
+    *proxy_address* adds a proxy node and DELEGATES_TO edge. With no dependencies, returns an empty graph with
+    ``metadata.error``.
     """
     if not unified or not unified.get("dependencies"):
         return {"nodes": [], "edges": [], "metadata": {"error": "no dependency data found"}}

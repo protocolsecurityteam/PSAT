@@ -1,10 +1,6 @@
-"""Integration tests for the protocol-subscription and monitored-contract routes.
+"""Protocol-subscription event_filter validation and monitored-contract PATCH / re-enroll routes.
 
-Covers protocol subscription event_filter validation and the monitored-contract
-PATCH / re-enroll endpoints.
-
-All tests run without live services — PostgreSQL for the DB, the enrollment call
-patched.
+No live services: PostgreSQL for the DB, enrollment call patched.
 """
 
 from __future__ import annotations
@@ -27,7 +23,6 @@ pytestmark = requires_postgres
 
 @pytest.fixture()
 def api_client(db_session):
-    """FastAPI test client wired to the in-memory SQLite session."""
 
     @contextmanager
     def fake_session_local():
@@ -51,81 +46,47 @@ def _create_protocol(session, name="__test_proto__"):
     return proto
 
 
-def test_subscribe_valid_event_filter(api_client, db_session):
-    """A well-formed event_filter is accepted."""
-    proto = _create_protocol(db_session)
+@pytest.mark.parametrize(
+    ("name", "body", "expected_filter"),
+    [
+        pytest.param(
+            "__test_proto__",
+            {"event_filter": {"event_types": ["upgraded", "paused"]}},
+            {"event_types": ["upgraded", "paused"]},
+            id="valid_filter",
+        ),
+        pytest.param("__test_no_filter__", {}, None, id="no_filter"),
+        # Technically valid: subscribe to nothing.
+        pytest.param(
+            "__test_empty_filter__", {"event_filter": {"event_types": []}}, {"event_types": []}, id="empty_list"
+        ),
+    ],
+)
+def test_subscribe_accepts_event_filter(api_client, db_session, name, body, expected_filter):
+    proto = _create_protocol(db_session, name=name)
     resp = api_client.post(
         f"/api/protocols/{proto.id}/subscribe",
-        json={
-            "discord_webhook_url": "https://discord.com/api/webhooks/1/abc",
-            "event_filter": {"event_types": ["upgraded", "paused"]},
-        },
+        json={"discord_webhook_url": "https://discord.com/api/webhooks/1/abc", **body},
     )
     assert resp.status_code == 200
-    assert resp.json()["event_filter"] == {"event_types": ["upgraded", "paused"]}
+    assert resp.json()["event_filter"] == expected_filter
 
 
-def test_subscribe_no_event_filter(api_client, db_session):
-    """Omitting event_filter is valid (subscribe to everything)."""
-    proto = _create_protocol(db_session, name="__test_no_filter__")
+@pytest.mark.parametrize(
+    ("name", "event_filter"),
+    [
+        pytest.param("__test_str_filter__", {"event_types": "upgraded"}, id="string_event_types"),
+        pytest.param("__test_typo_filter__", {"typo_field": ["upgraded"]}, id="typo_field"),
+        pytest.param("__test_bad_type__", {"event_types": ["upgraded", "nonexistent_event"]}, id="unknown_event_type"),
+    ],
+)
+def test_subscribe_rejects_bad_event_filter(api_client, db_session, name, event_filter):
+    proto = _create_protocol(db_session, name=name)
     resp = api_client.post(
         f"/api/protocols/{proto.id}/subscribe",
-        json={"discord_webhook_url": "https://discord.com/api/webhooks/2/def"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["event_filter"] is None
-
-
-def test_subscribe_string_event_types_rejected(api_client, db_session):
-    """event_types as string instead of list is rejected."""
-    proto = _create_protocol(db_session, name="__test_str_filter__")
-    resp = api_client.post(
-        f"/api/protocols/{proto.id}/subscribe",
-        json={
-            "discord_webhook_url": "https://discord.com/api/webhooks/3/ghi",
-            "event_filter": {"event_types": "upgraded"},
-        },
+        json={"discord_webhook_url": "https://discord.com/api/webhooks/3/ghi", "event_filter": event_filter},
     )
     assert resp.status_code == 422
-
-
-def test_subscribe_typo_field_rejected(api_client, db_session):
-    """event_filter with wrong key (no 'event_types') is rejected."""
-    proto = _create_protocol(db_session, name="__test_typo_filter__")
-    resp = api_client.post(
-        f"/api/protocols/{proto.id}/subscribe",
-        json={
-            "discord_webhook_url": "https://discord.com/api/webhooks/4/jkl",
-            "event_filter": {"typo_field": ["upgraded"]},
-        },
-    )
-    assert resp.status_code == 422
-
-
-def test_subscribe_unknown_event_type_rejected(api_client, db_session):
-    """An unrecognized event type in the list is rejected."""
-    proto = _create_protocol(db_session, name="__test_bad_type__")
-    resp = api_client.post(
-        f"/api/protocols/{proto.id}/subscribe",
-        json={
-            "discord_webhook_url": "https://discord.com/api/webhooks/5/mno",
-            "event_filter": {"event_types": ["upgraded", "nonexistent_event"]},
-        },
-    )
-    assert resp.status_code == 422
-
-
-def test_subscribe_empty_event_types_list_accepted(api_client, db_session):
-    """An empty event_types list is technically valid (subscribe to nothing)."""
-    proto = _create_protocol(db_session, name="__test_empty_filter__")
-    resp = api_client.post(
-        f"/api/protocols/{proto.id}/subscribe",
-        json={
-            "discord_webhook_url": "https://discord.com/api/webhooks/6/pqr",
-            "event_filter": {"event_types": []},
-        },
-    )
-    assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +117,6 @@ def _create_monitored_contract(session, address="0x" + "a1" * 20, protocol_id=No
 
 
 def test_patch_monitoring_config(api_client, db_session):
-    """PATCH updates monitoring_config while leaving other fields untouched."""
     mc = _create_monitored_contract(db_session)
     new_config = {"watch_upgrades": False, "watch_ownership": True, "watch_pause": True}
     resp = api_client.patch(
@@ -175,30 +135,21 @@ def test_patch_monitoring_config(api_client, db_session):
     assert body["needs_polling"] is False  # unchanged
 
 
-def test_patch_is_active(api_client, db_session):
-    """PATCH can deactivate monitoring."""
-    mc = _create_monitored_contract(db_session, address="0x" + "b2" * 20)
-    resp = api_client.patch(
-        f"/api/monitored-contracts/{mc.id}",
-        json={"is_active": False},
-    )
+@pytest.mark.parametrize(
+    ("address", "patch_body", "field", "expected"),
+    [
+        pytest.param("0x" + "b2" * 20, {"is_active": False}, "is_active", False, id="is_active"),
+        pytest.param("0x" + "c3" * 20, {"needs_polling": True}, "needs_polling", True, id="needs_polling"),
+    ],
+)
+def test_patch_scalar_field(api_client, db_session, address, patch_body, field, expected):
+    mc = _create_monitored_contract(db_session, address=address)
+    resp = api_client.patch(f"/api/monitored-contracts/{mc.id}", json=patch_body)
     assert resp.status_code == 200
-    assert resp.json()["is_active"] is False
-
-
-def test_patch_needs_polling(api_client, db_session):
-    """PATCH can enable polling."""
-    mc = _create_monitored_contract(db_session, address="0x" + "c3" * 20)
-    resp = api_client.patch(
-        f"/api/monitored-contracts/{mc.id}",
-        json={"needs_polling": True},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["needs_polling"] is True
+    assert resp.json()[field] is expected
 
 
 def test_patch_404_for_missing_contract(api_client):
-    """PATCH returns 404 for nonexistent contract."""
     resp = api_client.patch(
         f"/api/monitored-contracts/{uuid.uuid4()}",
         json={"is_active": False},
@@ -212,14 +163,12 @@ def test_patch_404_for_missing_contract(api_client):
 
 
 def test_re_enroll_404_for_missing_protocol(api_client):
-    """Re-enroll on nonexistent protocol returns 404."""
     resp = api_client.post("/api/protocols/999999/re-enroll")
     assert resp.status_code == 404
 
 
 @patch("services.monitoring.enrollment.enroll_protocol_contracts")
 def test_re_enroll_calls_enrollment(mock_enroll, api_client, db_session):
-    """Re-enroll calls enroll_protocol_contracts and returns result."""
     proto = _create_protocol(db_session, name="__test_reenroll__")
 
     mc = _create_monitored_contract(

@@ -1,6 +1,3 @@
-"""Audit endpoints: pipeline, fetch, PDF/text/scope, scope re-extraction,
-add/delete, refresh-coverage, and per-contract audit timeline."""
-
 from __future__ import annotations
 
 import logging
@@ -31,19 +28,9 @@ router = APIRouter()
 
 @router.get("/api/audits/pipeline", dependencies=[Depends(deps.require_admin_key)])
 def audits_pipeline() -> dict[str, Any]:
-    """In-flight audit text + scope extraction, grouped by bucket.
+    """In-flight audit extraction for the monitor page, each list capped at ``_PIPELINE_BUCKET_LIMIT``.
 
-    Feeds the monitor page's "Audit Extraction" shelf (parallel to
-    ``/api/jobs`` for the job pipeline). Text and scope workers drive a
-    column state machine on ``audit_reports`` rather than the ``jobs``
-    queue, so they need their own endpoint.
-
-    Each list is capped at ``_PIPELINE_BUCKET_LIMIT`` entries; callers
-    should surface an overflow indicator when counts hit the cap.
-
-    Route MUST stay registered before ``/api/audits/{audit_id}`` — FastAPI
-    matches in declaration order and the param route would otherwise try to
-    parse ``"pipeline"`` as an int and 422.
+    Must stay registered before ``/api/audits/{audit_id}``, or FastAPI parses "pipeline" as an int and 422s.
     """
     with deps.SessionLocal() as session:
         return build_audits_pipeline(session)
@@ -51,7 +38,6 @@ def audits_pipeline() -> dict[str, Any]:
 
 @router.get("/api/audits/{audit_id}", response_model=None)
 def get_audit(audit_id: int) -> AuditReportDict:
-    """Fetch a single audit report's metadata, including text-extraction state."""
     with deps.SessionLocal() as session:
         ar = session.get(AuditReport, audit_id)
         if ar is None:
@@ -61,16 +47,8 @@ def get_audit(audit_id: int) -> AuditReportDict:
 
 @router.get("/api/audits/{audit_id}/pdf")
 def get_audit_pdf(audit_id: int):
-    """Proxy an audit's PDF through our origin so the frontend can embed it
-    in an iframe. The typical source (GitHub raw content, auditor sites)
-    serves PDFs with `X-Frame-Options: deny` and `Content-Type:
-    application/octet-stream`, both of which prevent inline rendering — we
-    need a passthrough that strips those headers and sets
-    `Content-Type: application/pdf`.
-
-    The stored URL is crawler/LLM-sourced, so the fetch is routed through
-    ``safe_get`` — the target (and every redirect hop) must resolve to a
-    public address, closing the unauthenticated SSRF read.
+    """Proxy an audit PDF through our origin for iframe embedding: sources send ``X-Frame-Options: deny`` /
+    octet-stream. The URL is crawler/LLM-sourced, so it goes through ``safe_get`` (SSRF).
     """
     import requests
 
@@ -88,11 +66,7 @@ def get_audit_pdf(audit_id: int):
         url = github_blob_to_raw(url)
         filename = f"audit-{audit_id}.pdf"
 
-    # This is a PUBLIC, unauthenticated route and ``url`` is crawler/LLM-sourced.
-    # Stream with a content-type gate + hard byte cap so a seeded URL pointing at
-    # a large or non-PDF public file can't buffer an unbounded body into the
-    # 512MB web VM. Mirrors the download discipline in
-    # ``services.audits.text_extraction.download_audit_body``.
+    # Public route with an untrusted URL: content-type gate + byte cap so it can't buffer a huge body into the 512MB VM.
     try:
         resp = safe_get(url, timeout=30, stream=True)
     except UnsafeUrlError as exc:
@@ -110,8 +84,7 @@ def get_audit_pdf(audit_id: int):
             raise HTTPException(status_code=502, detail="Failed to fetch PDF") from exc
 
         content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
-        # Empty content-type is tolerated (some CDNs omit it); a present but
-        # non-PDF type means we were served an HTML error page or other body.
+        # Some CDNs omit content-type; a non-PDF type is an error page.
         if content_type and content_type not in _ACCEPTED_CONTENT_TYPES:
             logger.warning(
                 "Audit PDF fetch for audit %s returned unexpected content-type %r",
@@ -150,13 +123,7 @@ def get_audit_pdf(audit_id: int):
 
 @router.get("/api/audits/{audit_id}/text", response_class=PlainTextResponse)
 def get_audit_text(audit_id: int) -> str:
-    """Return the extracted plain-text body of an audit report.
-
-    Streams the text directly from object storage. Returns 404 for an
-    unknown audit, 409 if extraction hasn't completed successfully yet
-    (so the caller knows to retry later), and 503 if object storage is
-    unreachable.
-    """
+    """Extracted text from storage. 404 unknown audit, 409 not yet extracted, 503 storage unreachable."""
     with deps.SessionLocal() as session:
         ar = session.get(AuditReport, audit_id)
         if ar is None:
@@ -183,8 +150,7 @@ def get_audit_text(audit_id: int) -> str:
         logger.warning("Audit text storage unavailable for audit %s: %s", audit_id, exc)
         raise HTTPException(status_code=503, detail="storage error") from exc
     except deps.StorageError as exc:
-        # Covers StorageKeyMissing — DB says text is available but the object
-        # got deleted. Inconsistent state; surface as 500 so ops notice.
+        # DB says available but the object is gone; 500 so ops notice.
         logger.error("Audit text record missing from storage for audit %s: %s", audit_id, exc)
         raise HTTPException(
             status_code=500,
@@ -195,13 +161,7 @@ def get_audit_text(audit_id: int) -> str:
 
 @router.get("/api/audits/{audit_id}/scope", response_model=None)
 def get_audit_scope(audit_id: int) -> AuditScopeResponse:
-    """Return the list of in-scope contracts + date for a completed audit.
-
-    Reads from the denormalized ``scope_contracts`` column — the JSON
-    artifact in object storage is source-of-truth but not served here
-    (that would be a debug-only endpoint). 404 for unknown audit, 409 if
-    scope extraction hasn't completed successfully.
-    """
+    """Scope from the ``scope_contracts`` column. 404 unknown audit, 409 not yet extracted."""
     with deps.SessionLocal() as session:
         ar = session.get(AuditReport, audit_id)
         if ar is None:
@@ -227,7 +187,6 @@ def get_audit_scope(audit_id: int) -> AuditScopeResponse:
 
 @router.get("/api/contracts/{contract_id}/audit_timeline")
 def contract_audit_timeline(contract_id: int) -> dict[str, Any]:
-    """Per-impl audit timeline for a single contract, annotated with coverage."""
     with deps.SessionLocal() as session:
         payload = build_contract_audit_timeline(session, contract_id)
         if payload is None:
@@ -244,21 +203,9 @@ def refresh_company_coverage(
     company_name: str,
     verify_source_equivalence: bool = True,
 ) -> RefreshCoverageResponse:
-    """Rebuild ``audit_contract_coverage`` rows for every scoped audit in a protocol.
+    """Rebuild coverage for every scoped audit in a protocol.
 
-    Idempotent backfill. Useful when inventory is updated after audits are
-    scoped (new Contract rows match pre-existing audit scope) or when a
-    bulk data migration needs to re-seat links without waiting for the
-    next scope re-extraction.
-
-    ``verify_source_equivalence`` defaults to true: for each audit with
-    reviewed_commits + source_repo, compare the byte content of each
-    scope file against Etherscan's verified source. Proven matches
-    upgrade to ``match_type='reviewed_commit'`` / ``match_confidence='high'``
-    and every row gets an ``equivalence_status`` + ``equivalence_reason``
-    stamp so the UI can surface failure modes (hash_mismatch, commit
-    not in repo, etc.). Pass ``?verify_source_equivalence=false`` to
-    skip the network pass for a fast heuristic-only refresh.
+    Idempotent. ``verify_source_equivalence`` defaults to true; pass false for a fast heuristic-only refresh.
     """
     from services.audits.coverage import upsert_coverage_for_protocol
 
@@ -287,12 +234,7 @@ def refresh_company_coverage(
     response_model=None,
 )
 def reextract_audit_scope(audit_id: int) -> ReextractScopeResponse:
-    """Reset scope-extraction state so the worker picks the row up again.
-
-    Requires that text extraction already succeeded — without the stored
-    text body there's nothing to re-scope. Idempotent: a fresh row with
-    NULL status is a no-op reset.
-    """
+    """Reset scope extraction so the worker re-claims the row. Requires successful text extraction."""
     with deps.SessionLocal() as session:
         ar = session.get(AuditReport, audit_id)
         if ar is None:
@@ -317,14 +259,7 @@ def reextract_audit_scope(audit_id: int) -> ReextractScopeResponse:
     response_model=None,
 )
 def add_company_audit(company_name: str, req: AddAuditRequest) -> AuditReportDict:
-    """Register a new audit report for a protocol.
-
-    The row is inserted with NULL text/scope extraction status, so the
-    standing workers will claim it on their next poll: text extraction
-    downloads the PDF, scope extraction parses the contracts + commits,
-    and coverage matching wires it to deployed addresses. Duplicates
-    (same url on the same protocol) are rejected with 409.
-    """
+    """Register an audit; workers claim it via NULL extraction status. Duplicate url on the protocol is 409."""
     with deps.SessionLocal() as session:
         protocol_row = session.execute(select(Protocol).where(Protocol.name == company_name)).scalar_one_or_none()
         if protocol_row is None:
@@ -356,8 +291,7 @@ def add_company_audit(company_name: str, req: AddAuditRequest) -> AuditReportDic
         session.commit()
         session.refresh(ar)
 
-        # A new audit can adopt orphan contracts into this protocol; enqueue a
-        # reconcile so monitoring picks up any newly-owned addresses.
+        # A new audit can adopt orphan contracts into this protocol.
         from services.monitoring.enrollment import mark_enrollment_dirty
 
         mark_enrollment_dirty(session, protocol_row.id, "audit_added")
@@ -373,7 +307,6 @@ def add_company_audit(company_name: str, req: AddAuditRequest) -> AuditReportDic
     response_model=None,
 )
 def delete_audit(audit_id: int) -> DeleteAuditResponse:
-    """Remove an audit report (cascades to coverage rows)."""
     with deps.SessionLocal() as session:
         ar = session.get(AuditReport, audit_id)
         if ar is None:

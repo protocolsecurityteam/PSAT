@@ -1,16 +1,12 @@
-/* Addresses modal — reuses .ps-audit-modal-* backdrop + shell, adds its own toolbar/table */
+/* Reuses the .ps-audit-modal-* backdrop and shell. */
 .ps-addresses-modal {
   width: min(1200px, 100%);
   height: min(820px, 100%);
 }
 
 .company-hero-stat--clickable {
-  background: transparent;
-  border: none;
   padding: 0;
   text-align: left;
-  cursor: pointer;
-  color: inherit;
   font: inherit;
   transition: transform 120ms ease, opacity 120ms ease;
 }
@@ -36,37 +32,14 @@
   background: rgba(148, 163, 184, 0.08);
   color: #94a3b8;
   font-size: 10.5px;
-  font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  cursor: pointer;
   vertical-align: middle;
 }
 
 .ps-addresses-modal-historical-toggle:hover {
   border-color: rgba(45, 212, 191, 0.40);
   color: #e2e8f0;
-}
-
-.ps-addresses-modal-bulk-analyze {
-  padding: 6px 12px;
-  border-radius: 7px;
-  border: 1px solid rgba(45, 212, 191, 0.45);
-  background: rgba(45, 212, 191, 0.10);
-  color: #2dd4bf;
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.ps-addresses-modal-bulk-analyze:hover:not(:disabled) {
-  background: rgba(45, 212, 191, 0.22);
-}
-
-.ps-addresses-modal-bulk-analyze:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .ps-addresses-modal-search {
@@ -141,9 +114,7 @@
   border: 1px solid rgba(45, 212, 191, 0.50);
   background: rgba(45, 212, 191, 0.14);
   color: #2dd4bf;
-  font-weight: 700;
   font-size: 12px;
-  cursor: pointer;
 }
 
 .ps-addresses-modal-add button:hover:not(:disabled) {
@@ -239,19 +210,6 @@
   font-family: "JetBrains Mono", monospace;
 }
 
-.ps-addresses-modal-chip {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: 999px;
-  font-size: 9.5px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  background: rgba(148, 163, 184, 0.12);
-  color: #94a3b8;
-  border: 1px solid rgba(148, 163, 184, 0.20);
-}
-
 .ps-addresses-modal-chip.ok {
   background: rgba(45, 212, 191, 0.12);
   color: #2dd4bf;
@@ -333,8 +291,6 @@
   background: rgba(45, 212, 191, 0.14);
   color: #2dd4bf;
   font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
 }
 
 .ps-addresses-modal-compare-analyze:hover {

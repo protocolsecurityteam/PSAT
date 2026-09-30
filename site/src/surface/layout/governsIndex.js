@@ -1,27 +1,14 @@
-// Invert per-function authority into an authority-address → governed-contracts
-// index — the "authority OUT" view that mirrors the Control tab's "authority
-// IN". Pure — no React.
-//
-// For every contract's functions, each direct caller (direct_owner,
-// authority_roles principals, controllers principals — via collectDirectCallers)
-// becomes an authority that governs that function on that contract. Keyed by
-// lowercased authority address so a non-principal authority (e.g. an analyzed
-// timelock that has no entry in the principals list) still resolves its
-// governed set — the reason the inversion is client-side rather than read off
-// principal.controls_detail.
+// Authority address → governed contracts (Governs tab). Client-side so
+// machine-only authorities (an analyzed timelock with no principal entry) still
+// resolve.
 
 import { functionName, isRoleConstant } from "../format.js";
 import { entityKey } from "../entityKey.js";
 import { collectDirectCallers } from "./controlGraph.js";
 
 export function buildGovernsIndex(machines = [], functionData = {}) {
-  // authority addr (lc) → (governed contract addr (lc) → {contractAddress,
-  // contractName, functions: Set<name>})
-  //
-  // Iterate the machines (already scoped to the active chain) and read each
-  // one's functions by its (chain, address) key, rather than walking the raw
-  // functionData map — that map is composite-keyed across every chain, so a
-  // bare walk would fold another chain's same-address authority in.
+  // Iterate the chain-scoped machines rather than the cross-chain functionData
+  // map, which would fold in another chain's authority.
   const byAuthority = new Map();
   for (const machine of machines) {
     const contractLc = String(machine?.address || "").toLowerCase();
@@ -33,9 +20,8 @@ export function buildGovernsIndex(machines = [], functionData = {}) {
       const name = functionName(signature);
       if (!name || name === "?" || isRoleConstant(name)) continue;
       for (const caller of collectDirectCallers(fn)) {
-        const authorityLc = caller.address; // collectDirectCallers lowercases
-        // Governs = authority over OTHER contracts; a contract owning its own
-        // functions is the Control tab's job.
+        const authorityLc = caller.address;
+        // Owning its own functions is the Control tab's job.
         if (authorityLc === contractLc) continue;
         let governed = byAuthority.get(authorityLc);
         if (!governed) {

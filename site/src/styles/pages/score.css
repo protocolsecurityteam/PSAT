@@ -1,7 +1,5 @@
-/* ── Protocol score band + breakdown ──────────────────────────────────────────
-   Every class is `sc-`-prefixed — a namespace no other page uses — so nothing
-   here can reach the surface, the hero, or any other page. The two chart hues
-   are the CVD-validated pair from the approved prototype. */
+/* Everything is `sc-`-prefixed so nothing here reaches other pages. The two
+   chart hues are the CVD-validated pair from the prototype. */
 
 .score-band,
 .score-breakdown {
@@ -46,8 +44,6 @@
   color: var(--nd);
   font-style: italic;
 }
-
-/* ── grade band ───────────────────────────────────────────────────────────── */
 
 .sc-grade-inner {
   display: flex;
@@ -98,18 +94,10 @@
 }
 
 .sc-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
   margin-top: 8px;
-  font-size: 10.5px;
-  font-weight: 600;
-  padding: 3px 9px;
-  border-radius: 999px;
   border: 1px solid rgba(245, 158, 11, 0.35);
   color: var(--status-warn);
   background: rgba(245, 158, 11, 0.08);
-  white-space: nowrap;
 }
 
 .sc-grade-mid {
@@ -199,8 +187,6 @@
 
 .sc-gstat .sc-s { font-size: 10px; color: var(--faint); margin-top: 2px; }
 
-/* ── expander ─────────────────────────────────────────────────────────────── */
-
 .sc-expand-row { display: flex; justify-content: center; margin-top: 16px; }
 
 .sc-expand-btn {
@@ -215,22 +201,15 @@
   border: 1px solid var(--panel-border);
   border-radius: 999px;
   padding: 6px 16px;
-  cursor: pointer;
-  /* The global button rule paints a teal gradient and a lift shadow; this is
-     a quiet pill, so both are cancelled rather than layered over. */
-  box-shadow: none;
   letter-spacing: normal;
 }
 
 .sc-expand-btn:hover {
   color: var(--ink);
   border-color: rgba(148, 163, 184, 0.3);
-  transform: none;
 }
 .sc-expand-btn .sc-chev { transition: transform 0.15s; font-size: 10px; }
 .sc-expand-btn.sc-open .sc-chev { transform: rotate(180deg); }
-
-/* ── withheld grade ───────────────────────────────────────────────────────── */
 
 .sc-withheld {
   border: 1px solid rgba(245, 158, 11, 0.28);
@@ -258,8 +237,6 @@
 }
 
 .sc-withheld-figs b { color: var(--ink); font-weight: 600; }
-
-/* ── breakdown ────────────────────────────────────────────────────────────── */
 
 .sc-cols {
   display: grid;
@@ -305,7 +282,6 @@ h2.sc-band-title {
 
 .sc-who .sc-cap { font-weight: 600; color: var(--ink); }
 
-/* Capability glossary: the "?" beside a row's capability id and its popover. */
 .sc-cap-help { position: relative; display: inline-flex; align-items: center; gap: 4px; }
 .sc-cap-q {
   display: inline-flex;
@@ -316,12 +292,12 @@ h2.sc-band-title {
   padding: 0;
   border: 1px solid var(--panel-border);
   border-radius: 50%;
-  background: none;
   font-size: 9px;
-  font-weight: 700;
   line-height: 1;
   color: var(--muted);
-  cursor: pointer;
+}
+.sc-cap-q:hover {
+  transform: translateY(-1px);
 }
 .sc-cap-q:hover,
 .sc-cap-q[aria-expanded="true"] {
@@ -329,8 +305,8 @@ h2.sc-band-title {
   border-color: var(--teal);
 }
 .sc-cap-pop {
-  /* Fixed, anchored by inline top/left from the component: the lines this
-     tag sits in are overflow:hidden, which clips any absolute child. */
+  /* Fixed: the truncating lines this sits in are overflow:hidden and clip
+     absolute children. */
   position: fixed;
   z-index: 30;
   width: 280px;
@@ -370,9 +346,8 @@ h2.sc-band-title {
 
 .sc-frow .sc-val { font-size: 10.5px; color: var(--muted); text-align: right; white-space: nowrap; }
 
-/* Collapsed: a flex pair — the entity line ellipsises inside its own child
-   (min-width: 0 lets it shrink), and the "+N more" expander is a sibling the
-   row never shrinks, so long names can never push it out of existence. */
+/* The expander is a sibling that never shrinks, so long names can't push it
+   out. */
 .sc-targets {
   font-size: 10.5px;
   color: var(--faint);
@@ -392,69 +367,43 @@ h2.sc-band-title {
 .sc-targets.sc-open { display: block; }
 .sc-targets.sc-open .sc-targets-line { white-space: normal; overflow: visible; }
 .sc-targets b { color: var(--muted); font-weight: 600; }
-/* The host is the contract the function is ON — read it a shade stronger than
-   the reach list so direct and transitive never blur. */
+/* Hosts read stronger than reach so direct and transitive never blur. */
 .sc-targets .sc-host b { color: var(--ink); }
-/* The boundary of the row: everything BEFORE it is where the named controller
-   acts directly, everything after is reach through the control graph. Carries
-   the deduction hue so it reads as part of the charge, and is the only bold
-   token in the line so the eye finds the split without reading the names. */
+/* Hosts before the arrow, reach after; the only bold token, in the deduction
+   hue. */
 .sc-targets .sc-arr {
   color: var(--mark-deduct);
   font-weight: 700;
   padding: 0 1px;
 }
 
-/* Reach names stay quieter than the hosts above (.sc-host b is --ink): the
-   split only reads if the two sides differ in weight as well as position. */
 .sc-targets .sc-reached b { color: var(--muted); font-weight: 500; }
 .sc-targets .sc-ndp { color: var(--nd); font-style: italic; }
 
 .sc-tbtn {
-  background: none;
-  border: none;
   font: inherit;
   color: var(--teal);
-  cursor: pointer;
   padding: 0;
-  box-shadow: none;
   border-radius: 0;
   font-weight: inherit;
   letter-spacing: normal;
 }
 
-.sc-tbtn:hover { text-decoration: underline; transform: none; }
+.sc-tbtn:hover { text-decoration: underline; }
 
-/* Entity controls (contract names, controller addresses, function names). They
-   inherit everything from the line they sit in — the affordance is the cursor
-   and the same hover underline the prototype's target expander uses, so the
-   text reads exactly as it did before it became clickable. */
+/* Entity controls look exactly like the surrounding text except for cursor and
+   hover underline. */
 .sc-lnk { cursor: pointer; }
 .sc-lnk:hover { text-decoration: underline; }
 
-/* The ring is drawn INSIDE the element's own box and paired with a wash: these
-   controls sit in `overflow: hidden` truncating lines (.sc-who, .sc-addr), and
-   an outset ring is clipped away to two vertical slivers. A negative offset
-   costs no layout — the focused chip must not move the line it is in. */
+/* Inset ring: these sit in overflow:hidden lines, which clip an outset ring to
+   slivers. */
 .sc-lnk:focus-visible {
   outline: 1px solid var(--mark-kept);
   outline-offset: -1px;
   border-radius: 3px;
   background: var(--mark-kept-wash);
   color: var(--ink);
-}
-
-.sc-kchip {
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  padding: 2px 6px;
-  border-radius: 5px;
-  flex-shrink: 0;
-  background: rgba(148, 163, 184, 0.10);
-  color: var(--muted);
-  border: 1px solid rgba(148, 163, 184, 0.16);
 }
 
 .sc-kchip-eoa,
@@ -477,21 +426,17 @@ h2.sc-band-title {
 
 .sc-tail-btn {
   display: block;
-  background: none;
-  border: none;
   font: inherit;
   font-size: 11.5px;
   color: var(--faint);
-  cursor: pointer;
   text-align: left;
   padding: 6px 8px 0 78px;
-  box-shadow: none;
   border-radius: 0;
   font-weight: inherit;
   letter-spacing: normal;
 }
 
-.sc-tail-btn:hover { color: var(--muted); transform: none; }
+.sc-tail-btn:hover { color: var(--muted); }
 .sc-tail-flush { padding-left: 0; }
 .sc-tail-chev { margin: 0 6px; font-size: 9px; }
 
@@ -509,13 +454,9 @@ h2.sc-band-title {
 
 .sc-fix .sc-fixk { color: var(--teal); font-weight: 700; flex-shrink: 0; }
 
-/* ── protections ──────────────────────────────────────────────────────────── */
-
 .sc-shield { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
 .sc-shield-tracked { margin-left: 14px; }
 
-/* The chain a row's entities live on — same quiet line the possible-deductions
-   table already prints (.scz-chain). */
 .sc-chain { font-size: 11px; color: var(--faint); margin-top: 2px; }
 
 .sc-shield-v {
@@ -593,8 +534,6 @@ h2.sc-band-title {
 .sc-fact-line { margin-top: 6px; font-size: 11.5px; color: var(--faint); }
 .sc-fact-line b { color: var(--muted); }
 
-/* ── confidence channels ──────────────────────────────────────────────────── */
-
 .sc-channel { flex: 1; }
 .sc-channel .sc-row1 { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; }
 .sc-channel .sc-nm { color: var(--ink); font-weight: 600; }
@@ -632,12 +571,9 @@ h2.sc-band-title {
 
 .sc-channel .sc-desc { font-size: 11px; color: var(--faint); margin-top: 6px; line-height: 1.45; }
 
-/* ── confidence zone ──────────────────────────────────────────────────────────
-   Register: the PROVEN half of a question renders solid, exactly as a deduction
-   row does; only the unresolved half carries the quiet/dashed treatment. The
-   amber deduction hue is reserved for what is actually charged, so nothing in
-   this zone wears it except the refusal chip (a warning about the ceiling, not
-   a charge). Sky blue belongs to the pool chips alone. No red anywhere. */
+/* The proven half renders solid like a deduction row; only the unresolved half
+   is quiet/dashed. Amber is reserved for real charges (and the refusal chip);
+   sky blue for pools; no red. */
 
 .scz-zone {
   display: grid;
@@ -661,17 +597,10 @@ h2.sc-band-title {
 .scz-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px 26px; }
 
 .scz-tag {
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
   color: var(--faint);
   border: 1px dashed rgba(148, 163, 184, 0.35);
-  border-radius: 5px;
-  padding: 2px 7px;
   margin-left: 9px;
   vertical-align: 2px;
-  white-space: nowrap;
 }
 
 .scz-intro { margin: 2px 0 12px; }
@@ -706,8 +635,8 @@ h2.sc-band-title {
 }
 
 .scz-trow:hover { background: rgba(148, 163, 184, 0.05); }
-/* The identity line wraps here rather than truncating: this column is half the
-   width of the deductions one, and an ellipsis would eat the controller. */
+/* Wraps rather than truncating; an ellipsis would eat the controller in this
+   narrow column. */
 .scz-trow .sc-who { flex-wrap: wrap; row-gap: 3px; }
 .scz-trow .sc-addr { white-space: normal; }
 
@@ -765,19 +694,11 @@ h2.sc-band-title {
 .scz-unbounded { color: var(--status-warn); font-weight: 700; }
 
 .scz-poolchip {
-  display: inline-flex;
   align-items: baseline;
-  gap: 5px;
   margin-top: 4px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
   color: #7dd3fc;
   background: rgba(56, 189, 248, 0.1);
   border: 1px solid rgba(56, 189, 248, 0.45);
-  border-radius: 6px;
-  padding: 3px 8px;
-  white-space: nowrap;
 }
 
 .scz-ref {

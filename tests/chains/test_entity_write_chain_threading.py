@@ -1,16 +1,12 @@
 """Entity-write chain threading.
 
-Proves that the Contract-row chain and every resolution-spawned child/dependency
-job derive their chain from the job's first-class ``jobs.chain_id`` column (via
-the registry), never the ``request`` JSONB payload. A chainless ``/api/analyze``
-submission historically wrote ``Contract.chain=NULL`` and duplicated against
-``'ethereum'`` stubs because ``NULL ≠ NULL`` defeats ``uq_contract_address_chain``.
+The Contract-row chain and every resolution-spawned child job derive their chain from ``jobs.chain_id``
+(via the registry), never the ``request`` JSONB. A chainless ``/api/analyze`` used to write
+``Contract.chain=NULL`` and duplicate ``'ethereum'`` stubs, since ``NULL ≠ NULL`` defeats
+``uq_contract_address_chain``.
 
-Real-DB tests, because the fix hinges on the SQL-side ``coalesce(chain,'ethereum')``
-dedup predicate — a mocked session can't exercise it. Jobs are created through
-``create_job`` so the ``chain_id`` dual-write is real; the "chain_id set,
-request chainless" case is built by overriding the column directly, exactly the
-state a legacy chainless submission leaves behind after the chain-id backfill.
+Real-DB tests: the fix hinges on the SQL ``coalesce(chain,'ethereum')`` predicate. The "chain_id set, request
+chainless" case overrides the column directly, mimicking a legacy submission after Phase 0 backfill.
 """
 
 from __future__ import annotations
@@ -37,8 +33,7 @@ def _etherscan_result() -> dict:
 
 
 def _patch_discovery(monkeypatch, worker) -> None:
-    """Stub the Etherscan reads + file storage so ``_process_address`` runs
-    against the real DB session without touching the network."""
+    """Stub Etherscan reads + file storage so ``_process_address`` runs on the real DB without network."""
     result = _etherscan_result()
     monkeypatch.setattr("workers.discovery.fetch", lambda _addr, **_kw: result)
     monkeypatch.setattr("workers.discovery._batch_get_creators", lambda addresses, **kw: {})
@@ -134,8 +129,7 @@ def test_base_job_does_not_dedup_explicit_ethereum_row(db_session, monkeypatch):
 
 @requires_postgres
 def test_chain_id_column_beats_chainless_request_payload(db_session, monkeypatch):
-    """The chain comes from ``jobs.chain_id``, not the request payload: a job whose
-    payload lacks a chain but whose column says Base writes a Base contract row."""
+    """Chain comes from ``jobs.chain_id``, not the payload: no payload chain + column=Base writes a Base row."""
     from db.models import Contract
     from db.queue import create_job
     from workers.discovery import DiscoveryWorker
@@ -189,8 +183,7 @@ def test_resolution_child_job_stamped_from_chain_id_not_request(db_session, monk
 
 @requires_postgres
 def test_resolution_child_job_mainnet_chainless_stamps_ethereum(db_session):
-    """A chainless mainnet parent now stamps 'ethereum' onto the child (previously
-    the child was left chain-less, the write-NULL bug this fixes)."""
+    """A chainless mainnet parent stamps 'ethereum' on the child (it was left NULL — the bug this fixes)."""
     from db.models import Job
     from db.queue import create_job
     from workers.resolution_worker import ResolutionWorker

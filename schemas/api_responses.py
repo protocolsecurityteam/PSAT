@@ -1,34 +1,20 @@
-"""Static response shapes for the JSON endpoints in ``routers/``.
+"""Response TypedDicts for ``routers/`` handler return types, checked by pyright only.
 
-Checking-only: these annotate handler RETURN TYPES so pyright verifies what a
-handler builds. They are deliberately NOT wired as FastAPI ``response_model=``
-— that would prune undeclared keys from the wire at runtime, and the SPA reads
-these payloads as-is. FastAPI also INFERS a response model from a bare return
-annotation, so every route annotated with one of these types must pass
-``response_model=None`` in its decorator — without it the framework validates
-and prunes exactly as if the model had been declared.
+Not wired as ``response_model=``, which would prune undeclared keys the SPA reads. FastAPI infers a model from a bare
+return annotation, so every annotated route must pass ``response_model=None``.
 
-Depth is honest, not aspirational: a field is typed only as precisely as the
-producing code proves. Interior payloads assembled dynamically elsewhere stay
-``dict[str, Any]``; a wrong deep shape would be worse than an absent one.
+Fields are typed only as precisely as the producer proves; dynamic interiors stay ``dict[str, Any]``.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-# typing_extensions (not typing): pydantic refuses typing.TypedDict on
-# Python < 3.12, and FastAPI feeds these to pydantic when building docs.
+# pydantic refuses typing.TypedDict below 3.12, and FastAPI feeds these to pydantic for docs.
 from typing_extensions import NotRequired, TypedDict
-
-# ---------------------------------------------------------------------------
-# Jobs (db.models.Job.to_dict)
-# ---------------------------------------------------------------------------
 
 
 class JobDict(TypedDict):
-    """Serialized Job row — the shape of ``Job.to_dict()``."""
-
     job_id: str
     address: str | None
     company: str | None
@@ -76,11 +62,6 @@ class JobStageTimingsResponse(TypedDict):
     stage_timings: dict[str, Any]
 
 
-# ---------------------------------------------------------------------------
-# Company overview + sub-payloads (routers/company.py)
-# ---------------------------------------------------------------------------
-
-
 class TvlSummary(TypedDict):
     holdings_observed_at: str | None
     holdings_partial: bool | None
@@ -97,14 +78,13 @@ class ReachBlock(TypedDict):
 
 
 class CompanyOverviewResponse(TypedDict):
-    """Top level of ``assemble_company_payload``. The four governance lists are
-    dynamic aggregations (``GovernanceView``) and stay untyped inside."""
+    """The four governance lists are dynamic and stay untyped."""
 
     company: str
     protocol_id: int | None
     contract_count: int
-    tvl: TvlSummary | None
-    analysis_pending_balance_effects: dict[str, int]
+    tvl: NotRequired[TvlSummary | None]
+    analysis_pending_balance_effects: NotRequired[dict[str, int]]
     contracts: list[dict[str, Any]]
     principals: list[dict[str, Any]]
     ownership_hierarchy: list[dict[str, Any]]
@@ -122,9 +102,7 @@ class CompanyFunctionsResponse(TypedDict):
 
 
 class CompanyScoreResponse(TypedDict):
-    """Score-ledger passthrough: the ``grade_*``/finding fields come verbatim
-    from the persisted score document and are consumed by branching on
-    ``grade_state``/``perimeter_state`` — no shape promise beyond presence."""
+    """Score-document passthrough; consumers branch on ``grade_state``/``perimeter_state``."""
 
     company: str
     protocol_id: int
@@ -146,14 +124,7 @@ class CompanyScoreResponse(TypedDict):
     provenance: Any
 
 
-# ---------------------------------------------------------------------------
-# Audits (services/audits/serializers + routers/audits.py, routers/company.py)
-# ---------------------------------------------------------------------------
-
-
 class AuditReportDict(TypedDict):
-    """Serialized AuditReport row — the shape of ``_audit_report_to_dict``."""
-
     id: int
     url: str
     pdf_url: str | None
@@ -177,9 +148,9 @@ class AuditReportDict(TypedDict):
 
 
 class AuditBrief(TypedDict):
-    """Compact audit dict from ``_audit_brief``. The match keys appear
-    together iff a coverage row was supplied; the ``coverage_source`` trio is
-    stamped only on inherited rows (routers/company.py)."""
+    """Match keys appear together iff a coverage row was supplied; the ``coverage_source`` trio only on inherited
+    rows.
+    """
 
     audit_id: int
     auditor: str
@@ -197,8 +168,7 @@ class AuditBrief(TypedDict):
     coverage_source: NotRequired[str]
     inherited_from_protocol: NotRequired[str | None]
     inherited_contract_address: NotRequired[str | None]
-    # Stamped only by the contract-audit-timeline aggregation
-    # (services/aggregations/contract_audit_timeline.py).
+    # Only from services/aggregations/contract_audit_timeline.py.
     impl_address: NotRequired[str | None]
     bytecode_keccak_at_match: NotRequired[str | None]
     bytecode_keccak_now: NotRequired[str | None]
@@ -258,14 +228,8 @@ class DeleteAuditResponse(TypedDict):
     deleted: bool
 
 
-# ---------------------------------------------------------------------------
-# Monitoring (routers/monitored.py, routers/protocols.py)
-# ---------------------------------------------------------------------------
-
-
 class MonitoredContractItem(TypedDict):
-    """The one MonitoredContract row serialization — ``monitored_contract_payload``
-    in routers/monitored.py, shared by the protocols listing."""
+    """Shared by routers/monitored.py and the protocols listing."""
 
     id: str
     address: str
@@ -336,17 +300,11 @@ class ProtocolTvlResponse(TypedDict):
     history: list[TvlPoint]
 
 
-# ---------------------------------------------------------------------------
-# Fleet / stats (routers/fleet.py, routers/meta.py)
-# ---------------------------------------------------------------------------
-
-
 class FleetStatusResponse(TypedDict):
-    """Top level of ``build_fleet_status``; the per-process entries are
-    heterogeneous operator telemetry and stay untyped inside."""
+    """Per-process entries are heterogeneous and stay untyped."""
 
     now: str
-    # Status-name -> count, plus one nested "by_stage" breakdown dict.
+    # Status -> count, plus a nested "by_stage" dict.
     jobs: dict[str, Any]
     daemons: list[dict[str, Any]]
     watchers: dict[str, Any]
@@ -359,16 +317,8 @@ class PipelineStatsResponse(TypedDict):
     failed_jobs: int
 
 
-# ---------------------------------------------------------------------------
-# Analyses listing (routers/analyses.py)
-# ---------------------------------------------------------------------------
-
-
 class AnalysisListEntry(TypedDict):
-    """One row of ``/api/analyses`` after the proxy/impl merge.
-
-    ``display_name`` is stamped by ``_merge_proxy_impl_entries`` on every
-    entry; the ``proxy_*_display`` pair only on merged proxy rows."""
+    """``display_name`` on every entry; ``proxy_*_display`` only on merged proxy rows."""
 
     run_name: str
     job_id: str
@@ -386,11 +336,6 @@ class AnalysisListEntry(TypedDict):
     display_name: NotRequired[str]
     proxy_address_display: NotRequired[str | None]
     proxy_type_display: NotRequired[str | None]
-
-
-# ---------------------------------------------------------------------------
-# Address labels (routers/address_labels.py)
-# ---------------------------------------------------------------------------
 
 
 class AddressLabelView(TypedDict):
@@ -416,11 +361,6 @@ class AddressLabelDeleteResponse(TypedDict):
     address: str
     chain: str | None
     deleted: bool
-
-
-# ---------------------------------------------------------------------------
-# Agent sidebar (routers/agent.py)
-# ---------------------------------------------------------------------------
 
 
 class AddressTouch(TypedDict):

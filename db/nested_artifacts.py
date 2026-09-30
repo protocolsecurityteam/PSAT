@@ -1,24 +1,8 @@
-"""DB-bridge contract for per-sub-contract artifact bundles.
+"""Artifact naming for per-sub-contract bundles from recursive resolution.
 
-The resolution stage emits one ``LoadedArtifacts`` bundle per nested
-sub-contract discovered during recursive control-graph resolution. The
-runtime-state slices (``snapshot``, ``effective_permissions``) are
-persisted as ``artifacts`` rows keyed ``recursive.<address>.<kind>`` so
-the policy stage can look them up without another on-chain roundtrip.
-
-The static slices (``analysis``, ``tracking_plan``) used to live here
-too but they're a pure function of bytecode and now live in the
-cross-job ``contract_materializations`` table. Policy hydrates them
-per-address from there so a re-run of an already-analysed protocol
-skips the storage write entirely.
-
-Separator is ``.`` (not ``:``) because ``db.storage._safe_name`` only
-allows ``[A-Za-z0-9._-]`` in artifact names destined for S3-compatible
-object storage. Hex addresses and snake_case kind values are unambiguous
-under a dot-split.
-
-Both workers share this module so the naming convention and the
-set of kinds have a single source of truth.
+Runtime slices (``snapshot``, ``effective_permissions``) are stored as ``recursive.<address>.<kind>`` artifacts for the
+policy stage. Static slices live in ``contract_materializations`` instead. ``.`` rather than ``:`` because
+``db.storage._safe_name`` only allows ``[A-Za-z0-9._-]``. Shared by both workers as the single source of truth.
 """
 
 from __future__ import annotations
@@ -37,12 +21,11 @@ KEY_PREFIX = "recursive"
 
 
 def artifact_key(address: str, kind: str) -> str:
-    """Build the deterministic artifact key for a nested sub-contract bundle."""
     return f"{KEY_PREFIX}.{address.lower()}.{kind}"
 
 
 def parse_key(name: str) -> tuple[str, str] | None:
-    """Inverse of ``artifact_key``. Returns ``(address, kind)`` or ``None``."""
+    """Inverse of ``artifact_key``: ``(address, kind)`` or ``None``."""
     if not name.startswith(f"{KEY_PREFIX}."):
         return None
     parts = name.split(".", 2)
@@ -53,11 +36,8 @@ def parse_key(name: str) -> tuple[str, str] | None:
 
 
 def store_bundle(session: Session, job_id: Any, nested: Mapping[str, Mapping[str, Any]]) -> None:
-    """Persist a map of per-address ``LoadedArtifacts`` bundles as DB artifacts.
-
-    Logs a warning when an expected kind is missing (for example,
-    ``effective_permissions`` is ``None`` when the sub-contract build failed)
-    so absent authority enrichment is traceable at the policy stage.
+    """Persist per-address ``LoadedArtifacts`` bundles as artifacts, warning when an expected kind is missing so
+    absent authority enrichment is traceable.
     """
     for address, bundle in nested.items():
         for kind in ARTIFACT_KINDS:

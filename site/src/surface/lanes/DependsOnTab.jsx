@@ -1,23 +1,14 @@
-import { useEffect, useMemo, useState } from "react";
-
+import { useMemo } from "react";
+import { useResource } from "../../shared/useResource.js";
 import { blockExplorerAddressUrl, blockExplorerName } from "../blockExplorer.js";
-import { fnChipClass, shortAddr } from "../format.js";
-import { GotoArrow } from "../GotoArrow.jsx";
+import { fnChipClass } from "../format.js";
 import { buildDependencyView, fetchDependencyGraphViz } from "../layout/dependencies.js";
+import { EntityRef } from "../EntityRef.jsx";
 
-// The "Depends on" tab: the selected contract's outbound call surface. External
-// integrations (off-canvas — the trust surface shown nowhere else) sit up top
-// as elevated cards; internal calls collapse to one row per sibling contract.
-//
-// Interaction mirrors the rest of the card (same peek/commit split as Governs
-// rows): clicking a name previews the contract on the canvas, the → commits to
-// its card, and the count toggle expands the function chips. External rows are
-// off-canvas so they have neither a node nor a card — their only action is the
-// block explorer.
-//
-// Function chips reuse .ps-ctrl-fnchip + fnChipClass verbatim, so their size,
-// font, and semantic tint match the Governs tab exactly; the read/write/
-// delegatecall distinction is carried by the colored verb label, not the chip.
+// The selected contract's outbound calls: external integrations (the trust
+// surface shown nowhere else) as cards, internal calls one row per sibling.
+// Name previews, → commits, the count expands chips. Chips reuse the Governs
+// styling; the verb label carries read/write/delegatecall.
 
 const VERB_TONES = {
   writes: "#d6bd8c",
@@ -68,10 +59,8 @@ function countSummary(row) {
   return parts.join(" · ");
 }
 
-// Off-canvas dependency: no node to preview, no card to open, so the address
-// and the trailing affordance both link to the block explorer. Dep-graph nodes
-// carry no chain, so fall back to the selected contract's chain — an external
-// integration is reached in the same transaction, hence the same chain.
+// Off-canvas: only the block explorer. Dep-graph nodes carry no chain; an
+// external integration is on the selected contract's chain.
 function ExternalCard({ row, chain }) {
   const explorerChain = row.chain || chain;
   const url = blockExplorerAddressUrl(row.explorerAddress, explorerChain);
@@ -81,7 +70,7 @@ function ExternalCard({ row, chain }) {
       <div className="ps-depends-ext-top">
         <span className="ps-depends-ext-dot" />
         <span className="ps-depends-ext-name">{row.name}</span>
-        <span className="ps-depends-ext-tag">{isLib ? "library" : "off-protocol"}</span>
+        <span className="tag ps-depends-ext-tag">{isLib ? "library" : "off-protocol"}</span>
         <span className="ps-depends-spacer" />
         <a className="ps-depends-explorer" href={url} target="_blank" rel="noreferrer">{blockExplorerName(explorerChain)} ↗</a>
       </div>
@@ -94,81 +83,29 @@ function ExternalCard({ row, chain }) {
   );
 }
 
-// On-canvas dependency: collapsed by default. Body (name+addr) previews on the
-// canvas; the count toggle expands the chips; the → commits to its card.
 function InternalRow({ row, onPreview, onNavigate }) {
-  const [open, setOpen] = useState(false);
-  const preview = () => onPreview && onPreview(row.onCanvasAddress);
   return (
-    <div className={`ps-depends-row${open ? " open" : ""}`}>
-      <div className="ps-depends-head">
-        <span
-          className="ps-depends-preview"
-          role="button"
-          tabIndex={0}
-          onClick={preview}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              preview();
-            }
-          }}
-        >
-          <span className="ps-depends-name">{row.name}</span>
-          <span className="ps-depends-addr">{shortAddr(row.onCanvasAddress)}</span>
-        </span>
-        <button
-          type="button"
-          className="ps-depends-toggle"
-          aria-expanded={open}
-          onClick={(e) => {
-            e.stopPropagation();
-            setOpen((v) => !v);
-          }}
-        >
-          {countSummary(row)}
-          <span className="ps-depends-caret">{open ? "▾" : "▸"}</span>
-        </button>
-        {onNavigate && (
-          <GotoArrow
-            onCommit={() => onNavigate({ type: "contract", address: row.onCanvasAddress, label: row.name })}
-            label={`Go to ${row.name}`}
-          />
-        )}
-      </div>
-      {open && (
-        <div className="ps-depends-body">
-          <VerbLines row={row} />
-        </div>
-      )}
-    </div>
+    <EntityRef
+      address={row.onCanvasAddress}
+      name={row.name}
+      summary={countSummary(row)}
+      onPreview={onPreview}
+      onNavigate={onNavigate}
+    >
+      <VerbLines row={row} />
+    </EntityRef>
   );
 }
 
 export function DependsOnTab({ machine, machines, onPreview, onNavigate }) {
-  const [graphState, setGraphState] = useState({ loading: true, error: null, graph: null });
-
-  useEffect(() => {
-    let cancelled = false;
-    setGraphState({ loading: true, error: null, graph: null });
-    fetchDependencyGraphViz(machine)
-      .then((graph) => {
-        if (!cancelled) setGraphState({ loading: false, error: null, graph });
-      })
-      .catch((e) => {
-        if (!cancelled) setGraphState({ loading: false, error: e?.message || String(e), graph: null });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [machine]);
+  const graphState = useResource(() => fetchDependencyGraphViz(machine), [machine]);
 
   const view = useMemo(
     () =>
-      graphState.graph
-        ? buildDependencyView(graphState.graph, { machines, targetAddress: machine?.address })
+      graphState.data
+        ? buildDependencyView(graphState.data, { machines, targetAddress: machine?.address })
         : null,
-    [graphState.graph, machines, machine],
+    [graphState.data, machines, machine],
   );
 
   if (graphState.loading) return <div className="ps-lane-empty">Loading dependencies…</div>;

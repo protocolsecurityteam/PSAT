@@ -1,37 +1,17 @@
-"""Pure-logic tests for the audit report discovery module.
-
-The orchestrator — ``search_audit_reports`` and the LLM classify/extract
-helpers — is exercised end-to-end in ``test_audit_discovery_integration.py``
-against real HTTP fixtures via the ``responses`` library. That test is the
-source of truth for the discovery pipeline's behaviour.
-
-What lives here is everything that is *pure* (no HTTP, no LLM, no DB):
-    - JSON parsing helpers tolerant of markdown fences / surrounding text
-    - ``merge_audit_reports`` append-only dedup + richness selection
-    - filename date-extraction regex
-    - audit folder-name allowlist
-    - single-org auto-hop policy check
-    - cross-source filename dedup
-    - provenance field plumbing
-    - branch → commit SHA cache
-
-Any test that would need mocks for Tavily / LLM / GitHub / Solodit belongs
-in the integration test, not here.
+"""Pure-logic tests for audit report discovery (no HTTP, LLM or DB): JSON parsing helpers, ``merge_audit_reports``
+dedup/richness, filename date regex, folder-name allowlist, auto-hop policy, cross-source filename dedup,
+provenance plumbing, branch->commit SHA cache. Anything needing Tavily/LLM/GitHub/Solodit mocks belongs in
+``test_audit_discovery_integration.py``, the source of truth for the pipeline.
 """
 
 from __future__ import annotations
 
 import time
-from types import SimpleNamespace
 
 import pytest
 
 from services.discovery.audit_reports import merge_audit_reports
 from services.discovery.audit_reports_llm import _parse_json_array, _parse_json_object
-
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
 
 
 def _report(
@@ -59,36 +39,32 @@ def _report(
 # ---------------------------------------------------------------------------
 
 
+_ARRAY = [{"a": 1}]
+_OBJECT = {"a": 1}
+
+
 class TestJsonParsing:
-    def test_parse_array_clean(self):
-        assert _parse_json_array('[{"a": 1}]') == [{"a": 1}]
-
-    def test_parse_array_with_markdown_fences(self):
-        assert _parse_json_array('```json\n[{"a": 1}]\n```') == [{"a": 1}]
-
-    def test_parse_array_with_surrounding_text(self):
-        assert _parse_json_array('Here is the result: [{"a": 1}] Done.') == [{"a": 1}]
-
-    def test_parse_array_garbage_returns_none(self):
-        assert _parse_json_array("not json at all") is None
-
-    def test_parse_array_empty(self):
-        assert _parse_json_array("[]") == []
-
-    def test_parse_object_clean(self):
-        assert _parse_json_object('{"a": 1}') == {"a": 1}
-
-    def test_parse_object_with_markdown_fences(self):
-        assert _parse_json_object('```json\n{"a": 1}\n```') == {"a": 1}
-
-    def test_parse_object_with_surrounding_text(self):
-        assert _parse_json_object('Here is the result: {"a": 1} Done.') == {"a": 1}
-
-    def test_parse_object_garbage_returns_none(self):
-        assert _parse_json_object("not json") is None
-
-    def test_parse_object_empty(self):
-        assert _parse_json_object("{}") == {}
+    @pytest.mark.parametrize(
+        "parse, text, expected",
+        [
+            pytest.param(_parse_json_array, '[{"a": 1}]', _ARRAY, id="array-clean"),
+            pytest.param(_parse_json_array, '```json\n[{"a": 1}]\n```', _ARRAY, id="array-markdown-fences"),
+            pytest.param(
+                _parse_json_array, 'Here is the result: [{"a": 1}] Done.', _ARRAY, id="array-surrounding-text"
+            ),
+            pytest.param(_parse_json_array, "not json at all", None, id="array-garbage-returns-none"),
+            pytest.param(_parse_json_array, "[]", [], id="array-empty"),
+            pytest.param(_parse_json_object, '{"a": 1}', _OBJECT, id="object-clean"),
+            pytest.param(_parse_json_object, '```json\n{"a": 1}\n```', _OBJECT, id="object-markdown-fences"),
+            pytest.param(
+                _parse_json_object, 'Here is the result: {"a": 1} Done.', _OBJECT, id="object-surrounding-text"
+            ),
+            pytest.param(_parse_json_object, "not json", None, id="object-garbage-returns-none"),
+            pytest.param(_parse_json_object, "{}", {}, id="object-empty"),
+        ],
+    )
+    def test_parse_json(self, parse, text, expected):
+        assert parse(text) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -104,53 +80,39 @@ class TestMergeAuditReports:
         urls = {r["url"] for r in merged["reports"]}
         assert urls == {"https://a.com/old", "https://b.com/new"}
 
-    def test_richer_entry_wins_on_overlap(self):
+    @pytest.mark.parametrize("prev_is_richer", [True, False], ids=["prev-richer-beats-new", "new-richer-beats-prev"])
+    def test_richer_entry_wins_on_overlap(self, prev_is_richer):
         sparse = _report(url="https://a.com/report", pdf_url=None, date=None)
         rich = _report(
             url="https://a.com/report",
             pdf_url="https://a.com/report.pdf",
             date="2023-06-15",
         )
+        prev, new = (rich, sparse) if prev_is_richer else (sparse, rich)
         merged = merge_audit_reports(
-            {"company": "X", "reports": [sparse]},
-            {"company": "X", "reports": [rich]},
+            {"company": "X", "reports": [prev]},
+            {"company": "X", "reports": [new]},
         )
         assert len(merged["reports"]) == 1
         assert merged["reports"][0]["pdf_url"] == "https://a.com/report.pdf"
+        assert merged["reports"][0]["date"] == "2023-06-15"
 
-    def test_prev_richer_beats_new(self):
-        rich = _report(
-            url="https://a.com/report",
-            pdf_url="https://a.com/report.pdf",
-            date="2023-01-01",
-        )
-        sparse = _report(url="https://a.com/report", pdf_url=None, date=None)
+    @pytest.mark.parametrize(
+        "prev_reports, new_reports, expected_count",
+        [
+            pytest.param([], [_report()], 1, id="empty-prev-returns-new"),
+            pytest.param([_report()], [], 1, id="empty-new-keeps-prev"),
+            pytest.param([], [], 0, id="both-empty"),
+        ],
+    )
+    def test_empty_side_merges(self, prev_reports, new_reports, expected_count):
         merged = merge_audit_reports(
-            {"company": "X", "reports": [rich]},
-            {"company": "X", "reports": [sparse]},
+            {"company": "X", "reports": prev_reports},
+            {"company": "X", "reports": new_reports},
         )
-        assert merged["reports"][0]["pdf_url"] == "https://a.com/report.pdf"
-        assert merged["reports"][0]["date"] == "2023-01-01"
-
-    def test_empty_prev_returns_new(self):
-        new = {"company": "X", "reports": [_report()]}
-        merged = merge_audit_reports({"company": "X", "reports": []}, new)
-        assert len(merged["reports"]) == 1
-
-    def test_empty_new_keeps_prev(self):
-        prev = {"company": "X", "reports": [_report()]}
-        merged = merge_audit_reports(prev, {"company": "X", "reports": []})
-        assert len(merged["reports"]) == 1
-
-    def test_both_empty(self):
-        merged = merge_audit_reports(
-            {"company": "X", "reports": []},
-            {"company": "X", "reports": []},
-        )
-        assert merged["reports"] == []
+        assert len(merged["reports"]) == expected_count
 
     def test_url_normalization_dedup(self):
-        """Trailing slashes and case differences treated as the same URL."""
         r1 = _report(url="https://Example.com/Audit/")
         r2 = _report(url="https://example.com/Audit", title="Updated Title")
         merged = merge_audit_reports(
@@ -184,7 +146,6 @@ class TestFilenameDateExtraction:
             ("20241109-scroll-native-minting.md", "2024-11-09"),
             ("2024-06_audit.pdf", "2024-06"),
             ("Audit-2023.pdf", "2023"),
-            # URL-encoded
             ("2025.10.20%20-%20WeETH%20withdrawal%20adapter.pdf", "2025-10-20"),
             # Invalid month → falls through to year-only
             ("2024-13-01.pdf", "2024"),
@@ -230,77 +191,65 @@ class TestFilenameDateExtraction:
 
 
 class TestGithubBlobToRaw:
-    def test_converts_blob_url_to_raw(self):
+    @pytest.mark.parametrize(
+        "src, expected",
+        [
+            pytest.param(
+                "https://github.com/a/b/blob/main/foo.md",
+                "https://raw.githubusercontent.com/a/b/main/foo.md",
+                id="converts-blob-url-to-raw",
+            ),
+            # Audit filenames often contain spaces encoded as %20; they must
+            # survive verbatim (no double-encode, no decode).
+            pytest.param(
+                "https://github.com/etherfi-protocol/smart-contracts/blob/master/audits/2023.12.20%20-%20Hats%20Finance.md",
+                "https://raw.githubusercontent.com/etherfi-protocol/smart-contracts/master/audits/2023.12.20%20-%20Hats%20Finance.md",
+                id="preserves-url-encoded-characters",
+            ),
+            pytest.param(
+                "https://example.com/foo/bar.md", "https://example.com/foo/bar.md", id="non-github-passes-through"
+            ),
+            pytest.param(
+                "https://raw.githubusercontent.com/a/b/main/foo.md",
+                "https://raw.githubusercontent.com/a/b/main/foo.md",
+                id="already-raw-passes-through",
+            ),
+            pytest.param(
+                "https://github.com/a/b/tree/main/audits",
+                "https://github.com/a/b/tree/main/audits",
+                id="tree-url-passes-through",
+            ),
+        ],
+    )
+    def test_github_blob_to_raw(self, src, expected):
         from services.discovery.audit_reports import github_blob_to_raw
 
-        assert (
-            github_blob_to_raw("https://github.com/a/b/blob/main/foo.md")
-            == "https://raw.githubusercontent.com/a/b/main/foo.md"
-        )
-
-    def test_preserves_url_encoded_characters(self):
-        """Audit filenames often contain spaces encoded as %20 — those must
-        survive the conversion verbatim (don't double-encode, don't decode)."""
-        from services.discovery.audit_reports import github_blob_to_raw
-
-        src = (
-            "https://github.com/etherfi-protocol/smart-contracts/blob/master/audits/2023.12.20%20-%20Hats%20Finance.md"
-        )
-        expected = "https://raw.githubusercontent.com/etherfi-protocol/smart-contracts/master/audits/2023.12.20%20-%20Hats%20Finance.md"
         assert github_blob_to_raw(src) == expected
-
-    def test_non_github_url_passes_through(self):
-        from services.discovery.audit_reports import github_blob_to_raw
-
-        assert github_blob_to_raw("https://example.com/foo/bar.md") == "https://example.com/foo/bar.md"
-
-    def test_already_raw_url_passes_through(self):
-        """Idempotent — applying twice is a no-op."""
-        from services.discovery.audit_reports import github_blob_to_raw
-
-        raw = "https://raw.githubusercontent.com/a/b/main/foo.md"
-        assert github_blob_to_raw(raw) == raw
-
-    def test_github_tree_url_passes_through(self):
-        """``/tree/`` URLs aren't file blobs — leave them alone."""
-        from services.discovery.audit_reports import github_blob_to_raw
-
-        tree = "https://github.com/a/b/tree/main/audits"
-        assert github_blob_to_raw(tree) == tree
 
 
 class TestReportEntryNormalization:
-    def test_build_report_entry_normalizes_github_blob_pdf_urls(self):
-        from services.discovery.audit_reports import _build_report_entry
+    @pytest.mark.parametrize("builder", ["report_entry", "fallback_entry"])
+    def test_builders_normalize_github_blob_pdf_urls(self, builder):
+        from services.discovery.audit_reports import _build_fallback_entry, _build_report_entry
 
         blob = "https://github.com/a/b/blob/main/audits/report.pdf"
-        out = _build_report_entry(
-            {
-                "auditor": "Foo",
-                "title": "Report",
-                "pdf_url": blob,
-            },
-            source_url="https://docs.example.com/audits",
-            confidence=0.9,
-            now_iso="2026-01-01T00:00:00+00:00",
-        )
-
-        assert out["pdf_url"] == "https://raw.githubusercontent.com/a/b/main/audits/report.pdf"
-        assert out["url"] == out["pdf_url"]
-
-    def test_build_fallback_entry_normalizes_github_blob_pdf_urls(self):
-        from services.discovery.audit_reports import _build_fallback_entry
-
-        blob = "https://github.com/a/b/blob/main/audits/report.pdf"
-        out = _build_fallback_entry(
-            blob,
-            {"auditor": "Foo", "title": "Report"},
-            "Acme",
-            [],
-            confidence=0.9,
-            now_iso="2026-01-01T00:00:00+00:00",
-            pdf_url=blob,
-        )
+        if builder == "report_entry":
+            out = _build_report_entry(
+                {"auditor": "Foo", "title": "Report", "pdf_url": blob},
+                source_url="https://docs.example.com/audits",
+                confidence=0.9,
+                now_iso="2026-01-01T00:00:00+00:00",
+            )
+        else:
+            out = _build_fallback_entry(
+                blob,
+                {"auditor": "Foo", "title": "Report"},
+                "Acme",
+                [],
+                confidence=0.9,
+                now_iso="2026-01-01T00:00:00+00:00",
+                pdf_url=blob,
+            )
 
         assert out["pdf_url"] == "https://raw.githubusercontent.com/a/b/main/audits/report.pdf"
         assert out["url"] == out["pdf_url"]
@@ -315,11 +264,8 @@ class TestAutoHopPolicy:
     def test_should_auto_hop_includes_org_kind(self):
         from services.discovery.audit_reports import _should_auto_hop_org
 
-        # Bare org URL whose owner matches company name → hop
         assert _should_auto_hop_org("https://github.com/morpho-org", "Morpho", set())
-        # Same org already enumerated → don't re-hop
         assert not _should_auto_hop_org("https://github.com/morpho-org", "Morpho", {"morpho-org"})
-        # Org name doesn't substring-match company → don't hop
         assert not _should_auto_hop_org("https://github.com/Certora", "Morpho", set())
 
 
@@ -333,7 +279,6 @@ class TestFilenameDedup:
         from services.discovery.audit_reports import _collapse_by_filename
 
         reports = [
-            # Same PDF mirrored on two hosts — should collapse
             {
                 "url": "https://solodit.cyfrin.io/audit.pdf",
                 "pdf_url": "https://s3/audit.pdf",
@@ -348,7 +293,6 @@ class TestFilenameDedup:
                 "title": "Foo Audit longer title",
                 "date": "2024-05-01",
             },
-            # Different filename — standalone
             {
                 "url": "https://github.com/x/y/other.pdf",
                 "pdf_url": "https://github.com/x/y/other.pdf",
@@ -359,12 +303,10 @@ class TestFilenameDedup:
         ]
         out = _collapse_by_filename(reports)
         assert len(out) == 2
-        # Richer entry (longer title) wins
         foo = next(r for r in out if r["auditor"] == "Spearbit")
         assert "longer title" in foo["title"]
 
     def test_different_year_month_stays_separate(self):
-        """Same filename + different dates = different audits (retest)."""
         from services.discovery.audit_reports import _collapse_by_filename
 
         reports = [
@@ -414,41 +356,26 @@ class TestFilenameDedup:
 
 
 class TestProvenanceFields:
-    def test_build_report_entry_passes_source_commit(self):
+    @pytest.mark.parametrize(
+        "provenance",
+        [
+            pytest.param(
+                {"source_commit": "a" * 40, "source_repo": "owner/repo", "source_path": "audits/X.pdf"},
+                id="passes-source-commit",
+            ),
+            pytest.param({}, id="omits-provenance-when-missing"),
+        ],
+    )
+    def test_build_report_entry_provenance(self, provenance):
         from services.discovery.audit_reports import _build_report_entry
 
-        sha = "a" * 40
         out = _build_report_entry(
-            {
-                "auditor": "Foo",
-                "title": "T",
-                "date": "2024-01-01",
-                "pdf_url": "https://x.pdf",
-                "source_commit": sha,
-                "source_repo": "owner/repo",
-                "source_path": "audits/X.pdf",
-            },
+            {"auditor": "Foo", "title": "T", "date": "2024-01-01", "pdf_url": "https://x.pdf", **provenance},
             "https://src/",
             0.9,
             "2024-01-01T00:00:00Z",
         )
-        assert out["source_commit"] == sha
-        assert out["source_repo"] == "owner/repo"
-        assert out["source_path"] == "audits/X.pdf"
-
-    def test_build_report_entry_omits_provenance_when_missing(self):
-        """Non-GitHub sources don't supply a commit SHA — entry stays clean."""
-        from services.discovery.audit_reports import _build_report_entry
-
-        out = _build_report_entry(
-            {"auditor": "Foo", "title": "T", "date": "2024-01-01", "pdf_url": "https://x.pdf"},
-            "https://src/",
-            0.9,
-            "2024-01-01T00:00:00Z",
-        )
-        assert "source_commit" not in out
-        assert "source_repo" not in out
-        assert "source_path" not in out
+        assert {k: out[k] for k in ("source_commit", "source_repo", "source_path") if k in out} == provenance
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +408,6 @@ class TestResolveBranchCommit:
 
         assert ar._resolve_branch_commit("owner", "repo", "main") == sha
         assert call_count["n"] == 1
-        # Second call: cache hit, no extra HTTP.
         assert ar._resolve_branch_commit("owner", "repo", "main") == sha
         assert call_count["n"] == 1
 
@@ -526,12 +452,10 @@ class TestResolveBranchCommit:
 
         assert _github._resolve_branch_commit("owner", "repo", "main") is None
         assert ("owner", "repo", "main") not in _github._BRANCH_SHA_CACHE
-        # Retry resolves and now caches.
         assert _github._resolve_branch_commit("owner", "repo", "main") == sha
         assert state["n"] == 2
 
     def test_expired_entry_reprobes(self, monkeypatch):
-        """An entry older than the TTL is dropped and the HEAD re-fetched."""
         from services.discovery.audit_reports import _github
 
         _github.clear_branch_sha_cache()
@@ -560,7 +484,6 @@ class TestResolveBranchCommit:
         assert _github._BRANCH_SHA_CACHE[key][0] == fresh
 
     def test_eviction_bounds_at_max(self, monkeypatch):
-        """Distinct repos past the cap evict, keeping the cache size-bounded."""
         from services.discovery.audit_reports import _github
 
         _github.clear_branch_sha_cache()
@@ -581,60 +504,5 @@ class TestResolveBranchCommit:
             _github._resolve_branch_commit("owner", f"repo{i}", "main")
         assert len(_github._BRANCH_SHA_CACHE) <= _github._BRANCH_SHA_CACHE_MAX
 
-    def test_clear_resets_pressure_state(self, monkeypatch):
-        """clear_branch_sha_cache empties the dict and forgets pressure state."""
-        from services.discovery.audit_reports import _github
-        from utils import memory
-
-        _github.clear_branch_sha_cache()
-        monkeypatch.setattr(_github, "_BRANCH_SHA_CACHE_MAX", 4)
-
-        def fake_get(url, **kwargs):
-            class R:
-                status_code = 200
-
-                def json(self):
-                    return {"object": {"sha": "a" * 40}}
-
-            return R()
-
-        monkeypatch.setattr(_github._requests, "get", fake_get)
-
-        for i in range(8):
-            _github._resolve_branch_commit("owner", f"repo{i}", "main")
-        assert "branch_sha" in memory._CACHE_PRESSURE_STATE
-
-        _github.clear_branch_sha_cache()
-        assert _github._BRANCH_SHA_CACHE == {}
-        assert "branch_sha" not in memory._CACHE_PRESSURE_STATE
-
 
 # ── audit serializer error fields ────────────────────────────────────────────
-
-
-def test_audit_serializer_includes_extraction_errors():
-    from services.audits.serializers import _audit_report_to_dict
-
-    ar = SimpleNamespace(
-        id=1,
-        url="u",
-        pdf_url=None,
-        auditor="a",
-        title="t",
-        date="2026-01-01",
-        confidence=None,
-        text_extraction_status="failed",
-        text_extracted_at=None,
-        text_size_bytes=None,
-        text_extraction_error="boom-text",
-        scope_extraction_status=None,
-        scope_extracted_at=None,
-        scope_contracts=None,
-        scope_extraction_error="boom-scope",
-        reviewed_commits=None,
-        classified_commits=None,
-        referenced_repos=None,
-    )
-    out = _audit_report_to_dict(ar)
-    assert out["text_extraction_error"] == "boom-text"
-    assert out["scope_extraction_error"] == "boom-scope"

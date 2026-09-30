@@ -1,12 +1,6 @@
-"""Download audit PDFs, extract text, store it in object storage.
+"""Download audit PDFs/text, extract, store in object storage.
 
-I/O-only at this layer — orchestration (claiming rows, DB state, rate
-limiting) lives in ``workers.audit_text_extraction``. Importable and
-testable without DB or S3.
-
-``process_audit_report`` chains ``download_audit_body`` → extract (pypdf
-for PDFs, UTF-8 decode for markdown/text) → ``store_audit_text`` and
-returns an ``ExtractionOutcome`` the worker persists.
+I/O only; orchestration is in ``workers.audit_text_extraction``.
 """
 
 from __future__ import annotations
@@ -28,17 +22,13 @@ from utils.github_urls import github_blob_to_raw
 
 logger = logging.getLogger(__name__)
 
-# Size cap: >50MB is almost always a scanned-image dump anyway, plus OOM
-# protection against hostile hosts. Under-500-char extracts get marked
-# ``skipped`` as image-only PDFs (OCR is out of scope).
+# >50MB is almost always scanned images; also OOM protection.
 _MAX_PDF_BYTES: Final[int] = 50 * 1024 * 1024
 _CONNECT_TIMEOUT: Final[float] = 10.0
 _READ_TIMEOUT: Final[float] = 60.0
 _MIN_USEFUL_TEXT_LENGTH: Final[int] = 500
 
-# CDNs often serve PDFs as ``application/octet-stream`` — accept those too.
-# Non-matching content-types short-circuit so we don't parse HTML error
-# pages as PDFs.
+# CDNs often serve PDFs as octet-stream. Anything else is likely an HTML error page.
 _ACCEPTED_CONTENT_TYPES: Final[frozenset[str]] = frozenset(
     {
         "application/pdf",
@@ -48,10 +38,7 @@ _ACCEPTED_CONTENT_TYPES: Final[frozenset[str]] = frozenset(
     }
 )
 
-# Plain-text / markdown audit reports. raw.githubusercontent.com serves
-# markdown as ``text/plain``; other hosts use ``text/markdown`` or
-# ``text/x-markdown``. ``text/html`` is deliberately excluded — GitHub's
-# /blob/ URLs return HTML code-view pages, not the raw file body.
+# ``text/html`` excluded: GitHub /blob/ URLs return code-view pages.
 _ACCEPTED_TEXT_CONTENT_TYPES: Final[frozenset[str]] = frozenset(
     {
         "text/plain",
@@ -61,66 +48,41 @@ _ACCEPTED_TEXT_CONTENT_TYPES: Final[frozenset[str]] = frozenset(
     }
 )
 
-# File extensions whose URLs route through the plain-text path instead of
-# pypdf. Lowercase-matched against the URL's path component.
 _TEXT_URL_SUFFIXES: Final[tuple[str, ...]] = (".md", ".markdown", ".txt", ".rst")
 
 AUDIT_TEXT_CONTENT_TYPE: Final[str] = "text/plain; charset=utf-8"
 
-# Retry policy for transport-layer flakes. Prod observed bursts of
-# ConnectionResetError(104) from auditor CDNs that turned every batch into a
-# wave of permanent ``failed`` rows; retries absorb the brief upstream
-# windows where every connection RSTs at once. Bounded so a genuinely dead
-# host fails fast rather than wedging the worker.
+# Auditor CDNs RST every connection in brief bursts; bounded so a dead host fails fast.
 _RETRY_ATTEMPTS: Final[int] = 3
 _RETRY_INITIAL_BACKOFF: Final[float] = 0.5
 _RETRY_BACKOFF_CAP: Final[float] = 10.0
-# 408/429 are transient by spec; 5xx is the HTTP analogue of an RST. Other
-# 4xx (404, 403, 410) are terminal — refetching the same URL won't fix them.
+# Other 4xx are terminal.
 _TRANSIENT_HTTP_STATUS: Final[frozenset[int]] = frozenset({408, 429, 500, 502, 503, 504})
 
 
 def _retry_sleep(seconds: float) -> None:
-    """Sleep ``seconds`` with ±50% jitter. Factored out so unit tests can
-    stub the wall-clock wait without monkeypatching the whole ``time``
-    module — tests under ``TestDownloadAuditBodyRetry`` rely on this.
-    """
+    """±50% jitter; separate so tests can stub the wait."""
     time.sleep(random.uniform(seconds * 0.5, seconds * 1.5))
 
 
-# --- Errors ---------------------------------------------------------------
+class TextExtractionError(RuntimeError): ...
 
 
-class TextExtractionError(RuntimeError):
-    """Base class for failures during the download/extract/store flow."""
+class PdfDownloadError(TextExtractionError): ...
 
 
-class PdfDownloadError(TextExtractionError):
-    """HTTP or transport failure fetching the PDF body."""
+class PdfTooLargeError(TextExtractionError): ...
 
 
-class PdfTooLargeError(TextExtractionError):
-    """Server-reported or streamed content exceeded ``_MAX_PDF_BYTES``."""
+class PdfParseError(TextExtractionError): ...
 
 
-class PdfParseError(TextExtractionError):
-    """pypdf could not parse the body (encrypted, corrupted, not a PDF)."""
-
-
-class StorageWriteError(TextExtractionError):
-    """Object storage write failed or storage is not configured."""
-
-
-# --- Result type ----------------------------------------------------------
+class StorageWriteError(TextExtractionError): ...
 
 
 @dataclass(frozen=True)
 class ExtractionOutcome:
-    """Structured result of ``process_audit_report``.
-
-    Exactly one of ``storage_key`` / ``error`` is non-None for a given status.
-    ``status`` mirrors the ``AuditReport.text_extraction_status`` enum strings.
-    """
+    """Exactly one of ``storage_key`` / ``error`` is set."""
 
     status: str  # "success" | "failed" | "skipped"
     storage_key: str | None = None
@@ -129,24 +91,12 @@ class ExtractionOutcome:
     error: str | None = None
 
 
-# --- Storage key ---------------------------------------------------------
-
-
 def audit_text_key(audit_report_id: int) -> str:
-    """Deterministic object-storage key for an audit's extracted text body."""
     return f"audits/text/{int(audit_report_id)}.txt"
 
 
-# --- Download ------------------------------------------------------------
-
-
 def _url_looks_text(url: str) -> bool:
-    """True when the URL's path ends in a markdown/text suffix.
-
-    Keyed off extension, not content-type — the worker decides which
-    download mode to use *before* making the request so the content-type
-    check can reject mismatches (e.g. a .pdf URL returning text/html).
-    """
+    """By extension, decided before the request so content-type can reject mismatches."""
     try:
         path = urlparse(url).path.lower()
     except Exception:
@@ -155,12 +105,7 @@ def _url_looks_text(url: str) -> bool:
 
 
 def _normalize_download_url(url: str) -> str:
-    """Rewrite GitHub blob file links to raw-content URLs.
-
-    Discovery should ideally persist the raw URL, but normalizing here
-    keeps already-stored rows retriable and prevents one bad discovery run
-    from permanently wedging extraction.
-    """
+    """Keeps already-stored blob URLs retriable."""
     return github_blob_to_raw(url)
 
 
@@ -170,31 +115,17 @@ def download_audit_body(
     *,
     kind: Literal["pdf", "text"] = "pdf",
 ) -> bytes:
-    """Fetch an audit body by URL. Streams to memory with a hard size cap.
+    """Fetch an audit body with a hard size cap.
 
-    ``kind="pdf"`` accepts PDF / octet-stream content-types; ``kind="text"``
-    accepts text/plain / text/markdown / text/x-markdown / text/x-rst.
-    ``text/html`` is rejected in both modes — GitHub's ``/blob/`` URLs
-    serve HTML code-view pages, not the raw file body, so landing on HTML
-    in either mode signals a wrong URL was captured at discovery time.
-
-    Raises ``PdfDownloadError`` for network / HTTP failures and
-    ``PdfTooLargeError`` when the body exceeds ``_MAX_PDF_BYTES``.
-
-    Retries transient transport flakes (``ConnectionError``, ``Timeout``)
-    and transient HTTP statuses (408/429/5xx) with jittered exponential
-    backoff. 4xx other than 408/429 and content-type mismatches are fatal
-    — refetching won't change a 404 or a login-wall HTML page.
+    ``text/html`` is rejected in both modes: it means discovery captured a code-view URL. Transient failures retry with
+    backoff; other 4xx and content-type mismatches are fatal.
     """
     backoff = _RETRY_INITIAL_BACKOFF
 
     for attempt in range(_RETRY_ATTEMPTS):
         last_attempt = attempt == _RETRY_ATTEMPTS - 1
         try:
-            # SSRF guard: safe_get re-validates the target and every redirect
-            # hop, so a discovery-sourced URL that 302s to an internal address
-            # is refused rather than followed. Fatal — a bad URL/redirect won't
-            # improve on retry.
+            # SSRF guard re-validates every redirect hop. Fatal: won't improve on retry.
             resp = safe_get(
                 url,
                 timeout=(_CONNECT_TIMEOUT, _READ_TIMEOUT),
@@ -218,12 +149,9 @@ def download_audit_body(
             backoff = min(backoff * 2, _RETRY_BACKOFF_CAP)
             continue
         except requests.RequestException as exc:
-            # SSLError on a bad cert, InvalidURL, MissingSchema — not
-            # transport flakes, retrying won't help. Fail fast.
+            # Not a transport flake; fail fast.
             raise PdfDownloadError(f"fetch error: {exc}") from exc
 
-        # Transient HTTP status: discard the response and back off. We
-        # don't read the body so close immediately to release the conn.
         if resp.status_code in _TRANSIENT_HTTP_STATUS and not last_attempt:
             status = resp.status_code
             resp.close()
@@ -244,14 +172,9 @@ def download_audit_body(
 
             content_type = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
             accepted = _ACCEPTED_TEXT_CONTENT_TYPES if kind == "text" else _ACCEPTED_CONTENT_TYPES
-            # GitHub serves raw PDFs with content-type application/pdf; gitbook
-            # CDNs often use octet-stream. Reject text/html / application/json
-            # etc. — we've been redirected to an error page.
             if content_type and content_type not in accepted:
                 raise PdfDownloadError(f"unexpected content-type {content_type!r}")
 
-            # Server-reported size check — saves us the round trip if we can
-            # tell upfront the body is too big.
             content_length = resp.headers.get("content-length")
             if content_length and content_length.isdigit() and int(content_length) > _MAX_PDF_BYTES:
                 raise PdfTooLargeError(f"Content-Length {content_length} exceeds cap {_MAX_PDF_BYTES}")
@@ -270,49 +193,23 @@ def download_audit_body(
         finally:
             resp.close()
 
-    # Every branch above either returns or raises by ``last_attempt``.
     raise PdfDownloadError("retry budget exhausted")  # pragma: no cover
 
 
 def download_pdf(url: str, session: requests.Session | None = None) -> bytes:
-    """Fetch a PDF by URL. Thin wrapper around ``download_audit_body``.
-
-    Kept so existing callers (CLI dry-run, tests that monkeypatch this
-    symbol) continue to work.
-    """
+    """Kept for callers and tests that monkeypatch this symbol."""
     return download_audit_body(url, session=session, kind="pdf")
 
 
 def download_text(url: str, session: requests.Session | None = None) -> bytes:
-    """Fetch a markdown / plain-text audit body by URL.
-
-    Accepts ``text/plain`` / ``text/markdown`` / ``text/x-markdown`` /
-    ``text/x-rst`` content-types. Rejects ``text/html`` — GitHub ``/blob/``
-    URLs serve the HTML code-view page, not the raw markdown, so landing
-    on HTML means discovery captured the wrong URL.
-    """
     return download_audit_body(url, session=session, kind="text")
 
 
-# --- Extract -------------------------------------------------------------
-
-
 def _extract_link_annotation_uris(page) -> list[str]:
-    """Pull ``/URI`` values out of a page's ``/Link`` annotations.
+    """``/URI`` values from a page's ``/Link`` annotations.
 
-    Modern audit PDFs (Certora V3+) hyperlink the word "commit" instead
-    of spelling SHAs inline — ``page.extract_text()`` only sees the
-    display text ("commit"), losing the URL. Without this pass,
-    ``extract_reviewed_commits`` returns ``[]`` and the whole source-
-    equivalence path stays dark, collapsing audit coverage onto heuristic
-    grace-zone matching.
-
-    Only ``/Subtype == /Link`` annotations with a ``/A/URI`` field are
-    collected — highlights, comments, form fields, etc. are ignored.
-    pypdf's annotation graph is messy in the wild (indirect references,
-    malformed dicts, missing subtypes) so every access is try-wrapped
-    defensively; a broken annotation should degrade to "missed this one
-    URI" not "crashed the whole extractor".
+    Modern PDFs hyperlink the word "commit" instead of printing the SHA, which left source-equivalence dark. Every
+    access is guarded: a broken annotation should lose one URI, not crash the extractor.
     """
     annots = page.get("/Annots")
     if annots is None:
@@ -339,23 +236,14 @@ def _extract_link_annotation_uris(page) -> list[str]:
             if uri_str:
                 uris.append(uri_str)
         except Exception:
-            # Malformed annotation — skip it, keep extracting the rest.
             continue
     return uris
 
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    """Parse a PDF page-by-page with ``\\f\\n--- page {n} ---\\n\\f`` separators.
+    """Parse page-by-page with ``\\f\\n--- page {n} ---\\n\\f`` separators so scope extraction can recover pages.
 
-    Scope extraction uses the markers to recover page boundaries without
-    re-parsing. Empty/short output is the caller's call to skip. Raises
-    ``PdfParseError`` when pypdf rejects the body outright.
-
-    Each page's output is the visible text followed by any URIs from
-    ``/Link`` annotations (one per line, under a ``[links]`` marker).
-    Downstream ``extract_reviewed_commits`` picks commit SHAs straight
-    out of those URL strings — GitHub's ``/commit/<40-hex>`` and
-    ``/pull/*/commits/<40-hex>`` both contain the SHA as plain hex.
+    Each page ends with its link URIs under ``[links]`` so commit SHAs in URLs are picked up.
     """
     try:
         from pypdf import PdfReader
@@ -371,7 +259,7 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
         raise PdfParseError(f"pypdf failed: {exc}") from exc
 
     if getattr(reader, "is_encrypted", False):
-        # Empty-password decrypt covers legacy print-protection PDFs.
+        # Empty-password decrypt covers legacy print-protection.
         try:
             if not reader.decrypt(""):
                 raise PdfParseError("encrypted PDF; no password available")
@@ -383,8 +271,6 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
         try:
             text = page.extract_text() or ""
         except Exception as exc:
-            # Per-page noise: a malformed page yields an empty page, not a job
-            # failure. DEBUG keeps the breadcrumb without flooding the log.
             logger.debug("pypdf page %d extract_text raised: %s", idx, exc)
             text = ""
         link_uris = _extract_link_annotation_uris(page)
@@ -396,18 +282,11 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     return "".join(parts).strip()
 
 
-# --- Store ---------------------------------------------------------------
-
-
 def store_audit_text(
     audit_report_id: int,
     text: str,
 ) -> tuple[str, int, str]:
-    """Upload an audit's extracted text to object storage.
-
-    Returns ``(storage_key, size_bytes, sha256_hex)``. Raises
-    ``StorageWriteError`` if storage isn't configured or the put fails.
-    """
+    """Returns ``(storage_key, size_bytes, sha256_hex)``."""
     client = get_storage_client()
     if client is None:
         raise StorageWriteError("object storage not configured (ARTIFACT_STORAGE_* env vars unset)")
@@ -432,20 +311,12 @@ def store_audit_text(
     return key, len(body), digest
 
 
-# --- Orchestration ---------------------------------------------------------
-
-
 def process_audit_report(
     audit_report_id: int,
     url: str,
     session: requests.Session | None = None,
 ) -> ExtractionOutcome:
-    """Run download → parse → store for one audit. Never raises.
-
-    Typed errors from each stage become ``ExtractionOutcome(status=...)``
-    the worker can persist directly; unexpected exceptions still surface
-    as ``status="failed"`` with the error message captured.
-    """
+    """Download, parse, store for one audit. Never raises; failures become an ``ExtractionOutcome`` status."""
     if not url:
         return ExtractionOutcome(status="failed", error="no URL on audit row")
 
@@ -453,8 +324,7 @@ def process_audit_report(
     is_text_url = _url_looks_text(download_url)
 
     try:
-        # Call the module-level helpers so callers that monkeypatch
-        # ``download_pdf`` (existing unit tests) still hit the mock.
+        # Module-level lookup so tests that monkeypatch ``download_pdf`` hit the mock.
         body = (
             download_text(download_url, session=session) if is_text_url else download_pdf(download_url, session=session)
         )
@@ -463,8 +333,7 @@ def process_audit_report(
     except PdfDownloadError as exc:
         return ExtractionOutcome(status="failed", error=f"download: {exc}")
     except Exception as exc:
-        # pypdf can raise unbounded types on malformed input; don't let one
-        # broken PDF kill the worker loop.
+        # pypdf raises unbounded types on malformed input.
         logger.warning(
             "unexpected download error for %s: %s",
             url,
@@ -474,9 +343,7 @@ def process_audit_report(
         return ExtractionOutcome(status="failed", error=f"download: {exc!r}")
 
     if is_text_url:
-        # Markdown / plain-text reports go straight through — no pypdf.
-        # Bytes → UTF-8 with replacement so a stray non-UTF8 byte in an
-        # otherwise-valid markdown file doesn't wedge the pipeline.
+        # Replacement decoding so one stray byte doesn't wedge the pipeline.
         text = body.decode("utf-8", errors="replace")
     else:
         try:

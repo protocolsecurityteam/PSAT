@@ -1,33 +1,11 @@
 """Persist a resolved control graph to ``control_graph_nodes`` / ``control_graph_edges``.
 
-One writer, two call sites, deliberately the SAME code path:
+One writer for both the resolution stage (the first graph) and the policy stage (the refresh that adds
+``role_principal`` edges once ``effective_permissions`` exists). Before the policy stage wrote tables, those edges and
+some ``controller_value`` edges existed only in the artifact, so table readers (the value closure, Surface, chat,
+enrollment) missed authority structure.
 
-* the **resolution stage** (``workers/resolution_worker``) persists the walk's
-  first graph, and
-* the **policy stage** (``workers/policy_worker``) persists the refreshed graph
-  it rebuilds once ``effective_permissions`` exists — the refresh that projects
-  ``role_principal`` edges into the graph.
-
-Until the second call site existed, the policy refresh rewrote ONLY the
-artifact, so the table plane was a strict subset of the artifact plane: every
-``role_principal`` edge (they need effective_permissions, absent at resolution
-time) lived in the artifact and in ``principal_labels`` but was structurally
-unreachable in ``control_graph_edges`` — while every row still carried the
-walk's ``graph_max_depth``, a completeness assertion the rows did not support.
-The missing rows spanned ``role_principal`` (154) and ``controller_value``
-(87) among others; both are members of ``db.models.CONTROL_EDGE_RELATIONS``,
-so the table plane dropped authority structure from the effects value closure
-(a scorer input) and from every thin-plane consumer (Surface, chat,
-enrollment) that reads the tables instead of the artifact. Measured on the
-PR-161 corpus, the closure's value-at-stake movement rides almost entirely on
-a missing ``controller_value`` edge (RoleRegistry proxy -> WeETH); the
-``role_principal`` rows contribute negligible value but carry the role-holder
-authority structure.
-
-The write is a scoped replace — delete + insert under
-``(contract_id, deployment_scope(deployment_address))`` — so it is idempotent:
-re-running either stage converges on that stage's graph, and the policy-stage
-rewrite touches exactly the rows the resolution stage wrote for the same job.
+A scoped replace under ``(contract_id, deployment_scope(deployment_address))``, so re-running either stage converges.
 """
 
 from __future__ import annotations
@@ -47,10 +25,9 @@ def replace_control_graph_rows(
     deployment_address: str | None,
     resolved_graph: Mapping[str, Any],
 ) -> tuple[int, int]:
-    """Replace the persisted graph rows for one (contract, deployment) with
-    *resolved_graph*'s nodes and edges. Returns ``(nodes, edges)`` written.
+    """Replace the rows for one (contract, deployment) with *resolved_graph*.
 
-    Does not commit; the caller owns the transaction boundary.
+    Returns ``(nodes, edges)``. Doesn't commit.
     """
     session.query(ControlGraphNode).filter(
         ControlGraphNode.contract_id == contract_id,
@@ -76,11 +53,8 @@ def replace_control_graph_rows(
                 contract_name=node.get("contract_name"),
                 depth=node.get("depth"),
                 analyzed=node.get("analyzed", False),
-                # Absent in the graph => NULL, not a guessed value.
                 analysis_state=node.get("analysis_state"),
-                # The walk's horizon, which the row otherwise loses:
-                # without it ``depth`` cannot distinguish "cut off"
-                # from "not attempted for some other reason".
+                # Without the horizon, ``depth`` can't distinguish cut-off from not attempted.
                 graph_max_depth=graph_max_depth,
                 details=node.get("details"),
             )

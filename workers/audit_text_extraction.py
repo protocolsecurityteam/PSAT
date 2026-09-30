@@ -1,19 +1,7 @@
-"""Worker that downloads audit PDFs, extracts text, and stores the result.
+"""Downloads audit PDFs, extracts text, stores it in object storage.
 
-State model on ``audit_reports``:
-
-    NULL            — never attempted. Eligible for claim.
-    "processing"    — a worker holds this row. Gets recovered if stale.
-    "success"       — text is in object storage at ``text_storage_key``.
-    "failed"        — terminal failure; ``text_extraction_error`` has details.
-                      (Manual DB op can reset to NULL to retry.)
-    "skipped"       — image-only PDF, >50MB, or otherwise not extractable.
-
-Shared scaffolding (signal handling, batch claim, stale recovery, thread
-pool, run loop) lives in ``workers.audit_row_worker.AuditRowWorker``.
-This file holds only the text-phase specifics: the eligibility query,
-per-host rate limiting for auditor CDNs, the PDF download + extract
-call, and the result persistence.
+``text_extraction_status``: NULL eligible, processing, success, failed (terminal; reset to NULL manually to retry),
+skipped (image-only, >50MB, not extractable).
 """
 
 from __future__ import annotations
@@ -37,30 +25,20 @@ from workers.audit_row_worker import AuditRowWorker
 logger = logging.getLogger("workers.audit_text_extraction")
 
 
-# --- Tunables (env-overridable for ops) ----------------------------------
-
-# Rows claimed per poll. The thread pool processes all of them in
-# parallel, so keep this in proportion to MAX_CONCURRENT.
 _BATCH_SIZE = int(os.getenv("PSAT_AUDIT_TEXT_BATCH_SIZE", "8"))
 
-# Thread-pool size. pypdf parse is GIL-bounded, but downloads dominate —
-# 8 threads cover ~4 concurrent downloads on average (rest are waiting on
-# DB / storage I/O).
+# pypdf is GIL-bound but downloads dominate.
 _MAX_CONCURRENT = int(os.getenv("PSAT_AUDIT_TEXT_CONCURRENCY", "8"))
 
 _IDLE_POLL_INTERVAL = float(os.getenv("PSAT_AUDIT_TEXT_POLL_INTERVAL", "10.0"))
 
-# Max in-flight requests per host. Most auditor portfolios rate-limit
-# aggressively; GitHub's raw CDN tolerates far more but 3 is plenty for
-# the volume we're doing.
+# Auditor portfolios rate-limit aggressively.
 _PER_HOST_CONCURRENCY = int(os.getenv("PSAT_AUDIT_TEXT_HOST_CONCURRENCY", "3"))
 
 _STALE_PROCESSING_SECONDS = int(os.getenv("PSAT_AUDIT_TEXT_STALE_TIMEOUT", "600"))
 
 
 class AuditTextExtractionWorker(AuditRowWorker):
-    """Drain rows where text extraction has not yet been attempted."""
-
     worker_name = "AuditTextExtraction"
     heartbeat_process = HEARTBEAT_AUDIT_TEXT
     batch_size = _BATCH_SIZE
@@ -72,16 +50,10 @@ class AuditTextExtractionWorker(AuditRowWorker):
 
     def __init__(self) -> None:
         super().__init__()
-        # Per-host semaphores gate concurrent downloads from any one
-        # auditor's CDN — Spearbit / Cantina portfolio pages rate-limit
-        # at a few concurrent requests and will 429 at higher.
+        # Spearbit / Cantina portfolio pages 429 above a few concurrent requests.
         self._host_semaphores: dict[str, threading.Semaphore] = {}
         self._host_semaphores_lock = threading.Lock()
-        # One shared requests.Session so keep-alive connections pay off
-        # across calls to the same host.
         self._http_session = requests.Session()
-
-    # -- Claim predicates -------------------------------------------------
 
     def _pending_rows_query(self) -> Select:
         return (
@@ -113,11 +85,7 @@ class AuditTextExtractionWorker(AuditRowWorker):
             .returning(AuditReport.id)
         )
 
-    # -- Per-host rate limiting ------------------------------------------
-
     def _host_semaphore(self, url: str) -> threading.Semaphore:
-        """Return (and lazily create) the semaphore gating concurrent calls
-        to the URL's host. One semaphore per unique netloc."""
         host = urlparse(url).netloc.lower() or "_unknown"
         with self._host_semaphores_lock:
             sem = self._host_semaphores.get(host)
@@ -126,10 +94,7 @@ class AuditTextExtractionWorker(AuditRowWorker):
                 self._host_semaphores[host] = sem
         return sem
 
-    # -- Per-row work -----------------------------------------------------
-
     def _process_row(self, audit: AuditReport) -> tuple[int, ExtractionOutcome]:
-        """Download + extract for one claimed row; respects per-host limits."""
         url = audit.pdf_url or audit.url
         if not url:
             return audit.id, ExtractionOutcome(status="failed", error="no URL on audit row")
@@ -145,7 +110,6 @@ class AuditTextExtractionWorker(AuditRowWorker):
         return audit.id, outcome
 
     def _persist_outcome(self, audit_id: int, result: ExtractionOutcome) -> None:
-        """Write the extraction outcome back to the row in its own session."""
         now = datetime.now(timezone.utc)
         session = SessionLocal()
         try:

@@ -1,8 +1,4 @@
-"""Postgres-based job queue operations using SELECT ... FOR UPDATE SKIP LOCKED.
-
-Split into submodules; this package re-exports the full former ``db.queue``
-module surface so consumers import from ``db.queue`` unchanged.
-"""
+"""Postgres job queue (SELECT ... FOR UPDATE SKIP LOCKED). Re-exports the former ``db.queue`` surface."""
 
 from __future__ import annotations
 
@@ -56,7 +52,6 @@ from .jobs import (
     heartbeat_job,
     reclaim_stuck_jobs,
     reconcile_impl_job_for_proxy,
-    release_job_lease,
     requeue_job,
     update_job_detail,
 )
@@ -124,7 +119,6 @@ __all__ = [
     "reclaim_stuck_jobs",
     "reconcile_impl_job_for_proxy",
     "record_heartbeat",
-    "release_job_lease",
     "renew_daemon_lease",
     "requeue_job",
     "source_file_key",

@@ -16,11 +16,9 @@ def _gap_reading(
     partial: list[Any],
     ceilings_excluded: list[Any],
 ) -> str:
-    """How to read one gap entry, assembled from the reasons that actually fired.
+    """How to read one gap entry, from the reasons that fired.
 
-    A null exposure and a published one are opposite cases and cannot share a
-    sentence: the first measured nothing, the second measured a MARGINAL share
-    and understates by an amount this accounting can name.
+    Null and published exposure get different sentences: the second is a marginal share that understates.
     """
     parts = [
         (
@@ -70,22 +68,16 @@ def _grade(
     grade_lambda = round(100.0 - min(cumulative, 100.0), 4)
 
     claimed: dict[str, float] = defaultdict(float)
-    # Which findings spent each entity's budget, so a later row that finds it
-    # empty can name them instead of publishing the emptiness as a measurement.
+    # So a later row finding the budget empty can name who spent it.
     claimed_by: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exposure = 0.0
     gaps: list[dict[str, Any]] = []
     any_priced = False
     for finding in findings:
-        # W2c/R9 hook (this dict lookup is the whole change to this function):
-        # The weakest path TO THAT ENTITY wins, so a merged unit charges each
-        # entity at the rung of the members proven to reach it, not at the unit's
-        # weakest member.
+        # Each entity's rung is its weakest path, so charge per-entity rungs, not the unit's weakest.
         per_entity_weakness = finding.get("weakness_by_entity") or {}
         mine = 0.0
-        # Entities this row could actually measure a share of. An entity whose
-        # budget earlier rows already spent is priced and still unmeasurable,
-        # so counting it here is what published the exhaustion as a zero.
+        # Excludes entities whose budget earlier rows spent, so exhaustion isn't published as zero.
         measured_entities = 0
         exhausted: list[dict[str, Any]] = []
         partial: list[dict[str, Any]] = []
@@ -94,79 +86,49 @@ def _grade(
         charged_entities = list(finding["reach_entities"]) + [
             k for k in exclusive if k not in finding["reach_entities"]
         ]
-        # A SHEET ceiling stays out of the exposure numerator entirely. It
-        # is a risk-weighted upper bound on a move nobody witnessed, and charging
-        # it here would do two things at once — inflate exposure_usd off bounds,
-        # and SPEND that entity's budget, which silently displaces a later row
-        # that measured a real extraction at the same entity down to its
-        # marginal share.
-        #
-        # The set is the SHEET half only. A composed extraction ceiling is a
-        # destination function's own witnessed flow, charges the budget today,
-        # and keeps charging: the two are published apart precisely so this loop
-        # can tell them apart.
+        # sheet ceilings stay out of the exposure numerator; charging them would inflate exposure and spend budget
+        # a later real measurement needs. Composed extraction ceilings are witnessed flows and still charge.
         sheet_ceilings = set(finding.get("entities_priced_from_a_sheet_ceiling") or [])
         exclusive_ceilings = set(finding.get("subsumed_exclusive_sheet_ceiling_entities") or [])
         ceilings_excluded: list[str] = []
         for key in charged_entities:
-            # The row's OWN per-entity contribution, not its total: charging the
-            # row total against each entity would multiply one witnessed
-            # magnitude by the number of entities it was spread across.
+            # Per-entity contribution, not the row total, or one magnitude would be multiplied by the entity count.
             held = finding["value_by_entity"].get(key)
-            # An entity only a subsumed row reaches is charged at THAT row's
-            # fraction, never at this one's.
+            # Charged at the subsumed row's fraction.
             key_fraction = finding["severity_proven"] * per_entity_weakness.get(key, finding["weakness"])
             excluded = False
             if key in sheet_ceilings:
-                # This row's own figure here is a proven upper bound on a
-                # move nobody witnessed. It charges nothing — which is not the
-                # same as the entity being unmeasurable, so the fall-through to a
-                # subsumed row's WITNESSED figure below still runs.
+                # this row's own figure is a sheet ceiling and charges nothing, but a subsumed row's witnessed
+                # figure may still apply below.
                 held = None
                 excluded = True
             if held is None and key in exclusive:
                 if key in exclusive_ceilings:
-                    # The exclusive figure is itself a sheet ceiling, published by
-                    # a subsumed row. The skip is about the FIGURE, so it applies
-                    # wherever the figure came from: the top row's ceiling list
-                    # does not name this key, and reading only that list is how a
-                    # ceiling charges a budget its own row's copy is exempt from.
+                    # The skip is about the figure, wherever it came from; the top row's ceiling list doesn't name this
+                    # key.
                     excluded = True
                 else:
                     held = exclusive[key]["usd"]
                     key_fraction = exclusive[key]["fraction"]
-                    # A real measurement is charged after all. The row's own
-                    # ceiling here was skipped and nothing was lost by it, so
-                    # there is nothing to disclose as excluded at this key.
                     excluded = False
             if held is None:
                 if excluded:
-                    # Named, not silently skipped. A row whose every priced entity
-                    # is a sheet ceiling publishes exposure_usd null, and a null
-                    # with no stated reason is indistinguishable from one nobody
-                    # could price.
+                    # Named so a null exposure has a stated reason.
                     ceilings_excluded.append(key)
                     continue
-                # An unpriced entity contributes nothing AND is disclosed. Reading
-                # it as $0.00 publishes "this capability exposes nothing" out of a
-                # price lookup that never answered.
+                # Disclosed, not read as $0.
                 unpriced.append(key)
                 continue
             room = max(0.0, 1.0 - claimed[key])
             if room <= 0.0:
-                # Earlier findings spent this entity's whole budget. The
-                # remainder is not a measured $0.00 — it is a share this
-                # accounting cannot separate from theirs, so it is disclosed
-                # with the rows that took it rather than summed as a zero.
+                # The remainder isn't a measured $0; disclose which rows took it.
                 exhausted.append({"entity": key, "claimed_by": list(claimed_by[key])})
                 continue
             measured_entities += 1
             take = min(key_fraction, room)
             if room < key_fraction:
-                # A partial charge understates by exactly the difference, and it
-                # does so silently: the published figure is this row's MARGINAL
-                # share, not its exposure to the entity. Which row was marginal
-                # is a function of the sort order, not of what anyone reaches.
+                # A partial charge is this row's marginal share, which depends on sort order; disclosed so the
+                # understatement isn't silent.
                 partial.append(
                     {
                         "entity": key,
@@ -185,11 +147,8 @@ def _grade(
                     }
                 )
                 mine += take * held
-        # The keys a ceiling left contributing nothing are not "charged", and the
-        # set is the loop's own answer rather than the two ceiling lists re-read:
-        # a key whose ceiling was skipped and whose witnessed exclusive figure
-        # was then charged belongs here, and no re-derivation off the lists can
-        # tell that case from a key that charged nothing.
+        # Taken from the loop, not re-derived from the lists, which can't distinguish a skipped ceiling later charged
+        # via a witnessed figure.
         ceiling_only = set(ceilings_excluded)
         finding["exposure_entities_charged"] = sorted(
             key
@@ -200,19 +159,11 @@ def _grade(
             any_priced = True
             finding["exposure_usd"] = round(mine, 2)
         else:
-            # Either no priced entity in reach, or every priced one's budget was
-            # already spent: the exposure of this finding is a quantity nobody
-            # measured, and null is the only honest answer.
+            # Nothing measurable; null is the honest answer.
             finding["exposure_usd"] = None
         if unpriced or exhausted or partial or ceilings_excluded or finding["exposure_usd"] is None:
-            # One gap per finding, never two: a row with an unpriced entity AND
-            # a spent budget has one set of reasons, not one entry per reason.
-            # Every key is present on every entry — an empty list is the proven
-            # negative "this did not happen", which is not the same published
-            # fact as a key that is missing.
-            #
-            # S5: repopulated from the row's own undetermined instances, which
-            # is where an unpriced entity actually lands.
+            # One gap per finding with every key present; an empty list is a proven negative, not a missing key. S5:
+            # unpriced entities come from the row's undetermined instances.
             unpriced_entities = sorted(set(unpriced) | {row["entity"] for row in finding["undetermined_instances"]})
             gaps.append(
                 {
@@ -222,8 +173,6 @@ def _grade(
                     "undetermined_instances": finding["undetermined_instances"],
                     "budget_exhausted_entities": exhausted,
                     "budget_partially_exhausted_entities": partial,
-                    # Present on every entry, empty where it did not happen: an
-                    # absent key would read as a question nobody asked.
                     "ceiling_entities_excluded_from_exposure": sorted(ceilings_excluded),
                     "exposure_usd": finding["exposure_usd"],
                     "reading": _gap_reading(
@@ -231,8 +180,7 @@ def _grade(
                     ),
                 }
             )
-        # A finding whose exposure is not_determined contributes nothing to the
-        # total and is disclosed in exposure_gaps; it is never summed as a zero.
+        # Not-determined exposure is disclosed in exposure_gaps, never summed as zero.
         if finding["exposure_usd"] is not None:
             exposure += finding["exposure_usd"]
 
@@ -246,20 +194,10 @@ def _grade(
 def _exposure_coverage(findings: list[dict[str, Any]], value_plane: P.ValuePlane, tracked: float) -> dict[str, Any]:
     """How much of the perimeter the exposure ratio was actually measured over.
 
-    ``grade_exposure`` is ``100 * (1 - exposure / tracked_total)``. The
-    denominator is the whole priced perimeter; the numerator is a sum over only
-    the findings whose exposure could be measured at all. Once an unwitnessed
-    magnitude publishes ``not_determined`` instead of a balance sheet, most
-    findings contribute nothing to that numerator — and a ratio near 100 then
-    reads as "almost nothing is exposed" when what it says is "almost nothing
-    was measurable". The ratio is not adjusted for this: adjusting it would mint
-    a number out of the same absence. It is DISCLOSED, so the figure cannot be
-    read as a measurement it is not.
-
-    ``perimeter_usd_charged`` is the priced value of the entities that received
-    a charge, and ``perimeter_usd_reached_unmeasured`` the priced value reached
-    by findings whose own exposure is ``not_determined`` and which no charged
-    row covers — the weight the ratio is silent about.
+    ``grade_exposure`` divides by the whole priced perimeter, but the numerator only includes measurable findings, so a
+    ratio near 100 can mean "little was measurable". The ratio isn't adjusted; this discloses it.
+    ``perimeter_usd_charged`` is the priced value that was charged; ``perimeter_usd_reached_unmeasured`` is priced value
+    reached only by unmeasured findings.
     """
     determined = [f for f in findings if f.get("exposure_usd") is not None]
     undetermined = [f for f in findings if f.get("exposure_usd") is None]

@@ -87,7 +87,7 @@ def test_member_carries_state_and_admitting_witnesses(db_session, protocol):
     )
     db_session.commit()
 
-    payload = all_addresses_for_protocol(db_session, protocol, [])
+    payload = all_addresses_for_protocol(db_session, protocol)
     row = _row(payload, member.address)
     assert row["membership_state"] == "member"
     assert row["membership_reason"] is None
@@ -145,7 +145,7 @@ def test_member_revoked_witness_not_displayed(db_session, protocol):
     )
     db_session.commit()
 
-    row = _row(all_addresses_for_protocol(db_session, protocol, []), member.address)
+    row = _row(all_addresses_for_protocol(db_session, protocol), member.address)
     assert row["membership_state"] == "member"
     assert row["membership_witnesses"] == []
 
@@ -172,7 +172,7 @@ def test_candidate_probed_reason_names_the_reads(db_session, protocol):
     )
     db_session.commit()
 
-    row = _row(all_addresses_for_protocol(db_session, protocol, []), cand.address)
+    row = _row(all_addresses_for_protocol(db_session, protocol), cand.address)
     assert row["membership_state"] == "candidate"
     assert row["membership_witnesses"] == []
     assert row["membership_reason"] == {
@@ -183,45 +183,33 @@ def test_candidate_probed_reason_names_the_reads(db_session, protocol):
     }
 
 
-def test_candidate_unroutable_chain_reason(db_session, protocol):
-    cand = _add_candidate(db_session, protocol, chain="unknown")
-    db_session.add(
-        ContractProbeAttempt(
-            contract_id=cand.id,
-            chain_id=0,
-            block_number=None,
-            results={"status": "not_routable", "chain": "unknown"},
-        )
-    )
-    db_session.commit()
+@pytest.mark.parametrize(
+    "chain, probe, expected_reason",
+    [
+        pytest.param(
+            "unknown",
+            {"chain_id": 0, "results": {"status": "not_routable", "chain": "unknown"}},
+            {"kind": "chain_not_routable", "chain": "unknown"},
+            id="unroutable-chain",
+        ),
+        pytest.param("ethereum", None, {"kind": "no_probe_attempt"}, id="no-probe-row"),
+        pytest.param(
+            "ethereum",
+            {"chain_id": 1, "results": {"status": "rpc_error", "error": "boom"}},
+            {"kind": "probe_error"},
+            id="rpc-error-is-probe-error",
+        ),
+    ],
+)
+def test_candidate_membership_reason(db_session, protocol, chain, probe, expected_reason):
+    cand = _add_candidate(db_session, protocol, chain=chain)
+    if probe is not None:
+        db_session.add(ContractProbeAttempt(contract_id=cand.id, block_number=None, **probe))
+        db_session.commit()
 
-    row = _row(all_addresses_for_protocol(db_session, protocol, []), cand.address)
+    row = _row(all_addresses_for_protocol(db_session, protocol), cand.address)
     assert row["membership_state"] == "candidate"
-    assert row["membership_reason"] == {"kind": "chain_not_routable", "chain": "unknown"}
-
-
-def test_candidate_without_probe_row_says_so(db_session, protocol):
-    cand = _add_candidate(db_session, protocol)
-    row = _row(all_addresses_for_protocol(db_session, protocol, []), cand.address)
-    assert row["membership_state"] == "candidate"
-    assert row["membership_reason"] == {"kind": "no_probe_attempt"}
-
-
-def test_candidate_probe_error_reason(db_session, protocol):
-    cand = _add_candidate(db_session, protocol)
-    db_session.add(
-        ContractProbeAttempt(
-            contract_id=cand.id,
-            chain_id=1,
-            block_number=None,
-            results={"status": "rpc_error", "error": "boom"},
-        )
-    )
-    db_session.commit()
-
-    row = _row(all_addresses_for_protocol(db_session, protocol, []), cand.address)
-    assert row["membership_state"] == "candidate"
-    assert row["membership_reason"] == {"kind": "probe_error"}
+    assert row["membership_reason"] == expected_reason
 
 
 def test_pruned_carries_code_absent_block(db_session, protocol):
@@ -233,7 +221,7 @@ def test_pruned_carries_code_absent_block(db_session, protocol):
     )
     db_session.commit()
 
-    row = _row(all_addresses_for_protocol(db_session, protocol, []), cand.address)
+    row = _row(all_addresses_for_protocol(db_session, protocol), cand.address)
     assert row["membership_state"] == "pruned"
     assert row["membership_reason"] == {"kind": "code_absent", "code_probe_block": 999}
 
@@ -247,7 +235,7 @@ def test_unclaimed_and_foreign_rows_excluded(db_session, protocol):
     db_session.add_all([unclaimed, foreign])
     db_session.commit()
 
-    addrs = {r["address"] for r in all_addresses_for_protocol(db_session, protocol, [])}
+    addrs = {r["address"] for r in all_addresses_for_protocol(db_session, protocol)}
     assert unclaimed.address not in addrs
     assert foreign.address not in addrs
 
@@ -263,8 +251,8 @@ def test_count_matches_inventory_extension(db_session, protocol):
     )
     db_session.commit()
 
-    assert _all_addresses_count(db_session, protocol, []) == 3
-    assert len(all_addresses_for_protocol(db_session, protocol, [])) == 3
+    assert _all_addresses_count(db_session, protocol) == 3
+    assert len(all_addresses_for_protocol(db_session, protocol)) == 3
 
 
 def test_membership_enrichment_is_batched(db_session, protocol):
@@ -298,7 +286,7 @@ def test_membership_enrichment_is_batched(db_session, protocol):
 
     event.listen(db_session.bind, "before_cursor_execute", before_cursor_execute)
     try:
-        payload = all_addresses_for_protocol(db_session, protocol, [])
+        payload = all_addresses_for_protocol(db_session, protocol)
     finally:
         event.remove(db_session.bind, "before_cursor_execute", before_cursor_execute)
 

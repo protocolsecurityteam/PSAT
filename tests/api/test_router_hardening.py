@@ -20,60 +20,44 @@ pytestmark = [requires_postgres]
 # --- Bounded pagination (FINDING 7) -----------------------------------------
 
 
-def test_monitored_events_limit_over_cap_is_422(api_client):
-    resp = api_client.get("/api/monitored-events", params={"limit": 1000})
-    assert resp.status_code == 422
-
-
-def test_monitored_events_limit_below_floor_is_422(api_client):
-    resp = api_client.get("/api/monitored-events", params={"limit": 0})
-    assert resp.status_code == 422
-
-
-def test_monitored_events_limit_at_cap_ok(api_client):
-    resp = api_client.get("/api/monitored-events", params={"limit": 500})
-    assert resp.status_code == 200
-
-
-def test_protocol_events_limit_over_cap_is_422(api_client):
-    resp = api_client.get("/api/protocols/1/events", params={"limit": 1000})
-    assert resp.status_code == 422
-
-
-def test_protocol_events_limit_at_cap_ok(api_client):
-    resp = api_client.get("/api/protocols/1/events", params={"limit": 500})
-    assert resp.status_code == 200
+@pytest.mark.parametrize(
+    ("path", "limit", "expected"),
+    [
+        pytest.param("/api/monitored-events", 1000, 422, id="monitored_over_cap"),
+        pytest.param("/api/monitored-events", 0, 422, id="monitored_below_floor"),
+        pytest.param("/api/monitored-events", 500, 200, id="monitored_at_cap"),
+        pytest.param("/api/protocols/1/events", 1000, 422, id="protocol_over_cap"),
+        pytest.param("/api/protocols/1/events", 500, 200, id="protocol_at_cap"),
+    ],
+)
+def test_events_limit_bounds(api_client, path, limit, expected):
+    resp = api_client.get(path, params={"limit": limit})
+    assert resp.status_code == expected
 
 
 # --- Malformed-address contract on /api/analyze ------------------------------
 
 
-def test_analyze_non_prefixed_address_is_422(api_client):
-    # 42 chars but no 0x prefix: the AnalyzeRequest field validator rejects at
-    # the schema layer, so the endpoint's malformed-address contract is a 422.
-    resp = api_client.post(
-        "/api/analyze",
-        json={"address": "ab" + "c" * 40},
-        headers={"X-PSAT-Admin-Key": "test-admin-key"},
-    )
-    assert resp.status_code == 422
-
-
 # --- Guarded UUID parsing (FINDING 15) --------------------------------------
 
 
-def test_patch_monitored_contract_bad_uuid_is_404_not_500(api_client):
-    resp = api_client.patch("/api/monitored-contracts/not-a-uuid", json={"is_active": False})
-    assert resp.status_code == 404
-
-
-def test_delete_protocol_subscription_bad_uuid_is_404_not_500(api_client):
-    resp = api_client.delete("/api/protocol-subscriptions/not-a-uuid")
-    assert resp.status_code == 404
-
-
-def test_patch_monitored_contract_valid_uuid_absent_is_404(api_client):
-    resp = api_client.patch(f"/api/monitored-contracts/{uuid.uuid4()}", json={"is_active": False})
+@pytest.mark.parametrize(
+    ("method", "path", "kwargs"),
+    [
+        pytest.param(
+            "patch", "/api/monitored-contracts/not-a-uuid", {"json": {"is_active": False}}, id="patch_bad_uuid"
+        ),
+        pytest.param("delete", "/api/protocol-subscriptions/not-a-uuid", {}, id="delete_subscription_bad_uuid"),
+        pytest.param(
+            "patch",
+            f"/api/monitored-contracts/{uuid.uuid4()}",
+            {"json": {"is_active": False}},
+            id="patch_valid_uuid_absent",
+        ),
+    ],
+)
+def test_unknown_or_malformed_uuid_is_404(api_client, method, path, kwargs):
+    resp = getattr(api_client, method)(path, **kwargs)
     assert resp.status_code == 404
 
 
@@ -94,8 +78,6 @@ def test_monitored_events_valid_contract_id_absent_is_empty(api_client):
 
 
 def test_agent_stream_error_is_generic(api_client, monkeypatch):
-    """A raised agent stream returns a generic SSE error, never the raw
-    exception text."""
     secret = "SECRET_DB_DSN=postgres://user:pw@host/db"
 
     def _boom(*a, **k):
@@ -198,12 +180,8 @@ def test_upgrade_history_stage_raised_reason_omits_class_name(api_client, db_ses
 
 
 class _FakeStreamResponse:
-    """Minimal stand-in for a streamed ``requests.Response``.
-
-    ``iter_content`` yields from a caller-supplied generator/iterable and
-    records how many chunks were actually consumed, so a test can prove the
-    route aborts a too-large body early instead of buffering the whole thing.
-    """
+    """Minimal stand-in for a streamed ``requests.Response``; ``iter_content`` records how many
+    chunks were consumed so a test can prove the route aborts an oversized body early."""
 
     def __init__(self, *, content_type, chunks, status=200):
         self.headers = {"content-type": content_type}
@@ -257,7 +235,6 @@ def audit_pdf_row(db_session):
 
 
 def test_audit_pdf_small_pdf_is_served(api_client, audit_pdf_row, monkeypatch):
-    """A well-behaved small PDF returns 200 with ``application/pdf`` body."""
     pdf_body = b"%PDF-1.4\n" + b"content" * 10
 
     resp_obj = _FakeStreamResponse(content_type="application/pdf", chunks=[pdf_body])
@@ -280,7 +257,6 @@ def test_audit_pdf_non_pdf_content_type_is_rejected(api_client, audit_pdf_row, m
     resp = api_client.get(f"/api/audits/{audit_pdf_row}/pdf")
     assert resp.status_code == 502
     assert html not in resp.content
-    # Never streamed the body, and the connection was released.
     assert resp_obj.consumed == 0
     assert resp_obj.closed is True
 

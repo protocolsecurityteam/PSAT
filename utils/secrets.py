@@ -1,16 +1,6 @@
-"""URL redaction helpers.
+"""URL redaction for anything crossing an output boundary (logs, exceptions, responses, persisted state).
 
-``sanitize_url`` normalizes a URL to its scheme + host with sensitive
-path segments and query values replaced by ``<redacted>``. Use it on
-any URL value that crosses an output boundary (logs, exception
-messages, HTTP response bodies, persisted job state).
-
-``sanitize_string`` runs the same scrub over every URL found inside a
-free-form string. ``sanitize_obj`` walks a JSON-shaped value and
-applies the scrub to every string leaf, plus replaces values under
-known credential key names.
-
-Kept dependency-free for cheap import from low-level call sites.
+Dependency-free for cheap low-level import.
 """
 
 from __future__ import annotations
@@ -19,9 +9,7 @@ import re
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
-# Host substrings whose URL path is treated as sensitive. The match is
-# on substring containment so subdomains (``eth-mainnet.g.alchemy.com``,
-# ``arb-mainnet.g.alchemy.com``) all hit the same suffix entry.
+# Substring match so every subdomain hits.
 _SECRET_PATH_HOST_PARTS = (
     "alchemy.com",
     "alchemyapi.io",
@@ -45,8 +33,6 @@ _SECRET_PATH_HOST_PARTS = (
     "moralis.io",
 )
 
-# Query-string parameter names whose values are masked. Matched
-# case-insensitively.
 _SECRET_QUERY_KEYS = frozenset(
     {
         "apikey",
@@ -62,17 +48,12 @@ _SECRET_QUERY_KEYS = frozenset(
     }
 )
 
-# URL matcher for free-form strings. Stops at whitespace/quote/``>`` so
-# trailing prose ("...: connection reset") is not consumed.
+# Stops at whitespace/quotes so trailing prose isn't consumed.
 _URL_RE = re.compile(r"(?:https?|wss?)://[^\s\"'<>]+")
 
-# Generic ``/vN/<opaque>`` path-segment shape — catches provider URLs
-# whose host isn't in the suffix list.
+# Catches provider URLs whose host isn't listed.
 _PATH_KEY_SEGMENT_RE = re.compile(r"/(v\d+)/[A-Za-z0-9_\-]{12,}")
 
-# Discord webhook path, with or without an API version segment:
-#   /api/webhooks/<id>/<token>
-#   /api/v{N}/webhooks/<id>/<token>
 _DISCORD_WEBHOOK_PATH_RE = re.compile(r"^/api(?:/v\d+)?/webhooks/")
 
 _REDACTED = "<redacted>"
@@ -84,17 +65,10 @@ def _host_is_credentialed(host: str) -> bool:
 
 
 def sanitize_url(url: str) -> str:
-    """Return *url* with sensitive components masked.
+    """Mask userinfo, known-provider paths, Discord webhook tokens, ``/vN/<opaque>`` segments and secret query
+    values.
 
-    - ``user:pass@`` userinfo: stripped from the netloc.
-    - Known provider hosts: path replaced with ``/<redacted>``.
-    - Discord webhooks (versioned or unversioned): trailing token
-      segment masked, id retained.
-    - ``/vN/<opaque>`` path segments: masked.
-    - Query keys in ``_SECRET_QUERY_KEYS``: values masked.
-
-    Non-URL strings pass through. Unparseable URLs are reduced to
-    ``<redacted>``.
+    Unparseable URLs become ``<redacted>``.
     """
     if not isinstance(url, str) or "://" not in url:
         return url
@@ -112,8 +86,6 @@ def sanitize_url(url: str) -> str:
         parts.path
     ):
         segments = parts.path.split("/")
-        # Token sits one slot after "webhooks": index 4 for the
-        # unversioned shape, index 5 when an /api/vN/ segment is present.
         token_idx = 5 if len(segments) >= 3 and segments[2].startswith("v") else 4
         if len(segments) > token_idx:
             segments[token_idx] = _REDACTED
@@ -145,14 +117,11 @@ def sanitize_url(url: str) -> str:
 
 
 def sanitize_string(text: str) -> str:
-    """Apply :func:`sanitize_url` to every URL found inside *text*."""
     if not isinstance(text, str) or "://" not in text:
         return text
     return _URL_RE.sub(lambda m: sanitize_url(m.group(0)), text)
 
 
-# Dict keys whose string values are routed through ``sanitize_url``
-# regardless of shape. Case-insensitive.
 _SECRET_VALUE_KEYS = frozenset(
     {
         "rpc_url",
@@ -166,7 +135,6 @@ _SECRET_VALUE_KEYS = frozenset(
 
 
 def sanitize_obj(obj: Any) -> Any:
-    """Return a structural copy of *obj* with string leaves scrubbed."""
     if isinstance(obj, dict):
         out: dict[str, Any] = {}
         for k, v in obj.items():

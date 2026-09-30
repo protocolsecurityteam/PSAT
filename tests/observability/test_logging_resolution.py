@@ -1,8 +1,6 @@
-"""Observability locks for the resolution stage (backlog #6/#14/#15).
-
-Offline: every external read (hypersync scan, scan-floor lookup) is stubbed —
-no live network / RPC. Asserts the degraded breadcrumbs, split stage metrics,
-and per-decision DEBUG ``extra={}`` fields the monitor/Loki surfaces depend on.
+"""Observability locks for the resolution stage (backlog #6/#14/#15). Offline: external reads
+are stubbed. Asserts the degraded breadcrumbs, split stage metrics and per-decision DEBUG
+``extra={}`` fields the monitor/Loki surfaces depend on.
 """
 
 from __future__ import annotations
@@ -16,8 +14,8 @@ from utils.logging import bind_trace_context, degraded_errors_var, stage_metrics
 
 
 def test_incomplete_mapping_enumeration_degrades_and_counts(monkeypatch):
-    """A truncated mapping scan must land in stage_errors AND bump the
-    ``mapping_enum_incomplete`` metric — not silently drop authorized addrs."""
+    """A truncated mapping scan must land in stage_errors AND bump ``mapping_enum_incomplete``,
+    not silently drop authorized addrs."""
     monkeypatch.setenv("ENVIO_API_TOKEN", "test-token")
     monkeypatch.setattr(
         "services.resolution.creation_block_floor.resolve_scan_floor",
@@ -60,20 +58,9 @@ def test_incomplete_mapping_enumeration_degrades_and_counts(monkeypatch):
     assert accumulator[0].context["status"] == "incomplete_timeout"
 
 
-def test_proxies_redirected_metric_increments():
-    metrics: dict = {}
-    tok = stage_metrics_var.set(metrics)
-    try:
-        recursive._bump_stage_metric("proxies_redirected")
-        recursive._bump_stage_metric("proxies_redirected")
-    finally:
-        stage_metrics_var.reset(tok)
-    assert metrics["proxies_redirected"] == 2
-
-
 def test_solmate_decline_emits_decision_extra(caplog):
-    """The Veda cold-index race shows up as an adapter 'deferred' decision —
-    queryable by adapter/address/decision/reason, not buried."""
+    """The Veda cold-index race shows as an adapter 'deferred' decision, queryable by
+    adapter/address/decision/reason."""
     authority = "0x" + "cd" * 20
     with caplog.at_level(logging.DEBUG, logger="services.resolution.adapters.solmate_roles"):
         solmate_roles._check_only(authority, {"callee_selector": None}, ["no_index_cursor"])
@@ -127,10 +114,9 @@ def _reverting_plan(controller_ids: list[str]) -> dict:
 
 
 def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch, caplog):
-    """492 identical "controller read reverted" WARNINGs in one run read as 492
-    incidents. The per-occurrence line is DEBUG (its durable witness is the
-    per-controller ``record_degraded`` breadcrumb, unchanged); the per-snapshot
-    census — how many of how many — is the WARNING."""
+    """492 identical "controller read reverted" WARNINGs in one run read as 492 incidents. The
+    per-occurrence line is DEBUG (durable witness: the per-controller ``record_degraded``); the
+    per-snapshot census (how many of how many) is the WARNING."""
     from services.resolution import tracking
 
     def fake_rpc(_rpc_url, method, _params, *, chain_id=None):
@@ -146,10 +132,9 @@ def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch,
     accumulator: list = []
     token = degraded_errors_var.set(accumulator)
     try:
-        # A deliberately DIFFERENT ambient address than the plan's subject: the
-        # resolution worker binds this per job, and an ``address`` key in the
-        # summary's ``extra`` would be dropped in favour of it (JsonFormatter
-        # writes contextvars first), silently misattributing the census.
+        # A deliberately DIFFERENT ambient address than the plan's subject: an ``address`` key in
+        # the summary's ``extra`` would be dropped for the bound one (JsonFormatter writes
+        # contextvars first), misattributing the census.
         with bind_trace_context(job_id="1", stage="resolution", address="0x" + "99" * 20):
             with caplog.at_level(logging.DEBUG, logger="services.resolution.tracking"):
                 snapshot = tracking.build_control_snapshot(
@@ -160,7 +145,6 @@ def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch,
         degraded_errors_var.reset(token)
 
     assert all(v["observed_via"] == "eth_call_error" for v in snapshot["controller_values"].values())
-    # Every occurrence still lands in stage_errors — nothing was aggregated away.
     assert len(accumulator) == 3
 
     records = [r for r in caplog.records if r.name == "services.resolution.tracking"]

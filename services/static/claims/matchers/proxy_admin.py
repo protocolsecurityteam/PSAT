@@ -1,9 +1,5 @@
-"""``proxy.admin_change`` — changes the proxy admin who can upgrade a deployment.
-
-New claim (no legacy equivalent). Gate: the EIP-1967 ``AdminChanged`` log
-(matched on topic0) or a delegatecall-fallback proxy shell; trigger: the fixed
-``changeAdmin(address)`` selector. FiatTokenProxy.changeAdmin (today: nothing) and transparent-proxy
-changeAdmin (today: only a "delegatecall path" fact) get their exact claim.
+"""``proxy.admin_change``: the ``changeAdmin(address)`` selector, gated on the EIP-1967 ``AdminChanged`` topic or a
+delegatecall-fallback shell.
 """
 
 from __future__ import annotations

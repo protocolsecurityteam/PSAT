@@ -1,16 +1,8 @@
-"""The fold's population read — one pinned query, no job-currency filtering.
+"""The fold's population read: one pinned query, no job-currency filtering.
 
-``function_score_signals`` is a current-state plane: the distiller
-delete+reinserts a contract's signals wholesale, so every row present IS
-current and there is nothing to filter. This module exists so that fact has a
-single implementation. A hand-rolled query in the fold could reintroduce a
-job-scoped filter, and the moment it did, a protocol's signals would be
-partitioned by job and the fold would either double-count re-analysed contracts
-or drop them entirely — the two failure modes the lifecycle ruling closed.
-
-The ordering is part of the contract, not a convenience. The same DB state must
-produce a byte-identical document, and a fold over an
-unordered population is only deterministic by luck.
+``function_score_signals`` is replaced wholesale per contract, so every present row is current. Centralizing the query
+prevents a job-scoped filter that would double-count or drop re-analysed contracts. The order is part of the contract:
+deterministic folds require byte-identical documents.
 """
 
 from __future__ import annotations
@@ -25,11 +17,8 @@ from services.scoring.schema import FunctionSignal, coalesce_chain, signal_from_
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard, typing only
     from db.models import FunctionScoreSignal
 
-# Contracts already replaced in the current transaction. A second replace of the
-# same contract means the caller grouped its signals by something finer than
-# ``contract_id`` — the delete would drop the first call's rows and the contract
-# would end up carrying only its last group. That is silent recall loss, so it
-# raises. Cleared when the transaction ends, because the invariant is per-pass.
+# Contracts already replaced this transaction. A second replace means signals were grouped finer than ``contract_id``
+# and the first group's rows would be silently deleted, so it raises.
 _REPLACED_KEY = "_scoring_replaced_contract_ids"
 
 
@@ -39,26 +28,17 @@ def _replaced_contract_ids(session: Session) -> set[int]:
 
 @event.listens_for(Session, "after_transaction_end")
 def _clear_replaced_contract_ids(session: Session, transaction: object) -> None:
-    """Disarm the guard when the OUTERMOST transaction ends, and only then.
+    """Disarm the guard when the outermost transaction ends, and only then.
 
-    Not ``after_commit``/``after_rollback``: SQLAlchemy fires those on SAVEPOINT
-    release and savepoint rollback too, so a writer that wraps each contract in
-    its own savepoint — which the end-of-effects distiller does, precisely so
-    one contract's failure cannot discard another's — would clear the set after
-    every contract and the guard would never fire. The invariant it protects is
-    per-PASS, so it has to outlive the savepoints a pass is made of.
-
-    ``parent is None`` is the test, and ``not nested`` is NOT enough: a plain
-    ``Session.flush()`` opens an internal ``SUBTRANSACTION`` whose end also
-    reports ``nested = False``, and this function's own writer flushes. Only the
-    session-level transaction has no parent.
+    ``after_commit``/``after_rollback`` also fire for savepoints, which the distiller uses per contract, so they'd clear
+    the set every contract. ``not nested`` isn't enough either: ``Session.flush()`` opens a non-nested subtransaction.
+    Only the session-level transaction has ``parent is None``.
     """
     if getattr(transaction, "parent", None) is None:
         session.info.pop(_REPLACED_KEY, None)
 
 
 def current_signal_rows(session: Session, protocol_id: int) -> list[FunctionScoreSignal]:
-    """Every current signal ORM row for one protocol, in a stable order."""
     from db.models import FunctionScoreSignal
 
     return list(
@@ -76,37 +56,23 @@ def current_signal_rows(session: Session, protocol_id: int) -> list[FunctionScor
 
 
 def current_signals_for_protocol(session: Session, protocol_id: int) -> list[FunctionSignal]:
-    """The fold's input: every current signal for one protocol, typed and ordered.
-
-    Ordered by the identity key, so the sequence is total — two rows can never
-    tie — and the fold is replayable from the same evidence.
-    """
+    """The fold's input: every current signal for one protocol, typed and totally ordered by identity key."""
     return [signal_from_row(row) for row in current_signal_rows(session, protocol_id)]
 
 
 def current_signals_with_faults(
     session: Session, protocol_id: int
 ) -> tuple[list[FunctionSignal], list[dict[str, object]]]:
-    """The fold's input, plus the rows that could not be typed at all.
+    """The fold's input, plus the rows that couldn't be typed.
 
-    ``function_score_signals`` carries several list- and object-shaped JSONB
-    columns with no CHECK behind their INTERIOR: the entity-key format and the
-    principal-reference envelope are Python-enforced, so a row written by
-    anything but the sanctioned writer can hold a shape the typed reader
-    rejects. Those checks are right and stay — what changes is the blast radius.
-    A row that fails one withholds ITSELF and names the column; the rest of the
-    protocol still scores, because one malformed row is not evidence about any
-    other row.
-
-    Callers that want the strict behaviour keep using
-    :func:`current_signals_for_protocol`.
+    Several JSONB columns have Python-only shape checks, so a row not written by the sanctioned writer can fail them.
+    Such a row withholds itself and names the column; the rest of the protocol still scores.
+    :func:`current_signals_for_protocol` keeps the strict behaviour.
     """
     signals: list[FunctionSignal] = []
     faults: list[dict[str, object]] = []
     for row in current_signal_rows(session, protocol_id):
-        # Shape first, then typing. Two of these columns type cleanly and only
-        # fail where the FOLD walks them, so checking the shape at the boundary
-        # is what keeps the failure here rather than three layers downstream.
+        # Shape before typing: two columns type cleanly and only fail when the fold walks them.
         column = _shape_fault(row)
         detail = f"{column} does not hold its declared shape"
         if column is None:
@@ -128,12 +94,9 @@ def current_signals_with_faults(
 
 
 def _shape_fault(row: FunctionScoreSignal) -> str | None:
-    """The first column that does not hold its declared shape, or ``None``.
+    """The first column not holding its declared shape, or ``None``.
 
-    Named, never guessed at, and checked in the order a reader walks them.
-    ``witness_notes`` and ``severity_basis`` type cleanly and blow up only where
-    the fold iterates them, which is why the shape is checked here instead of
-    being left to the first consumer that trips over it.
+    ``witness_notes`` and ``severity_basis`` type cleanly but break when iterated, hence the check here.
     """
     from services.scoring.schema import is_entity_key
 
@@ -168,12 +131,8 @@ def _shape_fault(row: FunctionScoreSignal) -> str | None:
 
 
 def order_signals(signals: list[FunctionSignal]) -> list[FunctionSignal]:
-    """The population order, for signals that never went through the database.
-
-    The offline CLI distils every contract in memory and folds the result, so it
-    has no query to inherit an ORDER BY from. The fold's replayability rests on a
-    total order over the population, and the only order that keeps the two
-    feeding modes identical is the one :func:`current_signal_rows` pins.
+    """The population order for in-memory signals (offline CLI), matching :func:`current_signal_rows` so both feeding
+    modes fold identically.
     """
     return sorted(
         signals,
@@ -190,33 +149,14 @@ def replace_contract_signals(
 ) -> int:
     """Delete+reinsert one contract's signals. The writer half of the currency contract.
 
-    **The caller passes the contract's COMPLETE signal set.** A partial call
-    silently drops the omitted deployment's signals: the delete is scoped by
-    ``contract_id`` alone, so signals this call does not carry are removed and
-    not restored. Distillation must therefore group by ``contract_id`` and never
-    by ``(contract_id, deployment_address)`` — a contract whose functions appear
-    at two deployment addresses must arrive in ONE call. The double-replace
-    guard below makes the wrong grouping raise instead of silently truncating.
+    The caller must pass the contract's complete signal set: the delete is scoped by ``contract_id``, so grouping by
+    deployment address would drop rows. The double-replace guard makes that raise.
 
-    Wholesale per contract, in the caller's transaction, mirroring
-    ``write_effective_function_rows``. Wholesale because a distillation's rows
-    ARE the set it derived: a capability the contract no longer has must
-    disappear, and an upsert would leave the stale row behind to keep charging
-    exposure forever.
+    Wholesale (like ``write_effective_function_rows``) so capabilities that disappeared stop charging; not job-scoped,
+    since re-analysis mints new jobs. All signals are validated before the delete so a caught raise can't leave a
+    half-replaced contract.
 
-    Scoped by ``contract_id`` and NOT by job: re-analysis mints a new job, so a
-    job-scoped delete would never reach the previous job's rows and each
-    re-analysis would add a second full signal set for the same contract.
-
-    Every signal is validated BEFORE the delete, so the operation is
-    all-or-nothing regardless of caller discipline. Validating during the insert
-    loop would leave a half-replaced contract behind whenever the caller catches
-    the raise — and the distillation call site is fail-forward, so it
-    does exactly that. A partially replaced contract is worse than an
-    unreplaced one: it charges a subset of its exposure with no trace.
-
-    The caller commits. Returns the number of rows deleted, so a writer can log
-    the replacement rather than infer it.
+    The caller commits. Returns the number of rows deleted.
     """
     from db.models import FunctionScoreSignal
     from services.scoring.schema import signal_to_row_kwargs
@@ -247,16 +187,9 @@ def replace_contract_signals(
 def _validate_replacement(session: Session, *, contract_id: int, signals: list[FunctionSignal]) -> None:
     """Every signal agrees with the contract row it claims. Raises before any write.
 
-    ``protocol_id`` is the load-bearing one: a signal carrying the wrong
-    protocol inserts happily and is then read by that protocol's fold — a
-    finding charged against a protocol it was never derived from, invisible
-    until the next distillation overwrites it.
-
-    ``deployment_address`` is checked for canonical form but NOT against the
-    contract row: for a proxy child the deployment address is the PROXY's, and
-    ``contracts`` carries no column naming its parent proxy, so there is nothing
-    to compare against. Asserting equality with ``contract.address`` would
-    reject the split-proxy case this schema exists to support.
+    ``protocol_id`` matters most: a wrong one would be charged to another protocol's fold. ``deployment_address`` is
+    only checked for form, since for a proxy child it's the proxy's address and ``contracts`` has no parent-proxy
+    column.
     """
     from db.models import Contract
 

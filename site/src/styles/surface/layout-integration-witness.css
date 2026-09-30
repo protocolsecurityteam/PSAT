@@ -1,5 +1,5 @@
-/* External integration card — the off-protocol trust surface, elevated. Warm
-   amber border for an external protocol, blue for a linked library. */
+/* External integration card: amber for an external protocol, blue for a linked
+   library. */
 .ps-depends-ext {
   border: 1px solid rgba(224, 145, 63, 0.32);
   background: rgba(224, 145, 63, 0.06);
@@ -42,16 +42,8 @@
 }
 
 .ps-depends-ext-tag {
-  flex-shrink: 0;
-  white-space: nowrap;
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
   color: #f0b45f;
   border: 1px solid rgba(224, 145, 63, 0.4);
-  border-radius: 4px;
-  padding: 2px 6px;
 }
 
 .ps-depends-ext-lib .ps-depends-ext-tag {
@@ -175,18 +167,13 @@
   background: #131820;
   color: #8a94a6;
   font-size: 11px;
-  font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  cursor: pointer;
-  box-shadow: none;
   transition: background 120ms ease;
 }
 
 .ps-ops-category-header:hover {
   background: #1a2030;
-  transform: none;
-  box-shadow: none;
 }
 
 .ps-ops-chevron {
@@ -221,13 +208,6 @@
   text-align: center;
 }
 
-.ps-machine-body {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(280px, 360px) minmax(220px, 1fr);
-  gap: 16px;
-  margin-top: 16px;
-}
-
 .ps-port {
   --port-accent: #94a3b8;
   display: flex;
@@ -243,17 +223,13 @@
 .ps-port.ps-port-score-highlight {
   border-color: rgba(251, 113, 133, 0.9);
   box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.85);
-  /* The row is scrolled into view when it takes the mark; without a margin the
-     minimal scroll parks it flush against the fold, where it reads as cut off. */
+  /* Otherwise the scrolled-to row sits flush against the fold and looks cut
+     off. */
   scroll-margin: 28px;
 }
 
-/* The warning names an action AND who can take it, so the ONE caller chip for
-   the controller it named is marked alongside the row. Only that chip: a row's
-   other callers are other principals, and a border on them would read as "these
-   are who the deduction was about" for principals it was not about. Where the
-   named controller is not among this row's callers, the row wears the mark
-   alone. */
+/* Only the named controller's chip: marking other callers would imply the
+   deduction was about them. */
 .ps-port.ps-port-score-highlight .ps-caller-btn.ps-caller-score-highlight {
   border-color: rgba(251, 113, 133, 0.9);
   box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.7);
@@ -280,8 +256,6 @@
   line-height: 1.35;
 }
 
-/* Per-function caller buttons: one navigable button per direct caller; a function
-   with no resolved caller (open/unknown) renders a non-navigable .ps-caller-status pill. */
 .ps-callers { display: flex; flex-direction: column; }
 .ps-callers-label {
   font-size: 9px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
@@ -294,13 +268,11 @@
   padding: 4px 8px; border-radius: 6px;
   border: 1px solid rgba(148, 163, 184, 0.18); background: #141820;
   color: #e8edf3; cursor: pointer; font-size: 11px; font-weight: 400; line-height: 1.1;
-  /* Override the global button drop-shadow (teal glow) + hover lift. */
-  box-shadow: none;
   transition: background 120ms ease, border-color 120ms ease;
 }
-.ps-caller-btn:hover { background: #1a2030; border-color: rgba(148, 163, 184, 0.35); transform: none; box-shadow: none; }
+.ps-caller-btn:hover { background: #1a2030; border-color: rgba(148, 163, 184, 0.35); }
 .ps-caller-status { align-self: flex-start; color: #94a3b8; }
-.ps-caller-status:hover { background: #1a2030; transform: none; box-shadow: none; }
+.ps-caller-status:hover { background: #1a2030; }
 .ps-caller-ic {
   width: 18px; height: 18px; border-radius: 5px; flex-shrink: 0;
   display: inline-flex; align-items: center; justify-content: center;
@@ -322,66 +294,6 @@
   -webkit-mask-repeat: no-repeat;
   -webkit-mask-position: center;
   -webkit-mask-size: contain;
-}
-
-.ps-vault {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 14px;
-  border-radius: 10px;
-  background: #12161e;
-  border: 1px solid rgba(148, 163, 184, 0.1);
-}
-
-.ps-vault-label {
-  color: #cbd5e1;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.ps-vault-empty {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 80px;
-  border-radius: 8px;
-  border: 1px dashed rgba(148, 163, 184, 0.15);
-  color: #475569;
-  font-size: 12px;
-}
-
-.ps-vault-footer {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.ps-footer-stat {
-  padding: 10px;
-  border-radius: 14px;
-  background: #111620;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  text-align: center;
-}
-
-.ps-footer-stat span {
-  display: block;
-  color: #94a3b8;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.ps-footer-stat strong {
-  color: #e2e8f0;
-  font-family: "Space Grotesk", system-ui, sans-serif;
-  font-size: 22px;
-  line-height: 1;
 }
 
 .ps-inspector {
@@ -528,8 +440,6 @@
   line-height: 1.45;
 }
 
-/* Witness facts: verbose destination/expiry/backing/reach
-   rows in the function inspector. */
 .ps-witness-facts {
   margin: 0;
   display: grid;
@@ -557,8 +467,6 @@
   line-height: 1.4;
 }
 
-/* Non-terminal way-point / terminal-controller note under a principal card. The
-   "open" variant flags an unresolved/ambiguous controller — never a settled key. */
 .ps-principal-terminal {
   color: #94a3b8;
   font-size: 11px;
@@ -577,8 +485,6 @@
   margin-bottom: 4px;
 }
 
-/* Per-plane list under a multi-plane controller note — each parallel plane's own
-   terminal outcome, so the weakest plane is visible. */
 .ps-principal-planes {
   list-style: none;
   margin: 2px 0 0;
@@ -590,8 +496,8 @@
   line-height: 1.45;
 }
 
-/* Shared-deployer attribution HINT — a heuristic, deliberately dimmer than the
-   Tier-1 signer-overlap note so it never reads as a control claim. */
+/* Deliberately dimmer than the signer-overlap note: a heuristic, never a
+   control claim. */
 .ps-principal-deployer {
   color: #7c8899;
   font-size: 11px;
@@ -620,28 +526,13 @@
     padding: 18px;
   }
 
-  .ps-surface-overlay {
-    max-width: calc(100vw - 32px);
-    right: 16px;
-  }
-
-  .ps-surface-header,
   .ps-machine-header {
     flex-direction: column;
   }
 
   .ps-machine-badges,
-  .ps-inspector-badges,
-  .ps-surface-stats {
+  .ps-inspector-badges {
     justify-content: flex-start;
-  }
-
-  .ps-machine-body {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .ps-vault {
-    order: -1;
   }
 
   .ps-lane-top .ps-lane-body {
@@ -650,9 +541,6 @@
 }
 
 @media (max-width: 640px) {
-  .ps-surface-title {
-    font-size: 28px;
-  }
 
   .ps-machine {
     padding: 16px;
@@ -661,11 +549,6 @@
   .ps-port {
     flex-direction: column;
     align-items: stretch;
-  }
-
-  .ps-vault-footer,
-  .ps-surface-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

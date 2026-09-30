@@ -1,30 +1,14 @@
 """UPGRADE_INTERFACE_VERSION() no longer selects 'proxy_admin' (W6-3).
 
-The '5.0.0' string is the OZ-v5 UUPSUpgradeable constant: it is answered
-THROUGH every OZ-v5 UUPS proxy (via delegatecall to the implementation), by
-every bare UUPS implementation, and by the v5 ProxyAdmin — while the corpus's
-genuine (v4) ProxyAdmin does not implement it at all. Publishing 'proxy_admin'
-off a UIV answer alone therefore typed PROXIES as proxy admins at
-confidence=high (chain-verified: 5/5 published proxy_admin nodes carried a
-nonzero ERC-1967 implementation slot at pinned block 25619159, e.g. the KING
-ERC-20 proxy 0x8f08b704...; the genuine ProxyAdmin 0x8b9566ad... reverts on
-UIV and got typed 'contract'). Because proxy_admin is terminal
-(services/governance/principals.TERMINAL_PRINCIPAL_TYPES), the terminal walk
-stopped AT the proxy and the real upgrade authority was never reached.
+The '5.0.0' string is the OZ-v5 UUPSUpgradeable constant, answered THROUGH every OZ-v5
+UUPS proxy, so a UIV answer alone typed PROXIES as proxy admins at confidence=high
+(5/5 published proxy_admin nodes had a nonzero ERC-1967 slot at block 25619159; the
+genuine v4 ProxyAdmin 0x8b9566ad... reverts on UIV). proxy_admin is terminal, so the walk
+stopped AT the proxy and never reached the real upgrade authority.
 
-Discipline under test (services/resolution/tracking._resolve_uiv_shape):
-  * UIV + nonzero ERC-1967 implementation slot -> 'contract' (the address IS a
-    proxy; non-terminal, so the walk continues through it to the real
-    authority), details carry the witnessed erc1967_implementation;
-  * UIV + zero slot + proxiableUUID() answers -> 'contract' (bare UUPS
-    implementation), details.uups_implementation;
-  * UIV + zero slot + no proxiableUUID + owner() -> 'proxy_admin' (the OZ-v5
-    ProxyAdmin shape - the only earner of the token in this classifier);
-  * a discriminator read that did not happen -> 'contract' + had_error
-    (not determined, uncached, retryable).
-
-Wire stubbed per repo convention; probe shapes mirror the pinned on-chain
-observations from the re-verification (no live probes).
+UIV + nonzero slot -> 'contract'; + zero slot + proxiableUUID -> 'contract' (UUPS impl);
++ zero slot + owner() -> 'proxy_admin' (OZ-v5 shape); unreadable discriminator ->
+'contract' + had_error (uncached). Wire stubbed; shapes mirror pinned observations.
 """
 
 from __future__ import annotations
@@ -63,11 +47,9 @@ def _string_word(s: str) -> str:
 
 
 def _wire(monkeypatch, probe_map, *, storage=_ZERO_WORD, storage_raises=False, batched: bool = True):
-    """Stub both classify paths from one signature→outcome map (values: raw
-    hex, "revert", "transport"; missing → "0x", the empty-success shape the
-    sibling harnesses use so absent probes do not set had_error — the
-    revert-vs-error conflation of the probe layers is pre-existing and not
-    under test here)."""
+    """Stub both classify paths from one signature->outcome map (raw hex, "revert",
+    "transport"; missing -> "0x", the empty-success shape sibling harnesses use so absent
+    probes do not set had_error)."""
 
     def _outcome(signature: str) -> str:
         return probe_map.get(signature, "0x")

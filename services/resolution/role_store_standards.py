@@ -1,23 +1,13 @@
-"""Recognized enumerable role-store standards — the single place a new one is added.
+"""Recognized enumerable role-store standards; the single place a new one is added.
 
-A delegated role gate (``roleRegistry.onlyOperatingMultisig(msg.sender)`` and its
-siblings) resolves to its real controllers only if the pipeline knows (a) which
-events carry the grant/revoke history to fold and (b) which runtime-bytecode
-selectors confirm the store speaks a standard this pipeline models. This table is
-consumed by BOTH the indexer's enrollment branch (``all_topic0s`` /
-``detect_standards`` → which cursors to seed) and the Stage-2
-``EnumerableRoleStoreAdapter`` (``matches`` / ``enumerate`` fold), so a future
-protocol upgrade to a *recognized* standard lands enumerated automatically and an
-upgrade to a *novel* one remains unresolved and emits telemetry.
+A delegated role gate resolves only if we know which events carry grant/revoke history and which bytecode selectors
+confirm the standard. Both the indexer's enrollment (``all_topic0s`` / ``detect_standards``) and
+``EnumerableRoleStoreAdapter`` read this table, so recognized upgrades enumerate automatically and novel ones fail
+closed loudly.
 
-Adding a standard = one ``RoleStoreStandard`` entry in ``STANDARDS``; everything
-downstream (enrollment, fold, probe) is data-driven off it.
-
-Selectors and topic0s are derived from their signatures (keccak) rather than
-pinned as hex, and checked in ``tests/resolution/test_role_store_standards.py``
-(Solady ``RoleSet`` topic0
-0xaddc47d7…758201b8, ``hasRole(address,uint256)`` 0x5c97f4a2, OZ
-AccessControlEnumerable EIP-165 id 0x5a05180f).
+Selectors and topic0s are derived from signatures, cross-checked against
+``rolegate-fix-evidence/roles_ground_truth.json`` (Solady ``RoleSet`` 0xaddc47d7…758201b8, ``hasRole(address,uint256)``
+0x5c97f4a2, OZ AccessControlEnumerable EIP-165 0x5a05180f).
 """
 
 from __future__ import annotations
@@ -46,13 +36,10 @@ def _topic0(signature: str) -> str:
 
 @dataclass(frozen=True)
 class RoleEventSpec:
-    """One grant/revoke event of a role-store standard, described so a generic
-    fold can turn its log topics into a (holder, role, active) tuple.
+    """One grant/revoke event, described for a generic fold into (holder, role, active).
 
-    ``active_topic_index`` names the topic holding a bool active flag (Solady's
-    ``RoleSet`` carries one at topic3); when it is ``None`` the event's own
-    identity decides activation (``active_when``: OZ ``RoleGranted`` → True,
-    ``RoleRevoked`` → False).
+    ``active_topic_index`` names a bool topic (Solady ``RoleSet`` topic3); when ``None``, ``active_when`` decides (OZ
+    ``RoleGranted`` True, ``RoleRevoked`` False).
     """
 
     signature: str
@@ -68,9 +55,8 @@ class RoleEventSpec:
 
 @dataclass(frozen=True)
 class GetterSpec:
-    """The standard's enumerable-getter walk — an optional consistency alarm for
-    the adapter (fold is the source of truth; a getter mismatch declines loud).
-    ``count_selector(role) -> uint256`` then ``at_selector(role, i) -> address``.
+    """The enumerable-getter walk, an optional consistency alarm: ``count_selector(role)`` then ``at_selector(role,
+    i)``.
     """
 
     count_signature: str
@@ -107,7 +93,6 @@ SOLADY_ENUMERABLE_ROLES = RoleStoreStandard(
         _selector("hasRole(address,uint256)"),
     ),
     grant_events=(
-        # RoleSet(address indexed holder, uint256 indexed role, bool indexed active)
         RoleEventSpec(
             signature="RoleSet(address,uint256,bool)",
             holder_topic_index=1,
@@ -131,7 +116,6 @@ OZ_ACCESS_CONTROL_ENUMERABLE = RoleStoreStandard(
         _selector("hasRole(bytes32,address)"),
     ),
     grant_events=(
-        # RoleGranted/RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender)
         RoleEventSpec(
             signature="RoleGranted(bytes32,address,address)",
             holder_topic_index=2,
@@ -159,9 +143,9 @@ STANDARDS: tuple[RoleStoreStandard, ...] = (SOLADY_ENUMERABLE_ROLES, OZ_ACCESS_C
 
 
 def all_topic0s() -> list[str]:
-    """The union of every standard's grant/revoke topic0s — the over-enroll set
-    the indexer seeds when bytecode detection is inconclusive (a never-emitted
-    cursor costs one empty scan window; a missed cursor kills the recall path)."""
+    """Every standard's grant/revoke topic0s, enrolled when bytecode detection is inconclusive (an extra cursor is
+    cheap; a missed one kills recall).
+    """
     topics: set[str] = set()
     for standard in STANDARDS:
         topics.update(standard.topic0s())
@@ -169,12 +153,10 @@ def all_topic0s() -> list[str]:
 
 
 def spec_by_topic0() -> dict[str, RoleEventSpec]:
-    """Reverse lookup topic0 → its grant/revoke ``RoleEventSpec``, across every
-    standard — the fold engine's decode table: given an indexed row's topic0 it
-    reads which topics carry (holder, role, active) without re-deriving the event
-    shape. Standards' topic0s are disjoint (distinct signatures), so the union is
-    unambiguous; a later collision would surface here as a lost entry rather than
-    a silent mis-decode."""
+    """topic0 → ``RoleEventSpec`` across standards, the fold's decode table.
+
+    Topic0s are disjoint; a collision would show as a lost entry.
+    """
     out: dict[str, RoleEventSpec] = {}
     for standard in STANDARDS:
         for spec in standard.grant_events:
@@ -183,14 +165,11 @@ def spec_by_topic0() -> dict[str, RoleEventSpec]:
 
 
 def resolve_standard(code_hex: str | None) -> RoleStoreStandard | None:
-    """The single standard a role store speaks, for the adapter's ``matches`` /
-    ``enumerate`` (as opposed to the indexer's ``detect_standards``, which
-    union-enrolls on ambiguity). Exactly one detected standard → that standard;
-    zero → ``None`` (no recognized store → the adapter declines and the
-    refine-only guard backstops, loud). More than one is not a fold the adapter can trust —
-    the marker sets are disjoint, so a double match means a store masquerading as
-    both, which we DECLINE rather than guess a fold polarity for (fail-closed, the
-    safe direction: the guard still gates it)."""
+    """The single standard a store speaks, for the adapter.
+
+    One match → it; none → ``None`` (decline); several → ``None`` too, since disjoint markers matching twice means a
+    masquerade.
+    """
     detected = detect_standards(code_hex)
     return detected[0] if len(detected) == 1 else None
 
@@ -199,17 +178,12 @@ def _selector_in_code(selector: str, body: str) -> bool:
     sel = selector.lower().removeprefix("0x")
     if len(sel) != 8:
         return False
-    # solc emits each external function in the dispatcher as PUSH4 <selector>
-    # (0x63); the bare-substring fallback covers unusual dispatchers. Mirrors
-    # BytecodeSelectorRepo.has_selector so detection agrees with the adapter's probe.
+    # PUSH4 <selector> (0x63) with a bare-substring fallback; mirrors BytecodeSelectorRepo.has_selector.
     return ("63" + sel) in body or sel in body
 
 
 def detect_standards(code_hex: str | None) -> list[RoleStoreStandard]:
-    """Every standard whose full marker-selector set is present in ``code_hex``
-    (a contract's runtime bytecode). ALL markers required — a partial match is
-    inconclusive and falls to the caller's union-enroll fallback rather than
-    risking a cross-standard false positive."""
+    """Every standard whose full marker set is in ``code_hex``. Partial matches are inconclusive."""
     if not code_hex:
         return []
     body = code_hex.lower()
@@ -264,11 +238,9 @@ def resolve_probe_code(
     rpc_url: str | None = None,
     max_hops: int = 2,
 ) -> str | None:
-    """Runtime bytecode to run ``detect_standards`` against, following the proxy
-    hop the registry needs: the PROXY stub carries no getter selectors, so DB-
-    first via ``contracts.implementation`` (linkage proven on preview) → EIP-1967
-    slot read → the terminal code. Bounded to ``max_hops`` implementation links
-    (deeper → return whatever code we reached → no detection → guard, loud)."""
+    """Runtime bytecode to detect against, following the proxy hop (``contracts.implementation``, then the EIP-1967
+    slot), bounded by ``max_hops``.
+    """
     if not _looks_like_address(authority):
         return None
     if rpc_url is None:

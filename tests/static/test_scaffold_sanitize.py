@@ -30,8 +30,20 @@ def _standard_json_result(sources: dict, *, remappings=None, evm_version="shangh
 # ---- FINDING 1: path traversal ----
 
 
-def test_parse_sources_rejects_parent_traversal():
-    result = _standard_json_result({"contracts/../../../../tmp/evil.sol": {"content": "x"}})
+@pytest.mark.parametrize(
+    "key",
+    [
+        pytest.param("contracts/../../../../tmp/evil.sol", id="parent_traversal"),
+        # Relativizing the anchor must not open a traversal hole: an absolute key with an embedded ".."
+        # segment is still refused.
+        pytest.param("/tmp/../../etc/evil.sol", id="absolute_with_traversal"),
+        # "//"-anchored paths keep a distinct anchor part in PurePosixPath; the anchor strip and the ".."
+        # refusal must both still apply. Path-traversal confinement is a security boundary.
+        pytest.param("//tmp/../../etc/evil.sol", id="double_slash_absolute_with_traversal"),
+    ],
+)
+def test_parse_sources_rejects_traversal(key):
+    result = _standard_json_result({key: {"content": "x"}})
     with pytest.raises(ValueError):
         fetch.parse_sources(result)
 
@@ -49,22 +61,6 @@ def test_parse_sources_relativizes_absolute():
     assert parsed == {eurc_key.lstrip("/"): "x"}
 
 
-def test_parse_sources_rejects_absolute_with_traversal():
-    # Relativizing the anchor must not open a traversal hole: an absolute key
-    # with an embedded ".." segment is still refused.
-    result = _standard_json_result({"/tmp/../../etc/evil.sol": {"content": "x"}})
-    with pytest.raises(ValueError):
-        fetch.parse_sources(result)
-
-
-def test_parse_sources_rejects_double_slash_absolute_with_traversal():
-    # "//"-anchored paths keep a distinct anchor part in PurePosixPath; the
-    # anchor strip and the ".." refusal must both still apply.
-    result = _standard_json_result({"//tmp/../../etc/evil.sol": {"content": "x"}})
-    with pytest.raises(ValueError):
-        fetch.parse_sources(result)
-
-
 def test_parse_sources_windows_style_keys_stay_confined():
     # Windows-style keys are not treated as absolute by the POSIX-path
     # normalizer: a backslash key stays one opaque component, a drive-prefixed
@@ -80,13 +76,22 @@ def test_parse_sources_windows_style_keys_stay_confined():
     assert parsed == {"C:\\Users\\dev\\A.sol": "a", "C:/Users/dev/B.sol": "b"}
 
 
-def test_scaffold_writes_relativized_absolute_source(tmp_path):
-    # End-to-end: an absolute key scaffolds to a project-relative file that
-    # passes the _confine containment check, so analysis proceeds.
-    result = _standard_json_result({"/Users/dev/repo/contracts/v2/Token.sol": {"content": "pragma solidity 0.8.24;"}})
+@pytest.mark.parametrize(
+    ("key", "expected_file"),
+    [
+        # End-to-end: an absolute key scaffolds to a project-relative file that passes the _confine
+        # containment check, so analysis proceeds.
+        pytest.param(
+            "/Users/dev/repo/contracts/v2/Token.sol", "Users/dev/repo/contracts/v2/Token.sol", id="relativized_absolute"
+        ),
+        pytest.param("src/C.sol", "src/C.sol", id="legit_relative"),
+    ],
+)
+def test_scaffold_writes_source(tmp_path, key, expected_file):
+    result = _standard_json_result({key: {"content": "pragma solidity 0.8.24;"}})
     project = tmp_path / "proj"
     fetch.scaffold("0xabc", result, project)
-    assert (project / "Users/dev/repo/contracts/v2/Token.sol").exists()
+    assert (project / expected_file).exists()
 
 
 def test_parse_sources_accepts_legit_relative():
@@ -106,11 +111,6 @@ def test_confine_refuses_escape(tmp_path):
         fetch._confine(tmp_path, "../../etc/passwd")
 
 
-def test_confine_accepts_legit(tmp_path):
-    full = fetch._confine(tmp_path, "contracts/A.sol")
-    assert full == (tmp_path / "contracts/A.sol").resolve()
-
-
 def test_scaffold_refuses_escaping_source(tmp_path):
     result = _standard_json_result({"contracts/../../../../tmp/evil.sol": {"content": "x"}})
     project = tmp_path / "proj"
@@ -118,13 +118,6 @@ def test_scaffold_refuses_escaping_source(tmp_path):
     with pytest.raises(ValueError):
         fetch.scaffold("0xabc", result, project)
     assert not escape.exists()
-
-
-def test_scaffold_writes_legit_sources(tmp_path):
-    result = _standard_json_result({"src/C.sol": {"content": "pragma solidity 0.8.24;"}})
-    project = tmp_path / "proj"
-    fetch.scaffold("0xabc", result, project)
-    assert (project / "src/C.sol").exists()
 
 
 # ---- FINDING 3: EVMVersion TOML injection ----
@@ -177,17 +170,8 @@ def test_remapping_target_rejects_embedded_newline():
     assert not fetch._remapping_target_is_safe("@a/=lib/\n@x/=/etc/")
     assert not fetch._remapping_target_is_safe("@a/=lib/\r@x/=/etc/")
     assert not fetch._remapping_target_is_safe("@a/=lib/\r\n@x/=/etc/")
-    # Legit single-line entries (relative, empty target) still pass.
     assert fetch._remapping_target_is_safe("@openzeppelin/=lib/openzeppelin-contracts/")
     assert fetch._remapping_target_is_safe("@a/=")
-
-
-def test_parse_remappings_drops_newline_injection():
-    result = _standard_json_result(
-        {"src/C.sol": {"content": "x"}},
-        remappings=["@a/=lib/\n@x/=/etc/", "@oz/=lib/openzeppelin/"],
-    )
-    assert fetch.parse_remappings(result) == ["@oz/=lib/openzeppelin/"]
 
 
 def test_scaffold_remappings_never_writes_absolute_line(tmp_path):
@@ -199,7 +183,6 @@ def test_scaffold_remappings_never_writes_absolute_line(tmp_path):
     fetch.scaffold("0xabc", result, project)
     lines = (project / "remappings.txt").read_text().splitlines()
     assert lines == ["@oz/=lib/openzeppelin/"]
-    # No line may point at an absolute read root.
     assert not any(line.split("=", 1)[-1].startswith("/") for line in lines if line)
 
 

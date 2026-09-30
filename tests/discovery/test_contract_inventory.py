@@ -1,9 +1,5 @@
-"""Offline integration tests for the contract inventory pipeline.
-
-Exercises the full scoring, dedup, chain-resolution, and HTML extraction
-logic end-to-end with realistic inputs.  No network calls — runs in CI
-without API keys.
-"""
+"""Offline integration tests for the contract inventory pipeline: scoring, dedup, chain-resolution and HTML
+extraction end-to-end. No network calls."""
 
 from typing import Any
 
@@ -69,8 +65,6 @@ def _entry(
 
 class TestBuildContracts:
     def test_multi_source_merge_and_scoring(self):
-        """Multiple entries for the same address from different pages/kinds
-        merge into one contract with boosted confidence."""
         addr = "0x" + "a" * 40
         entries = [
             _entry(address=addr, name="Vault", chain="ethereum", kind="official_inventory_table", url="https://a.com"),
@@ -86,12 +80,9 @@ class TestBuildContracts:
         assert c["confidence"] > 0.7
         assert c["source"] == ["ai_inventory"]
         assert len(c["source_ids"]) >= 2
-        # Sources map should contain the URLs
         assert len(sources_map) >= 2
 
     def test_unknown_chain_remapped_and_multi_chain(self):
-        """Unknown-chain entry remaps when one specific chain exists;
-        multiple specific chains produce chains with both."""
         addr_a = "0x" + "a" * 40
         addr_b = "0x" + "b" * 40
         entries = [
@@ -116,7 +107,6 @@ class TestBuildContracts:
         assert set(contracts[0]["chains"]) == {"ethereum", "base"}
 
     def test_limit_and_sort_order(self):
-        """Higher-confidence contracts sort first; limit is respected."""
         entries = [
             _entry(address=f"0x{i:040x}", name=None, kind="official_inventory_text", explorer_url=None)
             for i in range(5)
@@ -148,7 +138,6 @@ class TestBuildContracts:
 
 class TestExtractFromPageText:
     def test_table_with_chain_headings_and_explorer_links(self):
-        """Realistic docs page with chain headings, a table, and explorer links."""
         html = """
         <h2>Ethereum</h2>
         <table>
@@ -212,7 +201,6 @@ class TestSearchProtocolInventoryOffline:
         assert any("Could not identify" in n for n in result["notes"])
 
     def test_full_pipeline_with_mocked_pages(self, monkeypatch):
-        """Mocked page extraction feeds through scoring and produces correct output shape."""
         fake_entries = [
             _entry(address="0x" + "a" * 40, name="Vault", chain="ethereum"),
             _entry(address="0x" + "b" * 40, name="Router", chain="arbitrum", kind="official_inventory_link"),
@@ -255,7 +243,6 @@ class TestSearchProtocolInventoryOffline:
 
     @pytest.mark.usefixtures("_stub_chain_resolver")  # deployer entries are chain="unknown" → would probe Alchemy
     def test_full_pipeline_with_deployer_expansion(self, monkeypatch):
-        """Deployer entries merge with Tavily entries and boost confidence."""
         addr_both = "0x" + "a" * 40
         addr_deployer_only = "0x" + "d" * 40
         tavily_entries = [
@@ -296,14 +283,12 @@ class TestSearchProtocolInventoryOffline:
         contracts = result["contracts"]
         by_addr = {c["address"]: c for c in contracts}
 
-        # Corroborated address gets both sources and deployer confidence boost
         assert addr_both in by_addr
         corroborated = by_addr[addr_both]
         assert "ai_inventory" in corroborated["source"]
         assert "deployer_expansion" in corroborated["source"]
         assert corroborated["evidence"].get("deployer", 0) > 0
 
-        # Deployer-only address appears with deployer source
         assert addr_deployer_only in by_addr
         deployer_only = by_addr[addr_deployer_only]
         assert deployer_only["source"] == ["deployer_expansion"]
@@ -317,7 +302,6 @@ class TestSearchProtocolInventoryOffline:
 
 class TestBuildContractsDeployerMerge:
     def test_deployer_unknown_chain_remapped_by_tavily(self):
-        """Deployer entries with chain=unknown get remapped when Tavily provides a chain."""
         addr = "0x" + "a" * 40
         entries = [
             _entry(address=addr, name="Vault", chain="ethereum", kind="official_inventory_table"),
@@ -336,7 +320,6 @@ class TestBuildContractsDeployerMerge:
         assert "deployer_expansion" in contracts[0]["source"]
 
     def test_deployer_corroboration_boosts_confidence(self):
-        """Address found by both sources should have higher confidence than either alone."""
         addr = "0x" + "a" * 40
         tavily_only = [_entry(address=addr, chain="ethereum")]
         combined = [
@@ -355,7 +338,6 @@ class TestBuildContractsDeployerMerge:
         assert combined_contracts[0]["confidence"] > tavily_contracts[0]["confidence"]
 
     def test_deployer_only_entry_included(self):
-        """Address found only by deployer expansion is still included."""
         addr = "0x" + "d" * 40
         entries = [
             _entry(
@@ -383,9 +365,7 @@ class TestExpandFromDeployers:
         assert expand_from_deployers([]) == []
 
     def test_expand_with_mocked_etherscan(self, monkeypatch):
-        """Mock Etherscan API to verify the deployer expansion flow."""
         deployer = "0x" + "de" * 20
-        # Supply enough seeds from one deployer to pass the min_seed_count threshold
         seeds = [f"0x{i:040x}" for i in range(1, 4)]
         new_contract = "0x" + "b" * 40
 
@@ -417,7 +397,6 @@ class TestExpandFromDeployers:
 
         entries = expand_from_deployers(seeds)
 
-        # 3 seeds + 1 new contract = 4 entries
         assert len(entries) == 4
         addresses = {e["address"] for e in entries}
         assert any(new_contract.lower() in a for a in addresses)
@@ -427,12 +406,10 @@ class TestExpandFromDeployers:
             assert entry["chain"] == "unknown"
             assert entry["explorer_url"] is not None
 
-        # The new contract should have its resolved name
         new_entry = next(e for e in entries if new_contract.lower() in e["address"])
         assert new_entry["name"] == "DiscoveredToken"
 
     def test_deployer_below_threshold_filtered_out(self, monkeypatch):
-        """A deployer that created only 1 seed should be rejected."""
         seed = "0x" + "a" * 40
         deployer = "0x" + "de" * 20
 
@@ -448,16 +425,13 @@ class TestExpandFromDeployers:
 
         monkeypatch.setattr("services.discovery.deployer.etherscan.get", fake_get)
 
-        # With default thresholds (min_seed_count=3), 1 seed is not enough
         entries = expand_from_deployers([seed])
         assert entries == []
 
-        # With lowered thresholds, same deployer qualifies
         entries = expand_from_deployers([seed], min_seed_count=1, min_seed_share=0.0)
         assert len(entries) == 0  # txlist not mocked, so no deployments found
 
     def test_no_creators_found(self, monkeypatch):
-        """If getcontractcreation fails for all seeds, return empty."""
 
         def fake_get(*_a, **_kw):
             raise RuntimeError("No data found")
@@ -468,7 +442,6 @@ class TestExpandFromDeployers:
         assert entries == []
 
     def test_deployer_with_no_creations(self, monkeypatch):
-        """If deployer txlist has no contract creations, still returns seed entry."""
         seed = "0x" + "a" * 40
         deployer = "0x" + "de" * 20
 
@@ -481,7 +454,6 @@ class TestExpandFromDeployers:
                     ],
                 }
             if action == "txlist":
-                # Deployer has transactions but none are contract creations
                 return {
                     "status": "1",
                     "result": [
@@ -503,7 +475,6 @@ class TestExpandFromDeployers:
 
 class TestGroupMultiDeployments:
     def test_same_name_different_addresses_grouped(self):
-        """Contracts with the same name but different addresses get a deployments array."""
         contracts = [
             {
                 "name": "Vault",
@@ -530,11 +501,9 @@ class TestGroupMultiDeployments:
         assert "deployments" in result[0]
         assert len(result[0]["deployments"]) == 2
         assert set(result[0]["chains"]) == {"ethereum", "arbitrum"}
-        # Address field removed in favor of deployments
         assert "address" not in result[0]
 
     def test_same_address_not_grouped(self):
-        """Same address listed twice keeps the best entry, no deployments array."""
         contracts = [
             {
                 "name": "Vault",
@@ -561,7 +530,6 @@ class TestGroupMultiDeployments:
         assert result[0]["address"] == "0x" + "a" * 40
 
     def test_unnamed_contracts_not_grouped(self):
-        """Unnamed contracts pass through ungrouped."""
         contracts = [
             {
                 "name": None,
@@ -587,7 +555,6 @@ class TestGroupMultiDeployments:
         assert all("deployments" not in c for c in result)
 
     def test_activity_data_preserved_in_deployments(self):
-        """Activity and rank_score from individual contracts carry into deployments."""
         contracts = [
             {
                 "name": "Token",
@@ -627,7 +594,6 @@ class TestGroupMultiDeployments:
 @pytest.mark.usefixtures("_all_inventory_chains_enabled")
 class TestResolveUnknownChains:
     def test_resolves_unknown_to_correct_chain(self, monkeypatch):
-        """Contracts with chains=["unknown"] get resolved via batch RPC probing."""
         contracts = [
             {"name": "Known", "address": "0x" + "a" * 40, "chains": ["ethereum"]},
             {"name": "Unknown1", "address": "0x" + "b" * 40, "chains": ["unknown"]},
@@ -635,7 +601,6 @@ class TestResolveUnknownChains:
         ]
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
-        # Simulate: Unknown1 found on ethereum, Unknown2 found on arbitrum + base
         def fake_batch_get_code(rpc_url, addresses):
             if rpc_url.endswith("/evm/1"):
                 return {addr: ("0x6001" if addr == "0x" + "b" * 40 else "0x") for addr in addresses}
@@ -655,7 +620,6 @@ class TestResolveUnknownChains:
         assert set(by_name["Unknown2"]["chains"]) == {"arbitrum", "base"}
 
     def test_no_unknowns_is_noop(self, monkeypatch):
-        """When all contracts have known chains, nothing is probed."""
         contracts = [{"name": "A", "address": "0x" + "a" * 40, "chains": ["ethereum"]}]
         # _probe_chains would fail if called — proves no probing happens.
         monkeypatch.setattr(
@@ -666,7 +630,6 @@ class TestResolveUnknownChains:
         assert result[0]["chains"] == ["ethereum"]
 
     def test_unresolved_stays_unknown(self, monkeypatch):
-        """Address not found on any chain keeps chains=["unknown"]."""
         contracts = [{"name": "Ghost", "address": "0x" + "d" * 40, "chains": ["unknown"]}]
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
         monkeypatch.setattr(
@@ -732,7 +695,6 @@ def test_resolver_skips_chains_off_the_allowlist(monkeypatch):
 class TestEvidenceBasedChainMembership:
     @staticmethod
     def _record_probed_chain_ids(monkeypatch) -> list[str]:
-        """Wire-level: record the chain id of every chain that gets probed."""
         probed: list[str] = []
 
         def fake_batch_get_code(rpc_url, addresses):
@@ -744,19 +706,15 @@ class TestEvidenceBasedChainMembership:
         return probed
 
     def test_declared_chains_narrow_the_probe(self, monkeypatch):
-        """(a) An unknown-chain entry is probed ONLY on the declared chains."""
         probed = self._record_probed_chain_ids(monkeypatch)
         contracts = [{"name": "U", "address": "0x" + "b" * 40, "chains": ["unknown"]}]
         resolve_unknown_chains(contracts, declared_chains=["ethereum"])
-        # No all-chain fan-out: ethereum (chain_id 1) is the only chain touched.
         assert set(probed) == {"1"}
 
     def test_uncorroborated_hit_is_candidate_only(self, monkeypatch):
-        """(b) With no declared evidence a probe hit is a candidate, not membership.
+        """(b) No declared evidence: a probe hit is a candidate, not membership.
 
-        The address has code on arbitrum but nothing declares any chain — so the
-        hit is recorded as a candidate and ``chains`` stays ``["unknown"]``. That
-        keeps it out of the ``contracts`` table on arbitrum and off the job queue.
+        ``chains`` stays ``["unknown"]``, keeping it out of ``contracts`` on arbitrum and off the job queue.
         """
 
         def fake_batch_get_code(rpc_url, addresses):
@@ -773,7 +731,6 @@ class TestEvidenceBasedChainMembership:
         assert contract["chain_candidates"] == ["arbitrum"]
 
     def test_declared_chain_hit_is_written(self, monkeypatch):
-        """(c) A hit on a declared chain is corroborated → written, as today."""
 
         def fake_batch_get_code(rpc_url, addresses):
             hit = rpc_url.endswith("/evm/1")
@@ -789,24 +746,15 @@ class TestEvidenceBasedChainMembership:
         assert "chain_candidates" not in contract
 
     def test_none_declared_chains_keeps_legacy_all_chain_probe(self, monkeypatch):
-        """Backward compat: ``declared_chains=None`` still runs the legacy probe.
-
-        The existing standalone callers (and the tests above in
-        ``TestResolveUnknownChains``) pass no declared set — they must keep
-        probing every chain and writing hits, unchanged.
-        """
+        """Backward compat: ``declared_chains=None`` keeps the legacy all-chain probe used by standalone callers."""
         probed = self._record_probed_chain_ids(monkeypatch)
         contracts = [{"name": "U", "address": "0x" + "b" * 40, "chains": ["unknown"]}]
         resolve_unknown_chains(contracts, declared_chains=None)
-        # Legacy path fans out across the whole registry, not just one chain.
         assert len(set(probed)) > 1
 
     def test_search_inventory_narrows_probe_to_declared(self, monkeypatch):
-        """End-to-end through the orchestrator: a declared set narrows the probe.
-
-        Bridge has code on arbitrum, but the protocol only declares ethereum, so
-        arbitrum is never probed and Bridge is not relabelled onto it.
-        """
+        """Orchestrator: a declared set narrows the probe (Bridge has code on arbitrum but only ethereum is declared,
+        so arbitrum is never probed)."""
         addr_known = "0x" + "a" * 40
         addr_unknown = "0x" + "b" * 40
         fake_entries = [
@@ -867,7 +815,6 @@ class TestEvidenceBasedChainMembership:
 
 class TestEnrichWithActivity:
     def test_scores_and_sorts_by_rank(self, monkeypatch):
-        """Active contracts rank higher than inactive ones."""
         import time as _time
 
         now_ts = _time.time()
@@ -875,7 +822,6 @@ class TestEnrichWithActivity:
             {"name": "Stale", "address": "0x" + "a" * 40, "chains": ["ethereum"], "confidence": 0.9},
             {"name": "Active", "address": "0x" + "b" * 40, "chains": ["ethereum"], "confidence": 0.5},
         ]
-        # Active was used today, Stale 365 days ago
         timestamps = {
             "0x" + "a" * 40: now_ts - 365 * 86400,
             "0x" + "b" * 40: now_ts,
@@ -893,19 +839,16 @@ class TestEnrichWithActivity:
         result = enrich_with_activity(contracts)
         assert len(result) == 2
 
-        # Both have activity and rank_score
         for c in result:
             assert "activity" in c
             assert "rank_score" in c
             assert c["activity"]["score"] > 0
 
-        # Active contract should rank first despite lower confidence
         assert result[0]["name"] == "Active"
         assert result[0]["rank_score"] > result[1]["rank_score"]
         assert result[0]["activity"]["score"] > result[1]["activity"]["score"]
 
     def test_missing_activity_gets_neutral_score(self, monkeypatch):
-        """Contracts where Etherscan returns no data get score=0.5."""
         contracts = [{"name": "NoData", "address": "0x" + "a" * 40, "chains": ["ethereum"], "confidence": 0.8}]
 
         def fake_get(*_a, **_kw):
@@ -931,7 +874,6 @@ class TestEnrichWithActivity:
         monkeypatch.setattr("services.discovery.activity.etherscan.get", fake_get)
 
         result = enrich_with_activity(contracts)
-        # No explorer fetch for the unregistered chain.
         assert called_with_chain_id == []
         # Ranked at the floor: activity score 0 (not the mainnet-fetched score,
         # not the 0.5 neutral used for a supported chain with no data).
@@ -949,12 +891,8 @@ class TestOrchestratorIntegration:
     def test_pipeline_with_chain_resolution(self, monkeypatch):
         """End-to-end: entries → build → chain resolve → group → output.
 
-        Activity ranking is no longer part of this orchestrator — the
-        worker pipeline runs the single authoritative ranking in the
-        selection stage, and standalone callers apply
-        ``enrich_with_activity`` themselves. This test asserts the new
-        shape: chain resolution lands, contracts are returned without
-        an ``activity`` / ``rank_score`` payload.
+        Activity ranking is no longer in this orchestrator (the selection stage owns it), so contracts carry no
+        ``activity`` / ``rank_score``.
         """
         addr_known = "0x" + "a" * 40
         addr_unknown = "0x" + "b" * 40
@@ -978,7 +916,6 @@ class TestOrchestratorIntegration:
         )
         monkeypatch.setattr("services.discovery.inventory.expand_from_deployers", lambda *_a, **_kw: [])
 
-        # Chain resolver: Bridge found on arbitrum
         monkeypatch.setenv("ERPC_BASE_URL", "https://erpc-proxy.example")
 
         def fake_batch(rpc_url, addrs):
@@ -994,7 +931,6 @@ class TestOrchestratorIntegration:
         assert len(contracts) == 2
         by_name = {c["name"]: c for c in contracts}
 
-        # Chain resolution worked
         assert by_name["Vault"]["chains"] == ["ethereum"]
         assert "arbitrum" in by_name["Bridge"]["chains"]
         assert "unknown" not in by_name["Bridge"]["chains"]
@@ -1004,7 +940,6 @@ class TestOrchestratorIntegration:
             assert "activity" not in c
             assert "rank_score" not in c
 
-        # Chain resolution note still fires; activity ranking note is gone.
         notes = " ".join(result["notes"])
         assert "Chain resolution" in notes
         assert "Activity ranking" not in notes

@@ -101,7 +101,6 @@ def _cursor(topic0: str, *, complete: bool = True, address: str = REGISTRY, **kw
 
 
 def _corpus_logs() -> list[IndexedEventLog]:
-    """The measured protocol-1 CumulativeMerkleDrop proxy history."""
     return [
         _log(RG, ZERO_ROLE, REVOKED_A, block=20933133, log_index=62),
         _log(RG, PAUSER, REVOKED_A, block=20933133, log_index=63),
@@ -134,7 +133,6 @@ def _run(
     address: str = REGISTRY,
     names=NAME_POOL,
 ):
-    """Resolve with ``eth_call_batch`` stubbed from a (role, account) map."""
 
     def fake_batch(rpc_url, calls, block_tag, *, headers=None, chain_id=None):
         assert block_tag == hex(PROBE_BLOCK.number), "every probe must be pinned at one block"
@@ -161,19 +159,16 @@ def _by_role(rows):
     return {row["role_hash"]: row for row in rows}
 
 
-# ---------------------------------------------------------------------------
 # A1 — identity space
-# ---------------------------------------------------------------------------
 
 
 def test_solady_roleset_logs_mint_no_row(db_session, monkeypatch):
     """Solady's ``RoleSet`` shares the registry but not the role identity space.
 
-    Folded through OZ's topic positions its ``uint256`` role becomes a bytes32
-    key that ``hasRole`` answers from the mapping's ZERO DEFAULT — successfully,
-    returning false. That is a completed read witnessing nothing, and it would
-    publish 40 unqualified rows over roles that do have holders. No row is the
-    honest outcome; row-absence means not_determined.
+    Folded through OZ's topic positions its ``uint256`` role becomes a bytes32 key that
+    ``hasRole`` answers from the mapping's ZERO DEFAULT, successfully returning false: a
+    completed read witnessing nothing, which would publish 40 unqualified rows. No row is
+    the honest outcome; row-absence means not_determined.
     """
     session = db_session
     logs = [
@@ -221,18 +216,15 @@ def test_fold_ignores_non_accesscontrol_topics():
     assert _word("0x07") not in folded
 
 
-# ---------------------------------------------------------------------------
 # A3 — the classifier boundary, where the three states must stay three
-# ---------------------------------------------------------------------------
 
 
 def test_classify_candidate_keeps_three_distinct_states():
     """A read that completed and said no is not a read that never happened.
 
-    Asserted at the classifier rather than through the resolver, because both a
-    correct implementation and one that calls ``decode_bool_word`` without
-    branching on ``success`` produce zero confirmations from an all-reverting
-    registry — the end-to-end arm cannot tell them apart.
+    Asserted at the classifier because a correct implementation and one calling
+    ``decode_bool_word`` without branching on ``success`` both give zero confirmations from
+    an all-reverting registry; the end-to-end arm cannot tell them apart.
     """
     assert rhp.classify_candidate(TRUE_WORD) == rhp.CANDIDATE_CONFIRMED
     assert rhp.classify_candidate(FALSE_WORD) == rhp.CANDIDATE_READ_COMPLETED_NOT_CONFIRMED
@@ -245,9 +237,7 @@ def test_classify_candidate_keeps_three_distinct_states():
     assert rhp.classify_candidate(EthCallResult(False, "0x", "0x", "reverted")) == rhp.CANDIDATE_UNCONFIRMED
 
 
-# ---------------------------------------------------------------------------
 # The positive: a lower bound
-# ---------------------------------------------------------------------------
 
 
 def test_corpus_rows_publish_confirmed_lower_bound(db_session, monkeypatch):
@@ -294,9 +284,7 @@ def test_corpus_rows_publish_confirmed_lower_bound(db_session, monkeypatch):
     assert {row["cursor_last_indexed_block"] for row in rows.values()} == {25641245}
 
 
-# ---------------------------------------------------------------------------
 # Fail-closed arms
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -322,42 +310,39 @@ def test_cold_or_missing_cursor_withholds_every_holder_set(db_session, monkeypat
         assert row["unconfirmed_candidate_count"] is None
 
 
-def test_all_candidates_revert_withholds(db_session, monkeypatch):
-    """The 0xd5edf773 / USDC shape: warm cursors, but no AccessControl beneath."""
+@pytest.mark.parametrize(
+    "verdicts",
+    [
+        # The 0xd5edf773 / USDC shape: warm cursors, but no AccessControl beneath (every probe
+        # falls through to MEASURED_REVERT).
+        pytest.param({}, id="all-candidates-revert"),
+        # A genuinely fully-revoked role publishes NULL, never ``[]``: a direct storage write the
+        # recording surface never saw would appear in neither the fold nor this arm.
+        pytest.param(
+            {
+                (role, account): FALSE_WORD
+                for role in (ZERO_ROLE, PAUSER, OPERATING_ADMIN)
+                for account in (ADMIN_HOLDER, REVOKED_A, REVOKED_B, PAUSER_EXTRA, OPS_HOLDER)
+            },
+            id="all-candidates-read-false",
+        ),
+    ],
+)
+def test_all_candidates_withhold(db_session, monkeypatch, verdicts):
     session = db_session
     _seed(session)
-    rows = _run(session, monkeypatch, {})  # every probe falls through to MEASURED_REVERT
+    rows = _run(session, monkeypatch, verdicts)
     for row in rows:
         assert row["holders"] is None
         assert row["holders_basis"] == "not_determined"
         assert row["coverage"] == "partial"
 
 
-def test_all_candidates_read_false_withholds(db_session, monkeypatch):
-    """A genuinely fully-revoked role publishes NULL, never ``[]``.
-
-    We cannot prove nobody holds it: a direct storage write the recording
-    surface never saw would not appear in either the fold or this arm.
-    """
-    session = db_session
-    _seed(session)
-    verdicts = {
-        (role, account): FALSE_WORD
-        for role in (ZERO_ROLE, PAUSER, OPERATING_ADMIN)
-        for account in (ADMIN_HOLDER, REVOKED_A, REVOKED_B, PAUSER_EXTRA, OPS_HOLDER)
-    }
-    rows = _run(session, monkeypatch, verdicts)
-    for row in rows:
-        assert row["holders"] is None
-        assert row["coverage"] == "partial"
-
-
 def test_all_false_and_all_revert_rows_are_indistinguishable(db_session, monkeypatch):
     """A2 — the residual counters must not reconstruct the banned empty set.
 
-    "N probed, every read completed, none confirmed" IS ``[]``. If the all-false
-    row differed from the all-revert row in any column, a reader could recover
-    it, and this plane would be publishing the diagnosis it refuses elsewhere.
+    "N probed, every read completed, none confirmed" IS ``[]``; if the all-false row differed
+    from the all-revert row in any column, a reader could recover it.
     """
     session = db_session
     _seed(session)
@@ -400,23 +385,17 @@ def test_unpinnable_probe_block_withholds(db_session, monkeypatch):
 
 
 def test_registry_with_no_role_logs_yields_no_rows(db_session, monkeypatch):
-    """Warm cursors, zero logs — row-absence, not "this registry has no roles"."""
     session = db_session
     _seed(session, logs=[], cursors=[_cursor(RG), _cursor(RR)])
     assert _run(session, monkeypatch, {}) == []
 
 
-# ---------------------------------------------------------------------------
 # role_name — a proven preimage, or the key is absent
-# ---------------------------------------------------------------------------
 
 
 def test_role_name_absent_without_a_preimage(db_session, monkeypatch):
-    """TIMELOCK_ADMIN_ROLE is in no ``role_definitions`` row, so it gets no name.
-
-    This falls out of the pool rather than being special-cased — and it is why
-    B0b's anti-decoy credit stays CONFIDENCE.
-    """
+    """TIMELOCK_ADMIN_ROLE is in no ``role_definitions`` row, so it gets no name (why B0b's
+    anti-decoy credit stays CONFIDENCE)."""
     session = db_session
     _seed(session, logs=[_log(RG, TIMELOCK_ADMIN, ADMIN_HOLDER, block=19298624, log_index=121)])
     row = _by_role(_run(session, monkeypatch, {(TIMELOCK_ADMIN, ADMIN_HOLDER): TRUE_WORD}))[TIMELOCK_ADMIN]
@@ -425,31 +404,40 @@ def test_role_name_absent_without_a_preimage(db_session, monkeypatch):
     assert row["holders"] == [ADMIN_HOLDER], "the hash is the identity; the name is decoration"
 
 
-def test_keccak_mismatch_is_refused():
-    """The hard ban: a role-shaped name may not be attached to a hash it does
-    not hash to, however plausible it looks."""
-    bogus = "0x" + "de" * 32
-    assert rhp.resolve_role_name(bogus, ["PAUSER_ROLE", "DEFAULT_ADMIN_ROLE"], has_role_answered=True) == (
-        None,
-        "not_determined",
-    )
-
-
-def test_misparsed_storage_pointers_cannot_leak_a_name():
-    """D6-reject stops MINTING these, but existing rows persist until their
-    contract is re-analysed. The keccak gate is what makes that harmless."""
-    pool = ["OwnableStorageLocation", "AccessControlDefaultAdminRulesStorageLocation"]
-    assert rhp.resolve_role_name(PAUSER, pool, has_role_answered=True) == (None, "not_determined")
-
-
-def test_default_admin_name_needs_an_answered_has_role():
-    """A6 — the zero-word arm is a convention about AccessControl, so it may not
-    fire on an emitter proven not to implement ``hasRole``."""
-    assert rhp.resolve_role_name(ZERO_ROLE, [], has_role_answered=True) == (
-        "DEFAULT_ADMIN_ROLE",
-        "accesscontrol_default_admin_literal",
-    )
-    assert rhp.resolve_role_name(ZERO_ROLE, [], has_role_answered=False) == (None, "not_determined")
+@pytest.mark.parametrize(
+    "role, pool, has_role_answered, expected",
+    [
+        # CRITICAL, the hard ban: a role-shaped name may not be attached to a hash it does not hash to.
+        pytest.param(
+            "0x" + "de" * 32,
+            ["PAUSER_ROLE", "DEFAULT_ADMIN_ROLE"],
+            True,
+            (None, "not_determined"),
+            id="keccak-mismatch-refused",
+        ),
+        # D6-reject stops MINTING these, but existing rows persist until re-analysis; the keccak
+        # gate makes that harmless.
+        pytest.param(
+            PAUSER,
+            ["OwnableStorageLocation", "AccessControlDefaultAdminRulesStorageLocation"],
+            True,
+            (None, "not_determined"),
+            id="misparsed-storage-pointers-cannot-leak-a-name",
+        ),
+        # A6: the zero-word arm is an AccessControl convention; it may not fire on an emitter
+        # proven not to implement ``hasRole``.
+        pytest.param(
+            ZERO_ROLE,
+            [],
+            True,
+            ("DEFAULT_ADMIN_ROLE", "accesscontrol_default_admin_literal"),
+            id="default-admin-answered",
+        ),
+        pytest.param(ZERO_ROLE, [], False, (None, "not_determined"), id="default-admin-unanswered"),
+    ],
+)
+def test_resolve_role_name(role, pool, has_role_answered, expected):
+    assert rhp.resolve_role_name(role, pool, has_role_answered=has_role_answered) == expected
 
 
 def test_default_admin_name_withheld_when_registry_never_answers(db_session, monkeypatch):
@@ -461,13 +449,9 @@ def test_default_admin_name_withheld_when_registry_never_answers(db_session, mon
 
 
 def test_candidate_pool_reads_declared_names_across_contracts(db_session):
-    """The pool is not contract-scoped, and does not need to be.
-
-    A preimage is a preimage whoever offered the string, so the name for the
-    proxy's role may legitimately come from the IMPLEMENTATION's row — which is
-    where it actually lives (the events are emitted at the proxy, while
-    ``role_definitions`` hangs off the implementation contract).
-    """
+    """The pool is not contract-scoped: a preimage is a preimage whoever offered it, so the proxy's
+    role name may come from the IMPLEMENTATION's row (events emit at the proxy;
+    ``role_definitions`` hangs off the implementation)."""
     session = db_session
     contract = Contract(address=REGISTRY, chain="ethereum", contract_name="Impl", is_proxy=False)
     session.add(contract)
@@ -484,23 +468,14 @@ def test_candidate_pool_reads_declared_names_across_contracts(db_session):
     session.rollback()
 
 
-def test_default_admin_role_name_is_not_its_own_keccak():
-    """Pins why the zero-word arm must exist separately: the name does not hash
-    to the hash it labels."""
-    assert "0x" + keccak(text="DEFAULT_ADMIN_ROLE").hex() != ZERO_ROLE
-
-
-# ---------------------------------------------------------------------------
 # Disagreement — recorded, never diagnosed
-# ---------------------------------------------------------------------------
 
 
 def test_fold_inactive_but_chain_true_is_admitted(db_session, monkeypatch):
     """The read is the witness, so it wins in both directions.
 
-    Admitting a fold-inactive address does not conflate administration with
-    membership: OZ expresses "may administer X" as membership in a different
-    bytes32, hence a different primary key.
+    Admitting a fold-inactive address does not conflate administration with membership: OZ
+    expresses "may administer X" as membership in a different bytes32 (a different key).
     """
     session = db_session
     _seed(session)
@@ -547,10 +522,9 @@ def test_fold_active_but_chain_false_is_omitted(db_session, monkeypatch):
 def test_disagreement_records_carry_no_cause(db_session, monkeypatch):
     """A9 — the permitted key set, exactly.
 
-    ``as_of_block`` sits above the cursor head, so "the fold missed a log" and
-    "the state changed after the cursor stopped" are indistinguishable. No
-    reason/cause/likely_* key may appear, and non-attribution must survive even
-    if a future run closes that window by pinning the two heights equal.
+    ``as_of_block`` sits above the cursor head, so "the fold missed a log" and "state changed
+    after the cursor stopped" are indistinguishable: no reason/cause/likely_* key may appear,
+    even if a future run pins the two heights equal.
     """
     session = db_session
     _seed(session)
@@ -563,63 +537,54 @@ def test_disagreement_records_carry_no_cause(db_session, monkeypatch):
     assert reverted["fold_chain_disagreements"] == []
 
 
-# ---------------------------------------------------------------------------
 # Cursor bounds consumed from U10A
-# ---------------------------------------------------------------------------
 
 
-def test_explicit_seed_lower_bound_is_dropped(db_session, monkeypatch):
-    """A seed a caller supplied is not a witness, and the number goes with the
-    basis so nothing can cite what it may not."""
+@pytest.mark.parametrize(
+    "cursor_kwargs, expected",
+    [
+        # A caller-supplied seed is not a witness; the number goes with the basis so nothing can cite it.
+        pytest.param(
+            [
+                {"first_indexed_block": 100, "first_indexed_block_basis": FIRST_INDEXED_BASIS_EXPLICIT},
+                {"first_indexed_block": 100, "first_indexed_block_basis": FIRST_INDEXED_BASIS_EXPLICIT},
+            ],
+            {"cursor_first_indexed_block": None, "cursor_first_indexed_block_basis": "not_determined"},
+            id="explicit-seed-dropped",
+        ),
+        # Weakest link: the pair is only covered from the HIGHER of the two. A lower bound alone
+        # licenses nothing (never exhaustiveness).
+        pytest.param(
+            [
+                {"first_indexed_block": 20933000, "first_indexed_block_basis": FIRST_INDEXED_BASIS_CREATION},
+                {"first_indexed_block": 20933100, "first_indexed_block_basis": FIRST_INDEXED_BASIS_CREATION},
+            ],
+            {
+                "cursor_first_indexed_block": 20933100,
+                "cursor_first_indexed_block_basis": FIRST_INDEXED_BASIS_CREATION,
+                "holder_set_exhaustive": "not_determined",
+            },
+            id="witnessed-carried",
+        ),
+        pytest.param(
+            [{"enrollment_basis": ENROLLMENT_BASIS_TRACKED_TOPICS}] * 2,
+            {
+                "holders": [ADMIN_HOLDER],
+                "cursor_enrollment_bases": {RG: ENROLLMENT_BASIS_TRACKED_TOPICS, RR: ENROLLMENT_BASIS_TRACKED_TOPICS},
+                "holder_set_exhaustive": "not_determined",
+            },
+            id="tracked-topics-recorded-not-depended-on",
+        ),
+    ],
+)
+def test_cursor_lower_bound_basis(db_session, monkeypatch, cursor_kwargs, expected):
     session = db_session
-    _seed(
-        session,
-        cursors=[
-            _cursor(RG, first_indexed_block=100, first_indexed_block_basis=FIRST_INDEXED_BASIS_EXPLICIT),
-            _cursor(RR, first_indexed_block=100, first_indexed_block_basis=FIRST_INDEXED_BASIS_EXPLICIT),
-        ],
-    )
+    _seed(session, cursors=[_cursor(RG, **cursor_kwargs[0]), _cursor(RR, **cursor_kwargs[1])])
     row = _by_role(_run(session, monkeypatch, {(PAUSER, ADMIN_HOLDER): TRUE_WORD}))[PAUSER]
-    assert row["cursor_first_indexed_block"] is None
-    assert row["cursor_first_indexed_block_basis"] == "not_determined"
+    assert {key: row[key] for key in expected} == expected
 
 
-def test_witnessed_lower_bound_is_carried(db_session, monkeypatch):
-    session = db_session
-    _seed(
-        session,
-        cursors=[
-            _cursor(RG, first_indexed_block=20933000, first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION),
-            _cursor(RR, first_indexed_block=20933100, first_indexed_block_basis=FIRST_INDEXED_BASIS_CREATION),
-        ],
-    )
-    row = _by_role(_run(session, monkeypatch, {(PAUSER, ADMIN_HOLDER): TRUE_WORD}))[PAUSER]
-    # Weakest link: the pair is only covered from the HIGHER of the two.
-    assert row["cursor_first_indexed_block"] == 20933100
-    assert row["cursor_first_indexed_block_basis"] == FIRST_INDEXED_BASIS_CREATION
-    assert row["holder_set_exhaustive"] == "not_determined", "a lower bound alone licenses nothing"
-
-
-def test_tracked_topics_basis_is_recorded_not_depended_on(db_session, monkeypatch):
-    """An exactness-ineligible cursor still supports a lower bound, because a
-    lower bound is not an exact empty. The basis is cited, not consumed."""
-    session = db_session
-    _seed(
-        session,
-        cursors=[
-            _cursor(RG, enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS),
-            _cursor(RR, enrollment_basis=ENROLLMENT_BASIS_TRACKED_TOPICS),
-        ],
-    )
-    row = _by_role(_run(session, monkeypatch, {(PAUSER, ADMIN_HOLDER): TRUE_WORD}))[PAUSER]
-    assert row["holders"] == [ADMIN_HOLDER]
-    assert row["cursor_enrollment_bases"] == {RG: ENROLLMENT_BASIS_TRACKED_TOPICS, RR: ENROLLMENT_BASIS_TRACKED_TOPICS}
-    assert row["holder_set_exhaustive"] == "not_determined"
-
-
-# ---------------------------------------------------------------------------
-# The pinned probe block itself (R2) — previously monkeypatched away everywhere
-# ---------------------------------------------------------------------------
+# The pinned probe block itself (R2)
 
 
 HEAD = 25643312
@@ -642,9 +607,8 @@ def _rpc_stub(calls: list[tuple[str, list[Any]]], *, head=hex(HEAD), block=None,
 
 
 def test_probe_block_is_confirmation_depth_below_head(monkeypatch):
-    """The height is head − DEFAULT_CONFIRMATION_DEPTH, and the block is asked
-    for by NUMBER. A bare head can be reorged out from under a persisted
-    `as_of_block`, and ``"latest"`` would make the citation unrepeatable."""
+    """The height is head - DEFAULT_CONFIRMATION_DEPTH, asked for by NUMBER: a bare head can be
+    reorged out from under a persisted `as_of_block`, and ``"latest"`` makes the citation unrepeatable."""
     calls: list[tuple[str, list[Any]]] = []
     monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls))
     pinned = rhp.pin_probe_block("http://stub", chain_id=1)
@@ -659,42 +623,37 @@ def test_probe_block_is_confirmation_depth_below_head(monkeypatch):
     assert all("latest" not in str(params) for _, params in calls), "never latest"
 
 
-def test_probe_block_survives_an_unreadable_hash(monkeypatch):
-    """The height stands on its own; only replay-after-reorg is weaker.
-
-    This is why the register says the hash is persisted WHEN READABLE rather
-    than unconditionally.
-    """
+@pytest.mark.parametrize(
+    "stub_kwargs",
+    [
+        # The height stands on its own; only replay-after-reorg is weaker (hash is persisted WHEN READABLE).
+        pytest.param({"fail_hash": True}, id="survives-an-unreadable-hash"),
+        pytest.param({"block": {}}, id="hash-absent-from-payload-is-not-invented"),
+    ],
+)
+def test_probe_block_without_a_hash(monkeypatch, stub_kwargs):
     calls: list[tuple[str, list[Any]]] = []
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, fail_hash=True))
+    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, **stub_kwargs))
     pinned = rhp.pin_probe_block("http://stub", chain_id=1)
     assert pinned is not None
     assert pinned.number == HEAD - DEFAULT_CONFIRMATION_DEPTH
     assert pinned.block_hash is None
 
 
-def test_probe_block_hash_absent_from_payload_is_not_invented(monkeypatch):
+@pytest.mark.parametrize(
+    "stub_kwargs",
+    [
+        pytest.param({"fail_head": True}, id="unreadable-head"),
+        pytest.param({"head": hex(DEFAULT_CONFIRMATION_DEPTH)}, id="chain-shallower-than-confirmation-depth"),
+    ],
+)
+def test_no_probe_block(monkeypatch, stub_kwargs):
     calls: list[tuple[str, list[Any]]] = []
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, block={}))
-    pinned = rhp.pin_probe_block("http://stub", chain_id=1)
-    assert pinned is not None and pinned.block_hash is None
-
-
-def test_unreadable_head_yields_no_probe_block(monkeypatch):
-    calls: list[tuple[str, list[Any]]] = []
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, fail_head=True))
+    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, **stub_kwargs))
     assert rhp.pin_probe_block("http://stub", chain_id=1) is None
 
 
-def test_chain_shallower_than_confirmation_depth_yields_no_probe_block(monkeypatch):
-    calls: list[tuple[str, list[Any]]] = []
-    monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, head=hex(DEFAULT_CONFIRMATION_DEPTH)))
-    assert rhp.pin_probe_block("http://stub", chain_id=1) is None
-
-
-# ---------------------------------------------------------------------------
 # The bans, enforced by the database
-# ---------------------------------------------------------------------------
 
 
 def _valid_row(**overrides: Any) -> dict[str, Any]:
@@ -769,12 +728,10 @@ def test_database_refuses_unprovable_rows(db_session, overrides, reason):
     ],
 )
 def test_discriminators_reject_an_explicit_null(db_session, column):
-    """A CHECK that evaluates to NULL PASSES in Postgres.
+    """A CHECK that evaluates to NULL PASSES in Postgres, so NOT NULL (not the CHECK) is what makes
+    these constraints binding (e.g. ``holder_set_exhaustive = 'not_determined'`` accepts NULL).
 
-    ``holder_set_exhaustive = 'not_determined'`` is satisfied by a NULL, as is
-    every domain check and both biconditionals — so NOT NULL, not the CHECK, is
-    what actually makes those constraints binding. Asserted through raw SQL
-    because the ORM's server_default would quietly substitute a value for an
+    Asserted through raw SQL because the ORM's server_default would substitute a value for an
     omitted column and hide the hole.
     """
     session = db_session
@@ -808,12 +765,9 @@ def _withheld_orm_row(**overrides: Any) -> dict[str, Any]:
 def test_orm_writes_sql_null_not_the_jsonb_scalar_null(db_session):
     """``none_as_null``, pinned.
 
-    Without it SQLAlchemy stores a Python None as the jsonb scalar ``null``,
-    which is a PRESENT payload to every SQL null test — the repo-wide invariant
-    in ``test_jsonb_null_predicates`` exists for exactly this. If it is ever
-    dropped, this fails rather than silently changing what a withheld row means.
-    ``jsonb_typeof`` returns SQL NULL for a SQL NULL and the string ``'null'``
-    for the scalar, so it separates the two states the trap conflates.
+    Without it SQLAlchemy stores Python None as the jsonb scalar ``null``, a PRESENT payload to
+    every SQL null test (the invariant in ``test_jsonb_null_predicates``). ``jsonb_typeof``
+    returns SQL NULL for SQL NULL and ``'null'`` for the scalar, separating the two states.
     """
     session = db_session
     session.add(RoleHolderPlane(**_withheld_orm_row()))
@@ -826,15 +780,13 @@ def test_orm_writes_sql_null_not_the_jsonb_scalar_null(db_session):
         {"r": PAUSER},
     ).one()
     assert typeof is None, "a withheld row must be SQL NULL, not the jsonb scalar 'null'"
-    # The disagreement ledger needs the same guard and cannot borrow the one above:
-    # its withheld predicate deliberately counts the scalar null, so the CHECKs stay
-    # satisfied while every naive IS NULL consumer reads the row as carrying evidence.
+    # The disagreement ledger needs the same guard: its withheld predicate deliberately counts
+    # the scalar null, so the CHECKs stay satisfied while naive IS NULL consumers see evidence.
     assert disagreements_typeof is None, "a withheld disagreement ledger must be SQL NULL too"
     session.rollback()
 
 
 def _raw_insert(session, holders_sql: str, **cols: str) -> None:
-    """Insert a withheld-shaped row with ``holders`` written as raw jsonb."""
     defaults = {
         "holders_basis": "'not_determined'",
         "holder_set_exhaustive": "'not_determined'",
@@ -858,13 +810,9 @@ def _raw_insert(session, holders_sql: str, **cols: str) -> None:
 
 
 def test_jsonb_scalar_null_is_treated_as_withheld(db_session):
-    """Raw SQL can still reach the column, so the trap is NEUTRALISED, not merely
-    avoided: the scalar null counts as withheld everywhere, exactly like SQL NULL.
-
-    Were it read as a payload instead, five constraints would stop
-    discriminating at once and a row carrying no holders would satisfy the
-    checks meant to require them.
-    """
+    """Raw SQL can still reach the column, so the trap is NEUTRALISED: the scalar null counts as
+    withheld everywhere, like SQL NULL. Read as a payload, five constraints would stop
+    discriminating at once."""
     session = db_session
     _raw_insert(session, "'null'::jsonb")
     stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
@@ -873,8 +821,6 @@ def test_jsonb_scalar_null_is_treated_as_withheld(db_session):
 
 
 def test_jsonb_scalar_null_cannot_carry_a_proven_basis(db_session):
-    """The biconditional sees the scalar null as withheld, so pairing it with the
-    pinned basis — or with a block, or with counters — is rejected."""
     session = db_session
     for extra in (
         {"holders_basis": "'pinned_has_role_confirmed'"},
@@ -889,9 +835,8 @@ def test_jsonb_scalar_null_cannot_carry_a_proven_basis(db_session):
 def test_withheld_row_cannot_claim_no_disagreement(db_session):
     """R4 — ``[]`` on a withheld row is an unearned negative.
 
-    On an all-reverting registry nothing was read, so "no disagreement" is
-    not_determined. On an all-false registry disagreements WERE observed, and
-    publishing ``[]`` there would suppress them. Both must be NULL.
+    On an all-reverting registry nothing was read (not_determined); on an all-false registry
+    disagreements WERE observed and ``[]`` would suppress them. Both must be NULL.
     """
     session = db_session
     with pytest.raises(IntegrityError):
@@ -900,22 +845,10 @@ def test_withheld_row_cannot_claim_no_disagreement(db_session):
 
 
 def test_published_row_must_carry_a_disagreement_log(db_session):
-    """The converse: a published floor may not omit the log that qualifies it."""
     session = db_session
     with pytest.raises(IntegrityError):
         session.add(RoleHolderPlane(**_valid_row(fold_chain_disagreements=None)))
         session.flush()
-    session.rollback()
-
-
-def test_published_empty_disagreement_log_is_allowed(db_session):
-    """On a published row ``[]`` is earned — scoped to the candidates whose
-    reads completed, with ``unconfirmed_candidate_count`` carrying the rest."""
-    session = db_session
-    session.add(RoleHolderPlane(**_valid_row(fold_chain_disagreements=[])))
-    session.flush()
-    stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
-    assert stored is not None and stored.fold_chain_disagreements == []
     session.rollback()
 
 
@@ -941,14 +874,14 @@ def test_withheld_rows_carry_a_null_disagreement_log(db_session, monkeypatch):
             {"cursor_first_indexed_block_basis": "'creation_block_minus_one'"},
             id="witnessed_basis_without_a_block",
         ),
+        pytest.param({"cursor_first_indexed_block": "999"}, id="lower_bound_block_without_a_basis"),
     ],
 )
 def test_cursor_bound_columns_are_domain_checked(db_session, cols):
     """R1 + R3 — gates that lived only in code, now in the schema.
 
-    A basis of ``creation_block_minus_one`` with no block claims a height it
-    cannot cite; ``explicit_seed`` is a caller's number and the writer
-    normalises it away, so it must not be storable as a witness either.
+    A ``creation_block_minus_one`` basis with no block claims an uncitable height;
+    ``explicit_seed`` is a caller's number the writer normalises away, so it must not be storable either.
     """
     session = db_session
     with pytest.raises(IntegrityError):
@@ -956,15 +889,7 @@ def test_cursor_bound_columns_are_domain_checked(db_session, cols):
     session.rollback()
 
 
-def test_lower_bound_block_without_a_basis_is_rejected(db_session):
-    session = db_session
-    with pytest.raises(IntegrityError):
-        _raw_insert(session, "NULL", cursor_first_indexed_block="999")
-    session.rollback()
-
-
 def test_non_array_holders_are_rejected(db_session):
-    """A jsonb string or object is neither a holder set nor a withheld marker."""
     session = db_session
     for payload in ("'\"0xabc\"'::jsonb", "'{}'::jsonb", "'7'::jsonb"):
         with pytest.raises(IntegrityError):
@@ -981,23 +906,29 @@ def test_non_array_holders_are_rejected(db_session):
         session.rollback()
 
 
-def test_valid_row_round_trips(db_session):
+@pytest.mark.parametrize(
+    "row, expected",
+    [
+        pytest.param(
+            _valid_row(), {"holders": [ADMIN_HOLDER], "holder_set_exhaustive": "not_determined"}, id="valid-row"
+        ),
+        pytest.param(_withheld_orm_row(), {"holders": None, "fold_chain_disagreements": None}, id="withheld-row"),
+        # Positive control for the CHECKs: a published row may carry an empty disagreement log.
+        pytest.param(
+            _valid_row(fold_chain_disagreements=[]),
+            {"fold_chain_disagreements": []},
+            id="published-empty-disagreement-log",
+        ),
+    ],
+)
+def test_row_round_trips(db_session, row, expected):
     session = db_session
-    session.add(RoleHolderPlane(**_valid_row()))
+    session.add(RoleHolderPlane(**row))
     session.flush()
     stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
     assert stored is not None
-    assert stored.holders == [ADMIN_HOLDER]
-    assert stored.holder_set_exhaustive == "not_determined"
-
-
-def test_withheld_row_round_trips(db_session):
-    session = db_session
-    session.add(RoleHolderPlane(**_withheld_orm_row()))
-    session.flush()
-    stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
-    assert stored is not None and stored.holders is None
-    assert stored.fold_chain_disagreements is None
+    assert {column: getattr(stored, column) for column in expected} == expected
+    session.rollback()
 
 
 def test_persist_upserts(db_session, monkeypatch):
@@ -1011,20 +942,15 @@ def test_persist_upserts(db_session, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Tolerant decoders on a registered witness plane (fix 3)
-#
-# Three instances of the same shape: a value nobody observed, padded/coerced
-# into one that looks observed. Each one published a POSITIVE fact — a role
-# name, a replay citation, "the chain answered false" — out of a read that
-# answered nothing.
+# Tolerant decoders on a registered witness plane (fix 3): three instances of a value nobody
+# observed being padded/coerced into one that looks observed, publishing a POSITIVE fact
+# (role name, replay citation, "the chain answered false") from a read that answered nothing.
 # ---------------------------------------------------------------------------
 
 
 def test_empty_word_is_never_padded_into_the_default_admin_role():
-    """FALSIFIER: ``"0x"`` left-padded is bit-identical to
-    ``DEFAULT_ADMIN_ROLE_HASH``, so the tolerant normalizer turned a no-data
-    read into the zero role AND its convention-based name — defeating the
-    guard this file already asserts one function over."""
+    """FALSIFIER: ``"0x"`` left-padded is bit-identical to ``DEFAULT_ADMIN_ROLE_HASH``, so the
+    tolerant normalizer turned a no-data read into the zero role AND its convention-based name."""
     assert rhp._normalize_word("0x") is None
     assert rhp.resolve_role_name("0x", [], has_role_answered=True) == (None, "not_determined")
     assert rhp.resolve_role_name("0x00", [], has_role_answered=True) == (None, "not_determined")
@@ -1043,17 +969,14 @@ def test_empty_word_is_never_padded_into_the_default_admin_role():
 
 
 def test_an_empty_word_topic_folds_to_no_candidate(db_session, monkeypatch):
-    """The fold's own entry point: a log whose role topic is ``"0x"`` must
-    contribute no role, rather than a DEFAULT_ADMIN candidate."""
     log = _log(RG, ZERO_ROLE, ADMIN_HOLDER, block=19298624, log_index=1)
     log.topics = [RG, "0x", _word(ADMIN_HOLDER)]
     assert rhp.fold_role_candidates([log]) == {}
 
 
 def test_block_hash_of_an_empty_return_is_absent_not_empty_bytes(monkeypatch):
-    """FALSIFIER: the reorg/replay witness was decoded with ``bytes.fromhex``
-    and no length check, so ``"0x"`` published ``b""`` — a citation a replaying
-    reader cannot tell from one it never got."""
+    """FALSIFIER: the replay witness was decoded via ``bytes.fromhex`` with no length check, so ``"0x"`` published
+    ``b""``."""
     calls: list[tuple[str, list[Any]]] = []
     monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, block={"hash": "0x"}))
     pinned = rhp.pin_probe_block("http://stub", chain_id=1)
@@ -1078,36 +1001,30 @@ def test_block_hash_of_an_empty_return_is_absent_not_empty_bytes(monkeypatch):
 
 
 def test_success_with_empty_returndata_is_a_failed_read(db_session, monkeypatch):
-    """FALSIFIER: ``eth_call_batch`` reports a result it cannot read as
-    ``EthCallResult(True, "0x", …)``. ``decode_bool_word("0x")`` is False, so a
-    call that returned NO DATA published ``chain_state: "false"`` in the
-    disagreement log AND satisfied ``has_role_answered``.
-    """
+    """FALSIFIER: ``eth_call_batch`` reports an unreadable result as ``EthCallResult(True, "0x", ...)``;
+    ``decode_bool_word("0x")`` is False, so a NO-DATA call published ``chain_state: "false"`` AND
+    satisfied ``has_role_answered``."""
     empty_success = EthCallResult(True, "0x", None, None)
     assert rhp.classify_candidate(empty_success) == rhp.CANDIDATE_UNCONFIRMED
     assert rhp.classify_candidate(EthCallResult(True, "0x0", None, None)) == rhp.CANDIDATE_UNCONFIRMED
     assert rhp.classify_candidate(EthCallResult(True, "0x" + "00" * 31, None, None)) == rhp.CANDIDATE_UNCONFIRMED
 
     session = db_session
-    # One GRANTED log for the zero role: the fold believes the account active,
-    # so a completed "false" would be a recorded disagreement.
+    # One GRANTED log for the zero role: a completed "false" would be a recorded disagreement.
     _seed(session, logs=[_log(RG, ZERO_ROLE, ADMIN_HOLDER, block=19298624, log_index=3)])
     rows = _run(session, monkeypatch, {(ZERO_ROLE, ADMIN_HOLDER): empty_success})
 
     row = _by_role(rows)[ZERO_ROLE]
-    # Withheld, not published-false.
     assert row["holders"] is None
     assert row["holders_basis"] == "not_determined"
     assert row["fold_chain_disagreements"] is None
-    # `has_role_answered` must NOT have been satisfied, so the zero-word naming
-    # convention has nothing to stand on.
+    # `has_role_answered` must NOT be satisfied, so the zero-word naming convention has nothing to stand on.
     assert row["role_name"] is None
     assert row["role_name_basis"] == "not_determined"
 
 
 def test_a_genuine_full_word_false_is_still_a_recorded_disagreement(db_session, monkeypatch):
-    """RECALL for the arm above: a completed read of a real 32-byte zero word
-    still records ``chain_state: "false"``. The plane loses no disagreement."""
+    """RECALL for the arm above: a completed read of a real 32-byte zero word still records ``chain_state: "false"``."""
     session = db_session
     _seed(
         session,
@@ -1125,7 +1042,6 @@ def test_a_genuine_full_word_false_is_still_a_recorded_disagreement(db_session, 
     )
     disagreements = rows[PAUSER]["fold_chain_disagreements"]
     assert disagreements == []
-    # The false read completed, so the zero-word convention IS earned here.
     assert rows[ZERO_ROLE]["role_name"] is None  # withheld: no confirmed holder
     assert rows[PAUSER]["holders"] == [PAUSER_EXTRA]
 

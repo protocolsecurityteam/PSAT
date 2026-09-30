@@ -1,19 +1,14 @@
 """NULL-chain Contract lookups in ``workers.static_worker``.
 
-Two Contract lookups resolved chain from the request JSONB (or not at all) and
-compared it with a raw ``chain == <value>`` predicate:
+Two lookups compared a request-JSONB chain (or none) with a raw ``chain == <value>`` predicate:
 
-  - ``_load_contract_row`` — the job_id-rebind fallback. It read
-    ``request["chain"]``, so a chainless L2 submission (chain only in the
-    first-class ``jobs.chain_id`` column) dropped the filter and could bind a
-    mainnet row.
-  - ``_resolve_proxy`` membership on classification — the membership gate's
-    W2 proxy-edge verification is chain-scoped, so a same-address member impl
-    on another chain can never stand in as the admitting anchor.
+  - ``_load_contract_row`` (job_id-rebind fallback) read ``request["chain"]``, so a chainless L2 submission
+    (chain only in ``jobs.chain_id``) dropped the filter and could bind a mainnet row.
+  - ``_resolve_proxy`` membership: the gate's W2 proxy-edge verification is chain-scoped, so a same-address
+    member impl on another chain can never be the admitting anchor.
 
-Both derive the chain from ``jobs.chain_id`` (``_parent_chain_name``) and
-coalesce (NULL≡mainnet). Proven both directions: mainnet finds legacy NULL
-rows; a non-mainnet job stays isolated.
+Both now derive chain from ``jobs.chain_id`` (``_parent_chain_name``) and coalesce NULL≡mainnet: mainnet finds
+legacy NULL rows, a non-mainnet job stays isolated.
 """
 
 from __future__ import annotations
@@ -45,43 +40,28 @@ def proto_id(db_session):
 
 
 @requires_postgres
-def test_load_contract_row_finds_legacy_null_row_for_mainnet_job(db_session):
-    """The Contract row was orphaned from the job (job_id rebind) and persisted
-    ``chain=NULL``. A mainnet job resolves it via the coalesced fallback."""
-    from db.models import Contract
-    from db.queue import create_job
-    from workers.static_worker import StaticWorker
-
-    addr = _addr()
-    job = create_job(db_session, {"address": addr, "name": "Subject"})  # chain_id=1, no request chain
-    db_session.add(Contract(address=addr.lower(), chain=None, contract_name="Legacy", job_id=None))
-    db_session.commit()
-
-    row = StaticWorker._load_contract_row(db_session, job)
-    assert row is not None
-    assert row.contract_name == "Legacy"
-
-
-@requires_postgres
-def test_load_contract_row_l2_job_does_not_bind_mainnet_row(db_session):
-    """A Base-routed job (chain only in ``jobs.chain_id``, absent from the
-    request JSONB) must not bind a legacy mainnet (NULL) row at the same
-    address — the request-only read used to drop the filter and bleed."""
+@pytest.mark.parametrize(
+    ("job_chain_id", "expected_name"),
+    [
+        pytest.param(1, "Legacy", id="mainnet-job-finds-legacy-null-row"),
+        # A Base-routed job (chain only in ``jobs.chain_id``) must not bind a legacy mainnet NULL row at the
+        # same address; the request-only read used to drop the filter and bleed.
+        pytest.param(8453, None, id="l2-job-does-not-bind-mainnet-row"),
+    ],
+)
+def test_load_contract_row_coalesces_null_chain(db_session, job_chain_id, expected_name):
     from db.models import Contract
     from db.queue import create_job
     from workers.static_worker import StaticWorker
 
     addr = _addr()
     job = create_job(db_session, {"address": addr, "name": "Subject"})
-    job.chain_id = 8453  # routed to Base; request payload carries no chain
-    db_session.commit()
-
-    # Only a mainnet (legacy NULL) row exists for this address.
-    db_session.add(Contract(address=addr.lower(), chain=None, contract_name="Mainnet", job_id=None))
+    job.chain_id = job_chain_id  # request payload carries no chain
+    db_session.add(Contract(address=addr.lower(), chain=None, contract_name="Legacy", job_id=None))
     db_session.commit()
 
     row = StaticWorker._load_contract_row(db_session, job)
-    assert row is None
+    assert getattr(row, "contract_name", None) == expected_name
 
 
 # ---------------------------------------------------------------------------
@@ -118,45 +98,29 @@ def _seed_adoption_graph(session, proto_id, *, impl_chain):
 
 @pytest.fixture()
 def _stub_resolve_proxy_seams(monkeypatch):
-    """Neutralize the child-spawn tail of ``_resolve_proxy`` so the test targets
-    only the membership-gate hook (which commits before the tail runs)."""
+    """Neutralize ``_resolve_proxy``'s child-spawn tail so the test targets only the membership-gate hook."""
     monkeypatch.setattr("workers.static_worker.store_artifact", lambda *a, **kw: None)
     monkeypatch.setattr("workers.static_worker.reconcile_impl_job_for_proxy", lambda *a, **kw: "skip")
     monkeypatch.setattr("workers.static_worker._redirect_proxy_policy_dependencies", lambda *a, **kw: None)
 
 
 @requires_postgres
-def test_resolve_proxy_promotes_when_impl_on_same_chain(db_session, proto_id, monkeypatch, _stub_resolve_proxy_seams):
-    """Mainnet job: the member impl is on ethereum, so the gate's
-    chain-scoped W2 proxy edge verifies and the nominated proxy promotes."""
-    from db.models import Contract
-    from workers.static_worker import StaticWorker
-
-    job, proxy_addr, impl_addr = _seed_adoption_graph(db_session, proto_id, impl_chain="ethereum")
-    monkeypatch.setattr(
-        "services.discovery.classifier.classify_single",
-        lambda address, rpc_url, **_kw: {"type": "proxy", "proxy_type": "eip1967", "implementation": impl_addr},
-    )
-
-    StaticWorker()._resolve_proxy(db_session, job, proxy_addr, "Proxy")
-
-    proxy = (
-        db_session.query(Contract).filter(Contract.address == proxy_addr.lower(), Contract.chain == "ethereum").one()
-    )
-    assert proxy.protocol_id == proto_id
-
-
-@requires_postgres
-def test_resolve_proxy_does_not_promote_when_impl_only_on_other_chain(
-    db_session, proto_id, monkeypatch, _stub_resolve_proxy_seams
+@pytest.mark.parametrize(
+    ("impl_chain", "promoted"),
+    [
+        pytest.param("ethereum", True, id="impl-on-same-chain-promotes"),
+        # The same-address member impl exists only on Base: chain-scoped W2 verification finds no mainnet
+        # member, so no promotion (the fix against cross-chain evidence bleed).
+        pytest.param("base", False, id="impl-only-on-other-chain-does-not-promote"),
+    ],
+)
+def test_resolve_proxy_promotion_is_chain_scoped(
+    db_session, proto_id, monkeypatch, _stub_resolve_proxy_seams, impl_chain, promoted
 ):
-    """Mainnet job: the same-address member impl exists only on Base. The
-    chain-scoped W2 verification finds no mainnet member, so no promotion —
-    the fix against cross-chain evidence bleed."""
     from db.models import Contract
     from workers.static_worker import StaticWorker
 
-    job, proxy_addr, impl_addr = _seed_adoption_graph(db_session, proto_id, impl_chain="base")
+    job, proxy_addr, impl_addr = _seed_adoption_graph(db_session, proto_id, impl_chain=impl_chain)
     monkeypatch.setattr(
         "services.discovery.classifier.classify_single",
         lambda address, rpc_url, **_kw: {"type": "proxy", "proxy_type": "eip1967", "implementation": impl_addr},
@@ -167,4 +131,4 @@ def test_resolve_proxy_does_not_promote_when_impl_only_on_other_chain(
     proxy = (
         db_session.query(Contract).filter(Contract.address == proxy_addr.lower(), Contract.chain == "ethereum").one()
     )
-    assert proxy.protocol_id is None
+    assert proxy.protocol_id == (proto_id if promoted else None)

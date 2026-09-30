@@ -36,29 +36,17 @@ def _addrinfo(ip: str):
         # allowlist is what refuses it.
         ("http://cgnat-metadata/", "100.100.100.200"),
         ("http://cgnat-low/", "100.64.0.1"),
+        # Decimal (2130706433) and hex (0x7f000001) integer spellings of 127.0.0.1: the guard
+        # classifies on the RESOLVED address, so however the literal is spelled it resolves to
+        # loopback and is refused. Pins that a refactor can't start deciding on the textual host.
+        ("http://2130706433/", "127.0.0.1"),
+        ("http://0x7f000001/", "127.0.0.1"),
     ],
 )
 def test_rejects_non_public_addresses(url, ip):
     with patch("socket.getaddrinfo", return_value=_addrinfo(ip)):
         with pytest.raises(UnsafeUrlError):
             assert_public_http_url(url)
-
-
-@pytest.mark.parametrize(
-    "host,resolved",
-    [
-        # Decimal (2130706433) and hex (0x7f000001) integer spellings of
-        # 127.0.0.1: the guard classifies on the RESOLVED address, so however
-        # the literal is spelled it resolves to loopback and is refused. Pins
-        # that a refactor can't start deciding on the textual host instead.
-        ("2130706433", "127.0.0.1"),
-        ("0x7f000001", "127.0.0.1"),
-    ],
-)
-def test_rejects_alternate_ip_literal_encodings(host, resolved):
-    with patch("socket.getaddrinfo", return_value=_addrinfo(resolved)):
-        with pytest.raises(UnsafeUrlError):
-            assert_public_http_url(f"http://{host}/")
 
 
 @pytest.mark.parametrize("url", ["file:///etc/passwd", "gopher://x/", "javascript:alert(1)", "ftp://host/"])
@@ -135,19 +123,25 @@ def test_safe_get_returns_non_redirect():
     assert mock_get.call_args.kwargs["allow_redirects"] is False
 
 
-def test_safe_get_refuses_redirect_to_internal_host():
-    # First hop resolves public and returns a redirect to an internal host;
-    # the redirect target must be re-validated and rejected.
+@pytest.mark.parametrize("injected", [False, True], ids=["module-requests", "injected-session"])
+def test_safe_get_refuses_redirect_to_internal_host(injected):
+    # First hop resolves public and returns a redirect to an internal host; the redirect target must
+    # be re-validated and rejected. An injected session is used for the connection, and the redirect
+    # is still refused rather than followed.
     resolutions = {"example.com": "93.184.216.34", "internal.local": "169.254.169.254"}
 
     def fake_getaddrinfo(host, *a, **k):
         return _addrinfo(resolutions[host])
 
     redirect = _FakeResp(302, {"Location": "http://internal.local/steal"})
+    session = MagicMock()
+    session.get.return_value = redirect
     with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
-        with patch("requests.get", return_value=redirect):
+        with patch("requests.get", return_value=redirect) as requests_get:
             with pytest.raises(UnsafeUrlError):
-                safe_get("https://example.com/", timeout=5)
+                safe_get("https://example.com/", timeout=5, **({"session": session} if injected else {}))
+    # Only the first (public) hop was fetched; the internal target never was.
+    assert (session.get if injected else requests_get).call_count == 1
 
 
 def test_safe_get_follows_public_redirect():
@@ -164,23 +158,6 @@ def test_safe_get_follows_public_redirect():
         with patch("requests.get", side_effect=responses):
             resp = safe_get("https://example.com/", timeout=5)
     assert resp.status_code == 200
-
-
-def test_safe_get_uses_injected_session_and_refuses_redirect():
-    # An injected session is used for the connection, and a redirect to an
-    # internal host is still re-validated and refused rather than followed.
-    resolutions = {"example.com": "93.184.216.34", "internal.local": "169.254.169.254"}
-
-    def fake_getaddrinfo(host, *a, **k):
-        return _addrinfo(resolutions[host])
-
-    session = MagicMock()
-    session.get.return_value = _FakeResp(302, {"Location": "http://internal.local/steal"})
-    with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
-        with pytest.raises(UnsafeUrlError):
-            safe_get("https://example.com/", timeout=5, session=session)
-    # Only the first (public) hop was fetched; the internal target never was.
-    assert session.get.call_count == 1
 
 
 def test_download_audit_body_refuses_redirect_to_internal():

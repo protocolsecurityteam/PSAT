@@ -1,11 +1,9 @@
 """Tests for the writer-gate two-pass analyzer.
 
-Single-key caller-keyed bool/uint mappings can't be
-classified as auth or personal-flag from the read-site alone — the
-discriminator is how the storage var is *written*. The analyzer
-walks the contract, finds writer functions of each candidate
-mapping, classifies the write key, and promotes leaves when the
-writer is itself authority-gated.
+Per v6/v7 plan: a 1-key caller-keyed bool/uint mapping can't be classified as auth vs
+personal-flag from the read site alone; the discriminator is how the var is *written*. The
+analyzer finds each candidate's writers, classifies the write key, and promotes leaves when
+the writer is itself authority-gated.
 """
 
 from __future__ import annotations
@@ -59,8 +57,6 @@ def _build_trees(contract):
 
 
 def test_personal_flag_stays_business(tmp_path):
-    """``claimed[msg.sender] = true`` is the only writer (and self-
-    keyed). Reading ``require(claimed[msg.sender])`` stays business."""
     sl = _compile(
         tmp_path,
         """
@@ -91,12 +87,9 @@ def test_personal_flag_stays_business(tmp_path):
 
 
 def test_blacklist_writer_gated_promotes(tmp_path):
-    """``_blacklist[user] = true`` is written by an Ownable function.
-    Reading ``require(!_blacklist[msg.sender])`` should promote to
-    caller_authority via rule b.i.
-
-    Confidence is MEDIUM on a rule-b.i promotion: the auth signal comes
-    from writer-side analysis, not from the read site's own shape."""
+    """``_blacklist[user] = true`` is written by an Ownable function, so reading
+    ``require(!_blacklist[msg.sender])`` promotes to caller_authority (rule b.i) with MEDIUM
+    confidence: the auth signal comes from writer-side analysis, not the read site."""
     sl = _compile(
         tmp_path,
         """
@@ -132,19 +125,12 @@ def test_blacklist_writer_gated_promotes(tmp_path):
 
 
 def test_self_administered_wards_promotes(tmp_path):
-    """Maker wards-style: ``rely(addr)`` is gated by ``wards[msg.
-    sender] == 1`` (same map, value-compare form). Reading
-    ``wards[msg.sender] == 1`` in someAction should promote via
-    rule b.ii because the writer is gated by the same storage var.
+    """Maker wards-style: ``rely(addr)`` is gated by ``wards[msg.sender] == 1`` (same map,
+    value-compare form), so reading it in someAction promotes via rule b.ii, with HIGH
+    confidence (tight structural match, unlike b.i).
 
-    Critical for real Maker contracts: this is THE canonical 'auth'
-    pattern in MakerDAO. Without ``map[k]==1`` recognition the leaf
-    stays equality, the writer-gate pass-2 doesn't see a membership
-    leaf to gate on, and the wards mapping looks like just a uint
-    state-var read.
-
-    Confidence is HIGH here (unlike rule b.i): the writer reads the same
-    map M as its own gate, which is a tight structural match."""
+    Critical for MakerDAO's canonical 'auth' pattern: without ``map[k]==1`` recognition the leaf
+    stays equality, pass-2 sees no membership leaf to gate on, and wards looks like a uint read."""
     sl = _compile(
         tmp_path,
         """
@@ -167,11 +153,8 @@ def test_self_administered_wards_promotes(tmp_path):
     leaves = _all_leaves(trees["someAction()"])
     assert len(leaves) == 1
     leaf = leaves[0]
-    # Recognized as membership (value-compare pattern) with
-    # truthy_value="1".
     assert leaf["kind"] == "membership"
     assert leaf["set_descriptor"]["truthy_value"] == "1"
-    # Promoted via rule b.ii (self-administered).
     assert leaf["authority_role"] == "caller_authority"
     assert leaf["confidence"] == "high"
 
@@ -182,9 +165,6 @@ def test_self_administered_wards_promotes(tmp_path):
 
 
 def test_open_registration_stays_business(tmp_path):
-    """``register(addr)`` writes ``_registered[addr] = true`` with no
-    gate. Reading ``require(_registered[msg.sender])`` should stay
-    business — anyone can register anyone, and confidence stays LOW."""
     sl = _compile(
         tmp_path,
         """
@@ -241,23 +221,16 @@ def test_mixed_gated_and_public_external_writers_stays_business(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Regression pin: inherited OZ Ownable through ``_checkOwner`` helper.
-# The predicate builder must walk ``owner() == _msgSender()`` through the
-# inherited helper and bind the operand to the underlying ``_owner`` storage
-# var — otherwise the leaf classifies as ``business`` (or empty) and the
-# downstream resolver has nothing to enumerate. Confirmed working on the
-# EtherFi LiquidityPool artifact (``operands: [_owner, msg_sender]``,
-# ``authority_role: caller_authority``), pinned here so a regression in
-# the cross-fn provenance walk surfaces immediately.
+# Regression pin: inherited OZ Ownable through the ``_checkOwner`` helper. The predicate builder
+# must walk ``owner() == _msgSender()`` through the inherited helper and bind the operand to
+# ``_owner``; otherwise the leaf is ``business``/empty and the resolver has nothing to enumerate.
+# Confirmed on the EtherFi LiquidityPool artifact.
 # ---------------------------------------------------------------------------
 
 
 def test_owner_eq_msgsender_through_helper_call(tmp_path):
-    """OZ-shaped Ownable: ``onlyOwner`` modifier calls ``_checkOwner()``,
-    which calls a view function ``owner()`` whose body is
-    ``return _owner;``. The condition is ``owner() == _msgSender()``.
-    The predicate builder should classify this leaf as
-    ``caller_authority`` because ``owner()`` resolves to ``_owner``."""
+    """OZ-shaped Ownable: ``onlyOwner`` -> ``_checkOwner()`` -> view ``owner()`` returning
+    ``_owner``; the leaf must classify as ``caller_authority``."""
     # Inheritance pattern matters: same-contract _checkOwner is already handled
     # by the existing cross-fn helper traversal. EtherFi inherits from
     # OwnableUpgradeable so the modifier + _checkOwner + owner() live in a
@@ -292,8 +265,7 @@ def test_owner_eq_msgsender_through_helper_call(tmp_path):
     apply_writer_gate_pass(contract, trees)
     leaves = _all_leaves(trees["transferOwnership(address)"])
     assert leaves, "expected at least one leaf for transferOwnership"
-    # The owner-check leaf should classify as caller_authority — not business
-    # (the empty fallback) and not unsupported.
+    # caller_authority, not business (the empty fallback) and not unsupported.
     auth_leaves = [leaf for leaf in leaves if leaf["authority_role"] == "caller_authority"]
     assert auth_leaves, (
         f"expected a caller_authority leaf for transferOwnership; got "

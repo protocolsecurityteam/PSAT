@@ -1,6 +1,5 @@
-// Formatters for the score page. Separate from surface/format.js because the
-// score page needs three significant figures on the dollar totals (the audit
-// block sets $4.08B against $4.17B — one decimal collapses both to $4.1B).
+// Score-page formatters: three significant figures, since $4.08B vs $4.17B
+// collapse to $4.1B at one decimal.
 
 import { middleSlice } from "../shared/format.js";
 
@@ -19,12 +18,8 @@ export function usdCompact(value) {
   return `$${value.toFixed(0)}`;
 }
 
-// The confidence zone's own dollar formatter, apart from usdCompact because an
-// at-most is read against its neighbours: the zone puts $2.20M, $29.5M and $159k
-// in one column, where usdCompact's fixed two-decimal step prints $159.0K and
-// $29.55M — more digits than the bound has meaning for. Sub-cent figures are
-// real ceilings the producer measured, so they print as "< $0.01" rather than
-// rounding to a zero nobody proved.
+// At-mosts are read against neighbours, so fewer digits than usdCompact.
+// Sub-cent ceilings print "< $0.01", not a zero nobody proved.
 function usdCeiling(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   if (value === 0) return "$0.00";
@@ -35,15 +30,13 @@ function usdCeiling(value) {
   return `$${(value / 1e9).toFixed(2)}B`;
 }
 
-// An at-most, never an amount: the ≤ is part of the figure and travels with it.
 export function ceilingText(value) {
   const figure = usdCeiling(value);
   if (figure === null) return null;
   return figure.startsWith("<") ? figure : `≤ ${figure}`;
 }
 
-// Trailing zeros come off so "up to 16.50" reads as 16.5, but only after a
-// decimal point — a bare 100 must not be stripped to 1.
+// Only after a decimal point: 100 must not become 1.
 export function pointsText(value) {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
   if (value === 0) return "0";
@@ -52,8 +45,7 @@ export function pointsText(value) {
   return two === "0" ? trim(value.toFixed(4)) : two;
 }
 
-// Percent of a total. null — never 0 — when either side is unwitnessed, so an
-// unmeasured share can't render as a measured zero.
+// null, never 0, when either side is unwitnessed.
 export function pctOf(part, total) {
   if (typeof part !== "number" || !Number.isFinite(part)) return null;
   if (typeof total !== "number" || !Number.isFinite(total) || total <= 0) return null;

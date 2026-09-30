@@ -8,8 +8,7 @@ import {
   subscriptionEventTypeSet,
 } from "./helpers.js";
 
-// Which protocol subscriptions would fire for this contract's watch config (a
-// webhook with no event filter matches everything).
+// A webhook with no filter matches everything.
 function matchingSubscriptions(groupKeys, subscriptions) {
   const eventTypes = eventTypesFromGroupKeys(groupKeys).map((t) => t.toLowerCase());
   return (subscriptions || []).filter((sub) => {
@@ -19,13 +18,8 @@ function matchingSubscriptions(groupKeys, subscriptions) {
   });
 }
 
-// Alerts: a READ-ONLY summary of what this contract is watched for + the Discord
-// delivery target. The watch set is NOT user-editable — it's derived at
-// enrollment from the contract's type and detected capabilities (a proxy watches
-// upgrades, a safe watches signer/threshold changes, a pausable contract watches
-// pause). Toggling flags for event kinds a contract can't emit would do nothing,
-// so we show the enrolled set rather than pretend it's configurable. The one real
-// operator control is the webhook — where alerts get delivered — gated on admin.
+// Read-only summary of what's watched (derived at enrollment from type and
+// capabilities) plus the admin-only webhook target.
 export function AlertControls({ contract, subscriptions, isAdmin, saving, onAttachWebhook }) {
   const groupKeys = groupKeysFromConfig(contract?.monitoring_config || {});
   const watched = MONITOR_ALERT_GROUPS.filter((g) => groupKeys.includes(g.key));
@@ -53,7 +47,6 @@ export function AlertControls({ contract, subscriptions, isAdmin, saving, onAtta
         </span>
       </div>
 
-      {/* Read-only: what this contract is watched for, from its type + capabilities. */}
       <div className="ps-activity-watched">
         {watched.length ? (
           watched.map((g) => (
@@ -64,7 +57,6 @@ export function AlertControls({ contract, subscriptions, isAdmin, saving, onAtta
         )}
       </div>
 
-      {/* The one real operator control: where alerts are delivered. Admin-only. */}
       {isAdmin ? (
         attaching ? (
           <form className="ps-activity-webhook-form" onSubmit={submitWebhook}>
@@ -91,12 +83,12 @@ export function AlertControls({ contract, subscriptions, isAdmin, saving, onAtta
           <div className="ps-activity-webhook-row">
             {matches.length ? (
               matches.map((sub) => (
-                <span key={sub.id} className="ps-activity-webhook-chip">
+                <span key={sub.id} className="tag tag-md tag-mono ps-activity-webhook-chip">
                   {sub.label || maskWebhook(sub.discord_webhook_url)}
                 </span>
               ))
             ) : (
-              <span className="ps-activity-webhook-chip none">no webhook</span>
+              <span className="tag tag-md tag-mono ps-activity-webhook-chip none">no webhook</span>
             )}
             <button type="button" className="ps-activity-link-btn" onClick={() => setAttaching(true)}>
               {matches.length ? "attach another" : "attach Discord"}

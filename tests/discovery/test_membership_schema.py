@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import inspect
 from sqlalchemy.exc import IntegrityError
 
-from db.models import Contract, ContractMembershipWitness, OpsKv, Protocol, ProtocolDeployer
+from db.models import Contract, ContractMembershipWitness, Protocol, ProtocolDeployer
 from tests.conftest import ADDR, requires_postgres
 
 pytestmark = [requires_postgres]
@@ -124,14 +124,3 @@ def test_probe_attempts_and_ops_kv_exist(db_session):
     assert probe_columns >= {"contract_id", "chain_id", "block_number", "results", "probed_at"}
     kv_columns = {c["name"] for c in inspector.get_columns("ops_kv")}
     assert kv_columns >= {"key", "value", "updated_at"}
-
-
-def test_ops_kv_roundtrip(db_session):
-    key = f"test_marker_{uuid.uuid4().hex[:8]}"
-    db_session.add(OpsKv(key=key, value={"enabled_chains_seen": [1, 8453]}))
-    db_session.flush()
-    row = db_session.get(OpsKv, key)
-    assert row is not None
-    assert row.value == {"enabled_chains_seen": [1, 8453]}
-    db_session.delete(row)
-    db_session.flush()

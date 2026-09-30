@@ -1,8 +1,6 @@
 // Every figure the score page renders, derived from the published document.
-// Pure functions, no React — the page is a projection of these and nothing
-// here invents a fact the document did not witness. Anything the document
-// leaves unwitnessed comes back as `null` and must render as not-determined,
-// never as zero and never as blank.
+// Anything unwitnessed comes back `null` and must render as not-determined,
+// never zero or blank.
 
 import { capabilityPhrase } from "../vocab/capabilityPhrase.js";
 import { entityKey } from "../surface/entityKey.js";
@@ -19,12 +17,9 @@ const ADDRESS_RE = /0x[0-9a-fA-F]{40}/;
 const SAFE_RE = /(\d+)\s*\/\s*(\d+)/;
 const TIMELOCK_DELAY_RE = /timelock\s+([0-9]+\s*[smhd])/i;
 
-// ── principals ──────────────────────────────────────────────────────────────
 
-// The controlling address is the one embedded in the principal DISPLAY string.
-// `principal_unit` is deliberately not used: for a Safe it can be an arbitrary
-// member of the unit, and naming a signer as the controller misattributes the
-// power to a person who only holds one key of k.
+// From the display string, not `principal_unit`: for a Safe that can be any
+// member, and naming a signer misattributes the power.
 export function controllerAddress(finding) {
   const match = ADDRESS_RE.exec(String(finding?.principal || ""));
   return match ? match[0].toLowerCase() : null;
@@ -45,7 +40,6 @@ function timelockDelayLabel(finding) {
   return match ? match[1].replace(/\s+/g, "") : null;
 }
 
-// The routing clause of a timelock principal: who can propose through it.
 export function timelockProposer(finding) {
   const principal = String(finding?.principal || "");
   if (/proposer\s+not_determined/i.test(principal)) {
@@ -56,9 +50,8 @@ export function timelockProposer(finding) {
   return null;
 }
 
-// Each merged member's own k/n, read off the overlap table — the display
-// string carries only one member's shape. null when any member's shape is not
-// witnessed there; the chip then counts members instead of guessing one.
+// Merged members' k/n from the overlap table; null when any is unwitnessed (the
+// chip then counts members).
 function memberShapes(doc, finding, members) {
   const shapes = new Map();
   for (const overlap of doc?.provenance?.safe_keyset_overlaps || []) {
@@ -69,18 +62,15 @@ function memberShapes(doc, finding, members) {
   return out.every(Boolean) ? out : null;
 }
 
-// Short chip: the shape of the principal. A single member's k/n and a
-// timelock's delay are parsed from the display string (a structured
-// principal_shape on the document would remove the regex; it does not exist
-// yet); a merged unit's member shapes come from the overlap table instead.
+// Single-member k/n and timelock delay are parsed from the display string (no
+// structured principal_shape yet).
 export function principalChip(finding, doc = null) {
   const kind = finding?.principal_kind || "";
   if (kind === "eoa") return { kind, label: "EOA" };
   if (kind === "anyone") return { kind, label: "Anyone" };
   if (kind === "safe") {
-    // A merged unit's display string names one member and that member's k/n —
-    // a chip built from it would attribute the whole unit's power to one Safe.
-    // Every member keeps its signer shape, in principal_addresses order.
+    // The display string names one member; building the chip from it would
+    // attribute the whole unit to one Safe.
     const members = principalAddresses(finding);
     if (members.length > 1) {
       const shapes = doc ? memberShapes(doc, finding, members) : null;
@@ -90,9 +80,7 @@ export function principalChip(finding, doc = null) {
           ? `Safes ${shapes.join(" + ")} · shared keys`
           : `${members.length} Safes · shared keys`,
         merged: true,
-        // Each member beside its own shape, so a consumer can hand every Safe
-        // its own click target. Absent when the shapes are unwitnessed — a
-        // handle labelled with a guessed shape would be worse than none.
+        // Absent when shapes are unwitnessed.
         ...(shapes ? { members: members.map((address, i) => ({ address, shape: shapes[i] })) } : {}),
       };
     }
@@ -117,52 +105,38 @@ function kindWord(kind) {
   return KIND_WORD[kind] || String(kind || "").toUpperCase();
 }
 
-// ── value ───────────────────────────────────────────────────────────────────
 
-// Which direction the producer proved the total bounds the principal in. Read
-// from the published field only: `value_at_stake_is_floor` is a boolean over a
-// three-sided question and cannot tell a floor from a sum of extraction
-// ceilings, so a document that carries only the boolean gets `null` — no badge
-// — rather than the floor its own flag would claim. `not_determined` is the
-// producer's fall-through and is itself no claim about the figure.
+// From the published field only: the `value_at_stake_is_floor` boolean can't
+// tell a floor from a sum of ceilings, so boolean-only documents get no badge.
 export const BOUND_DIRECTIONS = ["floor", "ceiling", "not_determined"];
 
-// The value cell. `determined: false` is a third state — the band was never
-// measured — and must not render as $0 or as an empty cell.
+// `determined: false` is a third state and must not render as $0 or empty.
 export function valueCell(finding) {
   const band = finding?.value_band;
   if (!band || band === "not_determined") return { determined: false, text: null, direction: null };
   const direction = finding?.value_at_stake_bound_direction;
   return {
     determined: true,
-    // Both qualifiers are stripped: the direction is carried as a state beside
-    // the band, never as a prefix a reader has to parse.
+    // The direction is carried as state beside the band, never as a prefix.
     text: String(band).replace(/^[<>]=\s*/, ""),
     direction: BOUND_DIRECTIONS.includes(direction) ? direction : null,
   };
 }
 
-// An earned negative, not an unknown: the reach question was answered, and the
-// answer was "nothing". Branching on value_state alone reads it as unmeasured.
+// An earned negative: reach was answered, and the answer was nothing.
 export function isProvenNoReach(finding) {
   return finding?.value_at_stake_basis === "proven_no_reach";
 }
 
-// ── sheet state / ceiling reason ────────────────────────────────────────────
 
-// The producer's sheet-state and ceiling-reason vocabularies, in the words the
-// page shows. These are LABEL tables and NOT allow-lists: an unregistered token
-// falls through to the raw token rather than to a blank, because a state the
-// page cannot name is still a state the document published, and rendering it as
-// nothing would silently withdraw it. `sheetStateLabel` is where that
-// fall-through lives; every consumer goes through it.
+// Label tables, not allow-lists: unregistered tokens fall through to the raw
+// token (in `sheetStateLabel`) rather than disappearing.
 const SHEET_STATE_LABELS = {
   priced: "priced",
   priced_below_resolution: "below resolution",
   unpriced: "unpriced",
   proven_empty: "proven empty",
   no_rows: "nothing observed",
-  // Legacy documents retain an explicit unknown-value label during migration.
   airdrop_determined: "unpriced (legacy classification)",
 };
 
@@ -191,24 +165,17 @@ export function ceilingReasonLabel(reason) {
   return label(CEILING_REASON_LABELS, reason);
 }
 
-// Legacy delivery classifications never establish a dollar amount.
 export function sheetDisposition() {
   return null;
 }
 
-// ── functions / targets ─────────────────────────────────────────────────────
 
-// The example function alone. The row's n_functions count used to render
-// beside it ("upgradeToAndCall · 3 functions") and was cut for space — the
-// count survives on the finding for any consumer that needs it.
 function functionsLabel(finding) {
   const example = (finding?.example_functions || [])[0];
   return example ? [example] : [];
 }
 
-// entity → contract, plus the implementation→proxy alias. A finding can reach a
-// proxy and its implementation; they are one deployed thing, so they collapse
-// to one target rather than reading as two contracts at risk.
+// An implementation collapses onto its proxy: one deployed thing, one target.
 export function buildContractIndex(contracts) {
   const byEntity = new Map();
   const implToProxy = new Map();
@@ -239,10 +206,7 @@ export function resolveTargets(entities, index) {
     if (seen.has(canonical)) continue;
     seen.add(canonical);
     const contract = index?.byEntity?.get(entity) || index?.byEntity?.get(canonical);
-    // The CANONICAL entity, not the raw one: the label already names the
-    // canonical contract (an implementation resolves to its proxy's name), and
-    // a button that navigates to the raw address would send the user somewhere
-    // other than the thing it is labelled with.
+    // The canonical entity, so the button goes where its label says.
     const { chain, address } = splitEntity(canonical);
     out.push({
       entity,
@@ -256,9 +220,7 @@ export function resolveTargets(entities, index) {
   return out;
 }
 
-// Where reach was never witnessed the instance list is all there is. It is
-// rendered in the not-determined style with no arrow, because "this is what it
-// reaches" and "this is where we could not tell" must not look alike.
+// Unwitnessed reach renders in the not-determined style with no arrow.
 export function undeterminedTargets(finding, index) {
   return resolveTargets(
     [...new Set((finding?.undetermined_instances || []).map((i) => i?.entity).filter(Boolean))],
@@ -266,12 +228,9 @@ export function undeterminedTargets(finding, index) {
   );
 }
 
-// ── deduction rows ──────────────────────────────────────────────────────────
 
-// The published document pins the row's points to −net_points_lambda.
-// The re-fold reproduces that field exactly today, but the published number is
-// the witness and the reconstruction is only a model of it: where the producer published one, it
-// wins. A field that is present but not a number is unwitnessed, not zero.
+// The published net wins over the re-fold. Present-but-non-numeric
+// is unwitnessed, not zero.
 function publishedNet(finding, refolded) {
   const published = finding?.net_points_lambda;
   if (published === undefined) return refolded;
@@ -282,21 +241,16 @@ export function deductionRows(doc, index) {
   const findings = doc?.findings || [];
   const ranked = rankedFindings(findings);
   const maxRaw = ranked.reduce((max, r) => (r.raw === null ? max : Math.max(max, r.raw)), 0);
-  // In the withheld state the producer pops net_points_lambda off the rows;
-  // absence of the field is the signal, so the row shows raw points only.
+  // Withheld documents drop net_points_lambda; its absence is the signal.
   const hasNet = findings.some((f) => f?.net_points_lambda !== undefined);
   return ranked.map((entry) => {
     const finding = findings[entry.index];
-    // The hosts are the contracts the row's functions actually live on — the
-    // direct targets. Reach is the closure those functions endanger THROUGH
-    // the control graph, so a host also present in reach is shown once, as a
-    // host: the two lists answer different questions and must not blur.
+    // Hosts are where the functions live; reach is what they endanger through
+    // the graph. A host also in reach shows once, as a host.
     const hosts = resolveTargets(finding?.host_entities, index);
     const hostKeys = new Set(hosts.map((h) => h.canonical));
     const reachWitnessed = (finding?.reach_entities || []).length > 0;
     const proven = resolveTargets(finding?.reach_entities, index).filter((t) => !hostKeys.has(t.canonical));
-    // The published net is the charge the grade was actually built from; the
-    // re-fold only stands in where the producer published no net for this row.
     const net = hasNet ? publishedNet(finding, entry.net) : null;
     return {
       index: entry.index,
@@ -307,18 +261,14 @@ export function deductionRows(doc, index) {
       chip: principalChip(finding, doc),
       capability: finding?.capability || "",
       controller: controllerAddress(finding),
-      // Every member of the (possibly merged) unit — principal_addresses[] is
-      // the witnessed list; the display string carries only one of them, and a
-      // row shown under that one address alone attributes the other members'
-      // gates to it.
+      // The display string names only one member; showing the row under it
+      // alone attributes the others' gates to it.
       controllers: principalAddresses(finding),
       functions: functionsLabel(finding),
       exampleFunction: (finding?.example_functions || [])[0] || null,
       value: valueCell(finding),
-      // Published beside the value on every row that has one, including the rows
-      // whose value cell is not determined: the disposition is a fact about the
-      // sheet the figure would have come from, and it is exactly on the rows
-      // with no figure that a silent omission would read as "nothing here".
+      // Published even when the value is not determined: those are exactly the
+      // rows where omission would read as "nothing here".
       sheetDisposition: sheetDisposition(finding),
       provenNoReach: isProvenNoReach(finding),
       trackPct: maxRaw && entry.raw !== null ? (entry.raw / maxRaw) * 100 : 0,
@@ -333,12 +283,9 @@ export function deductionRows(doc, index) {
   });
 }
 
-// ── grouping / callouts ─────────────────────────────────────────────────────
 
-// Greedy run-length grouping over the ranked rows: consecutive rows sharing a
-// (principal_kind, capability) are one story about one hole. A group whose
-// members include an unpublished net has NO sum — a total that skipped the
-// absent terms would read as a measured one.
+// Consecutive rows sharing (principal_kind, capability) are one hole. A group
+// with an unpublished net has no sum.
 export function groupRows(rows) {
   const groups = [];
   for (const row of rows) {
@@ -356,8 +303,6 @@ export function groupRows(rows) {
 
 const CALLOUT_MIN_POINTS = 5;
 
-// The leading run of groups each carrying at least 5 points. The first group
-// that does not — including one whose sum was never published — ends the run.
 function namedGroups(groups) {
   const named = [];
   for (const group of groups) {
@@ -367,10 +312,8 @@ function namedGroups(groups) {
   return named;
 }
 
-// Callouts sit under the ledger bar. The leading groups are named while they
-// each carry at least 5 points; the first group that does not ends the naming,
-// and everything from there collapses into one "N others". Every position and
-// the trailing sum are measured off λ, so with no λ there are no callouts.
+// Groups are named while each carries ≥5 points; the rest collapse into "N
+// others". Measured off λ, so no λ means no callouts.
 export function calloutsFor(rows, lambda) {
   if (typeof lambda !== "number" || !Number.isFinite(lambda)) return [];
   const groups = groupRows(rows);
@@ -402,15 +345,13 @@ export function calloutsFor(rows, lambda) {
   return callouts;
 }
 
-// ── ledger ──────────────────────────────────────────────────────────────────
 
 const LEDGER_TAIL_FLOOR = 0.4;
 
 export function ledgerSegments(rows, lambda) {
   const kept = typeof lambda === "number" ? lambda : 0;
-  // Partition, not filter+slice: the producer publishes rank-ordered rows so
-  // the floor selects a prefix today, but a non-monotone net sequence must
-  // not double-count a row into both head and tail.
+  // Partition, not filter+slice: a non-monotone net sequence must not land a
+  // row in both.
   const head = [];
   const tail = [];
   for (const r of rows) ((r.net || 0) >= LEDGER_TAIL_FLOOR ? head : tail).push(r);
@@ -432,14 +373,10 @@ export function ledgerSegments(rows, lambda) {
   return { kept, segments };
 }
 
-// ── fix first ───────────────────────────────────────────────────────────────
 
-// The group worth fixing first, and what removing it is modeled to recover.
-// Recovery comes from a re-fold over the survivors, never from summing the
-// group's nets: rank decay promotes everything below, so the sum understates
-// the recovery — and by different amounts per group. That is exactly why the
-// pick is the MAXIMUM modeled recovery over the called-out groups rather than
-// the first of them: five cheap rows can be worth more than one expensive one.
+// Recovery comes from re-folding the survivors, never summing nets: rank decay
+// promotes everything below. Hence the max modeled recovery, not the first
+// group.
 export function fixFirst(doc, rows) {
   const groups = groupRows(rows);
   const named = namedGroups(groups);
@@ -475,19 +412,16 @@ export function fixFirst(doc, rows) {
     subsumed,
     exampleFunction: (group.rows[0].finding?.example_functions || [])[0] || null,
     chain: group.rows[0].finding?.chain || null,
-    // The host is published only when the row's instances live on exactly one
-    // contract — the displayed example function is then unambiguously on it.
+    // Only when every instance is on one contract.
     host: group.rows[0].hosts?.length === 1 ? group.rows[0].hosts[0] : null,
     controller: group.rows[0].controller || null,
     controllers: group.rows[0].controllers || [],
   };
 }
 
-// ── protections ─────────────────────────────────────────────────────────────
 
-// Every address this principal acts through. `principal_addresses[]` is the
-// witnessed list; the display string carries only one of them, so matching on
-// the string alone silently drops any overlap that names one of the others.
+// The display string carries one member; matching on it alone drops overlaps
+// naming the others.
 function principalAddresses(finding) {
   const listed = (finding?.principal_addresses || [])
     .map((address) => String(address || "").toLowerCase())
@@ -498,13 +432,11 @@ function principalAddresses(finding) {
 }
 
 const PROTECTION_WEAKNESS_CEILING = 0.9;
-// How many rows the panel shows before the tail toggle, not a cap on the
-// derivation: every qualifying row is returned, ranked by λ-delta.
+// Rows before the tail toggle, not a cap on the derivation.
 export const PROTECTION_ROWS = 4;
 
-// Coordination that is modeled to be holding points on. Ranked by λ-delta —
-// what the grade would lose if the principal were unconditional — not by the
-// finding's own net, which measures the opposite thing.
+// Ranked by λ-delta (what the grade loses if the principal were unconditional),
+// not by the finding's own net.
 export function protectionRows(doc, limit = Infinity, rowsByIndex = null) {
   const findings = doc?.findings || [];
   const ranked = rankedFindings(findings);
@@ -520,29 +452,21 @@ export function protectionRows(doc, limit = Infinity, rowsByIndex = null) {
       index,
       finding,
       delta,
-      // The same finding's deduction row, so the panel renders the function
-      // and target anatomy through the SAME components — one derivation, like
-      // the possible-deductions table's join. null without the map.
+      // The same finding's deduction row, rendered through the same components.
+      // null without the map.
       anatomy: rowsByIndex?.get(index) || null,
       net: netByIndex.get(index) ?? 0,
       chip: principalChip(finding, doc),
-      // The principal's own address, so the row's kind chip selects the Safe or
-      // timelock it names on the surface — the same pathway the deduction rows'
-      // controller chips use.
+      // So the kind chip selects the Safe/timelock it names.
       chain: finding.chain || null,
       address: controllerAddress(finding),
       what: value.determined ? `${finding.capability} on ${value.text}` : finding.capability,
-      // The same reading split apart, for consumers that wrap the capability
-      // in its own control (the glossary tag) — one derivation, two shapes.
       capability: finding.capability,
-      // The whole cell, not its text: flattening it drops `direction` and
-      // collapses "the band was never measured" into the same null a row with
-      // no value carries. `valueText` stays for consumers that only print.
+      // The whole cell: flattening it loses `direction` and the never-measured
+      // state.
       value,
       valueText: value.determined ? value.text : null,
-      // An unmeasured band and an answered-nothing band are different states,
-      // and the deduction row already tells them apart — a protection row that
-      // could not would contradict the same finding one column over.
+      // The deduction row distinguishes these; the protection row must too.
       provenNoReach: isProvenNoReach(finding),
     });
   });
@@ -557,11 +481,8 @@ export function protectionRows(doc, limit = Infinity, rowsByIndex = null) {
   }));
 }
 
-// ── audit posture ───────────────────────────────────────────────────────────
 
-// Straight off provenance.audit_posture. Never re-derived from /api/company:
-// the naive join double-counts, and a page that recomputes a witnessed number
-// publishes a different one under the same name.
+// Never re-derived from /api/company: the naive join double-counts.
 export function auditPosture(doc) {
   const posture = doc?.provenance?.audit_posture;
   if (!posture) return null;
@@ -593,10 +514,7 @@ export function auditPosture(doc) {
   };
 }
 
-// ── confidence ──────────────────────────────────────────────────────────────
 
-// Every channel is value-weighted, so the copy says "of the protocol's value"
-// rather than repeating the weighting mechanics on each line.
 const CONFIDENCE_CHANNELS = [
   {
     id: "capability_scored_pct",
@@ -620,11 +538,8 @@ const CONFIDENCE_CHANNELS = [
   },
 ];
 
-// The headline is the MINIMUM of the channels; the MIN tag goes on whichever
-// channel actually is the minimum, so a re-ordering of the channels or a shift
-// in the data can never leave the tag pointing at the wrong one. This list must
-// carry EVERY term the producer minimises over, or the tagged minimum and the
-// published confidence_pct can disagree.
+// The MIN tag follows whichever channel is actually lowest. Must list every
+// term the producer minimises over, or the tag and confidence_pct can disagree.
 export function confidenceChannels(doc) {
   const detail = doc?.model_parameters?.confidence_detail || {};
   const channels = CONFIDENCE_CHANNELS.map((channel) => {
@@ -641,15 +556,12 @@ export function confidenceChannels(doc) {
   });
 }
 
-// ── the whole projection ────────────────────────────────────────────────────
 
 export function projectScore(doc, contracts) {
   const index = buildContractIndex(contracts);
   const rows = deductionRows(doc, index);
-  // A withheld grade is the producer refusing to publish λ. Reconstructing it
-  // from the raw points would republish the exact quantity that was withheld,
-  // so in that state the page holds no λ and nothing derived from one — no
-  // ledger position, no callout, no modeled fix-first recovery.
+  // Reconstructing λ from raw points would republish exactly what was withheld,
+  // so nothing derived from λ is shown.
   const withheld = doc?.grade_state === "not_determined";
   const lambda = withheld
     ? null

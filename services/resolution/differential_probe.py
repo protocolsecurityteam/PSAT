@@ -1,36 +1,14 @@
-"""Differential on-chain probe — upgrade a "gated, principals unknown" verdict
-from a static heuristic to an observed fact.
+"""Differential on-chain probe: turns "gated, principals unknown" into an observed fact.
 
-The earned-public default leaves a caller-dependent gate we can't resolve as
-``external_check_only`` → "gated, principals unknown". For each such verdict we
-ask the deployed contract directly whether the gate actually discriminates on
-the caller, using only ``eth_call`` with a varying ``from`` (no transaction, no
-state mutation):
+For an unresolved caller-dependent gate, ``eth_call`` it with ``from = RANDOM`` (in no allowlist) and, when known,
+``from = PRINCIPAL``. A caller-discriminating gate gives different outcomes; a non-caller gate gives the same.
 
-  * ``from = RANDOM``    — a fresh address in no allowlist, holding no role;
-  * ``from = PRINCIPAL`` — the resolved owner/role-holder, when known.
+The risk is upgrading a gated function to public when both reverted for an unrelated reason. So a public upgrade
+needs at least two distinct random identities all succeeding plus a block-independence cross-check, and revert
+attribution compares raw revert data (decoding is transcript-only).
 
-A gate that discriminates on the caller yields DIFFERENT outcomes; a non-caller
-gate (business precondition, value movement, pure view) yields the SAME outcome.
-That difference — or its absence — is the one bit this module observes.
-
-Soundness is the whole risk. The dangerous direction is upgrading a
-genuinely-gated function to public because both identities reverted for the same
-unrelated reason. Two rules make it sound:
-
-  1. A public upgrade is EARNED only by ≥2 distinct random identities all
-     SUCCEEDING, cross-checked for block-independence. A single ambiguous
-     probe never opens anything; indeterminate ≠ public; fail closed.
-  2. Revert attribution compares RAW revert data, not decoded semantics. Two
-     identical revert payloads are treated as the same gate (conservative —
-     withholds upgrades, the safe direction). Decoding is for the transcript
-     only and never drives a verdict (the earned-public refactor deliberately
-     moved away from positive recognition of authority patterns).
-
-This module is PURE given an injected ``call_batch`` callable (a thin wrapper
-over :func:`services.clients.rpc.eth_call_batch`), so it is testable against a stubbed wire
-with recorded transcripts. The wiring (predicate resolution) supplies the
-callable, the pinned block, and applies the verdict to the capability.
+Pure given an injected ``call_batch`` (wrapping :func:`services.clients.rpc.eth_call_batch`); the caller supplies the
+pinned block and applies the verdict.
 """
 
 from __future__ import annotations
@@ -44,8 +22,7 @@ from eth_utils.crypto import keccak
 
 from services.clients.rpc import EthCallResult
 
-# A call batch issues N eth_calls (each ``{from?, to, data}``) at one block tag and
-# returns per-call results PRESERVING revert data. Injected so the probe is hermetic.
+# N eth_calls at one block, preserving revert data. Injected for hermetic tests.
 CallBatch = Callable[[list[dict[str, str]], str], Sequence[EthCallResult]]
 
 Attribution = Literal[
@@ -56,26 +33,22 @@ Attribution = Literal[
     "indeterminate",  # undecodable / node error / synthesis miss → keep static
 ]
 
-# The only verdict that CHANGES a static gated-unknown verdict is ``public`` (and only
-# after the cross-checks pass). Everything else keeps the conservative static verdict;
-# ``gated_confirmed`` / ``gated_observed`` merely attach observed evidence to it.
+# Only ``public`` changes the static verdict; the others just attach evidence.
 Verdict = Literal["public", "gated_confirmed", "gated_observed", "keep_static"]
 
 _RANDOM_IDENTITY_COUNT = 2
 
 
 def differential_probe_enabled() -> bool:
-    """The differential-probe feature flag, enabled by default.
+    """Feature flag, default on (0 label-disagreeing upgrades over 711 corpus rows).
 
-    ``PSAT_DIFFERENTIAL_PROBE=0`` disables live eth_call probes. The offline
-    suite forces it off through ``tests/conftest.py`` for hermeticity."""
+    ``PSAT_DIFFERENTIAL_PROBE=0`` disables; tests/conftest.py forces it off.
+    """
     return os.getenv("PSAT_DIFFERENTIAL_PROBE", "1").lower() in ("1", "true", "yes")
 
 
 def _block_independence_delta() -> int:
-    """Blocks to step back for the state-independence re-probe. ~50k blocks
-    (≈7 days at 12s) is a different state epoch while staying inside an archive
-    node's range. Override with ``PSAT_PROBE_BLOCK_DELTA``."""
+    """Blocks to step back for the re-probe (~7 days); override with ``PSAT_PROBE_BLOCK_DELTA``."""
     try:
         return max(1, int(os.getenv("PSAT_PROBE_BLOCK_DELTA", "50000")))
     except ValueError:
@@ -88,14 +61,8 @@ class ProbeResult:
     verdict: Verdict
     transcript: dict[str, Any]
     reason: str
-    # The synthesized calldata, or None on a synthesis miss (then verdict is always
-    # keep_static — a miss can only withhold an upgrade, never manufacture one).
+    # None on a synthesis miss, which can only withhold an upgrade.
     calldata: str | None = field(default=None)
-
-
-# ---------------------------------------------------------------------------
-# calldata synthesis
-# ---------------------------------------------------------------------------
 
 
 def synthesize_calldata(
@@ -105,18 +72,11 @@ def synthesize_calldata(
     identity: str | None = None,
     caller_correlated_indices: Iterable[int] = (),
 ) -> str | None:
-    """Build full calldata ``selector ++ abi.encode(default_args)`` for a function.
+    """Build ``selector ++ abi.encode(default_args)``.
 
-    Zero/default-encodes every argument from the canonical ABI types (0 for
-    uint/address, empty for bytes/array/string, false for bool) — most authority
-    gates fire before argument validation, so a zero-arg call still exercises the
-    gate. When ``caller_correlated_indices`` is given and ``identity`` is
-    set, those address-typed positional arguments are set to ``identity`` instead
-    of zero, so a self-service / appointed path keyed on a parameter is reachable.
-
-    Returns None — a synthesis MISS — when the argument types can't be parsed or
-    ABI-encoded (a residual user-defined type, an exotic shape). A miss fails safe:
-    the caller keeps the static verdict. Never raises.
+    Arguments are zero/empty (most gates fire before argument validation). Address args at
+    ``caller_correlated_indices`` are set to ``identity`` so self-service paths are reachable. Returns None on
+    unparseable or unencodable types, which keeps the static verdict. Never raises.
     """
     if not isinstance(selector, str) or not selector.startswith("0x") or len(selector) != 10:
         return None
@@ -140,9 +100,7 @@ def synthesize_calldata(
 
 
 def _parse_arg_types(canonical_signature: str | None) -> list[str] | None:
-    """Extract the top-level argument type list from ``name(t1,t2,...)``. Returns
-    ``[]`` for a no-arg function, a list of type strings otherwise, or None when the
-    signature is malformed."""
+    """Top-level arg types from ``name(t1,t2,...)``: ``[]`` for no args, None if malformed."""
     if not isinstance(canonical_signature, str):
         return None
     open_paren = canonical_signature.find("(")
@@ -155,9 +113,7 @@ def _parse_arg_types(canonical_signature: str | None) -> list[str] | None:
 
 
 def _split_top_level(inner: str) -> list[str]:
-    """Split a comma-separated type list at depth 0, so nested tuples
-    ``(uint256,address)`` and arrays ``uint256[2]`` aren't split inside their
-    brackets."""
+    """Split a type list at depth 0 so tuples and fixed arrays stay intact."""
     parts: list[str] = []
     depth = 0
     current = ""
@@ -183,17 +139,16 @@ def _is_address_type(type_str: str) -> bool:
 
 
 def _checksum_optional(addr: str) -> str:
-    # eth_abi accepts lowercase hex addresses; keep it lowercase + 0x-prefixed.
     a = addr.lower()
     return a if a.startswith("0x") else "0x" + a
 
 
 def _default_value_for_type(type_str: str) -> Any:
-    """A canonical zero/empty Python value for an ABI type, for ``eth_abi.encode``.
-    Handles arrays (fixed + dynamic), tuples (recursive), and the scalar types.
-    Raises on an unrecognized type so :func:`synthesize_calldata` records a miss."""
+    """A zero/empty value for an ABI type (arrays, tuples, scalars).
+
+    Raises on unknown types so synthesis records a miss.
+    """
     t = type_str.strip()
-    # Dynamic / fixed arrays: strip the trailing [..]
     if t.endswith("]"):
         open_bracket = t.rfind("[")
         base = t[:open_bracket]
@@ -222,16 +177,10 @@ def _default_value_for_type(type_str: str) -> Any:
     raise ValueError(f"unsupported abi type for default-encode: {t!r}")
 
 
-# ---------------------------------------------------------------------------
-# deterministic random identities
-# ---------------------------------------------------------------------------
-
-
 def derive_random_identities(selector: str, contract_address: str, n: int = _RANDOM_IDENTITY_COUNT) -> list[str]:
-    """Derive ``n`` random caller addresses deterministically from
-    ``keccak(selector ++ address ++ salt)`` so a replay uses the SAME addresses
-    (no ``Math.random``-style nondeterminism). Astronomically unlikely to
-    collide with any curated allowlist member by construction."""
+    """``n`` deterministic random callers from ``keccak(selector ++ address ++ salt)``, so replays use the same
+    addresses.
+    """
     sel = bytes.fromhex(selector[2:]) if selector.startswith("0x") else bytes.fromhex(selector)
     addr = bytes.fromhex(contract_address[2:]) if contract_address.startswith("0x") else bytes.fromhex(contract_address)
     out: list[str] = []
@@ -241,21 +190,15 @@ def derive_random_identities(selector: str, contract_address: str, n: int = _RAN
     return out
 
 
-# ---------------------------------------------------------------------------
-# revert attribution (raw-data comparison; decode is transcript-only)
-# ---------------------------------------------------------------------------
-
-
 def _is_node_error(o: EthCallResult) -> bool:
-    """A revert with NO decodable data: OOG, transport, a node that omits
-    ``error.data``. Not attributable → drives indeterminate."""
+    """A revert with no data (OOG, transport, node omits ``error.data``): unattributable."""
     return (not o.success) and o.revert_data is None
 
 
 def decode_error(revert_data: str | None) -> str | None:
-    """Best-effort human label for a revert, for the transcript ONLY (never a
-    verdict input). Decodes ``Error(string)`` and ``Panic(uint256)``; otherwise
-    records the 4-byte custom-error selector."""
+    """Human label for a revert, for the transcript only: ``Error(string)``, ``Panic(uint256)``, else the
+    custom-error selector.
+    """
     if revert_data is None:
         return None
     if revert_data == "0x":
@@ -282,14 +225,12 @@ def decode_error(revert_data: str | None) -> str | None:
 
 
 def attribute(randoms: Sequence[EthCallResult], principal: EthCallResult | None) -> Attribution:
-    """Map a probe outcome set to an attribution.
+    """Map probe outcomes to an attribution.
 
-    Soundness rules baked in:
-      * any node error among the randoms → indeterminate (can't attribute);
-      * randoms that DISAGREE among themselves → indeterminate (a random/random
-        split is state/arg-specific, not curated-set caller discrimination);
-      * a public verdict requires EVERY random to SUCCEED;
-      * identical revert data is treated as the same gate (conservative).
+    * Any node error among randoms → indeterminate.
+    * Randoms disagreeing → indeterminate (state- or arg-specific).
+    * Public requires every random to succeed.
+    * Identical revert data counts as the same gate (conservative).
     """
     if not randoms:
         return "indeterminate"
@@ -304,7 +245,7 @@ def attribute(randoms: Sequence[EthCallResult], principal: EthCallResult | None)
     random_revert_datas = {o.revert_data for o in randoms if not o.success}
     randoms_same_gate = len(random_revert_datas) <= 1
 
-    # A principal that itself errored at the node is unusable — fall back to one-sided.
+    # An errored principal is unusable; fall back to one-sided.
     if principal is not None and _is_node_error(principal):
         principal = None
 
@@ -320,22 +261,16 @@ def attribute(randoms: Sequence[EthCallResult], principal: EthCallResult | None)
         if all_success and principal.success:
             return "not_caller_discriminating"  # candidate public
         if all_success and not principal.success:
-            # Random callers succeeding is the openness signal (a random success is
-            # strong evidence of openness); the principal reverting is arg/state-specific.
+            # Randoms succeeding signals openness; the principal's revert is arg/state-specific.
             return "not_caller_discriminating"
         return "indeterminate"
 
-    # One-sided — no principal.
+    # One-sided.
     if all_success:
         return "not_caller_discriminating"  # candidate public
     if all_revert and randoms_same_gate:
         return "caller_rejected_consistent"  # gated, observed (verdict unchanged)
     return "indeterminate"
-
-
-# ---------------------------------------------------------------------------
-# Orchestration
-# ---------------------------------------------------------------------------
 
 
 def _outcome_dict(role: str, addr: str, o: EthCallResult) -> dict[str, Any]:
@@ -362,15 +297,14 @@ def run_differential_probe(
     block_delta: int | None = None,
     caller_correlated_indices: Iterable[int] = (),
 ) -> ProbeResult:
-    """Probe one gated-unknown function and return an attributed verdict with a
-    replayable transcript. ``block`` MUST be a pinned height — never probe
-    at ``latest``, or mutable allowlist state makes the answer drift.
+    """Probe one gated-unknown function; returns a verdict with a replayable transcript.
 
-    Verdict mapping for the caller:
-      * ``public``         → mint ``conditional_universal`` (caller-independent, observed)
-      * ``gated_confirmed``→ keep gated; attach two-sided discriminating evidence
-      * ``gated_observed`` → keep gated; attach one-sided rejection evidence
-      * ``keep_static``    → leave the static verdict untouched (inconclusive/indeterminate/miss)
+    ``block`` must be pinned, never ``latest``.
+
+      * ``public`` → ``conditional_universal``
+      * ``gated_confirmed`` → keep gated, attach two-sided evidence
+      * ``gated_observed`` → keep gated, attach one-sided evidence
+      * ``keep_static`` → unchanged
     """
     calldata = synthesize_calldata(
         selector,
@@ -437,11 +371,10 @@ def run_differential_probe(
         )
 
     if attribution != "not_caller_discriminating":
-        # inconclusive / indeterminate → keep the static verdict, untouched.
         transcript["verdict"] = "keep_static"
         return ProbeResult(attribution, "keep_static", transcript, attribution, calldata)
 
-    # candidate public → block-independence cross-check before any upgrade.
+    # Candidate public: run the block-independence check first.
     delta = block_delta if block_delta is not None else _block_independence_delta()
     older_block = block - delta
     if older_block < 1:
@@ -463,7 +396,7 @@ def run_differential_probe(
         transcript["verdict"] = "public"
         return ProbeResult("not_caller_discriminating", "public", transcript, "open_and_block_independent", calldata)
 
-    # Admission was state-dependent (or unverifiable at the older block) — fail closed.
+    # State-dependent or unverifiable at the older block: fail closed.
     transcript["cross_checks"]["block_independence"] = "fail"
     transcript["verdict"] = "keep_static"
     return ProbeResult("not_caller_discriminating", "keep_static", transcript, "open_now_but_state_dependent", calldata)

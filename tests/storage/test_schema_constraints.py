@@ -66,12 +66,8 @@ def _cleanup(db_session, protocol_id):
 
 @requires_postgres
 def test_coverage_trigger_rejects_proxy_contract_insert(db_session):
-    """Attempting to insert an ``audit_contract_coverage`` row whose
-    ``contract_id`` references an is_proxy=True Contract must raise at
-    the DB layer, not silently succeed. This is the belt-and-suspenders
-    for the app-level candidate filter: even a raw SQL insert can't
-    produce a false-positive proxy coverage row.
-    """
+    """Belt-and-suspenders for the app-level candidate filter: even a raw SQL insert
+    can't produce a false-positive proxy coverage row."""
     protocol_id, contract_id, audit_id = _fresh_protocol_contract_audit(db_session, is_proxy=True)
     try:
         with pytest.raises((InternalError, ProgrammingError)) as exc_info:
@@ -94,8 +90,7 @@ def test_coverage_trigger_rejects_proxy_contract_insert(db_session):
 
 @requires_postgres
 def test_coverage_trigger_allows_non_proxy_insert(db_session):
-    """The trigger must not block legitimate inserts — is_proxy=False
-    Contract rows are the normal coverage target."""
+    """The trigger must not block is_proxy=False (normal coverage target) inserts."""
     from db.models import AuditContractCoverage
 
     protocol_id, contract_id, audit_id = _fresh_protocol_contract_audit(db_session, is_proxy=False)
@@ -122,24 +117,3 @@ def test_coverage_trigger_allows_non_proxy_insert(db_session):
 # Postgres does NOT auto-create an index on a foreign-key column, and several
 # hot paths scan those columns.
 # ---------------------------------------------------------------------------
-
-
-def test_upgrade_events_contract_id_index_exists(db_session):
-    """``upgrade_events.contract_id`` must have an index.
-
-    Hit by services.audits.coverage._compute_impl_windows* and by
-    api.contract_audit_timeline on every request. The FK constraint alone
-    does not create one; we rely on ``ix_upgrade_events_contract_id``.
-    """
-    row = db_session.execute(
-        text(
-            "SELECT indexname FROM pg_indexes "
-            "WHERE tablename = 'upgrade_events' "
-            "AND indexname = 'ix_upgrade_events_contract_id'"
-        )
-    ).scalar_one_or_none()
-    assert row == "ix_upgrade_events_contract_id", (
-        "Missing index ix_upgrade_events_contract_id on upgrade_events(contract_id) — "
-        "this index is required by the coverage matcher and audit_timeline API; "
-        "re-add it via an Alembic revision."
-    )

@@ -1,36 +1,9 @@
-"""RevertDetector — structured walk of all gated revert paths in a function.
+"""RevertDetector: every gated revert path in a function as a ``RevertGate`` (the condition value, its polarity, and
+a kind).
 
-Returns a list of ``RevertGate`` records, each describing:
-  * the IR-level condition value that, when violated, leads to the revert
-  * the polarity: ``allowed_when="C"`` means require(C); ``allowed_when=
-    "not C"`` means if(C) revert (predicate builder pushes the NOT into
-    each leaf's operator).
-  * the kind: ``require / assert / custom_revert / inline_asm /
-    try_catch_revert / external_call_revert / function_pointer_check / opaque``
-
-The detector covers these revert shapes:
-  1. require / require with msg
-  2. assert
-  3. if (C) revert / revert ErrorName(args)
-  4. SolidityCall(revert)
-  5. assembly { if iszero(X) { revert(0,0) } }   — inline asm conditional
-  6. try external.call() catch { revert(); }     — try/catch fallback
-  7. State-stored function pointer dispatch:
-        function p; require(p == expectedSig)
-     The function-pointer source is classified via ProvenanceEngine; the
-     gate is then a normal equality leaf of two state-vars (or
-     state-var+constant). Authority classification depends on whether
-     either operand traces to msg.sender; otherwise the leaf is
-     business.
-  8. Fully-opaque control flow (Yul jumps not modeled by Slither): the
-     detector emits a single ``opaque`` gate with no condition and the
-     predicate builder turns this into a ``kind="unsupported",
-     reason="opaque_control_flow"`` leaf.
-
-Cases 1-4 use shared structural revert primitives; cases 5-7 are added
-here. Case 8 is detected by checking whether the function has any
-InlineAssemblyOperation IR that we couldn't resolve — at which point
-we mark the function as needing review.
+Covers ``require``/``assert`` (with message or custom error), ``if (C) revert`` / ``revert Error()``, assembly ``if
+iszero(X) { revert }``, ``try ... catch { revert }``, stored function-pointer checks (an ordinary equality leaf), and
+unresolvable assembly reverts, which become one ``opaque`` gate the builder turns into an unsupported leaf.
 """
 
 from __future__ import annotations
@@ -49,11 +22,8 @@ from .slither_compat import (
 
 DEFAULT_INTERNAL_CALL_DEPTH = 4
 
-# How far the branch walk chases a helper-calls-helper chain when deciding
-# whether a CALLEE always reverts. A direct always-reverting helper (Solady
-# ``_revertEnumerableRolesUnauthorized``) and one further hop resolve; deeper
-# chains fall back to the conservative False (miss the gate rather than
-# fabricate one). Kept small: real revert helpers are 1-2 hops deep.
+# Real revert helpers are 1-2 hops (Solady ``_revertEnumerableRolesUnauthorized``); deeper returns False (miss a gate
+# rather than fabricate one).
 CALLEE_REVERT_MAX_DEPTH = 3
 
 
@@ -73,45 +43,22 @@ Polarity = Literal["allowed_when_true", "allowed_when_false"]
 
 @dataclass
 class RevertGate:
-    """One gated revert path in a function.
-
-    The predicate builder consumes a list of these to construct the
-    function's PredicateTree. Multiple gates AND together at the tree
-    root.
-    """
+    """One gated revert path; the builder ANDs them at the tree root."""
 
     kind: RevertKind
-    # The condition IR value that drives the revert. None for opaque
-    # / unconditional revert paths.
+    # None for opaque or unconditional reverts.
     condition_value: Any = None
     polarity: Polarity = "allowed_when_true"
-    # Slither node where the gate lives — used by the predicate builder
-    # for parameter-binding / modifier-frame lookups.
     node: Any = None
-    # Slither function/modifier whose body contains the gate node.
-    # When the gate is inside a cross-function helper (e.g.,
-    # ``_checkRole`` called from a modifier), this is the helper —
-    # the predicate builder uses it to walk the condition's defining
-    # IR through the right scope.
+    # The function or modifier whose body holds the gate (a helper like ``_checkRole`` for cross-function gates), so the
+    # builder resolves the condition in the right scope.
     containing_function: Any = None
-    # Cross-fn call chain: list of InternalCall/LibraryCall IRs taken
-    # to reach the gate's containing_function from the top-level
-    # function being analyzed. Used by the predicate builder to
-    # substitute the helper's parameters with the caller's argument
-    # provenance (the full ParameterBindingEnv).
+    # InternalCall/LibraryCall IRs from the analyzed function to the gate's container, for parameter binding.
     call_chain: list[Any] = field(default_factory=list)
-    # Diagnostic text for predicate.expression / leaf.basis.
     expression_text: str = ""
     basis: list[str] = field(default_factory=list)
-    # If kind=="opaque", the reason string surfaced as
-    # unsupported_reason on the predicate leaf.
+    # For ``opaque`` gates.
     unsupported_reason: str | None = None
-
-
-# ---------------------------------------------------------------------------
-# Primitive predicates exposed as building blocks the predicate builder
-# can call directly.
-# ---------------------------------------------------------------------------
 
 
 def _ir_class(ir: Any) -> str:
@@ -119,11 +66,7 @@ def _ir_class(ir: Any) -> str:
 
 
 def _ir_is_solidity_revert(ir: Any) -> bool:
-    """Slither emits SolidityCall(``revert(...)``) for both Solidity-
-    level reverts and Yul-level revert(offset, length). The signature
-    string varies (``revert()``, ``revert(string)``, ``revert(uint256,
-    uint256)``, ``revert ErrorName``), so we accept any SolidityCall
-    whose function name begins with ``revert(`` or ``revert ``."""
+    """Any SolidityCall named ``revert(`` or ``revert `` (Solidity and Yul forms share this lowering)."""
     if _ir_class(ir) != "SolidityCall":
         return False
     fn = getattr(ir, "function", None)
@@ -136,13 +79,7 @@ def _ir_is_require(ir: Any) -> bool:
         return False
     fn = getattr(ir, "function", None)
     name = getattr(fn, "name", None) or str(fn or "")
-    # ``require(bool,error)`` is the Solidity >=0.8.26 custom-error form
-    # (``require(cond, MyError())``). Slither lowers it to a SolidityCall
-    # named exactly that, with the condition as the first argument — the
-    # same shape ``_gate_from_solidity_call`` already consumes. Omitting it
-    # silently dropped the gate, leaving the predicate tree empty and the
-    # function defaulting to public; it must be recognized like the other
-    # two forms.
+    # ``require(bool,error)`` is the >=0.8.26 custom-error form; missing it left the tree empty and the function public.
     return name in ("require(bool)", "require(bool,string)", "require(bool,error)")
 
 
@@ -155,9 +92,9 @@ def _ir_is_assert(ir: Any) -> bool:
 
 
 def _ir_is_revert(ir: Any) -> bool:
-    """Any ``revert`` form, including ``revert(string)``. Used only to decide
-    that a value is on the REVERT path (a message operand) rather than on the
-    guard path — see ``_lvalue_already_lifted``."""
+    """Any ``revert`` form, to tell message operands on the revert path from guard operands
+    (``_lvalue_already_lifted``).
+    """
     if _ir_class(ir) != "SolidityCall":
         return False
     fn = getattr(ir, "function", None)
@@ -165,18 +102,8 @@ def _ir_is_revert(ir: Any) -> bool:
     return name.startswith("revert")
 
 
-# ---------------------------------------------------------------------------
-# Detector entry point
-# ---------------------------------------------------------------------------
-
-
 class RevertDetector:
-    """Walk a function's IR and return all gated revert paths.
-
-    Usage:
-        detector = RevertDetector(function)
-        gates = detector.run()  # list[RevertGate]
-    """
+    """Walk a function's IR and return every gated revert path: ``RevertDetector(function).run()``."""
 
     def __init__(
         self,
@@ -190,35 +117,18 @@ class RevertDetector:
         self.internal_call_depth = internal_call_depth
         self._gates: list[RevertGate] = []
         self._call_stack: list[str] = []
-        # Stack of InternalCall IRs traversed to reach the current
-        # node. Each gate found inside a helper records this chain
-        # so the predicate builder can build parameter bindings.
+        # InternalCalls taken to reach the current node, recorded on each gate for parameter binding.
         self._call_chain_irs: list[Any] = []
-        # Every node we walked (this function + recursed helpers), so the
-        # coverage invariant in ``run`` can tell a node that produced a gate
-        # apart from one carrying an unmodeled require/assert (the fail-safe
-        # against silent-public on a require form we don't structurally lift).
+        # Every walked node, so ``run`` can spot require/assert nodes that produced no gate.
         self._scanned_nodes: list[Any] = []
-        # Per-container cache of the value names that transitively reach a
-        # branch condition or a require/assert argument, for the
-        # already-lifted test in ``_scan_node``.
+        # Per container: names reaching a branch condition or require/assert argument.
         self._container_condition_reads: dict[int, set[str]] = {}
-        # Memo for ``_callee_always_reverts``, keyed by (id(callee), depth).
-        # Depth is part of the key because the ``CALLEE_REVERT_MAX_DEPTH`` cutoff
-        # makes the answer depth-relative — a helper resolved at one depth may be
-        # cut off (conservative False) at a deeper one. ``id()`` keys are scoped
-        # to this per-function detector, so they never outlive the Slither parse.
+        # Keyed by (callee id, depth) because the depth cutoff makes answers depth-relative; ids are scoped to this
+        # detector.
         self._callee_revert_cache: dict[tuple[int, int], bool] = {}
-        # Callee ids currently on the always-reverts recursion stack, so a helper
-        # that (in)directly calls itself reports escape on the back-edge rather
-        # than spinning.
+        # Self-recursive helpers report escape on the back-edge.
         self._callee_revert_inprogress: set[int] = set()
-        # Per-detector memo for ``str(node.expression)``, keyed by
-        # ``id(expression)``. Scoped to this (per-function) detector so it's
-        # GC'd with the instance — the id() keys never outlive the Slither
-        # parse they index. Repeated ``str(expr)`` over literal/binary chains
-        # is the dominant predicate-bench cost, so the memo stays; only its
-        # lifetime is bounded.
+        # ``str(node.expression)`` is the dominant cost; memoized for this detector's lifetime.
         self._expression_text_cache: dict[int, str] = {}
 
     def _expression_text(self, node: Any) -> str:
@@ -234,15 +144,10 @@ class RevertDetector:
         return text
 
     def run(self) -> list[RevertGate]:
-        # Walk the function's own body. Modifier-call IRs and
-        # internal-call IRs are both traversed via the in-body scan
-        # (the recursion handles both uniformly), so the call_chain
-        # captures modifier parameter bindings naturally — needed
-        # for full caller-side ParameterBindingEnv when a public entrypoint
-        # routes through nested helper guards with dynamic parameters.
+        # Modifier and internal calls are traversed by the in-body scan, so the call chain captures modifier parameter
+        # bindings.
         for node in self.function.nodes:
             self._scan_node(node, container=self.function)
-        # Case 8: opaque-Yul fallback.
         if self._has_unresolved_revert_in_assembly():
             self._gates.append(
                 RevertGate(
@@ -251,14 +156,8 @@ class RevertDetector:
                     expression_text="<inline assembly with unresolved revert>",
                 )
             )
-        # Coverage invariant (fail-safe): a require()/assert() SolidityCall we
-        # walked but did NOT lift into a gate means a revert *form* we don't
-        # model (a future require variant, a shape the lifter rejected). Letting
-        # it slip leaves the tree empty and the function defaults to public —
-        # exactly the silent open-on-extraction-gap this detector must never
-        # produce. Surface it as ``unsupported`` so the function resolves gated,
-        # not public. ``require(bool,error)`` is recognized now, so this fires
-        # only on genuinely unmodeled forms — never on the known three.
+        # Fail-safe: a require/assert that didn't become a gate is an unmodeled form; publish ``unsupported`` so the
+        # function resolves gated, not public.
         if self._has_unmodeled_require_assert_gate():
             self._gates.append(
                 RevertGate(
@@ -269,34 +168,17 @@ class RevertDetector:
             )
         return self._gates
 
-    # ------------------------------------------------------------------
-    # Per-node classification
-    # ------------------------------------------------------------------
-
     def _lvalue_already_lifted(self, lvalue: Any, container: Any) -> bool:
-        """Does a call's result reach a branch condition, or any argument of a
-        require / assert / revert, in ``container``'s body?
+        """Whether a call's result reaches a branch condition or any require/assert/revert argument in ``container``.
 
-        Only such a result is either lifted into a leaf by the predicate
-        builder or already on the revert path itself, so only such a result may
-        suppress the recursion into the callee. Being read *at all* is a
-        strictly weaker property and answering with it lost every gate behind a
-        ``return gatedCallee(...)`` forwarder: the RETURN node reads the result,
-        no condition ever does, and the callee's own require was therefore
-        never walked — the function resolved unguarded.
+        Only then does the builder lift it (or is it on the revert path), so only then may recursion into the callee be
+        skipped.
 
-        The revert family is in the seed set for the opposite reason. A
-        ``revert(string(abi.encodePacked(..., Strings.toHexString(...))))``
-        message builder is ON the revert path, not on the guard path, and its
-        own internal ``require`` is a bounds check inside a formatter. Recursing
-        into it lifts that check as a gate on the CALLER — OZ's ``_checkRole``
-        would acquire a "hex length insufficient" authority leaf. Seeding on the
-        whole IR's read set (condition AND message operands) keeps both out.
-
-        The reachability is transitive (``bool ok = _check(); bool z = ok &&
-        other; require(z);``), so it is a backwards closure from those operands
-        over each IR's ``lvalue -> read`` edges. Names (not identities) are
-        compared because nodes mix ``irs_ssa`` and ``irs`` views."""
+        Being read at all isn't enough: ``return gatedCallee(...)`` reads the result but no condition does, and skipping
+        the callee lost its require. Revert arguments are included so a message formatter's internal bounds check (OZ
+        ``_checkRole``'s ``Strings.toHexString``) isn't lifted as a caller gate. Transitive over ``lvalue -> read``
+        edges; compared by name since nodes mix SSA and non-SSA views.
+        """
         if container is None:
             return True  # no scope to prove otherwise — keep the legacy skip
         key = id(container)
@@ -332,7 +214,6 @@ class RevertDetector:
 
     def _scan_node(self, node: Any, container: Any = None) -> None:
         self._scanned_nodes.append(node)
-        # Case 1-2: require / assert directly in this node.
         for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
             if _ir_is_require(ir):
                 self._gates.append(self._gate_from_solidity_call(ir, node, "require", container))
@@ -341,15 +222,8 @@ class RevertDetector:
                 self._gates.append(self._gate_from_solidity_call(ir, node, "assert", container))
                 return
 
-        # Case 6: try/catch with revert in the catch block. The
-        # function reverts iff the try-body call reverts. When the
-        # try-body has a SINGLE HighLevelCall, we record it as
-        # ``try_catch_revert``
-        # with the call IR preserved so the predicate builder can lift
-        # the call's selector + target into an external_check_only leaf.
-        # When the try-body has zero or multiple HighLevelCalls, we fall
-        # back to the original opaque marker — the call's identity is
-        # ambiguous and downstream cannot characterize the gate further.
+        # try/catch reverting in the catch: with a single HighLevelCall in the try body, record ``try_catch_revert``
+        # with the call so the builder can lift it; otherwise opaque.
         if getattr(node, "type", None) == getattr(NodeType, "TRY", -999):
             if self._try_catch_has_revert(node):
                 primary_call = self._try_node_primary_call(node)
@@ -399,33 +273,20 @@ class RevertDetector:
                     )
                 )
 
-        # Cross-function revert detection: recurse into InternalCall /
-        # LibraryCall callees to find gates the modifier doesn't directly
-        # contain.
+        # Recurse into internal/library callees for gates the modifier doesn't hold directly.
         for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
             if isinstance(ir, (InternalCall, LibraryCall)):
                 lvalue = getattr(ir, "lvalue", None)
                 if lvalue is not None and self._lvalue_already_lifted(lvalue, container):
-                    # The result reaches a branch condition / require argument
-                    # — the predicate builder lifts that path. Recursing too
-                    # would double-count.
+                    # The builder lifts this path; recursing would double-count.
                     continue
-                # No result, a DISCARDED result, or a result that only ever
-                # leaves the function (``return gatedCallee(...)``):
-                # ``modifier hasRole(r) {
-                # _hasRole(r, msg.sender); _; }`` calls a bool-returning guard
-                # helper and ignores the bool — the require lives in the
-                # callee. Skipping these silently dropped the whole gate
-                # (every EtherFiRedemptionManager admin function went public).
+                # No result, a discarded one, or one only returned: the require lives in the callee (``modifier
+                # hasRole(r) { _hasRole(r, msg.sender); _; }``). Skipping these made every EtherFiRedemptionManager
+                # admin function public.
                 callee = getattr(ir, "function", None)
                 if callee is None:
                     continue
-                # Modifier callees are now traversed (not skipped)
-                # so the call_chain captures modifier parameter
-                # bindings — required for full caller-side
-                # ParameterBindingEnv. The recursion is the single
-                # source of truth for cross-fn body walking; we no
-                # longer iterate function.modifiers separately.
+                # Modifiers are traversed too, so the chain captures their bindings.
                 callee_id = getattr(callee, "full_name", None) or getattr(callee, "name", None)
                 if not callee_id or callee_id in self._call_stack:
                     continue
@@ -440,19 +301,14 @@ class RevertDetector:
                     self._call_stack.pop()
                     self._call_chain_irs.pop()
 
-        # Cases 3-4: if (C) revert ErrorName / SolidityCall(revert) where the
-        # revert can sit ANY number of hops below the IF — Slither lowers a
-        # multi-statement guard body (`if(C){ emit/assign…; revert; }`) into a
-        # chain of EXPRESSION nodes, so a one-hop son scan misses it.
+        # ``if (C) revert`` where the revert may be several nodes below the IF (Slither splits multi-statement guard
+        # bodies).
         condition_ir = self._extract_condition_ir(node)
         if condition_ir is None:
             return
 
-        # A guard is a fork where exactly ONE branch is a pure revert path (every
-        # path leaving it reverts before escaping the function); the other branch
-        # is the normal continuation. Both-revert => unconditional revert (not an
-        # access gate); neither => any revert below is conditional and belongs to
-        # a nested IF, scanned independently.
+        # A guard is a fork where exactly one branch always reverts. Both reverting is unconditional; neither means any
+        # revert below belongs to a nested IF.
         son_true = getattr(node, "son_true", None)
         son_false = getattr(node, "son_false", None)
         t_rev, t_ir = self._branch_always_reverts(son_true) if son_true is not None else (False, None)
@@ -481,7 +337,6 @@ class RevertDetector:
             )
             return
 
-        # Case 5: inline assembly conditional revert — limited support.
         if self._node_has_assembly_revert(node):
             self._gates.append(
                 RevertGate(
@@ -497,12 +352,8 @@ class RevertDetector:
                 )
             )
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
     def _gate_from_solidity_call(self, ir: Any, node: Any, kind: RevertKind, container: Any = None) -> RevertGate:
-        # require/assert take the condition as the first argument.
+        # The condition is the first argument.
         args = getattr(ir, "arguments", None) or getattr(ir, "read", None) or []
         cond = args[0] if args else None
         return RevertGate(
@@ -517,28 +368,19 @@ class RevertDetector:
         )
 
     def _branch_always_reverts(self, start: Any) -> tuple[bool, Any]:
-        """True iff EVERY path leaving ``start`` hits a revert before escaping
-        the function (reaching a no-successor / RETURN node).
+        """``(True, first_revert_ir)`` iff every path from ``start`` reverts before leaving the function.
 
-        Revert nodes are sinks: their successors (the merge/ENDIF link Slither
-        keeps for CFG completeness) are NOT followed, so a guard's revert never
-        leaks into post-merge code. Returns ``(True, first_revert_ir)`` when the
-        branch always reverts, else ``(False, None)``. Cycle-safe via a seen-set
-        (loops/back-edges); a worklist that drains with no revert seen — e.g. a
-        ``while(true)`` with no revert/return — escapes (not a guard)."""
+        Revert nodes are sinks (their ENDIF successor isn't followed). A drained worklist with no revert
+        (``while(true)``) escapes.
+        """
         return self._walk_all_paths_revert(start, 0)
 
     def _walk_all_paths_revert(self, start: Any, depth: int) -> tuple[bool, Any]:
-        """Core every-path-reverts CFG walk shared by branch-guard detection and
-        callee analysis. A path's revert SINK is either a direct Solidity/Yul
-        ``revert`` (``_ir_is_solidity_revert``) OR a call to a helper whose own
-        body always reverts (``_callee_always_reverts``) — the Solady
-        EnumerableRoles shape, where ``if (!isOwner()) _revertUnauthorized();``
-        routes the revert through an always-reverting assembly helper.
+        """Shared every-path-reverts walk.
 
-        ``depth`` bounds the helper-calls-helper chase (see
-        ``CALLEE_REVERT_MAX_DEPTH``). Returns ``(True, first_sink_ir)`` when every
-        explored path reverts, else ``(False, None)``."""
+        A path's revert sink is a direct ``revert`` or a call to an always-reverting helper (Solady ``if (!isOwner())
+        _revertUnauthorized();``). ``depth`` bounds the helper chase.
+        """
         return_type = getattr(NodeType, "RETURN", -997)
         seen: set[int] = set()
         work = [start]
@@ -553,26 +395,18 @@ class RevertDetector:
             if sink_ir is not None:
                 if first_rev is None:
                     first_rev = sink_ir
-                # this node reverts: it is a sink, don't follow its successors
                 continue
             sons = getattr(node, "sons", []) or []
             if not sons or getattr(node, "type", None) == return_type:
-                # reached function exit / a return without reverting -> escapes
                 return (False, None)
             work.extend(sons)
-        # Worklist drained. If a revert was seen on every explored path the branch
-        # always reverts; if it drained with NO revert seen, the only way out was
-        # an unbounded cycle (``while(true)`` with no revert/return) — that is not
-        # a guard, so report escape rather than fabricating an if_revert gate.
+        # Drained with no revert means an unbounded cycle, not a guard.
         return (first_rev is not None, first_rev)
 
     def _node_revert_sink(self, node: Any, depth: int) -> Any:
-        """The first IR in ``node`` that terminates the current path in a revert:
-        a direct Solidity/Yul ``revert`` SolidityCall, or a call to a callee whose
-        every path reverts. ``require``/``assert`` are deliberately NOT sinks —
-        they revert only conditionally, so a helper that merely ``require``s has a
-        non-reverting exit and must never manufacture a gate. Returns the IR (a
-        truthy sentinel for the caller) or ``None``."""
+        """The first IR in ``node`` ending the path in a revert (direct ``revert`` or an always-reverting callee), or
+        ``None``. ``require``/``assert`` aren't sinks: they revert only conditionally.
+        """
         for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
             if _ir_is_solidity_revert(ir):
                 return ir
@@ -583,17 +417,11 @@ class RevertDetector:
         return None
 
     def _callee_always_reverts(self, callee: Any, depth: int) -> bool:
-        """True iff EVERY path through ``callee``'s own body reverts before it
-        returns — an unconditionally-reverting helper such as Solady's
-        ``_revertEnumerableRolesUnauthorized`` (assembly ``revert``). A callee
-        with ANY non-reverting exit (a ``require`` that can pass, a normal
-        ``return``) is NOT counted: that conservative condition is what stops a
-        conditionally-reverting helper from fabricating a gate.
+        """True iff every path through ``callee`` reverts (Solady ``_revertEnumerableRolesUnauthorized``).
 
-        Memoized per ``(id(callee), depth)``; cycle-safe via
-        ``_callee_revert_inprogress``; the chase is bounded to
-        ``CALLEE_REVERT_MAX_DEPTH`` hops, beyond which we conservatively return
-        False (miss the gate rather than invent one)."""
+        Any non-reverting exit disqualifies it, so conditional helpers can't fabricate gates. Memoized per (callee,
+        depth), cycle-safe, bounded by ``CALLEE_REVERT_MAX_DEPTH`` (then False).
+        """
         if callee is None or depth >= CALLEE_REVERT_MAX_DEPTH:
             return False
         key = (id(callee), depth)
@@ -602,8 +430,7 @@ class RevertDetector:
             return cached
         cid = id(callee)
         if cid in self._callee_revert_inprogress:
-            # recursion back-edge: conservative escape, and don't cache (the
-            # answer here is an artifact of the in-flight walk, not intrinsic).
+            # Back-edge: conservative escape, not cached.
             return False
         entry = getattr(callee, "entry_point", None)
         if entry is None:
@@ -620,8 +447,6 @@ class RevertDetector:
         return result
 
     def _extract_condition_ir(self, node: Any) -> Any | None:
-        """If `node` is an IF node, return its Condition IR (the value
-        being branched on). Otherwise None."""
         if getattr(node, "type", None) != getattr(NodeType, "IF", -999):
             return None
         for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
@@ -630,32 +455,22 @@ class RevertDetector:
         return None
 
     def _branch_polarity(self, if_node: Any, successor: Any) -> Polarity:
-        """Determine whether the successor is the true-branch or the
-        false-branch of an IF.
-
-        Slither exposes ``son_true`` / ``son_false`` on IF nodes — if
-        the revert lives on the true branch, the condition being true
-        takes the revert path, so allowed_when_false."""
+        """Whether ``successor`` is an IF's true or false branch; a revert on the true branch means
+        ``allowed_when_false``.
+        """
         son_true = getattr(if_node, "son_true", None)
         son_false = getattr(if_node, "son_false", None)
         if son_true is successor:
             return "allowed_when_false"
         if son_false is successor:
             return "allowed_when_true"
-        # Fallback: if we can't tell, assume the revert was on the
-        # less common false branch (typical pattern is `if (bad)
-        # revert`, so true is the bad branch).
+        # Unknown: assume the usual ``if (bad) revert`` shape.
         return "allowed_when_false"
 
     def _try_node_primary_call(self, try_node: Any) -> Any | None:
-        """Return the HighLevelCall IR whose return value drives the TRY's
-        body, or None when the call's return is unused (the
-        ``try h.helper() {} catch { revert }`` shape — opaque, no signal).
-
-        A try/catch authority check is structurally a single bool-returning
-        HighLevelCall. Calls returning ``void`` or non-bool values cannot be
-        lifted into an authority predicate by shape alone. When there are
-        multiple candidate calls, we leave the gate opaque."""
+        """The HighLevelCall whose bool result drives a TRY, or None (unused result, non-bool return, or several
+        candidates stay opaque).
+        """
         calls = [
             ir
             for ir in (getattr(try_node, "irs_ssa", None) or getattr(try_node, "irs", []) or [])
@@ -672,22 +487,15 @@ class RevertDetector:
         return str(getattr(lvalue, "type", "") or "") == "bool"
 
     def _try_catch_has_revert(self, try_node: Any) -> bool:
-        """Walk descendants reachable from a TRY node through CATCH
-        successors and check whether any of them contains a revert
-        (SolidityCall(revert) or a require/assert that would always
-        fail). Bounded BFS with a visited set to handle CFG cycles.
+        """Whether the catch arm reaching from a TRY node reverts (including an always-failing require/assert).
 
-        We only scan the catch arm — the success arm of a try is
-        the call's lvalue path and doesn't itself revert."""
+        Bounded BFS; the success arm isn't scanned.
+        """
         try:
             catch_type = NodeType.CATCH
         except AttributeError:
             return False
-        # First descend into the CATCH siblings; the TRY node's sons
-        # include both the call's success path (NEW_VARIABLE / IF /
-        # ENDIF) and the catch arm — Slither alternates per
-        # solidity version, so we walk every successor and only mark
-        # nodes typed CATCH (or descendants of CATCH) as the catch arm.
+        # Slither orders TRY successors differently across versions, so walk all and only count nodes in the CATCH arm.
         seen: set[int] = set()
         worklist: list[tuple[Any, bool]] = [(s, False) for s in (getattr(try_node, "sons", []) or [])]
         while worklist:
@@ -699,29 +507,17 @@ class RevertDetector:
             if getattr(node, "type", None) == catch_type:
                 in_catch = True
             if in_catch:
-                # Direct revert IR in the catch body.
                 for ir in getattr(node, "irs_ssa", None) or getattr(node, "irs", []) or []:
                     if _ir_is_solidity_revert(ir):
                         return True
-                    # require/assert with literal-false condition
-                    # wrapped inside the catch counts too — rare but
-                    # cheap to catch.
                     if _ir_is_require(ir) or _ir_is_assert(ir):
                         return True
-                # Bound the BFS — we don't follow successors past the
-                # immediate catch body to avoid mistaking a downstream
-                # revert (after the try/catch finishes) as the catch's.
+                # Don't follow past the catch body, or a later revert would be attributed to it.
             worklist.extend((s, in_catch) for s in (getattr(node, "sons", []) or []))
         return False
 
     def _node_has_assembly_revert(self, node: Any) -> bool:
-        """Heuristic: a node containing assembly that ends in revert.
-
-        Slither doesn't expose YulAST richly, so we check whether the
-        node's expression text mentions `revert(` inside an
-        InlineAssemblyOperation. This is a coarse signal — false
-        positives are caught by the predicate builder routing it to
-        an unsupported leaf rather than a typed leaf."""
+        """Heuristic: a node whose assembly text mentions ``revert(``. False positives become unsupported leaves."""
         irs = getattr(node, "irs", []) or []
         for ir in irs:
             if _ir_class(ir) == "InlineAssemblyOperation":
@@ -731,16 +527,8 @@ class RevertDetector:
         return False
 
     def _has_unmodeled_require_assert_gate(self) -> bool:
-        """A ``require(...)`` / ``assert(...)`` SolidityCall we walked that did
-        NOT become a gate.
-
-        ``require``/``assert`` live directly in their own node, so a gate lifted
-        from one has ``gate.node`` == that node. Any scanned node holding a
-        require/assert SolidityCall whose id isn't among the gate nodes is a
-        revert form the structural lifter rejected — the coverage gap that, left
-        silent, defaults the function to public. Matched by name *prefix*
-        (``require(`` / ``assert(``) so an unknown future arity (beyond the three
-        ``_ir_is_require`` recognizes) is still caught rather than dropped.
+        """A walked require/assert node that didn't become a gate (matched by name prefix, so unknown future forms
+        are caught): a coverage gap that would otherwise default to public.
         """
         accounted = {id(g.node) for g in self._gates if g.node is not None}
         for node in self._scanned_nodes:
@@ -756,17 +544,10 @@ class RevertDetector:
         return False
 
     def _has_unresolved_revert_in_assembly(self) -> bool:
-        """Function has an InlineAssemblyOperation IR whose body
-        contains a textual `revert` keyword that we did NOT
-        structurally extract (Slither already parses
-        ``if iszero(x) { revert(0,0) }`` into IF + SolidityCall, which
-        we capture in the normal scan; this catches the residue —
-        e.g. computed-target jumps to revert handlers, JUMPI tables,
-        or assembly that conditionally reverts via paths Slither
-        can't model)."""
-        # Set of node IDs where we already classified a revert via
-        # cases 1-5; assembly-residing reverts inside these nodes are
-        # already accounted for.
+        """An assembly op mentioning ``revert`` that wasn't extracted structurally (Slither already lowers ``if
+        iszero(x) { revert(0,0) }``); this catches computed jumps and other unmodeled reverts.
+        """
+        # Nodes already classified.
         accounted_nodes = {id(g.node) for g in self._gates if g.node is not None}
         for node in self.function.nodes:
             for ir in getattr(node, "irs", []) or []:
@@ -777,7 +558,5 @@ class RevertDetector:
                     continue
                 if id(node) in accounted_nodes:
                     continue
-                # Assembly mentions revert and we don't have a
-                # corresponding structured gate. Surface as opaque.
                 return True
         return False

@@ -1,5 +1,3 @@
-"""Unified protocol monitoring + TVL endpoints."""
-
 from __future__ import annotations
 
 import uuid
@@ -34,7 +32,6 @@ router = APIRouter()
 
 @router.get("/api/protocols/{protocol_id}/monitoring", response_model=None)
 def list_protocol_monitoring(protocol_id: int) -> list[MonitoredContractItem]:
-    """List all MonitoredContract rows for a protocol (including inactive)."""
     with deps.SessionLocal() as session:
         stmt = select(MonitoredContract).where(
             MonitoredContract.protocol_id == protocol_id,
@@ -47,15 +44,8 @@ def list_protocol_monitoring(protocol_id: int) -> list[MonitoredContractItem]:
     "/api/protocols/{protocol_id}/re-enroll", dependencies=[Depends(deps.require_admin_key)], response_model=None
 )
 def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> ReEnrollResponse:
-    """Manually trigger monitoring enrollment for a protocol.
-
-    Calls enroll_protocol_contracts directly, bypassing the automatic
-    in-flight job checks. Useful when enrollment produced wrong results
-    or after manual DB changes.
-    """
-    # Allowlist enforcement: re-enroll spawns monitoring work on the
-    # resolved chain, so a chain this deployment has not enabled is rejected here.
-    # The admin-edge default 'ethereum' stays and is supported everywhere.
+    """Run enrollment directly, bypassing in-flight job checks; for fixing wrong results or manual DB changes."""
+    # Allowlist: re-enroll spawns monitoring work on that chain.
     try:
         require_supported_chain(chain=chain, context="protocol re-enroll")
     except UnsupportedChainError as exc:
@@ -68,9 +58,7 @@ def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> ReEnrollRes
 
         from services.monitoring.enrollment import enroll_protocol_contracts, mark_enrollment_dirty
 
-        # Commit the dirty mark first so a raising synchronous enroll still leaves
-        # a queued row for the reconciler drain to self-heal. The synchronous run
-        # below stays as the urgent escape hatch for the common (success) case.
+        # Commit the dirty mark first so a raising synchronous enroll still self-heals via the reconciler.
         mark_enrollment_dirty(session, protocol_id, "manual")
         session.commit()
 
@@ -99,7 +87,6 @@ def re_enroll_protocol(protocol_id: int, chain: str = "ethereum") -> ReEnrollRes
     "/api/protocols/{protocol_id}/subscribe", dependencies=[Depends(deps.require_admin_key)], response_model=None
 )
 def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -> SubscriptionItem:
-    """Create a ProtocolSubscription for governance event notifications."""
     with deps.SessionLocal() as session:
         protocol = session.get(Protocol, protocol_id)
         if protocol is None:
@@ -131,7 +118,6 @@ def subscribe_to_protocol(protocol_id: int, request: ProtocolSubscribeRequest) -
     "/api/protocols/{protocol_id}/subscriptions", dependencies=[Depends(deps.require_admin_key)], response_model=None
 )
 def list_protocol_subscriptions(protocol_id: int) -> list[SubscriptionItem]:
-    """List all ProtocolSubscription rows for a protocol."""
     from utils.secrets import sanitize_url
 
     with deps.SessionLocal() as session:
@@ -152,7 +138,6 @@ def list_protocol_subscriptions(protocol_id: int) -> list[SubscriptionItem]:
 
 @router.delete("/api/protocol-subscriptions/{sub_id}", dependencies=[Depends(deps.require_admin_key)])
 def delete_protocol_subscription(sub_id: str) -> dict[str, str]:
-    """Delete a ProtocolSubscription by id."""
     try:
         parsed = uuid.UUID(sub_id)
     except (ValueError, TypeError) as exc:
@@ -171,13 +156,9 @@ def delete_protocol_subscription(sub_id: str) -> dict[str, str]:
 def list_protocol_events(
     protocol_id: int, limit: int = Query(default=50, ge=1, le=500), chain: str | None = None
 ) -> list[MonitoredEventItem]:
-    """List MonitoredEvents for all contracts in a protocol.
+    """Scope by ``chain``: ``contract_address`` alone can't separate a shared Safe's chains.
 
-    ``chain`` scopes the feed to one chain's monitored rows. The same address
-    is a distinct deployment per chain, so this is the only correct place to
-    scope — the payload's ``contract_address`` alone cannot distinguish a
-    shared Safe's ethereum events from its base ones. NULL/``mainnet``
-    monitored rows fold to ``ethereum`` (the legacy-read convention).
+    NULL/``mainnet`` fold to ``ethereum``.
     """
     with deps.SessionLocal() as session:
         stmt = (
@@ -201,10 +182,7 @@ def list_protocol_events(
                 "event_type": e.event_type,
                 "block_number": e.block_number,
                 "tx_hash": e.tx_hash,
-                # ``chain`` and ``contract_type`` ride beside
-                # ``contract_address`` so a row is self-describing even in an
-                # unscoped fetch — the consumer must never re-derive either
-                # from a local lookup that can miss (and then guess).
+                # Self-describing rows so consumers never guess from a lookup that can miss.
                 "data": {
                     **(e.data or {}),
                     "contract_address": mc.address,
@@ -219,7 +197,6 @@ def list_protocol_events(
 
 @router.get("/api/protocols/{protocol_id}/tvl", response_model=None)
 def protocol_tvl(protocol_id: int, days: int = 30) -> ProtocolTvlResponse:
-    """Current TVL and historical snapshots for a protocol."""
     days = min(days, deps.MAX_TVL_HISTORY_DAYS)
 
     with deps.SessionLocal() as session:

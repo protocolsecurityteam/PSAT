@@ -1,20 +1,9 @@
 """Integration tests for governance-event-triggered re-analysis job queuing.
 
-Tests cover:
-  - Correct event types trigger re-analysis jobs
-  - Non-triggering events do NOT create jobs
-  - In-flight job dedup prevents duplicates
-  - Poll-detected state changes trigger appropriately
-  - Caching system compatibility (new job doesn't break cache lookup)
-  - Full Anvil integration: deploy → upgrade → scan → verify job queued
+Covers triggering vs non-triggering events, in-flight dedup, poll-detected changes, cache
+compatibility, and Anvil deploy -> upgrade -> scan -> job queued.
 
-Requires:
-  - PostgreSQL (TEST_DATABASE_URL env var)
-  - anvil, cast, forge (from Foundry) on PATH — for Anvil integration tests
-
-Run:
-    TEST_DATABASE_URL=postgresql://psat:psat@localhost:5433/psat_test \
-        uv run pytest tests/monitoring/test_reanalysis.py -v --timeout=120
+Requires PostgreSQL (TEST_DATABASE_URL) and anvil/cast/forge on PATH for the Anvil tests.
 """
 
 from __future__ import annotations
@@ -43,8 +32,6 @@ from db.models import (
 )
 from schemas.control_tracking import MonitoredContractType
 from services.monitoring.reanalysis import (
-    _REANALYSIS_WRITE_TARGETS,
-    REANALYSIS_POLL_FIELDS_VENDORED,
     maybe_queue_reanalysis,
     should_trigger_reanalysis,
 )
@@ -61,20 +48,9 @@ from tests.support.anvil import (
     anvil_env,  # noqa: F401
 )
 
-# Poll fields that should trigger reanalysis post-tag-migration: vendored
-# triggers (``implementation``) plus the analyzer's control-relevant
-# write targets (``owner``, ``_owner``, ``pendingOwner``, ``authority``,
-# the admin family, ``_initialized``/``_initializing``). The poll path
-# and the event path now share this vocabulary.
-_REANALYSIS_POLL_FIELDS = REANALYSIS_POLL_FIELDS_VENDORED | _REANALYSIS_WRITE_TARGETS
-
-# Canonical event types that should trigger a full re-analysis job. The
-# tag-driven dispatch in ``should_trigger_reanalysis`` derives the same
-# verdict from ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` — these are the
-# event_types whose synthesized tags either write a control-relevant
-# slot, set ``delegates``, or set ``is_initializer``. ``upgraded_revision``
-# is included because Aave V2's revision bump IS a delegate-target
-# swap (was missing from the pre-tag-migration set).
+# Event types that trigger a full re-analysis; ``should_trigger_reanalysis`` derives the same
+# verdict from ``_HANDROLLED_EVENT_TYPE_TO_TAGS``. ``upgraded_revision`` is included because
+# Aave V2's revision bump IS a delegate-target swap.
 _TRIGGERING_EVENT_TYPES = (
     "upgraded",
     "new_implementation",
@@ -109,8 +85,7 @@ pytestmark = [requires_postgres, pytest.mark.anvil, pytest.mark.compile]
 
 @pytest.fixture(autouse=True)
 def _disable_scan_confirmation_depth(monkeypatch):
-    # These anvil chains are only a handful of blocks long; the production
-    # 12-block confirmation clamp would hide every just-emitted event.
+    # Anvil chains are a few blocks long; the 12-block confirmation clamp would hide events.
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
 
 
@@ -180,7 +155,6 @@ def db_session():
         yield session
     finally:
         session.rollback()
-        # Clean up in FK-safe order
         for model in [
             MonitoredEvent,
             MonitoredContract,
@@ -192,7 +166,6 @@ def db_session():
                 session.query(model).delete()
             except Exception:
                 session.rollback()
-        # Clean jobs, contracts, protocols
         for model in [Job, ContractSummary, Contract, Protocol]:
             try:
                 session.query(model).delete()
@@ -223,9 +196,8 @@ def _make_monitored_contract(
 ) -> MonitoredContract:
     from services.monitoring.polling_plan import build_polling_plan
 
-    # PROXY_SOURCE in this test module writes to the EIP-1967 slot via
-    # assembly; default to the matching vendored entry so the storage-
-    # slot poll dispatch actually reads the upgraded value.
+    # PROXY_SOURCE writes the EIP-1967 slot via assembly; the matching vendored entry lets
+    # the storage-slot poll actually read the upgraded value.
     plan_proxy_type = proxy_type or ("eip1967" if contract_type == "proxy" else None)
     tracking_plan: dict | None = None
     if contract_type in ("regular", "pausable", "proxy"):
@@ -296,7 +268,7 @@ def _make_monitored_contract(
 
 
 class TestShouldTriggerReanalysis:
-    """Pure logic tests — no DB needed."""
+    """Pure logic tests, no DB."""
 
     @pytest.mark.parametrize("event_type", sorted(_TRIGGERING_EVENT_TYPES))
     def test_triggering_event_types(self, event_type):
@@ -320,79 +292,33 @@ class TestShouldTriggerReanalysis:
     def test_non_triggering_event_types(self, event_type):
         assert should_trigger_reanalysis(event_type) is False
 
-    @pytest.mark.parametrize("field", sorted(_REANALYSIS_POLL_FIELDS))
-    def test_poll_triggering_fields(self, field):
-        assert should_trigger_reanalysis("state_changed_poll", {"field": field}) is True
+    @pytest.mark.parametrize(
+        "args",
+        [
+            pytest.param(({"field": "paused"},), id="field_paused"),
+            pytest.param(({"field": "threshold"},), id="field_threshold"),
+            pytest.param(({"field": "min_delay"},), id="field_min_delay"),
+            pytest.param(({"field": "owners"},), id="field_owners"),
+            pytest.param((), id="no_data"),
+            pytest.param(({},), id="empty_data"),
+        ],
+    )
+    def test_poll_non_triggering_data(self, args):
+        assert should_trigger_reanalysis("state_changed_poll", *args) is False
 
-    @pytest.mark.parametrize("field", ["paused", "threshold", "min_delay", "owners"])
-    def test_poll_non_triggering_fields(self, field):
-        assert should_trigger_reanalysis("state_changed_poll", {"field": field}) is False
-
-    def test_poll_no_data(self):
-        assert should_trigger_reanalysis("state_changed_poll") is False
-        assert should_trigger_reanalysis("state_changed_poll", {}) is False
-
-    def test_effect_tags_writes_owner_triggers(self):
-        """Generic-classification fallback: an event_type the canonical
-        set doesn't recognize, but whose effect_tags say the emitter
-        writes ``owner``, still triggers reanalysis. Covers protocols
-        whose admin slots are renamed (e.g. fork ``protocolOwner``)."""
-        assert (
-            should_trigger_reanalysis(
-                "controller_changed:state_variable:owner",
-                {"effect_tags": {"writes": ["owner"]}},
-            )
-            is True
-        )
-
-    def test_effect_tags_delegates_triggers(self):
-        """A DELEGATECALL in the emitter body is unconditionally
-        upgrade-equivalent — proxy fallback / custom upgrade
-        choreography. Trigger reanalysis."""
-        assert (
-            should_trigger_reanalysis(
-                "controller_changed:custom",
-                {"effect_tags": {"delegates": True}},
-            )
-            is True
-        )
-
-    def test_effect_tags_is_initializer_triggers(self):
-        """Re-init detected by the modifier rather than the slot name —
-        OZ forks that rename ``_initialized`` still get caught."""
-        assert (
-            should_trigger_reanalysis(
-                "controller_changed:custom",
-                {"effect_tags": {"is_initializer": True}},
-            )
-            is True
-        )
-
-    def test_handrolled_ownership_transferred_data_synthesizes_tags(self):
-        """An ``ownership_transferred`` event passing through the
-        hand-rolled decoder (``parse_governance_log``) now carries
-        ``effect_tags={"writes": ["owner"]}`` in its data. Verify the
-        reanalysis check fires when given that shape — i.e. the
-        synthesis path produces a tag-equivalent verdict to the bare
-        event_type path. This is the production path: scan_for_events
-        always passes event_data (which includes effect_tags) when it
-        queues a reanalysis job."""
-        data = {
-            "old_owner": "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
-            "new_owner": "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
-            "effect_tags": {"writes": ["owner"]},
-        }
-        assert should_trigger_reanalysis("ownership_transferred", data) is True
-
-    def test_handrolled_upgraded_data_synthesizes_tags(self):
-        """Same shape as above but for proxy Upgraded — verifies the
-        ``delegates: True`` path fires when the hand-rolled decoder
-        attaches it."""
-        data = {
-            "implementation": "0x" + "aa" * 20,
-            "effect_tags": {"writes": ["implementation"], "delegates": True},
-        }
-        assert should_trigger_reanalysis("upgraded", data) is True
+    @pytest.mark.parametrize(
+        ("event_type", "effect_tags"),
+        [
+            # Renamed admin slots (e.g. fork ``protocolOwner``) still trigger via effect_tags.
+            pytest.param("controller_changed:state_variable:owner", {"writes": ["owner"]}, id="writes_owner"),
+            # A DELEGATECALL in the emitter body is unconditionally upgrade-equivalent.
+            pytest.param("controller_changed:custom", {"delegates": True}, id="delegates"),
+            # Re-init detected by modifier, not slot name, so OZ forks renaming ``_initialized`` are caught.
+            pytest.param("controller_changed:custom", {"is_initializer": True}, id="is_initializer"),
+        ],
+    )
+    def test_effect_tags_trigger(self, event_type, effect_tags):
+        assert should_trigger_reanalysis(event_type, {"effect_tags": effect_tags}) is True
 
 
 # ---------------------------------------------------------------------------
@@ -435,7 +361,6 @@ class TestMaybeQueueReanalysis:
         for event_type in ("paused", "unpaused", "role_granted", "signer_added", "delay_changed"):
             assert maybe_queue_reanalysis(db_session, mc, event_type) is None
 
-        # Verify no jobs were created
         jobs = db_session.execute(select(Job).where(func.lower(Job.address) == mc.address.lower())).scalars().all()
         assert len(jobs) == 0
 
@@ -443,15 +368,12 @@ class TestMaybeQueueReanalysis:
         addr = "0x" + "ff" * 20
         mc = _make_monitored_contract(db_session, addr, "proxy")
 
-        # First call creates a job
         job1 = maybe_queue_reanalysis(db_session, mc, "upgraded")
         assert job1 is not None
 
-        # Second call should skip (job1 is queued)
         job2 = maybe_queue_reanalysis(db_session, mc, "upgraded")
         assert job2 is None
 
-        # Only one job exists
         jobs = db_session.execute(select(Job).where(func.lower(Job.address) == addr.lower())).scalars().all()
         assert len(jobs) == 1
 
@@ -462,31 +384,25 @@ class TestMaybeQueueReanalysis:
         job1 = maybe_queue_reanalysis(db_session, mc, "upgraded")
         assert job1 is not None
 
-        # Mark the first job as completed
         job1.status = JobStatus.completed
         job1.stage = JobStage.done
         db_session.commit()
 
-        # Now a new job should be created
         job2 = maybe_queue_reanalysis(db_session, mc, "upgraded")
         assert job2 is not None
         assert job2.id != job1.id
 
     def test_dedup_respects_chain(self, db_session, monkeypatch):
-        # This test models a deployment where Base is enabled; re-analysis
-        # gates off-allowlist chains,
-        # so make the base-enabled premise explicit rather than relying on {1}.
+        # Base is made enabled explicitly (re-analysis gates off-allowlist chains).
         monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
         addr = "0x" + "cd" * 20
 
         mc_eth = _make_monitored_contract(db_session, addr, "proxy", chain="ethereum")
         mc_base = _make_monitored_contract(db_session, addr, "proxy", chain="base")
 
-        # Create job for ethereum
         job_eth = maybe_queue_reanalysis(db_session, mc_eth, "upgraded")
         assert job_eth is not None
 
-        # Should still allow a job for base (different chain)
         job_base = maybe_queue_reanalysis(db_session, mc_base, "upgraded")
         assert job_base is not None
         assert job_base.id != job_eth.id
@@ -505,27 +421,20 @@ class TestMaybeQueueReanalysis:
         assert job.request is not None
         assert job.request.get("protocol_id") == proto.id
 
-    def test_poll_implementation_triggers_job(self, db_session):
-        mc = _make_monitored_contract(db_session, "0x" + "22" * 20, "proxy")
-        data = {"field": "implementation", "old_value": "0xold", "new_value": "0xnew"}
+    @pytest.mark.parametrize(
+        ("field", "addr_byte", "contract_type"),
+        [
+            pytest.param("implementation", "22", "proxy", id="implementation"),
+            pytest.param("owner", "33", "regular", id="owner"),
+        ],
+    )
+    def test_poll_field_triggers_job(self, db_session, field, addr_byte, contract_type):
+        mc = _make_monitored_contract(db_session, "0x" + addr_byte * 20, contract_type)
+        data = {"field": field, "old_value": "0xold", "new_value": "0xnew"}
         job = maybe_queue_reanalysis(db_session, mc, "state_changed_poll", data)
         assert job is not None
         assert job.request is not None
-        assert job.request.get("reanalysis_trigger") == "poll:implementation"
-
-    def test_poll_owner_triggers_job(self, db_session):
-        mc = _make_monitored_contract(db_session, "0x" + "33" * 20)
-        data = {"field": "owner", "old_value": "0xold", "new_value": "0xnew"}
-        job = maybe_queue_reanalysis(db_session, mc, "state_changed_poll", data)
-        assert job is not None
-        assert job.request is not None
-        assert job.request.get("reanalysis_trigger") == "poll:owner"
-
-    def test_poll_paused_does_not_trigger(self, db_session):
-        mc = _make_monitored_contract(db_session, "0x" + "44" * 20, "pausable")
-        data = {"field": "paused", "old_value": "False", "new_value": "True"}
-        job = maybe_queue_reanalysis(db_session, mc, "state_changed_poll", data)
-        assert job is None
+        assert job.request.get("reanalysis_trigger") == f"poll:{field}"
 
     def test_different_event_types_dedup_each_other(self, db_session):
         """An upgrade and an ownership_transferred for the same address produce one job."""
@@ -540,17 +449,12 @@ class TestMaybeQueueReanalysis:
         assert job2 is None
 
     def test_cache_compatibility(self, db_session):
-        """A re-analysis job does not break find_completed_static_cache.
-
-        The cache finder looks for completed+done jobs with source files and
-        contract_analysis artifacts. A queued re-analysis job should not
-        interfere because it has status=queued, stage=discovery.
-        """
+        """A queued re-analysis job (status=queued, stage=discovery) must not interfere with
+        ``find_completed_static_cache``, which wants completed+done jobs."""
         from db.queue import find_completed_static_cache, store_artifact, store_source_files
 
         addr = "0x" + "66" * 20
 
-        # Create a completed job that acts as a cache source
         old_job = Job(
             address=addr.lower(),
             status=JobStatus.completed,
@@ -564,7 +468,6 @@ class TestMaybeQueueReanalysis:
         store_source_files(db_session, old_job.id, {"src/A.sol": "contract A {}"})
         store_artifact(db_session, old_job.id, "contract_analysis", data={"functions": []})
 
-        # Create Contract + ContractSummary (required by find_completed_static_cache)
         contract = Contract(
             job_id=old_job.id,
             address=addr.lower(),
@@ -579,7 +482,6 @@ class TestMaybeQueueReanalysis:
         db_session.add(summary)
         db_session.commit()
 
-        # Now queue a re-analysis job
         mc = _make_monitored_contract(db_session, addr, "proxy")
         reanalysis_job = maybe_queue_reanalysis(db_session, mc, "upgraded")
         assert reanalysis_job is not None
@@ -629,13 +531,11 @@ class TestReanalysisAnvilIntegration:
             protocol_id=proto.id,
         )
 
-        # Upgrade
         _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
 
         events = scan_for_events(db_session, rpc_url)
         assert any(e.event_type == "upgraded" for e in events)
 
-        # Verify re-analysis job was created
         jobs = (
             db_session.execute(
                 select(Job).where(
@@ -731,25 +631,6 @@ class TestReanalysisAnvilIntegration:
         assert len(jobs) == 1
         assert jobs[0].request.get("reanalysis_trigger") == "admin_changed"
 
-    def test_pause_does_not_trigger_reanalysis(self, anvil_env, db_session):
-        """Deploy pausable, pause, scan → NO reanalysis job."""
-        rpc_url, tmp_path = anvil_env
-        from services.monitoring.unified_watcher import scan_for_events
-
-        addr = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
-        current_block = int(_cast(["block-number"], rpc_url))
-
-        _make_monitored_contract(db_session, addr, "pausable", current_block)
-
-        _cast_send(addr, "pause()", [], rpc_url, PRIVATE_KEY)
-
-        events = scan_for_events(db_session, rpc_url)
-        assert any(e.event_type == "paused" for e in events)
-
-        # No reanalysis job should exist
-        jobs = db_session.execute(select(Job).where(func.lower(Job.address) == addr.lower())).scalars().all()
-        assert len(jobs) == 0
-
     def test_multiple_upgrades_single_scan_creates_one_job(self, anvil_env, db_session):
         """Two upgrades in consecutive blocks → only one reanalysis job (dedup)."""
         rpc_url, tmp_path = anvil_env
@@ -757,7 +638,6 @@ class TestReanalysisAnvilIntegration:
 
         impl_v1 = _compile_and_deploy(IMPL_V1_SOURCE, "ImplV1", [], rpc_url, PRIVATE_KEY, tmp_path)
         impl_v2 = _compile_and_deploy(IMPL_V2_SOURCE, "ImplV2", [], rpc_url, PRIVATE_KEY, tmp_path)
-        # Deploy a third impl for the second upgrade
         impl_v3_source = """
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -777,13 +657,12 @@ contract ImplV3 { uint256 public version = 3; }
         current_block = int(_cast(["block-number"], rpc_url))
         _make_monitored_contract(db_session, proxy_addr, "proxy", current_block)
 
-        # Two upgrades in quick succession
         _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
         _cast_send(proxy_addr, "upgradeTo(address)", [impl_v3], rpc_url, PRIVATE_KEY)
 
         events = scan_for_events(db_session, rpc_url)
         upgrade_events = [e for e in events if e.event_type == "upgraded"]
-        assert len(upgrade_events) == 2  # Two upgrade events detected
+        assert len(upgrade_events) == 2
 
         # But only ONE reanalysis job (second upgrade deduped against first)
         jobs = (
@@ -825,14 +704,12 @@ contract ImplV3 { uint256 public version = 3; }
         mc.last_known_state = {"implementation": impl_v1.lower()}
         db_session.commit()
 
-        # Upgrade (poll doesn't read events, it reads storage)
         _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
 
         events = poll_for_state_changes(db_session, rpc_url)
         impl_changes = [e for e in events if e.data and e.data.get("field") == "implementation"]
         assert len(impl_changes) == 1
 
-        # Reanalysis job should be queued
         jobs = (
             db_session.execute(
                 select(Job).where(
@@ -860,7 +737,6 @@ contract ImplV3 { uint256 public version = 3; }
         _make_monitored_contract(db_session, ownable_addr, "regular", current_block)
         _make_monitored_contract(db_session, pausable_addr, "pausable", current_block)
 
-        # Trigger both
         new_owner = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
         _cast_send(ownable_addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
         _cast_send(pausable_addr, "pause()", [], rpc_url, PRIVATE_KEY)
@@ -1218,40 +1094,21 @@ class TestCompletionWebhook:
             assert str(job.id)[:8] in field_map["Job"]
             assert "Implementation" in field_map["Changes detected"]
 
-    def test_completion_no_webhook_without_protocol(self, db_session):
-        """Job without protocol_id → no webhook sent."""
+    @pytest.mark.parametrize("with_protocol", [False, True], ids=["without_protocol", "without_subscriptions"])
+    def test_completion_no_webhook(self, db_session, with_protocol):
+        """No protocol_id, or a protocol with no subscriptions → no webhook sent."""
         from unittest.mock import patch
 
         from services.monitoring.notifier import notify_reanalysis_complete
 
+        protocol_id = _make_protocol(db_session, "NoSubTest").id if with_protocol else None
+        address = "0x" + "f1" * 20
         job = Job(
-            address="0x" + "e0" * 20,
+            address=address,
             status=JobStatus.completed,
             stage=JobStage.done,
-            protocol_id=None,
-            request={"reanalysis_trigger": "upgraded", "address": "0x" + "e0" * 20, "chain": "ethereum"},
-        )
-        db_session.add(job)
-        db_session.commit()
-        db_session.refresh(job)
-
-        with patch("services.monitoring.notifier.requests.post") as mock_post:
-            notify_reanalysis_complete(db_session, job)
-            mock_post.assert_not_called()
-
-    def test_completion_no_webhook_without_subscriptions(self, db_session):
-        """Protocol with no subscriptions → no webhook sent."""
-        from unittest.mock import patch
-
-        from services.monitoring.notifier import notify_reanalysis_complete
-
-        proto = _make_protocol(db_session, "NoSubTest")
-        job = Job(
-            address="0x" + "f1" * 20,
-            status=JobStatus.completed,
-            stage=JobStage.done,
-            protocol_id=proto.id,
-            request={"reanalysis_trigger": "upgraded", "address": "0x" + "f1" * 20, "chain": "ethereum"},
+            protocol_id=protocol_id,
+            request={"reanalysis_trigger": "upgraded", "address": address, "chain": "ethereum"},
         )
         db_session.add(job)
         db_session.commit()

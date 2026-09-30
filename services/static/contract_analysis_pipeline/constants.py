@@ -1,5 +1,3 @@
-"""Shared constants for contract analysis."""
-
 from __future__ import annotations
 
 STANDARD_SIGNATURES = {

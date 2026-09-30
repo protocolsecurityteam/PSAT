@@ -1,8 +1,3 @@
-"""
-Stores and manages captured DApp interactions (transactions, signatures,
-contract addresses) discovered during crawling.
-"""
-
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -57,12 +52,7 @@ class InteractionLog:
         return sorted(addresses)
 
     def get_address_details(self) -> list[dict]:
-        """Extract unique contract addresses with source context.
-
-        Each entry includes the page URLs where the address was found,
-        the discovery method (page-text, js-runtime, explorer link, etc.),
-        and inferred chain from block explorer links.
-        """
+        """Unique addresses with the pages, discovery method and explorer-inferred chain."""
         EXPLORER_CHAINS = {
             "etherscan": "ethereum",
             "arbiscan": "arbitrum",
@@ -87,9 +77,7 @@ class InteractionLog:
             source = i.data or ""
             if source:
                 entry["sources"].add(source)
-            # Infer chain from any URL-like field — i.url is always a URL, and
-            # for scraped page addresses i.data sometimes holds the full explorer
-            # href. Calldata (hex) can't contain explorer domain names anyway.
+            # For scraped addresses, ``i.data`` sometimes holds the explorer href.
             for candidate in (i.url, source):
                 if not candidate or not candidate.startswith(("http://", "https://")):
                     continue

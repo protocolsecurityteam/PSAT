@@ -12,9 +12,8 @@ from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 
 @pytest.fixture(autouse=True)
 def _isolated_classify_cache():
-    # Process-wide classify cache leaks across test files when xdist/pytest-cov
-    # serializes them in worker order — clear before each test so mocked RPC
-    # responses aren't shadowed by a stale entry from a sibling file.
+    # Process-wide classify cache leaks across files under xdist; clear so mocked RPC
+    # responses aren't shadowed by a stale entry.
     clear_classify_cache()
     yield
     clear_classify_cache()
@@ -234,14 +233,11 @@ def test_build_control_snapshot_handles_reverting_getter(monkeypatch):
 
 
 def test_build_control_snapshot_recovers_immutable_getter_via_impl_fallback(monkeypatch):
-    """Regression mirroring real EtherFi data (EtherFiNode): authority addresses
-    declared ``immutable`` live in the implementation bytecode, not proxy
-    storage. EtherFiNode's runtime/proxy address (0x3c55986c) does not
-    delegatecall to its analyzed impl (0xa91f8a52) — its EIP-1967/beacon slots
-    are zero — so ``etherFiNodesManager()`` reverts there but resolves on the
-    impl. The snapshot must fall back to the impl address so the controller is
-    recovered, not recorded null (which left 13 EtherFiNode functions ownerless
-    on the Surface, with the EtherFiNodesManager controller missing entirely).
+    """Regression mirroring real EtherFi data (EtherFiNode): ``immutable`` authority
+    addresses live in the implementation bytecode, not proxy storage. The runtime
+    address (0x3c55986c) does not delegatecall to its impl (0xa91f8a52), so
+    ``etherFiNodesManager()`` reverts there. The snapshot must fall back to the impl,
+    else 13 EtherFiNode functions were left ownerless on the Surface.
     """
     proxy = "0x3c55986cfee455e2533f4d29006634ecf9b7c03f"  # runtime addr — getter reverts here
     impl = "0xa91f8a52f0c1b4d3fdc256fc5bebca4d627da392"  # immutable lives in this bytecode
@@ -295,14 +291,12 @@ def test_build_control_snapshot_recovers_immutable_getter_via_impl_fallback(monk
         lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
 
-    # With the impl fallback, the reverting proxy read recovers from the impl.
     recovered = build_control_snapshot(plan, "https://rpc.example", getter_fallback_address=impl)
     cv = recovered["controller_values"]["state_variable:etherFiNodesManager"]
     assert cv["value"] == "0x" + manager, f"expected impl-fallback to recover the manager; got {cv}"
     assert cv["observed_via"] == "eth_call_impl_fallback"
     assert cv["resolved_type"] == "contract"
 
-    # Without a fallback (the default), the prior behavior holds: recorded null.
     nulled = build_control_snapshot(plan, "https://rpc.example")
     cv2 = nulled["controller_values"]["state_variable:etherFiNodesManager"]
     assert cv2["value"] is None
@@ -343,12 +337,10 @@ def _avs_operator_plan(instance: str) -> ControlTrackingPlan:
 
 
 def test_build_control_snapshot_attributes_beacon_owner_to_instance(monkeypatch):
-    """An UpgradeableBeacon's owner() is the governed instance's upgrade
-    authority — it can re-point every instance at a new implementation — but
-    lives in the beacon, not the instance's own state. With ``beacon_address``
-    set the snapshot reads beacon.owner() live and records it as a
-    ``beacon_owner`` controller of the instance, leaving the instance's own
-    controllers untouched. Mirrors real EtherFi AvsOperator/EtherFiNode data."""
+    """An UpgradeableBeacon's owner() is the instance's upgrade authority but lives in the
+    beacon. With ``beacon_address`` set the snapshot records it as a ``beacon_owner``
+    controller, leaving the instance's own controllers untouched. Mirrors real EtherFi
+    AvsOperator/EtherFiNode data."""
     instance = "0xf4718766a7fc8c81f788669b0985fac03d064d29"  # AvsOperator impl/instance
     beacon = "0x29b1c223be35ccb6bfbd43154528cd0b881756e9"  # UpgradeableBeacon
     manager = "2093bbb221f1d8c7c932c32ee28be6dee4a37a6a"  # beacon.owner() (AvsOperatorsManager owner)
@@ -373,7 +365,6 @@ def test_build_control_snapshot_attributes_beacon_owner_to_instance(monkeypatch)
         lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
 
-    # Baseline: no beacon attribution -> the instance carries only its own controllers.
     baseline = build_control_snapshot(plan, "https://rpc.example")
     assert "beacon_owner" not in baseline["controller_values"]
 
@@ -384,7 +375,6 @@ def test_build_control_snapshot_attributes_beacon_owner_to_instance(monkeypatch)
     assert bo["source"] == "beacon"
     assert bo["observed_via"] == "beacon_owner"
     assert bo["details"]["beacon_address"] == beacon
-    # Additive: every baseline controller is preserved byte-for-byte.
     for cid, value in baseline["controller_values"].items():
         assert snapshot["controller_values"][cid] == value
 
@@ -565,9 +555,7 @@ def test_build_control_snapshot_parity_parallel_vs_sequential(monkeypatch):
     seq = _snapshot_parity_helper(monkeypatch, "1")
     par = _snapshot_parity_helper(monkeypatch, "8")
 
-    # Compare canonicalised form: sort controller_values by key for stable
-    # comparison (dict iteration order in CPython is insertion order, which
-    # may differ between sequential and parallel paths).
+    # Sort by key: sequential and parallel paths may differ in insertion order.
     def _canon(snapshot):
         return {
             "block_number": snapshot["block_number"],
@@ -578,31 +566,20 @@ def test_build_control_snapshot_parity_parallel_vs_sequential(monkeypatch):
 
     assert _canon(seq) == _canon(par)
 
-
-# ---------------------------------------------------------------------------
-# Phantom-EOA regression. tracking_plan admits non-address state vars (uints,
-# bools, mappings) so the *event* pathway can watch them, on the documented
-# promise that "the poller filters by type_kind itself". build_control_snapshot
-# is that poller for the resolution pathway — and the single choke point whose
-# controller_values feed the ControllerValue table, the recursive control graph
-# (recursive.py:911), and effective_permissions, all of which read ``value`` as
-# a 0x-address. Before the fix it read every tracked controller's slot and ran
-# classify_resolved_address on it: a scalar < 2**160 (e.g. uint _minDelay ==
-# 864000) coerces to a no-code address, classifies "eoa", and is promoted to a
-# controller of every contract declaring that variable. These are the real
-# etherfi phantoms observed on the PR95 live DB.
-# ---------------------------------------------------------------------------
+    # Phantom-EOA regression. tracking_plan admits non-address state vars (uints, bools,
+    # mappings) for the *event* pathway on the promise that "the poller filters by
+    # type_kind itself"; build_control_snapshot is that poller, and its controller_values
+    # feed ControllerValue, the recursive control graph and effective_permissions, all of
+    # which read ``value`` as an address. Before the fix a scalar < 2**160 (e.g. uint
+    # _minDelay == 864000) coerced to a no-code address, classified "eoa", and was promoted
+    # to a controller. These are the real etherfi phantoms observed on the PR95 live DB.
 
 
 def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
     """Primitive-scalar state vars must not enter the value snapshot as principals.
 
-    Uses the exact live PR95 read_specs (``type_kind="primitive"``,
-    ``strategy="getter_call"`` with a target getter) and the real scalar values
-    those getters return, driving the real snapshot builder (block read,
-    parallel_map, decode, classify). Only the address-typed ``owner`` should
-    survive; if the guard regresses, the scalar getters get polled + classified
-    "eoa" and the set-equality assertion below fails.
+    Uses the exact live PR95 read_specs and scalar values; only the address-typed
+    ``owner`` should survive.
     """
     target = "0x1111111111111111111111111111111111111111"
     owner_addr = "cc" * 20
@@ -626,7 +603,6 @@ def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
         }
 
     def _primitive(getter: str, sol_type: str) -> dict[str, str]:
-        # Verbatim shape the static stage emits for a primitive state var.
         return {
             "strategy": "getter_call",
             "target": getter,
@@ -635,9 +611,8 @@ def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
             "type_kind": "primitive",
         }
 
-    # (source, read_spec, scalar the getter returns) — verbatim live PR95
-    # phantoms. Each scalar is < 2**160, so absent the guard it coerces to a
-    # no-code address and classifies "eoa".
+        # (source, read_spec, scalar the getter returns) - verbatim live PR95 phantoms.
+
     scalars = [
         ("_minDelay", _primitive("getMinDelay", "uint256"), 864_000),
         ("threshold", _primitive("threshold", "uint256"), 3),
@@ -662,8 +637,7 @@ def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
         "tracked_controllers": [_sv("owner", owner_spec), *[_sv(src, rs) for src, rs, _v in scalars]],
     }
 
-    # Map each getter selector (keyed by read_spec target) to its 32-byte word,
-    # so that *if the guard were removed* the scalars would be read + coerced.
+    # If the guard were removed the scalars would be read + coerced.
     word_by_selector = {selector(f"{rs['target']}()"): "0x" + format(val, "064x") for _src, rs, val in scalars}
     word_by_selector[selector("owner()")] = "0x" + "00" * 12 + owner_addr
 
@@ -684,21 +658,17 @@ def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
     snapshot = build_control_snapshot(plan, "https://rpc.example")
     cvs = snapshot["controller_values"]
 
-    # The address-typed controller survives and resolves normally...
     assert set(cvs) == {"state_variable:owner"}
     assert cvs["state_variable:owner"]["value"] == "0x" + owner_addr
     assert cvs["state_variable:owner"]["resolved_type"] == "eoa"
 
-    # ...and not one primitive slot produced a (phantom) controller value, so no
-    # downstream consumer can mint an "eoa" principal from them.
     for src, _rs, _v in scalars:
         assert f"state_variable:{src}" not in cvs
 
 
 def test_build_control_snapshot_keeps_address_var_with_missing_type(monkeypatch):
-    """The guard is conservative: a state var with no/unknown type info is
-    still classified, so real address principals are never dropped when the
-    static stage failed to record a type_kind."""
+    """The guard is conservative: no/unknown type info is still classified, so real
+    address principals are never dropped."""
     target = "0x1111111111111111111111111111111111111111"
     plan: ControlTrackingPlan = {
         "schema_version": "0.1",
@@ -741,11 +711,9 @@ def test_build_control_snapshot_keeps_address_var_with_missing_type(monkeypatch)
 
 
 def test_build_control_snapshot_keeps_non_primitive_controllers(monkeypatch):
-    """The guard skips ONLY primitive scalars. A mapping-typed state var
-    (e.g. an OZ AccessControl ``_roles`` / etherfi ``registered`` role map,
-    type_kind="mapping") must pass through untouched — a bare getter reverts on
-    it (value=None) and its members are enumerated elsewhere — so the real Safe
-    principals enumerated from those maps are never dropped.
+    """The guard skips ONLY primitive scalars. A mapping-typed state var (OZ
+    AccessControl ``_roles``, etherfi ``registered``) must pass through: a bare getter
+    reverts on it and its members are enumerated elsewhere.
     """
     target = "0x1111111111111111111111111111111111111111"
     plan: ControlTrackingPlan = {
@@ -789,20 +757,13 @@ def test_build_control_snapshot_keeps_non_primitive_controllers(monkeypatch):
     monkeypatch.setattr("services.resolution.tracking._rpc_request", fake_rpc)
 
     cvs = build_control_snapshot(plan, "https://rpc.example")["controller_values"]
-    # Not skipped: the mapping controller still appears (as a reverting/unknown
-    # entry), exactly as before the fix — so mapping enumeration is untouched.
     assert "state_variable:registered" in cvs
     assert cvs["state_variable:registered"]["value"] is None
     assert cvs["state_variable:registered"]["resolved_type"] == "unknown"
 
-
-# ---------------------------------------------------------------------------
-# Multicall3 snapshot-getter prewarm parity: PSAT_SNAPSHOT_MULTICALL on/off must
-# produce identical controller_values. With prewarm ON, every {target}() getter
-# is pre-read in ONE aggregate3 (services.clients.rpc.rpc_request) and _read_polling_source
-# consumes the cached raw; OFF, each is read per-controller via tracking._rpc_request.
-# Both wires return the same bytes, so the snapshot is byte-identical.
-# ---------------------------------------------------------------------------
+    # Multicall3 snapshot-getter prewarm parity: PSAT_SNAPSHOT_MULTICALL on/off must produce
+    # identical controller_values. ON: getters pre-read in ONE aggregate3
+    # (services.clients.rpc.rpc_request); OFF: per-controller via tracking._rpc_request.
 
 
 def _multi_controller_plan(target: str) -> ControlTrackingPlan:
@@ -860,7 +821,6 @@ def test_build_control_snapshot_multicall_prewarm_parity(monkeypatch):
         lambda rpc_url, address, block_tag="latest", **_kw: ("contract", {"address": address}),
     )
 
-    # Multicall3 prewarm wire (used when prewarm is ON) — same getter values.
     mc_calls = {"n": 0}
 
     def fake_multicall_rpc(_rpc_url, method, params, **_kw):
@@ -945,14 +905,12 @@ def test_snapshot_prewarm_reverting_getter_falls_through(monkeypatch):
 @pytest.mark.parametrize(
     "read_spec, expected",
     [
-        # Primitive scalars (the phantom source) -> True == skip from snapshot.
         ({"type_kind": "primitive"}, True),  # the live shape for uint/bool/bytes
         ({"type_kind": "primitive", "type": "uint64"}, True),
         ({"type": "uint256"}, True),  # type-only fallback (no type_kind)
         ({"type": "bool"}, True),
         ({"type": "bytes32"}, True),
         ({"type": "int128"}, True),
-        # Real principals / enumerated refs -> False == keep.
         ({"type_kind": "address"}, False),
         ({"type_kind": "contract"}, False),
         ({"type_kind": "mapping"}, False),  # role maps -> real Safe members

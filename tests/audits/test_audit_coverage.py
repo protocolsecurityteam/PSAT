@@ -1,15 +1,6 @@
-"""Unit tests for the audit-coverage matcher.
-
-Focus: the *rules* — direct vs. impl_era matching, temporal window
-selection, confidence downgrade on boundary misses, proxy resolution,
-date parsing quirks (partial months, null dates). Integration with the
-scope worker + live API is covered separately in
-``test_audit_coverage_integration.py``.
-
-Requires a real test Postgres (matcher queries UpgradeEvent / Contract /
-AuditReport) — skipped cleanly on a dev box without TEST_DATABASE_URL.
-Object storage is NOT required here; we never touch the scope artifact
-bucket.
+"""Unit tests for the audit-coverage matcher rules: direct vs impl_era matching, temporal windows,
+confidence downgrade, proxy resolution, date parsing. Needs a real test Postgres (TEST_DATABASE_URL);
+no object storage. Integration is in test_audit_coverage_integration.py.
 """
 
 from __future__ import annotations
@@ -41,14 +32,27 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 
-def test_audit_effective_ts_full_date():
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # End-of-day semantics so "impl replaced on 2024-06-15" matches.
+        pytest.param("2024-06-15", {"year": 2024, "month": 6, "day": 15, "hour": 23, "minute": 59}, id="full_date"),
+        pytest.param("2023", {"month": 12, "day": 31}, id="year_only"),
+        pytest.param(None, None, id="none"),
+        pytest.param("", None, id="empty"),
+        pytest.param("nonsense", None, id="garbage"),
+    ],
+)
+def test_audit_effective_ts(raw, expected):
     from services.audits.coverage import _audit_effective_ts
 
-    got = _audit_effective_ts("2024-06-15")
+    got = _audit_effective_ts(raw)
+    if expected is None:
+        assert got is None
+        return
     assert got is not None
-    # End-of-day semantics so "impl replaced on 2024-06-15" matches.
-    assert got.year == 2024 and got.month == 6 and got.day == 15
-    assert got.hour == 23 and got.minute == 59
+    for attr, value in expected.items():
+        assert getattr(got, attr) == value
 
 
 def test_audit_effective_ts_month_placeholder():
@@ -60,22 +64,6 @@ def test_audit_effective_ts_month_placeholder():
     b = _audit_effective_ts("2024-06")
     assert a == b
     assert a is not None and a.month == 6 and a.day == 30
-
-
-def test_audit_effective_ts_year_only():
-    from services.audits.coverage import _audit_effective_ts
-
-    got = _audit_effective_ts("2023")
-    assert got is not None
-    assert got.month == 12 and got.day == 31
-
-
-def test_audit_effective_ts_none_and_garbage():
-    from services.audits.coverage import _audit_effective_ts
-
-    assert _audit_effective_ts(None) is None
-    assert _audit_effective_ts("") is None
-    assert _audit_effective_ts("nonsense") is None
 
 
 # ---------------------------------------------------------------------------
@@ -127,15 +115,13 @@ def test_scope_name_not_in_protocol_yields_zero_matches(db_session, seed_protoco
 
     protocol_id, _ = seed_protocol
     _add_contract(db_session, protocol_id, address="0x" + "a" * 40, name="Pool")
-    # Name in scope doesn't exist in this protocol's contracts.
     audit = _add_audit(db_session, protocol_id, scope=["UnrelatedThing"], date="2024-01-01")
     assert match_contracts_for_audit(db_session, audit.id) == []
 
 
 def test_duplicate_scope_names_collapse_to_single_match(db_session, seed_protocol):
-    """Extraction glitches sometimes ship the same contract twice under
-    near-identical names (e.g. 'EtherFiNodesManager' + 'EtherFiNodeManager').
-    Only one coverage row should emerge for the single Contract row.
+    """Extraction glitches ship one contract twice under near-identical names (EtherFiNodesManager /
+    EtherFiNodeManager); expect one row.
     """
     from services.audits.coverage import match_contracts_for_audit
 
@@ -153,8 +139,7 @@ def test_duplicate_scope_names_collapse_to_single_match(db_session, seed_protoco
 
 
 def test_impl_era_match_inside_window_is_high(db_session, seed_protocol):
-    """Proxy was X (block 100) → Y (block 200). Audit on X dated between
-    those blocks lands in X's window → high confidence, range set."""
+    """Proxy X (block 100) -> Y (200): an audit dated between lands in X's window, high confidence."""
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
@@ -199,8 +184,7 @@ def test_impl_era_match_inside_window_is_high(db_session, seed_protocol):
 
 
 def test_impl_era_match_open_ended_window_for_current_impl(db_session, seed_protocol):
-    """An audit dated AFTER the latest upgrade covers the still-current
-    impl — covered_to_block is NULL because the impl hasn't been replaced."""
+    """An audit dated after the latest upgrade covers the still-current impl; covered_to_block is NULL."""
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
@@ -231,9 +215,9 @@ def test_impl_era_match_open_ended_window_for_current_impl(db_session, seed_prot
 
 
 def test_impl_era_grace_window_gives_medium_confidence(db_session, seed_protocol):
-    """Audit published 10 days AFTER the impl was replaced should still
-    attach to that impl at 'medium' — typical 'audit finalized after
-    remediation upgrade shipped' pattern."""
+    """Audit 10 days after the impl was replaced (audit finalized after remediation upgrade) stays attached at
+    'medium'.
+    """
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
@@ -258,7 +242,6 @@ def test_impl_era_grace_window_gives_medium_confidence(db_session, seed_protocol
         timestamp=_ts(2024, 6, 1),
     )
 
-    # 10 days after replacement — within the 14-day grace.
     audit = _add_audit(db_session, protocol_id, scope=["MorphoBlue"], date="2024-06-11")
     [m] = match_contracts_for_audit(db_session, audit.id)
     assert m.match_confidence == "medium"
@@ -266,9 +249,7 @@ def test_impl_era_grace_window_gives_medium_confidence(db_session, seed_protocol
 
 
 def test_impl_era_far_outside_window_is_low(db_session, seed_protocol):
-    """Audit dated years after the impl was replaced — name matches but
-    timing is clearly off. Still emits a row (don't silently drop) but
-    marks it low so a UI can hide or badge it."""
+    """Far-outside timing still emits a row (never silently dropped) but at low so a UI can hide or badge it."""
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
@@ -320,16 +301,13 @@ def test_impl_era_with_no_audit_date_falls_to_low(db_session, seed_protocol):
 
 
 def test_impl_era_picks_correct_window_across_multiple_upgrades(db_session, seed_protocol):
-    """Proxy: A (block 100) → B (200) → A (300) → C (400). Audit dated
-    in the [300,400) window matches A again with THAT window, not the
-    earlier [100,200) one."""
+    """Proxy A(100) -> B(200) -> A(300) -> C(400): an audit in [300,400) matches A's second window, not [100,200)."""
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
     proxy = _add_contract(db_session, protocol_id, address="0x" + "1" * 40, name="Proxy", is_proxy=True)
     impl_a = _add_contract(db_session, protocol_id, address="0x" + "a" * 40, name="ImplA")
 
-    # A active [100, 200), then B [200, 300), then A again [300, 400), then C.
     for ts, block, new_impl, old_impl in [
         (_ts(2024, 1, 1), 100, impl_a.address, None),
         (_ts(2024, 2, 1), 200, "0x" + "b" * 40, impl_a.address),
@@ -348,7 +326,6 @@ def test_impl_era_picks_correct_window_across_multiple_upgrades(db_session, seed
 
     audit = _add_audit(db_session, protocol_id, scope=["ImplA"], date="2024-03-15")
     [m] = match_contracts_for_audit(db_session, audit.id)
-    # Audit lands in the SECOND active window of A: [300, 400).
     assert m.covered_from_block == 300
     assert m.covered_to_block == 400
     assert m.match_confidence == "high"
@@ -360,11 +337,8 @@ def test_impl_era_picks_correct_window_across_multiple_upgrades(db_session, seed
 
 
 def test_proxy_and_impl_share_name_only_impl_gets_row(db_session, seed_protocol):
-    """Proxy and impl share a scope name. Under is_proxy-aware matching,
-    only the impl gets a coverage row — the proxy's direct match on its
-    own name is dropped regardless of the spelling. The proxy view still
-    shows coverage through ``audit_timeline``'s union over historical
-    impls.
+    """Proxy and impl share a scope name: only the impl gets a row. The proxy view still shows coverage via
+    audit_timeline's union over historical impls.
     """
     from services.audits.coverage import match_contracts_for_audit
 
@@ -398,13 +372,8 @@ def test_proxy_and_impl_share_name_only_impl_gets_row(db_session, seed_protocol)
 
 
 def test_proxy_direct_match_on_own_name_skipped(db_session, seed_protocol):
-    """A Contract whose ``is_proxy`` is True shouldn't get a direct
-    coverage row on its own scope-name match. Scope like "UUPSProxy"
-    matches generic proxy Contract rows verbatim, and attributing audit
-    coverage on that alone is the false-positive class we want gone.
-    Coverage for the proxy, when legitimate, flows via the impl's own
-    Contract row + audit_timeline's union, not via a direct match on the
-    proxy name.
+    """A proxy's own generic scope-name match ("UUPSProxy") must not yield a direct row; that is the false-positive
+    class this pins. Legitimate proxy coverage flows via the impl's row.
     """
     from services.audits.coverage import match_contracts_for_audit
 
@@ -435,22 +404,12 @@ def test_proxy_direct_match_on_own_name_skipped(db_session, seed_protocol):
     )
 
     matches = match_contracts_for_audit(db_session, audit.id)
-    # Proxy row must not emit a coverage row — its ``is_proxy`` tells us
-    # the meaningful name is the impl's, and the impl's name isn't in
-    # scope here. Impl row's own name ("Distributor") also isn't in
-    # scope, so no coverage anywhere. Before the fix this returned a
-    # direct/high row for the proxy.
+    # Before the fix this returned a direct/high row for the proxy.
     assert matches == []
 
 
 def test_proxy_direct_match_skipped_but_impl_still_matches(db_session, seed_protocol):
-    """The etherfi-style case: proxy named generically, impl has the
-    protocol-specific name the audit actually scopes. The impl gets a
-    direct coverage row on its own name; the proxy still appears
-    covered in audit_timeline through the impl_era union, but the
-    matcher doesn't emit a redundant direct row on the proxy's generic
-    name.
-    """
+    """Etherfi-style: generic proxy name, protocol-specific impl name in scope. Only the impl gets a direct row."""
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
@@ -485,25 +444,18 @@ def test_proxy_direct_match_skipped_but_impl_still_matches(db_session, seed_prot
 
     matches = match_contracts_for_audit(db_session, audit.id)
     by_id = {m.contract_id: m for m in matches}
-    # Only the impl gets a coverage row; the proxy's generic-name match
-    # is dropped in favor of the impl-sourced signal.
     assert set(by_id) == {impl.id}
     assert by_id[impl.id].match_type == "impl_era"
     assert by_id[impl.id].matched_name == "LiquidityPool"
 
 
 def test_non_proxy_contract_named_proxy_still_matches_directly(db_session, seed_protocol):
-    """Defensive: skipping only triggers on ``is_proxy=True``. A
-    protocol could have a Contract legitimately named "Proxy" or
-    "UUPSProxy" that isn't actually a delegator (``is_proxy=False`` per
-    the static analyzer). Those must still get a direct match — the
-    rule is about the behavior flag, not the string.
+    """Defensive: skipping keys on is_proxy=True, not the string. A non-delegator Contract named "UUPSProxy" still
+    matches directly.
     """
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
-    # Named "UUPSProxy" but classifier said is_proxy=False — treat as a
-    # regular contract.
     c = _add_contract(
         db_session,
         protocol_id,
@@ -519,19 +471,13 @@ def test_non_proxy_contract_named_proxy_still_matches_directly(db_session, seed_
 
 
 def test_proxy_with_windows_is_still_excluded_from_matching(db_session, seed_protocol):
-    """Regression for the pre-architectural-filter shape: a proxy that
-    has impl windows (because another proxy was upgraded to point at it
-    — a proxy-behind-proxy chain) could previously slip through the
-    ``else: if c.is_proxy: continue`` guard, since that guard only
-    applies in the no-windows branch. The architectural filter at the
-    candidate query must exclude is_proxy=True rows regardless of
-    window status.
+    """Regression: a proxy-behind-proxy has impl windows and used to slip past the no-windows-branch is_proxy guard;
+    the candidate-query filter must exclude is_proxy rows regardless of windows.
     """
     from db.models import Contract
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
-    # Inner proxy (target of the audit scope name) that has is_proxy=True.
     inner_proxy = _add_contract(
         db_session,
         protocol_id,
@@ -561,24 +507,18 @@ def test_proxy_with_windows_is_still_excluded_from_matching(db_session, seed_pro
     audit = _add_audit(db_session, protocol_id, scope=["UUPSProxy"], date="2024-06-01")
 
     matches = match_contracts_for_audit(db_session, audit.id)
-    # Neither proxy should appear. Pre-fix: inner_proxy would have slipped
-    # through as an impl_era match because it has a window.
+    # Pre-fix: inner_proxy slipped through as an impl_era match because it has a window.
     by_id = {m.contract_id: m for m in matches}
     assert inner_proxy.id not in by_id, (
         "Proxy with windows must be excluded from coverage candidates even "
         "though the impl_era path would have matched it"
     )
     assert outer_proxy.id not in by_id
-    # Sanity: confirm is_proxy really is True on the DB side.
     assert db_session.get(Contract, inner_proxy.id).is_proxy is True
 
 
 def test_match_audits_for_contract_skips_proxies_own_name(db_session, seed_protocol):
-    """Symmetric: querying by proxy_id must not surface audits that only
-    matched on the proxy's own generic name. The audit_timeline endpoint
-    will still show coverage for the proxy through impl-era rows on
-    historical impls — that path is separate.
-    """
+    """Symmetric: querying by proxy_id must not surface audits that only matched the proxy's own generic name."""
     from services.audits.coverage import match_audits_for_contract
 
     protocol_id, _ = seed_protocol
@@ -625,7 +565,6 @@ def test_match_audits_for_contract_ignores_non_success_scope(db_session, seed_pr
 
     protocol_id, _ = seed_protocol
     contract = _add_contract(db_session, protocol_id, address="0x" + "a" * 40, name="Pool")
-    # A failed/skipped/pending extraction shouldn't contribute coverage.
     _add_audit(db_session, protocol_id, scope=["Pool"], date="2024-06-01", status="skipped")
     _add_audit(db_session, protocol_id, scope=["Pool"], date="2024-06-01", status="failed")
     _add_audit(db_session, protocol_id, scope=None, date="2024-06-01", status=None)
@@ -660,9 +599,7 @@ def test_upsert_coverage_for_audit_is_idempotent(db_session, seed_protocol):
 
 
 def test_upsert_drops_stale_rows_after_scope_change(db_session, seed_protocol):
-    """Simulates a re-extraction where scope_contracts changes from
-    ['Pool'] to ['Vault']. The prior Pool coverage row must disappear;
-    a fresh Vault row must appear."""
+    """Re-extraction changing scope_contracts from ['Pool'] to ['Vault'] drops the Pool row and adds a Vault row."""
     from db.models import AuditContractCoverage, AuditReport
     from services.audits.coverage import upsert_coverage_for_audit
 
@@ -676,7 +613,6 @@ def test_upsert_drops_stale_rows_after_scope_change(db_session, seed_protocol):
     rows = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit.id).all()
     assert {r.contract_id for r in rows} == {pool.id}
 
-    # Re-extraction result: scope now says Vault instead of Pool.
     ar = db_session.get(AuditReport, audit.id)
     ar.scope_contracts = ["Vault"]
     db_session.commit()
@@ -688,9 +624,9 @@ def test_upsert_drops_stale_rows_after_scope_change(db_session, seed_protocol):
 
 
 def test_upsert_skipped_audit_wipes_rows(db_session, seed_protocol):
-    """If an audit transitions from success → skipped (e.g. a
-    reextract_scope that later failed), coverage rows for it must
-    clear. Otherwise stale data outlives the extraction."""
+    """Audit success -> skipped (e.g. failed reextract_scope) must clear its coverage rows so stale data can't outlive
+    extraction.
+    """
     from db.models import AuditContractCoverage, AuditReport
     from services.audits.coverage import upsert_coverage_for_audit
 
@@ -757,7 +693,6 @@ def test_extract_reviewed_commits_filters_all_digit_and_palette_tokens():
 
     # 7 digits with no hex-letters → rejected (block number / issue ID).
     # Repeated-char token (0x000000..0) → rejected.
-    # Real commit → kept.
     text = "issue 1234567 placeholder 0000000 real commit deadbeefcafe01"
     assert extract_reviewed_commits(text) == ["deadbeefcafe01"]
 
@@ -775,9 +710,8 @@ def test_extract_reviewed_commits_empty_input_safe():
 
 
 def test_source_equivalence_proves_coverage_when_hashes_match(db_session, seed_protocol, monkeypatch):
-    """When audit.reviewed_commits[0] has a src file whose sha matches the
-    impl's Etherscan source, the upsert path upgrades the match to
-    ``reviewed_commit`` / ``high`` — regardless of temporal fit.
+    """A source-file sha matching the impl's Etherscan source upgrades the match to reviewed_commit/high regardless of
+    temporal fit.
     """
     import hashlib
 
@@ -791,8 +725,6 @@ def test_source_equivalence_proves_coverage_when_hashes_match(db_session, seed_p
     # If only temporal matching applied, we'd get 'direct'/'medium' at best.
     impl = _add_contract(db_session, protocol_id, address="0x" + "a" * 40, name="MyPool")
     audit = _add_audit(db_session, protocol_id, scope=["MyPool"], date="2099-01-01")
-    # Manually set the source-equivalence inputs (would be populated by
-    # scope extraction in production).
     audit.reviewed_commits = ["abc1234"]
     audit.source_repo = "etherfi-protocol/smart-contracts"
     db_session.commit()
@@ -800,7 +732,6 @@ def test_source_equivalence_proves_coverage_when_hashes_match(db_session, seed_p
     content = "contract MyPool {}"
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
 
-    # Stub Etherscan: return a single source file whose sha matches.
     def fake_etherscan(address, **_kw):
         return source_equivalence.EtherscanFetch(
             source=source_equivalence.VerifiedSource(
@@ -812,7 +743,6 @@ def test_source_equivalence_proves_coverage_when_hashes_match(db_session, seed_p
             detail="",
         )
 
-    # Stub GitHub: same hash → equivalence proven.
     def fake_github(repo, commit, path, *, token=None):
         if path == "src/MyPool.sol":
             return source_equivalence.GithubHashResult(sha256=content_hash, status="ok", detail="")
@@ -833,10 +763,7 @@ def test_source_equivalence_proves_coverage_when_hashes_match(db_session, seed_p
 
 
 def test_source_equivalence_leaves_temporal_match_when_hashes_differ(db_session, seed_protocol, monkeypatch):
-    """Source hashes don't match → match stays at its original type/confidence.
-    Proof failure must never DOWNGRADE a match the temporal matcher already
-    emitted.
-    """
+    """Hash mismatch must never DOWNGRADE a match the temporal matcher already emitted."""
     from db.models import AuditContractCoverage
     from services.audits import source_equivalence
     from services.audits.coverage import upsert_coverage_for_audit
@@ -848,7 +775,6 @@ def test_source_equivalence_leaves_temporal_match_when_hashes_differ(db_session,
     audit.source_repo = "etherfi-protocol/smart-contracts"
     db_session.commit()
 
-    # Stubs return mismatching hashes.
     def fake_etherscan(address, **_kw):
         return source_equivalence.EtherscanFetch(
             source=source_equivalence.VerifiedSource(
@@ -867,17 +793,12 @@ def test_source_equivalence_leaves_temporal_match_when_hashes_differ(db_session,
     upsert_coverage_for_audit(db_session, audit.id, verify_source_equivalence=True)
     db_session.commit()
     row = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit.id).one()
-    # Original temporal match stands — 'direct' because no proxy history.
     assert row.match_type == "direct"
-    # But equivalence_status reflects the mismatch.
     assert row.equivalence_status == "hash_mismatch"
 
 
 def test_source_equivalence_prefers_db_source_files(db_session, seed_protocol, monkeypatch):
-    """When a Contract's Job has SourceFile rows, source-equivalence reads
-    them instead of hitting Etherscan. Saves one HTTP call per impl and
-    keeps the matcher usable when Etherscan is rate-limited.
-    """
+    """DB SourceFile rows are used instead of Etherscan (saves an HTTP call, works when rate-limited)."""
     import hashlib
     import uuid as _uuid
 
@@ -910,7 +831,6 @@ def test_source_equivalence_prefers_db_source_files(db_session, seed_protocol, m
         etherscan_calls["count"] += 1
         raise AssertionError("Etherscan should not be called when DB source is available")
 
-    # GitHub stub returns the matching hash.
     def fake_github(repo, commit, path, *, token=None):
         if path == "src/MyPool.sol":
             return source_equivalence.GithubHashResult(sha256=content_hash, status="ok", detail="")
@@ -927,11 +847,9 @@ def test_source_equivalence_prefers_db_source_files(db_session, seed_protocol, m
     assert row.match_type == "reviewed_commit"
     assert row.match_confidence == "high"
 
-    # Cleanup — the autouse teardown doesn't know about the Job we created.
+    # Autouse teardown doesn't know about this Job. Detach it from the contract so contract
+    # teardown doesn't cascade-delete a job other tests may depend on.
     db_session.query(SourceFile).filter_by(job_id=job.id).delete()
-    # Detach the job_id from the contract so the contract teardown doesn't
-    # cascade-delete a job that other tests may depend on (Job has no FK
-    # back here but keeping clean is nice).
     impl.job_id = None
     db_session.commit()
     db_session.query(Job).filter_by(id=job.id).delete()
@@ -939,10 +857,7 @@ def test_source_equivalence_prefers_db_source_files(db_session, seed_protocol, m
 
 
 def test_source_equivalence_falls_back_to_etherscan_when_no_db_source(db_session, seed_protocol, monkeypatch):
-    """Contract has no Job → no SourceFile rows → DB path returns None →
-    matcher falls through to Etherscan. Proves the fallback is wired,
-    not just a happy-path optimization.
-    """
+    """No Job -> no SourceFile rows -> falls through to Etherscan; proves the fallback is wired."""
     import hashlib
 
     from db.models import AuditContractCoverage
@@ -990,15 +905,13 @@ def test_source_equivalence_falls_back_to_etherscan_when_no_db_source(db_session
 
 
 def test_source_equivalence_skipped_when_audit_missing_commits(db_session, seed_protocol, monkeypatch):
-    """No reviewed_commits populated → equivalence short-circuits without
-    any HTTP calls. Protects us from a config error pounding GitHub."""
+    """No reviewed_commits: no HTTP calls, so a config error can't pound GitHub."""
     from services.audits import source_equivalence
     from services.audits.coverage import upsert_coverage_for_audit
 
     protocol_id, _ = seed_protocol
     _add_contract(db_session, protocol_id, address="0x" + "a" * 40, name="MyPool")
     audit = _add_audit(db_session, protocol_id, scope=["MyPool"], date="2024-06-01")
-    # reviewed_commits is None (not set).
     db_session.commit()
 
     called = {"etherscan": 0, "github": 0}
@@ -1056,9 +969,8 @@ def test_verify_source_equivalence_off_by_default(db_session, seed_protocol, mon
 
 
 def test_deferred_path_stamps_pending_when_audit_is_verifiable(db_session, seed_protocol, monkeypatch):
-    """verify_source_equivalence=False on a verifiable audit must write
-    ``equivalence_status='pending'`` so ``CoverageVerifyWorker`` can later
-    drain it. No HTTP calls happen here.
+    """Verifiable audit with verify_source_equivalence=False writes 'pending' so CoverageVerifyWorker can drain it; no
+    HTTP.
     """
     from db.models import AuditContractCoverage
     from services.audits import source_equivalence
@@ -1088,25 +1000,20 @@ def test_deferred_path_stamps_pending_when_audit_is_verifiable(db_session, seed_
     db_session.commit()
 
     row = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit.id).one()
-    # Heuristic match still emitted synchronously…
     assert row.match_type == "direct"
-    # …with verification deferred.
     assert row.equivalence_status == "pending"
     assert row.equivalence_checked_at is None
     assert called == {"etherscan": 0, "github": 0}
 
 
 def test_deferred_path_stamps_no_reviewed_commit_when_audit_lacks_commits(db_session, seed_protocol):
-    """Audits without reviewed_commits can never be verified — write a
-    terminal status immediately so the verify worker doesn't keep
-    polling them."""
+    """No reviewed_commits is terminal, so the verify worker doesn't keep polling."""
     from db.models import AuditContractCoverage
     from services.audits.coverage import upsert_coverage_for_audit
 
     protocol_id, _ = seed_protocol
     _add_contract(db_session, protocol_id, address="0x" + "a" * 40, name="MyPool")
     audit = _add_audit(db_session, protocol_id, scope=["MyPool"], date="2024-06-01")
-    # No reviewed_commits, no source_repo.
     db_session.commit()
 
     upsert_coverage_for_audit(db_session, audit.id)
@@ -1118,8 +1025,7 @@ def test_deferred_path_stamps_no_reviewed_commit_when_audit_lacks_commits(db_ses
 
 
 def test_deferred_path_stamps_no_source_repo_when_repo_missing(db_session, seed_protocol):
-    """reviewed_commits without source_repo / referenced_repos is also a
-    terminal — there's nowhere to fetch the file from."""
+    """reviewed_commits without source_repo/referenced_repos is terminal too: nowhere to fetch from."""
     from db.models import AuditContractCoverage
     from services.audits.coverage import upsert_coverage_for_audit
 
@@ -1127,7 +1033,6 @@ def test_deferred_path_stamps_no_source_repo_when_repo_missing(db_session, seed_
     _add_contract(db_session, protocol_id, address="0x" + "a" * 40, name="MyPool")
     audit = _add_audit(db_session, protocol_id, scope=["MyPool"], date="2024-06-01")
     audit.reviewed_commits = ["abc1234"]
-    # source_repo + referenced_repos both missing.
     db_session.commit()
 
     upsert_coverage_for_audit(db_session, audit.id)
@@ -1139,9 +1044,9 @@ def test_deferred_path_stamps_no_source_repo_when_repo_missing(db_session, seed_
 
 
 def test_deferred_path_for_contract_stamps_pending(db_session, seed_protocol, monkeypatch):
-    """Symmetric: ``upsert_coverage_for_contract`` (called by
-    CoverageWorker.process) on a verifiable audit must also write
-    ``pending`` rather than blocking on inline HTTP."""
+    """Symmetric: upsert_coverage_for_contract (CoverageWorker.process) also writes pending rather than blocking on
+    HTTP.
+    """
     from db.models import AuditContractCoverage
     from services.audits import source_equivalence
     from services.audits.coverage import upsert_coverage_for_contract
@@ -1179,9 +1084,7 @@ def test_deferred_path_for_contract_stamps_pending(db_session, seed_protocol, mo
 
 
 def test_verify_one_coverage_row_proves_when_hashes_match(db_session, seed_protocol, monkeypatch):
-    """End-to-end one-row verify: pending row → proven, with match_type
-    upgraded to ``reviewed_commit`` and the audit's classified_commits
-    feeding ``proof_kind``."""
+    """One-row verify: pending -> proven, match_type upgraded to reviewed_commit, classified_commits feed proof_kind."""
     import hashlib
 
     from db.models import AuditContractCoverage
@@ -1196,7 +1099,6 @@ def test_verify_one_coverage_row_proves_when_hashes_match(db_session, seed_proto
     audit.classified_commits = [{"sha": "abc1234", "label": "reviewed", "context": ""}]
     db_session.commit()
 
-    # Land a pending row first.
     upsert_coverage_for_audit(db_session, audit.id)
     db_session.commit()
     row = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit.id).one()
@@ -1243,9 +1145,7 @@ def test_verify_one_coverage_row_proves_when_hashes_match(db_session, seed_proto
 
 
 def test_verify_one_coverage_row_writes_hash_mismatch_when_hashes_differ(db_session, seed_protocol, monkeypatch):
-    """Files exist on both sides, content differs → hash_mismatch.
-    match_type stays at the heuristic 'direct' — failed proofs annotate
-    but never delete."""
+    """Failed proofs annotate (hash_mismatch) but never delete; match_type stays 'direct'."""
     from db.models import AuditContractCoverage
     from services.audits import source_equivalence
     from services.audits.coverage import upsert_coverage_for_audit, verify_one_coverage_row
@@ -1296,20 +1196,15 @@ def test_verify_one_coverage_row_writes_hash_mismatch_when_hashes_differ(db_sess
 
 
 def test_verify_one_coverage_row_returns_none_when_row_vanished(db_session, seed_protocol):
-    """If the row has been deleted between claim and verify (e.g. a
-    coverage rebuild raced), the verify entry point must no-op cleanly."""
+    """Row deleted between claim and verify (coverage rebuild raced) must no-op."""
     from services.audits.coverage import verify_one_coverage_row
 
-    # Deliberately use an id that won't exist.
     status = verify_one_coverage_row(db_session, 999_999_999)
     assert status is None
 
 
 def test_verify_one_coverage_row_etherscan_unverified(db_session, seed_protocol, monkeypatch):
-    """Etherscan returns the empty-source sentinel → permanent
-    ``etherscan_unverified``. The verify worker won't retry a row in
-    this state, but the row stays visible to the UI as "no verified
-    source"."""
+    """Empty-source sentinel -> permanent etherscan_unverified: not retried, still visible to the UI."""
     from db.models import AuditContractCoverage
     from services.audits import source_equivalence
     from services.audits.coverage import upsert_coverage_for_audit, verify_one_coverage_row
@@ -1400,21 +1295,14 @@ def test_source_equivalence_uses_referenced_repos_when_source_repo_missing(
 
 
 def test_match_contracts_for_audit_is_not_n_plus_one(db_session, seed_protocol):
-    """With N scope-name candidate Contracts × K proxies each, the old
-    implementation fired (K+1) queries per candidate inside
-    ``_compute_impl_windows_for_contract``. The batched path must keep the
-    count bounded regardless of N, proving we don't scale queries with
-    candidate count.
-    """
+    """Query count must stay bounded regardless of candidate count (was K+1 queries per candidate)."""
     from sqlalchemy import event
 
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
 
-    # Seed a handful of impl candidates (all sharing the same scope name)
-    # and a proxy history per impl. The more candidates, the more the
-    # per-candidate helper would amplify the query count.
+    # More candidates amplify the query count of a per-candidate helper.
     n_candidates = 8
     scope_name = "SharedImpl"
     for i in range(n_candidates):
@@ -1473,21 +1361,11 @@ def test_match_contracts_for_audit_is_not_n_plus_one(db_session, seed_protocol):
 
 
 def test_match_contracts_for_audit_per_contract_dedupe_prefers_reviewed_commit(db_session, seed_protocol):
-    """Symmetric ranking inside the matcher: ``by_contract`` in
-    match_contracts_for_audit must use the same (confidence, match_type)
-    ranking. Same audit + same contract from two scope-name matches
-    should keep the ``reviewed_commit`` candidate, not whichever
-    spelling iterated first.
+    """by_contract must use the same (confidence, match_type) ranking; keep the reviewed_commit candidate, not
+    whichever spelling iterated first.
     """
-    # NOTE: ``match_contracts_for_audit`` itself only emits one match
-    # type per (audit, contract) — it picks impl_era when windows exist
-    # and direct otherwise, never both. The (confidence, match_type)
-    # rank applies when two scope-name spellings produce candidates of
-    # different match types... which can't happen in current code (the
-    # branch is per-contract, not per-name). But we still want the
-    # ranker future-proofed against a refactor that could mix types.
-    # This test seeds two CoverageMatch outputs directly via the dedup
-    # helper to confirm the ranking semantics.
+    # match_contracts_for_audit emits one match type per (audit, contract), so mixed types can't occur today;
+    # seed the dedup helper directly to future-proof the ranking against a refactor.
     from services.audits.coverage import CoverageMatch, _row_score
 
     impl_era_high = CoverageMatch(
@@ -1514,10 +1392,8 @@ def test_match_contracts_for_audit_per_contract_dedupe_prefers_reviewed_commit(d
         match_type="direct",
         match_confidence="high",
     )
-    # Reviewed_commit must outrank both.
     assert _row_score(reviewed_high) > _row_score(impl_era_high)
     assert _row_score(reviewed_high) > _row_score(direct_high)
-    # impl_era beats direct.
     assert _row_score(impl_era_high) > _row_score(direct_high)
     # Confidence still dominates: reviewed_commit/low loses to direct/high.
     reviewed_low = CoverageMatch(
@@ -1537,12 +1413,9 @@ def test_match_contracts_for_audit_per_contract_dedupe_prefers_reviewed_commit(d
 
 
 def test_fetch_bytecode_keccak_returns_hex_hash(monkeypatch):
-    """Runtime bytecode → keccak256 hex string with ``0x`` prefix."""
     from services.audits import coverage as cov
 
     addr = "0x" + "ab" * 20
-    # Known input → known keccak. "0x1234" runtime bytes, keccak256 is
-    # deterministic so a stable assert is possible.
     monkeypatch.setattr(
         cov,
         "get_code" if hasattr(cov, "get_code") else "_dummy",
@@ -1561,53 +1434,28 @@ def test_fetch_bytecode_keccak_returns_hex_hash(monkeypatch):
     assert len(got) == 66  # 0x + 64 hex chars
 
 
-def test_fetch_bytecode_keccak_none_on_empty_code(monkeypatch):
-    """EOA or selfdestructed address returns ``None`` not a zero hash."""
+def _boom_get_code(_rpc_url, _addr):
+    raise RuntimeError("RPC down")
+
+
+@pytest.mark.parametrize(
+    ("addr", "get_code"),
+    [
+        # EOA or selfdestructed address returns ``None`` not a zero hash.
+        pytest.param("0x" + "cd" * 20, _stub_get_code({}), id="empty_code"),
+        # RPC exception -> NULL propagates (drift-unknown, not drift-detected).
+        pytest.param("0x" + "ef" * 20, _boom_get_code, id="rpc_error"),
+    ],
+)
+def test_fetch_bytecode_keccak_none(monkeypatch, addr, get_code):
     from services.audits import coverage as cov
     from services.clients import rpc
 
-    monkeypatch.setattr(rpc, "get_code", _stub_get_code({}))
-    assert cov._fetch_bytecode_keccak("0x" + "cd" * 20, "ethereum") is None
-
-
-def test_fetch_bytecode_keccak_none_on_rpc_error(monkeypatch):
-    """RPC exception → NULL propagates (drift-unknown, not drift-detected)."""
-    from services.audits import coverage as cov
-    from services.clients import rpc
-
-    def boom(_rpc_url, _addr):
-        raise RuntimeError("RPC down")
-
-    monkeypatch.setattr(rpc, "get_code", boom)
-    assert cov._fetch_bytecode_keccak("0x" + "ef" * 20, "ethereum") is None
-
-
-def test_upsert_coverage_stamps_bytecode_keccak(db_session, seed_protocol, monkeypatch):
-    """End-to-end: after upsert, coverage rows carry ``bytecode_keccak_at_match``."""
-    from db.models import AuditContractCoverage
-    from services.audits.coverage import upsert_coverage_for_audit
-    from services.clients import rpc
-
-    protocol_id, _ = seed_protocol
-    pool_addr = "0x" + "aa" * 20
-    _add_contract(db_session, protocol_id, address=pool_addr, name="Pool")
-    audit = _add_audit(db_session, protocol_id, date="2024-06-15", scope=["Pool"])
-
-    monkeypatch.setattr(rpc, "get_code", _stub_get_code({pool_addr: "0xdeadbeef"}))
-
-    rows_written = upsert_coverage_for_audit(db_session, audit.id)
-    db_session.commit()
-    assert rows_written == 1
-
-    cov_row = db_session.query(AuditContractCoverage).filter_by(audit_report_id=audit.id).one()
-    assert cov_row.bytecode_keccak_at_match is not None
-    assert cov_row.bytecode_keccak_at_match.startswith("0x")
-    assert len(cov_row.bytecode_keccak_at_match) == 66
-    assert cov_row.verified_at is not None
+    monkeypatch.setattr(rpc, "get_code", get_code)
+    assert cov._fetch_bytecode_keccak(addr, "ethereum") is None
 
 
 def test_upsert_coverage_keccak_null_when_rpc_fails(db_session, seed_protocol, monkeypatch):
-    """Row still writes, keccak/verified_at stay NULL — drift unknown."""
     from db.models import AuditContractCoverage
     from services.audits.coverage import upsert_coverage_for_audit
     from services.clients import rpc
@@ -1630,18 +1478,14 @@ def test_upsert_coverage_keccak_null_when_rpc_fails(db_session, seed_protocol, m
 
 
 # ---------------------------------------------------------------------------
-# Findings / live_findings filter
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # Phase F: address-anchored matching via scope_entries
 # ---------------------------------------------------------------------------
 
 
 def test_scope_entry_address_produces_reviewed_address_match(db_session, seed_protocol):
-    """Audit with an address-pinned scope entry emits match_type='reviewed_address'
-    at the Contract row sharing that address. No name matching needed."""
+    """Address-pinned scope entry emits match_type='reviewed_address' at the Contract sharing that address; no name
+    matching.
+    """
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
@@ -1661,7 +1505,6 @@ def test_scope_entry_address_produces_reviewed_address_match(db_session, seed_pr
 
 
 def test_scope_entry_address_can_match_global_shared_contract(db_session, seed_protocol):
-    """Address-pinned audits can target the one global Contract row for a shared dependency."""
     from db.models import Protocol
     from services.audits.coverage import match_contracts_for_audit
 
@@ -1684,8 +1527,9 @@ def test_scope_entry_address_can_match_global_shared_contract(db_session, seed_p
 
 
 def test_scope_entry_proxy_address_resolves_to_impl(db_session, seed_protocol):
-    """Audit's scope table names the PROXY address; coverage row targets
-    the impl contract_id (proxy rejected by db trigger, resolved before insert)."""
+    """Scope table names the PROXY address; the row targets the impl (proxy rejected by db trigger, resolved before
+    insert).
+    """
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
@@ -1701,7 +1545,6 @@ def test_scope_entry_proxy_address_resolves_to_impl(db_session, seed_protocol):
     )
     impl = _add_contract(db_session, protocol_id, address=impl_addr, name="WeETH")
     audit = _add_audit(db_session, protocol_id, scope=["WeETH"], date="2024-06-01")
-    # Audit lists the PROXY address (user-facing), not the impl.
     audit.scope_entries = [{"name": "WeETH", "address": proxy_addr, "commit": None, "chain": None}]
     db_session.commit()
 
@@ -1712,8 +1555,7 @@ def test_scope_entry_proxy_address_resolves_to_impl(db_session, seed_protocol):
 
 
 def test_scope_entry_proxy_address_uses_impl_active_at_audit_date(db_session, seed_protocol):
-    """A proxy-address scope entry must resolve to the impl active when the
-    audit happened, not the proxy's current implementation pointer."""
+    """A proxy-address scope entry resolves to the impl active at audit date, not the proxy's current pointer."""
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
@@ -1756,9 +1598,9 @@ def test_scope_entry_proxy_address_uses_impl_active_at_audit_date(db_session, se
 
 
 def test_scope_entry_suppresses_duplicate_name_match(db_session, seed_protocol):
-    """Audit has BOTH a scope_entry with address AND the name in
-    scope_contracts[]. Matcher emits a single reviewed_address row,
-    not a redundant direct/impl_era row on the same contract."""
+    """Scope entry + same name in scope_contracts[] yields one reviewed_address row, not a redundant direct/impl_era
+    row.
+    """
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
@@ -1792,7 +1634,6 @@ def test_scope_entry_match_survives_unmatched_leftover_scope_names(db_session, s
 
 
 def test_scope_entry_address_honors_chain(db_session, seed_protocol):
-    """Same-address contracts on different chains must not collide."""
     from services.audits.coverage import match_contracts_for_audit
 
     protocol_id, _ = seed_protocol
@@ -1810,7 +1651,6 @@ def test_scope_entry_address_honors_chain(db_session, seed_protocol):
 
 
 def test_match_audits_for_contract_finds_address_anchored(db_session, seed_protocol):
-    """Dual-entry contract→audits matcher honors scope_entries by address."""
     from services.audits.coverage import match_audits_for_contract
 
     protocol_id, _ = seed_protocol
@@ -1876,7 +1716,6 @@ def test_match_audits_for_contract_proxy_scope_entry_uses_historical_impl(db_ses
 
 
 def test_match_audits_for_contract_address_anchor_honors_chain(db_session, seed_protocol):
-    """Reverse address-anchored matching must respect chain as well as address."""
     from services.audits.coverage import match_audits_for_contract
 
     protocol_id, _ = seed_protocol
@@ -1894,93 +1733,61 @@ def test_match_audits_for_contract_address_anchor_honors_chain(db_session, seed_
     assert matches[0].match_type == "reviewed_address"
 
 
-def test_reviewed_address_match_type_in_order_ranking():
-    """_MATCH_TYPE_ORDER: reviewed_address beats impl_era, loses to reviewed_commit."""
-    from services.audits.coverage import _MATCH_TYPE_ORDER
-
-    assert _MATCH_TYPE_ORDER["direct"] < _MATCH_TYPE_ORDER["impl_era"]
-    assert _MATCH_TYPE_ORDER["impl_era"] < _MATCH_TYPE_ORDER["reviewed_address"]
-    assert _MATCH_TYPE_ORDER["reviewed_address"] < _MATCH_TYPE_ORDER["reviewed_commit"]
-
-
 # ---------------------------------------------------------------------------
 # Phase C: _compute_proof_kind — one test per taxonomy case
 # ---------------------------------------------------------------------------
 
 
 class TestComputeProofKind:
-    """Covers the five proof_kind values the Phase C rules produce.
-
-    The function is pure: it doesn't hit the DB or network. Each test
-    feeds a matched-commit set + a classified_commits list and asserts
-    the returned kind.
-    """
+    """Pure function (no DB/network): matched-commit set + classified_commits -> proof_kind."""
 
     def _call(self, matched: list[str], classified: list[dict] | None):
         from services.audits.coverage import _compute_proof_kind
 
         return _compute_proof_kind({m.lower() for m in matched}, classified)
 
-    def test_unclassified_when_no_classification_data(self):
-        """NULL classified_commits → we can't judge strength → ``unclassified``."""
-        assert self._call(["abc1234"], None) == "unclassified"
-        assert self._call(["abc1234"], []) == "unclassified"
+    _REVIEWED = {"sha": "abc1234", "label": "reviewed", "context": "review"}
+    _FIX = {"sha": "def5678", "label": "fix", "context": "fix L-01"}
 
-    def test_clean_when_matched_reviewed_and_no_fix_commits(self):
-        """Audit has no fix commits; deployed matches the reviewed one.
-        Canonical happy path."""
-        classified = [{"sha": "abc1234", "label": "reviewed", "context": "audited at abc1234"}]
-        assert self._call(["abc1234"], classified) == "clean"
-
-    def test_clean_when_matched_reviewed_and_fix(self):
-        """Deployed matches both reviewed and fix commits — file was stable
-        across the fix window. Still clean."""
-        classified = [
-            {"sha": "abc1234", "label": "reviewed", "context": "review"},
-            {"sha": "def5678", "label": "fix", "context": "fix L-01"},
-        ]
-        assert self._call(["abc1234", "def5678"], classified) == "clean"
-
-    def test_post_fix_when_matched_only_fix(self):
-        """Deployed matches fix but not reviewed — audit reviewed older
-        code, fix was shipped. Audit's findings are addressed."""
-        classified = [
-            {"sha": "abc1234", "label": "reviewed", "context": "review"},
-            {"sha": "def5678", "label": "fix", "context": "fix L-01"},
-        ]
-        assert self._call(["def5678"], classified) == "post_fix"
-
-    def test_pre_fix_unpatched_when_reviewed_matches_but_fix_doesnt(self):
-        """DANGER: deployed matches reviewed AND fix commits exist AND
-        deployed doesn't match any fix. Audit's findings are still
-        present in the deployed code."""
-        classified = [
-            {"sha": "abc1234", "label": "reviewed", "context": "review"},
-            {"sha": "def5678", "label": "fix", "context": "fix L-01"},
-            {"sha": "ffa9876", "label": "fix", "context": "fix L-02"},
-        ]
-        assert self._call(["abc1234"], classified) == "pre_fix_unpatched"
-
-    def test_cited_only_when_match_hits_cited_label(self):
-        """Matched only a commit labeled as 'cited' (historical context,
-        not the reviewed commit) — coincidence. Weak signal."""
-        classified = [
-            {"sha": "abc1234", "label": "reviewed", "context": "review"},
-            {"sha": "def5678", "label": "cited", "context": "baseline"},
-        ]
-        assert self._call(["def5678"], classified) == "cited_only"
-
-    def test_cited_only_when_match_hits_unclear_label(self):
-        """Matched only a commit labeled 'unclear' — same semantics as cited."""
-        classified = [
-            {"sha": "abc1234", "label": "reviewed", "context": "review"},
-            {"sha": "def5678", "label": "unclear", "context": "?"},
-        ]
-        assert self._call(["def5678"], classified) == "cited_only"
-
-    def test_prefix_match_tolerates_abbreviated_shas(self):
-        """Matched commit is 40-char full SHA; classified is 7-char abbrev.
-        Proof kind computation compares on the shared 7-char prefix."""
-        full = "abc1234" + "f" * 33
-        classified = [{"sha": "abc1234", "label": "reviewed", "context": "review"}]
-        assert self._call([full], classified) == "clean"
+    @pytest.mark.parametrize(
+        ("matched", "classified", "expected"),
+        [
+            pytest.param(["abc1234"], None, "unclassified", id="unclassified_none"),
+            pytest.param(["abc1234"], [], "unclassified", id="unclassified_empty"),
+            pytest.param(
+                ["abc1234"],
+                [{"sha": "abc1234", "label": "reviewed", "context": "audited at abc1234"}],
+                "clean",
+                id="clean_reviewed_no_fix_commits",
+            ),
+            pytest.param(["abc1234", "def5678"], [_REVIEWED, _FIX], "clean", id="clean_reviewed_and_fix"),
+            pytest.param(["def5678"], [_REVIEWED, _FIX], "post_fix", id="post_fix_matched_only_fix"),
+            # CRITICAL, DANGER: deployed matches reviewed AND fix commits exist AND deployed doesn't
+            # match any fix. Audit's findings are still present in the deployed code.
+            pytest.param(
+                ["abc1234"],
+                [_REVIEWED, _FIX, {"sha": "ffa9876", "label": "fix", "context": "fix L-02"}],
+                "pre_fix_unpatched",
+                id="pre_fix_unpatched",
+            ),
+            # Matched only a commit labeled 'cited' (historical context, not the reviewed commit):
+            # coincidence, weak signal.
+            pytest.param(
+                ["def5678"],
+                [_REVIEWED, {"sha": "def5678", "label": "cited", "context": "baseline"}],
+                "cited_only",
+                id="cited_only_cited_label",
+            ),
+            pytest.param(
+                ["def5678"],
+                [_REVIEWED, {"sha": "def5678", "label": "unclear", "context": "?"}],
+                "cited_only",
+                id="cited_only_unclear_label",
+            ),
+            # Matched commit is a 40-char full SHA; classified is a 7-char abbrev. Proof kind
+            # compares on the shared 7-char prefix.
+            pytest.param(["abc1234" + "f" * 33], [_REVIEWED], "clean", id="prefix_match_abbreviated_shas"),
+        ],
+    )
+    def test_proof_kind(self, matched, classified, expected):
+        assert self._call(matched, classified) == expected

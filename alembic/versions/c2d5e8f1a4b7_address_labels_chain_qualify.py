@@ -5,8 +5,7 @@ Revises: b4e1d8a52f39
 Create Date: 2026-07-17 15:00:00.000000
 
 The bare-address PK on ``address_labels`` collided for contracts deployed at the
-same address on two chains. Move to the global-plus-override model (invariant
-12): a surrogate ``id`` PK, a nullable chain-NAME ``chain`` column, and two
+same address on two chains. Move to the global-plus-override model: a surrogate ``id`` PK, a nullable chain-NAME ``chain`` column, and two
 PARTIAL unique indexes.
 
 Expand-contract, safe on POPULATED prod:

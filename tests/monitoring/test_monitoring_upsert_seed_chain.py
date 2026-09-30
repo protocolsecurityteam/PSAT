@@ -1,16 +1,9 @@
-"""Fix: the manual monitored-contract upsert (`POST /api/protocols/{id}/monitoring`)
-must seed its scan cursor + enrollment floor from the enrolled contract's OWN
-chain head, not the mainnet head.
+"""The manual upsert (`POST /api/protocols/{id}/monitoring`) must seed its scan cursor and
+enrollment floor from the enrolled contract's OWN chain head.
 
-Before the fix ``_current_head_block`` always read ``deps.DEFAULT_RPC_URL`` (a
-mainnet eRPC route), so a chain='base' enrollment stamped ``enrollment_block``
-with a mainnet-scale block — a wrong, immutable pre-watch floor. It now routes
-through ``rpc_for_chain`` (the same registry-derived selection the scanner uses):
-mainnet keeps ``deps.DEFAULT_RPC_URL`` verbatim, a second chain resolves its own
-eRPC route.
-
-The wire is stubbed (netguard): we capture the RPC URL ``_current_head_block``
-would POST to, per chain.
+``_current_head_block`` used to read the mainnet ``DEFAULT_RPC_URL``, so a chain='base'
+enrollment got a mainnet-scale, immutable ``enrollment_block``. It now routes through
+``rpc_for_chain``; the wire is stubbed and we capture the URL per chain.
 """
 
 from __future__ import annotations
@@ -45,23 +38,18 @@ def test_base_enrollment_seeds_from_base_rpc(captured_url):
     assert block == 36_108_610
 
 
-def test_mainnet_enrollment_uses_default_rpc_verbatim(captured_url):
-    # Mainnet (and the empty/None default) keeps deps.DEFAULT_RPC_URL untouched, so
-    # mainnet enrollment is byte-identical to before the fix.
-    for chain in ("ethereum", None):
-        captured_url.clear()
-        monitored._current_head_block(chain)
-        assert captured_url["url"] == deps.DEFAULT_RPC_URL
+# Mainnet (and empty/None) keeps deps.DEFAULT_RPC_URL untouched.
+@pytest.mark.parametrize("chain", ["ethereum", None])
+def test_mainnet_enrollment_uses_default_rpc_verbatim(captured_url, chain):
+    monitored._current_head_block(chain)
+    assert captured_url["url"] == deps.DEFAULT_RPC_URL
 
 
 def test_head_block_failure_is_not_determined_not_zero(monkeypatch):
-    """An RPC failure reads as not-determined, never as block 0.
-
-    Block 0 is a claim — "watching this contract since genesis" — that seeds a
-    cursor 25M blocks behind head and a floor that lets every historical event
-    publish as a live change. The route refuses the enrollment on ``None``
-    rather than persist that (``test_upsert_refuses_to_seed_a_floor_zero_row``
-    in tests/monitoring/test_cursor_hygiene.py)."""
+    """An RPC failure reads as not-determined, never block 0: block 0 claims "watching since
+    genesis", seeding a cursor 25M blocks behind and a floor letting every historical event
+    publish as live. See ``test_upsert_route_refuses_to_seed_a_floor_zero_row`` in
+    tests/monitoring/test_cursor_hygiene.py."""
 
     def _boom(*_a, **_kw):
         raise RuntimeError("upstream down")

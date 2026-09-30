@@ -1,7 +1,5 @@
-// Display metadata for chains — labels + accent colors for the chain switcher
-// pills and the entity-card deployment badge. Chain *truth* (which chains
-// exist, their explorer URLs) lives in chains.json / blockExplorer.js; this is
-// purely cosmetic presentation, keyed by canonical chain name.
+// Cosmetic chain labels and colours. Chain truth lives in chains.json /
+// blockExplorer.js.
 
 import { coalesceChain } from "./entityKey.js";
 

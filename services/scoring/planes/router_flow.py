@@ -10,51 +10,28 @@ from sqlalchemy.orm import Session
 
 from services.scoring.schema import coalesce_chain, is_entity_key
 
-# How an INTERMEDIATE's own body treats the destination call it makes. Three
-# outcomes and the third is the fall-through: a route this reader cannot
-# classify is ``not_determined``, never an arm. Each positive token is earned
-# from ONE named field of the intermediate function's
-# own stored value-flow witness — never from the function's name, its selector,
-# its hop position or the shape of the contract it sits on.
+# How an intermediate's body treats the destination call it makes. Each positive token is earned from one field of the
+# intermediate's stored value-flow witness, never names or shapes; anything else is ``not_determined``.
 ROUTE_AMOUNT_AUTHORED = "destination_amount_is_authored_by_the_intermediate"
-# Named for the field it is EARNED from — ``target_constraint`` on the
-# intermediate's own flow witness, which pins the destination call's counterparty
-# ARGUMENT. It is deliberately not called a callee restriction: ``callee`` is an
-# intra-unit AST name for the object the external call is made on
-# (``services/static/claims/matchers/flows.py``), and no stored witness says the
-# intermediate restricts THAT. A token asserting a restricted callee set would be
-# a positive security claim on evidence that answers a different question.
+# Earned from ``target_constraint``, which pins the destination call's counterparty argument. Not a callee restriction:
+# no witness says the intermediate restricts the object called.
 ROUTE_TARGET_CONSTRAINED = "destination_target_is_constrained_by_the_intermediate"
 ROUTE_NOT_DETERMINED = "not_determined"
 ROUTE_CLASSIFICATIONS = (ROUTE_AMOUNT_AUTHORED, ROUTE_TARGET_CONSTRAINED, ROUTE_NOT_DETERMINED)
 
-# Why a route stayed unclassified. Two different evidential situations: the
-# intermediate's body carries no flow witness naming this destination call at
-# all, or it carries one and the two conjuncts below are both unproven on it.
+# No flow witness names this destination call, or one does and both conjuncts are unproven.
 ROUTE_NO_FLOW_WITNESS = "the_intermediate_body_names_no_value_flow_into_this_destination_selector"
 ROUTE_NEITHER_CONJUNCT = "the_intermediate_flow_witness_proves_neither_an_authored_amount_nor_a_constrained_target"
 
-# The two field values that earn the two tokens, read off
-# ``effective_functions.claims[].witness.flows[]``:
-#
-# * ``amount_kind.kind == "param_derived"`` — the intermediate COMPUTES the
-#   quantity the destination moves out of its own parameters and state rather
-#   than forwarding one the caller supplied, so the destination's own figure is
-#   not a figure this caller can ask for. (``param`` is the pass-through case
-#   and earns nothing.)
-# * ``target_constraint.state == "constrained"`` — the intermediate pins the
-#   destination call's counterparty argument under a guard it enforces, so the
-#   admissible destination calls are a subset the caller does not choose.
-#   ``unconstrained_proven`` is an EARNED negative and ``not_determined`` is the
-#   absence; neither earns the token, and they are not the same fact.
+# From ``effective_functions.claims[].witness.flows[]``: ``amount_kind == "param_derived"`` means the intermediate
+# computes the amount itself (``param`` is pass-through); ``target_constraint.state == "constrained"`` means it pins the
+# counterparty. ``unconstrained_proven`` and ``not_determined`` earn nothing and differ.
 _FLOW_AMOUNT_PARAM_DERIVED = "param_derived"
 _FLOW_TARGET_CONSTRAINED = "constrained"
 
 
 @dataclass(frozen=True)
 class RouterFlow:
-    """One stored value-flow of an intermediate function into a named callee op."""
-
     sink_id: str | None
     destination_selector: str
     amount_kind: str | None
@@ -73,8 +50,6 @@ class RouterFlow:
 
 @dataclass(frozen=True)
 class RouteClassification:
-    """What the traversed body proves about the destination call it makes."""
-
     state: str
     reason: str | None
     flows: tuple[RouterFlow, ...]
@@ -96,11 +71,7 @@ class RouteClassification:
             "source": "effective_functions.claims[].witness.flows[]",
             "state": self.state,
             "reason": self.reason,
-            # The two conjuncts, published whatever the state, so a reader sees
-            # which one carried the classification and which one did not — and
-            # so ``not_determined`` is legible as "both unproven" rather than as
-            # "nothing was read". Three-valued: ``null`` where no flow witness
-            # answered at all.
+            # Both conjuncts published in every state; ``null`` where no flow witness answered.
             "amount_is_authored_by_the_intermediate": self.amount_authored,
             "destination_target_is_constrained_by_the_intermediate": self.target_constrained,
             "flows": [flow.as_json() for flow in self.flows],
@@ -124,12 +95,8 @@ class RouteClassification:
 
 @dataclass
 class RouterFlowPlane:
-    """Every intermediate function's stored value-flows, keyed by the call it makes.
-
-    Keyed on ``(chain, intermediate address, that function's own selector)`` —
-    the pair the act-as step publishes as ``caller`` and ``calling_selector`` —
-    so the body consulted is the body the chain actually traverses and not some
-    other function of the same contract.
+    """Every intermediate function's stored value-flows, keyed by ``(chain, intermediate, that function's own
+    selector)``, the pair the act-as step publishes.
     """
 
     flows: dict[tuple[str, str, str], tuple[RouterFlow, ...]] = field(default_factory=dict)
@@ -141,7 +108,6 @@ class RouterFlowPlane:
         }
 
     def classify(self, caller_key: str, calling_selector: str | None, destination_selector: str) -> RouteClassification:
-        """How the traversed body treats this destination call."""
         rows: tuple[RouterFlow, ...] = ()
         if is_entity_key(caller_key) and calling_selector:
             chain, _, address = caller_key.partition("::")
@@ -151,17 +117,11 @@ class RouterFlowPlane:
             )
         if not rows:
             return RouteClassification(ROUTE_NOT_DETERMINED, ROUTE_NO_FLOW_WITNESS, (), None, None)
-        # EVERY matching flow, not any: two flows of one function into the same
-        # destination selector that disagree about the amount have not proved
-        # the amount is authored, and taking the first would publish whichever
-        # one the extractor stored first as if it were the answer.
+        # Every matching flow must agree; disagreeing flows haven't proved it.
         amount_authored = all(flow.amount_kind == _FLOW_AMOUNT_PARAM_DERIVED for flow in rows)
         target_constrained = all(flow.target_constraint_state == _FLOW_TARGET_CONSTRAINED for flow in rows)
         if amount_authored:
-            # Both conjuncts can hold at once and the amount is the one that
-            # speaks about the FIGURE, which is what this rule withholds. The
-            # other conjunct is published beside it either way, so nothing is
-            # hidden by the order.
+            # Both may hold; the amount conjunct is the one about the figure. The other is published too.
             return RouteClassification(ROUTE_AMOUNT_AUTHORED, None, rows, True, target_constrained)
         if target_constrained:
             return RouteClassification(ROUTE_TARGET_CONSTRAINED, None, rows, False, True)
@@ -169,14 +129,9 @@ class RouterFlowPlane:
 
 
 def load_router_flow_plane(session: Session, protocol_id: int) -> RouterFlowPlane:
-    """Every value-flow an analysed function routes into a named callee op.
-
-    Read from ``effective_functions.claims`` — the same stored witness the
-    destination's own magnitude was distilled from, asked a different question:
-    not "how much does this function move" but "what does this function decide
-    about the call it makes". Protocol-scoped, unlike the deletability plane,
-    because an unclassified route withholds: a missing row can only make a route
-    less classified, never more, so scoping cannot mint a positive here.
+    """Every value-flow an analysed function routes into a named callee op, from ``effective_functions.claims``
+    (asked what the function decides about its call). Protocol-scoped: a missing row can only make a route less
+    classified.
     """
     from db.models import Contract, EffectiveFunction
 

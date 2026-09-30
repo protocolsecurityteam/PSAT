@@ -1,6 +1,4 @@
-/* Surface "Activity" tab — unified monitoring + upgrade-history timeline.
-   Visual source of truth: site/prototypes/activity-tab/index.html. Classes are
-   ps-activity-* (project convention); tokens come from styles/tokens.css. */
+/* Activity tab (site/prototypes/activity-tab/index.html). */
 
 .ps-activity-protocol,
 .ps-activity-entity {
@@ -10,7 +8,6 @@
   padding: 4px 2px 8px;
 }
 
-/* Kind palette — lifted from the prototype's ps-monitor-event-icon colors. */
 .ps-activity-tl,
 .ps-activity-recent {
   --k-upgrade: #93c5fd;
@@ -42,10 +39,8 @@
   text-transform: uppercase;
   color: #cbd5e1;
 }
-/* Shown whenever the upgrade_history read did not produce an answer — 503 "not
-   determined", a 500, an edge 502/504, a network failure — and never when the
-   API answered 404. The timeline below it would otherwise read as a
-   proven-empty history. */
+/* Any non-answer from upgrade_history (not a 404), or the timeline would read
+   as a proven-empty history. */
 .ps-activity-unknown {
   margin: 6px 0 2px;
   padding: 6px 8px;
@@ -69,17 +64,9 @@
   padding: 2px 2px 0;
 }
 
-/* ── type badge (mirrors pm-badge) ── */
 .ps-activity-badge {
-  font-size: 9px;
-  padding: 1px 6px;
   border: 1px solid currentColor;
   background: transparent;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  border-radius: 3px;
-  white-space: nowrap;
 }
 .ps-activity-badge.proxy { color: #60a5fa; }
 .ps-activity-badge.safe { color: #a78bfa; }
@@ -88,12 +75,9 @@
 .ps-activity-badge.role_control { color: #5eead4; }
 .ps-activity-badge.governance { color: #8a80a0; }
 .ps-activity-badge.regular { color: var(--muted); }
-/* Additive: the not-determined arm of contractTypeForMachine. Same colour as
-   .regular (both are the low-signal end of the badge vocabulary) and the same
-   specificity, so no existing rule's cascade changes. */
+/* Same colour and specificity as .regular, so no cascade changes. */
 .ps-activity-badge.unclassified { color: var(--muted); }
 
-/* ── protocol-wide summary card ── */
 .ps-activity-card {
   display: grid;
   gap: 8px;
@@ -131,7 +115,6 @@
   box-shadow: 0 0 0 3px rgba(134, 239, 172, 0.18);
 }
 
-/* ── recent-across-protocol rows ── */
 .ps-activity-recent { display: grid; gap: 5px; }
 .ps-activity-recent-row {
   display: grid;
@@ -144,16 +127,12 @@
   padding: 7px 9px;
   cursor: pointer;
   text-align: left;
-  color: inherit;
   font: inherit;
-  /* Zero the global shell/forms.css button chrome (teal drop shadow + hover lift). */
-  box-shadow: none;
   transition: none;
 }
 .ps-activity-recent-row:hover:not(:disabled) {
   border-color: rgba(45, 212, 191, 0.26);
   background: rgba(20, 26, 36, 0.55);
-  transform: none;
 }
 .ps-activity-recent-row:disabled { cursor: default; opacity: 0.7; }
 .ps-activity-recent-main { min-width: 0; display: grid; gap: 3px; }
@@ -182,7 +161,6 @@
   white-space: nowrap;
 }
 
-/* ── entity status strip ── */
 .ps-activity-strip {
   display: grid;
   gap: 9px;
@@ -225,7 +203,6 @@
 .ps-activity-kv .v.warn { color: var(--status-warn); }
 .ps-activity-kv .v.muted { color: var(--muted); font-family: inherit; font-size: 11.5px; }
 
-/* ── alert controls ── */
 .ps-activity-watch {
   display: grid;
   gap: 9px;
@@ -238,8 +215,6 @@
 .ps-activity-status { font-size: 11px; font-weight: 800; color: var(--muted); white-space: nowrap; }
 .ps-activity-status.on { color: var(--status-ok); }
 
-/* Read-only "watched for" summary — the enrolled watch set is not editable
-   here (it's derived from contract type), so the chips are static, not toggles. */
 .ps-activity-watched { display: flex; flex-wrap: wrap; gap: 5px; }
 .ps-activity-watch-chip {
   display: inline-flex;
@@ -259,21 +234,12 @@
 
 .ps-activity-webhook-row { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); }
 .ps-activity-webhook-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  font-size: 10.5px;
-  font-weight: 700;
   background: rgba(45, 212, 191, 0.08);
   color: #5eead4;
   border: 1px solid rgba(45, 212, 191, 0.24);
-  font-family: var(--mono, ui-monospace, monospace);
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 220px;
-  white-space: nowrap;
 }
 .ps-activity-webhook-chip.none { background: rgba(127, 29, 29, 0.16); color: #fca5a5; border-color: rgba(248, 113, 113, 0.32); }
 .ps-activity-link-btn {
@@ -282,17 +248,11 @@
   color: var(--status-mute);
   text-decoration: underline dotted;
   cursor: pointer;
-  background: none;
-  border: none;
   border-radius: 0;
   font-family: inherit;
   padding: 0;
-  /* Zero the global shell/forms.css button chrome — its teal drop shadow
-     reads as a blue hue and its hover lift is wrong on a text link. */
-  box-shadow: none;
   transition: none;
 }
-.ps-activity-link-btn:hover { transform: none; }
 .ps-activity-link-btn:disabled { opacity: 0.5; cursor: default; }
 .ps-activity-webhook-form { display: grid; gap: 6px; }
 .ps-activity-webhook-input {
@@ -306,7 +266,6 @@
 }
 .ps-activity-webhook-actions { display: flex; gap: 12px; }
 
-/* ── timeline ── */
 .ps-activity-tl { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
 .ps-activity-ev { position: relative; display: grid; grid-template-columns: 20px 1fr; gap: 11px; padding: 9px 0; }
 .ps-activity-ev + .ps-activity-ev { border-top: 1px solid var(--line); }
@@ -338,7 +297,6 @@
   padding: 1px 5px;
 }
 
-/* kind chips */
 .ps-activity-kind {
   font-size: 9px;
   font-weight: 800;
@@ -359,23 +317,15 @@
 .ps-activity-kind.k-safe { color: var(--k-safe); background: rgba(125, 211, 252, 0.10); border-color: rgba(125, 211, 252, 0.26); }
 .ps-activity-kind.k-other { color: var(--muted); background: rgba(148, 163, 184, 0.08); border-color: var(--panel-border); }
 
-/* Backfill timeline dots are upgrade-only (only upgrades are back-filled below
-   the boundary), so the upgrade tint is the sole reachable variant. */
+/* Only upgrades are back-filled, so this is the sole reachable variant. */
 .ps-activity-dot.d-upgrade { background: var(--k-upgrade) !important; }
 
-/* boundary + empty */
 .ps-activity-boundary { display: grid; gap: 3px; padding: 12px 0 10px; text-align: center; position: relative; }
 .ps-activity-boundary::before { content: ""; position: absolute; left: 0; right: 0; top: 21px; border-top: 1px dashed rgba(245, 158, 11, 0.4); }
 .ps-activity-boundary-pill {
   justify-self: center;
   position: relative;
   z-index: 1;
-  font-size: 9.5px;
-  font-weight: 800;
-  letter-spacing: 0.10em;
-  text-transform: uppercase;
-  padding: 4px 11px;
-  border-radius: 999px;
   background: rgba(245, 158, 11, 0.12);
   color: var(--amber-deep);
   border: 1px solid rgba(245, 158, 11, 0.34);
@@ -392,9 +342,7 @@
 }
 .ps-activity-empty b { color: var(--muted); }
 
-/* Salience filter — three positions plus the hidden count, which renders
-   unconditionally (including "0 hidden"): a view that withholds rows without
-   saying how many is the suppression this axis exists to prevent. */
+/* The hidden count always renders, including "0 hidden". */
 .ps-activity-salience {
   display: flex;
   align-items: center;
@@ -411,7 +359,9 @@
   border: 1px solid var(--line);
   background: transparent;
   color: var(--status-mute);
-  cursor: pointer;
+}
+.ps-activity-salience-opt:hover {
+  transform: translateY(-1px);
 }
 .ps-activity-salience-opt.on {
   background: rgba(148, 163, 184, 0.16);
@@ -425,8 +375,6 @@
   color: var(--status-mute);
 }
 
-/* Collapsed run of PROVEN-routine rows. Never a drop: the count is the row,
-   and one click reveals the members in place. */
 .ps-activity-routine-run {
   display: grid;
   grid-template-columns: 18px 1fr;
@@ -435,35 +383,23 @@
 .ps-activity-routine-toggle {
   font: inherit;
   font-size: 10.5px;
-  font-weight: 700;
   text-align: left;
   padding: 3px 0;
-  border: 0;
-  background: transparent;
   color: var(--status-mute);
-  cursor: pointer;
   border-bottom: 1px dotted rgba(148, 163, 184, 0.28);
   justify-self: start;
 }
 .ps-activity-dot.routine { opacity: 0.45; }
 
-/* Call-target reference in a timeline row. The link is styled flat on purpose
-   — shell/forms.css gives every bare <button> a teal gradient + shadow. */
 .ps-activity-target { color: var(--muted); }
 .ps-activity-target-link {
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-  transform: none;
   padding: 0;
   font: inherit;
   color: var(--ink);
-  cursor: pointer;
   border-bottom: 1px dotted rgba(148, 163, 184, 0.45);
 }
-.ps-activity-target-link:hover { border-bottom-color: var(--ink); box-shadow: none; transform: none; }
+.ps-activity-target-link:hover { border-bottom-color: var(--ink); }
 .ps-activity-target .ps-goto-arrow { margin-left: 4px; }
-/* An off-graph target shows its whole address — it has no name to stand in
-   for it, so the full witness wraps rather than truncates. */
+/* Off-graph targets have no name, so the full address wraps. */
 .ps-activity-target-addr { word-break: break-all; color: var(--ink); }
 .ps-activity-target-note { color: var(--status-mute); font-style: italic; }

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 from tests.conftest import requires_postgres
 
 
@@ -18,14 +20,21 @@ def _addr() -> str:
 
 
 @requires_postgres
-def test_analyze_with_company_links_existing_protocol(api_client, db_session):
+@pytest.mark.parametrize(
+    "company_form",
+    [
+        pytest.param(str, id="exact_name"),
+        pytest.param(str.upper, id="uppercase_name"),
+    ],
+)
+def test_analyze_with_company_links_existing_protocol(api_client, db_session, company_form):
     from db.models import Job, Protocol
 
     proto = Protocol(name=f"linkco-{uuid.uuid4().hex[:10]}")
     db_session.add(proto)
     db_session.commit()
 
-    resp = api_client.post("/api/analyze", json={"address": _addr(), "name": "t", "company": proto.name})
+    resp = api_client.post("/api/analyze", json={"address": _addr(), "name": "t", "company": company_form(proto.name)})
     assert resp.status_code == 200, resp.text
 
     job = db_session.query(Job).filter_by(id=resp.json()["job_id"]).one()
@@ -41,21 +50,6 @@ def test_analyze_with_company_links_existing_protocol(api_client, db_session):
 
     parsed = human_assertion_from_request(job.request)
     assert parsed is not None and parsed.actor == "admin_api_key"
-
-
-@requires_postgres
-def test_analyze_company_match_is_case_insensitive(api_client, db_session):
-    from db.models import Job, Protocol
-
-    base_name = f"caseco-{uuid.uuid4().hex[:10]}"
-    proto = Protocol(name=base_name)
-    db_session.add(proto)
-    db_session.commit()
-
-    resp = api_client.post("/api/analyze", json={"address": _addr(), "name": "t", "company": base_name.upper()})
-    assert resp.status_code == 200, resp.text
-    job = db_session.query(Job).filter_by(id=resp.json()["job_id"]).one()
-    assert job.protocol_id == proto.id
 
 
 @requires_postgres

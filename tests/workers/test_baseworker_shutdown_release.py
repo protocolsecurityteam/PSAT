@@ -8,6 +8,8 @@ from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from db.models import Job, JobStage, JobStatus
 from workers.base import BaseWorker
 
@@ -48,61 +50,35 @@ def test_sigterm_preserves_live_leases(mock_session, _signal):
 # ---- _execute_job registers/deregisters around the lifecycle ----------
 
 
+def _boom(*_a, **_kw):
+    raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize(
+    ("process", "lease_id"),
+    [
+        # Later drains must not treat a completed claim as live; workers must not leak entries.
+        pytest.param(lambda *_a, **_kw: None, uuid.uuid4(), id="success"),
+        # A raising ``process()`` clears tracking after finalizing its failure.
+        pytest.param(_boom, uuid.uuid4(), id="exception"),
+        # Legacy rows / test stubs without a token do not populate claim tracking.
+        pytest.param(lambda *_a, **_kw: None, None, id="no-lease-id"),
+    ],
+)
 @patch("workers.base.signal.signal")
 @patch("workers.base.advance_job")
 @patch("workers.base.fail_job_terminal")
 @patch("workers.base.requeue_job")
 @patch("workers.base.store_artifact")
-def test_execute_job_registers_and_deregisters_on_success(_store, _requeue, _fail_terminal, _advance, _mock_signal):
-    """Successful completion clears tracking so later drains cannot treat a
-    completed claim as live, and long-running workers do not leak entries."""
+def test_execute_job_leaves_no_inflight_entry(
+    _store, _requeue, _fail_terminal, _advance, _mock_signal, process, lease_id
+):
     w = _Worker()
-    w.process = lambda *_a, **_kw: None
+    w.process = process
 
-    lease_id = uuid.uuid4()
-    job = _make_job(lease_id=lease_id)
-    session = MagicMock()
-    w._execute_job(session, cast(Job, job))
-
-    with w._inflight_lock:
-        assert job.id not in w._inflight_jobs, "successful completion must clear inflight entry"
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.advance_job")
-@patch("workers.base.fail_job_terminal")
-@patch("workers.base.requeue_job")
-@patch("workers.base.store_artifact")
-def test_execute_job_deregisters_on_exception(_store, _requeue, _fail_terminal, _advance, _mock_signal):
-    """A raising ``process()`` clears tracking after finalizing its failure."""
-    w = _Worker()
-
-    def _boom(*_a, **_kw):
-        raise RuntimeError("boom")
-
-    w.process = _boom
-
-    lease_id = uuid.uuid4()
     job = _make_job(lease_id=lease_id)
     session = MagicMock()
     w._execute_job(session, cast(Job, job))  # _execute_job swallows exceptions
-
-    with w._inflight_lock:
-        assert job.id not in w._inflight_jobs
-
-
-@patch("workers.base.signal.signal")
-@patch("workers.base.advance_job")
-@patch("workers.base.fail_job_terminal")
-@patch("workers.base.store_artifact")
-def test_execute_job_skips_registration_when_lease_id_is_none(_store, _fail_terminal, _advance, _mock_signal):
-    """Legacy rows / test stubs without a token do not populate claim tracking."""
-    w = _Worker()
-    w.process = lambda *_a, **_kw: None
-
-    job = _make_job(lease_id=None)
-    session = MagicMock()
-    w._execute_job(session, cast(Job, job))
 
     with w._inflight_lock:
         assert w._inflight_jobs == {}

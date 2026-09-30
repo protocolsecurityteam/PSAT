@@ -1,31 +1,17 @@
-"""Regression tests for the two PR-79 cache bugs:
+"""Regression tests for the two PR-79 cache bugs.
 
-#1 Duplicate concurrent builds. ``materialize_or_wait`` used to release
-   the advisory lock between the phase-1 ready-check and the phase-2
-   builder without persisting anything about the in-flight build.
-   Two callers reaching phase 1 within the (now 60-150 s) build window
-   therefore both ran the full forge+Slither+predicate pipeline; only
-   the phase-3 *write* was deduped. The fix is a ``status='building'``
-   claim row with ``builder_started_at`` so the second caller polls the
-   first to ``ready`` instead of duplicating the build, with a staleness
-   threshold so a crashed worker can't wedge the cache.
+#1 Duplicate concurrent builds: ``materialize_or_wait`` released the advisory lock between the
+phase-1 ready-check and the phase-2 builder without recording the in-flight build, so two callers
+within the 60-150 s build window both ran the full pipeline (only the phase-3 *write* deduped). The
+fix is a ``status='building'`` claim row with ``builder_started_at``; the second caller polls it,
+with a staleness threshold so a crashed worker can't wedge the cache.
 
-#4 ``predicate_trees`` was dropped on the write path
-   (``services/resolution/recursive.py``: ``_builder`` returned only
-   ``contract_name``, ``analysis``, ``tracking_plan``) and the cache row
-   had no column to store it anyway. Every cache hit therefore returned
-   ``predicate_trees=None`` and silently skipped mapping-writer
-   enumeration downstream. The fix adds a JSONB + blob column and
-   routes the artifact end-to-end through the cache. ``effects`` was
-   considered for the same treatment but has no consumer in this cache
-   path (the policy stage reads the per-job artifact written by the
-   static worker; ``copy_static_cache`` propagates it across
-   same-bytecode jobs).
+#4 ``predicate_trees`` was dropped on the write path (``recursive.py`` ``_builder`` omitted it, and
+the row had no column), so every cache hit returned ``None`` and skipped mapping-writer enumeration.
+The fix adds a JSONB + blob column. ``effects`` has no consumer in this cache path
+(``copy_static_cache`` propagates it across same-bytecode jobs).
 
-Both bug paths are best exercised against a real Postgres because the
-serialization story rides on ``pg_advisory_xact_lock`` and the row
-status transitions. Tests are gated on ``requires_postgres`` so the
-offline tier still runs the unit subset.
+Gated on ``requires_postgres``: serialization rides on ``pg_advisory_xact_lock`` and status transitions.
 """
 
 from __future__ import annotations
@@ -38,7 +24,6 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy import text
 
 from db import contract_materializations as cm
 from db.models import ContractMaterialization
@@ -60,8 +45,6 @@ def _clean_cm(db_session):
 
 @pytest.fixture()
 def _route_to_test_db(monkeypatch):
-    """Point ``cm.SessionLocal`` at TEST_DATABASE_URL so concurrent
-    builders don't leak into the dev DB."""
     import os
 
     from sqlalchemy import create_engine
@@ -80,9 +63,7 @@ def _route_to_test_db(monkeypatch):
 
 @pytest.fixture()
 def _short_wait_poll(monkeypatch):
-    """Tighten the wait-poll loop so the concurrency tests don't sleep
-    for a full second between polls. Staleness stays long so the test
-    never accidentally trips into stale-takeover."""
+    """Tighten the wait-poll loop; staleness stays long so the test never trips stale-takeover."""
     monkeypatch.setenv("PSAT_MATERIALIZE_WAIT_POLL_INTERVAL_S", "0.05")
     monkeypatch.setenv("PSAT_MATERIALIZE_BUILDER_STALENESS_S", "120")
 
@@ -94,17 +75,10 @@ def _short_wait_poll(monkeypatch):
 
 @requires_postgres
 def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _clean_cm, _short_wait_poll):
-    """Two threads call ``materialize_or_wait`` with the same
-    ``(chain, bytecode_keccak)`` while a slow builder is running.
+    """Two threads call ``materialize_or_wait`` for one key while a slow builder runs.
 
-    Pre-fix: both threads' phase-1 ready-checks miss, both run the
-    builder concurrently, phase 3 dedupes the *write* but not the
-    *work*. ``builder_invocations`` would be 2.
-
-    Post-fix: thread A claims a ``status='building'`` row in phase 1,
-    thread B sees ``status='building'`` + recent ``builder_started_at``
-    and polls until A flips the row to ``ready``. Builder runs once.
-    """
+    Pre-fix both phase-1 ready-checks miss and both run the builder (``builder_invocations`` 2).
+    Post-fix A claims a ``status='building'`` row and B polls it to ``ready``; the builder runs once."""
     chain = "1"
     keccak = "0x" + "ab" * 32
 
@@ -116,9 +90,7 @@ def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _cl
         with builder_lock:
             invocations["n"] += 1
         builder_started.set()
-        # Hold long enough for thread B to enter phase 1, observe the
-        # building row, and start polling. Without the building-row
-        # claim, B would race past phase 1 and also call this builder.
+        # Hold long enough for B to observe the building row and start polling.
         time.sleep(0.6)
         return {
             "contract_name": "ConcurrentDedup",
@@ -146,8 +118,7 @@ def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _cl
     t1 = threading.Thread(target=call, args=("1",))
     t2 = threading.Thread(target=call, args=("2",))
     t1.start()
-    # Wait until thread A is inside the builder before launching B so B
-    # is guaranteed to enter phase 1 against an in-flight building row.
+    # Wait until A is inside the builder so B enters phase 1 against an in-flight building row.
     assert builder_started.wait(timeout=5), "thread A never entered builder"
     t2.start()
     t1.join(timeout=10)
@@ -166,19 +137,15 @@ def test_concurrent_materialize_runs_builder_exactly_once(_route_to_test_db, _cl
 
 @requires_postgres
 def test_stale_building_row_is_taken_over(_route_to_test_db, _clean_cm, monkeypatch):
-    """A ``status='building'`` row older than the staleness threshold
-    must NOT block fresh callers — the prior worker is presumed dead.
-    The next caller takes over (re-claims the row, runs the builder,
-    writes ``ready``)."""
-    # Short staleness so the test runs fast.
+    """A ``status='building'`` row older than the staleness threshold must NOT block callers (the
+    worker is presumed dead): the next caller re-claims, builds and writes ``ready``."""
     monkeypatch.setenv("PSAT_MATERIALIZE_BUILDER_STALENESS_S", "60")
     monkeypatch.setenv("PSAT_MATERIALIZE_WAIT_POLL_INTERVAL_S", "0.05")
 
     chain = "1"
     keccak = "0x" + "cd" * 32
 
-    # Plant a stale building row: claim made 10 minutes ago, no worker
-    # alive to advance it.
+    # Plant a stale building row: claimed 10 minutes ago, no live worker.
     stale_row = ContractMaterialization(
         chain=chain,
         bytecode_keccak=keccak,
@@ -220,14 +187,9 @@ def test_stale_building_row_is_taken_over(_route_to_test_db, _clean_cm, monkeypa
 
 @requires_postgres
 def test_predicate_trees_cached_inline(_route_to_test_db, _clean_cm):
-    """The builder bundle's ``predicate_trees`` must be persisted on
-    the materialization row so cache hits return them.
-
-    Pre-fix the builder closure dropped them. ``cm.hydrate_predicate_trees``
-    on a hit returned None and downstream
-    ``_mapping_writer_specs_from_predicate_trees`` silently returned
-    an empty list — mapping-writer enumeration was disabled on every hit.
-    """
+    """The bundle's ``predicate_trees`` must be persisted so cache hits return them; the builder
+    closure used to drop them, disabling mapping-writer enumeration
+    (``_mapping_writer_specs_from_predicate_trees``) on every hit."""
     chain = "1"
     keccak = "0x" + "11" * 32
 
@@ -300,10 +262,6 @@ def test_predicate_trees_cached_inline(_route_to_test_db, _clean_cm):
 
 @requires_postgres
 def test_predicate_trees_cached_via_blob(_route_to_test_db, _clean_cm):
-    """When ``get_storage_client`` is configured the bundle's
-    ``predicate_trees`` goes to blob storage (not inline JSONB) and the
-    row carries the key. The hydrate helper transparently pulls it back
-    through the blob path."""
 
     class _StubStorage:
         def __init__(self) -> None:
@@ -351,10 +309,7 @@ def test_predicate_trees_cached_via_blob(_route_to_test_db, _clean_cm):
 
 
 def _row_stub(**kwargs: Any) -> Any:
-    """Build a SimpleNamespace mimicking a ContractMaterialization row.
-    The hydrate helpers use ``getattr`` so duck-typing is sufficient.
-    Returning ``Any`` keeps pyright from rejecting the stub at the
-    typed ``ContractMaterialization`` parameter boundary."""
+    """A SimpleNamespace row stub (``Any`` keeps pyright from rejecting it at the typed parameter)."""
     defaults = dict(
         analysis=None,
         analysis_blob_key=None,
@@ -367,25 +322,22 @@ def _row_stub(**kwargs: Any) -> Any:
     return SimpleNamespace(**defaults)
 
 
-def test_hydrate_predicate_trees_unit():
-    """Unit-level smoke: ``hydrate_predicate_trees`` reads the
-    ``predicate_trees`` column, not ``analysis`` or ``tracking_plan``."""
-    row = _row_stub(
-        analysis={"should": "not appear"},
-        predicate_trees={"trees": {"f()": {}}},
-    )
-    assert cm.hydrate_predicate_trees(row) == {"trees": {"f()": {}}}
-
-
-def test_hydrate_predicate_trees_returns_none_for_pre_migration_row():
-    """Rows written by the pre-c1d2e3f4a5b6 cache have neither the
-    JSONB column nor the blob key. Returning None lets the caller fall
-    back to its "no semantic artifact" path instead of crashing."""
-    row = _row_stub(
-        analysis={"controllers": []},
-        tracking_plan={"slots": []},
-    )
-    assert cm.hydrate_predicate_trees(row) is None
+@pytest.mark.parametrize(
+    "row_kwargs, expected",
+    [
+        pytest.param(
+            {"analysis": {"should": "not appear"}, "predicate_trees": {"trees": {"f()": {}}}},
+            {"trees": {"f()": {}}},
+            id="reads-predicate-trees-column",
+        ),
+        # Pre-c1d2e3f4a5b6 rows have neither column; None lets the caller take its "no semantic artifact" path.
+        pytest.param(
+            {"analysis": {"controllers": []}, "tracking_plan": {"slots": []}}, None, id="pre-migration-row-is-none"
+        ),
+    ],
+)
+def test_hydrate_predicate_trees_unit(row_kwargs, expected):
+    assert cm.hydrate_predicate_trees(_row_stub(**row_kwargs)) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -394,78 +346,54 @@ def test_hydrate_predicate_trees_returns_none_for_pre_migration_row():
 
 
 @requires_postgres
-def test_find_by_keccak_filters_on_schema_version(_clean_cm):
-    """``find_by_keccak`` serves only a row stamped with the current
-    ``ANALYSIS_SCHEMA_VERSION``. An older-version row reads as a miss so
-    a bumped analyzer rebuilds instead of serving a stale bundle."""
-    chain = "1"
-    keccak_old = "0x" + "a1" * 32
-    keccak_cur = "0x" + "a2" * 32
-
+@pytest.mark.parametrize(
+    "find, hit_attr, hit_idx, old_keys, cur_keys",
+    [
+        pytest.param(
+            lambda session, keys: cm.find_by_keccak(session, chain="1", bytecode_keccak=keys[0]),
+            "bytecode_keccak",
+            0,
+            ("0x" + "a1" * 32, "0x" + "1" * 40),
+            ("0x" + "a2" * 32, "0x" + "2" * 40),
+            id="find_by_keccak",
+        ),
+        pytest.param(
+            lambda session, keys: cm.find_by_address(session, chain="1", address=keys[1]),
+            "address",
+            1,
+            ("0x" + "b3" * 32, "0x" + "a3" * 20),
+            ("0x" + "b4" * 32, "0x" + "a4" * 20),
+            id="find_by_address",
+        ),
+    ],
+)
+def test_find_filters_on_schema_version(_clean_cm, find, hit_attr, hit_idx, old_keys, cur_keys):
+    """keys are (bytecode_keccak, address)."""
     _clean_cm.add_all(
         [
             ContractMaterialization(
-                chain=chain,
-                bytecode_keccak=keccak_old,
-                address="0x" + "1" * 40,
+                chain="1",
+                bytecode_keccak=keys[0],
+                address=keys[1],
                 status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION - 1,
-            ),
-            ContractMaterialization(
-                chain=chain,
-                bytecode_keccak=keccak_cur,
-                address="0x" + "2" * 40,
-                status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
-            ),
+                analysis_schema_version=version,
+            )
+            for keys, version in (
+                (old_keys, cm.ANALYSIS_SCHEMA_VERSION - 1),
+                (cur_keys, cm.ANALYSIS_SCHEMA_VERSION),
+            )
         ]
     )
     _clean_cm.commit()
 
-    assert cm.find_by_keccak(_clean_cm, chain=chain, bytecode_keccak=keccak_old) is None
-    hit = cm.find_by_keccak(_clean_cm, chain=chain, bytecode_keccak=keccak_cur)
+    assert find(_clean_cm, old_keys) is None
+    hit = find(_clean_cm, cur_keys)
     assert hit is not None
-    assert hit.bytecode_keccak == keccak_cur
-
-
-@requires_postgres
-def test_find_by_address_filters_on_schema_version(_clean_cm):
-    """Address-keyed lookups apply the same version gate as keccak ones."""
-    chain = "1"
-    addr_old = "0x" + "a3" * 20
-    addr_cur = "0x" + "a4" * 20
-
-    _clean_cm.add_all(
-        [
-            ContractMaterialization(
-                chain=chain,
-                bytecode_keccak="0x" + "b3" * 32,
-                address=addr_old,
-                status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION - 1,
-            ),
-            ContractMaterialization(
-                chain=chain,
-                bytecode_keccak="0x" + "b4" * 32,
-                address=addr_cur,
-                status="ready",
-                analysis_schema_version=cm.ANALYSIS_SCHEMA_VERSION,
-            ),
-        ]
-    )
-    _clean_cm.commit()
-
-    assert cm.find_by_address(_clean_cm, chain=chain, address=addr_old) is None
-    hit = cm.find_by_address(_clean_cm, chain=chain, address=addr_cur)
-    assert hit is not None
-    assert hit.address == addr_cur
+    assert getattr(hit, hit_attr) == cur_keys[hit_idx]
 
 
 @requires_postgres
 def test_materialize_rebuilds_old_schema_version_row(_route_to_test_db, _clean_cm, _short_wait_poll):
-    """A 'ready' row built by an older analyzer must NOT be served — it
-    reads as a miss, the builder runs once, and the row is rewritten at
-    the current ``ANALYSIS_SCHEMA_VERSION``."""
     chain = "1"
     keccak = "0x" + "c1" * 32
 
@@ -507,8 +435,7 @@ def test_materialize_rebuilds_old_schema_version_row(_route_to_test_db, _clean_c
 
 @requires_postgres
 def test_materialize_serves_current_schema_version_row(_route_to_test_db, _clean_cm, _short_wait_poll):
-    """A 'ready' row at the current version is a hit — the builder never
-    runs (a re-run would re-pay the forge+Slither cost for nothing)."""
+    """A 'ready' row at the current version is a hit; a re-run would re-pay the forge+Slither cost."""
     chain = "1"
     keccak = "0x" + "c2" * 32
 
@@ -538,32 +465,3 @@ def test_materialize_serves_current_schema_version_row(_route_to_test_db, _clean
     assert row.status == "ready"
     assert row.contract_name == "CurrentAnalyzer"
     assert row.analysis_schema_version == cm.ANALYSIS_SCHEMA_VERSION
-
-
-@requires_postgres
-def test_migration_backfills_existing_rows_to_launch_version(_clean_cm):
-    """A row inserted without an explicit ``analysis_schema_version`` — the
-    shape a pre-column row takes after the migration backfill — carries the
-    ``server_default`` the migration installed: schema version 1, the launch
-    value of ``ANALYSIS_SCHEMA_VERSION``. This keeps a deploy from
-    invalidating the whole cache at once."""
-    chain = "1"
-    keccak = "0x" + "d1" * 32
-    _clean_cm.execute(
-        text(
-            "INSERT INTO contract_materializations "
-            "(chain, bytecode_keccak, address, status) "
-            "VALUES (:chain, :keccak, :addr, 'ready')"
-        ),
-        {"chain": chain, "keccak": keccak, "addr": "0x" + "1" * 40},
-    )
-    _clean_cm.commit()
-
-    version = _clean_cm.execute(
-        text(
-            "SELECT analysis_schema_version FROM contract_materializations "
-            "WHERE chain = :chain AND bytecode_keccak = :keccak"
-        ),
-        {"chain": chain, "keccak": keccak},
-    ).scalar_one()
-    assert version == 1

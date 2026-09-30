@@ -1,11 +1,9 @@
 """Anchored-authority-chain transitivity.
 
-The shapes pinned here are the ones the dev DB actually carries: a protocol's
-governance component (registry → timelock → multisig) enters the graph only
-through W3-D2 edges, so D2 non-transitivity leaves it and every ward it
-governs unwitnessed. The extension admits exactly the case where the D2
-controller's OWN controllers root in the protocol's independently anchored
-perimeter, and refuses the shared-operator shape it must never license.
+Shapes pinned here come from the dev DB: a protocol's governance component (registry → timelock → multisig)
+enters the graph only through W3-D2 edges, so D2 non-transitivity leaves it and every ward it governs
+unwitnessed. The extension admits only when the D2 controller's OWN controllers root in the protocol's
+independently anchored perimeter, and refuses the shared-operator shape.
 """
 
 from __future__ import annotations
@@ -85,16 +83,15 @@ def _anchored_member(db_session, protocol, address):
 
 
 def _anchored_holder(db_session, protocol, address):
-    """A role holder / Safe signer that is itself an independently anchored
-    MEMBER — the only terminal a SET-valued link may root at."""
+    """A role holder / Safe signer that is itself an independently anchored MEMBER: the only terminal a SET-valued
+    link may root at (extension, set-arity rule)."""
     return _anchored_member(db_session, protocol, address).address
 
 
 def _probe_read(db_session, subject, value):
-    """Persist the probe read of a governance getter, merged into the
-    subject's single attempt row under the first free slot of the three reads
-    the gate consults. This is the derivation a W3-D2 witness rests on
-    (``W3_D2_SOURCES``) — a bare caller gate is not one."""
+    """Persist the probe read of a governance getter (the derivation a W3-D2 witness rests on,
+    ``W3_D2_SOURCES``; a bare caller gate is not one), merged into the subject's attempt row under the first
+    free slot of the three reads the gate consults."""
     row = db_session.get(ContractProbeAttempt, (subject.id, 1))
     reads = dict(row.results.get("reads", {})) if row is not None and isinstance(row.results, dict) else {}
     slot = next(
@@ -171,10 +168,8 @@ def _role_plane(db_session, registry_address, role_hash, holders, *, role_name="
 
 
 def _unclaimed_ward(db_session, controller):
-    """A row the controller is observed to control that no protocol claims.
-    Every D2 fixture carries one so the pre-existing exclusivity arm cannot
-    stand in for the anchor chain under test (and so a refusal is a real
-    refusal, not exclusivity quietly admitting)."""
+    """A row the controller controls that no protocol claims. Every D2 fixture carries one so the exclusivity arm
+    cannot stand in for the anchor chain under test (a refusal must be a real refusal)."""
     row = Contract(address=ADDR(int(controller.address, 16) + 0x800000), chain="ethereum")
     db_session.add(row)
     db_session.flush()
@@ -736,11 +731,9 @@ def test_anchor_link_address_reaches_the_revocation_frontier(db_session, protoco
 def test_foreign_promotion_of_a_published_anchor_revokes_in_the_same_run(db_session, protocol):
     """A promotion is counterevidence for STANDING witnesses, not only recall.
 
-    Once another protocol claims the address a published anchor chain cites,
-    the link is proven foreign and the transitivity it carried is gone. The
-    same ``evaluate`` that promotes must revoke the dependent D1 and demote the
-    member it was holding up — waiting for reconcile leaves a member with no
-    verified witness."""
+    Once another protocol claims the address a published anchor chain cites, the link is proven foreign; the same
+    ``evaluate`` that promotes must revoke the dependent D1 and demote its member. Waiting for reconcile leaves a
+    member with no verified witness."""
     _anchor, timelock, safe, ward, proxy, independent = _timelock_shape(db_session, protocol, 0x2400)
     other = Protocol(name=f"claimant-{uuid.uuid4().hex[:8]}")
     db_session.add(other)
@@ -783,11 +776,9 @@ def test_api_level_new_member_delta_seeds_the_revocation_stratum(db_session, pro
 
 
 def test_foreign_promotion_breaks_a_d2_exclusive_via_in_the_same_run(db_session, protocol):
-    """The ``d2_exclusive`` arm publishes no anchor chain and keys its
-    dependents on the controller, so a promoted row reaches them only through
-    its own controllers. A controller whose observed control set has just
-    widened past the protocol is no longer exclusive, and everything it
-    licensed must fall in the promoting run."""
+    """``d2_exclusive`` publishes no anchor chain and keys dependents on the controller, so a promoted row reaches
+    them only through its controllers. A controller whose observed control set widened past the protocol is no
+    longer exclusive, and everything it licensed must fall in the promoting run."""
     # Built without ``_d2_member``: exclusivity needs the controller's whole
     # observed ward set inside the protocol, so this shape carries no
     # unclaimed ward.

@@ -1,23 +1,16 @@
-// Membership-state helpers for the AddressesModal. The addresses payload
-// carries `membership_state` derived by the
-// backend gate helper plus witness/probe reason fields; nothing here computes
-// a state of its own — display logic only reads those fields.
+// Membership display for AddressesModal;
+// states come from the payload, never computed here.
 //
-// Sections:
-//   - members: proven-present rows (the main table). A member whose only
-//     admitting witness is a `historical_implementation` structural edge and
-//     which is not currently behind any proxy in the payload is a stale past
-//     impl — kept for audit-coverage matching, collapsed behind a toggle.
-//   - candidates: not-determined rows, each with a token-templated reason
-//     built ONLY from the payload's persisted probe fields.
-//   - pruned: proven-absent rows (no code at the probed block), collapsed
-//     behind a count.
+// - members: proven present. A member admitted only as a historical
+//     implementation and not behind a live proxy is collapsed behind a toggle.
+// - candidates: not determined, with a reason built only from persisted probe
+//     fields.
+// - pruned: proven absent (no code at the probed block).
 
 import { shortenAddress } from "../shared/format.js";
 
 export function membershipState(row) {
-  // Rows without the field (compare-mode synthesized rows, legacy fixtures)
-  // render in the main table rather than vanishing.
+  // Rows without the field render as members rather than vanishing.
   return row?.membership_state || "member";
 }
 
@@ -31,10 +24,8 @@ export function computeCurrentImplAddrs(rows) {
   return set;
 }
 
-// A member is "pure historical" iff every admitting witness is a
-// historical_implementation structural edge AND it is not the live impl of a
-// proxy in the same payload. Witness-field-driven: a member with no recorded
-// witnesses (or any other admitting edge) stays visible.
+// Every admitting witness is a historical_implementation edge and it isn't a
+// live impl here. Members with no recorded witnesses stay visible.
 export function isPureHistorical(row, currentImplAddrs) {
   if (membershipState(row) !== "member") return false;
   const witnesses = row?.membership_witnesses || [];
@@ -61,8 +52,6 @@ export function splitMembership(rows) {
   return { members, candidates, pruned };
 }
 
-// Token-templated candidate reason — assembled from the payload's persisted
-// probe fields only.
 export function candidateReasonText(row) {
   const reason = row?.membership_reason;
   const kind = reason?.kind;
@@ -84,8 +73,7 @@ export function candidateReasonText(row) {
   }
   if (kind === "probe_error") return "probe attempt failed";
   if (kind === "no_probe_attempt") return "no probe attempt yet";
-  // An unknown kind surfaces its token verbatim — never a vague default.
-  // The missing piece is always named.
+  // Unknown kinds surface verbatim.
   return typeof kind === "string" && kind ? kind : "";
 }
 
@@ -97,9 +85,7 @@ export function prunedReasonText(row) {
   return "no code at probed block";
 }
 
-// Rows eligible for the bulk "Analyze pending" action: discovered-but-not-
-// analyzed rows that are worth analyzing. Pruned rows (proven no code) and
-// pure-historical impls are skipped even when the user has them visible.
+// Skips pruned rows and pure-historical impls even when visible.
 export function bulkAnalyzeCandidates(rows, currentImplAddrs) {
   const out = [];
   for (const r of rows || []) {

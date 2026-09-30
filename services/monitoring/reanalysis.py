@@ -27,11 +27,7 @@ _OWNER_CONTROLLER_IDS = ("owner", "state_variable:owner")
 logger = logging.getLogger(__name__)
 
 
-# State-variable write targets whose mutation invalidates the control
-# graph / effective permissions / implementation hash and so warrants a
-# full re-analysis job. Anything writing one of these slots — Compound
-# NewAdmin, Curve CommitOwnership, Solady setOwner, a fork's renamed
-# admin field — triggers reanalysis through the tag-driven path.
+# Write targets whose mutation invalidates the control graph, permissions or implementation hash.
 _REANALYSIS_WRITE_TARGETS = frozenset(
     {
         "owner",
@@ -47,38 +43,20 @@ _REANALYSIS_WRITE_TARGETS = frozenset(
     }
 )
 
-# Field names whose poll-detected change always triggers reanalysis
-# regardless of the per-contract write-target set. ``implementation`` is
-# the canonical proxy-upgrade signal and the vendored EIP-1967 poll
-# entry surfaces it without ever flowing through ``_REANALYSIS_WRITE_
-# TARGETS``; included here so the trigger fires even when the proxy
-# shell has no tracking plan of its own.
+# Poll fields that always trigger reanalysis. ``implementation`` comes from the vendored EIP-1967 poll entry, which
+# never flows through the write targets.
 REANALYSIS_POLL_FIELDS_VENDORED = frozenset({"implementation"})
 
 
 def should_trigger_reanalysis(event_type: str, data: dict | None = None) -> bool:
-    """Return True if *event_type* (with optional *data*) warrants a re-analysis.
+    """Whether *event_type* (with optional *data*) warrants re-analysis.
 
-    Tag-driven: an event triggers reanalysis when its ``effect_tags`` say
-    the emitter wrote a control-relevant slot, performed a delegatecall
-    (delegate-target swap), or ran through the OZ Initializable modifier.
-    Bare event_type calls (legacy tests, queue dedupe paths) synthesize
-    tags from the canonical event_type via
-    ``_HANDROLLED_EVENT_TYPE_TO_TAGS`` so the dispatch shape is uniform.
-
-    The poll path (``state_changed_poll``) reuses the same write-target
-    vocabulary so custom slots (``protocolAdmin``, a renamed ``_admin``)
-    trigger reanalysis through the analyzer-derived polling plan
-    without a per-slot map entry. ``implementation`` is additionally
-    treated as a vendored trigger because it's emitted by the EIP-1967
-    storage-slot poll entry, which is keyed by ``proxy_type`` rather
-    than by the analyzer's write targets.
+    Tag-driven: control-slot writes, delegatecalls or Initializable runs trigger it. Bare event types synthesize tags
+    via ``_HANDROLLED_EVENT_TYPE_TO_TAGS``. Poll changes use the same write-target vocabulary.
     """
     if (event_type == "state_changed_poll" or event_type.startswith("value_changed")) and data:
-        # Both are read-observed changes: the changed FIELD is the witnessed
-        # fact, so the trigger keys off it rather than off the emitter's
-        # donated write set. Same target vocabulary either way — the
-        # read-verified vocabulary is recognized here, not widened.
+        # Read-observed changes: the changed field is the witnessed fact, so key off it rather than the emitter's write
+        # set.
         field = data.get("field")
         if field in REANALYSIS_POLL_FIELDS_VENDORED:
             return True
@@ -86,9 +64,6 @@ def should_trigger_reanalysis(event_type: str, data: dict | None = None) -> bool
             return True
         return False
 
-    # Tag-driven dispatch. Prefer tags from the parsed event; fall back
-    # to canonical-event_type synthesis for callers that pass bare
-    # event_type without a data envelope.
     tags: dict | None = None
     if isinstance(data, dict):
         candidate = data.get("effect_tags")
@@ -116,26 +91,15 @@ def maybe_queue_reanalysis(
     event_type: str,
     data: dict | None = None,
 ) -> Job | None:
-    """Queue a re-analysis job if the event warrants it.
+    """Queue a re-analysis job unless one is already in flight for the address and chain; return it or ``None``.
 
-    Checks:
-    1. Event type is in the trigger set.
-    2. No queued or processing job already exists for this address+chain.
-
-    The job starts at the ``discovery`` stage so the caching system can
-    copy static artifacts (source files, contract_analysis, etc.) and the
-    static worker can detect implementation changes via
-    ``_check_proxy_cache``.
-
-    Returns the created :class:`Job`, or ``None`` if skipped.
+    Starts at ``discovery`` so cached static artifacts are copied and the static worker can detect implementation
+    changes.
     """
     if not should_trigger_reanalysis(event_type, data):
         return None
 
-    # Defense in depth: enrollment already gates off-allowlist chains, so
-    # a monitored contract on a disabled chain should not exist going forward — but
-    # a legacy row must never re-spawn analysis work on a chain this deployment has
-    # disabled.
+    # Enrollment already excludes disabled chains, but a legacy row must never spawn work on one.
     if not chain_enabled(mc.chain):
         logger.info(
             "Skipping re-analysis: chain not enabled for this deployment",
@@ -143,7 +107,6 @@ def maybe_queue_reanalysis(
         )
         return None
 
-    # Deduplicate: skip if a job is already in-flight for this address+chain.
     in_flight_candidates = (
         session.execute(
             select(Job).where(
@@ -167,7 +130,6 @@ def maybe_queue_reanalysis(
             )
             return None
 
-    # Determine a human-readable trigger label
     if event_type == "state_changed_poll":
         trigger = f"poll:{(data or {}).get('field', 'unknown')}"
     elif event_type.startswith("value_changed"):
@@ -175,9 +137,7 @@ def maybe_queue_reanalysis(
     else:
         trigger = event_type
 
-    # No rpc_url is pinned here: the worker resolves eRPC from ``chain`` so
-    # re-analysis routes through the proxy like every other run. Pinning a
-    # direct provider URL is what let a 429 storm bypass eRPC.
+    # No pinned rpc_url: a direct provider URL is what let a 429 storm bypass eRPC.
     request_dict: dict = {
         "address": mc.address,
         "chain": mc.chain,
@@ -187,16 +147,15 @@ def maybe_queue_reanalysis(
     if mc.protocol_id:
         request_dict["protocol_id"] = mc.protocol_id
 
-    # Snapshot current analysis state so the completion webhook can show a diff.
+    # Snapshot current state so the completion webhook can show a diff.
     snapshot = _build_snapshot(session, mc)
     if snapshot:
         request_dict["reanalysis_snapshot"] = snapshot
 
     job = create_job(session, request_dict)
 
-    # A fresh job is going to rewrite this protocol's planes, and the current
-    # score was folded over the ones it replaces. Marked after ``create_job``
-    # commits, so the mark never references a job that rolled back.
+    # The new job rewrites this protocol's planes, so dirty the score. Marked after ``create_job`` commits so it never
+    # references a rolled-back job.
     if mc.protocol_id:
         from services.scoring.dirty import SCORE_DIRTY_REANALYSIS, mark_protocol_score_dirty
 
@@ -204,9 +163,7 @@ def maybe_queue_reanalysis(
             try:
                 session.commit()
             except Exception:
-                # The mark swallows its own failure; the commit it induces must
-                # too, or a best-effort mark would sink the job this function
-                # exists to create. ``create_job`` already committed it.
+                # Best-effort: a failing mark must not sink the already-committed job.
                 session.rollback()
                 logger.warning(
                     "Re-analysis: protocol score dirty-mark commit failed for protocol %s",
@@ -223,13 +180,7 @@ def maybe_queue_reanalysis(
     return job
 
 
-# ---------------------------------------------------------------------------
-# Snapshot & diff helpers
-# ---------------------------------------------------------------------------
-
-
 def _build_snapshot(session: Session, mc: MonitoredContract) -> dict[str, Any]:
-    """Capture the current analysis state for later comparison."""
     snap: dict[str, Any] = {}
     if not mc.contract_id:
         return snap
@@ -248,7 +199,6 @@ def _build_snapshot(session: Session, mc: MonitoredContract) -> dict[str, Any]:
         snap["control_model"] = summary.control_model
         snap["is_pausable"] = summary.is_pausable
 
-    # Effective function names
     fns = (
         session.execute(select(EffectiveFunction.function_name).where(EffectiveFunction.contract_id == contract.id))
         .scalars()
@@ -256,7 +206,6 @@ def _build_snapshot(session: Session, mc: MonitoredContract) -> dict[str, Any]:
     )
     snap["effective_functions"] = sorted(fns)
 
-    # Owner value
     owner_cv = (
         session.execute(
             select(ControllerValue).where(
@@ -274,10 +223,7 @@ def _build_snapshot(session: Session, mc: MonitoredContract) -> dict[str, Any]:
 
 
 def build_reanalysis_diff(session: Session, job: Job) -> list[str]:
-    """Compare the pre-reanalysis snapshot with the current DB state.
-
-    Returns a list of human-readable change descriptions (may be empty).
-    """
+    """Human-readable changes between the pre-reanalysis snapshot and current DB state."""
     request = job.request if isinstance(job.request, dict) else {}
     snapshot: dict[str, Any] = request.get("reanalysis_snapshot", {})
     if not snapshot:
@@ -301,7 +247,6 @@ def build_reanalysis_diff(session: Session, job: Job) -> list[str]:
 
     changes: list[str] = []
 
-    # Implementation
     old_impl = snapshot.get("implementation")
     new_impl = contract.implementation
     if old_impl and new_impl and old_impl.lower() != new_impl.lower():
@@ -309,13 +254,11 @@ def build_reanalysis_diff(session: Session, job: Job) -> list[str]:
     elif not old_impl and new_impl:
         changes.append(f"Implementation: (none) → `{new_impl}`")
 
-    # Admin
     old_admin = snapshot.get("admin")
     new_admin = contract.admin
     if old_admin and new_admin and old_admin.lower() != new_admin.lower():
         changes.append(f"Admin: `{old_admin}` → `{new_admin}`")
 
-    # Summary fields
     summary = session.execute(
         select(ContractSummary).where(ContractSummary.contract_id == contract.id)
     ).scalar_one_or_none()
@@ -324,7 +267,6 @@ def build_reanalysis_diff(session: Session, job: Job) -> list[str]:
         if old_model and summary.control_model and old_model != summary.control_model:
             changes.append(f"Control model: {old_model} → {summary.control_model}")
 
-    # Effective functions diff
     old_fns = set(snapshot.get("effective_functions", []))
     new_fns_rows = (
         session.execute(select(EffectiveFunction.function_name).where(EffectiveFunction.contract_id == contract.id))
@@ -342,7 +284,6 @@ def build_reanalysis_diff(session: Session, job: Job) -> list[str]:
             parts.append(f"-{', '.join(removed)}")
         changes.append(" | ".join(parts))
 
-    # Owner
     old_owner = snapshot.get("owner")
     owner_cv = (
         session.execute(

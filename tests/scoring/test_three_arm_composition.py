@@ -94,7 +94,6 @@ def test_case3a_one_hop_with_no_deletability_row_does_not_republish(fold):
     assert entry["route_classification"]["state"] == P.ROUTE_AMOUNT_AUTHORED
     assert entry["route_classification"]["amount_is_authored_by_the_intermediate"] is True
 
-    # The gate claim transfers: the whole act-as chain is published.
     assert entry["act_as_chain"][0]["caller"] == KEY_C
     assert entry["act_as_chain"][0]["destination"] == KEY_V
     assert entry["act_as_chain"][0]["witness_kind"]
@@ -152,19 +151,12 @@ _DELETES_THE_GATING_AUTHORITYS_ROLES = ((f"ethereum::{_GATING_AUTHORITY}", EOA, 
 def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold, deletability, arm, setter_name):
     """POSITIVE ARM, mandatory. Length 2 and the figure survives.
 
-    The chain traverses a node the principal seized nothing on, and the body it
-    traverses authors the destination's amount — so a route-only rule would
-    withhold. It does not, because the deletability join returns a row proving
-    this principal can author the destination's calldata itself: either by
-    pointing the vault at an authority it controls (the HOST arm) or by writing
-    its own role at the authority the vault already consults (the GATING
-    AUTHORITY arm).
+    The deletability join returns a row proving this principal can author the
+    destination's calldata itself — via the HOST arm or the GATING AUTHORITY arm —
+    so a route-only or hop-count rule would wrongly withhold.
 
-    A hop-count implementation withholds this entry under either arm.
-
-    Parametrised over both arms: each arm is exercised alone at
-    the join, but only the host arm reached a composed entry, so the *published*
-    ``basis.arm == "gating_authority"`` had no carrier anywhere.
+    Parametrised over both arms to check the host witness: only the host arm reached a
+    composed entry, so the published ``basis.arm == "gating_authority"`` had no carrier.
     """
     row = _gate_row(
         CA.composed_document(
@@ -204,10 +196,8 @@ def test_case3b_two_hops_with_a_qualifying_row_republishes_and_names_it(fold, de
     witness = entry["authority_deletability"]["gating_authority_witness"]
     assert witness["selector_scoped"] == ([] if arm == P.DELETABILITY_ARM_HOST else [_GATING_AUTHORITY])
 
-    # The execution record travels with the figure it accounts for.
     assert entry["proving_execution"]["state"] == EX.EXECUTION_NOT_DETERMINED
     assert entry["proving_execution"]["reason"] == EX.REASON_NOT_PERSISTED
-    # The body still authors the amount; the entry publishes both.
     assert entry["route_classification"]["state"] == P.ROUTE_AMOUNT_AUTHORED
 
 

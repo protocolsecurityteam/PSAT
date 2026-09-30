@@ -2,10 +2,9 @@ import { useEffect, useRef } from "react";
 
 import { GuardGlyph } from "../../ui/GuardGlyph.jsx";
 import { GotoArrow } from "../GotoArrow.jsx";
+import { clickable } from "../../shared/clickable.js";
 
-// Body click = preview the caller on the canvas (light peek, no selection
-// change); the trailing arrow commits to its card. Same peek/commit split as
-// Governs rows and the Guard Inspector's principal cards.
+// Body previews, arrow commits.
 function CallerButton({ principal, onPreview, onNavigate, marked = false }) {
   const d = principal.display || {};
   const accent = d.accent || "#94a3b8";
@@ -13,19 +12,8 @@ function CallerButton({ principal, onPreview, onNavigate, marked = false }) {
   return (
     <div
       className={`ps-caller-btn${marked ? " ps-caller-score-highlight" : ""}`}
-      role="button"
-      tabIndex={0}
       title={`Preview ${d.name}${d.sub ? ` ${d.sub}` : ""}`}
-      onClick={(e) => {
-        e.stopPropagation();
-        preview();
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          preview();
-        }
-      }}
+      {...clickable(preview, { stopPropagation: true })}
     >
       <span className="ps-caller-ic" style={{ color: accent }}>
         <GuardGlyph kind={d.kind} accent={accent} title={d.name} />
@@ -60,15 +48,11 @@ export function FunctionPort({
 }) {
   const guard = fnView.guard || {};
   const callers = guard.principals || [];
-  // The pair the score row named: this row AND the one caller it named. Scoped
-  // to the highlighted row and matched on address, so a caller chip is never
-  // marked on a same-named function elsewhere, and never for a controller this
-  // row does not list.
+  // Scoped to the highlighted row and matched on address, so no same-named
+  // function elsewhere or unlisted controller is marked.
   const markedCaller = highlighted && highlightedCaller ? String(highlightedCaller).toLowerCase() : null;
   const nodeRef = useRef(null);
-  // The sidebar scrolls, so a highlighted row can land below its fold — a ring
-  // the user has to go hunting for marks nothing. ``nearest`` keeps it to the
-  // minimum movement needed and is a no-op when the row is already visible.
+  // ``nearest`` is minimal movement and a no-op when already visible.
   useEffect(() => {
     if (!highlighted) return;
     nodeRef.current?.scrollIntoView?.({ block: "nearest" });

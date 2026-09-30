@@ -1,43 +1,23 @@
 """Allocation-order determinism probe (class B).
 
-Runs the REAL static pipeline over the ``exec_arbitrary_binding.sol`` corpus
-fixture and prints a canonical JSON payload with two halves:
+Runs the real static pipeline over ``exec_arbitrary_binding.sol`` and prints:
 
 ``binding``
-    the ``exec.arbitrary`` witness the pipeline publishes. Every run of this
-    probe, under every allocation environment, must produce byte-identical
-    bytes here. Variation is the defect.
+    the published ``exec.arbitrary`` witness; must be byte-identical across the allocation matrix.
 
 ``unordered_control``
-    the *removed* idiom — ``next(iter(<set intersection of Slither variables>))``,
-    copied verbatim from ``services/static/claims/matchers/_taint.py`` as it
-    stood before the fix — recomputed live over the same IR and
-    published beside the real answer. It is an instrument, never a product: the
-    gate requires it to **vary** across the allocation matrix. If it stops
-    varying, the matrix has lost its discriminating power and the gate says so
-    instead of reporting a green it has not earned. A control is only evidence
-    while it still discriminates, and this one proves itself on every run rather
-    than being trusted to still be alive.
+    the removed ``next(iter(<set of Slither variables>))`` idiom (verbatim from pre-fix ``_taint.py``), which must vary,
+or the matrix has lost its power.
 
-Why an allocation matrix and not just repeated processes: Slither's variable
-classes inherit ``object.__hash__``, so set iteration follows allocation
-addresses. Under pymalloc those addresses are a deterministic function of the
-allocation *sequence* — pools are page-aligned, so the low bits that decide a
-small set's probe order survive ASLR unchanged. Measured: the pre-fix code
-produced byte-identical output across 8 fresh processes at a fixed
-``PYTHONHASHSEED``, with and without varied preamble parses, and this probe's
-own control instrument is constant across 30 consecutive pymalloc runs.
-``PYTHONMALLOC=malloc``
-routes object allocation through glibc, whose addresses ASLR does move, and the
-same pre-fix code then answers differently. Re-running processes is not the
-knob; changing the allocator is.
+Why an allocation matrix: Slither variables hash by address. Under pymalloc, addresses follow the allocation sequence
+and the low bits survive ASLR, so repeated processes agree (measured). ``PYTHONMALLOC=malloc`` routes through glibc,
+which ASLR moves.
 
 Usage:
     determinism_probe_taint.py [--preamble name,name]
 
-``--preamble`` parses other corpus fixtures first, so the target parse starts
-from a different heap. Kept because it costs nothing and is the perturbation
-that flipped the real ``LRTSquaredAdmin.rebalance`` pick while the defect was live.
+``--preamble`` parses other fixtures first to perturb the heap; it once flipped the real ``LRTSquaredAdmin.rebalance``
+pick.
 """
 
 from __future__ import annotations
@@ -58,7 +38,6 @@ FIXTURES = REPO / "tests" / "fixtures" / "contracts" / "claims_upgrade_exec"
 
 TARGET = ("exec_arbitrary_binding.sol", "ExecBinding")
 
-# Other corpus fixtures, only ever parsed to leave a heap behind.
 PREAMBLE_FIXTURES: dict[str, tuple[str, str]] = {
     "boring": ("boring_vault_manage.sol", "BoringVault"),
     "safe": ("safe_wallet.sol", "SafeWallet"),
@@ -66,22 +45,14 @@ PREAMBLE_FIXTURES: dict[str, tuple[str, str]] = {
     "plain": ("plain_transfer_call.sol", "PlainTransfer"),
 }
 
-# The published binding this probe refuses to lose. A gate that can be satisfied
-# by emitting nothing is not a gate: if the pipeline stops proving a destination
-# on the one fixture function where the destination IS provable, the comparison
-# below would go green on an empty payload. Suppression is the failure mode that
-# got past every test the last time: a proposal that resolved every binding to
-# ``not_determined`` passed the whole suite while erasing the positive control.
+# Positive control: without it, an empty payload passes. A proposal resolving every binding to ``not_determined`` once
+# passed the whole suite.
 ANCHOR_SIGNATURE = "singlyAssignedLocal(address,bytes)"
 ANCHOR_EXPECTED = {"destination_kind": "param", "destination_param": "a"}
 
 
 def _prefix_idiom_pick(taint_module: Any, ctx: Any, signature: str) -> dict[str, str] | None:
-    """``_taint.arbitrary_exec_taint`` as it stood before the fix.
-
-    Verbatim, including ``next(iter(...))`` over a set of Slither variables —
-    that is the whole point. Only the return shape is narrowed to the two names.
-    """
+    """``_taint.arbitrary_exec_taint`` before the fix, verbatim."""
     from slither.slithir.operations import HighLevelCall, LibraryCall, LowLevelCall
 
     function = taint_module._slither_function(ctx, signature)
@@ -115,7 +86,6 @@ def _prefix_idiom_pick(taint_module: Any, ctx: Any, signature: str) -> dict[str,
 
 
 def _install_control(sink: dict[str, dict[str, str]]) -> None:
-    """Wrap the matcher's taint entry so each call also records the old pick."""
     from services.static.claims.matchers import _taint as taint_module
     from services.static.claims.matchers import exec_arbitrary as exec_module
 
@@ -130,8 +100,7 @@ def _install_control(sink: dict[str, dict[str, str]]) -> None:
             sink[signature] = old
         return real(ctx, signature)
 
-    # exec_arbitrary.py binds the name at import time, so patching the defining
-    # module alone would leave the live call site untouched.
+    # exec_arbitrary.py binds the name at import time.
     exec_module.arbitrary_exec_taint = wrapper
 
 
@@ -147,14 +116,10 @@ def _run(fixture: str, contract: str) -> Mapping[str, Any]:
 
 
 def _suppressions(fixture: str, contract: str) -> dict[str, Any]:
-    """Taint fragments that resolved a PROVEN-ABSENT destination, so no claim was
-    minted (``exec_arbitrary`` drops the ``state_var`` case: the claim asserts a
-    caller-supplied target and ``state_var`` proves the caller supplies none).
+    """Fragments that resolved a proven-absent destination (``state_var``), so no claim was minted.
 
-    Published beside ``binding`` because the suppression is now the ONLY place
-    that fact is observable, and a determinism gate that only diffed the minted
-    claims would stop watching it the moment the claim went away — a coverage
-    hole opened by a correctness fix is still a coverage hole."""
+    Published because this is now the only place the fact is observable.
+    """
     from slither import Slither
 
     from services.static.claims.context import ClaimContext
@@ -185,9 +150,7 @@ def main() -> int:
 
     from utils.logging import configure_logging
 
-    # The probe's own output is the print()s below; this is so the library
-    # code it drives logs through the house JSON handler instead of falling
-    # to lastResort (WARNING-only, unscrubbed).
+    # So library logs go through the JSON handler rather than lastResort (WARNING-only, unscrubbed).
     configure_logging()
 
     control: dict[str, dict[str, str]] = {}
@@ -212,9 +175,7 @@ def main() -> int:
         )
         return 3
 
-    # Exit 4, not 3: the payload is still printed and still worth comparing. A
-    # lost anchor is a separate fact from a varying binding, and the gate reports
-    # both rather than letting the first hide the second.
+    # A lost anchor is separate from a varying binding; report both.
     anchor = binding.get(ANCHOR_SIGNATURE) or {}
     violation = next(
         (

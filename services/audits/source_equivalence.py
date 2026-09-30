@@ -1,20 +1,8 @@
-"""Prove an audit reviewed the code currently deployed at an impl address.
+"""Prove an audit reviewed the code deployed at an impl: if a reviewed commit's source file is byte-identical to the
+verified source, coverage is proven. No compilation needed.
 
-Forensic complement to temporal matching: if the audit PDF mentions commit
-X and commit X's source is byte-identical to the impl's Etherscan-verified
-source, the audit's coverage of that impl is proven. Source-text equality
-is sufficient — no compilation step needed.
-
-Impl source: DB ``SourceFile`` rows first (populated by the static worker),
-Etherscan ``getsourcecode`` fallback. Audit source: GitHub raw, keyed on
-``source_repo`` + ``reviewed_commits``.
-
-Verification returns an ``EquivalenceOutcome`` that distinguishes
-"proven" from each of several failure modes, so callers can persist a
-specific status + reason rather than silently treating every failure as
-"not verified". Status vocabulary lives in ``EQUIVALENCE_STATUSES``;
-transient vs. permanent split in ``TRANSIENT_STATUSES`` so a retry sweep
-knows what's worth re-running.
+Impl source: DB ``SourceFile`` rows, else Etherscan. Audit source: GitHub raw. Outcomes distinguish each failure mode;
+``TRANSIENT_STATUSES`` marks the retryable ones.
 """
 
 from __future__ import annotations
@@ -33,37 +21,21 @@ import requests
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Retry policy for transient GitHub raw fetches.
-#
-# Same shape as services.audits.text_extraction: prod observed bursts of
-# ConnectionResetError(104) hammering raw.githubusercontent.com that turned
-# every flake into a permanent ``transport_error``. Retry runs *inside* the
-# fetch worker so its post-retry outcome — not a flake — is what the
-# hash-level cache (``_fetch_github_raw_hash``) memoizes for the run.
-# ---------------------------------------------------------------------------
+# Retries run inside the fetch so the hash cache memoizes the post-retry outcome, not a flake; RST bursts from
+# raw.githubusercontent.com were becoming permanent ``transport_error``.
 _RETRY_ATTEMPTS: Final[int] = 3
 _RETRY_INITIAL_BACKOFF: Final[float] = 0.5
 _RETRY_BACKOFF_CAP: Final[float] = 10.0
-# 408/429 are transient by spec; 5xx is the HTTP analogue of an RST.
-# 404/403/410 stay terminal — refetching won't materialize a missing file.
+# 404/403/410 stay terminal.
 _TRANSIENT_HTTP_STATUS: Final[frozenset[int]] = frozenset({408, 429, 500, 502, 503, 504})
 
 
 def _retry_sleep(seconds: float) -> None:
-    """Sleep ``seconds`` with ±50% jitter. Factored out so unit tests can
-    stub the wall-clock wait without monkeypatching the whole ``time``
-    module — tests under ``TestFetchGithubRawRetry`` rely on this.
-    """
+    """±50% jitter; separate so tests can stub the wait."""
     time.sleep(random.uniform(seconds * 0.5, seconds * 1.5))
 
 
-# ---------------------------------------------------------------------------
-# Status vocabulary
-# ---------------------------------------------------------------------------
-
-# Every coverage row's ``equivalence_status`` is one of these. Keep in sync
-# with the UI badge mapping in the frontend (ProtocolSurface.jsx).
+# Keep in sync with the frontend badge mapping (ProtocolSurface.jsx).
 EQUIVALENCE_STATUSES = frozenset(
     {
         "proven",  # ✓ files match byte-for-byte
@@ -77,46 +49,26 @@ EQUIVALENCE_STATUSES = frozenset(
         "no_source_repo",  # audit.source_repo is NULL — can't look it up
         "not_attempted",  # row predates verification rollout; needs backfill
         "row_vanished",  # concurrent coverage rebuild deleted the row mid-verify
-        # Deferred-verification states owned by ``workers.coverage_verify``.
-        # ``pending`` is the initial state coverage refresh writes for any
-        # row that *could* be verified later (audit has reviewed_commits +
-        # at least one repo). ``verifying`` is the in-flight sentinel the
-        # worker stamps while running the HTTP probe — stale recovery
-        # reverts it back to ``pending`` after a timeout.
+        # Deferred-verification states owned by ``workers.coverage_verify``; stale ``verifying`` reverts to ``pending``.
         "pending",
         "verifying",
     }
 )
 
-# Subset of statuses where a retry might plausibly succeed (network /
-# rate-limit failures). The rest are semantic — hash_mismatch stays
-# hash_mismatch until code changes on one side, no_reviewed_commit stays
-# until the PDF text is re-extracted, etc.
+# The rest are semantic and don't change without new code or re-extraction.
 TRANSIENT_STATUSES = frozenset({"etherscan_fetch_failed", "github_fetch_failed"})
 
 
-# ---------------------------------------------------------------------------
-# Reviewed-commit extraction
-# ---------------------------------------------------------------------------
-
-
-# 7-40 char hex tokens: 7 is git's abbrev default, 40 is a full SHA.
 _HEX_TOKEN_RE = re.compile(r"\b([0-9a-f]{7,40})\b", re.IGNORECASE)
 
 
-# GitHub repo URL scanner for full-text PDF scraping (Phase D).
-# Matches ``github.com/<owner>/<repo>`` with common surrounding punctuation.
-# Non-anchored — scans body text for occurrences anywhere. Accepts optional
-# trailing ``.git``, ``/tree/...``, ``/blob/...``, ``/pull/...`` etc. and
-# stops at the first path boundary after owner/repo.
+# Unanchored ``github.com/<owner>/<repo>`` scanner, stopping at the first path boundary.
 _GITHUB_REPO_MENTION_RE = re.compile(
     r"github\.com/([A-Za-z0-9][A-Za-z0-9_.-]{0,38})/([A-Za-z0-9][A-Za-z0-9_.-]{0,99})",
     re.IGNORECASE,
 )
 
-# Common GitHub paths under ``github.com/<owner>/`` that aren't protocol
-# repos — profile pages, issue tracker, etc. Exclude to avoid false-matching
-# a URL like ``github.com/etherfi-protocol/issues/42`` as repo ``issues``.
+# So ``github.com/etherfi-protocol/issues/42`` isn't read as repo ``issues``.
 _GITHUB_NON_REPO_OWNERS = frozenset(
     {
         "orgs",
@@ -171,14 +123,9 @@ _GITHUB_NON_REPO_REPOS = frozenset(
 
 
 def extract_referenced_repos(text: str) -> list[str]:
-    """Pull every ``github.com/<owner>/<repo>`` reference from audit text.
+    """Every ``owner/repo`` mentioned, deduped, lowercased, first-seen.
 
-    Returns deduped ``"owner/repo"`` strings, lowercased, first-seen order.
-    Used by source-equivalence as fallback candidates when the primary
-    ``AuditReport.source_repo`` doesn't contain the audit's reviewed commit
-    — common when discovery recorded the auditor's publication repo instead
-    of the protocol's own. Skips obvious GitHub-system paths (``issues``,
-    ``pulls``, user profile URLs, etc.).
+    Fallbacks for when ``source_repo`` is the auditor's publication repo.
     """
     if not text:
         return []
@@ -187,7 +134,6 @@ def extract_referenced_repos(text: str) -> list[str]:
     for m in _GITHUB_REPO_MENTION_RE.finditer(text):
         owner = m.group(1).lower()
         repo = m.group(2).lower()
-        # Strip trailing .git that the regex allowed through.
         if repo.endswith(".git"):
             repo = repo[: -len(".git")]
         if not repo:
@@ -205,24 +151,15 @@ def extract_referenced_repos(text: str) -> list[str]:
 
 
 def extract_reviewed_commits(text: str) -> list[str]:
-    """Pull commit-SHA-like hex tokens from audit PDF text.
-
-    Deduped, lowercased, first-seen order. Pure-digit tokens (block
-    numbers) and all-same-char tokens (``0000000``, ``ffffffff``) are
-    rejected as noise. No GitHub validation — the caller decides.
-    """
+    """SHA-like hex tokens, deduped, lowercased, first-seen. Rejects pure digits and all-same-char padding."""
     if not text:
         return []
     seen: set[str] = set()
     out: list[str] = []
     for m in _HEX_TOKEN_RE.finditer(text):
         token = m.group(1).lower()
-        # Require at least one hex letter so we don't catch block numbers,
-        # issue IDs, etc. that happen to be 7+ chars of digits.
         if not any(c in "abcdef" for c in token):
             continue
-        # Reject all-same-char tokens (0000000, aaaaaaa, ffffffff) — common
-        # padding / placeholder strings.
         if len(set(token)) < 3:
             continue
         if token in seen:
@@ -232,71 +169,36 @@ def extract_reviewed_commits(text: str) -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Fetch diagnostics
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class GithubFetch:
-    """Outcome of a single GitHub raw fetch.
-
-    ``content`` is non-None only on success. ``status`` + ``detail``
-    distinguish transient transport failures (``http_5xx``,
-    ``transport_error``) from permanent ones (``http_404``,
-    ``content_type_rejected``, ``size_cap_exceeded``) so the orchestrator
-    can emit the right EQUIVALENCE_STATUS.
-    """
+    """``content`` only on success; ``status`` separates transient from permanent failures."""
 
     content: str | None
-    # "ok" | "http_404" | "http_5xx" | "http_other" | "transport_error"
-    # | "content_type_rejected" | "size_cap_exceeded"
     status: str
     detail: str
 
 
 @dataclass(frozen=True)
 class EtherscanFetch:
-    """Outcome of an Etherscan verified-source fetch.
-
-    ``source`` is non-None only when ``status == 'ok'``. ``status`` is
-    one of ``'ok'`` (verified source parsed), ``'unverified'`` (Etherscan
-    returned the empty-source sentinel), ``'fetch_failed'`` (API error,
-    transient).
-    """
-
     source: VerifiedSource | None
-    # "ok" | "unverified" | "fetch_failed"
     status: str
     detail: str
 
 
-# ---------------------------------------------------------------------------
-# Etherscan source fetch
-# ---------------------------------------------------------------------------
-
-
 def _hash_source_text(text: str) -> str:
-    """Stable hash of a source file's content for equality comparison."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
 class VerifiedSource:
-    """Parsed Etherscan verified-source response for one address."""
-
     contract_name: str | None
     compiler_version: str | None
     files: dict[str, str]  # path -> sha256(content)
 
 
 def fetch_etherscan_source_files(address: str, *, chain_id: int) -> EtherscanFetch:
-    """Return parsed verified-source for ``address`` as file-path→sha256.
-
-    Delegates parsing to ``services.discovery.fetch.parse_sources`` — the
-    same function the discovery worker uses when persisting source to the
-    DB. Distinguishes three outcomes: parsed (``ok``), contract-not-verified
-    (``unverified``), transport/API failure (``fetch_failed``).
+    """Parsed verified source as path -> sha256 via the same parser discovery uses: ``ok``, ``unverified``, or
+    ``fetch_failed``.
     """
     from services.clients.etherscan import get
     from services.discovery.fetch import parse_sources
@@ -311,8 +213,7 @@ def fetch_etherscan_source_files(address: str, *, chain_id: int) -> EtherscanFet
     compiler_version = (result.get("CompilerVersion") or "").strip() or None
     files = parse_sources(result)
     if not files:
-        # Etherscan returns empty SourceCode when the address has no verified
-        # source. This is a permanent status until someone submits verification.
+        # Permanent until someone verifies the contract.
         return EtherscanFetch(
             source=None,
             status="unverified",
@@ -331,13 +232,7 @@ def fetch_etherscan_source_files(address: str, *, chain_id: int) -> EtherscanFet
 
 
 def fetch_db_source_files(session: Any, contract_id: int) -> VerifiedSource | None:
-    """Return a Contract's verified source from ``SourceFile`` rows.
-
-    Reuses what the discovery worker already persisted (keyed on
-    ``Contract.job_id``) to avoid an Etherscan round-trip. Returns ``None``
-    when the contract hasn't been analyzed yet — caller falls back to
-    ``fetch_etherscan_source_files``.
-    """
+    """Source from persisted ``SourceFile`` rows; ``None`` if not yet analyzed."""
     from db.models import Contract
     from db.queue import get_source_files
 
@@ -347,8 +242,7 @@ def fetch_db_source_files(session: Any, contract_id: int) -> VerifiedSource | No
     try:
         files = get_source_files(session, contract.job_id)
     except Exception as exc:
-        # Caller falls back to fetch_etherscan_source_files; the empty return is a
-        # clean miss, not a degraded outcome — level audit only, no record_degraded.
+        # A clean miss (caller falls back), so no record_degraded.
         logger.warning(
             "DB source file fetch failed for contract %s: %s",
             contract_id,
@@ -367,12 +261,7 @@ def fetch_db_source_files(session: Any, contract_id: int) -> VerifiedSource | No
 
 
 def fetch_contract_source(session: Any, contract_id: int) -> EtherscanFetch:
-    """DB-first resolver: try ``SourceFile`` rows, fall back to Etherscan.
-
-    Wraps the DB result in the same ``EtherscanFetch`` envelope the
-    Etherscan call returns so the orchestrator handles one shape. DB-hit
-    becomes ``status='ok'`` with ``detail=''``.
-    """
+    """DB-first, wrapped in the same ``EtherscanFetch`` envelope."""
     from db.models import Contract
 
     db_source = fetch_db_source_files(session, contract_id)
@@ -387,8 +276,7 @@ def fetch_contract_source(session: Any, contract_id: int) -> EtherscanFetch:
         )
     from utils.chains import require_chain
 
-    # NULL Contract.chain is legacy-mainnet by convention (same coalesce as
-    # routers/jobs.py); a named-but-unknown chain fails loud.
+    # NULL chain is legacy mainnet; an unknown named chain fails loud.
     return fetch_etherscan_source_files(
         contract.address,
         chain_id=require_chain(
@@ -397,27 +285,14 @@ def fetch_contract_source(session: Any, contract_id: int) -> EtherscanFetch:
     )
 
 
-# Kept for backwards compatibility with callers expecting the old
-# VerifiedSource | None shape. Prefer ``fetch_contract_source`` in new code.
+# Legacy shape; prefer ``fetch_contract_source``.
 def fetch_contract_source_files(session: Any, contract_id: int) -> VerifiedSource | None:
     return fetch_contract_source(session, contract_id).source
 
 
-# ---------------------------------------------------------------------------
-# GitHub source fetch
-# ---------------------------------------------------------------------------
-
-
 def _fetch_github_raw(url: str, token: str | None) -> GithubFetch:
-    """Fetch a GitHub raw URL, returning a diagnostic-rich outcome.
-
-    The full body is returned here but not memoized; the process-global
-    cache lives one level up in :func:`_fetch_github_raw_hash`, which keeps
-    only the content hash. Retries transient transport flakes
-    (``ConnectionError``, ``Timeout``) and transient HTTP statuses
-    (408/429/5xx) with jittered exponential backoff *before* the hash-level
-    cache memoizes the outcome — so a single RST burst can't poison a URL
-    for the worker's process lifetime.
+    """Fetch a raw URL with diagnostics, retrying transient failures before the hash cache memoizes the outcome, so
+    one RST burst can't poison a URL for the process lifetime.
     """
     headers = {"User-Agent": "PSAT-source-equivalence/0.1"}
     if token:
@@ -448,7 +323,7 @@ def _fetch_github_raw(url: str, token: str | None) -> GithubFetch:
             backoff = min(backoff * 2, _RETRY_BACKOFF_CAP)
             continue
         except requests.RequestException as exc:
-            # SSLError / InvalidURL / etc. — not transport flakes, retry won't help.
+            # Not a transport flake; retry won't help.
             logger.warning("github raw fetch failed for %s: %s", url, exc)
             return GithubFetch(content=None, status="transport_error", detail=str(exc))
 
@@ -477,9 +352,7 @@ def _fetch_github_raw(url: str, token: str | None) -> GithubFetch:
                 detail=f"{url}: {r.status_code}",
             )
 
-        # Reject likely binary or huge responses — source files are plain text
-        # and shouldn't exceed a few hundred KB. This guards against a repo
-        # path collision with a PDF or similar.
+        # Guards against a path colliding with a PDF or similar.
         ct = (r.headers.get("content-type") or "").lower()
         if ct and "text" not in ct and "application/octet-stream" not in ct:
             return GithubFetch(
@@ -495,8 +368,6 @@ def _fetch_github_raw(url: str, token: str | None) -> GithubFetch:
             )
         return GithubFetch(content=r.text, status="ok", detail="")
 
-    # Loop fell through: every attempt was transient. Surface the most
-    # recent failure shape so callers can distinguish transport vs 5xx.
     if last_transport_exc is not None:
         return GithubFetch(content=None, status="transport_error", detail=str(last_transport_exc))
     assert last_5xx_status is not None  # one branch must have set this
@@ -505,15 +376,12 @@ def _fetch_github_raw(url: str, token: str | None) -> GithubFetch:
 
 @dataclass(frozen=True)
 class GithubHashResult:
-    """Hash of a file at a specific (repo, commit, path), or a failure detail."""
-
     sha256: str | None
     status: str  # mirrors GithubFetch.status
     detail: str
 
 
 def _coerce_github_hash_result(result: Any) -> GithubHashResult:
-    """Backward-compat for legacy test stubs that return bare hashes/None."""
     if isinstance(result, GithubHashResult):
         return result
     if isinstance(result, str):
@@ -530,15 +398,9 @@ def _coerce_github_hash_result(result: Any) -> GithubHashResult:
 
 @functools.lru_cache(maxsize=4096)
 def _fetch_github_raw_hash(url: str, token: str | None) -> GithubHashResult:
-    """Memoized content hash for ``url`` — the process-global GitHub cache.
+    """Process-global memoized hash, keyed by ``(url, token)``, capped at 4096.
 
-    Keyed by ``(url, token)`` and capped at 4096 entries by ``lru_cache``.
-    Stores only the sha256 (plus the fetch status/detail), never the body,
-    so each row is a fixed ~100 bytes regardless of file size and the entry
-    cap is a real memory bound. The full text from :func:`_fetch_github_raw`
-    is hashed and discarded here. Terminal failures (404, content-type/size
-    rejects, exhausted retries) cache their status too, so a known outcome
-    is a single lookup per run.
+    Stores only the sha256 and status so the cap is a real memory bound; terminal failures are cached too.
     """
     fetch = _fetch_github_raw(url, token)
     if fetch.content is None:
@@ -547,14 +409,7 @@ def _fetch_github_raw_hash(url: str, token: str | None) -> GithubHashResult:
 
 
 def fetch_github_source_hash(repo: str, commit: str, path: str, *, token: str | None = None) -> GithubHashResult:
-    """Hash the file at ``github.com/<repo>/<commit>/<path>``.
-
-    Returns a ``GithubHashResult``: ``sha256`` is set on ``status='ok'``,
-    ``None`` otherwise. The caller maps the status to the appropriate
-    ``EQUIVALENCE_STATUS`` (e.g. ``http_404`` alone is ambiguous — it
-    could be ``commit_not_found_in_repo`` or ``candidate_path_missing``
-    depending on whether the commit itself resolved).
-    """
+    """``http_404`` alone is ambiguous: the caller maps it to commit-not-found or path-missing."""
     if not (repo and commit and path):
         return GithubHashResult(
             sha256=None,
@@ -566,33 +421,16 @@ def fetch_github_source_hash(repo: str, commit: str, path: str, *, token: str | 
 
 
 def _commit_exists_in_repo(repo: str, commit: str, *, token: str | None = None) -> GithubHashResult:
-    """Probe whether a commit resolves in ``repo``.
+    """Whether a commit resolves in ``repo``, probing ``README.md`` at the ref, to tell a bad SHA from a path miss.
 
-    Fetches the repo's root tree at the commit ref — one URL, returns a
-    success/failure diagnostic (``status == 'ok'`` ⇔ the commit resolves).
-    Used to distinguish a real "commit not found" (bad SHA / force-push)
-    from a "commit exists but this file isn't in it" (path miss).
-
-    Hits ``raw.githubusercontent.com/<repo>/<commit>/README.md`` as a
-    cheap probe. If the repo has no README (uncommon) this still reports
-    ``http_404`` which degrades the diagnosis — acceptable edge case.
+    A repo without a README degrades the diagnosis.
     """
     url = f"https://raw.githubusercontent.com/{repo}/{commit}/README.md"
     return _fetch_github_raw_hash(url, token)
 
 
-# ---------------------------------------------------------------------------
-# Candidate path generation
-# ---------------------------------------------------------------------------
-
-
 def _candidate_paths_for_name(name: str, etherscan_paths: list[str]) -> list[str]:
-    """Paths in Etherscan's source that plausibly correspond to ``name``.
-
-    Prefers Etherscan paths verbatim (they carry the project's actual
-    layout); falls back to conventional ``src/`` / ``contracts/`` when the
-    bundle doesn't include a matching name (flattened verification).
-    """
+    """Etherscan paths verbatim (real layout), falling back to ``src/`` / ``contracts/`` for flattened verification."""
     name_lc = name.lower()
     matches = [p for p in etherscan_paths if p.rsplit("/", 1)[-1].lower() in (f"{name_lc}.sol", f"{name_lc}.vy")]
     if matches:
@@ -600,15 +438,8 @@ def _candidate_paths_for_name(name: str, etherscan_paths: list[str]) -> list[str
     return [f"src/{name}.sol", f"contracts/{name}.sol"]
 
 
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class EquivalenceMatch:
-    """Proof that audit at commit X reviewed the source file at path Y."""
-
     commit: str
     scope_name: str
     etherscan_path: str
@@ -617,12 +448,6 @@ class EquivalenceMatch:
 
 @dataclass(frozen=True)
 class EquivalenceOutcome:
-    """Verdict for one (audit, matched_name) verification attempt.
-
-    ``status`` is one of ``EQUIVALENCE_STATUSES``. ``reason`` is a short
-    human string. ``matches`` is non-empty only when ``status='proven'``.
-    """
-
     status: str
     reason: str
     matches: tuple[EquivalenceMatch, ...] = field(default_factory=tuple)
@@ -638,38 +463,14 @@ def verify_audit_covers_impl(
     specific_commit: str | None = None,
     fallback_repos: list[str] | None = None,
 ) -> EquivalenceOutcome:
-    """Verify one audit reviewed one specific contract (by ``scope_name``).
+    """Verify one audit reviewed one contract (``scope_name``), scoped so the reason describes this row.
 
-    Scoped per ``scope_name`` — NOT the full audit scope — so the returned
-    reason describes what actually happened for the coverage row being
-    verified (fixes a reviewer-flagged bug where mismatched Vault files
-    could show up as the reason for a Pool row).
+    ``specific_commit`` narrows to the auditor-pinned SHA. ``fallback_repos`` are tried when ``source_repo`` lacks the
+    commit (auditors often publish in a different repo).
 
-    ``specific_commit`` (Phase F) narrows verification to exactly that
-    commit, ignoring the broader ``reviewed_commits`` list. Used when the
-    audit's scope table pinned a specific reviewed commit to this contract
-    — so ``hash_mismatch`` means "the auditor-declared commit's file
-    differs" rather than "one of many SHAs in the PDF differs." Tighter
-    signal, same verifier machinery.
-
-    ``fallback_repos`` (Phase D) is a list of additional ``owner/repo``
-    candidates to try when ``source_repo`` returns ``commit_not_found_in_repo``
-    or ``no_source_repo``. The auditor often publishes in one repo
-    (e.g. ``Cyfrin/cyfrin-audit-reports``) but reviewed code from a
-    different repo (the protocol's own). The fallback list is typically
-    the ``referenced_repos`` field on ``AuditReport`` — every repo the
-    PDF text mentioned. First repo that produces a better outcome wins.
-
-    Returns an ``EquivalenceOutcome``:
-    - ``proven`` — at least one (commit, path) pair matched byte-for-byte
-    - ``hash_mismatch`` — both sides returned content, hashes differ
-    - ``commit_not_found_in_repo`` — every commit 404s in every tried repo
-    - ``candidate_path_missing`` — commits exist; no candidate path found on GitHub
-    - ``github_fetch_failed`` — 5xx / transport error on every attempted fetch
-    - ``no_reviewed_commit`` / ``no_source_repo`` — fast-fails
+    Statuses: ``proven``, ``hash_mismatch``, ``commit_not_found_in_repo``, ``candidate_path_missing``,
+    ``github_fetch_failed``, ``no_reviewed_commit`` / ``no_source_repo``.
     """
-    # specific_commit overrides the list when provided — verify against
-    # exactly that one SHA.
     if specific_commit:
         reviewed_commits = [specific_commit]
 
@@ -679,9 +480,6 @@ def verify_audit_covers_impl(
             reason="audit has no parseable commit SHAs",
         )
 
-    # Assemble the candidate repo list: source_repo first (preserves
-    # legacy call sites), then the referenced_repos fallback. Dedupe
-    # while preserving order.
     candidate_repos: list[str] = []
     seen_repos: set[str] = set()
     if source_repo:
@@ -700,13 +498,8 @@ def verify_audit_covers_impl(
             reason="audit has no source_repo or fallback repos",
         )
 
-    # Try each repo. Outcome priority when no proof is found:
-    #   proven > hash_mismatch > candidate_path_missing > github_fetch_failed
-    #         > commit_not_found_in_repo
-    # The first proven wins immediately; otherwise keep the strongest
-    # negative signal for the final verdict. Avoids masking a real
-    # hash_mismatch (found the code, it differs) behind a 404 from a
-    # different repo we also happened to try.
+    # proven > hash_mismatch > candidate_path_missing > github_fetch_failed > commit_not_found_in_repo, so a real
+    # mismatch isn't masked by another repo's 404.
     outcome_rank = {
         "proven": 5,
         "hash_mismatch": 4,
@@ -739,10 +532,6 @@ def _verify_single_repo(
     source_repo: str,
     github_token: str | None = None,
 ) -> EquivalenceOutcome:
-    """Per-repo verification — the original single-repo logic extracted so
-    the multi-repo wrapper can iterate. Returns the status describing what
-    happened with THIS specific repo.
-    """
     if not impl_source.files:
         return EquivalenceOutcome(
             status="etherscan_unverified",
@@ -757,21 +546,14 @@ def _verify_single_repo(
     etherscan_paths = list(impl_source.files.keys())
     candidate_paths = _candidate_paths_for_name(scope_name, etherscan_paths)
 
-    # Accumulate evidence across (commit, path) attempts. We can prove on
-    # the first match and short-circuit; otherwise we need to summarize
-    # the most diagnostic failure.
     matches: list[EquivalenceMatch] = []
     any_commit_resolved = False  # at least one commit had *anything* resolve → not commit_not_found_overall
     any_hash_mismatch = False  # files on both sides, content differs
     any_transient = False  # saw a 5xx / transport err → retry later
     details: list[str] = []
 
-    # Flatten the (commit × path) cross-product into one parallel fetch.
-    # Each ``fetch_github_source_hash`` is an independent HTTP call; the
-    # prior nested loop walked the cross-product serially so a wide audit
-    # paid one RTT per pair (5 commits × 20 paths = 100 sequential GitHub
-    # round-trips per scope name). Skips pairs whose Etherscan path is
-    # missing so ``candidate_path_missing`` stays accurate.
+    # Parallel over (commit × path): serial fetching cost ~100 round-trips per scope name. Pairs without an Etherscan
+    # path are skipped so ``candidate_path_missing`` stays accurate.
     from services.concurrency import parallel_map
 
     fetch_pairs: list[tuple[str, str]] = []
@@ -790,10 +572,7 @@ def _verify_single_repo(
         for pair, outcome in results:
             fetch_results[pair] = outcome
 
-    # Replay the per-commit branching logic against the pre-fetched results.
-    # ``commit_hit_anything`` / ``commit_had_404`` / ``commit_had_transient``
-    # are still reasoned about per-commit so the negative-signal classification
-    # below stays identical to the prior sequential implementation.
+    # Replayed per commit so classification matches the serial version.
     for commit in reviewed_commits:
         commit_hit_anything = False
         commit_had_transient = False
@@ -804,9 +583,7 @@ def _verify_single_repo(
                 continue
             raw_outcome = fetch_results.get((commit, path))
             if isinstance(raw_outcome, BaseException):
-                # Treat fetch crashes the same as transport errors so the
-                # parallel path can't escalate a failure mode the serial
-                # path would have caught.
+                # Crashes count as transport errors, as the serial path did.
                 commit_had_transient = True
                 any_transient = True
                 details.append(f"{commit[:8]} {path}: crash: {raw_outcome}")
@@ -832,20 +609,15 @@ def _verify_single_repo(
                 commit_had_transient = True
                 any_transient = True
                 details.append(f"{commit[:8]} {path}: {gh.detail}")
-            # http_other / content_type_rejected / size_cap_exceeded: treat as 404-ish
 
         if commit_hit_anything:
             any_commit_resolved = True
         elif commit_had_404 and not commit_had_transient:
-            # Every candidate path 404'd for this commit. Differentiate
-            # "commit doesn't exist" from "commit exists but path missing"
-            # by probing the repo root at the commit.
+            # Probe the repo root to tell a missing commit from a missing path.
             probe = _commit_exists_in_repo(source_repo, commit, token=github_token)
             if probe.status == "ok":
-                # Commit resolves — just our candidate paths didn't match.
                 any_commit_resolved = True
 
-    # Proof wins over everything.
     if matches:
         return EquivalenceOutcome(
             status="proven",
@@ -853,16 +625,13 @@ def _verify_single_repo(
             matches=tuple(matches),
         )
 
-    # No proof. Classify the strongest negative signal.
     if any_hash_mismatch:
-        # Files exist on both sides but differ. Strong negative evidence.
         return EquivalenceOutcome(
             status="hash_mismatch",
             reason="; ".join(details[:3]) or f"files differ for {scope_name}",
         )
 
     if not any_commit_resolved:
-        # Every commit's probe 404'd. Audit reference rot / wrong repo.
         if any_transient:
             return EquivalenceOutcome(
                 status="github_fetch_failed",
@@ -873,115 +642,8 @@ def _verify_single_repo(
             reason=f"none of {len(reviewed_commits)} commit(s) resolve in {source_repo}",
         )
 
-    # Commits resolve, but our candidate paths for ``scope_name`` never hit.
-    # Most common cause: Etherscan's layout doesn't match GitHub's, or the
-    # contract is in a subpath our heuristic doesn't guess.
+    # Usually Etherscan's layout differs from GitHub's.
     return EquivalenceOutcome(
         status="candidate_path_missing",
         reason=f"commits exist; candidate paths ({candidate_paths}) not in repo",
-    )
-
-
-def check_audit_covers_impl(
-    *,
-    reviewed_commits: list[str],
-    scope_contracts: list[str],
-    impl_source: VerifiedSource,
-    source_repo: str | None,
-    github_token: str | None = None,
-) -> list[EquivalenceMatch]:
-    """Legacy multi-scope wrapper: tries every scope name, returns all proven
-    matches as a flat list.
-
-    Kept for test and script callers that still iterate the whole audit
-    scope. Prefer ``verify_audit_covers_impl`` (single-name, structured
-    outcome) in new code — the row-level statuses on
-    ``audit_contract_coverage`` need per-name scoping to be accurate.
-    """
-    if not scope_contracts:
-        return []
-    out: list[EquivalenceMatch] = []
-    for name in scope_contracts:
-        outcome = verify_audit_covers_impl(
-            reviewed_commits=reviewed_commits,
-            scope_name=name,
-            impl_source=impl_source,
-            source_repo=source_repo,
-            github_token=github_token,
-        )
-        out.extend(outcome.matches)
-    return out
-
-
-def check_audit_row_covers_contract(
-    session: Any,
-    audit_id: int,
-    contract_id: int,
-    *,
-    github_token: str | None = None,
-) -> list[EquivalenceMatch]:
-    """DB-bound wrapper returning proven matches as a flat list.
-
-    Prefer ``verify_audit_row_covers_contract`` in new code — returns a
-    structured outcome so the row-level status can be persisted.
-    """
-    outcome = verify_audit_row_covers_contract(session, audit_id, contract_id, github_token=github_token)
-    return list(outcome.matches)
-
-
-def verify_audit_row_covers_contract(
-    session: Any,
-    audit_id: int,
-    contract_id: int,
-    *,
-    matched_name: str | None = None,
-    github_token: str | None = None,
-) -> EquivalenceOutcome:
-    """DB-bound single-name verification: resolve inputs, delegate to
-    ``verify_audit_covers_impl``.
-
-    When ``matched_name`` is ``None``, falls back to "first scope entry"
-    for backwards compatibility with callers that don't track matched_name.
-    New coverage.py passes the ``CoverageMatch.matched_name`` explicitly
-    so the returned status/reason actually pertains to the row being
-    persisted.
-    """
-    from db.models import AuditReport, Contract
-
-    audit = session.get(AuditReport, audit_id)
-    contract = session.get(Contract, contract_id)
-    if audit is None or contract is None:
-        return EquivalenceOutcome(status="not_attempted", reason="audit or contract row missing")
-
-    commits = list(audit.reviewed_commits or [])
-    scope = list(audit.scope_contracts or [])
-    repo = audit.source_repo
-    fallback_repos = list(audit.referenced_repos or [])
-    if not commits:
-        return EquivalenceOutcome(status="no_reviewed_commit", reason="audit has no reviewed_commits")
-    if not repo and not fallback_repos:
-        return EquivalenceOutcome(status="no_source_repo", reason="audit has no source_repo or referenced_repos")
-    if not contract.address:
-        return EquivalenceOutcome(status="not_attempted", reason="contract has no address")
-
-    name = matched_name or (scope[0] if scope else "")
-    if not name:
-        return EquivalenceOutcome(status="no_reviewed_commit", reason="no matched_name and empty scope")
-
-    fetch = fetch_contract_source(session, contract_id)
-    if fetch.status == "unverified":
-        return EquivalenceOutcome(status="etherscan_unverified", reason=fetch.detail)
-    if fetch.status == "fetch_failed":
-        return EquivalenceOutcome(status="etherscan_fetch_failed", reason=fetch.detail)
-    if fetch.source is None:
-        # Belt-and-suspenders: ok status should always carry a source.
-        return EquivalenceOutcome(status="etherscan_fetch_failed", reason="empty source")
-
-    return verify_audit_covers_impl(
-        reviewed_commits=commits,
-        scope_name=name,
-        impl_source=fetch.source,
-        source_repo=repo,
-        github_token=github_token,
-        fallback_repos=fallback_repos,
     )

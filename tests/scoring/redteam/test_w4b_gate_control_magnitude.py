@@ -1,4 +1,4 @@
-"""W4b — compositional gate-control magnitude."""
+"""W4b: compositional gate-control magnitude (Phase 6)."""
 
 from __future__ import annotations
 
@@ -38,10 +38,10 @@ from tests.support.scoring_builders import (
 def test_w4b_a_gate_composes_the_destination_functions_own_witness(fold):
     """Act-as composition, whole. The dollars are the DESTINATION's witness, not the sheet.
 
-    Three witnesses and the row publishes all three: the role licenses ``exit``
-    at the vault, ``exit`` carries its own fork-proven ``flow.out`` magnitude,
-    and a restricted authority-gated function of the seized node is witnessed
-    calling that selector on a state variable read on-chain holding the vault.
+    Three witnesses, all published: the role licenses ``exit`` at the vault,
+    ``exit`` carries its own fork-proven ``flow.out`` magnitude, and a restricted
+    authority-gated function of the seized node calls that selector on a state
+    variable read on-chain holding the vault.
     """
     document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case())
     row = _gate_row(document)
@@ -72,8 +72,8 @@ def test_w4b_a_gate_composes_the_destination_functions_own_witness(fold):
 def test_w4b_no_composed_magnitude_exceeds_the_destinations_own_bound(fold):
     """The anti-composition regression test.
 
-    The destination's witness is the ceiling and the destination's sheet is the
-    other ceiling; the published figure clears neither, whichever is lower.
+    The destination's witness and its sheet are both ceilings; the published
+    figure clears whichever is lower.
     """
     for sheet, expected in ((5_000_000.0, 1_000_000.0), (250_000.0, 250_000.0)):
         document = fold(
@@ -92,12 +92,11 @@ def test_w4b_no_composed_magnitude_exceeds_the_destinations_own_bound(fold):
 def test_b7_a_total_composed_from_extraction_ceilings_is_not_published_as_a_floor(fold):
     """The row header published BOTH directions of one bound.
 
-    Every dollar of this row's value is a composed figure, and the row names
-    which entities those are. The header said ``value_at_stake_is_floor`` and
-    the band said ``">= "``, so the same row published a floor over a sum of
-    ceilings — and the UI painted the badge. Ceilings do not become a floor by
-    being summed, and the coverage gaps mean the total is not a ceiling on the
-    row either.
+    Every dollar of this row's value is a composed figure. The header said
+    ``value_at_stake_is_floor`` and the band said ``">= "``, so the row
+    published a floor over a sum of ceilings and the UI painted the badge.
+    Ceilings do not become a floor by being summed, and coverage gaps mean the
+    total is not a ceiling either.
     """
     document = fold(_composing_signals(), principals=_composing_principals(), **_composing_case())
     row = _gate_row(document)
@@ -122,11 +121,9 @@ def test_b7_a_total_composed_from_extraction_ceilings_is_not_published_as_a_floo
 def test_b7_every_contribution_a_ceiling_with_no_coverage_gap_publishes_a_ceiling(fold):
     """The second arm, which the reference corpus never reaches.
 
-    Aliasing the seized node onto the vault leaves the row ONE priced entity,
-    whose whole figure is composed: no instance is undetermined and no entity
-    holds an unpriced asset, so nothing is missing from the sum and the total
-    bounds the principal from above. Implemented and asserted rather than left
-    as a branch nobody has executed.
+    Aliasing the seized node onto the vault leaves ONE priced entity whose whole
+    figure is composed, with nothing missing from the sum, so the total bounds
+    the principal from above. Asserted rather than left as an unexecuted branch.
     """
     document = fold(
         _composing_signals(),
@@ -148,12 +145,10 @@ def test_b7_every_contribution_a_ceiling_with_no_coverage_gap_publishes_a_ceilin
 def test_b7_a_row_mixing_a_ceiling_with_an_ungraded_figure_claims_neither_bound(fold):
     """The MIXED shape, end to end: one ceiling beside one figure of its own.
 
-    A second call on the same row carries its own magnitude witness, so its
-    entity is priced from that and never from composition. The row's total is
-    then part extraction ceiling and part figure this fold does not grade for
-    direction — an at-most over the sum would claim a bound the second half does
-    not support, and the basis has to count which half is which rather than say
-    "every one of them".
+    A second call with its own magnitude witness prices its entity without
+    composition. The total is then part extraction ceiling and part figure not
+    graded for direction, so an at-most would claim a bound the second half does
+    not support, and the basis must count which half is which.
     """
     witnessed = sig(
         claim_id="authority.replace",
@@ -187,9 +182,9 @@ def _attributed(usd: float, **over: Any) -> FunctionSignal:
     """A ``flow.out`` instance whose figure came off the ATTRIBUTION path.
 
     ``proven_upper_bound`` is the constant-amount probe crediting a holder's
-    whole priced balance — the live shape behind the reference corpus's rank-1
-    finding, and no ceiling to :func:`_ceiling_bearing_basis`, which is exactly
-    why its prose used to be written from coverage alone.
+    whole priced balance (the live shape behind the reference corpus's rank-1
+    finding); it is no ceiling to :func:`_ceiling_bearing_basis`, which is why
+    its prose used to be written from coverage alone.
     """
     return flow_sig(
         authority_openness="restricted",
@@ -203,7 +198,6 @@ def _attributed(usd: float, **over: Any) -> FunctionSignal:
 
 
 def _unwitnessed_elsewhere() -> FunctionSignal:
-    """A sibling instance on the same row that answered no magnitude at all."""
     return flow_sig(
         function_name="g",
         selector="0xfeedface",
@@ -219,10 +213,9 @@ def test_f1_an_attribution_derived_total_under_a_gap_names_the_refusal_not_a_flo
     """The live carrier: the basis said ">= proven floor" beside no floor.
 
     The string was built from the COVERAGE axis in :func:`_row_value`, where the
-    attribution axis is not visible, so a row whose header refused the floor —
-    ``bound_direction: not_determined``, ``is_floor: false`` — still published
-    floor prose. Both axes are read where the direction is, and the refusal is
-    COUNTED off the membership test it was made on rather than asserted.
+    attribution axis is not visible, so a row whose header refused the floor
+    still published floor prose. Both axes are read where the direction is, and
+    the refusal is COUNTED off the membership test it was made on.
     """
     plane = value_plane(
         {KEY_C: {"usdc": 5_000_000.0}},
@@ -259,9 +252,8 @@ def test_f1_a_floor_counts_the_partly_priced_entities_it_was_earned_on(fold):
     """The mirror face, which the reference corpus has no carrier for.
 
     ``_bound_direction``'s coverage axis reads undetermined instances AND partly
-    priced entities; the floor string counted only the first. A floor earned on
-    the second alone therefore had no floor prose at all, and one earned on both
-    published a count that omitted half of what earned it.
+    priced entities; the floor string counted only the first, so a floor earned
+    on the second alone had no floor prose, and one earned on both omitted half.
     """
     plane = value_plane(
         {KEY_C: {"usdc": 5_000_000.0}},
@@ -299,10 +291,9 @@ def test_b7_a_direction_is_published_only_where_one_was_proven():
     """Two claims and a fall-through, each earned separately.
 
     ``floor`` needs a coverage gap and NO composed figure; ``ceiling`` needs
-    EVERY figure composed and nothing missing from the sum — a gap, a mixed
-    contribution or a withheld hop each defeat it, and each for the same reason:
-    what is absent from the total can only push the truth up, which an at-least
-    survives and an at-most does not.
+    EVERY figure composed and nothing missing from the sum. What is absent from
+    the total can only push the truth up, which an at-least survives and an
+    at-most does not.
     """
     both, one = frozenset({KEY_C, KEY_V}), frozenset({KEY_V})
     direction = FOLD._bound_direction
@@ -336,10 +327,9 @@ def test_b7_a_direction_is_published_only_where_one_was_proven():
 def test_w4b_an_unwitnessed_act_as_step_leaves_the_magnitude_not_determined(fold):
     """The binding rule. A licence says N MAY call D, never that P can make it.
 
-    Each variant removes exactly one part of the act-as witness and each one is
-    enough on its own to withhold the magnitude — including the live corpus
-    shape, where the call site takes its callee as a PARAMETER so nothing
-    witnesses which address it lands on.
+    Each variant removes one part of the act-as witness, and each alone withholds
+    the magnitude, including the live corpus shape where the call site takes its
+    callee as a PARAMETER.
     """
     variants = {
         # the corpus's own AtomicSolverV3 shape: receiver is not a state variable
@@ -380,9 +370,8 @@ def test_w4b_an_unwitnessed_act_as_step_leaves_the_magnitude_not_determined(fold
 def test_w4b_an_empty_licence_map_composes_nothing(fold):
     """A destination reached only through a state-variable hop names no function.
 
-    There is no compositional source for it — nothing said WHICH of its
-    functions the gate reaches — and an empty licence must never be read as
-    "price the sheet".
+    Nothing says WHICH of its functions the gate reaches, and an empty licence
+    must never be read as "price the sheet".
     """
     document = fold(
         _composing_signals(),
@@ -400,7 +389,6 @@ def test_w4b_an_empty_licence_map_composes_nothing(fold):
 
 
 def test_w4b_a_destination_with_no_flow_out_witness_composes_nothing(fold):
-    """Composition REUSES a witness; where there is none there is nothing to reuse."""
     gate, _ = _composing_signals()
     unwitnessed = flow_sig(
         deployment_address=VAULT,
@@ -425,10 +413,9 @@ def test_w4b_a_destination_with_no_flow_out_witness_composes_nothing(fold):
 def test_w4b_a_freeze_has_no_compositional_source_and_stays_floored(fold):
     """Act-as composition leaves pause.set unchanged.
 
-    Nothing composes into "how much a freeze immobilises": the destination
-    witness act-as composition reuses answers how much a CALL MOVES, which is a different
-    quantity. Even with every act-as witness in place the freeze row publishes
-    no magnitude.
+    The destination witness Phase 6 reuses answers how much a CALL MOVES, not how
+    much a freeze immobilises, so even with every act-as witness the freeze row
+    publishes no magnitude.
     """
     freeze = pause_sig(
         function_name="pause",
@@ -449,9 +436,8 @@ def test_w4b_a_freeze_has_no_compositional_source_and_stays_floored(fold):
 def test_w4b_a_composed_magnitude_answers_the_confidence_term(fold):
     """Composing an answer may only raise the term, and only where real.
 
-    The signal whose magnitude composed counts as answered; the unwitnessed
-    freeze beside it does not, so the term rises by exactly one signal's worth
-    and not to the ceiling.
+    The composed signal counts as answered; the unwitnessed freeze beside it does
+    not, so the term rises by exactly one signal's worth.
     """
     signals = _composing_signals()
     without = fold(signals, principals=_composing_principals(), **_composing_case(act_as=act_as_plane()))
@@ -469,14 +455,13 @@ def test_w4b_a_composed_magnitude_answers_the_confidence_term(fold):
 def test_w4b_case2_a_seed_that_cannot_act_composes_nothing_two_hops_out(fold):
     """A seed without a licensed first hop cannot compose a downstream magnitude.
 
-    The timelock behind RolesAuthority ``0x4df6b733`` has no witnessed
-    composed magnitude because the
-    seized node is an AUTHORITY, its own outgoing hop names no licensed function,
-    and the vault two hops out — which has a ``flow.out`` witness and a caller
-    with a full act-as witness — is behind that break. A chain is as strong as
-    its weakest step, so the magnitude stays not_determined for the timelock
-    exactly as it does for the two EOAs the shipped document over-charged. That
-    keeps all three magnitudes not_determined, as this test pins.
+    The spec expected the timelock behind RolesAuthority ``0x4df6b733`` to regain
+    a witnessed magnitude at Phase 6. It does not: the seized node is an
+    AUTHORITY whose outgoing hop names no licensed function, and the vault two
+    hops out is behind that break. A chain is as strong as its weakest step, so
+    the magnitude stays not_determined, as for the two EOAs the shipped document
+    over-charged. That is the OTHER admissible outcome ("both sides
+    fall to not_determined"), and this test pins which.
     """
     signals = _composing_signals()
     document = fold(

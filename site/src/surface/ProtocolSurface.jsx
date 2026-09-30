@@ -1,3 +1,4 @@
+import { companyApi } from "../api/client.js";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -21,13 +22,11 @@ import { useChainScope } from "./hooks/useChainScope.js";
 import { useAuditCoverage } from "./hooks/useAuditCoverage.js";
 import { useSurfaceModel } from "./hooks/useSurfaceModel.js";
 import { useReachOverlay } from "./hooks/useReachOverlay.js";
+import StaleBanner from "../shared/StaleBanner.jsx";
 
-// Audit-coverage highlight set — lives with the coverage hook; re-exported
-// here for existing importers (tests target this module's public surface).
+// Re-exported for existing importers.
 export { auditHighlightSet } from "./hooks/useAuditCoverage.js";
 
-// Chain-scope predicate for principals lives in entityKey.js (shared with the
-// indirect-caller derivation); re-exported here for existing importers.
 export { principalOnChain };
 
 function ProtocolSurface({
@@ -35,38 +34,30 @@ function ProtocolSurface({
   initialData = null,
   initialCoverage = null,
   initialFunctions = null,
+  initialScore = undefined,
   embedded = false,
 }, ref) {
   const isAdmin = useIsAdmin();
-  // initialData / initialFunctions let a parent (CompanyOverview) hand
-  // us the /api/company/{name} payload and /functions map it already
-  // fetched, so we don't fire duplicate requests on mount. Fixtures
-  // (vitest, e2e) still embed functions on each contract entry, so
-  // fall back to those when neither prop is provided.
+  // A parent (CompanyOverview) may hand in data it already fetched, avoiding
+  // duplicate requests. Fixtures embed functions per contract instead.
   const [companyData, setCompanyData] = useState(initialData);
+  const [sectionMetas, setSectionMetas] = useState([]);
   const { availableChains, activeChain, isMultichain, rescopeChain } = useChainScope({
     companyData,
     embedded,
   });
 
-  // Derive functionData from props so a CompanyOverview-supplied
-  // initialFunctions that arrives AFTER mount (its /functions fetch
-  // resolves after /api/company) flows in. The previous
-  // useState(initialFunctionData) seeded once and never resynced, so
-  // the embedded surface stayed permanently empty on hard refresh.
-  // Precedence: prop > locally fetched > inline-on-contract fixtures.
+  // Derived, not seeded state: the parent's /functions can arrive after mount
+  // (a seeded useState stayed empty on hard refresh). Precedence: prop >
+  // locally fetched > inline fixtures.
   const [locallyFetched, setLocallyFetched] = useState(null);
   const functionData = useMemo(() => {
     if (initialFunctions && Object.keys(initialFunctions).length > 0) return initialFunctions;
     if (locallyFetched && Object.keys(locallyFetched).length > 0) return locallyFetched;
     const source = companyData?.contracts || initialData?.contracts;
     if (Array.isArray(source) && source.some((c) => Array.isArray(c.functions))) {
-      // Key by the composite (chain, address) token — uniform with the
-      // /functions endpoint payload (initialFunctions/locallyFetched), which is
-      // now composite-keyed too. Two chains can share an address, so a bare key
-      // would last-wins one chain's functions onto the other. The
-      // per-chain filter is redundant given the composite key but kept so the
-      // inline fixture map stays scoped to what the canvas renders.
+      // Composite keys, like the /functions payload: a bare address would let
+      // one chain's functions overwrite another's.
       return Object.fromEntries(
         source
           .filter((c) => c.address && coalesceChain(c.chain) === activeChain)
@@ -76,16 +67,10 @@ function ProtocolSurface({
     return {};
   }, [initialFunctions, locallyFetched, companyData, initialData, activeChain]);
   const [functionsLoading, setFunctionsLoading] = useState(false);
-  // Single URL writer. Persists a committed selection as ?sel=<addr> — the
-  // address alone determines which card renders, so no view axis is stored.
-  // Also writes the radar deep-link's ?score=1&fn=<sig>. Called imperatively
-  // ONLY from the committing wrappers (select + radar) and the mount restore's
-  // URL normalization — never from a focus preview (search browsing / contract
-  // pager) and never on plain render. Because it fires only after a user commit
-  // (which can only happen after the machines-gated mount restore has run and
-  // read the params), it cannot race the restore; no separate write gate is
-  // needed beyond the per-restore refs below. Legacy ?focus and ?view are
-  // dropped on every write so old-style params don't linger next to ?sel.
+  // The single URL writer: ?sel=<addr> for a committed selection,
+  // ?score=1&fn=<sig> for radar. Called only from committing wrappers and the
+  // mount restore, never from previews, so it can't race the restore. Drops
+  // legacy ?focus/?view on every write.
   const syncUrl = useCallback(({ sel = null, radar: radarSig = null } = {}) => {
     if (embedded) return;
     const url = new URL(window.location.href);
@@ -108,25 +93,17 @@ function ProtocolSurface({
   }, [embedded]);
   const [error, setError] = useState(null);
 
-  // Right sidebar mode: "detail", "agent", "audits", or "activity". Agent is
-  // admin-only, so non-admins open in Detail; admins open in Agent (the chat is
-  // the most useful first stop). Activity is public (its write controls gate
-  // internally). A canvas click switches to Detail in all modes (handlers below).
+  // Agent is admin-only and the most useful first stop for admins; everyone
+  // else opens in Detail.
   const [sidebarMode, setSidebarMode] = useState(() => (isAdmin ? "agent" : "detail"));
-  // If the admin key clears while the admin-only Agent tab is open, fall back to
-  // Detail so the hidden tab's content can't linger. Activity stays allowed.
+  // Don't leave admin-only content on screen after the key clears.
   useEffect(() => {
     if (!isAdmin && sidebarMode === "agent") {
       setSidebarMode("detail");
     }
   }, [isAdmin, sidebarMode]);
-  // Per-proxy upgrade history cache, keyed by job_id. Server's
-  // /api/company/{name} returns upgrade_count=null for protocols whose
-  // chain monitor hasn't ingested events yet (the static-analysis blob in
-  // /api/analyses/{job_id} has the real numbers). We populate this lazily
-  // each time the user opens a proxy in the Upgrades tab so subsequent
-  // visits skip the round-trip and the global proxy list can show real
-  // counts for already-opened proxies.
+  // Upgrade history per proxy job, fetched lazily: /api/company reports
+  // upgrade_count=null until the chain monitor ingests events.
   const [upgradeHistoryCache, setUpgradeHistoryCache] = useState({});
   const cacheUpgradeHistory = useCallback((jobId, history, deps) => {
     if (!jobId) return;
@@ -142,9 +119,6 @@ function ProtocolSurface({
     auditHighlights,
   } = useAuditCoverage({ companyName, initialCoverage, sidebarMode, activeChain });
 
-  // Agent-emitted highlights: addresses the LLM mentioned in its last
-  // answer, intersected server-side with the protocol's in-scope contracts.
-  // Plain state so AgentPanel can replace it via setHighlightedAddresses.
   const [agentHighlights, setAgentHighlights] = useState(null);
 
   const setHighlightedAddresses = setAgentHighlights;
@@ -152,11 +126,11 @@ function ProtocolSurface({
   useEffect(() => {
     if (!companyName) return undefined;
     setError(null);
+    setSectionMetas([]);
     let cancelled = false;
+    const controller = new AbortController();
 
     const haveCompanyData = Boolean(initialData);
-    // Fixtures (vitest, e2e) still embed functions on each contract,
-    // so detect that and skip the /functions fetch in that case.
     const initialFixtureFunctions =
       !initialFunctions &&
       Array.isArray(initialData?.contracts) &&
@@ -165,44 +139,37 @@ function ProtocolSurface({
 
     if (haveCompanyData) setCompanyData(initialData);
 
-    // Fire both fetches in parallel — /api/company and /functions are
-    // independent. /functions is the heavy one (was 120-290 ms + 2.13 MB
-    // of payload inside the main endpoint); doing it alongside keeps the
-    // canvas TTI down without waiting on the function inspector data.
+    // In parallel: /functions is the heavy one (~2 MB).
     if (!haveCompanyData) {
-      fetch(`/api/company/${encodeURIComponent(companyName)}`)
-        .then((r) => {
-          if (!r.ok) throw new Error("Failed to load company overview");
-          return r.json();
-        })
+      Promise.all([
+        companyApi(`/api/company/${encodeURIComponent(companyName)}`, { signal: controller.signal }),
+        companyApi(`/api/company/${encodeURIComponent(companyName)}/summary`, { signal: controller.signal }),
+      ]).then(([overview, summary]) => {
+        if (!cancelled) setSectionMetas((current) => [...current, overview.meta, summary.meta]);
+        return { ...overview.data, ...summary.data };
+      })
         .then((d) => {
           if (cancelled) return;
           setCompanyData(d);
-          // Older / mocked /api/company responses still embed functions
-          // on contract entries (e2e fixtures, legacy backend). The
-          // functionData memo picks those up from companyData.contracts;
-          // no explicit copy needed here.
+          // Legacy/mocked responses embed functions per contract; the
+          // functionData memo picks those up.
         })
         .catch((err) => { if (!cancelled) setError(err.message || "Failed to load surface"); });
     }
 
     if (haveFunctions) {
-      // initialFunctions (or fixture-embedded functions) supplied — clear
-      // any prior loading state so machines aren't gated unnecessarily.
       setFunctionsLoading(false);
     } else if (embedded) {
-      // CompanyOverview already fires /functions for the embedded surface
-      // and threads the result back via initialFunctions; firing again
-      // here doubled the network + DB cost per page-load. Wait for the
-      // prop instead and surface functionsLoading=true so buildMachines
-      // keeps analyzed contracts visible during the gap.
+      // CompanyOverview already fetches /functions for the embedded surface;
+      // wait for the prop rather than doubling the cost. functionsLoading keeps
+      // analyzed contracts visible meanwhile.
       setFunctionsLoading(true);
     } else {
       setFunctionsLoading(true);
-      fetch(`/api/company/${encodeURIComponent(companyName)}/functions`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d) => {
+      companyApi(`/api/company/${encodeURIComponent(companyName)}/functions`, { signal: controller.signal })
+        .then(({ data: d, meta }) => {
           if (cancelled) return;
+          setSectionMetas((current) => [...current, meta]);
           const incoming = d && typeof d === "object" && d.functions;
           if (incoming && Object.keys(incoming).length > 0) {
             setLocallyFetched(incoming);
@@ -214,6 +181,7 @@ function ProtocolSurface({
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [companyName, initialData, initialFunctions]);
 
@@ -242,15 +210,9 @@ function ProtocolSurface({
     focusPreview,
   } = useSurfaceSelection({ entityIndex, machines: allMachines, companyName, chain: activeChain });
 
-  // Restore a persisted selection from the URL on initial data load. Reads
-  // ?sel=, falling back to the legacy ?focus= param so old links still resolve.
-  // A legacy ?view= is parsed and IGNORED — the address alone determines the
-  // card now, which also un-breaks old ?sel=<addr>&view=principal links whose
-  // stored view contradicted the entity's facets. A radar deep-link (?score) is
-  // left to the radar-restore effect below. Runs once, gated on machines so the
-  // entity index can resolve the address; this read happens before any user
-  // commit can fire the URL writer, so the writer never clobbers these params
-  // first.
+  // Restore the selection from ?sel= (or legacy ?focus=) once machines exist.
+  // Legacy ?view= is ignored: the address alone picks the card. ?score deep
+  // links are handled by the radar restore.
   const restoredSelection = useRef(false);
   useEffect(() => {
     if (embedded || restoredSelection.current || !allMachines.length) return;
@@ -263,17 +225,13 @@ function ProtocolSurface({
       select(addr);
       syncUrl({ sel: addr });
     } else {
-      // A garbage/off-index address becomes a camera preview, never a
-      // synthesized junk selection card.
+      // An unknown address previews; it never synthesizes a junk card.
       focusPreview(addr);
     }
   }, [embedded, allMachines, entityIndex, activeChain, select, focusPreview, syncUrl]);
 
-  // Switching chains rescopes the entire page: clear the selection (the same
-  // address can be a different contract — or absent — on the new chain), drop
-  // overlay highlights, and write the shareable ?chain= param (omitted for the
-  // default chain so those links stay clean). The URL selection params are
-  // cleared alongside since they refer to the old chain's entity.
+  // A chain switch rescopes everything: the same address may be a different
+  // contract (or absent) on the new chain. ?chain= is omitted for the default.
   const handleSelectChain = useCallback((name) => {
     rescopeChain(name);
     setAgentHighlights(null);
@@ -282,26 +240,21 @@ function ProtocolSurface({
   }, [rescopeChain, setActiveAuditId, select]);
 
   const handleSelectMachine = useCallback((machine) => {
-    // Any committed selection transition drops the overlay highlights — the
-    // agent green-ring set AND the picked-audit set. Clearing belongs to the
-    // transition, not just the deselect, so a stale highlight can't outrank the
-    // new selection's dimming. (A plain tab-switch keeps the audit pick so
-    // returning to Audits re-lights it; committing to an entity ends it.)
+    // Every committed transition drops overlay highlights so a stale one can't
+    // outrank the new selection's dimming. A plain tab switch keeps the audit
+    // pick.
     setAgentHighlights(null);
     setActiveAuditId(null);
     if (machine) {
       select(machine.address);
       syncUrl({ sel: machine.address });
     } else {
-      // Pane click / deselect — full clear.
       select(null);
       syncUrl({});
     }
   }, [select, syncUrl]);
 
-  // Escape clears the committed selection — the same full clear a pane click
-  // does, just discoverable from the keyboard. Ignored while a form field has
-  // focus so it never fights the search input's own key handling.
+  // Ignored while a form field has focus.
   useEffect(() => {
     const onKey = (e) => {
       if (e.key !== "Escape" || !selection) return;
@@ -323,10 +276,7 @@ function ProtocolSurface({
 
   const handleSelectGuard = useCallback((fnView) => guard(fnView?.key || null), [guard]);
 
-  // Clicking a Safe/Timelock/EOA node on the canvas selects the principal
-  // (opens the detail panel with signers / delay / controlled contracts)
-  // and focuses it — same behaviour as clicking a single-principal guard
-  // badge, just driven from the node itself.
+  // Same behaviour as clicking a single-principal guard badge.
   const handleSelectPrincipal = useCallback((principal, reachedFrom = null) => {
     if (!principal) return;
     setAgentHighlights(null);
@@ -343,34 +293,24 @@ function ProtocolSurface({
     syncUrl({ sel: machine.address, radar: { signature: fnView?.signature } });
   }, [radar, syncUrl]);
 
-  // The single entrypoint for a selection requested from outside the surface:
-  // the score page's entity buttons (through the imperative handle below), the
-  // ?score deep link and the sessionStorage handoff all land here, so no caller
-  // carries its own copy of the selection transition.
+  // The single entrypoint for selections requested from outside the surface
+  // (score page, ?score deep link, sessionStorage handoff).
   //
-  // The result is a discriminated outcome, never a bare boolean: "selected the
-  // contract but the named function is not on it", "that name is on several
-  // contracts" and "that entity is on another chain" are three different facts
-  // and a caller that collapses them tells the user something untrue. A request
-  // that names a function but no contract is resolved against the whole graph,
-  // and only a unique match selects — see findFunctionMatches.
-  // A cross-chain request parks here while handleSelectChain re-scopes the
-  // graph; the effect below selectExample re-runs it once the active chain
-  // matches, on the freshly scoped entity index.
+  // Returns a discriminated outcome: function-not-on-contract,
+  // name-on-several-contracts and on-another-chain are different facts. A
+  // function with no contract resolves only on a unique match
+  // (findFunctionMatches). A cross-chain request parks while the chain
+  // rescopes, then re-runs.
   const pendingCrossChain = useRef(null);
 
   const selectExample = useCallback((example) => {
     const address = String(example?.contractAddress || "").toLowerCase();
     const named = Boolean(example?.functionSignature || example?.selector);
-    // The optional highlight hint: what the score row was ABOUT (its example
-    // function and the controller it named), as opposed to what the click asked
-    // to select. It never changes which entity is selected or what the outcome
-    // is called — it only says what to mark once the card is up, and every part
-    // of it has to survive a lookup against that card's own lanes to be marked.
+    // What the score row was about; it never changes what's selected, and each
+    // part must survive a lookup against the card's own lanes to be marked.
     const hint = example?.highlight || null;
-    // One controller or several: a merged-unit row names every member, and
-    // which member gates THIS card's function is the card's own fact — the
-    // caller list decides, never the hint's ordering.
+    // A merged-unit row names every member; the card's caller list decides
+    // which one gates this function.
     const hintedControllers = (
       Array.isArray(hint?.controllers) ? hint.controllers : hint?.controller ? [hint.controller] : []
     )
@@ -383,11 +323,8 @@ function ProtocolSurface({
       }
       return null;
     };
-    // Where the request says this entity was REACHED FROM (a score-page click on
-    // a transitive target names the host the controller acts on directly). Like
-    // the hint it never changes which entity is selected or what the outcome is
-    // called — it only lets the card show the route, and the route still has to
-    // exist in this graph's own control edges to be shown.
+    // Lets the card show the route; the route must exist in this graph's own
+    // edges.
     const reachedFrom = example?.reachedFrom || null;
     const hintOutcome = (fnView, caller, unpaired = false) =>
       hint
@@ -399,23 +336,15 @@ function ProtocolSurface({
           }
         : {};
     if (!address && !named) return { ok: false, kind: "empty" };
-    // Identity is (chain, address) and the surface renders one chain
-    // at a time. Another chain's entity is not a miss when the payload
-    // witnesses it there: switch the page's scope to that chain and park the
-    // request — the effect below re-runs it once the graph has re-scoped, so
-    // there is never a second copy of the selection logic. A chain the payload
-    // does NOT witness the entity on refuses as not-found: "it is on that
-    // chain" is exactly the claim this graph cannot make.
+    // Identity is (chain, address). Switch chains only when the
+    // payload witnesses the entity there; otherwise not-found.
     const requestedChain = coalesceChain(example?.chain || activeChain);
     if (requestedChain !== activeChain) {
-      // The page can only scope to a chain it has contracts on — outside that,
-      // handleSelectChain would silently degrade to the default and the
-      // "switched" outcome would be a lie.
+      // Otherwise handleSelectChain would silently fall back to the default and
+      // "switched" would be a lie.
       const scopable = availableChains.some((c) => c.name === requestedChain);
-      // The witness must be explicit: a contract row on that chain, or a
-      // principal whose OWN chains list names it. principalOnChain's
-      // legacy-payload default (no list → every chain) is exactly the
-      // default-as-witness shape this check exists to refuse.
+      // An explicit witness only: principalOnChain's no-list default (every
+      // chain) doesn't count.
       const witnessedThere =
         scopable &&
         Boolean(address) &&
@@ -436,11 +365,8 @@ function ProtocolSurface({
     if (!address) {
       const matches = findFunctionMatches(allMachines, example);
       if (!matches.length) return { ok: false, kind: "not-found" };
-      // The hinted controller narrows a shared name to the witnessed pair: the
-      // graph lists callers per function, so among the contracts carrying this
-      // name, the one whose function this controller can actually call IS the
-      // action the score row charged — same-named functions under someone
-      // else's gate are different actions and never candidates.
+      // Among contracts sharing the name, only the one whose function this
+      // controller can call is the charged action.
       const paired = hintedControllers.length ? matches.filter((m) => findHintedCaller(m.fnView)) : [];
       const pool = paired.length ? paired : matches;
       if (pool.length > 1) {
@@ -454,8 +380,7 @@ function ProtocolSurface({
     }
     const entry = entityIndex.get(entityKey(activeChain, address));
     if (!entry) return { ok: false, kind: "not-found" };
-    // Machine facet wins over principal — same precedence the selection hook
-    // applies, so a timelock contract opens the richer card either way.
+    // Machine facet wins, as in the selection hook.
     if (!entry.machine) {
       if (!entry.principal) return { ok: false, kind: "not-found" };
       setSidebarMode("detail");
@@ -464,13 +389,9 @@ function ProtocolSurface({
     }
     const machine = entry.machine;
     const fnView = findFunctionView(machine, example);
-    // A contract click carries no function of its own, so the hinted example
-    // function is resolved against THIS card's lanes — and only as the whole
-    // pair. A same-named function the hinted controller cannot call is a
-    // different action under someone else's gate; ringing it would present
-    // that gate as the one the points were charged for. Function and caller
-    // are marked together or not at all — an unmarkable hint opens the card
-    // with nothing marked, and the caller's `unpaired` outcome says why.
+    // The hinted function and caller are marked together on this card's lanes
+    // or not at all: ringing a same-named function under someone else's gate
+    // would misattribute the charge.
     let marked = fnView;
     let matchedCaller = findHintedCaller(marked);
     let unpaired = false;
@@ -485,9 +406,7 @@ function ProtocolSurface({
       }
     }
     selectMachineExample(machine, marked, matchedCaller, reachedFrom);
-    // The outcome describes the request the caller made, not the hint: a click
-    // that asked for a contract landed on a contract even when the hint marked
-    // a row inside it.
+    // The outcome describes the request, not the hint.
     if (fnView) return { ok: true, kind: "function", ...hintOutcome(marked, matchedCaller) };
     return { ok: true, kind: "contract", functionMissing: named, ...hintOutcome(marked, matchedCaller, unpaired) };
   }, [activeChain, allMachines, availableChains, companyData, entityIndex, handleSelectChain, handleSelectPrincipal, selectMachineExample]);
@@ -505,9 +424,8 @@ function ProtocolSurface({
   const restoredExampleSelection = useRef(false);
   useEffect(() => {
     if (embedded || restoredExampleSelection.current || !allMachines.length) return;
-    // Machines exist before /functions lands, and a machine with empty lanes
-    // answers "that function is not on this contract" — which would restore the
-    // contract alone and latch, losing the named function the link carried.
+    // Before /functions lands, machines have empty lanes and would answer "not
+    // on this contract", latching the wrong result.
     if (functionsLoading) return;
     const params = new URLSearchParams(window.location.search);
     const focus = params.get("sel") || params.get("focus");
@@ -546,23 +464,17 @@ function ProtocolSurface({
     agentHighlights,
   });
 
-  // Search browse preview. Null (result set changed / emptied) clears the
-  // focus address so a stale gold ring can't outlive the browsing session —
-  // the committed selection is untouched either way. Stable identity:
-  // SearchNavigator's reset effect lists it as a dependency.
+  // Null clears the focus so a stale ring can't outlive browsing. Stable
+  // identity: SearchNavigator's reset effect depends on it.
   const handleSearchPreview = useCallback(
     (item) => focusPreview(item ? item.address : null),
     [focusPreview],
   );
 
   const handleNavigate = useCallback((target) => {
-    // Surface the navigation result in the Detail panel. The card is chosen from
-    // the target's facets, not the caller's guessed type — a machine-only
-    // authority (e.g. an analyzed timelock the server never emits as a
-    // principal) opens its contract card instead of stranding an empty sidebar.
-    // The full target rides along as `hint` so resolveEntity can read its type
-    // to synthesize a principal card for off-index targets. The card opens on
-    // its default tab — same as clicking the node on the canvas.
+    // The card follows the target's facets, so a machine-only authority opens
+    // its contract card. `hint` lets resolveEntity synthesize a card for
+    // off-index targets.
     setSidebarMode("detail");
     setAgentHighlights(null);
     setActiveAuditId(null);
@@ -573,18 +485,18 @@ function ProtocolSurface({
   if (error) return <p className="empty">Failed: {error}</p>;
   if (!companyData) return <p className="empty">Loading surface...</p>;
 
-  // Score-page arrivals (radar sub-mode) mark the action the warning was about
-  // on the ONE sidebar card, never a second parallel card. The mark is the
-  // PAIR the warning named — the function row and, inside it, the caller chip
-  // for the controller the row named — or nothing: when no row answers to the
-  // name the card simply opens unmarked. A principal-only selection never
-  // enters radar mode (it commits through select), so these are machine-facet
-  // only.
+  // Score arrivals mark the named function row and caller chip on the one card,
+  // or nothing if no row answers. Machine-facet only.
   const radarFunctionKey = selectedMachine ? radarSelection?.functionKey || null : null;
   const radarCallerAddress = radarFunctionKey ? radarSelection?.callerAddress || null : null;
 
   return (
     <div className="ps-surface ps-surface-fullscreen">
+      {/*
+        Floats like the selection toast so the fullscreen layout keeps its
+        height.
+      */}
+      <StaleBanner metas={sectionMetas} className="company-select-toast" />
       <SurfaceFilterPanel
         machines={allMachines}
         principals={visiblePrincipals}
@@ -616,11 +528,9 @@ function ProtocolSurface({
             reachDistances={reachDistances}
             reachPathEdges={reachPathEdges}
             onSelectMachine={(m) => {
-              // Auto-switch to Detail when the user clicks a contract
-              // ON THE CANVAS so the function lanes are immediately
-              // visible. Agent-link clicks go through
-              // handleSelectMachine directly (not this wrapper), so
-              // they don't trigger this and the user stays in the chat.
+              // Canvas clicks switch to Detail so the lanes are visible;
+              // agent-link clicks bypass this wrapper so the user stays in
+              // chat.
               if (m && sidebarMode !== "detail") setSidebarMode("detail");
               handleSelectMachine(m);
             }}
@@ -668,14 +578,14 @@ function ProtocolSurface({
               chain={activeChain}
             />
           )}
-          {/* One universal card for every selection. selectedMachine and
-              selectedPrincipal are mutually exclusive (the selection invariant),
-              so the Detail panel is: something selected → the card; nothing →
-              the empty state. A score-page arrival lands here too — same card,
-              with the highlight props set. */}
+          {/*
+            Machine and principal selections are mutually exclusive, so Detail
+            shows the one card or the empty state.
+          */}
           {sidebarMode === "detail" && !selectedPrincipal && !selectedMachine && (
             <DetailEmptyState
               companyName={companyName}
+              initialScore={initialScore}
               companyData={scopedCompanyData}
               machines={allMachines}
               principals={visiblePrincipals}
@@ -715,9 +625,8 @@ function ProtocolSurface({
               selectedPrincipal={selectedPrincipal}
               onHighlight={setHighlightedAddresses}
               onFocusAddress={(addr) => {
-                // Route through the same selection handlers a canvas
-                // click uses so we get the connected-edges-stay-bright
-                // dim behavior for free.
+                // Same handlers as a canvas click, for the edge-dimming
+                // behaviour.
                 const lc = addr.toLowerCase();
                 const machine = allMachines.find(
                   (m) => (m.address || "").toLowerCase() === lc,
@@ -733,12 +642,8 @@ function ProtocolSurface({
                   handleSelectPrincipal(principal);
                   return;
                 }
-                // Out-of-scope address (typical: an EOA that's a Safe
-                // owner / role holder but not itself a canvas node).
-                // Fetch its "touch radius" — every contract it has
-                // function-level authority over — and write that set
-                // into highlightedAddresses. The canvas's existing
-                // audit-overlay dim path then dims everything else.
+                // Off-canvas address (e.g. a Safe owner EOA): highlight every
+                // contract it has authority over and dim the rest.
                 focusPreview(addr);
                 api(
                   `/api/agent/address-touches?company=${encodeURIComponent(companyName)}&address=${encodeURIComponent(addr)}${isMultichain ? `&chain=${encodeURIComponent(activeChain)}` : ""}`,
@@ -751,8 +656,7 @@ function ProtocolSurface({
                     setHighlightedAddresses(set);
                   })
                   .catch(() => {
-                    // Network/auth error — at least light up the focus
-                    // target so the click isn't a no-op.
+                    // On error at least light the target.
                     setHighlightedAddresses(new Set([lc]));
                   });
               }}

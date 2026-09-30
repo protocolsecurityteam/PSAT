@@ -1,8 +1,4 @@
-"""URL/filename utilities that have no external dependencies.
-
-Kept in a leaf module so every other submodule can pull from here without
-fear of circular imports.
-"""
+"""Dependency-free URL/filename utilities, a leaf module to avoid import cycles."""
 
 from __future__ import annotations
 
@@ -12,7 +8,7 @@ from urllib.parse import unquote, urlparse
 
 
 def _normalize_url(url: str) -> str:
-    """Canonical form for dedup: lowercase scheme+host, strip trailing slash."""
+    """Canonical form for dedup: lowercase scheme and host, no trailing slash."""
     try:
         parsed = urlparse(url)
         normalized = parsed._replace(
@@ -27,7 +23,6 @@ def _normalize_url(url: str) -> str:
 
 
 def _dedupe_results_by_url(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deduplicate Tavily results by URL, keeping the first occurrence."""
     seen: set[str] = set()
     out: list[dict[str, Any]] = []
     for r in results:
@@ -42,7 +37,6 @@ def _dedupe_results_by_url(results: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def _is_pdf_url(url: str) -> bool:
-    """Heuristic check if URL path ends in .pdf (ignoring query params)."""
     try:
         return urlparse(url).path.lower().endswith(".pdf")
     except Exception:
@@ -50,11 +44,7 @@ def _is_pdf_url(url: str) -> bool:
 
 
 def _company_name_variants(company: str) -> list[str]:
-    """Lowercase name variants for filename substring matching.
-
-    Handles stylings like ``EtherFi`` / ``ether.fi`` / ``ether_fi`` without
-    coding them per-protocol.
-    """
+    """Lowercase company-name variants (``EtherFi`` / ``ether.fi`` / ``ether_fi``) for filename matching."""
     base = company.strip().lower()
     if not base:
         return []
@@ -66,7 +56,6 @@ def _company_name_variants(company: str) -> list[str]:
 
 
 def _filename_mentions_company(name: str, company_variants: list[str]) -> bool:
-    """True when any company-name variant substring-matches the filename."""
     if not company_variants:
         return True
     haystack = re.sub(r"[^a-z0-9]", "", name.lower())
@@ -74,11 +63,8 @@ def _filename_mentions_company(name: str, company_variants: list[str]) -> bool:
 
 
 def _extract_date_from_filename(name: str) -> str | None:
-    """Best-effort ISO date from a filename, or None.
-
-    Recognises YYYY-MM-DD / YYYY_MM_DD / YYYY.MM.DD / YYYYMMDD and the
-    partial forms YYYY-MM and YYYY. Calendar-validated (1-12 / 1-31 /
-    2015-2099) so random digit runs don't match.
+    """Best-effort ISO date from a filename (YYYY-MM-DD, YYYY_MM_DD, YYYY.MM.DD, YYYYMMDD, YYYY-MM, YYYY),
+    calendar-validated within 2015-2099.
     """
     decoded = unquote(name or "")
     if not decoded:
@@ -108,11 +94,7 @@ def _extract_date_from_filename(name: str) -> str | None:
 
 
 def _augment_filename_metadata(name: str, meta: dict[str, Any] | None) -> dict[str, Any]:
-    """Fill ``date`` deterministically when the LLM left it blank.
-
-    Auditor isn't filled here — the LLM (with folder + sibling context) is
-    more accurate than a hand-maintained substring table.
-    """
+    """Fill ``date`` when the LLM left it blank. Auditor is left to the LLM, which has sibling context."""
     out = dict(meta or {})
     date_val = out.get("date")
     date_str = str(date_val).strip() if date_val else ""

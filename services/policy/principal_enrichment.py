@@ -1,5 +1,3 @@
-"""Build frontend-friendly principal labels from effective permissions and resolved control graphs."""
-
 from __future__ import annotations
 
 import logging
@@ -29,22 +27,10 @@ from utils.logging import record_stage_metric
 logger = logging.getLogger(__name__)
 
 
-# --- signer-overlap attribution fact -----------------------------------------
 def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[str, dict[str, Any]]:
-    """The protocol's dispositively-enumerated Safe owner sets, keyed by lowercased
-    Safe address, for signer-overlap comparison.
-
-    Sources ``function_principals`` (the authoritative owner store with the
-    ``membership_quality`` witness). Only ``resolved_type='safe'`` rows whose
-    ``details.owners`` is present AND ``membership_quality == 'exact'`` are
-    admitted — the on-chain owner set was dispositively read, not a lower-bound
-    guess. A Safe appears on many function rows; identical exact rows dedup by
-    address. If two exact rows DISAGREE on the owner set, that Safe is a witness
-    conflict and is OMITTED (no recency column to arbitrate, so we
-    never silently pick one contradictory enumeration). The set is only as
-    complete as the protocol contracts analyzed so far, which is correct: the
-    comparison pool grows monotonically as more contracts resolve, never
-    producing a wrong deduction, only fewer comparisons.
+    """Exactly-enumerated Safe owner sets (``resolved_type='safe'``, ``membership_quality == 'exact'``), by Safe
+    address, for signer-overlap comparison. Disagreeing exact rows are omitted (no recency column to arbitrate).
+    Grows monotonically as contracts resolve.
     """
     rows = session.execute(
         select(func.lower(FunctionPrincipal.address), FunctionPrincipal.details)
@@ -53,21 +39,11 @@ def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[st
         .where(Contract.protocol_id == protocol_id, FunctionPrincipal.resolved_type == "safe")
     ).all()
 
-    # Per-Safe accumulator: the first exact owner set seen, its threshold, and a
-    # conflict flag. ``function_principals`` has no recency column (no
-    # updated_at/probe-block on the row — see db/models/contracts.py), so two exact rows
-    # that DISAGREE on the owner set are contradictory witnesses with no
-    # dispositive way to pick between them: fail closed. Identical
-    # duplicate exact rows agree and are kept.
     accum: dict[str, dict[str, Any]] = {}
     for address, details in rows:
         if not isinstance(details, dict):
             continue
-        # Fallback (no guessing): omit when the owner set was not dispositively
-        # enumerated. ``lower_bound`` membership means the resolution did not
-        # prove the full owner set — inadmissible as a Tier-1 owner fact. An exact
-        # + lower_bound pair is NOT a conflict: the lower_bound row is skipped here
-        # and the exact one stands.
+        # ``lower_bound`` owner sets are inadmissible; an exact + lower_bound pair isn't a conflict.
         if details.get("membership_quality") != "exact":
             continue
         owners_raw = details.get("owners")
@@ -81,7 +57,6 @@ def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[st
         if existing is None:
             accum[addr] = {"owners": owners, "threshold": details.get("threshold"), "conflict": False}
         elif existing["owners"] != owners:
-            # Two exact witnesses disagree — refuse to arbitrate, drop the Safe.
             existing["conflict"] = True
     return {
         addr: {"owners": entry["owners"], "threshold": entry["threshold"], "membership_quality": "exact"}
@@ -93,17 +68,9 @@ def load_protocol_safe_owner_sets(session: Session, protocol_id: int) -> dict[st
 def _compute_signer_overlap(
     self_address: str, protocol_safe_owner_sets: Mapping[str, Mapping[str, Any]]
 ) -> dict[str, Any] | None:
-    """The ``signer_overlap`` fact for one Safe principal, or ``None`` to omit.
+    """The ``signer_overlap`` fact against every other exactly-enumerated protocol Safe, or ``None``.
 
-    Emits subset/superset/equal flags + Jaccard of this Safe's owner set against
-    every *other* dispositively-enumerated Safe of the same protocol. Omitted
-    when this Safe isn't in the exact-owners registry (owners absent or
-    ``membership_quality != exact``) or when there is no other Safe to compare
-    against. A disjoint pair is still emitted (empty overlap) — that is itself a
-    dispositive fact ("no shared signers"). NB the honesty boundary: shared
-    signers is grade-admissible attribution CONTEXT (Tier 1, on-chain owner
-    reads), NOT proof of shared organizational identity — org identity stays a
-    warning/confidence signal and is never deduced here.
+    Disjoint pairs still emit. Shared signers are Tier 1 attribution context, not proof of shared organization.
     """
     self_entry = protocol_safe_owner_sets.get(self_address)
     if self_entry is None:
@@ -136,28 +103,17 @@ def _compute_signer_overlap(
     if not overlaps:
         return None
     return {
-        # Dispositive Safe getOwners() reads — scoring Tier 1, grade-admissible.
-        # Kept as a semantic provenance string (NOT "tier1"/"tier2") so a consumer
-        # never collides it with services/effects/config.py's fork/call tier
-        # strings. See docstring for the same-signers != same-org boundary.
+        # Semantic string, not "tier1", so it can't collide with services/effects/config.py tier strings.
         "provenance": "onchain_owner_read",
         "self_owner_count": len(self_owners),
         "overlaps": overlaps,
     }
 
 
-# --- shared-deployer attribution fact ----------------------------------------
 def load_protocol_deployer_groups(session: Session, protocol_id: int) -> dict[str, dict[str, Any]]:
-    """Per-address shared-deployer groups for a protocol, keyed by lowercased
-    contract address.
+    """Shared-deployer groups (≥2 contracts) keyed by address.
 
-    Groups the protocol's ``contracts`` by ``deployer`` (lowercased); a group of
-    ≥2 contracts sharing one deployer yields, for each member, ``{"deployer",
-    "addresses": [full sorted group]}``. Contracts with a NULL ``deployer`` (73/205
-    populated locally) are omitted — no fact without the witness. Same-deployer is
-    a WITNESSED on-chain fact but a HEURISTIC for attribution (factories defeat
-    "same deployer ⇒ same org"); the emitted fact carries that flag and never
-    yields an org-identity deduction (see ``_shared_deployer_fact``).
+    NULL deployers are omitted. Same deployer is witnessed but only heuristic for attribution (factories defeat it).
     """
     rows = session.execute(
         select(func.lower(Contract.address), func.lower(Contract.deployer)).where(
@@ -183,15 +139,10 @@ def load_protocol_deployer_groups(session: Session, protocol_id: int) -> dict[st
 
 
 def _shared_deployer_fact(address: str, deployer_groups: Mapping[str, Mapping[str, Any]]) -> dict[str, Any] | None:
-    """The ``shared_deployer`` fact for a principal that co-shares a deployer with
-    other protocol contracts, or ``None`` to omit (deployer absent / singleton).
+    """The ``shared_deployer`` fact, or ``None``.
 
-    WITNESSED fact, NOT a conclusion: ``provenance="deployer_read"`` is a Tier-1
-    on-chain read, but ``heuristic=True`` flags that same-deployer does NOT prove
-    same organization (factories, shared deployer EOAs, and vanity-deployer
-    services all defeat it). Routes to confidence/warnings, never a grade
-    deduction, and MUST NOT mint an org-identity label — same honesty as the
-    signer-overlap fact: fact yes, org conclusion no.
+    ``provenance="deployer_read"`` with ``heuristic=True``: confidence/warnings only, never a grade deduction or org
+    label.
     """
     entry = deployer_groups.get(address)
     if entry is None:
@@ -205,13 +156,7 @@ def _shared_deployer_fact(address: str, deployer_groups: Mapping[str, Mapping[st
 
 
 def _safe_role_int(role: Any) -> int | None:
-    """Coerce a role identifier to int, returning None for non-int shapes.
-
-    Role-name strings and Condition-mapping shapes cannot be represented as
-    numeric policy roles. Callers decide whether to skip-with-warning or
-    surface ``role=None`` on a typed permission while preserving the
-    original identifier in the controller bucket.
-    """
+    """Int role, or None for role names and Condition-mapping shapes."""
     try:
         return int(role)
     except (TypeError, ValueError):
@@ -224,22 +169,14 @@ def _slug(value: str) -> str:
     return lowered.strip("_")
 
 
-# --- Plane-1 claim → principal-tag vocabulary --------------------------------
-# Which claim families grant which enrichment tag. Keyed on the atomic claim_id
-# (namespace prefix or exact id), NOT consumer_family: ``pause.*`` / ``lz_oapp.*``
-# are control-plane but not admin powers, and ``exec.arbitrary`` is a manager
-# power that ``contract_deployment`` (also exec-family) is not.
-# ``callee_pointer.rotate`` IS an admin power — the precise use-link idiom that
-# replaced the diluted ``hook_update`` label.
+# Keyed on claim_id, not consumer_family: ``pause.*`` / ``lz_oapp.*`` are control-plane but not admin, and
+# ``exec.arbitrary`` is a manager power ``contract_deployment`` isn't.
 _ADMIN_CLAIM_PREFIXES = ("ownership.", "roles.", "authority.", "upgrade.", "timelock.", "safe.")
 _ADMIN_CLAIM_IDS = frozenset({"authorized_caller.rotate", "proxy.admin_change", "callee_pointer.rotate"})
 _OPERATOR_CLAIM_PREFIXES = ("flow.", "supply.")
 _MANAGER_CLAIM_IDS = frozenset({"exec.arbitrary"})
 
-# Legacy effect_labels → tag: the fallback for rows written before the claims
-# plane (or a degraded effects artifact). ``hook_update`` is deliberately absent
-# from the admin set — it was the 1/69-correct diluted label, and no measured
-# prod principal depends on it for an admin tag.
+# Fallback for pre-claims rows. ``hook_update`` is absent: 1/69 correct, and no admin tag depends on it.
 _LEGACY_ADMIN_LABELS = frozenset(
     {"authority_update", "ownership_transfer", "implementation_update", "role_management", "timelock_operation"}
 )
@@ -248,9 +185,6 @@ _LEGACY_MANAGER_LABELS = frozenset({"arbitrary_external_call"})
 
 
 def _claim_ids(claims: Any) -> set[str]:
-    """The ``claim_id`` strings from a function's ``claims`` list — the
-    ``{claim_id, tier, witness}`` dict shape the effective-permissions payload
-    carries. An unexpected shape reads as empty (claims-less fallback)."""
     out: set[str] = set()
     if not isinstance(claims, list):
         return out
@@ -263,10 +197,7 @@ def _claim_ids(claims: Any) -> set[str]:
 
 
 def _enrichment_tags(claims: Any, effect_labels_set: set[str]) -> set[str]:
-    """The admin/operator/manager tags a function grants its authorized callers.
-
-    Plane-1 claims are authoritative when present; a claim-less function (stale
-    row / degraded artifact) falls back to the legacy effect_labels."""
+    """Claims win when present; claim-less rows fall back to legacy labels."""
     claim_ids = _claim_ids(claims)
     tags: set[str] = set()
     if claim_ids:
@@ -301,7 +232,6 @@ def _display_from_type(resolved_type: str) -> str:
 
 
 def _cross_chain_display_name(details: dict[str, Any]) -> str:
-    """Human label for a ``cross_chain_authority`` principal, from its role."""
     role = str(details.get("role") or "")
     if role == "cross_domain_messenger":
         return "Cross-domain messenger"
@@ -339,8 +269,6 @@ def _collect_permissions(
         effect_labels = [str(label) for label in function.get("effect_labels", [])]
         authority_public = bool(function.get("authority_public", False))
         effect_labels_set = set(effect_labels)
-        # Tags depend only on the function's effects, not the caller — compute
-        # once and stamp every authorized principal below.
         function_tags = _enrichment_tags(function.get("claims"), effect_labels_set)
         direct_owner = function.get("direct_owner")
         if direct_owner:
@@ -357,10 +285,7 @@ def _collect_permissions(
             by_address[address].append(permission)
             permission_labels[address].update({f"{contract_slug}_direct_owner", f"{contract_slug}_controlled"})
 
-        # ``or []`` — see recursive.py: authority_roles is present-with-None
-        # for a role-gated function whose role is not determined, and a dict
-        # default only fires on an absent key. Not-determined mints no
-        # role_N label, exactly as [] did.
+        # ``authority_roles`` may be present-with-None (role undetermined); a dict default only covers an absent key.
         for role_grant in function.get("authority_roles") or []:
             raw_role = role_grant.get("role")
             role = _safe_role_int(raw_role)
@@ -417,8 +342,7 @@ def _collect_permissions(
                         f"{contract_slug}_controller_{controller_slug}",
                     }
                 )
-                # Controller-path parity with the pre-claims behavior: a
-                # state-variable controller earns manager/admin, never operator.
+                # Parity with pre-claims behavior: state-variable controllers get manager/admin, never operator.
                 if "manager" in function_tags:
                     permission_labels[address].add(f"{contract_slug}_manager")
                 if "admin" in function_tags:
@@ -475,11 +399,8 @@ def _graph_labels_for_node(
             if edge_label == "owner":
                 labels.add("owner_controller")
         elif relation == EDGE_RELATION_EXTERNAL_CALL_TARGET:
-            # The from-node CALLS this address. That is a proven fact and worth
-            # publishing, but it is not control: minting ``controller_*`` here
-            # is what labelled the Ethereum 2 deposit contract a controller of
-            # StakingManager and the Curve stETH/ETH pool a controller of
-            # Liquifier. Neither controls anything; both are callees.
+            # Calling an address isn't controlling it: ``controller_*`` here labeled the ETH2 deposit contract a
+            # controller of StakingManager.
             labels.add("call_target")
             labels.add(f"{source_slug}_calls_{edge_label}")
         elif relation == "safe_owner":
@@ -577,39 +498,13 @@ def build_principal_labels(
     protocol_deployer_groups: Mapping[str, Mapping[str, Any]] | None = None,
     resolve_controllers: Callable[[str], Sequence[Mapping[str, Any]] | None] | None = None,
 ) -> PrincipalLabels:
-    """Construct principal records for every authority address.
+    """Principal records for every authority address.
 
-    ``classify_cache`` is mutated in place. When supplied, classification
-    results from prior pipeline stages (resolution, policy graph refresh)
-    are reused and any new classifications discovered here are added to
-    the same dict — so a caller threading the same cache through the whole
-    job sees fan-out of 6-10 RPCs per address collapse to one lookup.
-
-    ``cross_chain_recognizer`` is an ``address -> (resolved_type,
-    details) | None`` classifier that takes priority over the generic
-    EOA/contract typing: an aliased L1 owner reads as a codeless EOA and a
-    bridge predeploy as a generic contract, yet both are cross-chain
-    authorities, never anonymous principals. ``None`` (the mainnet path, and
-    every chain without bridge constants) leaves classification byte-identical.
-
-    ``protocol_safe_owner_sets`` — the protocol's
-    exact-owner Safe registry (``load_protocol_safe_owner_sets``). When present,
-    each Safe principal gains a ``details.signer_overlap`` attribution fact
-    against every other protocol Safe. ``None`` omits the fact (no guessing).
-
-    ``protocol_deployer_groups`` — the protocol's shared-deployer
-    groups (``load_protocol_deployer_groups``). When present, a principal whose
-    address co-shares a deployer with other protocol contracts gains a witnessed
-    (heuristic-tagged) ``details.shared_deployer`` fact. ``None`` omits it.
-
-    ``resolve_controllers`` — an
-    ``address -> [{"address","resolved_type","details"}, ...] | None`` step
-    function (backed by on-chain owner reads). When present, each
-    ``resolved_type=contract`` principal is walked to its ultimate Safe/EOA and
-    the result stored in ``details.terminal_principal``. ``None`` skips the walk;
-    the non-terminal
-    ``details.terminal`` marking is still stamped on every principal so a
-    contract way-point never reads as a settled key.
+    ``classify_cache`` is mutated in place and shared across the job, collapsing 6-10 RPCs per address to one lookup.
+    ``cross_chain_recognizer`` takes priority over EOA/contract typing (an aliased L1 owner looks like an EOA).
+    ``protocol_safe_owner_sets`` / ``protocol_deployer_groups`` add attribution facts. ``resolve_controllers`` walks
+    contract principals to their terminal Safe/EOA; ``details.terminal`` is stamped regardless so a way-point never
+    reads as settled.
     """
     nodes_by_id = _node_by_id(resolved_control_graph or {})
     nodes_by_address = {node["address"].lower(): node for node in (resolved_control_graph or {}).get("nodes", [])}
@@ -622,14 +517,8 @@ def build_principal_labels(
 
     target_address = effective_permissions["contract_address"].lower()
     contract_name = effective_permissions["contract_name"]
-    # The per-job classify_cache is shared read+write across worker threads.
-    # Fast path is the cache hit (artifact pre-populated by resolution stage),
-    # so the lock is uncontended in the common case.
     classify_cache_lock = threading.Lock()
-    # Cache effectiveness is the dominant perf signal here (labeling re-runs
-    # classify_resolved_address = 6-10 RPCs on a miss; the memory note records a
-    # 14+ min etherfi LP-impl labeling pass). A hit-rate collapse run-over-run is
-    # the regression to watch.
+    # Hit rate is the key perf signal: a miss is 6-10 RPCs (one etherfi labeling pass took 14+ min).
     classify_stats: dict[str, int] = {"hits": 0, "misses": 0}
 
     def _per_address(address: str) -> PrincipalProfile | None:
@@ -641,9 +530,6 @@ def build_principal_labels(
         resolved_type = coerce_resolved_controller_type(node.get("resolved_type")) if node else "unknown"
         details = dict(node.get("details", {})) if node else {}
 
-        # Cross-chain authority is recognised from the registry +
-        # run scope with no RPC, and overrides the generic classification an
-        # aliased owner / bridge predeploy would otherwise receive.
         if cross_chain_recognizer is not None:
             recognized = cross_chain_recognizer(address)
             if recognized is not None:
@@ -661,7 +547,6 @@ def build_principal_labels(
                 with classify_cache_lock:
                     classify_stats["hits"] += 1
                 cached_type, cached_details = cached
-                # Pre-seeded from a persisted artifact — unproven until coerced.
                 resolved_type = coerce_resolved_controller_type(cached_type)
                 details = dict(cached_details)
             else:
@@ -670,9 +555,7 @@ def build_principal_labels(
                 resolved_type, details, cacheable = classify_resolved_address_with_status(
                     rpc_url, address, chain_id=chain_id
                 )
-                # Skip per-job cache write if any underlying probe errored —
-                # otherwise a transient blip during labeling would persist
-                # a wrong "contract" classification for the rest of the job.
+                # A transient probe error would persist a wrong classification for the job.
                 if classify_cache is not None and cacheable:
                     with classify_cache_lock:
                         classify_cache[cache_key] = (resolved_type, dict(details))
@@ -711,26 +594,17 @@ def build_principal_labels(
             if role:
                 labels.add(role)
 
-        # Non-terminal marking: a contract/unresolved principal is a
-        # way-point, never a settled controlling key. Stamped on every principal
-        # so a consumer never mistakes a ``contract`` row for a resolved key.
         details["terminal"] = is_terminal_principal_type(resolved_type)
         if resolved_type == "contract" and resolve_controllers is not None:
-            # Bounded, cycle-safe walk to the ultimate Safe/EOA. Fails closed to
-            # an ``unknown`` terminal record (never a guessed key) when the
-            # controller is unfetched/unverified, the chain doesn't terminate, or
-            # a step exposes parallel control planes (ambiguous_controllers).
+            # Fails closed to an ``unknown`` terminal (never a guessed key) when unverified, non-terminating, or
+            # ambiguous.
             details["terminal_principal"] = resolve_terminal_principal(
                 address, resolved_type, resolve_controllers=resolve_controllers
             )
-        # Signer-overlap attribution fact for dispositively-enumerated Safes.
         if resolved_type == "safe" and protocol_safe_owner_sets:
             overlap = _compute_signer_overlap(address, protocol_safe_owner_sets)
             if overlap is not None:
                 details["signer_overlap"] = overlap
-        # Shared-deployer attribution fact — witnessed, heuristic,
-        # never an org-identity deduction. Applies to any principal that is itself
-        # a protocol contract co-sharing a deployer.
         if protocol_deployer_groups:
             shared = _shared_deployer_fact(address, protocol_deployer_groups)
             if shared is not None:

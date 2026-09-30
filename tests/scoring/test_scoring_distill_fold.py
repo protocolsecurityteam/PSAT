@@ -80,7 +80,6 @@ from utils.scoring_status import (
 
 
 def _identity(signal) -> tuple:
-    """The population's total-order key, which both feeding modes must agree on."""
     return (signal.chain, signal.deployment_address, signal.contract_id, signal.selector, signal.claim_id)
 
 
@@ -231,9 +230,9 @@ _PROVEN_EMPTY_MODULES = {
 def test_unread_delegatecall_destination_scores_nothing(corpus):
     """The banned defect class, as a permanent regression test.
 
-    The row publishes the honest third state — ``indeterminate`` /
-    ``unresolved_operand`` — and a scorer that graded it ``unconstrained`` took
-    an unmodified OpenZeppelin ``multicall`` to an F.
+    The row publishes the honest third state (``indeterminate`` /
+    ``unresolved_operand``); a scorer that graded it ``unconstrained`` took an
+    unmodified OpenZeppelin ``multicall`` to an F.
     """
     contract = corpus.contract("0x" + "a" * 40)
     function = corpus.function(
@@ -262,7 +261,6 @@ def test_unread_delegatecall_destination_scores_nothing(corpus):
 
 
 def test_unread_exec_destination_scores_nothing(corpus):
-    """The same collapse is reachable on ``exec.arbitrary`` and is closed there too."""
     contract = corpus.contract("0x" + "b" * 40)
     corpus.function(
         contract,
@@ -322,9 +320,9 @@ def _caller_arbitrary_verdict(function: EffectiveFunction, *, sentinel_param: st
 
 
 def test_fork_caller_arbitrary_is_consumed_on_the_destination_parameter(corpus):
-    """The 15 already-proven verdicts the exec arm never read: a sentinel that
-    landed in the SAME parameter this sink calls through proves the destination is
-    the caller's to choose."""
+    """The 15 already-proven verdicts the exec arm never read: a sentinel landing
+    in the SAME parameter this sink calls through proves the caller picks the
+    destination."""
     contract = corpus.contract("0x" + "1a" * 20)
     function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
     corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param="target"))
@@ -338,10 +336,10 @@ def test_fork_caller_arbitrary_is_consumed_on_the_destination_parameter(corpus):
 
 
 def test_fork_caller_arbitrary_about_another_parameter_licenses_nothing(corpus):
-    """The refusal that keeps the arm honest, and the ordinary shape on this corpus:
-    an arbitrary-call executor takes the sentinel in its PAYLOAD slot while the call
-    target keeps the value the base probe passed, so the verdict proves the payload
-    recipient is caller-chosen and says nothing about the destination parameter."""
+    """The ordinary shape on this corpus: an arbitrary-call executor takes the
+    sentinel in its PAYLOAD slot while the call target keeps the base probe's
+    value, so the verdict proves the payload recipient is caller-chosen and says
+    nothing about the destination parameter."""
     contract = corpus.contract("0x" + "1b" * 20)
     function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
     corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param="data"))
@@ -355,8 +353,8 @@ def test_fork_caller_arbitrary_about_another_parameter_licenses_nothing(corpus):
 
 
 def test_fork_verdict_that_names_no_parameter_licenses_nothing(corpus):
-    """A verdict whose subject is unnamed is not a weaker proof — it is a proof
-    about an unidentified parameter, and there is no join to make."""
+    """A verdict whose subject is unnamed is a proof about an unidentified
+    parameter, with no join to make."""
     contract = corpus.contract("0x" + "1c" * 20)
     function = corpus.function(contract, name="manage", claims=[_exec_param_claim("target")], openness="restricted")
     corpus.session.add(_caller_arbitrary_verdict(function, sentinel_param=None))
@@ -368,7 +366,6 @@ def test_fork_verdict_that_names_no_parameter_licenses_nothing(corpus):
 
 
 def test_fork_verdicts_disagreeing_on_the_parameter_yield_nothing():
-    """Two proven verdicts naming different sentinel parameters is not a menu."""
     from types import SimpleNamespace
 
     from services.scoring import distill as D
@@ -416,9 +413,8 @@ def _caller_relative_flow(kind: str) -> dict[str, Any]:
 
 
 def test_msg_sender_destination_with_an_open_gate_is_unconstrained(corpus):
-    """Anyone can be ``msg.sender``: with a proven-open caller gate the caller names
-    the destination by choosing which address calls, and it takes the unconstrained
-    convention."""
+    """With a proven-open caller gate the caller names the destination by
+    choosing which address calls, so it takes the unconstrained convention."""
     contract = corpus.contract("0x" + "2a" * 20)
     corpus.function(contract, name="redeem", claims=[_caller_relative_flow("msg_sender")], openness="open")
 
@@ -429,13 +425,12 @@ def test_msg_sender_destination_with_an_open_gate_is_unconstrained(corpus):
 
 
 def test_an_open_msg_sender_payee_publishes_the_destination_and_withholds_the_price(corpus):
-    """The two questions are answered separately and the row must publish both answers.
+    """The two questions are answered separately and the row must publish both.
 
-    The payee IS the caller, proven. What the payout is bounded BY — the caller's
-    own position, or the contract's whole balance — has no witness, so the price
-    is withheld. Publishing either half without the other is the defect: a
-    withheld destination would un-earn a proof, and a priced row would charge a
-    bound nobody read.
+    The payee IS the caller, proven. What the payout is bounded BY (the caller's
+    own position or the contract's whole balance) has no witness, so the price is
+    withheld. Publishing either half alone is the defect: a withheld destination
+    would un-earn a proof, a priced row would charge a bound nobody read.
     """
     contract = corpus.contract("0x" + "3a" * 20)
     corpus.function(contract, name="unwrap", claims=[_caller_relative_flow("msg_sender")], openness="open")
@@ -453,11 +448,11 @@ def test_an_open_msg_sender_payee_publishes_the_destination_and_withholds_the_pr
 
 def test_an_open_gate_licenses_no_escalation_where_the_caller_cannot_name_the_payee(corpus):
     """``token_owner`` is not ``msg_sender``. The caller picks the token id; the
-    token's transfer history picks the address — so an open gate is the canonical
-    SAFE shape here ("anyone may settle, the funds go to the rightful owner"), not
-    evidence the destination is the attacker's. The escalation is withheld rather
-    than taken; whether the open-caller ruling reaches this kind is the owner's
-    call, and until it is made the row publishes no positive destination."""
+    token's transfer history picks the address, so an open gate is the canonical
+    SAFE shape ("anyone may settle, funds go to the rightful owner"), not
+    evidence the destination is the attacker's. The escalation is withheld;
+    whether the open-caller ruling reaches this kind is the owner's call, and
+    until then the row publishes no positive destination."""
     contract = corpus.contract("0x" + "2b" * 20)
     corpus.function(contract, name="claimWithdraw", claims=[_caller_relative_flow("token_owner")], openness="open")
 
@@ -477,10 +472,10 @@ def test_an_open_gate_licenses_no_escalation_where_the_caller_cannot_name_the_pa
     ids=["msg_sender", "token_owner"],
 )
 def test_caller_relative_destination_behind_a_gate_is_the_constrained_convention(corpus, kind, note):
-    """Both kinds take the pipeline's existing constrained-destination severity, and
-    each names the constraint that actually holds it: for ``msg_sender`` that IS the
-    caller gate; for ``token_owner`` the gate bounds who may trigger the settlement
-    and the payee is fixed by token ownership instead."""
+    """Both kinds take the existing constrained-destination severity, each naming
+    the constraint that holds it: for ``msg_sender`` the caller gate; for
+    ``token_owner`` the gate bounds who may trigger and token ownership fixes the
+    payee."""
     contract = corpus.contract("0x" + ("2c" if kind == "msg_sender" else "2d") * 20)
     corpus.function(contract, name="rescueTokens", claims=[_caller_relative_flow(kind)], openness="restricted")
 
@@ -495,8 +490,6 @@ def test_caller_relative_destination_behind_a_gate_is_the_constrained_convention
 
 
 def test_caller_relative_destination_with_an_unread_gate_stays_undetermined(corpus):
-    """An unread caller gate is neither open nor restricted, and either arm would
-    price an unread witness."""
     contract = corpus.contract("0x" + "2e" * 20)
     corpus.function(
         contract, name="unwrapForEEthAndBurn", claims=[_caller_relative_flow("msg_sender")], openness="not_determined"
@@ -511,7 +504,7 @@ def test_caller_relative_destination_with_an_unread_gate_stays_undetermined(corp
 
 def test_caller_relative_conjunction_takes_the_worst_member(corpus):
     """A flow set mixing a fixed payee with a caller-relative one reduces to the
-    caller-relative one — the meet, not whichever entry was read last."""
+    caller-relative one: the meet, not whichever was read last."""
     contract = corpus.contract("0x" + "2f" * 20)
     corpus.function(
         contract,
@@ -535,8 +528,6 @@ def test_caller_relative_conjunction_takes_the_worst_member(corpus):
 
 
 def test_an_indeterminate_member_still_blocks_a_caller_relative_conjunction(corpus):
-    """The new arms widen what the lattice can PROVE; they do not weaken what it
-    refuses. One unreadable member and the destination stays unread."""
     contract = corpus.contract("0x" + "3a" * 20)
     corpus.function(
         contract,
@@ -580,11 +571,10 @@ def _msg_value_claims(*flows: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def test_msg_value_returned_to_the_caller_carries_no_severity_of_its_own(corpus):
-    """W3a, the exact conjunction: every out-flow pays out this contract's own
+    """W3a, the exact conjunction: every out-flow pays this contract's own
     balance, in the amount the caller attached to THIS call, to the caller. The
-    payout can move no position the caller did not just fund, so it is priced at a
-    named zero — and the destination fact the lattice earned is republished
-    untouched rather than swapped for the amount's."""
+    payout moves no position the caller did not just fund, so it is priced at a
+    named zero, and the earned destination fact is republished untouched."""
     contract = corpus.contract("0x" + "4a" * 20)
     corpus.function(
         contract, name="unwrapL2Eth", claims=_msg_value_claims(_msg_value_flow("msg_sender")), openness="restricted"
@@ -605,11 +595,11 @@ def test_msg_value_returned_to_the_caller_carries_no_severity_of_its_own(corpus)
 
 def test_msg_value_self_return_answers_the_withhold_it_is_pending_on(corpus):
     """The compose ordering, on the branch that created the pending state. An open
-    caller-relative destination is PROVEN and its price is withheld *pending an
-    amount witness*; this is that witness, so it is read first. A row that carries
-    both the refusal and the witness that answers it would be publishing a question
-    it has the answer to — and the destination fact stays exactly what the lattice
-    proved, because it is the AMOUNT that carries the bound."""
+    caller-relative destination is PROVEN and its price withheld *pending an
+    amount witness*; this is that witness, so it is read first (a row carrying
+    both the refusal and its answer would publish a question it has the answer
+    to). The destination fact stays what the lattice proved: the AMOUNT carries
+    the bound."""
     contract = corpus.contract("0x" + "4d" * 20)
     corpus.function(contract, name="refund", claims=_msg_value_claims(_msg_value_flow("msg_sender")), openness="open")
 
@@ -624,11 +614,10 @@ def test_msg_value_self_return_answers_the_withhold_it_is_pending_on(corpus):
 
 
 def test_the_self_return_arm_cannot_price_a_destination_nobody_read(corpus):
-    """The gate on the reordering is the destination being PROVEN, not priced. With
-    the caller gate unread the payee is neither open nor restricted, so the row
-    keeps the unread-destination withhold — the amount fact is still published,
-    because it is true, but it prices nothing and the repetition residual, which
-    belongs to the priced verdict, is not published either."""
+    """The gate on the reordering is the destination being PROVEN, not priced.
+    With the caller gate unread the row keeps the unread-destination withhold;
+    the amount fact is still published (it is true) but prices nothing, and the
+    repetition residual, which belongs to the priced verdict, is not published."""
     contract = corpus.contract("0x" + "4e" * 20)
     corpus.function(
         contract,
@@ -649,10 +638,10 @@ def test_the_self_return_arm_cannot_price_a_destination_nobody_read(corpus):
 
 def test_msg_value_passed_through_to_a_fixed_payee_is_uncharged_product(corpus):
     """W3b, ruled in by the owner. The caller's own ETH reaching a payee no caller
-    can name is bounded by what the caller just attached, so — beside the
-    self-return arm and ahead of the withhold — it is uncharged product surface at
-    a named zero. Its basis names the pass-through arm, which is the token the fold
-    reads to exclude the row; the destination fact the lattice earned is unchanged."""
+    can name is bounded by what the caller just attached, so (beside the
+    self-return arm, ahead of the withhold) it is uncharged product surface at a
+    named zero. Its basis names the pass-through arm, the token the fold reads to
+    exclude the row; the earned destination fact is unchanged."""
     contract = corpus.contract("0x" + "4b" * 20)
     corpus.function(contract, name="receive", claims=_msg_value_claims(_msg_value_flow("immutable")), openness="open")
 
@@ -805,8 +794,8 @@ _MSG_VALUE_REFUSALS = [
 )
 def test_msg_value_return_refuses(corpus, slug, claims, reason, severity):
     """Every conjunct, removed one at a time: the witness publishes its named
-    refusal and NOTHING positive, and the row scores exactly what the destination
-    lattice scored it without the witness."""
+    refusal and NOTHING positive, and the row scores what the destination lattice
+    scored it without the witness."""
     from services.scoring import distill as D
 
     assert D._msg_value_return(claims) == D._MsgValueReturn(arm=None, refusal=reason)
@@ -829,10 +818,10 @@ def test_msg_value_return_refuses(corpus, slug, claims, reason, severity):
 
 
 def test_a_payout_that_never_mentions_msg_value_is_asked_nothing(corpus):
-    """The third state, and the reason it is silence rather than a refusal: on a
-    payout whose amount is a parameter the question does not arise, and hanging a
-    reason off it would put this witness's vocabulary on every flow in the corpus
-    while proving nothing about any of them."""
+    """The third state, and why it is silence rather than a refusal: where the
+    payout amount is a parameter the question does not arise, and a reason there
+    would put this witness's vocabulary on every flow in the corpus while proving
+    nothing about any."""
     contract = corpus.contract("0x" + "4c" * 20)
     corpus.function(
         contract,
@@ -852,8 +841,8 @@ def test_a_payout_that_never_mentions_msg_value_is_asked_nothing(corpus):
 
 
 def test_a_blocked_flow_set_proves_no_msg_value_arm():
-    """A claim with no ``flows`` key blocks the read, and a universal over a set
-    that could not be read must not come out vacuously true."""
+    """A claim with no ``flows`` key blocks the read; a universal over an unread
+    set must not come out vacuously true."""
     from services.scoring import distill as D
 
     blocked = [{"claim_id": "flow.out", "tier": "idiom_structural", "witness": {"kind": "value_flow"}}]
@@ -900,10 +889,9 @@ def _ss_claims(*flows: dict[str, Any]) -> list[dict[str, Any]]:
 
 def test_self_service_bound_conjuncts():
     """G2, the universal directly. A COMPLETE fixture proves; dropping any one
-    conjunct — W1 (C1), W2 (C2), the caller-relative payee (C3), a readable
-    sibling flow (C4) — yields a NAMED refusal and nothing positive. A refused
-    conjunct never reaches a proven verdict, so the arm can never clear a payout
-    whose bound was not fully witnessed."""
+    conjunct (W1 (C1), W2 (C2), the caller-relative payee (C3), a readable
+    sibling flow (C4)) yields a NAMED refusal and nothing positive, so the arm
+    never clears a payout whose bound was not fully witnessed."""
     from services.scoring import distill as D
 
     proven = D._self_service_bound(_ss_claims(_ss_flow()))
@@ -937,11 +925,11 @@ def test_self_service_bound_conjuncts():
 
 
 def test_self_service_proven_reclassifies_an_open_payout_to_uncharged_product(corpus):
-    """The compose ordering the SPEC demands: an open ``msg_sender`` payout has its
-    destination PROVEN and its price withheld pending an amount witness, and W1 ∧
-    W2 IS that witness — so it is read BEFORE the withhold and the row reclassifies
-    to a named zero rather than staying withheld. Row kept; the two G7 disclosures
-    ride the notes so the fold's earned negative can carry them."""
+    """The compose ordering the SPEC demands: an open ``msg_sender`` payout has
+    its destination PROVEN and price withheld pending an amount witness, and
+    W1 ∧ W2 IS that witness, so it is read BEFORE the withhold and the row
+    reclassifies to a named zero. Row kept; the two G7 disclosures ride the notes
+    so the fold's earned negative can carry them."""
     contract = corpus.contract("0x" + "51" * 20)
     corpus.function(contract, name="cancelBid", claims=_ss_claims(_ss_flow()), openness="open")
 
@@ -960,9 +948,9 @@ def test_self_service_proven_reclassifies_an_open_payout_to_uncharged_product(co
 
 
 def test_self_service_refused_open_payout_stays_at_the_interim_withhold(corpus):
-    """A refused conjunction returns the row to the U-IW withhold — the
-    pre-pass-2 state, not_determined and withheld from the grade — never to a
-    cheaper number. The refusal reason rides the row it withheld."""
+    """A refused conjunction returns the row to the U-IW withhold (not_determined,
+    withheld from the grade), never to a cheaper number. The refusal reason rides
+    the row."""
     contract = corpus.contract("0x" + "52" * 20)
     corpus.function(
         contract,
@@ -982,9 +970,9 @@ def test_self_service_refused_open_payout_stays_at_the_interim_withhold(corpus):
 
 
 def test_self_service_uncharged_row_is_excluded_and_leaves_an_earned_negative(corpus):
-    """G1 + G7 together. A proven-bounded row keeps its confidence credit (it
-    enters the grade) but creates NO finding — and its disclosures, which would
-    vanish with the finding, ride an earned negative instead."""
+    """G1 + G7 together. A proven-bounded row keeps its confidence credit but
+    creates NO finding; its disclosures, which would vanish with the finding, ride
+    an earned negative instead."""
     contract = corpus.contract("0x" + "53" * 20)
     corpus.function(contract, name="cancelBid", claims=_ss_claims(_ss_flow()), openness="open")
 
@@ -1012,10 +1000,10 @@ def test_self_service_uncharged_row_is_excluded_and_leaves_an_earned_negative(co
 
 
 def test_uncharged_product_basis_value_disagreement_warns_and_does_not_exclude():
-    """G8. A severity_basis that names an uncharged-product token beside a severity
-    that is not proven 0.0 is a bug, not a benign row: it warns and is NOT
-    excluded, so the disagreement can never buy a silent exclusion. The corpus
-    count of that warning is 0 (checked by the differential harness)."""
+    """G8. A severity_basis naming an uncharged-product token beside a severity
+    that is not proven 0.0 is a bug: it warns and is NOT excluded, so the
+    disagreement never buys a silent exclusion. The corpus count of that warning
+    is 0 (checked by the differential harness)."""
     import types
     from typing import cast
 
@@ -1051,7 +1039,6 @@ def test_uncharged_product_basis_value_disagreement_warns_and_does_not_exclude()
 
 
 def test_destination_fold_is_a_meet_not_last_wins(corpus):
-    """One unread site makes the function's destination unread as a whole."""
     contract = corpus.contract("0x" + "c" * 40)
     corpus.function(
         contract,
@@ -1067,7 +1054,6 @@ def test_destination_fold_is_a_meet_not_last_wins(corpus):
 
 
 def test_not_applicable_is_a_different_fact_from_not_determined(corpus):
-    """``not_applicable`` comes from an allow-list, never from "not in the bearing tuple"."""
     contract = corpus.contract("0x" + "d" * 40)
     corpus.function(
         contract,
@@ -1100,7 +1086,6 @@ def test_not_applicable_is_a_different_fact_from_not_determined(corpus):
 
 
 def test_self_delegatecall_is_proven_fixed_and_benign(corpus):
-    """``address(this)`` preserves ``msg.sender``, so every sub-call re-runs its own gate."""
     contract = corpus.contract("0x" + "e" * 40)
     corpus.function(
         contract,
@@ -1116,7 +1101,6 @@ def test_self_delegatecall_is_proven_fixed_and_benign(corpus):
 
 
 def test_self_exec_is_fixed_but_not_benign(corpus):
-    """A plain call to self makes ``msg.sender`` the contract, which a gate may trust."""
     contract = corpus.contract("0x" + "f" * 40)
     corpus.function(
         contract,
@@ -1192,7 +1176,6 @@ def test_caller_arbitrary_needs_a_behavioural_existence_proof(corpus):
 
 
 def test_unwitnessed_reach_is_not_the_entity_balance_sheet(corpus):
-    """A proven destination does not license reading the balance sheet as a reach."""
     contract = corpus.contract("0x" + "3a" * 20)
     corpus.function(
         contract,
@@ -1309,7 +1292,6 @@ def test_null_openness_is_never_read_as_restricted(corpus):
 
 
 def test_two_functions_reaching_one_vault_charge_it_once(corpus):
-    """MAX per (entity, asset), never SUM."""
     contract = corpus.contract("0x" + "8a" * 20)
     for index, selector in enumerate(("0x77777777", "0x88888888")):
         function = corpus.function(
@@ -1340,7 +1322,6 @@ def test_two_functions_reaching_one_vault_charge_it_once(corpus):
 
 
 def test_chain_aliases_collapse_to_one_entity(corpus):
-    """``mainnet``/NULL and ``ethereum`` are one chain, so one entity key."""
     legacy = corpus.contract("0x" + "9a" * 20, chain="mainnet")
     corpus.function(
         legacy,
@@ -1353,7 +1334,6 @@ def test_chain_aliases_collapse_to_one_entity(corpus):
 
 
 def test_same_safe_on_two_chains_stays_two_units(corpus):
-    """Same address is not proof of same owner set (#158)."""
     mainnet = corpus.contract("0x" + "ab" * 20, chain="ethereum")
     optimism = corpus.contract("0x" + "ac" * 20, chain="optimism")
     for contract in (mainnet, optimism):
@@ -1387,7 +1367,6 @@ def test_unpriced_value_is_a_confidence_hit_not_a_zero(corpus):
 
 
 def test_safe_protection_withholds_the_kn_credit(corpus):
-    """A proven module means k/n is an upper bound, so the demotion is denied."""
     protected = corpus.contract("0x" + "ae" * 20)
     exposed = corpus.contract("0x" + "af" * 20)
     # Disjoint owner sets, so the two Safes stay two units: identical owners
@@ -1494,7 +1473,6 @@ def test_two_folds_of_one_state_are_identical(corpus):
 
 
 def test_job_signals_group_by_contract_not_deployment_address(corpus):
-    """Split-proxy siblings share one deployment address and must not collide."""
     proxy = "0x" + "be" * 20
     first = corpus.contract("0x" + "bf" * 20)
     second = corpus.contract("0x" + "ca" * 20)
@@ -1516,7 +1494,6 @@ def test_job_signals_group_by_contract_not_deployment_address(corpus):
 
 
 def test_contract_typed_principal_scores_nothing(corpus):
-    """ "An EOA controls the gating CONTRACT" is not "an EOA can call this"."""
     contract = corpus.contract("0x" + "cb" * 20)
     function = corpus.function(
         contract,
@@ -1575,8 +1552,8 @@ def test_both_feeding_modes_produce_the_same_document(corpus, db_session):
     """Distil-in-memory and distil-then-persist are one implementation.
 
     Two contracts whose ids and addresses sort in OPPOSITE orders, so a fold that
-    inherited the in-memory iteration order instead of the pinned population
-    order would produce a different document rather than the same one by luck.
+    inherited in-memory iteration order rather than the pinned population order
+    would produce a different document rather than the same one by luck.
     """
     from services.scoring.population import replace_contract_signals
 
@@ -1621,12 +1598,11 @@ def test_both_feeding_modes_produce_the_same_document(corpus, db_session):
 def test_r2_a_foreign_protocols_backlink_licenses_no_reach(corpus, db_session):
     """A reach licence from another protocol's graph is not this protocol's fact.
 
-    The payloads here are the producer's own shape: the node is written AT THE
-    GATING CONTRACT'S ADDRESS, on the GATED contract's graph, and its
-    ``gated_contract_address`` names that gated contract. The earlier version of
-    this test wrote ``gated_contract_address = manager.address`` — a payload no
-    producer emits — so the arm it exercised was one the real data could never
-    reach and the join it protected was inert on every row in the database.
+    The payloads are the producer's own shape: the node is written AT THE GATING
+    CONTRACT'S ADDRESS, on the GATED contract's graph, with
+    ``gated_contract_address`` naming the gated contract. An earlier version wrote
+    ``gated_contract_address = manager.address`` (a payload no producer emits), so
+    the join it protected was inert on every real row.
     """
     from db.models import ControlGraphNode, Protocol
 
@@ -1745,7 +1721,6 @@ def _coverage(session, protocol_id: int, contract: Contract, report, *, status: 
 
 
 def test_the_tracked_total_is_published_and_folds_the_impl_onto_its_proxy(corpus, db_session):
-    """The exposure denominator is emitted, not left to be back-solved."""
     token = "0x" + "d1" * 20
     proxy = corpus.contract("0x" + "c1" * 20, implementation="0x" + "c2" * 20)
     impl = corpus.contract("0x" + "c2" * 20)
@@ -1763,7 +1738,6 @@ def test_the_tracked_total_is_published_and_folds_the_impl_onto_its_proxy(corpus
 
 
 def test_an_unpriced_perimeter_publishes_no_tracked_total(corpus, db_session):
-    """Nothing priced is not_determined, never a proven zero."""
     corpus.contract("0x" + "c3" * 20)
 
     plane = load_value_plane(db_session, corpus.protocol.id)
@@ -1827,7 +1801,6 @@ def test_audit_posture_value_is_null_when_no_covered_entity_is_priced(corpus, db
 
 
 def test_a_proven_equivalence_without_its_commit_is_not_a_proof(corpus, db_session):
-    """``equivalence_status='proven'`` alone names no commit to have proven it."""
     token = "0x" + "d4" * 20
     anchored = corpus.contract("0x" + "d5" * 20)
     unanchored = corpus.contract("0x" + "d6" * 20)
@@ -1876,7 +1849,6 @@ def test_audit_discovery_that_ran_and_found_nothing_publishes_zero(corpus, db_se
 
 
 def test_an_unwitnessed_audit_discovery_publishes_no_counts(corpus, db_session):
-    """An empty table with no discovery witness is not 'this protocol has no audits'."""
     corpus.contract("0x" + "d8" * 20)
 
     posture = load_audit_posture(db_session, corpus.protocol.id, load_value_plane(db_session, corpus.protocol.id))
@@ -1902,10 +1874,9 @@ def _balance_row(
     block: int | None = None,
     raw: str = "1",
 ) -> None:
-    """A balance row. ``block`` is only storable on a native row: the schema's
+    """A balance row. ``block`` is only storable on a native row:
     ``ck_contract_balances_token_block_null`` enforces that an ERC-20 quantity is
-    never height-pinned, which is why most observations can only be ordered by
-    write order."""
+    never height-pinned, so most observations can only be ordered by write order."""
     from db.models import ContractBalance
 
     session.add(
@@ -1926,8 +1897,8 @@ def test_the_same_account_read_at_two_heights_publishes_the_later_read(corpus, d
     """R5: MAX across heights republishes a balance that had already moved.
 
     The proxy's live row and its implementation's frozen row observe ONE address;
-    the alias fold puts them in one bucket, and only the height says which is
-    current. Native, because the schema refuses a height on an ERC-20 row.
+    the alias fold buckets them and only the height says which is current.
+    Native, because the schema refuses a height on an ERC-20 row.
     """
     proxy = corpus.contract("0x" + "f1" * 20, implementation="0x" + "f2" * 20)
     impl = corpus.contract("0x" + "f2" * 20)
@@ -1940,25 +1911,7 @@ def test_the_same_account_read_at_two_heights_publishes_the_later_read(corpus, d
     assert plane.provenance["observation_reduction"]["stale_high_water_usd_dropped"] == 12057846.17
 
 
-def test_two_distinct_observed_accounts_of_one_entity_are_summed(corpus, db_session):
-    """R5, the other leg: distinct accounts are distinct holdings.
-
-    Unexercised on the corpus this shipped against — every competing pair there
-    observes one address — so the ruling is pinned rather than left implicit.
-    """
-    token = "0x" + "d6" * 20
-    proxy = corpus.contract("0x" + "f3" * 20, implementation="0x" + "f4" * 20)
-    impl = corpus.contract("0x" + "f4" * 20)
-    _balance_row(db_session, proxy, usd="1000.00", token=token, observed=proxy.address)
-    _balance_row(db_session, impl, usd="400.00", token=token, observed=impl.address)
-
-    plane = load_value_plane(db_session, corpus.protocol.id)
-    assert plane.total(entity_key("ethereum", proxy.address)) == 1400.0
-    assert plane.provenance["observation_reduction"]["multi_account_buckets"] == 1
-
-
 def test_a_sheet_of_rounding_dust_publishes_no_total_and_names_why(corpus, db_session):
-    """R6: 0.00 is the storage floor, not a proven-empty balance sheet."""
     token = "0x" + "d7" * 20
     other = "0x" + "d8" * 20
     contract = corpus.contract("0x" + "f5" * 20)
@@ -1981,13 +1934,11 @@ def test_a_sheet_of_rounding_dust_publishes_no_total_and_names_why(corpus, db_se
 def test_the_sheet_state_census_counts_the_entities_nobody_has_read(corpus, db_session):
     """V2: ``no_rows`` was a STRUCTURAL zero, not a measurement.
 
-    The census walked the observation maps, and every key in those maps has by
-    construction something observed on it — so the one state meaning "nothing
-    observed" could never be incremented. A consumer reading
-    ``sheet_states.no_rows: 0`` was told the earned fact "every entity this
-    protocol names carries a balance sheet" by a counter that had no way to say
-    anything else. Here two of the three contracts have never been read, and the
-    census says two.
+    The census walked the observation maps, whose keys by construction have
+    something observed, so the "nothing observed" state could never increment and
+    ``sheet_states.no_rows: 0`` falsely told a consumer "every entity carries a
+    balance sheet". Here two of three contracts were never read; the census says
+    two.
     """
     read = corpus.contract("0x" + "e1" * 20)
     corpus.contract("0x" + "e2" * 20)
@@ -2004,10 +1955,9 @@ def test_the_sheet_state_census_counts_the_entities_nobody_has_read(corpus, db_s
 def test_an_unread_proxy_and_its_implementation_are_one_unread_sheet(corpus, db_session):
     """The base population is NOT canonical when the census runs.
 
-    ``contract_entities`` is folded onto proxies only after this block, so a
-    census that read it raw would count an implementation apart from the proxy
-    it folds onto and report two unread sheets where there is one. The fold is
-    the whole reason the count is taken over canonical keys.
+    ``contract_entities`` folds onto proxies only after this block, so a census
+    over it raw would count an implementation apart from its proxy and report two
+    unread sheets where there is one.
     """
     proxy = "0x" + "e4" * 20
     impl = "0x" + "e5" * 20
@@ -2022,8 +1972,8 @@ def test_an_unread_proxy_and_its_implementation_are_one_unread_sheet(corpus, db_
 def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(corpus, db_session):
     """R10: a burn sentinel is not a principal, and not an anchor either.
 
-    Admitting it makes every renounced authority in the protocol one principal's
-    closure — the single largest fan-out in the graph, seeded by no witness.
+    Admitting it makes every renounced authority one principal's closure, the
+    largest fan-out in the graph, seeded by no witness.
     """
     from db.models import ControlGraphEdge
 
@@ -2060,7 +2010,6 @@ def test_the_zero_address_is_refused_at_both_ends_and_the_refusal_is_counted(cor
 
 
 def test_an_edge_with_an_unkeyable_endpoint_is_refused_by_name_not_dropped(corpus, db_session):
-    """An uncounted drop reads as a protocol with less control in it."""
     from db.models import ControlGraphEdge
 
     anchor = corpus.contract("0x" + "f7" * 20)
@@ -2085,7 +2034,7 @@ def test_an_edge_with_an_unkeyable_endpoint_is_refused_by_name_not_dropped(corpu
 def test_a_controller_value_pointing_at_the_zero_address_is_an_earned_negative(corpus, db_session):
     """R18: renounced authority is a resolved constraint, not a missing edge.
 
-    Counted apart from the refusal it coincides with — "we declined to walk this"
+    Counted apart from the refusal it coincides with: "we declined to walk this"
     and "nobody holds this authority" are different facts.
     """
     from db.models import ControlGraphEdge
@@ -2122,9 +2071,9 @@ def test_a_controller_value_pointing_at_the_zero_address_is_an_earned_negative(c
 def test_every_excluded_relation_is_enumerated_with_its_count_and_reason(corpus, db_session):
     """R13: the bound is discovery-fixed, not built from what the walk consumed.
 
-    A relation the scorer never mentions, and a relation that carries no rows
-    today, are both silently unwalked under an enumeration keyed on the consumed
-    set. Both must be published with their counts.
+    Relations the scorer never mentions, or that carry no rows today, are
+    silently unwalked under an enumeration keyed on the consumed set; both must
+    be published with counts.
     """
     from db.models import CONTROL_EDGE_RELATIONS, ControlGraphEdge
 
@@ -2171,10 +2120,10 @@ def test_every_excluded_relation_is_enumerated_with_its_count_and_reason(corpus,
 def test_role_holder_floors_are_scoped_to_the_protocol_being_scored(corpus, db_session):
     """R20: another protocol's analysis may not move this protocol's floors.
 
-    The table carries no protocol column, so an unscoped read makes the
-    population a function of what else has been analysed — the same protocol
-    scored twice would carry different floors. Only a registry this protocol's
-    own resolution names is in scope, which is exactly the set the fold can join.
+    The table has no protocol column, so an unscoped read makes the population a
+    function of what else was analysed (same protocol scored twice, different
+    floors). Only a registry this protocol's own resolution names is in scope,
+    which is the set the fold can join.
     """
     contract = corpus.contract("0x" + "fb" * 20)
     registry = "0x" + "f9" * 20

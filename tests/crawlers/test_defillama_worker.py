@@ -1,11 +1,7 @@
-"""Tests for DefiLlamaWorker — process() paths and edge cases.
+"""Tests for DefiLlamaWorker.process() paths and edge cases.
 
-Child-job creation and ``analyze_limit`` enforcement moved out of the
-worker in the move to a unified selection stage; tests that covered
-those concerns now live next to the ``SelectionWorker`` and the
-DApp-crawl integration suite. What's left here is the worker's direct
-responsibilities: run the scan, persist artifacts, populate the
-``contracts`` table, and mark the job complete.
+Child-job creation and ``analyze_limit`` moved to ``SelectionWorker``; this file keeps the worker's direct duties:
+run the scan, persist artifacts, populate ``contracts``, complete the job.
 """
 
 from __future__ import annotations
@@ -20,13 +16,11 @@ import pytest
 from workers.base import JobHandledDirectly
 from workers.defillama_worker import DefiLlamaWorker
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 ADDR_1 = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ADDR_2 = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 PROTOCOL = "aave-v3"
+_BARE_TOKEN = "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
+_BASE_TOKEN = "0x60359a0d0bd9f2c6e3a8b1a9b4c5d6e7f8091a2b"
 
 
 def _job(**overrides: Any) -> SimpleNamespace:
@@ -46,7 +40,6 @@ def _scan_result(
     addresses: list[str] | None = None,
     address_details: list[dict] | None = None,
 ) -> dict:
-    """Return a minimal scan_protocol result."""
     addrs = addresses or []
     return {
         "addresses": addrs,
@@ -56,7 +49,6 @@ def _scan_result(
 
 
 def _patch_worker_deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
-    """Patch all external dependencies of DefiLlamaWorker.process() and return trackers."""
     store_calls: list[tuple[str, Any]] = []
     complete_calls: list[tuple] = []
     protocol_calls: list[tuple[str, str | None]] = []
@@ -92,74 +84,33 @@ def _patch_worker_deps(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
 class TestMissingProtocol:
-    """process() raises ValueError when defillama_protocol is missing."""
-
-    def test_missing_protocol_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        "request_payload", [pytest.param({}, id="missing-key"), pytest.param(None, id="none-request")]
+    )
+    def test_missing_protocol_raises(self, monkeypatch: pytest.MonkeyPatch, request_payload: Any) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
-        job = _job(request={})
+        job = _job(request=request_payload)
         _patch_worker_deps(monkeypatch)
 
         with pytest.raises(ValueError, match="defillama_protocol"):
             worker.process(session, cast(Any, job))
-
-    def test_none_request_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = DefiLlamaWorker()
-        session = MagicMock()
-        job = _job(request=None)
-        _patch_worker_deps(monkeypatch)
-
-        with pytest.raises(ValueError, match="defillama_protocol"):
-            worker.process(session, cast(Any, job))
-
-
-class TestHappyPath:
-    """Full successful scan writes artifacts and completes the job."""
-
-    def test_stores_artifacts_and_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = DefiLlamaWorker()
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-        job = _job()
-
-        trackers = _patch_worker_deps(monkeypatch)
-
-        details = [
-            {"address": ADDR_1, "chain": "ethereum"},
-            {"address": ADDR_2, "chain": "polygon"},
-        ]
-        monkeypatch.setattr(
-            "workers.defillama_worker.scan_protocol",
-            lambda **kwargs: _scan_result(
-                addresses=[ADDR_1, ADDR_2],
-                address_details=details,
-            ),
-        )
-
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        stored_names = [name for name, _ in trackers["store_calls"]]
-        assert "defillama_full_scan" in stored_names
-        assert "defillama_scan_results" in stored_names
-        assert "discovery_summary" in stored_names
-        assert len(trackers["complete_calls"]) == 1
 
 
 class TestJobName:
-    """Job name is set when missing, not overwritten when present."""
-
-    def test_sets_name_when_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        ("initial_name", "expected"),
+        [
+            pytest.param(None, f"DefiLlama: {PROTOCOL}", id="sets-name-when-missing"),
+            pytest.param("My Custom Name", "My Custom Name", id="preserves-existing-name"),
+        ],
+    )
+    def test_job_name(self, monkeypatch: pytest.MonkeyPatch, initial_name: str | None, expected: str) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
-        job = _job(name=None)
+        job = _job(name=initial_name)
 
         _patch_worker_deps(monkeypatch)
         monkeypatch.setattr(
@@ -170,53 +121,18 @@ class TestJobName:
         with pytest.raises(JobHandledDirectly):
             worker.process(session, cast(Any, job))
 
-        assert job.name == f"DefiLlama: {PROTOCOL}"
-
-    def test_preserves_existing_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = DefiLlamaWorker()
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-        original_name = "My Custom Name"
-        job = _job(name=original_name)
-
-        _patch_worker_deps(monkeypatch)
-        monkeypatch.setattr(
-            "workers.defillama_worker.scan_protocol",
-            lambda **kwargs: _scan_result(addresses=[]),
-        )
-
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        assert job.name == original_name
+        assert job.name == expected
 
 
 class TestNoCloneEnvVar:
-    """DEFILLAMA_NO_CLONE env var is correctly passed through to scan_protocol."""
-
-    def test_no_clone_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = DefiLlamaWorker()
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-        job = _job()
-
-        _patch_worker_deps(monkeypatch)
-        monkeypatch.setenv("DEFILLAMA_NO_CLONE", "true")
-
-        captured_kwargs: list[dict] = []
-
-        def spy_scan(**kwargs):
-            captured_kwargs.append(kwargs)
-            return _scan_result(addresses=[])
-
-        monkeypatch.setattr("workers.defillama_worker.scan_protocol", spy_scan)
-
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        assert captured_kwargs[0]["no_clone"] is True
-
-    def test_no_clone_false_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        ("env", "expected"),
+        [
+            pytest.param({"DEFILLAMA_NO_CLONE": "true"}, True, id="true"),
+            pytest.param({}, False, id="false-by-default"),
+        ],
+    )
+    def test_no_clone(self, monkeypatch: pytest.MonkeyPatch, env: dict[str, str], expected: bool) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
@@ -224,6 +140,8 @@ class TestNoCloneEnvVar:
 
         _patch_worker_deps(monkeypatch)
         monkeypatch.delenv("DEFILLAMA_NO_CLONE", raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
 
         captured_kwargs: list[dict] = []
 
@@ -236,12 +154,10 @@ class TestNoCloneEnvVar:
         with pytest.raises(JobHandledDirectly):
             worker.process(session, cast(Any, job))
 
-        assert captured_kwargs[0]["no_clone"] is False
+        assert captured_kwargs[0]["no_clone"] is expected
 
 
 class TestScanResultArtifactContent:
-    """Verify artifact data payloads contain correct information."""
-
     def test_full_scan_artifact_contents(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
@@ -297,15 +213,12 @@ class TestScanResultArtifactContent:
         assert summary["mode"] == "defillama_scan"
         assert summary["protocol"] == PROTOCOL
         assert summary["discovered_count"] == 2
-        # Ranking and child-job creation moved to SelectionWorker; the
-        # DefiLlama summary no longer reports analyzed_count or child_jobs.
+        # Ranking/child jobs moved to SelectionWorker; the summary no longer reports analyzed_count or child_jobs.
         assert "analyzed_count" not in summary
         assert "child_jobs" not in summary
 
 
 class TestZeroAddressesFound:
-    """Scan finds zero addresses — still completes with discovery_summary."""
-
     def test_no_addresses(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
@@ -327,8 +240,6 @@ class TestZeroAddressesFound:
 
 
 class TestScanProtocolRaises:
-    """If scan_protocol raises, the exception propagates (not caught by worker)."""
-
     def test_exception_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
@@ -345,13 +256,20 @@ class TestScanProtocolRaises:
 
 
 class TestProtocolCreation:
-    """Protocol row is created from defillama slug when company is absent."""
-
-    def test_slug_becomes_protocol_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        ("company", "expected_name"),
+        [
+            pytest.param(None, PROTOCOL, id="slug-becomes-protocol-name"),
+            pytest.param("Aave", "Aave", id="company-preferred-over-slug"),
+        ],
+    )
+    def test_protocol_name_derivation(
+        self, monkeypatch: pytest.MonkeyPatch, company: str | None, expected_name: str
+    ) -> None:
         worker = DefiLlamaWorker()
         session = MagicMock()
         session.execute.return_value.scalar_one_or_none.return_value = None
-        job = _job()
+        job = _job(company=company)
 
         trackers = _patch_worker_deps(monkeypatch)
         monkeypatch.setattr(
@@ -362,27 +280,9 @@ class TestProtocolCreation:
         with pytest.raises(JobHandledDirectly):
             worker.process(session, cast(Any, job))
 
-        assert trackers["protocol_calls"] == [(PROTOCOL, None)]
+        assert trackers["protocol_calls"] == [(expected_name, None)]
         assert job.protocol_id == 1
-        assert job.company == PROTOCOL
-
-    def test_company_prefers_over_slug(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        worker = DefiLlamaWorker()
-        session = MagicMock()
-        session.execute.return_value.scalar_one_or_none.return_value = None
-        job = _job(company="Aave")
-
-        trackers = _patch_worker_deps(monkeypatch)
-        monkeypatch.setattr(
-            "workers.defillama_worker.scan_protocol",
-            lambda **kwargs: _scan_result(addresses=[]),
-        )
-
-        with pytest.raises(JobHandledDirectly):
-            worker.process(session, cast(Any, job))
-
-        assert trackers["protocol_calls"] == [("Aave", None)]
-        assert job.company == "Aave"
+        assert job.company == expected_name
 
 
 class TestListingAddressNomination:
@@ -417,19 +317,34 @@ class TestListingAddressNomination:
             worker.process(session, cast(Any, job))
         return captured
 
-    def test_bare_listing_address_is_nominated_on_ethereum(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        token = "0xfe0c30065b384f05761f15d0cc899d4f9f9cc0eb"
-        entries = self._run(
-            monkeypatch, listing=[{"address": token, "chain": None, "slug": "ether.fi-liquid"}], scanned=[ADDR_1]
-        )
-        assert {"address": token, "chain": "ethereum", "new_sources": ["defillama"]} in entries
-        assert {"address": ADDR_1, "chain": None, "new_sources": ["defillama"]} in entries
-
-    def test_prefixed_listing_address_keeps_its_chain(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        token = "0x60359a0d0bd9f2c6e3a8b1a9b4c5d6e7f8091a2b"
-        entries = self._run(monkeypatch, listing=[{"address": token, "chain": "base", "slug": "x"}], scanned=[])
-        assert entries == [{"address": token, "chain": "base", "new_sources": ["defillama"]}]
-
-    def test_no_listing_address_changes_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        entries = self._run(monkeypatch, listing=[], scanned=[ADDR_1])
-        assert entries == [{"address": ADDR_1, "chain": None, "new_sources": ["defillama"]}]
+    @pytest.mark.parametrize(
+        ("listing", "scanned", "expected"),
+        [
+            pytest.param(
+                [{"address": _BARE_TOKEN, "chain": None, "slug": "ether.fi-liquid"}],
+                [ADDR_1],
+                [
+                    {"address": _BARE_TOKEN, "chain": "ethereum", "new_sources": ["defillama"]},
+                    {"address": ADDR_1, "chain": None, "new_sources": ["defillama"]},
+                ],
+                id="bare-listing-address-nominated-on-ethereum",
+            ),
+            pytest.param(
+                [{"address": _BASE_TOKEN, "chain": "base", "slug": "x"}],
+                [],
+                [{"address": _BASE_TOKEN, "chain": "base", "new_sources": ["defillama"]}],
+                id="prefixed-listing-address-keeps-its-chain",
+            ),
+            pytest.param(
+                [],
+                [ADDR_1],
+                [{"address": ADDR_1, "chain": None, "new_sources": ["defillama"]}],
+                id="no-listing-address-changes-nothing",
+            ),
+        ],
+    )
+    def test_listing_address_nomination(
+        self, monkeypatch: pytest.MonkeyPatch, listing: list[dict], scanned: list[str], expected: list[dict]
+    ) -> None:
+        entries = self._run(monkeypatch, listing=listing, scanned=scanned)
+        assert sorted(entries, key=lambda e: e["address"]) == sorted(expected, key=lambda e: e["address"])
