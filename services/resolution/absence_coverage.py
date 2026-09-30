@@ -1,37 +1,19 @@
 """What a set of event cursors does and does not prove about absence.
 
-An earned negative of the form "this state variable has never been written"
-rests on three separate things being true at once:
+"This variable was never written" needs three things:
 
-1. **Recording surface** — every topic that CAN write the variable has a warm
-   cursor. Enumerating that surface requires a proven inverse index from
-   variables to writing topics. No such index exists in this system: the static
-   pass that discovers writer events attaches its findings only to mappings keyed
-   on the CALLER, and the one persisted forward map
-   (``tracked_topics[].effect_tags.writes[]``) is a union over every emitter of a
-   signature, so reading it backwards attributes a write to the wrong event.
-2. **Range** — the covered range's LOWER bound. ``backfill_complete`` is an
-   upper-bound flag; a cursor can be warm to head having started above the first
-   write.
-3. **Pages** — every ``eth_getLogs`` page in that range came back whole. A page
-   returned at an upstream's result cap is indistinguishable from a truncated
-   one, and nothing recorded the counts until now.
+1. Recording surface: every topic that can write the variable has a warm cursor. That needs a proven variable-to-topic
+inverse index, which doesn't exist (writer events are only attached to caller-keyed mappings, and
+``tracked_topics[].effect_tags.writes[]`` is a union over emitters).
+2. Range: a witnessed lower bound; ``backfill_complete`` only bounds from above.
+3. Pages: every ``eth_getLogs`` page came back whole.
 
-This module reports on (2) and (3) from persisted rows, and reports honestly that
-(1) is unavailable. It therefore publishes a CEILING — a necessary condition that
-can fail — and never a licence. ``earned_negative_admissible`` is hard-wired
-False: making it reachable requires a proven inverse index, which does not exist,
-and a new adversarial panel. It is not "unreachable by construction" in some
-permanent sense — it is unreachable because the evidence is missing.
+This reports (2) and (3) and says (1) is unavailable, so it publishes a ceiling, never a licence:
+``earned_negative_admissible`` is hard-wired False until an inverse index exists.
 
-A caller may pass ``write_surface_topics`` to say which topics IT believes write
-the variable. That populates ``enrolled`` / ``missing`` / ``blocking_reasons``
-FOR REPORTING ONLY; it NEVER changes ``write_surface_basis``, which remains
-``not_determined``, and therefore never changes ``enrollment_complete`` (false)
-or ``earned_negative_admissible`` (false). A caller's belief about a third
-party's write surface is a code-invariant claim, not a witness — a role registry
-written directly by ``_roles[role].members[x] = true``, or an implementation
-swapped behind a proxy after the plan was built, breaks it silently.
+``write_surface_topics`` lets a caller say which topics it believes write the variable. That fills ``enrolled`` /
+``missing`` / ``blocking_reasons`` for reporting only; ``write_surface_basis`` stays ``not_determined``, since such a
+belief is a claim, not a witness.
 """
 
 from __future__ import annotations
@@ -50,11 +32,10 @@ from db.models import (
 from services.resolution.repos.event_logs_rpc import default_result_cap
 from utils.scoring_status import NOT_DETERMINED
 
-# ``page_completeness`` domain.
 PAGES_COMPLETE = "complete"
 PAGES_INCOMPLETE = "incomplete"
 
-# ``blocking_reasons`` vocabulary — why the earned negative is not admissible.
+# Why the earned negative isn't admissible.
 REASON_NO_INVERSE_INDEX = "write_surface_not_enumerable"
 REASON_MISSING_CURSORS = "write_surface_topics_missing_cursors"
 REASON_COLD_CURSORS = "enrolled_cursors_not_warm"
@@ -63,14 +44,9 @@ REASON_PAGE_RESIDUAL = "page_completeness_not_determined"
 
 
 def page_completeness(cursor: IndexedEventCursor, *, configured_cap: int | None) -> str:
-    """Whether every page this cursor folded is proven whole.
-
-    ``complete`` requires all four of: a continuous window record, a recorded
-    maximum, a cap persisted alongside those counts, and that persisted cap
-    still being the one in force. The last condition is what stops a cap change
-    from silently re-grading history: pages accepted under one guard say nothing
-    about a different guard, in either direction, so a disagreement is
-    ``not_determined`` rather than a re-computation.
+    """Whether every page this cursor folded is proven whole: a continuous window record, a recorded maximum, a
+    persisted cap, and that cap still in force. A cap change gives ``not_determined`` rather than re-grading
+    history.
     """
     if cursor.window_stats_basis != WINDOW_STATS_CONTINUOUS:
         return NOT_DETERMINED
@@ -84,10 +60,7 @@ def page_completeness(cursor: IndexedEventCursor, *, configured_cap: int | None)
 def _range_lower_bound(cursors: Sequence[IndexedEventCursor]) -> tuple[int | None, str]:
     """The highest witnessed lower bound across ``cursors``, or not_determined.
 
-    Highest, not lowest: the claim is "no write below this height", and it holds
-    only where EVERY cursor was covered, so the weakest link governs. One cursor
-    without a witnessed bound makes the whole set's bound unknown — a NULL is
-    never read as 0, which would assert coverage from genesis.
+    Highest because every cursor must be covered; a NULL is never read as 0 (coverage from genesis).
     """
     if not cursors:
         return None, NOT_DETERMINED
@@ -100,12 +73,7 @@ def _range_lower_bound(cursors: Sequence[IndexedEventCursor]) -> tuple[int | Non
 
 
 def _normalize_topics(topics: Iterable[str] | None) -> list[str] | None:
-    """Lower-case FIRST, then test the prefix.
-
-    Testing ``startswith("0x")`` on the raw string silently drops an uppercase
-    ``0X…`` topic, which would shorten ``missing`` — the caller would be told a
-    writer is covered because its topic was thrown away on the way in.
-    """
+    """Lowercase before testing the prefix, or an uppercase ``0X`` topic is dropped and shortens ``missing``."""
     if topics is None:
         return None
     lowered = (str(t).lower() for t in topics if isinstance(t, str))
@@ -122,8 +90,7 @@ def absence_coverage(
 ) -> dict[str, Any]:
     """Report what the cursors on ``(chain_id, address)`` can support.
 
-    The gate travels inside the same object as the numbers that produced it, so a
-    consumer cannot read the payload without the verdict that qualifies it.
+    The verdict travels with the numbers so they can't be read without it.
     """
     cap = default_result_cap() if configured_cap is None else configured_cap
     rows = list(
@@ -134,11 +101,7 @@ def absence_coverage(
         ).scalars()
     )
     enrolled = sorted(str(row.topic0).lower() for row in rows)
-    # ``warm`` means "this cursor could support an absence claim", so it must
-    # agree with what the resolution gate actually does. A cursor the gate
-    # refuses is reported under its own key rather than counted as warm — read as
-    # warm it would say the recording surface is covered by a cursor that folds
-    # as cold.
+    # ``warm`` must match the resolution gate; refused cursors are reported under their own key.
     warm = sorted(
         str(row.topic0).lower()
         for row in rows
@@ -175,23 +138,20 @@ def absence_coverage(
     return {
         "chain_id": chain_id,
         "address": address.lower(),
-        # The PROVEN write surface. Always null: no inverse index exists.
+        # The proven write surface: always null (no inverse index).
         "write_surface": None,
         "write_surface_basis": NOT_DETERMINED,
-        # A caller's assertion, echoed under its own key so it can never be
-        # mistaken for the proven surface above.
+        # The caller's assertion, under its own key so it can't be mistaken for the proven surface.
         "write_surface_asserted": asserted,
         "enrolled": enrolled,
         "warm": warm,
-        # Enrolled and possibly backfilled, but refused by the resolution gate:
-        # indexing history, licensing nothing.
+        # Enrolled but refused by the resolution gate: indexes history, licenses nothing.
         "exactness_ineligible": exactness_ineligible,
         "missing": missing,
         "range_lower_bound": lower_bound,
         "range_lower_bound_basis": lower_bound_basis,
         "page_completeness": pages,
-        # Ceiling, not licence. False here does not mean the variable HAS been
-        # written; it means this system cannot yet see whether it was.
+        # Ceiling, not licence: False means we can't see, not that it was written.
         "enrollment_complete": False,
         "earned_negative_admissible": False,
         "blocking_reasons": sorted(set(reasons)),

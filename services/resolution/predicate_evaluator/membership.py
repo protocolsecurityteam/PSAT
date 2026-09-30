@@ -109,8 +109,7 @@ def _observed_event_key_words(
 
     scan_chain_id = getattr(outer_ctx, "chain_id", None)
     if not isinstance(scan_chain_id, int):
-        # ctx.chain_id is required (inv. 6); a chainless durable read can no longer
-        # default to mainnet's indexed logs.
+        # Chainless reads can't default to mainnet (inv. 6).
         return []
 
     out: set[str] = set()
@@ -199,17 +198,9 @@ def _observed_event_key_words_from_hypersync(
 
         scan_chain_id = getattr(outer_ctx, "chain_id", None)
         if not isinstance(scan_chain_id, int):
-            # ctx.chain_id is required (inv. 6); no chain → no scan surface.
             return []
-        # Per-chain HyperSync endpoint (inv. 5), driven by the evaluation's chain:
-        # meta override, then env override, then the registry URL. A chain with no
-        # registry coverage has no scan surface — skip the live scan (no members)
-        # rather than silently scanning mainnet.
-        # NOTE (F7): PSAT_HYPERSYNC_URL is a single-URL global — it outranks the
-        # per-chain registry URL, so it is a SINGLE-CHAIN DEV OVERRIDE only. Never
-        # set it in a multichain deployment or every chain's scan is pinned to one
-        # endpoint; multichain routing must come from the registry (or per-eval
-        # meta.hypersync_url), not this env var.
+        # Per-chain endpoint (inv. 5): meta override, env override, registry. No coverage means no scan.
+        # ``PSAT_HYPERSYNC_URL`` overrides every chain, so it's a single-chain dev override only.
         registry_url = hypersync_url_for_chain(scan_chain_id)
         url = getattr(outer_ctx, "meta", {}).get("hypersync_url") or os.getenv("PSAT_HYPERSYNC_URL") or registry_url
         if not url:
@@ -224,8 +215,7 @@ def _observed_event_key_words_from_hypersync(
 
         found: set[str] = set()
         for event_address, topic0s in address_topics.items():
-            # No floor → DEFER this address (skip the live scan) rather than scan
-            # from genesis; a known floor scans deploy→head.
+            # No floor: defer rather than scan from genesis.
             floor = resolve_scan_floor(
                 event_address,
                 scan_chain_id,

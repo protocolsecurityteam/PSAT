@@ -1,27 +1,8 @@
-"""Membership-probe service for semantic predicate trees.
+"""Membership probe for semantic predicate trees: is this address in a leaf's set?
 
-Given a serialized PredicateTree, a leaf index, and a candidate
-member address, returns a structured answer to "is this address in
-the leaf's set?" The decision relies on the AdapterRegistry to
-expand the leaf's set descriptor into a CapabilityExpr.
-
-Three answers ``probe_membership`` returns:
-
-  * ``yes``  — the address is provably allowed by the leaf.
-  * ``no``   — the address is provably NOT allowed.
-  * ``unknown`` — the adapter resolved the descriptor but the
-    answer can't be made definitive (e.g. lower_bound finite_set
-    where the address isn't in the partial known list, or
-    external_check_only / signature_witness shapes).
-
-The shape of "unknown" matters: it tells the caller whether to fall
-back to an out-of-band probe (RPC authority check, EIP-1271
-``isValidSignature``) or accept the ambiguity. The membership
-quality + confidence on the CapabilityExpr drive the trit.
-
-This is the engine the probe HTTP route (``/api/contract/<addr>/probe/membership``)
-will wrap. Keeping it pure-function over an injected registry +
-context makes it unit-testable without spinning up FastAPI.
+``probe_membership`` answers ``yes``, ``no``, or ``unknown`` (e.g. a lower_bound set not containing it, or
+external_check_only / signature_witness shapes), based on the resolved CapabilityExpr's quality and confidence.
+``unknown`` tells the caller to try an out-of-band probe. Pure over an injected registry and context.
 """
 
 from __future__ import annotations
@@ -40,8 +21,7 @@ def probe_membership(
     registry: AdapterRegistry,
     ctx: EvaluationContext,
 ) -> dict[str, Any]:
-    """Return ``{"result": "yes"|"no"|"unknown", ...}`` for the
-    leaf at ``predicate_index`` in the predicate tree."""
+    """``{"result": "yes"|"no"|"unknown", ...}`` for the leaf at ``predicate_index``."""
     leaves = list(_walk_leaves(tree))
     if not 0 <= predicate_index < len(leaves):
         return {
@@ -90,22 +70,11 @@ def probe_signature(
     registry: AdapterRegistry,
     ctx: EvaluationContext,
 ) -> dict[str, Any]:
-    """Counterpart to ``probe_membership`` for ``signature_auth``
-    leaves. The caller has already done ECDSA recovery (or
-    EIP-1271 isValidSignature) and supplies the recovered signer
-    address; we return whether that address is in the leaf's
+    """``probe_membership`` for ``signature_auth`` leaves: whether an already-recovered signer is in the
     allowed-signer set.
 
-    For ECDSA leaves (``ecrecover(hash, v, r, s) == knownSigner``)
-    the signer set is the resolved address-typed operand —
-    typically a state-var read or constant. For EIP-1271 leaves,
-    the leaf carries a signature_witness shape that wraps an
-    ``external_check_only`` indicating the caller must invoke
-    ``isValidSignature(hash, sig)`` on the signing contract; we
-    surface that probe target+selector via ``unknown``.
-
-    Returns ``{"result": "yes"|"no"|"unknown", ...}`` on the same
-    contract as ``probe_membership``.
+    ECDSA leaves compare against the resolved operand. EIP-1271 leaves wrap an ``external_check_only`` for
+    ``isValidSignature``, surfaced via ``unknown``.
     """
     from ..static.contract_analysis_pipeline.predicate_types import make_leaf_node
     from .predicate_evaluator import evaluate_tree_with_registry
@@ -129,10 +98,7 @@ def probe_signature(
             "authority_role": role,
         }
 
-    # Resolve the leaf by itself — wrap in a make_leaf_node so the
-    # evaluator handles it cleanly. The evaluator returns a
-    # signature_witness whose .signer is the address-set the
-    # signature must recover to.
+    # Evaluate the leaf alone; the result's ``.signer`` is the allowed set.
     isolated_tree = make_leaf_node(leaf)  # pyright: ignore[reportArgumentType]
     cap = evaluate_tree_with_registry(isolated_tree, registry, ctx)
     if cap.kind == "signature_witness" and cap.signer is not None:
@@ -142,8 +108,7 @@ def probe_signature(
         answer["leaf_kind"] = leaf_kind
         answer["authority_role"] = role
         return answer
-    # Fall-through: leaf resolved to something other than a
-    # signature_witness — surface for diagnostic.
+    # Not a signature_witness; surface for diagnosis.
     return {
         "result": "unknown",
         "reason": f"unexpected_signature_capability_{cap.kind}",
@@ -166,8 +131,7 @@ def _walk_leaves(tree: dict[str, Any] | None) -> Iterator[dict[str, Any]]:
 
 
 def _resolve_in_capability(cap: CapabilityExpr, member: str) -> dict[str, Any]:
-    """Project a CapabilityExpr into ``{"result": ..., "reason": ...}``
-    for a candidate ``member``."""
+    """Project a CapabilityExpr to ``{"result": ..., "reason": ...}`` for ``member``."""
     member_lower = member.lower()
 
     if cap.kind == "finite_set":
@@ -177,15 +141,12 @@ def _resolve_in_capability(cap: CapabilityExpr, member: str) -> dict[str, Any]:
         if quality == "exact":
             return {"result": "yes" if in_set else "no", "reason": "finite_set_exact"}
         if quality == "lower_bound":
-            # Listed members are KNOWN to hold; absence means we
-            # haven't observed them — could still hold.
+            # lower_bound: listed members hold; absence proves nothing.
             if in_set:
                 return {"result": "yes", "reason": "finite_set_lower_bound"}
             return {"result": "unknown", "reason": "lower_bound_absent"}
         if quality == "upper_bound":
-            # Listed members ARE all that could hold; absence is a
-            # definitive no, but presence isn't a definitive yes
-            # (current state may have evicted them).
+            # upper_bound: absence is a definite no; presence isn't a definite yes.
             if not in_set:
                 return {"result": "no", "reason": "finite_set_upper_bound"}
             return {"result": "unknown", "reason": "upper_bound_present"}
@@ -195,9 +156,7 @@ def _resolve_in_capability(cap: CapabilityExpr, member: str) -> dict[str, Any]:
         threshold = cap.threshold or (0, [])
         signers = threshold[1]
         if member_lower in {m.lower() for m in signers}:
-            # Being a signer doesn't guarantee they'll sign — but
-            # they're potentially-allowed. Caller decides whether
-            # potential is enough.
+            # A signer may not sign; the caller decides if potential is enough.
             return {"result": "yes", "reason": "threshold_group_signer"}
         return {"result": "no", "reason": "threshold_group_non_signer"}
 
@@ -208,10 +167,7 @@ def _resolve_in_capability(cap: CapabilityExpr, member: str) -> dict[str, Any]:
         return {"result": "yes", "reason": "cofinite_not_blacklisted"}
 
     if cap.kind == "external_check_only":
-        # The adapter can't enumerate; the caller needs to invoke
-        # the probe interface (e.g. authority check / isValidSignature) at
-        # the chain level. Surface the probe descriptor so the
-        # caller can do that.
+        # Not enumerable; surface the probe descriptor for an on-chain check.
         check = cap.check
         return {
             "result": "unknown",
@@ -231,10 +187,7 @@ def _resolve_in_capability(cap: CapabilityExpr, member: str) -> dict[str, Any]:
         }
 
     if cap.kind in ("AND", "OR"):
-        # Compose results of children. AND: every child says yes →
-        # yes; any child says no → no; otherwise unknown. OR: any
-        # child says yes → yes; every child says no → no; otherwise
-        # unknown.
+        # AND: all yes → yes, any no → no. OR: any yes → yes, all no → no. Otherwise unknown.
         child_results = [_resolve_in_capability(c, member) for c in cap.children]
         statuses = [r["result"] for r in child_results]
         if cap.kind == "AND":
@@ -243,7 +196,6 @@ def _resolve_in_capability(cap: CapabilityExpr, member: str) -> dict[str, Any]:
             if any(s == "no" for s in statuses):
                 return {"result": "no", "reason": "and_any_no"}
             return {"result": "unknown", "reason": "and_some_unknown"}
-        # OR
         if any(s == "yes" for s in statuses):
             return {"result": "yes", "reason": "or_any_yes"}
         if all(s == "no" for s in statuses):

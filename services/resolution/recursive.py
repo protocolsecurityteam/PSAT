@@ -54,41 +54,27 @@ logger = logging.getLogger(__name__)
 
 
 class UnresolvedProxyError(RuntimeError):
-    """Raised when a proxy classification has no resolvable single implementation.
+    """A proxy with no resolvable single implementation (diamonds, failed beacons, short-bytecode ``unknown``
+    proxies).
 
-    Covers EIP-2535 diamonds, beacon proxies whose ``implementation()`` failed,
-    and short-bytecode ``unknown`` proxies with no probe target. Analyzing the
-    delegatecall shell yields an empty guard set that downstream renders as
-    permissionless, so the materialization fails closed and the BFS records a
-    degraded, un-analyzed node instead.
+    Analysing the delegatecall shell yields an empty guard set that reads as permissionless, so materialization fails
+    closed and the BFS records a degraded node.
     """
 
 
 ANALYZABLE_TYPES = {"contract", "timelock", "proxy_admin"}
 DEFAULT_RECURSION_MAX_DEPTH = int(os.getenv("PSAT_RECURSION_MAX_DEPTH", "6"))
 
-# Tied to the schema vocabulary: pyright rejects these lines if the members
-# leave ``ControllerProvenance``, so the comparisons below cannot drift.
+# Typed against the schema vocabulary so pyright catches drift.
 _PROVENANCE_CALL_TARGET: ControllerProvenance = "call_target"
 _PROVENANCE_CALLER_GATE: ControllerProvenance = "caller_gate"
 
 
 def _coerce_resolved_type(value: object) -> ResolvedControllerType:
-    """A ``resolved_type`` that was never determined must surface as the
-    vocabulary's not-determined token (``"unknown"``), never as a fabricated
-    concrete one.
+    """Coerce an undetermined ``resolved_type`` to ``"unknown"``.
 
-    ``str(payload.get("resolved_type", "unknown"))`` only defaults on an
-    ABSENT key; a key PRESENT with value ``None`` reaches ``str(None)`` and
-    mints the literal ``"None"`` — a token in no vocabulary
-    (``schemas.control_tracking.ResolvedControllerType``) that is truthy and
-    ``!= "unknown"``, so every downstream three-way branch reads it as a
-    concrete, determined type. The literal string ``"None"`` is likewise
-    coerced: it can arrive from a previously stored graph (the policy-stage
-    refresh pre-seeds from the persisted artifact) and means the same absence.
-    Any other out-of-vocabulary token is the same class of undetermined input
-    — nothing downstream can act on a type it does not know — so membership in
-    ``RESOLVED_CONTROLLER_TYPES`` is the earned bar for a concrete answer.
+    A present ``None`` becomes the literal ``"None"`` via ``str()`` (also possible from a stored graph), which
+    downstream reads as a concrete type. Anything outside ``RESOLVED_CONTROLLER_TYPES`` is likewise undetermined.
     """
     return coerce_resolved_controller_type(value)
 
@@ -98,20 +84,15 @@ _MATERIALIZE_METRIC_LOCK = threading.Lock()
 
 def _bump_materialize_metric(key: str) -> None:
     """Thread-safe +1 to a stage metric from the parallel materialize fan-out.
-    ``record_stage_metric`` overwrites, but the build-vs-cache-hit fold needs an
-    increment — and ``_materialize_with_cross_process_cache`` runs inside the
-    ``parallel_map`` worker threads, which inherit ``stage_metrics_var`` via
-    copy_context — so guard the read-modify-write. A cache-hit-rate collapse
-    here is the canonical cause of a resolution stage silently multiplying its
-    forge/Slither spend run-over-run. No-op outside a worker job context."""
+
+    ``record_stage_metric`` overwrites, and worker threads share ``stage_metrics_var`` via copy_context. No-op outside a
+    worker job.
+    """
     _bump_stage_metric(key)
 
 
 def _bump_stage_metric(key: str, n: int = 1) -> None:
-    """Thread-safe ``+n`` to a per-job stage metric. ``record_stage_metric``
-    overwrites, but the BFS fan-out (and the per-contract mapping/proxy folds)
-    need an increment across contracts and worker threads, which inherit
-    ``stage_metrics_var`` via copy_context. No-op outside a worker job context."""
+    """Thread-safe ``+n`` to a per-job stage metric (see :func:`_bump_materialize_metric`)."""
     metrics = stage_metrics_var.get()
     if metrics is None:
         return
@@ -120,8 +101,6 @@ def _bump_stage_metric(key: str, n: int = 1) -> None:
 
 
 class LoadedArtifacts(TypedDict):
-    """Per-contract artifact bundle emitted by ``resolve_control_graph`` and persisted by the worker as DB artifacts."""
-
     analysis: dict[str, Any]
     tracking_plan: dict[str, Any]
     snapshot: ControlSnapshot
@@ -171,9 +150,7 @@ def _contract_name_for_address(address: str, chain_id: int) -> str | None:
         return None
     if not isinstance(result, dict):
         return None
-    # ``or ""`` not a ``.get`` default: a key PRESENT with ``None`` would reach
-    # ``str(None)`` and fabricate the name "None" (same shape as the
-    # ``resolved_type`` bug ``_coerce_resolved_type`` guards).
+    # ``or ""``: a present ``None`` would otherwise become the name "None".
     name = str(result.get("ContractName") or "").strip()
     return name or None
 
@@ -182,13 +159,7 @@ def _build_effective_permissions(
     analysis: dict[str, Any],
     snapshot: ControlSnapshot,
 ) -> dict[str, Any] | None:
-    """Compute the effective-permissions payload for nested resolution."""
-    # Function-scope import: the module-level form is the back-edge of the
-    # policy↔resolution package cycle (policy.__init__ → effective_permissions
-    # → capability_surface → permissionless_shapes → resolution.__init__ →
-    # here), which import-crashes any process that touches services.policy
-    # first — policy_worker died on boot and took the whole worker pool with
-    # it (deploy/start_workers.sh exits on first death).
+    # Function-scope import breaks the policy/resolution import cycle, which crashed policy_worker on boot.
     from services.policy.effective_permissions import build_effective_permissions
 
     try:
@@ -201,12 +172,8 @@ def _build_effective_permissions(
             ),
         )
     except Exception as exc:
-        # A nested contract whose effective-permissions build fails silently drops
-        # its role principals from the graph (consumed below in
-        # ``_role_principals_from_effective_permissions``). Was debug-only — surface
-        # it as a degraded breadcrumb so the gap is visible in stage_errors.
-        # ``or ""`` before ``str``: a subject with ``address: None`` must fall
-        # through to "<unknown>", not read as the truthy string "None".
+        # A failed build silently drops the node's role principals, so record it as degraded. ``or ""`` keeps ``address:
+        # None`` from reading as "None".
         address = str((analysis.get("subject") or {}).get("address") or "") or "<unknown>"
         record_degraded(
             phase="recursive_effective_permissions",
@@ -228,19 +195,10 @@ def _build_static_artifacts(
     *,
     chain_id: int,
 ) -> tuple[str, ContractAnalysis, ControlTrackingPlan, dict[str, Any] | None]:
-    """Run the expensive forge+Slither+predicate pipeline for *effective_address*.
+    """Run the forge+Slither+predicate pipeline for *effective_address*.
 
-    Returns ``(contract_name, analysis, tracking_plan, predicate_trees)``.
-    ``effects`` is also produced by the predicate pipeline but is not
-    plumbed back here: the recursive resolver doesn't consume it, and
-    the policy stage reads the per-job ``effects`` artifact written by
-    the static worker (propagated across same-bytecode jobs by
-    ``copy_static_cache``), so the materialization cache has no
-    consumer for it.
-
-    Pulled out of ``_materialize_contract_artifacts`` so the cross-process
-    cache can call this exact closure when it needs to populate the
-    persistent row. The tempdir is cleaned up at function exit.
+    Returns ``(contract_name, analysis, tracking_plan, predicate_trees)``. ``effects`` isn't returned: the policy stage
+    reads the static worker's per-job artifact instead. Separate so the cross-process cache can call it as its builder.
     """
     result = fetch(effective_address, chain_id=chain_id)
     contract_name = str(result.get("ContractName") or "Contract")
@@ -256,11 +214,10 @@ def _build_static_artifacts(
 
 
 def _chain_name_for_materialization(chain_id: int) -> str:
-    """Canonical chain name used as the ``contract_materializations`` cache key
-    component. Mainnet (``chain_id=1``) resolves to ``"ethereum"`` so mainnet
-    cache keys are unchanged. An unregistered id fails loud: the old
-    ``PSAT_DEFAULT_CHAIN`` env fallback is gone, so a bad chain_id can no longer
-    key an L2's artifacts under mainnet."""
+    """Canonical chain name for the ``contract_materializations`` cache key (mainnet is ``"ethereum"``).
+
+    Unregistered ids fail loud rather than key under mainnet.
+    """
     from utils.chains import require_chain
 
     return require_chain(chain_id, context="materialization chain name").name
@@ -269,12 +226,7 @@ def _chain_name_for_materialization(chain_id: int) -> str:
 def _widen_built(
     built: tuple[str, ContractAnalysis, ControlTrackingPlan, dict[str, Any] | None],
 ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
-    """Widen a fresh build to the mixed-provenance materialize shape.
-
-    The cross-process cache serves both fresh builds (typed at the producer)
-    and persisted JSONB rows (shape unverified), so its tuple stays wide; the
-    fresh arm is only ever widened, never the reverse.
-    """
+    """Widen a fresh build to the mixed-provenance cache shape (persisted rows are unverified JSONB)."""
     name, analysis, plan, predicate_trees = built
     return name, cast("dict[str, Any]", analysis), cast("dict[str, Any]", plan), predicate_trees
 
@@ -288,19 +240,10 @@ def _materialize_with_cross_process_cache(
 ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     """Consult the persistent contract_materializations table; build on miss.
 
-    Returns ``(contract_name, analysis, tracking_plan, predicate_trees)``.
-    ``predicate_trees`` round-trips through the cache so mapping-writer
-    enumeration stays functional on cache hits (pre-c1d2e3f4a5b6 the
-    builder dropped it and downstream silently disabled enumeration).
-
-    Falls back to a direct ``_build_static_artifacts`` call when:
-      * ``bytecode_keccak`` is None (we have nothing to key on);
-      * the DB layer raises (e.g., the table doesn't exist in a
-        fixture-isolated test, or the DB is unreachable).
+    Returns ``(contract_name, analysis, tracking_plan, predicate_trees)``; ``predicate_trees`` round-trips so mapping
+    enumeration works on cache hits. Builds directly when ``bytecode_keccak`` is None or the DB layer raises.
     """
-    # Chain threaded from the job/contract (via ``_chain_name_for_materialization``
-    # at the walk entry). A chainless call is a data bug: fail loud
-    # rather than defaulting to mainnet via the old PSAT_DEFAULT_CHAIN env read.
+    # A chainless call is a data bug; fail loud rather than default to mainnet.
     from utils.chains import require_chain
 
     build_chain_id = require_chain(chain=chain, context="contract materialization").chain_id
@@ -317,10 +260,7 @@ def _materialize_with_cross_process_cache(
         return _widen_built(_build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id))
 
     if not cm.is_enabled():
-        # Operator-controlled kill switch (PSAT_CONTRACT_MATERIALIZATIONS=0)
-        # for prod incidents. Bypasses the persistent layer entirely so a
-        # broken table or hot-spot lock contention can't fail-stop the
-        # pipeline.
+        # PSAT_CONTRACT_MATERIALIZATIONS=0 kill switch bypasses the persistent layer during incidents.
         _bump_materialize_metric("materialize_builds")
         return _widen_built(_build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id))
 
@@ -340,9 +280,7 @@ def _materialize_with_cross_process_cache(
         }
 
     def _source_hash_fn() -> str | None:
-        # Cross-chain code-plane reuse key. ``get_source`` is
-        # in-memory + PG cached, so on the build path this shares the fetch
-        # ``_build_static_artifacts`` makes; on a keccak hit it is never called.
+        # Cross-chain reuse key; ``get_source`` is cached, so the build path shares the fetch.
         from services.discovery.fetch import source_content_hash
 
         result = fetch(effective_address, chain_id=build_chain_id)
@@ -357,12 +295,8 @@ def _materialize_with_cross_process_cache(
             source_hash_fn=_source_hash_fn,
         )
     except Exception as exc:
-        # ``materialize_or_wait`` re-raises the builder's exception. If
-        # the failure was *inside* the builder, propagating preserves the
-        # existing behaviour of letting the resolution stage handle its
-        # own retry/terminal classification. If the failure was in the
-        # DB layer (lock acquisition, schema absent), fall back so we
-        # don't fail-stop the whole pipeline on a cache outage.
+        # Builder failures propagate for the stage's own retry classification; DB-layer failures fall back to a direct
+        # build.
         if _is_builder_exception(exc):
             raise
         record_degraded(
@@ -375,36 +309,17 @@ def _materialize_with_cross_process_cache(
         return _widen_built(_build_static_artifacts(effective_address, workspace_prefix, chain_id=build_chain_id))
 
     if not built["ran"]:
-        # materialize_or_wait returned without invoking our builder — served from
-        # the persistent cache (or a sibling process built it); either way this
-        # process did not pay the forge/Slither cost.
+        # Served from the cache or a sibling process's build.
         _bump_materialize_metric("materialize_cache_hits")
 
-    # ``hydrate_*`` transparently reads from blob storage when the row's
-    # ``*_blob_key`` is set or falls back to inline JSONB (rows written
-    # before blob storage was enabled, or when storage was unconfigured).
-    # The blob path's ``json.loads`` already returns a
-    # fresh dict per call, but the inline path returns the SQLAlchemy
-    # JSONB-cached dict, so the deepcopy is still required to avoid
-    # downstream mutations leaking back into the ORM identity map.
+    # Deepcopy because the inline-JSONB path returns the ORM-cached dict.
     #
-    # ``StorageContentIncomplete`` propagates deliberately, all the way out of
-    # ``resolve_control_graph`` (``_materialize_for_pending`` re-raises it rather
-    # than degrading the contract; the worker's classifier calls the
-    # not-determined subclass transient so the stage re-runs, and the
-    # proven-absent one terminal so it does not re-ask an answered question).
-    # ``or {}`` below is therefore only ever
-    # applied to a *proven* absence — a row that stored nothing. If the payload
-    # merely could not be read, an empty analysis here means "this contract has
-    # no functions, no plan and no predicate trees", and that verdict is what
-    # the effects probe is seeded from and what gets cached under the witness
-    # schema version. A retried stage can still become right; a witness built
-    # on {} is already wrong and cached.
+    # ``StorageContentIncomplete`` propagates on purpose (transient when undetermined, terminal when proven absent), so
+    # ``or {}`` only applies to a row that stored nothing. An unreadable payload treated as ``{}`` would seed and cache
+    # a witness built on nothing.
     analysis = copy.deepcopy(cm.hydrate_analysis(row) or {})
     plan = copy.deepcopy(cm.hydrate_tracking_plan(row) or {})
-    # ``predicate_trees`` is absent on rows written before the
-    # c1d2e3f4a5b6 migration; hydrate returns None in that case and
-    # ``_mapping_writer_specs_from_predicate_trees`` short-circuits.
+    # ``None`` on rows before c1d2e3f4a5b6; the mapping-writer extraction short-circuits.
     predicate_trees_cached = cm.hydrate_predicate_trees(row)
     predicate_trees = copy.deepcopy(predicate_trees_cached) if predicate_trees_cached else None
     contract_name = row.contract_name or "Contract"
@@ -412,16 +327,7 @@ def _materialize_with_cross_process_cache(
 
 
 def _is_builder_exception(exc: BaseException) -> bool:
-    """Did *exc* originate inside the materialization builder
-    rather than the DB cache layer?
-
-    Builder exceptions are anything raised by ``fetch`` / ``scaffold`` /
-    ``collect_contract_analysis`` — broadly Etherscan / Slither errors.
-    DB-layer errors are SQLAlchemy / psycopg2 exceptions. We can't
-    cleanly distinguish without a type sniff; treat anything from the
-    sqlalchemy module as a DB-layer error and let other exceptions
-    propagate.
-    """
+    """Did *exc* come from the builder rather than the DB cache layer? Anything from sqlalchemy counts as DB-layer."""
     mod = type(exc).__module__ or ""
     return not (mod.startswith("sqlalchemy") or mod.startswith("psycopg2"))
 
@@ -434,27 +340,21 @@ def _materialize_contract_artifacts(
     chain: str | None = None,
     chain_id: int | None = None,
 ) -> LoadedArtifacts:
-    """Build analysis + plan + snapshot + effective permissions in memory (tempdir cleaned up before return)."""
-    # Proxy check — analyze the implementation but read storage from the proxy.
+    """Build analysis, plan, snapshot and effective permissions in memory (tempdir cleaned up before return)."""
+    # Analyse the implementation but read storage from the proxy.
     effective_address = address
     snapshot_address = address
 
-    # Classify in its OWN try so a generic classify hiccup degrades to
-    # "analyze the address as-is" (historical behavior). The retarget /
-    # fail-closed decision runs OUTSIDE this except — otherwise the
-    # ``UnresolvedProxyError`` raise below would be swallowed into a silent
-    # shell analysis. ``ClassificationIncompleteError`` (proxy-slot read
-    # failure) is propagated, not swallowed, for the same reason.
+    # Own try so a classify hiccup degrades to analysing the address as-is, while the fail-closed
+    # ``UnresolvedProxyError`` and ``ClassificationIncompleteError`` still propagate.
     classification: dict | None = None
     try:
         from services.discovery.classifier import classify_single
 
         classification = classify_single(address, rpc_url, chain_id=chain_id)
     except ClassificationIncompleteError:
-        # #121: the proxy-detection slots could not be read (transient RPC).
-        # Refuse to analyze this address as a confident clean contract; propagate
-        # so the BFS records a degraded, un-analyzed node and the worker retries
-        # when the RPC heals.
+        # #121: proxy slots unreadable (transient RPC). Propagate so the node is degraded and retried, not analysed as a
+        # clean contract.
         raise
     except Exception as exc:
         logger.debug("Recursive resolve: proxy check failed for %s: %s", address, exc)
@@ -462,9 +362,7 @@ def _materialize_contract_artifacts(
     if classification is not None and classification.get("type") == "proxy":
         impl = classification.get("implementation")
         if impl:
-            # Per-contract redirect (one per nested proxy in the BFS); was the
-            # single loudest INFO in recursive output. DEBUG per-iteration + a
-            # folded ``proxies_redirected`` count for the lifecycle signal.
+            # Per-nested-proxy, so DEBUG plus a ``proxies_redirected`` count.
             logger.debug(
                 "Recursive resolve: proxy redirect to impl",
                 extra={"address": address, "implementation": impl},
@@ -472,22 +370,15 @@ def _materialize_contract_artifacts(
             _bump_stage_metric("proxies_redirected")
             effective_address = impl
         else:
-            # #122: a proxy with no resolvable single implementation — an
-            # eip2535 diamond, a beacon whose ``implementation()`` failed, or a
-            # short-bytecode ``unknown`` proxy with no probe target. The address
-            # is a delegatecall shell with no business logic; analyzing it yields
-            # an empty guard set that downstream renders as permissionless. Fail
-            # closed: refuse the shell and let the BFS record a degraded,
-            # un-analyzed node (facet-union recall is a separate follow-up).
+            # #122: no resolvable implementation; the address is a delegatecall shell whose empty guard set would read
+            # as permissionless. Fail closed.
             _bump_stage_metric("proxies_unresolved")
             raise UnresolvedProxyError(
                 f"proxy {address} (type={classification.get('proxy_type')}) implementation "
                 "unresolved; refusing to analyze the proxy shell"
             )
 
-    # Resolve bytecode_keccak so the persistent contract_materializations
-    # row is keyed on byte-exact code match: identical-bytecode contracts
-    # at different addresses share one row.
+    # Keyed on bytecode so identical code at different addresses shares a row.
     bytecode_keccak: str | None = None
     try:
         from services.clients.rpc import get_code_with_keccak
@@ -496,23 +387,14 @@ def _materialize_contract_artifacts(
     except Exception as exc:
         logger.debug("Recursive resolve: get_code_with_keccak failed for %s: %s", effective_address, exc)
 
-    # Cross-process cache: consult contract_materializations before paying
-    # the forge+Slither cost. Two impl jobs in the same protocol — or a
-    # re-run of a previously-analysed protocol on a different day — hit
-    # this layer and skip the build. The advisory-lock-coalescing inside
-    # ``materialize_or_wait`` ensures concurrent same-bytecode requests
-    # across processes only run the builder once; the loser blocks on the
-    # lock and reads the result.
+    # ``materialize_or_wait``'s advisory lock ensures concurrent same-bytecode requests across processes build once.
     contract_name, analysis, plan, predicate_trees = _materialize_with_cross_process_cache(
         effective_address=effective_address,
         bytecode_keccak=bytecode_keccak,
         workspace_prefix=workspace_prefix,
         chain=chain,
     )
-    # Address-mismatch retarget: when the persistent row was populated for
-    # a different address that shares this bytecode, the cached
-    # plan["contract_address"] points at the OTHER address. Stamp it for
-    # THIS call so build_control_snapshot reads from the right contract.
+    # A row built for another address with the same bytecode has that address in the plan; restamp it.
     if isinstance(analysis.get("subject"), dict):
         analysis["subject"]["address"] = effective_address
     plan["contract_address"] = effective_address
@@ -534,18 +416,9 @@ def _materialize_contract_artifacts(
 def _analysis_state(node: ResolvedGraphNode, max_depth: int) -> ResolvedAnalysisState | None:
     """Why this node is (or is not) analysed.
 
-    ``analyzed`` is a non-nullable bool, so its ``False`` is four different
-    populations at once — a principal that was never a candidate, a contract
-    whose materialization failed, a contract the depth horizon cut off, and
-    "cannot say". The first says nothing adverse, the second is a fact about
-    the contract, the third is a fact about *our walk*, and only the fourth is
-    an absence of knowledge. Derived once here, at the end of the walk, because
-    this is the only place that holds ``max_depth`` alongside every node.
-
-    Returns ``None`` — not determined — for an analyzable contract inside the
-    horizon that is nonetheless unanalysed with no recorded failure. That
-    combination is not known to be reachable, and inventing a value for it
-    would be exactly the error this field exists to remove.
+    ``analyzed=False`` conflates never-a-candidate, failed materialization, cut off by depth, and unknown. Derived here
+    because only the end of the walk has ``max_depth`` with every node. Returns ``None`` for an unanalysed in-horizon
+    contract with no recorded failure.
     """
     if node.get("analyzed"):
         return "analyzed"
@@ -558,36 +431,17 @@ def _analysis_state(node: ResolvedGraphNode, max_depth: int) -> ResolvedAnalysis
             return "beyond_depth_horizon"
         return None
     if resolved_type and resolved_type not in {"unknown", "None"}:
-        # ``not_analyzable``, not ``not_a_contract``: the test is membership of
-        # ANALYZABLE_TYPES, and the largest population outside it is Gnosis
-        # Safes (230 of the local corpus's 1,236), which ARE contracts. The old
-        # token stated something literally false about every one of them.
-        #
-        # ``"None"`` is excluded alongside ``"unknown"``: it is ``str(None)``,
-        # a not-determined type that leaked through an unguarded
-        # stringification (producers now coerce it via ``_coerce_resolved_type``,
-        # but a stored graph from before that fix can still carry the token
-        # into this recomputation via the policy refresh's pre-seed).
-        # ``not_analyzable`` is a positive claim — "analysis was never
-        # applicable" — and an undetermined type proves no such thing.
+        # ``not_analyzable``: Safes are contracts too, just not analyzable. ``"None"`` (a leaked ``str(None)`` from old
+        # stored graphs) and ``"unknown"`` are undetermined, which proves nothing about applicability.
         return "not_analyzable"
     return None
 
 
 def _resolved_type_rank(resolved_type: str | None) -> int:
-    """How much a ``resolved_type`` claims. A more specific answer may replace a
-    vaguer one; the reverse is a loss of information.
+    """How much a ``resolved_type`` claims; more specific may replace vaguer, not the reverse.
 
-    ``"contract"`` is the GENERIC answer — "there is code here" — and every
-    analysed node was previously stamped with it unconditionally, so an address
-    already classified ``timelock`` (carrying its ``delay``) was overwritten the
-    moment the walk analysed it. Whether the type survived came down to walk
-    order: it did only when the node happened to be re-ensured as a controller
-    of a LATER-processed contract. 41 of the local corpus's 47 timelock nodes
-    survived that way; the rest read ``contract``.
-
-    Equal ranks keep last-write-wins, which is the pre-existing behaviour for
-    two specific classifications of the same address.
+    ``"contract"`` is generic. Stamping it unconditionally used to overwrite types like ``timelock`` (and their
+    ``delay``) depending on walk order. Equal ranks keep last-write-wins.
     """
     if not resolved_type:
         return -1
@@ -653,7 +507,7 @@ def _ensure_node(
 
 def _edge_key(edge: ResolvedGraphEdge) -> tuple:
     relation = edge["relation"]
-    # Nested holder edges often appear via multiple upstream controller paths; keep one edge and merge notes.
+    # Nested holder edges arrive via several upstream paths; keep one and merge notes.
     if relation in {"safe_owner", "timelock_owner", "proxy_admin_owner"}:
         return (
             edge["from_id"],
@@ -700,9 +554,8 @@ def _nested_principals_for_details(
     return principals
 
 
-#: Provenance marker (``services/policy/capability_surface.py``) identifying a
-#: principal the POLICY stage projected from a witnessed role grant. Read off the
-#: persisted ``details`` a named code path wrote — never off ``label``.
+# Marks a principal the policy stage projected from a witnessed role grant (``services/policy/capability_surface.py``).
+# Read from ``details``, never ``label``.
 ROLE_GRANT_SOURCE = "semantic_capability:role_grant"
 
 
@@ -715,12 +568,9 @@ def _maybe_probe_backlink(
     node_type: str,
     chain_id: int | None,
 ) -> dict[str, Any] | None:
-    """The ``vault()`` back-link witness for a role-granted CONTRACT principal.
+    """The ``vault()`` back-link witness for a role-granted contract principal.
 
-    Fired on provenance, not on a name: only for a node whose ``details.source``
-    is the role-grant marker and which resolved to an analyzable contract, so the
-    ~88 plain-principal and non-role-grant nodes pay nothing. A raise here must
-    not fail the walk — the witness is optional and its absence is honest.
+    Gated on provenance so other nodes pay nothing; failures don't fail the walk.
     """
     if node_type != "contract" or details.get("source") != ROLE_GRANT_SOURCE:
         return None
@@ -739,12 +589,7 @@ def _maybe_probe_backlink(
 
 
 def _safe_role_int(role: Any) -> int | None:
-    """Coerce a role identifier to int, returning None for non-int shapes.
-
-    Role-name strings and Condition-mapping shapes cannot be represented
-    in the recursive resolver's ``set[int]`` accumulator; callers must skip
-    those grants entirely.
-    """
+    """Coerce a role identifier to int, or None for role-name strings and Condition shapes (callers skip those)."""
     try:
         return int(role)
     except (TypeError, ValueError):
@@ -757,11 +602,7 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
         if not isinstance(function, dict):
             continue
         function_signature = str(function.get("function") or "")
-        # ``or []``, not ``get(..., [])``: the key is now PRESENT with value
-        # ``None`` on a role-gated function whose role identity is not
-        # determined, and a dict default only fires on an
-        # ABSENT key — so the plain default would iterate None and raise.
-        # Not-determined contributes no role principals, exactly as [] did.
+        # ``or []``: the key can be present as ``None`` (undetermined role), which contributes nothing.
         for role_grant in function.get("authority_roles") or []:
             if not isinstance(role_grant, dict):
                 continue
@@ -845,34 +686,19 @@ def _role_principals_from_effective_permissions(effective_permissions: dict[str,
     return sorted(serialized, key=lambda item: str(item["address"]))
 
 
-# Only these leaf roles prove that being IN the mapping confers authority;
-# same set as the static plane's caller-gate promotion (`_AUTHORITY_LEAF_ROLES`
-# in services/static/contract_analysis_pipeline/tracking.py).
+# Leaf roles proving mapping membership confers authority; matches ``_AUTHORITY_LEAF_ROLES`` in
+# services/static/contract_analysis_pipeline/tracking.py.
 _MAPPING_HARVEST_AUTHORITY_ROLES = frozenset({"caller_authority", "delegated_authority"})
 
 
 def _mapping_leaf_confers_authority(leaf: Mapping[str, Any]) -> bool:
-    """Does *leaf* prove that membership in its mapping CONFERS authority?
+    """Does *leaf* prove that membership in its mapping confers authority?
 
-    The harvest publishes every enumerated member as a ``mapping_member``
-    control edge — a member of CONTROL_EDGE_RELATIONS, i.e. a scorer input and
-    a published control claim — so it must not out-claim the leaf the static
-    plane lowered. Three discriminators, all read from that same leaf:
+    Harvested members become ``mapping_member`` control edges, so this mustn't out-claim the static leaf:
 
-    - ``authority_role``: only an authority-bearing role qualifies. A
-      ``business`` membership read (a duplicate-registration guard, an
-      accounting map) says nothing about who controls the contract. An ABSENT
-      role is a pre-schema tree — not-determined, so no authority is earned
-      and nothing is harvested from it.
-    - polarity: ``operator == "falsy"`` means the gate passes when the caller
-      is NOT in the set (a denylist, an already-enrolled guard). Members of
-      such a set are the blocked population, the exact opposite of
-      authorities.
-    - ``confidence``: an explicit ``"low"`` from the static plane disqualifies
-      (today unreachable for authority roles — ``_derive_confidence`` floors
-      them at medium — but the harvest must not depend on that staying true).
-      Absent confidence is not lowered evidence and does not disqualify on
-      its own.
+    - ``authority_role`` must be authority-bearing (absent means pre-schema, undetermined);
+    - ``operator == "falsy"`` is a denylist, whose members are the blocked population;
+    - an explicit ``"low"`` confidence disqualifies; absent doesn't.
     """
     if leaf.get("authority_role") not in _MAPPING_HARVEST_AUTHORITY_ROLES:
         return False
@@ -971,15 +797,10 @@ def _replay_mapping_principals(
     edges: dict[tuple, ResolvedGraphEdge],
     chain_id: int,
 ) -> str:
-    """Replay mapping-writer events for *address* into principal nodes/edges,
-    returning the enumeration status.
+    """Replay mapping-writer events for *address* into principal nodes and edges; returns the enumeration status.
 
-    FLOOR-or-DEFER: a contract emits no events before it exists, so flooring the
-    replay at its deploy block returns the identical principal set without the
-    genesis walk that 429-storms HyperSync. When the floor is unknown we DEFER
-    (skip the live scan, status ``deferred_no_floor``) rather than walk from 0 —
-    these ACL/authority addresses are enrolled+backfilled, so the principal set
-    materializes on a later policy pass instead of stranding the function.
+    Floored at the deploy block (no events before it). With no known floor it defers (``deferred_no_floor``) instead of
+    scanning from genesis, which 429-storms HyperSync; enrolled addresses fill in on a later policy pass.
     """
     hypersync_token = os.getenv("ENVIO_API_TOKEN") or ""
     logger.info(
@@ -1009,15 +830,13 @@ def _replay_mapping_principals(
         result = enumerate_mapping_allowlist_sync(
             address,
             mapping_specs,
-            # The scan URL is derived from the walk's chain, not a mainnet
-            # default. Mainnet ("1") is byte-identical to the prior chain-less call.
+            # Chain from the walk, not a mainnet default.
             chain=str(chain_id),
             bearer_token=hypersync_token,
             from_block=scan_floor,
         )
     except Exception as exc:
-        # Bounds are inside enumerate_mapping_allowlist; raises here are
-        # unexpected (auth, hypersync load, etc).
+        # Bounds are handled inside; raises here are unexpected (auth, load).
         record_degraded(phase="mapping_enumerator", exc=exc, context={"address": address})
         logger.warning(
             "mapping_enumerator UNEXPECTED FAILURE for %s: %s — treating as truncated",
@@ -1029,9 +848,7 @@ def _replay_mapping_principals(
     enumerated = list(result["principals"])
     enumeration_status = result["status"]
     if enumeration_status != "complete":
-        # A truncated/errored scan returns a partial present-set: authorized
-        # addresses past the bound are silently absent. Surface it as a degraded
-        # breadcrumb + a chartable count, not just a WARNING line.
+        # A truncated scan silently omits members past the bound; record it as degraded with a count.
         record_degraded(
             phase="mapping_enum_incomplete",
             exc=RuntimeError(f"mapping enumeration {enumeration_status}"),
@@ -1060,15 +877,8 @@ def _replay_mapping_principals(
     for principal in enumerated:
         member_addr = principal["address"]
         if member_addr.lower() == address.lower():
-            # A contract enumerated as a member of its OWN mapping (e.g. a
-            # timelock granting itself a Solady `_roles` role) is real on-chain
-            # state, but as a control edge it is degenerate: X->X asserts
-            # nothing, yet the raw graph plane serves it verbatim through the
-            # analysis-detail API, and the _ensure_node call below would merge
-            # principal fields (controller_label/mapping_name/...) onto the
-            # contract's own node and clobber its label with the mapping name.
-            # Skip the self edge. (The value closure and the Surface
-            # indirect-path index each drop self loops on their own.)
+            # Skip self-membership edges (e.g. a timelock granted a role on itself): X->X asserts nothing, and
+            # ``_ensure_node`` would clobber the contract's label with the mapping name.
             logger.debug(
                 "mapping_enumerator: skipping self-membership edge",
                 extra={"address": address, "mapping_name": principal["mapping_name"]},
@@ -1169,12 +979,10 @@ def resolve_control_graph(
     initial_graph: ResolvedControlGraph | None = None,
     heartbeat: Callable[[], None] | None = None,
 ) -> tuple[ResolvedControlGraph, dict[str, LoadedArtifacts]]:
-    """BFS the control chain. Returns ``(graph, nested_artifacts_by_address)``; classify_cache is mutated in place.
+    """BFS the control chain. Returns ``(graph, nested_artifacts_by_address)``; mutates classify_cache.
 
-    ``chain_id`` is required: it scopes the two chain-sensitive reads
-    inside the walk — the ``contract_materializations`` cache key (via the
-    chain's canonical name) and the mapping-writer replay's scan floor. A
-    chainless walk can no longer run as mainnet; callers thread the job's chain."""
+    ``chain_id`` scopes the materialization cache key and the mapping-writer scan floor.
+    """
     chain_name = _chain_name_for_materialization(chain_id)
     root_analysis = root_artifacts["analysis"]
     root_subject = root_analysis.get("subject", {})
@@ -1201,13 +1009,11 @@ def resolve_control_graph(
         if key in _classify_cache:
             classify_stats["hits"] += 1
             kind, details = _classify_cache[key]
-            # The cache may be pre-seeded from a persisted artifact, so a read
-            # is not a proven vocabulary member until coerced.
+            # The cache may be pre-seeded from a stored artifact, so coerce.
             return _coerce_resolved_type(kind), details
         classify_stats["misses"] += 1
         kind, details, cacheable = classify_resolved_address_with_status(rpc_url, addr, chain_id=chain_id)
-        # Skip caching transient RPC errors — otherwise a "contract" fallback gets cemented in the persisted
-        # classified_addresses artifact.
+        # Don't cache transient RPC errors, or the "contract" fallback gets persisted.
         if cacheable:
             _classify_cache[key] = (kind, details)
         return kind, details
@@ -1215,8 +1021,7 @@ def resolve_control_graph(
     nodes: dict[str, ResolvedGraphNode] = {}
     edges: dict[tuple, ResolvedGraphEdge] = {}
 
-    # Pre-seed the graph from a prior walk so the policy refresh path skips re-analyzing already-processed nested
-    # contracts.
+    # Pre-seed from a prior walk so the policy refresh skips already-processed nested contracts.
     if initial_graph is not None:
         for node in initial_graph.get("nodes", []):
             if not isinstance(node, dict):
@@ -1224,18 +1029,14 @@ def resolve_control_graph(
             node_id = node.get("id")
             if isinstance(node_id, str):
                 seeded = dict(node)
-                # A stored graph written before the ``str(None)`` guard can
-                # carry the fabricated ``"None"`` type; coerce it back to the
-                # not-determined token at the boundary so it can neither win a
-                # ``_resolved_type_rank`` merge nor read as a concrete type.
+                # Old stored graphs can carry the fabricated ``"None"``; coerce so it can't win a rank merge.
                 seeded["resolved_type"] = _coerce_resolved_type(seeded.get("resolved_type"))
                 nodes[node_id] = cast(ResolvedGraphNode, seeded)
         for edge in initial_graph.get("edges", []):
             if not isinstance(edge, dict):
                 continue
             edges[_edge_key(cast(ResolvedGraphEdge, edge))] = cast(ResolvedGraphEdge, dict(edge))
-        # Mark already-analyzed nested contracts as processed; the root must re-walk so freshly-computed role principals
-        # get projected.
+        # Analysed nested contracts are processed; the root re-walks so fresh role principals get projected.
         for node in initial_graph.get("nodes", []):
             if not isinstance(node, dict) or not node.get("analyzed"):
                 continue
@@ -1248,20 +1049,12 @@ def resolve_control_graph(
     from services.concurrency import parallel_map
 
     def _materialize_for_pending(pending: PendingContract) -> tuple[LoadedArtifacts | None, BaseException | None]:
-        """Materialize one pending contract's artifacts. Returns
-        ``(artifacts, error)`` so the caller wires the success and error
-        branches deterministically on the main thread.
+        """Materialize one pending contract.
 
-        Storage failing to answer is the one case that does NOT come back as an
-        error tuple. Every other materialize failure is a fact about the
-        contract or its compile, and the caller degrades that contract to
-        ``analyzed=False`` and walks on. An unreadable bucket is a fact about
-        us: the analysis may exist and simply be out of reach, the same outage
-        hits every sibling in the level, and degrading would let the whole walk
-        return normally so nothing above ever re-runs. Propagating is what makes
-        the stage retryable (``workers/retry_policy`` classifies both storage
-        types below as transient), and a retry is the only thing that can turn
-        not-determined into a fact.
+        Returns ``(artifacts, error)`` so the main thread wires both branches deterministically.
+
+        Storage failures propagate instead: they're about us, not the contract, and would hit every sibling. Degrading
+        would let the walk finish so nothing retries; ``workers/retry_policy`` treats them as transient.
         """
         address = pending["address"]
         preloaded = pending.get("artifacts")
@@ -1285,10 +1078,7 @@ def resolve_control_graph(
 
     _levels = 0
     while queue:
-        # BFS guarantees ``queue`` is depth-ordered. Drain every pending entry
-        # at the current minimum depth into one level so they materialize
-        # concurrently; new entries appended during wiring land at a strictly
-        # greater depth and roll into the next iteration.
+        # The queue is depth-ordered; drain the current depth as one concurrent level.
         target_depth = queue[0]["depth"]
         level_pending: list[PendingContract] = []
         while queue and queue[0]["depth"] == target_depth:
@@ -1308,16 +1098,8 @@ def resolve_control_graph(
             extra={"phase": "recursive_level", "depth": target_depth, "level_size": len(level_pending)},
         )
 
-        # Parallel materialization. ``_materialize_contract_artifacts``
-        # consults ``contract_materializations`` (cheap on a hit) and runs
-        # Slither + ``forge build`` in a fresh tempdir on a miss. The miss
-        # path is **CPU-bound** (Slither's IR build + solc + foundry compile
-        # are not GIL-friendly), so the cap has to track host vCPU count
-        # rather than the I/O-bound RPC fan-out ceiling — running
-        # ``max_workers=8`` on a shared-cpu-2x VM thrashes the load average
-        # to >5 and wedges sibling workers (observed on psat-pr-60 at
-        # 2026-05-02). Default 2 matches the smallest worker VM size;
-        # bumpable via env for performance-2x / shared-cpu-4x.
+        # Cache misses are CPU-bound (Slither/solc/forge), so the cap tracks host vCPUs; 8 workers wedged a
+        # shared-cpu-2x VM. Default 2 matches the smallest worker.
         materialize_fanout = max(1, int(os.getenv("PSAT_RESOLUTION_MATERIALIZE_FANOUT", "2")))
         materialized = parallel_map(
             _materialize_for_pending,
@@ -1328,12 +1110,7 @@ def resolve_control_graph(
 
         for pending, (_pending, outcome) in zip(level_pending, materialized):
             if isinstance(outcome, BaseException):
-                # ``_materialize_for_pending`` converts every failure it is
-                # entitled to answer for into ``(None, exc)``. What arrives
-                # here is either a genuine bug or storage declining to answer,
-                # which it re-raises on purpose. Both must leave this function:
-                # the walk cannot describe a graph it could not read, and the
-                # stage above is what retries.
+                # Only bugs and storage outages arrive here; both must reach the retrying stage.
                 raise outcome
             artifacts, mat_exc = outcome
             address = pending["address"]
@@ -1376,19 +1153,12 @@ def resolve_control_graph(
             effective_permissions = artifacts.get("effective_permissions")
             subject = analysis.get("subject", {})
             contract_name = str(subject.get("name") or address)
-            # The classifier's answer, not a hardcoded "contract". A timelock
-            # that is itself analysed used to lose its type AND its ``delay``
-            # here: EtherFiTimelock's own node read ``resolved_type=contract``
-            # with no delay, and that delay is a credit-bearing scoring input.
-            # ``_cached_classify`` is the same memo the controller/principal
-            # wiring already uses, so a nested contract reached as someone's
-            # controller is a cache hit; a root costs one classification.
+            # Use the classifier's answer, not a hardcoded "contract", so analysed timelocks keep their type and
+            # ``delay`` (a scoring input). Usually a cache hit.
             analyzed_type, analyzed_details = _cached_classify(address)
             node_details: dict[str, object] = {"address": address}
             if analyzed_type in {"", "unknown"}:
-                # Classification did not answer. "contract" is what we DO know
-                # (the artifacts materialized), and it is the generic rank, so
-                # it cannot overwrite a specific type set elsewhere.
+                # Generic rank, so it can't overwrite a specific type set elsewhere.
                 analyzed_type = "contract"
             else:
                 node_details.update(analyzed_details)
@@ -1405,8 +1175,7 @@ def resolve_control_graph(
                 artifacts={"data_key": f"recursive:{address.lower()}"},
             )
 
-            # Replay semantic mapping-writer event hints into principal nodes;
-            # bounded enumeration surfaces truncation via the `status` field.
+            # Bounded enumeration reports truncation via ``status``.
             mapping_specs = _mapping_writer_specs_from_predicate_trees(artifacts.get("predicate_trees"))
             if mapping_specs:
                 enumeration_status = _replay_mapping_principals(
@@ -1418,7 +1187,7 @@ def resolve_control_graph(
                     edges=edges,
                     chain_id=chain_id,
                 )
-                # Surface enumeration status on the node so downstream stages can flag incomplete allowlists.
+                # So downstream can flag incomplete allowlists.
                 if contract_node_id in nodes:
                     nodes[contract_node_id]["details"]["mapping_enumeration_status"] = enumeration_status
 
@@ -1439,23 +1208,9 @@ def resolve_control_graph(
                     node_type=controller_node_type,
                     details=details,
                 )
-                # A slot the contract only CALLS is not a controller of it.
-                # Provenance ABSENT is the third state and gets the third
-                # relation: neither question was answered, so the address was
-                # enrolled from a predicate tree without ever being shown to
-                # gate a caller. ``controller_value`` would assert an authority
-                # nothing proved (one widening of the enrolled-target set minted
-                # 37 such targets in a single merge — pure constants like
-                # HUNDRED_PERCENT_IN_BPS, non-authority mappings like _balances,
-                # 28 of them surviving the primitive-scalar skip);
-                # ``external_call_target`` would assert the opposite unproven
-                # fact. The unattributed relation keeps the edge visible and
-                # moves no authority.
-                #
-                # This is NOT the forbidden demotion of a proven authority to a
-                # mere callee: that rule protects an authority that was actually
-                # established. Here the not-determined input reaches a
-                # not-determined relation.
+                # Called-only slots aren't controllers. Absent provenance gets the unattributed relation:
+                # ``controller_value`` would claim unproven authority (constants and non-authority mappings got enrolled
+                # this way) and ``external_call_target`` the opposite. This isn't demoting a proven authority.
                 provenance = controller_value.get("authority_provenance")
                 if provenance == _PROVENANCE_CALL_TARGET:
                     relation = EDGE_RELATION_EXTERNAL_CALL_TARGET
@@ -1560,11 +1315,7 @@ def resolve_control_graph(
                     chain_id=chain_id,
                 )
 
-    # Aggregate profile for the BFS orchestration. The per-contract static cost
-    # is already visible via the nested ``pipeline_profile`` lines; this surfaces
-    # the orchestration shape (levels walked, contracts processed, classify cache
-    # effectiveness) that was previously opaque inside the ``recursive_graph``
-    # phase. ``record_stage_metric`` is a no-op outside a worker job context.
+    # Orchestration profile (levels, contracts, classify cache); per-contract static cost is in ``pipeline_profile``.
     _mat_metrics = stage_metrics_var.get() or {}
     _mat_builds = _mat_metrics.get("materialize_builds", 0)
     _mat_hits = _mat_metrics.get("materialize_cache_hits", 0)

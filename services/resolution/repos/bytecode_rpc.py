@@ -1,14 +1,7 @@
-"""RPC-backed ``BytecodeRepo`` — confirms a contract implements a standard by
-probing its runtime bytecode for that standard's distinguishing function
-selectors.
+"""RPC-backed ``BytecodeRepo``: confirms a standard by looking for its selectors in runtime bytecode.
 
-Used by adapters' ``matches()`` to disambiguate standards that share a selector.
-The headline case: Solmate ``RolesAuthority`` and OZ ``AccessManager`` both expose
-``canCall(address,address,bytes4)`` (selector ``0xb7009613``), so signature alone
-can't tell them apart — but a RolesAuthority's bytecode contains
-``getRolesWithCapability``/``doesUserHaveRole`` while an AccessManager's contains
-``getTargetFunctionRole``. Bytecode is immutable per address and fetched through
-the cached ``services.clients.rpc.get_code``, so repeated probes are cheap.
+Disambiguates standards sharing a selector, e.g. Solmate ``RolesAuthority`` vs OZ ``AccessManager`` (both have
+``canCall``, 0xb7009613). Uses the cached ``services.clients.rpc.get_code``.
 """
 
 from __future__ import annotations
@@ -17,8 +10,7 @@ from services.clients.rpc import get_code
 
 
 class BytecodeSelectorRepo:
-    """``BytecodeRepo`` backed by ``eth_getCode`` (cached). ``has_selector``
-    checks whether a function selector appears in the runtime dispatcher."""
+    """``BytecodeRepo`` backed by cached ``eth_getCode``."""
 
     def __init__(self, rpc_url: str | None, chain_id: int) -> None:
         self._rpc_url = rpc_url
@@ -32,15 +24,12 @@ class BytecodeSelectorRepo:
         if len(sel) != 8:
             return False
         body = code.lower()
-        # solc emits each external function in the dispatcher as PUSH4 <selector>
-        # (opcode 0x63). Requiring the 0x63 prefix avoids matching the 4 bytes as
-        # incidental constant data; fall back to a bare substring for unusual
-        # dispatchers.
+        # solc dispatches via PUSH4 <selector> (0x63), which avoids matching incidental data; bare substring as a
+        # fallback.
         return ("63" + sel) in body or sel in body
 
     def declares_event(self, *, chain_id: int, contract_address: str, topic0: str) -> bool:
-        # Event topics aren't recoverable from runtime bytecode. Not supported;
-        # adapters needing event confirmation use the indexed-log repo instead.
+        # Event topics aren't recoverable from bytecode; use the indexed-log repo.
         del chain_id, contract_address, topic0
         return False
 

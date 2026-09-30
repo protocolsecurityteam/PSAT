@@ -1,40 +1,13 @@
-"""Resolver-side counterpart to ``predicate_artifacts``: given a
-contract address, return semantic capabilities per externally-callable
-function.
+"""Resolve a contract's semantic capabilities per externally-callable function.
 
-It loads the persisted ``predicate_trees``
-artifact (written by the static stage's
-``build_predicate_artifacts`` + ``store_artifact``), wires the
-Postgres-backed generic event-log repo into an
-``EvaluationContext``, evaluates each function's PredicateTree
-through ``evaluate_tree_with_registry`` to a ``CapabilityExpr``,
-and serializes the result to a JSON-ready dict per function.
-
-The output is the structured per-function capability surface: every
-external/public function appears when it has semantic predicate data,
-with a typed capability shape the resolver/UI can reason about
-uniformly.
-
-Usage:
+Loads the persisted ``predicate_trees`` artifact, evaluates each tree via ``evaluate_tree_with_registry`` against the
+Postgres event-log repo, and serializes each ``CapabilityExpr`` to a dict:
 
     with SessionLocal() as session:
-        result = resolve_contract_capabilities(
-            session, address="0x...", chain_id=1
-        )
-    # {
-    #   "grantRole(bytes32,address)": {
-    #       "kind": "finite_set",
-    #       "members": ["0x..."],
-    #       "membership_quality": "exact",
-    #       "confidence": "enumerable",
-    #       ...
-    #   },
-    #   ...
-    # }
+        result = resolve_contract_capabilities(session, address="0x...", chain_id=1)
+    # {"grantRole(bytes32,address)": {"kind": "finite_set", "members": [...], ...}, ...}
 
-Returns ``None`` when the contract has no completed analysis or no
-predicate-tree artifact yet. Callers degrade explicitly instead of
-using the old static summary as an authority source.
+Returns ``None`` when there's no completed analysis or predicate-tree artifact; callers degrade explicitly.
 """
 
 from __future__ import annotations
@@ -77,30 +50,20 @@ from .repos.bytecode_rpc import BytecodeSelectorRepo
 
 logger = logging.getLogger(__name__)
 
-# Finality margin (in blocks) the resolver steps back from live head when it pins
-# the per-pass event-fold evaluation height (#119). It is INTENTIONALLY deeper than
-# the event indexer's own confirmation depth (``PSAT_EVENT_INDEXER_FINALITY_DEPTH``,
-# default 12): a keeping-up durable cursor sits at ``indexer_head - depth`` as of the
-# indexer's last pass, while the resolver reads a fresher ``resolver_head >=
-# indexer_head``. Pinning ``resolver_head - depth`` would race — a perfectly healthy
-# cursor falls a few blocks short of it whenever any block arrived since the indexer's
-# last pass — and degenerate to a blanket demotion. Stepping back a margin LARGER than
-# ``depth + (blocks per indexer poll interval)`` makes the pinned height one the
-# keeping-up cursor has provably already covered, so coverage is deterministic:
-# ``cursor >= pin`` is stably TRUE for a healthy cursor (no flap), and a stalled cursor
-# (frozen while head advances) falls below ``pin`` and demotes. Because ``pin <=
-# cursor`` whenever it stays exact, the index is COMPLETE up to the read height — the
-# ``exact`` label is truthful, never a fail-open. Default 64 comfortably covers the
-# ~12s/2s-block chains (Ethereum/Base/Optimism/Polygon); raise it for sub-second chains
-# (e.g. Arbitrum) where a healthy cursor lags further. Larger only delays stall
-# detection; it never manufactures a false ``exact``.
+# Blocks the resolver steps back from head when pinning the per-pass evaluation height (#119).
+#
+# Deliberately deeper than the indexer's confirmation depth (``PSAT_EVENT_INDEXER_FINALITY_DEPTH``, 12): a healthy
+# cursor sits at ``indexer_head - depth`` as of its last poll, so pinning at ``resolver_head - depth`` would race and
+# demote everything. With a margin larger than depth plus one poll interval of blocks, a healthy cursor always covers
+# the pin and a stalled one falls behind it. ``exact`` stays truthful. 64 suits ~2-12s block chains; raise it for
+# sub-second chains. A larger value only delays stall detection.
 RESOLVER_FINALITY_MARGIN = int(os.getenv("PSAT_RESOLVER_FINALITY_MARGIN", "64"))
 
 
 def _capability_function_slow_ms() -> int:
-    """Per-function log threshold for the resolver profiler — mirrors
-    ``predicate_artifacts._slow_function_threshold_ms`` (env
-    ``PSAT_CAPABILITY_FUNCTION_SLOW_MS``, default 250)."""
+    """Per-function slow-log threshold (``PSAT_CAPABILITY_FUNCTION_SLOW_MS``, default 250), mirroring
+    ``predicate_artifacts``.
+    """
     try:
         return max(0, int(os.getenv("PSAT_CAPABILITY_FUNCTION_SLOW_MS", "250")))
     except ValueError:
@@ -108,9 +71,9 @@ def _capability_function_slow_ms() -> int:
 
 
 def _capability_summary_ms() -> int:
-    """Aggregate threshold below which the per-contract capability summary is
-    suppressed — mirrors ``predicate_artifacts._predicate_summary_threshold_ms``
-    (env ``PSAT_CAPABILITY_SUMMARY_MS``, default 500)."""
+    """Per-contract summary threshold (``PSAT_CAPABILITY_SUMMARY_MS``, default 500), mirroring
+    ``predicate_artifacts``.
+    """
     try:
         return max(0, int(os.getenv("PSAT_CAPABILITY_SUMMARY_MS", "500")))
     except ValueError:
@@ -118,13 +81,11 @@ def _capability_summary_ms() -> int:
 
 
 def _capability_kind_label(cap: CapabilityExpr) -> str:
-    """Bucket a resolved capability for the per-job kind tally. ``finite_set``
-    splits into ``resolved_empty`` (an exact "nobody") vs a populated set; an
-    ``external_check_only`` carrying the cold-index marker becomes
-    ``deferred_pending_index`` (flags self-heal-pending cold-event-index races).
-    This tally is the run-over-run regression signal — e.g. the Veda OR-kind
-    17→106 jump that was previously invisible because per-function outcomes were
-    never recorded."""
+    """Bucket a capability for the per-job kind tally, the run-over-run regression signal.
+
+    ``finite_set`` splits into ``resolved_empty`` and populated; a cold-index ``external_check_only`` becomes
+    ``deferred_pending_index``.
+    """
     kind = getattr(cap, "kind", "unknown")
     if kind == "finite_set":
         members = getattr(cap, "members", None) or []
@@ -137,10 +98,7 @@ def _capability_kind_label(cap: CapabilityExpr) -> str:
         if extra.get("deferred_pending_index"):
             return "deferred_pending_index"
         return "external_check_only"
-    # Lowercase so the metric keys are uniform (cap_or / cap_and /
-    # cap_cofinite_blacklist, matching the special-cased lowercase labels above)
-    # — ``CapabilityExpr`` stores composite kinds as "OR"/"AND". Mixed casing
-    # would split the run-over-run diff this tally exists for.
+    # ``CapabilityExpr`` stores "OR"/"AND"; lowercase so metric keys don't split.
     return str(kind).lower()
 
 
@@ -152,10 +110,9 @@ def _emit_capability_summary(
     kind_counts: dict[str, int],
     resolve_counters: dict[str, Any],
 ) -> None:
-    """Fold the per-job capability-kind tally + work-volume counters into the
-    stage_timing artifact and, when the contract was expensive enough, emit a
-    ``capability_summary`` line (mirrors ``predicate_artifacts``' predicate
-    summary). ``record_stage_metric`` is a no-op outside a worker job context."""
+    """Fold the capability-kind tally and work counters into stage_timing, and emit ``capability_summary`` when the
+    contract was slow enough. No-op outside a worker job.
+    """
     for label, count in kind_counts.items():
         record_stage_metric(f"cap_{label}", count)
     record_stage_metric("cap_total", sum(kind_counts.values()))
@@ -201,11 +158,8 @@ def find_analysis_job_for_address(
     chain: str | None = None,
     completed_only: bool = True,
 ) -> AnalysisJobLookup | None:
-    """Find the job whose artifacts should be used for a runtime address.
-
-    Proxies are runtime addresses, but their semantic artifacts usually live
-    on the implementation child job. Prefer a direct artifact when present;
-    otherwise follow the proxy Contract row to the implementation job.
+    """Find the job whose artifacts apply to a runtime address: a direct artifact if present, else the proxy's
+    implementation job.
     """
     for runtime_job in _jobs_for_address(session, address, chain=chain, completed_only=completed_only):
         lookup = _analysis_lookup_for_runtime_job(
@@ -226,12 +180,9 @@ def find_dependency_provider_job_for_address(
     *,
     chain: str | None = None,
 ) -> AnalysisJobLookup | None:
-    """Return the job that should satisfy a policy dependency for address.
+    """The job that should satisfy a policy dependency for *address*.
 
-    If ``address`` is a proxy and its implementation child job exists, the
-    policy edge must wait on the implementation job. The proxy job may already
-    be ``done`` without policy artifacts, so depending on the proxy address can
-    unblock too early or never satisfy the semantic inlining path.
+    For a proxy that's the implementation job, since the proxy job may be done without policy artifacts.
     """
     for runtime_job in _jobs_for_address(session, address, chain=chain, completed_only=False):
         impl_job = _implementation_child_job(session, runtime_job, chain=chain, completed_only=False)
@@ -246,12 +197,11 @@ def _resolve_chain_context(
     explicit_rpc_url: str | None,
     chain: str | None,
 ) -> ChainContext:
-    """Bind ``chain_id`` to its RPC URL (invariant 7). Registry-backed via
-    :func:`services.clients.rpc.chain_context`. An unregistered ``chain_id`` (only reachable
-    from a hand-built job request) now fails loud (invariant 6): ``require_chain``
-    raises :class:`~utils.chains.UnsupportedChainError` with call context instead
-    of silently building an eRPC route for an unknown chain. A local (Anvil/test)
-    ``explicit_rpc_url`` still wins for fork tests."""
+    """Bind ``chain_id`` to its RPC URL via :func:`services.clients.rpc.chain_context`.
+
+    Unregistered ids raise :class:`~utils.chains.UnsupportedChainError`; an explicit local ``explicit_rpc_url`` wins for
+    fork tests.
+    """
     require_chain(chain_id, chain=chain, context="capability resolution chain context")
     return chain_context(chain_id, explicit_rpc_url=explicit_rpc_url)
 
@@ -265,31 +215,12 @@ def resolve_contract_capabilities(
     job_id: Any = None,
     chain: str | None = None,
 ) -> dict[str, dict[str, Any]] | None:
-    """Return ``{function_signature: capability_dict}`` for the most
-    recent completed analysis of ``address``, or ``None`` if there's
-    no analysis / no semantic predicate artifact yet.
+    """``{function_signature: capability_dict}`` for the latest completed analysis of ``address``, or ``None``.
 
-    The caller MUST keep ``session`` open for the duration of the
-    call — adapters consume the repos lazily inside
-    ``evaluate_tree_with_registry``.
-
-    ``chain_id`` is required (invariant 6): it binds the live event/bytecode
-    reads to the right chain via a single :class:`ChainContext`. Callers thread
-    the job/contract chain — a chainless call can no longer run the predicate
-    tree as mainnet.
-
-    ``job_id`` lets in-pipeline callers (e.g. the policy worker's semantic
-    enrichment pass) target the job they're currently processing. The
-    default ``Job.status == completed`` filter would otherwise skip
-    the in-progress job and return None or stale prior artifacts.
-
-    ``chain`` is the string chain identifier (e.g. ``"ethereum"``,
-    ``"optimism"``) matching ``Contract.chain``. Together with
-    ``job_id`` it scopes the per-job ``ControllerValue`` lookup so a
-    re-analysis on a different chain (or a follow-up run on the same
-    address) doesn't leak rows back into a completed job's resolved
-    capabilities. Falls back to address-only lookup with a warn-log when
-    ``job_id`` is None.
+    ``session`` must stay open: adapters read repos lazily. ``chain_id`` binds the live reads. ``job_id`` targets an
+    in-progress job (the default completed-job filter would skip it). ``chain`` plus ``job_id`` scope the
+    ``ControllerValue`` lookup so other runs' rows don't leak in; without ``job_id`` it falls back to address-only with
+    a warning.
     """
     addr = address.lower()
     runtime_addr = addr
@@ -334,10 +265,7 @@ def resolve_contract_capabilities(
         if not isinstance(artifact, dict) or "trees" not in artifact:
             return None
 
-    # Default chain from Job.request when caller didn't supply one. The
-    # downstream ``_load_state_var_values`` only filters by chain when
-    # it's non-None, so this is best-effort: a job whose request lacks
-    # a 'chain' key falls back to address-only Contract lookup.
+    # Best-effort default from Job.request; without it the lookup is address-only.
     if chain is None and isinstance(analysis_job.request, dict):
         req_chain = analysis_job.request.get("chain")
         if isinstance(req_chain, str) and req_chain:
@@ -353,26 +281,20 @@ def resolve_contract_capabilities(
         if isinstance(candidate_job.request.get("rpc_url"), str):
             explicit_rpc_url = candidate_job.request["rpc_url"]
             break
-    # Resolve the RPC URL *from* ``chain_id`` via a single ChainContext so
-    # the (chain_id, rpc_url) pair can never disagree. They used to come from
-    # independent sources — the request's ``chain_id`` for the URL and the
-    # caller's ``chain_id`` argument for the event/bytecode reads — which let the
-    # URL point at one chain while the reads ran as another. A local (Anvil/test)
-    # explicit rpc_url still wins for fork tests, exactly as before.
+    # Derive the RPC URL from ``chain_id`` so the pair can't disagree (they used to come from different sources).
     ctx_chain = _resolve_chain_context(chain_id, explicit_rpc_url, chain)
     rpc_url = ctx_chain.rpc_url
     chain_id = ctx_chain.chain_id
 
     registry = AdapterRegistry()
-    # Named standard adapters first (higher matches() scores win); the generic
-    # event-indexed adapter is the fallback for non-standard authority.
+    # Named standard adapters first (higher matches() scores win); event-indexed is the fallback.
     registry.register(SolmateRolesAuthorityAdapter)
     registry.register(EnumerableRoleStoreAdapter)
     registry.register(EventIndexedAdapter)
 
     event_log_repo = PostgresEventLogRepo(session)
-    # Lets adapters confirm a contract's standard from its bytecode — e.g. tell a
-    # Solmate RolesAuthority from an OZ AccessManager, which share canCall's selector.
+    # Lets adapters tell standards apart by bytecode, e.g. Solmate RolesAuthority vs OZ AccessManager (same canCall
+    # selector).
     bytecode_repo = BytecodeSelectorRepo(rpc_url, chain_id)
     state_var_values = _load_state_var_values(
         session,
@@ -384,55 +306,27 @@ def resolve_contract_capabilities(
         state_var_values = _load_state_var_values(session, addr, job_id=runtime_job.id, chain=chain)
     canonical_signatures = artifact.get("canonical_signatures") if isinstance(artifact, dict) else None
     out: dict[str, dict[str, Any]] = {}
-    # Per-function profiling + per-job capability-kind tally + work-volume
-    # counters. This loop is the resolver-side twin of the static stage's
-    # ``build_predicate_artifacts`` loop, which has predicate_function_slow /
-    # predicate_summary lines; this one had none, so a function (or a cold
-    # HyperSync fallback) that ran away inside the policy stage was invisible.
-    # ``resolve_counters`` rides on each EvaluationContext.meta so the adapter
-    # dispatch and the cross-contract inline path increment it (adapter matches,
-    # live getter eth_calls, inline recursions, HyperSync scans) — surfacing
-    # redundant work without per-RPC latency noise.
+    # Resolver-side twin of ``build_predicate_artifacts``' profiling, so runaway functions in the policy stage are
+    # visible. ``resolve_counters`` rides on ctx.meta for adapters and inlining to increment.
     started = time.monotonic()
     per_function_ms: list[tuple[str, int]] = []
     kind_counts: dict[str, int] = {}
     resolve_counters: dict[str, Any] = {}
-    # Contract-scoped memo (shared into every function's ctx.meta below, like resolve_counters) of live
-    # nullary getter reads. Lets owner()/governor()/external-getter values that miss the persisted feed be
-    # read once per resolution pass instead of once per gated function. Discarded with this frame — it is a
-    # within-pass dedup, never a cross-run/persistent cache, so it cannot serve stale data across runs.
+    # Per-pass memo of live nullary getter reads, shared across functions; discarded with this frame, never persisted.
     live_read_memo: dict[Any, Any] = {}
     slow_threshold_ms = _capability_function_slow_ms()
-    # Differential probe (default OFF). Pin ONE block for the whole pass so every
-    # probed function is observed at the same height (replay + caching
-    # consistency). A None block (non-archive node / blocknum read failure)
-    # disables probing for the pass — the probe is strictly additive, so its
-    # absence is exactly the current behavior.
-    # Pin a finalized head for the WHOLE pass (#119). An unpinned ``block=None``
-    # evaluates "at live head", which a durable event index structurally lags, so
-    # every event-indexed allowlist would demote to ``lower_bound``. Pin a height
-    # stepped back ``RESOLVER_FINALITY_MARGIN`` from head — deeper than the indexer's
-    # confirmation depth — so a keeping-up cursor DETERMINISTICALLY covers it (no
-    # resolver-vs-indexer head race) and stays ``exact``, while a stalled cursor falls
-    # below it and demotes. Reads every function at one replayable height. ``None``
-    # (no RPC / blocknum read failure) leaves ``block`` unpinned -> the fold's
-    # coverage gate demotes, the safe direction. The differential probe keeps its own
-    # shallower head-12 height (default OFF), independent of this coverage pin.
+    # Pin one finalized height for the whole pass (#119), stepped back ``RESOLVER_FINALITY_MARGIN`` so healthy cursors
+    # stay ``exact`` and stalled ones demote. ``None`` leaves it unpinned, which demotes (safe). The differential probe
+    # keeps its own height.
     resolution_block: int | None = _resolve_resolution_block(rpc_url, block, chain_id=chain_id)
     probe_block: int | None = (
         _resolve_probe_block(rpc_url, block, chain_id=chain_id) if differential_probe_enabled() else None
     )
-    # One-shot consumed/live probe (default ON). The runtime address IS a proxy
-    # when the analysis artifact came from an implementation child job, or the
-    # job carried an explicit ``proxy_address`` — so an unset latch on it is a
-    # confirmed live one-shot, not a bare-template false-open. Block is pinned
-    # once per pass (reuses the differential-probe block when set) for a
-    # consistent read height; lazily resolved only if a one-shot row exists.
+    # One-shot latch probe (default on). The runtime address is a proxy when the artifact came from an implementation
+    # job or the job has ``proxy_address``, so an unset latch is genuinely live.
     one_shot_enabled = one_shot_probe_enabled()
     db_proxy_linked = (runtime_job.id != analysis_job.id) or (runtime_addr != addr)
-    # Pinned one-shot read height, resolved lazily on the FIRST one-shot row so a
-    # pass with no initializers makes zero extra wire calls. ``[sentinel]`` marks
-    # "not yet resolved"; reuses the differential-probe block when that is set.
+    # Resolved lazily on the first one-shot row so passes without initializers make no extra calls.
     one_shot_block_cell: list[Any] = [probe_block if probe_block is not None else _UNRESOLVED_BLOCK]
     one_shot_pass_cache: dict[tuple[Any, ...], LatchReadResult] = {}
     for fn_signature, tree in (artifact["trees"] or {}).items():
@@ -516,12 +410,8 @@ def _selector_for_signature(
         return None
     from eth_utils.crypto import keccak
 
-    # ``trees`` keys are Slither ``full_name`` signatures, which keep user-defined
-    # parameter type names (``addAsset(ERC20)``, ``executeTasks(IFoo.Report)``).
-    # The real EVM selector — and ``effective_functions.selector`` — is keyed on
-    # the canonical ABI signature. The static stage precomputes that per function
-    # (contract→address, enum→uint8, struct→tuple); prefer it so the selector the
-    # Solmate ``canCall`` fold keys on equals the true ``msg.sig``.
+    # Tree keys are Slither ``full_name`` signatures with user-defined type names; prefer the static stage's canonical
+    # ABI signature so the selector equals the real ``msg.sig``.
     canonical = (canonical_signatures or {}).get(signature)
     if isinstance(canonical, str) and "(" in canonical and canonical.endswith(")"):
         return "0x" + keccak(text=canonical).hex()[:8]
@@ -529,52 +419,36 @@ def _selector_for_signature(
     from services.policy.effective_permissions import _abi_signature
     from services.static.contract_analysis_pipeline.predicate_artifacts import is_canonical_abi_signature
 
-    # Fallback: string normalization of full_name. Correct for contract/interface
-    # params (→ ``address``); enum/struct params can't be recovered from the name
-    # alone (no tuple layout, no uint width), which is why the map above exists.
-    # When the lowering is provably incomplete we return no selector rather than
-    # one the chain will never dispatch on — a wrong selector silently matches
-    # the wrong function, while a missing one only fails to match.
+    # Name-based fallback handles contract params but not enums or structs; when lowering is incomplete, return no
+    # selector, since a wrong one silently matches the wrong function.
     lowered = _abi_signature(signature)
     if not is_canonical_abi_signature(lowered):
         return None
     return "0x" + keccak(text=lowered).hex()[:8]
 
 
-# ---------------------------------------------------------------------------
-# Differential probe wiring. Gated behind
-# ``PSAT_DIFFERENTIAL_PROBE`` (default OFF) in the resolution loop above; these
-# helpers run only when the flag is on, so flag-off resolution is byte-identical.
-# ---------------------------------------------------------------------------
+# Differential probe wiring, only used when ``PSAT_DIFFERENTIAL_PROBE`` is on.
 
-# Process-level probe cache: a probe is deterministic given
-# ``(chain, address, selector, block)`` — the random identities are derived from
-# (selector, address) and the block is pinned — so cache the result and skip the
-# wire when the same gated-unknown function is re-resolved in-process. Bounded;
-# only used on the real-wire production path (a stubbed ``call_batch`` bypasses it
-# so tests stay hermetic). Keyed by exact block, never bucketed — a different
-# block may see different allowlist state, so re-probing then is correct.
+# Deterministic per ``(chain, address, selector, block)``, so cached in-process on the real-wire path only (injected
+# ``call_batch`` bypasses it). Keyed by exact block.
 _PROBE_CACHE: dict[tuple[int, str, str, int], "ProbeResult"] = {}
 _PROBE_CACHE_MAX = 4096
 
 
 def clear_probe_cache() -> None:
-    """Clear the process-level differential-probe cache (tests / manual reset)."""
     _PROBE_CACHE.clear()
 
 
 def _probe_cache_put(key: tuple[int, str, str, int], result: "ProbeResult") -> None:
     if len(_PROBE_CACHE) >= _PROBE_CACHE_MAX:
-        # Cheap FIFO-ish trim: drop an arbitrary quarter when the bound is hit.
+        # FIFO-ish trim: drop a quarter at the bound.
         for stale in list(_PROBE_CACHE.keys())[: _PROBE_CACHE_MAX // 4]:
             _PROBE_CACHE.pop(stale, None)
     _PROBE_CACHE[key] = result
 
 
 def _resolve_probe_block(rpc_url: str | None, block: int | None, *, chain_id: int | None = None) -> int | None:
-    """Pin a concrete probe height. Prefer the caller's ``block``; else read the
-    head and step back a finality margin. None on any failure (no RPC, blocknum
-    read fails) → probing is skipped for the pass (strictly additive)."""
+    """Pin a probe height: the caller's ``block``, else head minus a finality margin. None on failure skips probing."""
     if isinstance(block, int) and block > 0:
         return block
     if not rpc_url:
@@ -587,16 +461,10 @@ def _resolve_probe_block(rpc_url: str | None, block: int | None, *, chain_id: in
 
 
 def _resolve_resolution_block(rpc_url: str | None, block: int | None, *, chain_id: int | None = None) -> int | None:
-    """Pin the per-pass evaluation height for event-indexed coverage (#119).
-
-    Prefer the caller's explicit ``block`` (a deliberate as-of height). Otherwise
-    read live head and step back ``RESOLVER_FINALITY_MARGIN`` — deeper than the
-    indexer's confirmation depth so a keeping-up durable cursor provably COVERS the
-    pinned height (``cursor >= pin``) despite the poll-interval gap between the
-    indexer's last pass and this read, making the fold-coverage gate deterministic.
-    ``None`` on no-RPC / blocknum-read-failure leaves the height unpinned, so the
-    fold's coverage gate demotes event-indexed sets to ``lower_bound`` — the safe
-    (never-fabricates) direction, and exactly the offline/non-archive behavior."""
+    """Pin the per-pass evaluation height for event-indexed coverage (#119): the caller's ``block``, else head minus
+    ``RESOLVER_FINALITY_MARGIN`` (see its comment). ``None`` leaves it unpinned, so coverage demotes to
+    ``lower_bound``.
+    """
     if isinstance(block, int) and block > 0:
         return block
     if not rpc_url:
@@ -609,12 +477,10 @@ def _resolve_resolution_block(rpc_url: str | None, block: int | None, *, chain_i
 
 
 def _should_differential_probe(cap: CapabilityExpr) -> bool:
-    """True only for the gated-unknown population the probe targets: a
-    top-level ``external_check_only`` carrying a caller-gate basis tag — exactly
-    ``_is_root_authority_blocker``'s external-check arm. A cold-index self-heal
-    deferral is NEVER probed: overwriting its marker would freeze the cold result
-    (the Veda RolesAuthority race) instead of letting ``deferred_reconciler``
-    converge it once the authority's events backfill."""
+    """True only for a top-level ``external_check_only`` with a caller-gate basis tag.
+
+    Cold-index deferrals are never probed, so ``deferred_reconciler`` can converge them.
+    """
     if cap.kind != "external_check_only" or cap.check is None:
         return False
     extra = cap.check.extra or {}
@@ -625,11 +491,11 @@ def _should_differential_probe(cap: CapabilityExpr) -> bool:
 
 
 def _apply_probe_result(cap: CapabilityExpr, result: ProbeResult) -> CapabilityExpr:
-    """Land a probe verdict on the capability. Only a confirmed-public
-    verdict CHANGES the static verdict (→ ``conditional_universal``); a gated
-    confirmation/observation and an inconclusive/indeterminate probe keep the
-    static ``external_check_only`` and merely attach the transcript so the verdict
-    is reproducible."""
+    """Land a probe verdict.
+
+    Only confirmed-public changes the verdict (to ``conditional_universal``); others keep ``external_check_only`` and
+    attach the transcript.
+    """
     transcript_step = {"step": "differential_probe", **result.transcript}
     if result.verdict == "public":
         opened = CapabilityExpr.conditional_universal(
@@ -637,7 +503,6 @@ def _apply_probe_result(cap: CapabilityExpr, result: ProbeResult) -> CapabilityE
         )
         opened.trace = list(cap.trace) + [transcript_step]
         return opened
-    # Keep the gated verdict; attach the transcript to the check's extra.
     if cap.check is not None:
         extra = dict(cap.check.extra or {})
         extra["differential_probe"] = result.transcript
@@ -658,16 +523,15 @@ def _maybe_differential_probe(
     block: int,
     call_batch: Any = None,
 ) -> CapabilityExpr:
-    """Probe one resolved capability when it is gated-unknown.
-    Wrapped in a blanket try/except: a probe failure must never break resolution
-    (strictly additive) — on any error the static verdict stands. ``call_batch`` is
-    injectable for hermetic tests; defaults to the real ``eth_call_batch`` wire."""
+    """Probe one gated-unknown capability.
+
+    Any failure leaves the static verdict. ``call_batch`` is injectable for tests.
+    """
     if not _should_differential_probe(cap):
         return cap
     selector = _selector_for_signature(fn_signature, canonical_signatures)
     if not selector:
         return cap
-    # Cache only on the real-wire path; an injected (test) batch bypasses it.
     use_cache = call_batch is None
     cache_key = (chain_id, contract_address.lower(), selector, block)
     if use_cache:
@@ -703,21 +567,15 @@ def _maybe_differential_probe(
     return _apply_probe_result(cap, result)
 
 
-# Process-level one-shot latch cache: a read is deterministic given
-# ``(chain, address, block, latch-slot signature)`` — the proxy topology and
-# init slot don't change at a fixed height — so re-resolving the same contract
-# in-process skips the wire. Bounded with a cheap FIFO trim, like the
-# differential-probe cache.
+# Deterministic per ``(chain, address, block, latch-slot signature)``; bounded FIFO like the probe cache.
 _ONE_SHOT_CACHE: dict[tuple[Any, ...], LatchReadResult] = {}
 _ONE_SHOT_CACHE_MAX = 4096
 
-# Sentinel for the lazily-resolved one-shot block cell: distinguishes "not yet
-# resolved" from a real ``None`` (block read failed → read at latest).
+# Distinguishes "not yet resolved" from a real ``None`` (read at latest).
 _UNRESOLVED_BLOCK = object()
 
 
 def clear_one_shot_cache() -> None:
-    """Clear the process-level one-shot latch cache (tests / manual reset)."""
     _ONE_SHOT_CACHE.clear()
 
 
@@ -740,18 +598,11 @@ def _maybe_one_shot_probe(
     db_proxy_linked: bool,
     pass_cache: dict[tuple[Any, ...], LatchReadResult],
 ) -> None:
-    """Read the on-chain latch state for a one-shot row and annotate ``cap_dict``
-    in place. Strictly additive: any failure leaves the static badge untouched.
+    """Read the latch state for a one-shot row and annotate ``cap_dict`` in place; failures leave the badge
+    unchanged.
 
-    A standard (A-spine) one-shot always annotates its ``one_shot`` condition. A
-    structural candidate is promoted to a one_shot condition ONLY when the read
-    confirms a real latch (consumed/live) — an indeterminate read leaves the
-    generic badge, so the candidate's false-positive class costs one wasted read,
-    never a wrong badge.
-
-    ``block_cell`` is a 1-element mutable holder for the pass-pinned read height,
-    resolved lazily here so a function with NO one-shot row triggers zero wire
-    calls (the ``eth_blockNumber`` head read fires only once a latch is found).
+    Standard one-shots always annotate. Structural candidates are promoted only when the read confirms a real latch.
+    ``block_cell`` resolves the height lazily on first use.
     """
     try:
         latches = collect_one_shot_latches(tree)
@@ -804,16 +655,9 @@ def _analysis_lookup_for_runtime_job(
     chain: str | None,
     completed_only: bool,
 ) -> AnalysisJobLookup | None:
-    # A proxy's own predicate_trees artifact is present but *empty* — it has no
-    # logic of its own, so the analyzable functions live on the implementation
-    # child job. Treating that empty artifact as "present" (the old
-    # ``_job_has_artifact`` check) returns the proxy job and shadows the
-    # implementation's real trees, which strands cross-contract authority
-    # inlining with an empty tree set and drops the true controller (e.g. an
-    # upgrade gate delegating to RoleRegistry.onlyProtocolUpgrader never
-    # resolves its owner/timelock). Prefer whichever job carries a *substantive*
-    # artifact; only fall back to a present-but-empty one when neither does (a
-    # contract that genuinely has no gated functions).
+    # A proxy's own predicate_trees artifact exists but is empty; preferring it would shadow the implementation's trees
+    # and break cross-contract inlining. Prefer a substantive artifact; fall back to an empty one only if neither has
+    # content.
     runtime_artifact = get_artifact(session, runtime_job.id, required_artifact)
     if _artifact_is_substantive(required_artifact, runtime_artifact):
         return AnalysisJobLookup(runtime_job=runtime_job, analysis_job=runtime_job)
@@ -905,12 +749,8 @@ def _job_chain(job: Job) -> str | None:
 
 
 def _artifact_is_substantive(artifact_name: str, artifact: Any) -> bool:
-    """Whether an artifact carries usable content — not merely that a row exists.
-
-    A proxy contract's ``predicate_trees`` artifact is present but empty (no
-    logic of its own), so ``predicate_trees`` counts as substantive only when it
-    carries at least one ``trees``/``check_trees`` entry. Other artifact kinds
-    count as substantive whenever the row is a dict.
+    """Whether an artifact has usable content: ``predicate_trees`` needs at least one ``trees``/``check_trees``
+    entry; other kinds just need to be a dict.
     """
     if not isinstance(artifact, dict):
         return False
@@ -926,39 +766,19 @@ def _load_state_var_values(
     job_id: Any = None,
     chain: str | None = None,
 ) -> dict[str, str]:
-    """Read persisted ``controller_values`` rows for ``address`` and key
-    them by the bare state-variable name the predicate evaluator looks
-    up (e.g. ``"_owner"``, ``"roleRegistry"``).
+    """Persisted ``controller_values`` for ``address``, keyed by bare state-variable name.
 
-    The static pipeline writes ``controller_id`` with a
-    ``"<kind>:<name>"`` prefix (e.g. ``"state_variable:_owner"``,
-    ``"external_contract:roleRegistry"``). The predicate evaluator
-    queries ``ctx.state_var_values[<name>]`` without the prefix, so we
-    strip it on read and prefer ``state_variable:`` rows when both
-    a state-variable and an external-contract row exist for the same
-    name.
-
-    Scoping rules:
-      - ``Contract.job_id == :job_id`` when ``job_id`` is non-None. Static
-        writes a fresh Contract row per analysis job, and resolution writes
-        the snapshot's ControllerValue rows under that exact row.
-      - ``Contract.chain == :chain`` when ``chain`` is non-None for fallback
-        address lookups.
-
-    Picks the exact job Contract when available. Falls back to the latest
-    address/chain Contract only when callers do not provide job context or
-    rows do not have job_id populated.
-
-    Returns an empty dict when no contract row matches — the evaluator
-    falls back to the lower_bound/partial placeholder."""
+    Stored ids are ``"<kind>:<name>"``; the prefix is stripped and ``state_variable:`` rows win over others with the
+    same name. Scoped to ``Contract.job_id`` when given, else the latest contract for the address (and ``chain`` if
+    given). Empty dict when nothing matches.
+    """
     if job_id is not None:
         stmt = select(Contract).where(Contract.job_id == job_id)
         if chain is not None:
             stmt = stmt.where(Contract.chain == chain)
         contract = session.execute(stmt.order_by(Contract.created_at.desc()).limit(1)).scalar_one_or_none()
         if contract is not None:
-            # Scope to this job's deployment so a shared impl (N proxies → 1 impl
-            # row) reads only its own proxy's controller values, not a sibling's.
+            # Scope to this deployment so a shared impl reads only its own proxy's values.
             job = session.get(Job, job_id)
             deployment = (
                 normalize_deployment(job.request.get("proxy_address"))
@@ -967,8 +787,7 @@ def _load_state_var_values(
             )
             return _controller_values_for_contract(session, contract, deployment, scope_deployment=True)
     else:
-        # No job context → address-only lookup can surface controller rows from a
-        # different job/chain (cross-tenant leakage). Degrade + breadcrumb.
+        # Address-only lookup can pick up another job's or chain's rows; record it.
         record_degraded(
             phase="state_var_values_no_job_id",
             exc=RuntimeError("_load_state_var_values called without job_id"),
@@ -998,8 +817,7 @@ def _controller_values_for_contract(
 ) -> dict[str, str]:
     stmt = select(ControllerValue).where(ControllerValue.contract_id == contract.id)
     if scope_deployment:
-        # One impl row can hold N per-proxy controller sets; read only this
-        # deployment's (plus legacy untagged NULL) rows. No-op for 1:1.
+        # Only this deployment's rows (plus legacy NULL). No-op for 1:1.
         stmt = stmt.where(deployment_scope(ControllerValue.deployment_address, deployment_address))
     rows = session.execute(stmt).scalars()
     state_var: dict[str, str] = {}
@@ -1019,18 +837,13 @@ def _controller_values_for_contract(
             state_var[name] = value
         else:
             other.setdefault(name, value)
-    # state_variable rows win; external_contract / role_identifier rows
-    # fill in only when there's no direct state-variable value.
+    # state_variable rows win.
     return {**other, **state_var}
 
 
 def capability_to_dict(cap: CapabilityExpr) -> dict[str, Any]:
-    """Serialize a ``CapabilityExpr`` to a JSON-ready dict.
-
-    Recurses through ``children`` (AND / OR composition) and
-    ``signer`` (signature_witness wraps another CapabilityExpr).
-    Drops keys whose value is the dataclass default (None / empty
-    list) so the wire shape is compact.
+    """Serialize a ``CapabilityExpr`` to a JSON-ready dict, recursing through ``children`` and ``signer`` and
+    dropping default-valued keys.
     """
     if not is_dataclass(cap):
         return {}
@@ -1056,36 +869,23 @@ def capability_to_dict(cap: CapabilityExpr) -> dict[str, Any]:
     out["confidence"] = cap.confidence
     if cap.last_indexed_block is not None:
         out["last_indexed_block"] = cap.last_indexed_block
-    # Three states on the wire: an int (exact at one instant), the literal
-    # ``"not_determined"`` (heights present, heterogeneous — refused), and the key
-    # ABSENT (never computed). ``last_indexed_block`` is a staleness floor and is
-    # never a substitute for this key.
+    # Three states: int (exact at one height), ``"not_determined"`` (heterogeneous heights), or absent (never computed).
+    # ``last_indexed_block`` is never a substitute.
     if cap.exact_as_of is not None:
         out["exact_as_of"] = cap.exact_as_of
     if cap.trace:
         out["trace"] = list(cap.trace)
-    # Only emit when non-default so root-caller capabilities (the vast majority) keep
-    # their existing wire shape; ``bound`` marks an inlined downstream-call subject.
+    # Emitted only when non-default, so root capabilities keep their shape.
     if cap.subject != "root":
         out["subject"] = cap.subject
-    # ALWAYS emitted on a cofinite, never elsewhere. The old
-    # emit-when-non-default rule made ABSENCE mean ``exact``: a consumer that has
-    # never heard of this key read every cofinite denylist as a COMPLETE
-    # exclusion, which is the strong claim — the one place where a hedge's
-    # default was the assertion rather than the caution. Absence
-    # now means "this capability is not a denylist", so the question of denylist
-    # completeness simply does not arise; a present ``lower_bound`` says at least
-    # these are excluded, so the complement is an upper bound on who may call.
+    # Always emitted on a cofinite: when it was omitted by default, absence read as a complete denylist (the strong
+    # claim). Absence now just means "not a denylist".
     if cap.kind == "cofinite_blacklist":
         out["blacklist_quality"] = cap.blacklist_quality
     elif cap.blacklist_quality != "exact":
-        # A non-cofinite carrying a non-default blacklist quality would be a
-        # producer bug; emit it rather than silently dropping the anomaly.
+        # A non-cofinite with a non-default quality is a producer bug; emit it rather than hide it.
         out["blacklist_quality"] = cap.blacklist_quality
-    # Emit-when-non-default: only labeled empties carry a reason, so populated
-    # sets and pre-existing empties keep their wire shape. Carries the
-    # empty-by-design ceiling / read-failure flavor to the persisted
-    # ``capability_expr`` the policy + surface layers read.
+    # Only labelled empties carry a reason.
     if cap.empty_reason is not None:
         out["empty_reason"] = cap.empty_reason
     return out

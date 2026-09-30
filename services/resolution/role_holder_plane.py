@@ -1,43 +1,16 @@
 """Who a role is proven to include, and why that is only ever a lower bound.
 
-The plane is keyed ``(chain_id, registry_address, role_hash)``. Two surfaces
-name the same ``(role, account)`` pair and neither is trusted to do the other's
-job:
+Keyed ``(chain_id, registry_address, role_hash)``. The ``RoleGranted``/``RoleRevoked`` fold proposes candidates; a
+pinned ``hasRole(bytes32,address)`` read witnesses each. Only the read admits a holder, so a broken fold yields a
+smaller lower bound, never a wrong one; completeness is published as ``holder_set_exhaustive``.
 
-* the **fold** over ``RoleGranted``/``RoleRevoked`` logs PROPOSES candidates;
-* a pinned ``hasRole(bytes32,address)`` read WITNESSES each one.
+Candidates include revoked addresses too, since the read decides. ``holders`` proves the address's own ``hasRole``
+returned true at ``as_of_block``, the same virtual function ``_checkRole`` dispatches to. Unlike the excised
+``external_set`` arm, the event topic and the predicate are two independent surfaces from the same contract.
 
-Only the read can put an address in ``holders``. That asymmetry is what makes
-the result sound under a broken fold: a fold that misses grants, mis-orders
-revokes, or stops early yields a SMALLER lower bound, never a wrong one. What it
-costs is completeness, published permanently as ``holder_set_exhaustive``.
-
-Because the fold is only a proposal, candidates are drawn from every address
-that ever APPEARS for a role — granted and revoked alike — and the read decides.
-An address the fold believes was revoked but whose ``hasRole`` returns true is
-admitted: the read proves it. This does not conflate role administration with
-role membership, because OZ expresses "may administer role X" as membership in a
-*different* ``bytes32``, which is a different primary key.
-
-What ``holders`` proves, stated exactly: **this address's own ``hasRole``
-predicate returned true at ``as_of_block``.** That is a behavioural read of
-deployed code, not a claim about the layout of ``_roles``. It is the right
-predicate anyway — ``hasRole`` is the same virtual function ``_checkRole``
-dispatches to, so an override that fools this read fools the gate identically.
-This is also what separates this ACCEPT side from the ``external_set`` arm B4c
-excised: there the callee's interface was the CALLING contract's declaration and
-no independent surface corroborated it; here the canonical OZ topic0 emitted BY
-that address and that address's OWN predicate independently name the same pair.
-
-**Identity is the hash and only the hash.** Rows are minted from the OZ
-AccessControl topic pair LITERALLY — not from ``role_store_standards`` — so that
-one identity space is in play. Solady's ``RoleSet(address,uint256,bool)`` also
-lives in that registry and carries a ``uint256`` role in a wholly different
-space; folding it here would key rows by a word that, cast into the OZ
-``bytes32`` mapping, reads the ZERO DEFAULT and returns false *successfully*.
-That is a completed read standing in for a witness — a default masquerading as
-evidence — and it would publish an unqualified nothing over roles that do have
-holders. Solady logs therefore mint NO ROW, and row-absence means not_determined.
+Rows use the OZ AccessControl topic pair literally, not ``role_store_standards``: Solady's ``RoleSet`` uses a
+``uint256`` role in a different space, and probing it through ``bytes32`` would read the zero default and return a
+successful false. Solady logs mint no row; absence means not_determined.
 """
 
 from __future__ import annotations
@@ -80,79 +53,50 @@ from utils.scoring_status import NOT_DETERMINED
 
 logger = logging.getLogger(__name__)
 
-# The OZ AccessControl pair, written out rather than read from
-# ``role_store_standards.spec_by_topic0()``. That map also carries Solady's
-# ``RoleSet``, whose role word indexes a different identity space (see module
-# docstring); consuming it would silently widen this plane by 78%.
+# Written out rather than taken from ``role_store_standards.spec_by_topic0()``, which also carries Solady's ``RoleSet``
+# (see module docstring).
 ROLE_GRANTED_TOPIC0 = "0x2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d"
 ROLE_REVOKED_TOPIC0 = "0xf6391f5c32d9c69d2a47ea670b442974b53935d1edc7fd64eb21e047a839171b"
 ACCESS_CONTROL_TOPIC0S = (ROLE_GRANTED_TOPIC0, ROLE_REVOKED_TOPIC0)
 
-# ``RoleGranted(bytes32 indexed role, address indexed account, address indexed sender)``
 _ROLE_TOPIC_INDEX = 1
 _ACCOUNT_TOPIC_INDEX = 2
 
 HAS_ROLE_SELECTOR = selector("hasRole(bytes32,address)")
 
-# AccessControl defines ``DEFAULT_ADMIN_ROLE`` as the literal zero word. Note it
-# is NOT ``keccak("DEFAULT_ADMIN_ROLE")`` (that is 0x1effbbff…), so this name can
-# never be attached by the preimage arm and needs its own, weaker basis.
+# ``DEFAULT_ADMIN_ROLE`` is the zero word, not ``keccak("DEFAULT_ADMIN_ROLE")``, so it needs its own weaker naming
+# basis.
 DEFAULT_ADMIN_ROLE_HASH = "0x" + "00" * 32
 DEFAULT_ADMIN_ROLE_NAME = "DEFAULT_ADMIN_ROLE"
 
 _HEX_DIGITS = frozenset("0123456789abcdef")
-# A 32-byte block hash, and nothing shorter. ``bytes.fromhex("")`` is ``b""``,
-# which is a value a reader cannot tell from a hash it never got.
+# Exactly 32 bytes; ``bytes.fromhex("")`` is ``b""``, indistinguishable from a missing hash.
 _BLOCK_HASH_BYTES = 32
 
-# Per-candidate probe outcomes. Three states, and the last two must never
-# collapse: a completed read returning false and a read that never happened are
-# different facts, and only the first is a read at all.
+# A completed false read and a read that never happened must never collapse.
 CANDIDATE_CONFIRMED = "confirmed"
 CANDIDATE_READ_COMPLETED_NOT_CONFIRMED = "read_completed_not_confirmed"
 CANDIDATE_UNCONFIRMED = "unconfirmed"
 
-# The only keys a disagreement record may carry. No key naming a cause belongs
-# here: ``as_of_block`` sits above the cursor head, so "the fold missed a log"
-# and "the state changed after the cursor stopped" are indistinguishable. If a
-# future run ever pins the probe block AT the cursor head that window closes,
-# but non-attribution must survive on principle — a cursor is an upper bound on
-# what was READ, never a proof of what was EMITTED.
+# No cause key belongs here: ``as_of_block`` is above the cursor head, so a missed log and a later state change are
+# indistinguishable. A cursor bounds what was read, not what was emitted.
 DISAGREEMENT_KEYS = frozenset({"registry", "role_hash", "address", "fold_state", "chain_state"})
 
 
 @dataclass(frozen=True)
 class ProbeBlock:
-    """A confirmation-depth-deep height and its hash.
-
-    Bare ``eth_blockNumber`` is not replayable: the head can be reorged out from
-    under a persisted number, and then ``as_of_block`` cites a block that no
-    longer exists on the canonical chain. The hash is what makes the citation
-    checkable after the fact.
-    """
+    """A confirmation-depth-deep height and its hash, so the citation stays checkable after a reorg."""
 
     number: int
     block_hash: bytes | None
 
 
 def classify_candidate(result: EthCallResult) -> str:
-    """One ``hasRole`` outcome, as three states that never collapse into two.
+    """One ``hasRole`` outcome in three states.
 
-    ``decode_bool_word`` returns False for a revert, an empty return and a short
-    word alike, so calling it without first branching on ``success`` converts
-    every failed read into a proven non-holder — the exact fail-open shape this
-    plane exists to avoid. The branch is here, once, so no caller can skip it.
-
-    ``success`` is necessary and NOT sufficient. ``eth_call_batch`` reports a
-    node result it cannot read as ``EthCallResult(True, "0x", …)``, and that
-    coercion is deliberate elsewhere (a simulated state-changing call whose
-    only fact IS that it succeeded). Here the fact wanted is the RETURNED BOOL,
-    so a success carrying no full word answers nothing: it is a failed read,
-    which keeps it out of ``has_role_answered`` and out of the disagreement log
-    instead of publishing ``chain_state: "false"`` for a call that returned no
-    data. Exactly one 32-byte word is required, the width ``hasRole`` returns —
-    a shorter return has no bool in it, and a longer one is not the ABI this
-    plane is decoding.
+    ``decode_bool_word`` returns False for reverts, empty and short returns alike, so ``success`` must be checked first
+    or failed reads become proven non-holders. ``success`` isn't sufficient either: ``eth_call_batch`` reports
+    unreadable results as ``EthCallResult(True, "0x", …)``. Exactly one 32-byte word is required.
     """
     if not result.success:
         return CANDIDATE_UNCONFIRMED
@@ -163,13 +107,9 @@ def classify_candidate(result: EthCallResult) -> str:
 
 
 def fold_role_candidates(rows: Iterable[Any]) -> dict[str, dict[str, bool]]:
-    """``role_hash -> {account: fold_believes_active}`` in log order.
+    """``role_hash -> {account: fold_believes_active}`` in log order, last-write-wins.
 
-    Last-write-wins per ``(role, account)``. Rows whose ``topic0`` is not one of
-    the two AccessControl topics are dropped, so a Solady ``RoleSet`` in the same
-    result set contributes nothing rather than being read with OZ's topic
-    positions. The returned map keeps revoked accounts: they are candidates too,
-    and the pinned read — not this fold — decides membership.
+    Non-AccessControl topics (e.g. Solady ``RoleSet``) are dropped. Revoked accounts stay as candidates.
     """
     state: dict[str, dict[str, bool]] = {}
     for row in rows:
@@ -190,20 +130,11 @@ def fold_role_candidates(rows: Iterable[Any]) -> dict[str, dict[str, bool]]:
 def resolve_role_name(
     role_hash: str, candidate_names: Iterable[str], *, has_role_answered: bool
 ) -> tuple[str | None, str]:
-    """``(role_name, role_name_basis)`` — a proven preimage, or the key absent.
+    """``(role_name, role_name_basis)``: a proven preimage, or absent.
 
-    What the ``keccak_preimage`` arm proves is a TOTAL fact about the hash: some
-    string S satisfies ``keccak(S) == role_hash``, and collision resistance makes
-    S the only such short string. It does NOT prove that this registry declares a
-    constant named S — which is why the candidate pool may be drawn from anywhere
-    without weakening the result, and why a candidate that fails the hash check
-    is discarded no matter how role-shaped its name looks.
-
-    The zero-word arm is a naming CONVENTION, not a preimage, so it carries its
-    own weaker basis. It additionally requires that ``hasRole`` was answered by
-    this registry at all: rows exist wherever the two topics were emitted, and an
-    emitter that does not implement ``hasRole`` is not the AccessControl the
-    convention describes.
+    ``keccak_preimage`` proves ``keccak(S) == role_hash`` (so candidates can come from anywhere), not that this registry
+    declares S. The zero-word arm is only a convention with a weaker basis, and additionally requires that this registry
+    answered ``hasRole``.
     """
     normalized = _normalize_word(role_hash)
     for name in candidate_names:
@@ -217,13 +148,9 @@ def resolve_role_name(
 
 
 def candidate_name_pool(session: Session) -> list[str]:
-    """Distinct declared role names, as CANDIDATES only.
+    """Distinct declared role names as candidates only.
 
-    Every one is filtered through the keccak check before it can be published,
-    so a mis-parsed row (the ERC-7201 storage pointers D6-reject stops minting,
-    which persist until their contract is re-analysed) cannot leak a name: its
-    hash matches nothing. The pool is deliberately not chain- or contract-scoped
-    — a preimage is a preimage regardless of who offered the string.
+    Everything passes the keccak check, so mis-parsed rows can't leak. Deliberately not scoped by chain or contract.
     """
     return sorted({name for (name,) in session.execute(select(RoleDefinition.role_name).distinct()) if name})
 
@@ -231,9 +158,7 @@ def candidate_name_pool(session: Session) -> list[str]:
 def pin_probe_block(rpc_url: str, *, chain_id: int) -> ProbeBlock | None:
     """A height at least ``DEFAULT_CONFIRMATION_DEPTH`` below head, plus its hash.
 
-    Returns None on any failure. A probe with no pinned height is not run at all;
-    it is never retried against ``"latest"``, which would publish a membership
-    fact at an unrecorded and unrepeatable height.
+    None on failure; the probe is then skipped, never retried at ``"latest"``.
     """
     try:
         head = int(str(rpc_request(rpc_url, "eth_blockNumber", [], chain_id=chain_id)), 16)
@@ -249,7 +174,7 @@ def pin_probe_block(rpc_url: str, *, chain_id: int) -> ProbeBlock | None:
         raw = block.get("hash") if isinstance(block, Mapping) else None
         block_hash = _decode_block_hash(raw)
     except Exception as exc:
-        # The height still stands on its own; only replay-after-reorg is weaker.
+        # The height stands; only replay after a reorg is weaker.
         record_degraded(
             phase="pin_probe_block_hash",
             exc=exc,
@@ -268,13 +193,9 @@ def probe_has_role(
     block_number: int,
     chain_id: int,
 ) -> list[str]:
-    """Classify ``hasRole(role_hash, account)`` for each probe at a PINNED block.
+    """Classify ``hasRole(role_hash, account)`` for each probe at a pinned block.
 
-    One JSON-RPC array request at one ``block_tag``, so every answer in the plane
-    describes the same height. ``eth_call_batch`` is used rather than Multicall3
-    because it preserves the per-call success/revert distinction that
-    ``classify_candidate`` needs; aggregated through Multicall3 a revert and a
-    false would arrive looking more alike than they are.
+    One JSON-RPC batch at one height; not Multicall3, which would blur reverts and falses.
     """
     if not probes:
         return []
@@ -284,9 +205,7 @@ def probe_has_role(
     for index, (role_hash, account) in enumerate(probes):
         word = _normalize_word(role_hash)
         if word is None:
-            # Never substitute a default role word here: probing the zero role
-            # in place of an unparseable one would attribute DEFAULT_ADMIN's
-            # holders to it. An unaskable question stays unanswered.
+            # Never substitute the zero role for an unparseable one; that would attribute DEFAULT_ADMIN's holders to it.
             continue
         calls.append({"to": registry_address, "data": HAS_ROLE_SELECTOR + word[2:] + encode_address_word(account)})
         slots.append(index)
@@ -297,13 +216,10 @@ def probe_has_role(
 
 
 def _cursor_bounds(session: Session, *, chain_id: int, registry_address: str) -> dict[str, Any]:
-    """Both AccessControl cursors' state, and whether the pair is warm.
+    """Both AccessControl cursors' state and whether both are warm (``backfill_complete``).
 
-    Warmth is read from ``backfill_complete`` on BOTH topics rather than from
-    ``absence_coverage``'s ``warm`` list, which additionally requires exactness
-    eligibility. That extra condition governs whether a cursor may support an
-    exact EMPTY, and this plane never claims one — so the enrolment basis is
-    recorded and cited here, not depended upon.
+    Exactness eligibility isn't required since this plane never claims an exact empty; the basis is recorded, not
+    depended on.
     """
     rows = list(
         session.execute(
@@ -325,21 +241,19 @@ def _cursor_bounds(session: Session, *, chain_id: int, registry_address: str) ->
     lower_bound = coverage_report["range_lower_bound"]
     lower_basis = coverage_report["range_lower_bound_basis"]
     if lower_basis != FIRST_INDEXED_BASIS_CREATION:
-        # An ``explicit_seed`` or a NULL is not a witness, and the number is
-        # dropped with the basis so no consumer can cite what it may not.
+        # Not a witness; drop the number with the basis.
         lower_bound = None
         lower_basis = NOT_DETERMINED
     last_blocks = [int(row.last_indexed_block) for row in rows if row.last_indexed_block is not None]
     return {
         "both_warm": both_warm,
-        # Weakest link: the pair covers only as far as the shorter cursor.
+        # The pair covers only as far as the shorter cursor.
         "last_indexed_block": min(last_blocks) if len(last_blocks) == len(ACCESS_CONTROL_TOPIC0S) else None,
         "first_indexed_block": lower_bound,
         "first_indexed_block_basis": lower_basis,
         "enrollment_bases": {topic: by_topic[topic].enrollment_basis for topic in sorted(by_topic)},
         "page_completeness": coverage_report["page_completeness"],
-        # Consulted only to REFUSE. It is hard-wired False upstream, so this can
-        # never license anything; reading it keeps the refusal explicit.
+        # Hard-wired False upstream; read only to keep the refusal explicit.
         "earned_negative_admissible": coverage_report["earned_negative_admissible"],
     }
 
@@ -355,19 +269,9 @@ def _withheld_row(
 ) -> dict[str, Any]:
     """A row that publishes no lower bound.
 
-    Every counter is NULL, and so is the disagreement log. A cold surface, an
-    all-reverting registry and a registry where every read completed and
-    confirmed nobody are the SAME row here, on purpose: distinguishing them
-    would let a reader reconstruct "N probed, all completed, none held" — the
-    banned empty set, spelled out in columns.
-
-    The disagreement log is NULL rather than ``[]`` for a second, independent
-    reason. On an all-reverting registry nothing was read, so "no disagreement
-    was observed" is not_determined, not an earned negative. On an all-false
-    registry disagreements genuinely WERE observed, and they are withheld along
-    with the floor they qualify rather than silently dropped. Either way ``[]``
-    would assert something unproven — an unearned negative one column over from
-    the empty set the table makes unrepresentable.
+    All counters and the disagreement log are NULL. Cold surfaces, all-reverting registries and all-false registries
+    look identical on purpose; distinguishing them would reconstruct the banned empty set. The log is NULL rather than
+    ``[]`` because "no disagreement" would be unproven too.
     """
     return {
         "chain_id": chain_id,
@@ -401,12 +305,9 @@ def resolve_role_holder_planes(
     probe_block: ProbeBlock | None = None,
     candidate_names: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Every ``(role_hash)`` this registry has emitted, resolved to a lower bound.
+    """Every role hash this registry has emitted, resolved to a lower bound.
 
-    A registry that emitted no AccessControl role log yields NO ROWS, and that
-    absence means not_determined — never "this registry has no roles". The four
-    corpus registries carrying warm role cursors and zero logs (two of them
-    protocol-1, and ``hasRole`` reverts on all four) are exactly this case.
+    A registry with no AccessControl logs yields no rows, meaning not_determined, not "no roles".
     """
     registry_address = registry_address.lower()
     repo_rows = list(
@@ -430,8 +331,7 @@ def resolve_role_holder_planes(
     names = list(candidate_names) if candidate_names is not None else candidate_name_pool(session)
 
     def withhold_all() -> list[dict[str, Any]]:
-        """No read happened, so the zero-word convention has nothing to stand on
-        either — every name falls back to the keccak arm or to not_determined."""
+        """No read happened, so the zero-word convention has nothing to stand on."""
         out = []
         for role_hash in sorted(folded):
             name, basis = resolve_role_name(role_hash, names, has_role_answered=False)
@@ -447,9 +347,7 @@ def resolve_role_holder_planes(
             )
         return out
 
-    # A cold or missing cursor on either topic withholds every lower bound for
-    # this registry. The candidate set is knowingly incomplete, and a floor
-    # published from it invites a reader to treat its size as a count.
+    # Either cursor cold withholds every lower bound: the candidate set is knowingly incomplete.
     if not bounds["both_warm"]:
         return withhold_all()
 
@@ -464,8 +362,7 @@ def resolve_role_holder_planes(
     for (role_hash, account), verdict in zip(probes, verdicts):
         by_role.setdefault(role_hash, []).append((account, verdict))
 
-    # The zero-word arm needs proof this registry answers ``hasRole`` at all.
-    # Any completed call against it is that proof, whatever the answer was.
+    # Any completed call proves this registry answers ``hasRole``.
     has_role_answered = any(v != CANDIDATE_UNCONFIRMED for v in verdicts)
 
     rows: list[dict[str, Any]] = []
@@ -474,13 +371,8 @@ def resolve_role_holder_planes(
         confirmed = sorted(account for account, verdict in outcomes if verdict == CANDIDATE_CONFIRMED)
         unconfirmed = sum(1 for _, verdict in outcomes if verdict == CANDIDATE_UNCONFIRMED)
         if not confirmed:
-            # The zero-word arm is withheld on a withheld row even where the
-            # reads DID complete. Publishing it here would leak the one bit A2
-            # forbids: a reader seeing the DEFAULT_ADMIN name beside a NULL
-            # holder set would know every read completed, which reconstructs "N
-            # probed, all answered, none held" — the banned empty set. The
-            # keccak arm is unaffected, because a preimage is a fact about the
-            # hash and says nothing about whether any call succeeded.
+            # Withheld even when reads completed: the DEFAULT_ADMIN name beside a NULL holder set would reveal that
+            # every read completed with no holders. The keccak arm is unaffected.
             withheld_name, withheld_basis = resolve_role_name(role_hash, names, has_role_answered=False)
             rows.append(
                 _withheld_row(
@@ -532,7 +424,6 @@ def resolve_role_holder_planes(
 
 
 def persist_role_holder_planes(session: Session, rows: Sequence[Mapping[str, Any]]) -> int:
-    """Upsert resolved rows. Returns the number written."""
     written = 0
     for row in rows:
         existing = session.get(RoleHolderPlane, (row["chain_id"], row["registry_address"], row["role_hash"]))
@@ -547,16 +438,10 @@ def persist_role_holder_planes(session: Session, rows: Sequence[Mapping[str, Any
 
 
 def _normalize_word(raw: Any) -> str | None:
-    """A full 32-byte word, lower-cased, or ``None``.
+    """A full 32-byte word, lowercased, or ``None``.
 
-    There is deliberately no lenient path. The tolerant version of this
-    accepted anything shorter than a word and left-padded it, so ``"0x"`` —
-    the empty return of a call that answered nothing — came back as
-    ``"0x" + "00"*32``, which IS ``DEFAULT_ADMIN_ROLE_HASH``. A no-data read
-    then minted the DEFAULT_ADMIN name and the holders of the zero role, from
-    a word nobody ever observed. Every word on this plane comes off a log
-    topic or a returned word, both of which are 32 bytes on the wire, so
-    requiring the full width costs no recall.
+    No lenient path: padding ``"0x"`` produced the zero role hash and minted DEFAULT_ADMIN holders from an unobserved
+    word.
     """
     if not isinstance(raw, str) or not raw.startswith("0x"):
         return None
@@ -564,8 +449,7 @@ def _normalize_word(raw: Any) -> str | None:
     if len(body) != 64:
         return None
     lowered = body.lower()
-    # ``bytes.fromhex`` and ``int(..., 16)`` both tolerate ASCII whitespace, so
-    # the hex alphabet is checked explicitly rather than via a parse attempt.
+    # ``bytes.fromhex`` and ``int(..., 16)`` tolerate whitespace, so check the alphabet explicitly.
     if any(char not in _HEX_DIGITS for char in lowered):
         return None
     return "0x" + lowered
@@ -579,14 +463,7 @@ def _word_to_address(raw: Any) -> str | None:
 
 
 def _decode_block_hash(raw: Any) -> bytes | None:
-    """The pinned block's hash as 32 bytes, or ``None``.
-
-    ``bytes.fromhex`` accepts the empty string and ignores ASCII whitespace, so
-    an ``eth_getBlockByNumber`` that answered ``"0x"`` used to store ``b""`` —
-    an empty citation that a reader replaying the row cannot distinguish from a
-    hash. The width is what makes the height checkable after a reorg, so a word
-    that is not exactly 32 bytes is no citation and the field goes absent.
-    """
+    """The pinned block's hash as 32 bytes, or ``None``; a short or empty value is no citation."""
     word = _normalize_word(raw)
     if word is None:
         return None

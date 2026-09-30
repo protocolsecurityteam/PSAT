@@ -15,8 +15,7 @@ REPAIR_AGE_S = 86400
 LEASE_S = 900
 
 
-class WorkPending(Exception):
-    """Inputs are temporarily unavailable; retain this work for a later pass."""
+class WorkPending(Exception): ...
 
 
 @dataclass(frozen=True)
@@ -33,7 +32,7 @@ def mark_dirty(session: Session, kind: str, key: str) -> None:
 
 
 def repair_due(session: Session, kinds: tuple[str, ...], *, limit: int = 50) -> int:
-    """Bounded daily safety sweep. Never accelerate a pending failure's retry."""
+    """Bounded daily safety sweep; never accelerates a pending failure's retry."""
     rows = (
         session.execute(
             select(IndexerWork)
@@ -103,20 +102,19 @@ def finish(session: Session, claim: Claim, *, success: bool, remove: bool = Fals
             )
         )
         session.execute(update(IndexerWork).where(*owned, IndexerWork.revision == claim.revision).values(**values))
-    # A new revision keeps its dirty flag and immediate due time, but can now be
-    # claimed. A stolen lease remains completely untouched.
+    # A new revision stays dirty and due but becomes claimable; a stolen lease is untouched.
     session.execute(update(IndexerWork).where(*owned).values(lease_id=None, lease_expires_at=None))
     session.commit()
 
 
 def renew_and_commit(session: Session, claim: Claim) -> None:
-    """Commit cursor progress before RPC only while this worker owns a live lease."""
+    """Commit cursor progress before RPC only while holding a live lease."""
     renew_claim(session, claim)
     session.commit()
 
 
 def renew_claim(session: Session, claim: Claim) -> None:
-    """Fence writes and renew within the caller's transaction, without committing."""
+    """Fence and renew within the caller's transaction, without committing."""
     result = session.execute(
         update(IndexerWork)
         .where(
@@ -133,7 +131,7 @@ def renew_claim(session: Session, claim: Claim) -> None:
 
 
 def lock_claim(session: Session, claim: Claim) -> None:
-    """Fence short database-only reorg actions through their atomic commit."""
+    """Fence short DB-only reorg actions through their commit."""
     owned = session.execute(
         select(IndexerWork.lease_id)
         .where(

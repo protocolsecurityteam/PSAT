@@ -33,15 +33,11 @@ logger = logging.getLogger("services.resolution.predicate_evaluator")
 
 
 def _stamp_caller_gate_check(cap: CapabilityExpr, leaf: LeafPredicate) -> CapabilityExpr:
-    """Under the earned-public default, mark an unresolvable
-    ``external_check_only`` that IS a caller gate (caller-tainted leaf, no
-    permissionless shape) with its ``caller_gate_basis`` tag. The projection
-    blocker keys on the tag: a tagged check suppresses a sibling public path
-    (the Solmate ``requiresAuth`` decline, a view ACL probe), while an
-    untagged check — a downstream statement-call probe whose revert surface
-    gates the INTERMEDIATE contract (the un-inlined Veda teller→vault call)
-    — keeps the legacy side-condition fold. The decision is made here, where
-    the leaf is in hand, never by pattern-matching check dicts downstream."""
+    """Tag an unresolvable caller-gate ``external_check_only`` with ``caller_gate_basis``.
+
+    Tagged checks suppress sibling public paths; untagged checks (probes gating an intermediate contract) keep the
+    legacy side-condition fold. Decided here, where the leaf is known.
+    """
     if cap.kind != "external_check_only" or cap.check is None:
         return cap
     if not earned_public_enabled():
@@ -55,17 +51,14 @@ def _stamp_caller_gate_check(cap: CapabilityExpr, leaf: LeafPredicate) -> Capabi
         basis.append(tag)
     extra["basis"] = basis
     stamped = replace(cap, check=replace(cap.check, extra=extra))
-    # A caller gate that settles here without a pending-index deferral is unresolved
-    # for good — the durability tripwire (a transient cold deferral self-heals via
-    # the reconciler and is excluded).
+    # Settled here without a deferral means unresolved for good (the durability tripwire).
     if stamped.check is not None and not extra.get("deferred_pending_index"):
         _record_delegated_gate_unresolved(stamped.check)
     return stamped
 
 
 def _resolve_external_bool(leaf: LeafPredicate, ctx: EvaluationContext | None = None) -> CapabilityExpr:
-    """``require(authority.check(...))`` — produces an
-    external_check_only capability."""
+    """``require(authority.check(...))``: external_check_only."""
     selector = None
     for op in leaf.get("operands") or []:
         if op.get("source") == "external_call":
@@ -89,23 +82,12 @@ def _normalize_membership_decline_for_negation(
     descriptor: SetDescriptor,
     ctx: EvaluationContext,
 ) -> CapabilityExpr:
-    """Turn an *un-enumerable* membership decline into an ``external_check_only`` so a
-    pending ``falsy`` negate reaches ``negate``'s cofinite arm.
+    """Turn an un-enumerable membership decline into ``external_check_only`` so a pending falsy negate reaches the
+    cofinite arm.
 
-    A ``falsy`` membership leaf (``if (set[caller]) revert``) proceeds for anyone NOT in
-    the set, so its faithful resolution is the complement (cofinite/open). But when the
-    adapter can't enumerate the set the decline arrives as ``unsupported("no_adapter")``
-    (the real ``AdapterRegistry`` has no enumerator for this ``mapping_membership``) or
-    as the null adapter's ``finite_set([], lower_bound)`` placeholder — and the raw
-    ``unsupported`` would negate to ``unsupported("negate_of_no_adapter")``, discarding
-    the denylist. Convert *only* that decline to an ``external_check_only`` describing
-    the membership probe; ``negate(external_check_only)`` then yields a lower_bound
-    cofinite. ``subject`` is carried through so a bound (inlined-hook) denylist stays a
-    side-condition.
-
-    Narrow by construction — a populated/exact ``finite_set``,
-    ``membership_without_descriptor``, or any other reason is returned untouched and
-    stays gated. Mirrors the external_bool branch's existing ``no_adapter`` handling.
+    Otherwise ``unsupported("no_adapter")`` or the null adapter's placeholder negates to ``negate_of_no_adapter`` and
+    the denylist is lost. Only that decline is converted; everything else is returned untouched. ``subject`` is
+    preserved.
     """
     is_no_adapter = cap.kind == "unsupported" and cap.unsupported_reason == "no_adapter"
     is_null_placeholder = cap.kind == "finite_set" and not cap.members and cap.membership_quality == "lower_bound"
@@ -164,18 +146,9 @@ def _resolve_signer_from_leaf(
     leaf: LeafPredicate,
     ctx: EvaluationContext | None = None,
 ) -> CapabilityExpr:
-    """For a signature_auth leaf, the principal is whoever signed.
-    Find the operand that's NOT the signature_recovery source — that
-    operand identifies the expected signer, which becomes a
-    capability that the resolver-side check verifies the signature
-    against.
+    """For a signature_auth leaf the principal is whoever signed: the operand that isn't the recovery source.
 
-    State-variable signers consult ``ctx.state_var_values`` so persisted
-    ``ControllerValue`` rows surface as concrete signers — mirrors the
-    sibling ``_resolve_equality_principal`` branch. Without this lookup,
-    every signature-gated function whose signer is a state variable
-    wraps an empty ``finite_set``, and the writer emits zero
-    ``FunctionPrincipal`` rows of ``principal_type=signature_witness``.
+    State-variable signers read ``ctx.state_var_values`` so persisted values surface as concrete signers.
     """
     operands = leaf.get("operands") or []
     signers = [op for op in operands if op["source"] != "signature_recovery"]
@@ -211,9 +184,7 @@ def _condition_from_leaf(leaf: LeafPredicate) -> Condition:
     role = leaf.get("authority_role")
     kind: str = role if role in ("time", "pause", "reentrancy", "business", "one_shot") else "business"
     if kind == "business" and _leaf_is_permit_shape(leaf):
-        # A signature-witness open path that folded to a side condition (the
-        # void EIP-2612 statement call, or a recover-equality that stayed a
-        # business leaf): record that this open is a permit, not a bare open.
+        # Record the open path as a permit, not a bare open.
         kind = "permit_sig"
     return Condition(
         kind=kind,

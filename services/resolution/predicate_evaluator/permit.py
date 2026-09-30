@@ -11,16 +11,12 @@ from services.static.contract_analysis_pipeline.predicate_types import (
 
 logger = logging.getLogger("services.resolution.predicate_evaluator")
 
-# Canonical signature-verification callees: the EVM ``ecrecover`` builtin, the
-# OZ ECDSA library (``recover``/``tryRecover``), and OZ SignatureChecker /
-# EIP-1271 (``isValidSignature``/``isValidSignatureNow``). Standard library
-# entry points, not user identifiers.
+# Standard signature-verification entry points (``ecrecover``, OZ ECDSA, SignatureChecker / EIP-1271).
 _SIGNATURE_VERIFIER_CALLEES = frozenset(
     {"ecrecover", "recover", "tryRecover", "isValidSignature", "isValidSignatureNow"}
 )
 
-# EIP-2612 / DAI-style permit and EIP-3009 authorization ABI signatures — the
-# canonical self-authorizing token entry points a void statement call gates on.
+# EIP-2612 / DAI permit and EIP-3009 authorization signatures.
 _PERMIT_FAMILY_SIGNATURES = frozenset(
     {
         "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)",
@@ -33,9 +29,9 @@ _PERMIT_FAMILY_SIGNATURES = frozenset(
 
 
 def _leaf_is_permit_shape(leaf: LeafPredicate) -> bool:
-    """Structural permit witness on a side-condition leaf: an operand carrying
-    ``signature_recovery`` provenance, a canonical signature-verifier callee,
-    or a void call into the EIP-2612/3009 permit family."""
+    """Structural permit witness: a ``signature_recovery`` operand, a canonical verifier callee, or a void
+    permit-family call.
+    """
     for op in leaf.get("operands") or []:
         if op.get("source") == "signature_recovery":
             return True

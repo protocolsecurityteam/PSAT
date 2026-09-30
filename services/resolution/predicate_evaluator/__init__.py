@@ -1,27 +1,16 @@
-"""Predicate-tree evaluator — the bridge from static stage to resolver.
+"""Predicate-tree evaluator: turns a static ``PredicateTree`` into a ``CapabilityExpr``.
 
-Takes a ``PredicateTree`` (from ``services.static.contract_analysis_pipeline.
-predicates.build_predicate_tree``) and produces a ``CapabilityExpr``
-describing the principal set / capability shape that gates the
-function. Recursive: AND/OR nodes compose via the closed combinators
-in ``capabilities.py``.
-
-Per v6 round-5 #3 fix, dispatch order is:
+AND/OR compose via the combinators in ``capabilities.py``. Leaf dispatch order:
   1. kind == "unsupported"           → CapabilityExpr.unsupported(reason)
-  2. authority_role ∈ {reentrancy, pause, business, time} →
-     conditional_universal (anyone, with the side condition)
-  3. caller_authority / delegated_authority — dispatch on leaf kind:
-     - membership   → adapter.enumerate(set_descriptor) → finite_set
-     - equality     → resolve operand → finite_set([address])
-     - external_bool→ external_check_only
+  2. authority_role ∈ {reentrancy, pause, business, time} → conditional_universal
+  3. caller_authority / delegated_authority, by leaf kind:
+     - membership     → adapter enumeration → finite_set
+     - equality       → resolve operand → finite_set([address])
+     - external_bool  → external_check_only
      - signature_auth → signature_witness
-     - comparison   → conditional_universal (caller-priority comparisons
-                       are exotic; mostly time-gates, already handled)
+     - comparison     → conditional_universal
 
-Adapters are pluggable: the caller passes an ``AdapterRegistry`` (week 5
-deliverable). Without adapters, membership leaves return finite_set with
-quality=lower_bound and empty members — the structural skeleton is
-correct, just unfilled.
+Without adapters, membership leaves return an empty lower_bound finite_set.
 """
 
 from __future__ import annotations

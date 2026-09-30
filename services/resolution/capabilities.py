@@ -1,35 +1,23 @@
-"""CapabilityExpr — resolver-side authority-set algebra.
+"""CapabilityExpr: resolver-side authority-set algebra.
 
-The static stage produces a ``PredicateTree`` per guarded function;
-the resolver evaluates the tree against on-chain state and emits a
-``CapabilityExpr``. This module defines that type plus the closed,
-total combinators (intersect/union/negate) called by the evaluator.
+The resolver evaluates each function's ``PredicateTree`` into a ``CapabilityExpr``:
 
-Per v4 plan + v6 round-3 fix #4 (closed combinators with confidence-
-aware quality), the capability vocabulary is:
+  finite_set            members, exact / lower_bound / upper_bound
+  threshold_group       Safe-style M-of-N
+  cofinite_blacklist    anyone except these
+  signature_witness     anyone with a valid signature from <signer>
+  external_check_only   query-only (EIP-1271, oracle policy)
+  conditional_universal anyone, given side conditions
+  unsupported           typed reason; propagates fail-closed under AND
+  AND, OR               structural composition when no closed form exists
 
-  finite_set            — exact / lower_bound / upper_bound members
-  threshold_group       — Safe-style M-of-N
-  cofinite_blacklist    — "anyone except these"
-  signature_witness     — anyone with a valid signature from <signer>
-  external_check_only   — query-only (EIP-1271, oracle policy)
-  conditional_universal — anyone, given side conditions (time/business/etc.)
-  unsupported           — typed reason; propagates fail-closed under AND
-  AND, OR               — structural composition when no closed-form result
-
-Combinators are TOTAL functions: every combination either resolves to
-a typed capability or returns ``unsupported(reason)``. Never raises.
+The combinators are total: they return a typed capability or ``unsupported(reason)``, never raise.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Literal
-
-# ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
-
 
 CapKind = Literal[
     "finite_set",
@@ -46,12 +34,8 @@ CapKind = Literal[
 MembershipQuality = Literal["exact", "lower_bound", "upper_bound"]
 CapabilityConfidence = Literal["enumerable", "partial", "check_only"]
 
-# Why a finite_set is empty, when it is. Lets the policy layer tell an
-# empty-by-design ceiling (a 2-step accept gate with no pending transfer) apart
-# from a silent read gap, and distinguishes the gap's flavor (revert vs empty
-# return vs nothing-attempted) so each is classified instead of funneling to one
-# ``lower_bound`` sink. ``None`` on a populated set, or on an empty set whose
-# emptiness predates this field. See ``predicate_evaluator`` for who sets each.
+# Why a finite_set is empty: separates empty-by-design ceilings from read gaps, and classifies gap flavors. ``None`` on
+# populated sets and legacy empties; see ``predicate_evaluator``.
 EmptyReason = Literal[
     "empty_by_design",
     "unreadable_revert",
@@ -59,47 +43,27 @@ EmptyReason = Literal[
     "needs_enumeration",
     "bad_input",
     "not_read",
-    # Read-confirmed zeros: the getter / slot returned the zero word at a stated
-    # block. Distinct from ``empty_by_design`` (which classifies WHY the gate is
-    # empty from the accessor's name) — these say only what was read.
+    # What was read (a zero word at a stated block), unlike ``empty_by_design`` which classifies why.
     "owner_read_zero",
     "slot_read_zero",
-    # The read returned 0x…dEaD. Kept apart from the zero shape: "dead" is a
-    # convention, not a proof that the key is unspendable, so this reason never
-    # accompanies an exact/enumerable set and never licenses an earned negative.
+    # 0x…dEaD is a convention, not proof of unspendability, so it never licenses an earned negative.
     "owner_read_burn_address",
 ]
 
-# Which caller dimension a capability constrains. ``root`` = the function's
-# end-user caller (msg.sender / tx.origin at the protected entrypoint). ``bound``
-# = an already-resolved intermediate subject — the caller of an *inlined*
-# downstream cross-contract call (e.g. a Teller calling ``vault.exit``, where the
-# inner ``requiresAuth`` is keyed on the Teller's address, not the end user).
-# A bound-subject guard is a runtime side-condition, never a narrowing of the
-# end-user principal set: combining it via set-intersection (``{users} ∩ {teller}``)
-# wrongly zeroes the real callers. Default ``root`` — everything is an end-user
-# gate unless the leaf evaluator proves the subject was already bound.
+# Which caller a capability constrains. ``root`` is the function's end-user caller; ``bound`` is the caller of an
+# inlined downstream call (e.g. a Teller calling ``vault.exit``). A bound guard is a runtime side condition;
+# intersecting it with root callers would wrongly zero them.
 Subject = Literal["root", "bound"]
-
-
-# ---------------------------------------------------------------------------
-# Helper records
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Condition:
-    """A side condition that doesn't restrict the principal set but
-    must hold at runtime for the function to succeed (time, pause,
-    reentrancy, business invariants).
+    """A side condition that must hold at runtime but doesn't restrict the principal set (time, pause, reentrancy,
+    business invariants).
 
-    ``one_shot`` — an initializer-family latch: anyone may call until the
-    global latch is consumed, then nobody. Whether it IS consumed is
-    on-chain state the resolver annotates onto the serialized condition
-    dict (``latch_state``), not a field here. ``permit_sig`` — the open
-    path verifies a signature from the affected party (EIP-2612/3009 /
-    ecrecover-equality folds that stay open). ``denylist`` — open except a
-    finite exclusion (the cofinite projection's typed badge)."""
+    ``one_shot``: an initializer latch (the resolver annotates ``latch_state``). ``permit_sig``: the open path verifies
+    the affected party's signature. ``denylist``: open except a finite exclusion.
+    """
 
     kind: Literal[
         "time",
@@ -118,24 +82,17 @@ class Condition:
 
 @dataclass(frozen=True)
 class ExternalCheck:
-    """Descriptor for an external_check_only capability — a probe
-    interface the UI / API can call to ask 'is this address
-    authorized'. The resolver populates the address + selector from
-    the predicate's set_descriptor."""
+    """Probe descriptor for an external_check_only capability (address + selector), for asking "is this address
+    authorized".
+    """
 
     target_address: str | None
     target_call_selector: str | None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# CapabilityExpr
-# ---------------------------------------------------------------------------
-
-
 def _canon_addresses(values: list[str]) -> list[str]:
-    """Lowercase + sort + dedup the address list for stable equality.
-    Members are the universal canonical form for set ops."""
+    """Lowercase, sort and dedup for stable equality."""
     seen: set[str] = set()
     out: list[str] = []
     for v in sorted(values, key=lambda x: x.lower() if isinstance(x, str) else str(x)):
@@ -159,51 +116,24 @@ class CapabilityExpr:
     unsupported_reason: str | None = None
     children: list["CapabilityExpr"] = field(default_factory=list)
     membership_quality: MembershipQuality = "exact"
-    # Quality of a cofinite_blacklist's ``blacklist`` (the EXCLUDED set), independent of
-    # ``membership_quality`` (which describes a finite_set's allow-list). ``exact`` = the
-    # exclusion is fully enumerated, so the complement is exactly "anyone else";
-    # ``lower_bound`` = at least these are excluded (an un-enumerated denylist), so the
-    # complement is an upper bound on who may call. Inert today — every cofinite produced
-    # now is exact — and carried for surfacing only; the projection never branches on it.
+    # Quality of the excluded set, separate from ``membership_quality``: ``exact`` means the complement is exactly
+    # everyone else, ``lower_bound`` makes it an upper bound on callers. Currently every cofinite is exact; carried for
+    # surfacing only.
     blacklist_quality: MembershipQuality = "exact"
     confidence: CapabilityConfidence = "enumerable"
-    # Why this set is empty (see ``EmptyReason``); only meaningful for an empty
-    # finite_set. Default-None keeps the wire shape of every populated set and of
-    # the pre-existing empty sets byte-identical.
-    #
-    # Wire-shape note (A2): the combinators below now propagate this field and
-    # ``last_indexed_block``, and add ``exact_as_of``, so a capability built from
-    # height-bearing operands is NO LONGER byte-identical to what this module
-    # emitted before. That is deliberate — the previous shape was byte-stable
-    # because it discarded the provenance — and it is registered in
-    # SCORING_INVARIANTS B16. Emit-when-non-default still holds, so a capability
-    # whose operands carried nothing is unchanged.
+    # Only meaningful for an empty finite_set. The combinators propagate it and the fold heights, so outputs built from
+    # height-bearing operands differ from the old shape; registered in SCORING_INVARIANTS B16.
     empty_reason: EmptyReason | None = None
     last_indexed_block: int | None = None
-    # The height at which this set is EXACT, when one is licensed. Three states:
-    # an ``int`` (every operand carried a height and ALL heights were equal —
-    # only then does the composition describe one instant), the literal
-    # ``"not_determined"`` (heights present but heterogeneous — an EARNED refusal,
-    # not an omission), and ``None`` (never computed: a leaf, or an operand with
-    # no height at all).
+    # The height at which this set is exact: an ``int`` when all operands had equal heights, ``"not_determined"`` when
+    # heights differed (an earned refusal), ``None`` when never computed.
     #
-    # ``last_indexed_block`` is deliberately NOT an as-of: it is the MIN, a
-    # STALENESS FLOOR. MIN cannot be promoted to "the set was exact at MIN"
-    # because both fold families publish state-AT-h with revocations already
-    # applied (``enumerable_role_store``/``solmate_roles``), so an address
-    # revoked from the later operand in (MIN, h] is absent from the published
-    # set while the true set at MIN still held it; and on the subtractive paths
-    # (finite − blacklist, negate) the published set is a SUBSET of the true set
-    # at MIN, inverting the argument outright.
+    # ``last_indexed_block`` (the MIN) is a staleness floor, not an as-of: folds publish state at their own height with
+    # revocations applied, and subtractive paths publish subsets, so the set at MIN can differ.
     exact_as_of: int | Literal["not_determined"] | None = None
     trace: list[dict[str, Any]] = field(default_factory=list)
-    # Caller dimension this capability constrains; see ``Subject``. Set at leaf
-    # resolution and propagated by the combinators below.
+    # Set at leaf resolution and propagated by the combinators.
     subject: Subject = "root"
-
-    # ------------------------------------------------------------------
-    # Factories
-    # ------------------------------------------------------------------
 
     @classmethod
     def finite_set(
@@ -295,9 +225,7 @@ class CapabilityExpr:
 
     @classmethod
     def conditional_universal(cls, condition: Condition) -> "CapabilityExpr":
-        """Universal set with side conditions (time gates, pause,
-        reentrancy, business invariants). Anyone may call, but the
-        condition must hold."""
+        """Anyone may call, given the side conditions."""
         return cls(
             kind="conditional_universal",
             conditions=[condition],
@@ -321,49 +249,32 @@ class CapabilityExpr:
         return cls(kind="OR", children=list(children))
 
 
-# ---------------------------------------------------------------------------
-# Combinators
-# ---------------------------------------------------------------------------
-
-
 def intersect(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
-    """``a AND b`` — every caller in both. Total over all kinds."""
-    # unsupported absorbs.
+    """``a AND b``: callers in both. Total over all kinds."""
     if a.kind == "unsupported":
         return CapabilityExpr.unsupported(f"intersect_with_unsupported_{a.unsupported_reason}")
     if b.kind == "unsupported":
         return CapabilityExpr.unsupported(f"intersect_with_unsupported_{b.unsupported_reason}")
 
-    # X ∩ conditional_universal(c) — preserve X with c appended. conditional_universal
-    # is pure side-conditions (anyone, given C); it never constrains the caller set,
-    # so this holds for either subject. Handled BEFORE the cross-subject divert so a
-    # bound check AND-ed with a root side-condition stays the bound check rather than
-    # collapsing to a public path. (Preserves test_intersect_finite_with_conditional_universal_keeps_set.)
+    # conditional_universal never constrains callers, so keep X with the conditions added. Handled before the
+    # cross-subject divert so a bound check stays a bound check.
     if a.kind == "conditional_universal":
         return _attach_conditions(b, a.conditions)
     if b.kind == "conditional_universal":
         return _attach_conditions(a, b.conditions)
 
-    # Cross-dimension AND (root caller ∩ bound intermediate). The bound side is a
-    # runtime side-condition on a downstream call, NOT a narrowing of the end-user
-    # caller set — attaching it as a condition preserves the real callers, whereas
-    # set-intersection would compute {users} ∩ {intermediate} = ∅. Covers every
-    # remaining shape (finite_set, external_check_only, cofinite_blacklist, …);
-    # same-subject pairs fall through to the set algebra unchanged. See ``Subject``.
+    # Cross-subject: attach the bound side as a condition instead of intersecting it away. See ``Subject``.
     if a.subject != b.subject:
         return _intersect_cross_subject(a, b)
 
-    # finite_set ∩ finite_set
     if a.kind == "finite_set" and b.kind == "finite_set":
         return _intersect_finite(a, b)
 
-    # finite_set ∩ cofinite_blacklist (and reverse)
     if a.kind == "finite_set" and b.kind == "cofinite_blacklist":
         return _intersect_finite_blacklist(a, b)
     if a.kind == "cofinite_blacklist" and b.kind == "finite_set":
         return _intersect_finite_blacklist(b, a)
 
-    # cofinite_blacklist ∩ cofinite_blacklist
     if a.kind == "cofinite_blacklist" and b.kind == "cofinite_blacklist":
         # Anyone not in (a.blacklist ∪ b.blacklist).
         return _carry_fold_provenance(
@@ -375,26 +286,20 @@ def intersect(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
             b,
         )
 
-    # threshold_group ∩ X — defer to structural AND.
     if a.kind == "threshold_group" or b.kind == "threshold_group":
         return CapabilityExpr.structural_and([a, b])
 
-    # signature_witness / external_check_only — structural AND.
     return CapabilityExpr.structural_and([a, b])
 
 
 def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
-    """``a OR b`` — caller in either. Total."""
+    """``a OR b``: callers in either. Total."""
     if a.kind == "unsupported":
         return CapabilityExpr.structural_or([a, b])
     if b.kind == "unsupported":
         return CapabilityExpr.structural_or([a, b])
 
-    # Cross-dimension OR: a bound-subject alternative (e.g. an inlined downstream
-    # call's authorization) is a distinct route, not an additional end-user caller.
-    # Keep both as a structural OR rather than merging an intermediate address into
-    # the root member list (which would mint a phantom end-user principal). See
-    # ``Subject``.
+    # Cross-subject: keep a structural OR so an intermediate address isn't merged in as an end-user principal.
     if a.subject != b.subject:
         return CapabilityExpr.structural_or([a, b])
 
@@ -414,8 +319,7 @@ def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
             b,
         )
 
-    # finite_set ∪ cofinite_blacklist: cofinite minus members already in
-    # finite_set (those are still in finite_set, so allowed).
+    # Cofinite minus members already allowed by the finite set.
     if a.kind == "finite_set" and b.kind == "cofinite_blacklist":
         return _union_finite_blacklist(a, b)
     if a.kind == "cofinite_blacklist" and b.kind == "finite_set":
@@ -424,29 +328,19 @@ def union(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     if a.kind == "conditional_universal" and b.kind == "conditional_universal" and a.conditions == b.conditions:
         return a
 
-    # X ∪ conditional_universal — structural OR (anyone, with c) is
-    # not the same as X.
+    # Anyone-with-condition isn't the same as X.
     return CapabilityExpr.structural_or([a, b])
 
 
 def negate(a: CapabilityExpr) -> CapabilityExpr:
-    """``NOT a`` — used when a leaf has operator=falsy / op=ne and the
-    underlying capability needs inversion. Total.
+    """``NOT a``, for ``falsy``/``ne`` leaves. Total.
 
-    ``falsy``/``ne`` is the static lowering of an ``if (predicate) revert``
-    exclusion: the predicate names the *denied* set, so the function proceeds for
-    everyone else. ``negate`` maps a constraint on that excluded set to its
-    complement — an open (cofinite) caller set — wherever the complement is
-    faithfully representable. The polarity is the safety boundary: a positive gate
-    (``require(...)`` → ``truthy``/``eq``) is never negated, so an authority never
-    reaches these arms.
+    Those are the static lowering of ``if (predicate) revert``: the predicate names the denied set, so the result is its
+    complement where representable. Positive gates are never negated, so authorities never reach these arms.
     """
     if a.kind == "finite_set":
         if a.membership_quality != "exact":
-            # A non-exact (lower_bound) exclusion is "at least these are denied";
-            # its complement is "anyone except an un-enumerated exclusion" — a
-            # lower_bound cofinite, not an unknown. (Was unsupported("negate_partial_set"),
-            # which discarded the denylist.)
+            # A lower_bound exclusion complements to a lower_bound cofinite, not an unknown.
             return _carry_fold_provenance(
                 CapabilityExpr.cofinite_blacklist(
                     list(a.members or []),
@@ -467,15 +361,9 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
             a,
         )
     if a.kind == "cofinite_blacklist":
-        # The complement of a cofinite denylist is exactly its members. A
-        # lower_bound denylist ("at least these are denied") complements to a
-        # lower_bound finite set, not a provably-complete one — calling it "exact"
-        # would claim we enumerated everyone the gate admits.
+        # A lower_bound denylist complements to a lower_bound finite set, not an exact one.
         quality = "exact" if a.blacklist_quality == "exact" else "lower_bound"
-        # The height carries (complementation does not move the height at which
-        # the enumeration was folded) but ``empty_reason`` does NOT: why a set was
-        # empty says nothing about why its complement is. An empty denylist
-        # complements to an empty allow-list with no reason — absent, not minted.
+        # Height carries through complementation; ``empty_reason`` doesn't.
         return _carry_fold_provenance(
             CapabilityExpr.finite_set(
                 list(a.blacklist or []),
@@ -487,23 +375,13 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
             a,
         )
     if a.kind == "external_check_only":
-        # An external membership probe under ``falsy`` is an un-enumerated denylist
-        # (``if (check(caller)) revert``): anyone the probe does NOT flag may call. Its
-        # complement is an empty-known, lower_bound cofinite. Surface the probe as a
-        # side-condition so the filter stays visible, and preserve ``subject`` so a
-        # bound (inlined-hook) denylist folds as a condition under cross-subject AND
-        # rather than opening an authority'd function. (Was
-        # unsupported("negate_unsupported_capability_external_check_only").)
+        # A falsy external probe is an un-enumerated denylist: complement to a lower_bound empty cofinite, with the
+        # probe kept as a condition and ``subject`` preserved so bound denylists fold as conditions.
         conditions = list(a.conditions)
         probe = _external_check_as_condition(a.check)
         if probe is not None:
             conditions.append(probe)
-        # Deliberately NOT a fold-provenance site (the only mint site in this
-        # module that is not): an ``external_check_only`` operand is a probe
-        # interface, never an enumeration, so it carries no height and no
-        # exactness there would be anything to date. Stated so the omission
-        # cannot later read as an oversight — see the test that asserts this arm
-        # emits neither ``last_indexed_block`` nor ``exact_as_of``.
+        # Deliberately no fold provenance: a probe isn't an enumeration and has no height (a test asserts this).
         return CapabilityExpr.cofinite_blacklist(
             [],
             blacklist_quality="lower_bound",
@@ -512,21 +390,15 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
             subject=a.subject,
         )
     if a.kind == "conditional_universal":
-        # Negation of "anyone if C" is "no one if C" — empty set with
-        # the condition negated. Concretely: empty set if C, full
-        # set if NOT C. We emit unsupported because the negation of
-        # a condition isn't always representable as a typed
-        # condition (e.g., negation of a business invariant).
+        # The negation of a condition isn't always representable (e.g. business invariants).
         return CapabilityExpr.unsupported("negate_conditional_universal")
     if a.kind in ("threshold_group", "signature_witness"):
-        # An M-of-N or signature gate has no faithful open complement — keep gated.
+        # M-of-N and signature gates have no faithful open complement.
         return CapabilityExpr.unsupported(f"negate_unsupported_capability_{a.kind}")
     if a.kind == "unsupported":
         return CapabilityExpr.unsupported(f"negate_of_{a.unsupported_reason}")
     if a.kind in ("AND", "OR"):
-        # De Morgan: NOT(AND) = OR(NOT each); NOT(OR) = AND(NOT each).
-        # But each child's negate may produce unsupported; that's
-        # propagated.
+        # De Morgan; unsupported children propagate.
         flipped = [negate(c) for c in a.children]
         if a.kind == "AND":
             return CapabilityExpr.structural_or(flipped)
@@ -534,27 +406,12 @@ def negate(a: CapabilityExpr) -> CapabilityExpr:
     return CapabilityExpr.unsupported(f"negate_unknown_kind_{a.kind}")
 
 
-# ---------------------------------------------------------------------------
-# Internals
-# ---------------------------------------------------------------------------
-
-
 def _propagated_height(*operands: CapabilityExpr) -> int | None:
-    """MIN of the operands' fold heights, or ``None`` when ANY operand lacks one.
+    """MIN of the operands' fold heights, or ``None`` when any operand lacks one.
 
-    FAIL-CLOSED, and the strictness is the point: ``min`` over whatever happens
-    to be present would stamp a fold height onto a composition whose other
-    operand is an unpinned live ``owner()`` read, publishing a bounded-in-time
-    claim about an unbounded one. A composition is only as current as its
-    least-current operand, so the MIN is a STALENESS FLOOR — never an as-of (see
-    ``CapabilityExpr.exact_as_of``).
-
-    MIN is defined only over heights drawn from the SAME chain's cursors. Every
-    height reaching here originates at an adapter leaf that read
-    ``IndexedEventCursor`` under an explicit ``chain_id`` scope (chain-scoped
-    resolution, #158), and a capability tree is built within one chain-scoped
-    resolution frame, so operands are same-chain by construction; a MIN across
-    chains would compare unrelated clocks and is not representable here.
+    Fail closed: stamping a height onto a composition that includes an unpinned live read would claim time-bounded
+    knowledge. A staleness floor, never an as-of. Operands are same-chain by construction (chain-scoped resolution,
+    #158).
     """
     heights = [op.last_indexed_block for op in operands]
     if any(height is None for height in heights):
@@ -569,34 +426,18 @@ def _carry_fold_provenance(
 ) -> CapabilityExpr:
     """Carry the operands' fold provenance onto a rebuilt capability.
 
-    Every combinator rebuilds its result through a factory, which cannot see the
-    operands — so before this existed each rebuild silently dropped the height
-    the adapter leaf had computed, on every solmate fold in the corpus.
+    Factories can't see operands, so combinators used to drop the leaf heights. ``last_indexed_block`` propagates via
+    :func:`_propagated_height`. ``exact_as_of`` is published only when all operands have equal heights, the result is
+    ``exact``, and any emptiness was inherited.
 
-    ``last_indexed_block`` propagates under :func:`_propagated_height`.
-    ``exact_as_of`` is far more restricted: it is published only when every
-    operand carried a height AND all of them are EQUAL (one instant), the result
-    is ``exact``, and — for an empty result — the emptiness was INHERITED rather
-    than created by this operation (``exact_as_of_licensed``).
-
-    **The REFUSAL is recorded first, before any other test.** Heterogeneous
-    operand heights collapse to one MIN in ``last_indexed_block``, and a result
-    carrying one height with no ``exact_as_of`` is indistinguishable from a leaf
-    — so a second combinator would read "all heights equal" and mint an as-of
-    the first operation had every reason to refuse. Returning early for an
-    unlicensed or non-exact result would leave exactly that shape: three working
-    launderings existed through those two returns (a created-empty subtraction
-    re-composed with a fold; its negation; a ``lower_bound`` cofinite union fed
-    back into an intersection). The refusal must therefore be published
-    regardless of licensing and regardless of quality — it is the weakest state,
-    so publishing it can never over-claim, while omitting it can.
+    The refusal is recorded before anything else: otherwise a result with one MIN height and no ``exact_as_of`` looks
+    like a leaf, and a later combinator would mint an as-of the first refused (three such launderings existed). The
+    refusal is the weakest state, so publishing it can't over-claim.
     """
     cap.last_indexed_block = _propagated_height(*operands)
     cap.exact_as_of = None
     heights = [op.last_indexed_block for op in operands]
-    # (a) an operand that already refused poisons every composition it enters;
-    # (b) heights that disagree can never license an as-of again, whatever this
-    # result's quality or licensing turns out to be.
+    # A prior refusal poisons every composition; disagreeing heights can never license an as-of.
     if any(op.exact_as_of == "not_determined" for op in operands) or (
         all(height is not None for height in heights) and len(set(heights)) > 1
     ):
@@ -614,13 +455,10 @@ def _carry_fold_provenance(
 
 
 def _inherited_empty_reason(*operands: CapabilityExpr) -> EmptyReason | None:
-    """The reason carried by the operands that were ALREADY empty, or ``None``.
+    """The reason carried by already-empty operands, or ``None``.
 
-    Only inherited emptiness has a reason to inherit: emptiness this operation
-    *created* has no witness behind it (see :func:`_intersect_finite`). Two
-    already-empty operands disagreeing about why they are empty resolve to
-    ``None`` rather than to whichever came first — a composed emptiness the
-    producers do not agree on is not determined.
+    Emptiness created by this operation has no witness (see :func:`_intersect_finite`); disagreeing reasons give
+    ``None``.
     """
     reasons: set[EmptyReason] = {
         op.empty_reason for op in operands if op.kind == "finite_set" and not op.members and op.empty_reason is not None
@@ -638,23 +476,13 @@ def _intersect_finite(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
     if quality is None:
         return CapabilityExpr.structural_and([a, b])
     if not common and am and bm:
-        # Emptiness CREATED by the intersection of two independently-resolved,
-        # NON-empty caller sets is never a witnessed "provably nobody": on a
-        # deployed function it is proof that one conjunct is wrong (a leaf
-        # mis-attributed to this function, or an under-enumerated set), not
-        # proof the function is unreachable. Publishing it as an exact-empty
-        # finite_set minted false ``resolved_empty`` on live withdrawal paths
-        # ({liquidityPool} ∩ {upgradeTimelock} = ∅ on
-        # WithdrawRequestNFT.requestWithdraw). Keep the full AND so both
-        # conjuncts stay visible and the policy layer reads not-determined.
-        # Emptiness INHERITED from an already-empty input (all-revoked role
-        # store, empty-by-design ceiling) keeps its own witness and still
-        # resolves below.
+        # Emptiness created by intersecting two non-empty sets means a conjunct is wrong, not that nobody can call.
+        # Publishing exact-empty minted false ``resolved_empty`` on live withdrawal paths, so keep the AND. Inherited
+        # emptiness still resolves below.
         return CapabilityExpr.structural_and([a, b])
     confidence = _meet_confidence(a.confidence, b.confidence)
     conditions = list(a.conditions) + list(b.conditions)
-    # Reached only for same-subject pairs (cross-subject diverts before the kind
-    # dispatch), so a.subject == b.subject — carry it onto the result.
+    # Only same-subject pairs reach here.
     cap = CapabilityExpr.finite_set(
         common,
         quality=quality,
@@ -664,8 +492,7 @@ def _intersect_finite(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
         empty_reason=_inherited_empty_reason(a, b) if not common else None,
     )
     cap.trace = list(a.trace) + list(b.trace)
-    # An empty result here is always INHERITED: the created-empty case (both
-    # operands non-empty, no overlap) diverted to a structural AND above.
+    # Any emptiness here is inherited; created-empty diverted above.
     return _carry_fold_provenance(cap, a, b)
 
 
@@ -687,19 +514,16 @@ def _union_finite(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
         empty_reason=_inherited_empty_reason(a, b) if not merged else None,
     )
     cap.trace = list(a.trace) + list(b.trace)
-    # A union is empty only when BOTH operands were: emptiness is always inherited.
+    # A union is empty only when both operands were.
     return _carry_fold_provenance(cap, a, b)
 
 
 def _intersect_finite_blacklist(finite: CapabilityExpr, blacklist: CapabilityExpr) -> CapabilityExpr:
-    """``finite ∩ cofinite_blacklist`` = ``finite − blacklist``."""
     members_set = set(finite.members or [])
     bl = set(blacklist.blacklist or [])
     out = _canon_addresses(list(members_set - bl))
-    # Unlike ``_intersect_finite`` this path has NO structural-AND diversion, so a
-    # subtraction that removes every member ({X} − {X}) produces an emptiness this
-    # operation CREATED. It inherits neither a reason nor an as-of; only an
-    # already-empty allow-list carries its own witness through.
+    # No structural-AND diversion here, so a subtraction that removes every member creates emptiness with no reason or
+    # as-of; only an already-empty allow-list keeps its own.
     inherited_empty = not members_set
     cap = CapabilityExpr.finite_set(
         out,
@@ -713,7 +537,6 @@ def _intersect_finite_blacklist(finite: CapabilityExpr, blacklist: CapabilityExp
 
 
 def _union_finite_blacklist(finite: CapabilityExpr, blacklist: CapabilityExpr) -> CapabilityExpr:
-    """``finite ∪ cofinite_blacklist`` = ``cofinite_blacklist − finite``."""
     bl = set(blacklist.blacklist or [])
     fin = set(finite.members or [])
     out = _canon_addresses(list(bl - fin))
@@ -732,8 +555,7 @@ def _union_finite_blacklist(finite: CapabilityExpr, blacklist: CapabilityExpr) -
 def _intersect_quality(qa: MembershipQuality, qb: MembershipQuality) -> MembershipQuality | None:
     """Quality lattice for intersect:
     exact ∩ exact   = exact
-    exact ∩ lower   = lower_bound (members must be in both;
-                       the partial side may have more)
+    exact ∩ lower   = lower_bound
     lower ∩ lower   = lower_bound
     upper ∩ upper   = structural (lose the upper bound)
     mixed lower/upper → structural
@@ -749,10 +571,10 @@ def _intersect_quality(qa: MembershipQuality, qb: MembershipQuality) -> Membersh
 
 def _union_quality(qa: MembershipQuality, qb: MembershipQuality) -> MembershipQuality | None:
     """Quality lattice for union:
-    exact ∪ exact     = exact (members from either are in result)
-    exact ∪ lower     = lower_bound (known-in-either, may have more)
+    exact ∪ exact     = exact
+    exact ∪ lower     = lower_bound
     lower ∪ lower     = lower_bound
-    upper ∪ upper     = upper_bound (possible-in-either)
+    upper ∪ upper     = upper_bound
     mixed lower/upper → structural
     """
     if qa == qb == "exact":
@@ -765,20 +587,16 @@ def _union_quality(qa: MembershipQuality, qb: MembershipQuality) -> MembershipQu
 
 
 def _combine_blacklist_quality(qa: MembershipQuality, qb: MembershipQuality) -> MembershipQuality:
-    """Quality of a blacklist combined from two cofinite blacklists (the union under
-    cofinite ∩ cofinite, the intersection under cofinite ∪ cofinite). Inert in Part 1:
-    every cofinite is ``exact`` today, so this returns ``exact`` and changes nothing. It
-    exists so the field is carried, never silently dropped, once Part 2 introduces
-    ``lower_bound`` denylists. Matching qualities survive; a mismatch degrades to the
-    conservative ``lower_bound`` (a combination involving an under-known exclusion can
-    only be a lower bound on the true excluded set)."""
+    """Quality of a blacklist combined from two cofinites.
+
+    Matching qualities survive; a mismatch degrades to ``lower_bound``. Inert while every cofinite is exact.
+    """
     if qa == qb:
         return qa
     return "lower_bound"
 
 
 def _meet_confidence(a: CapabilityConfidence, b: CapabilityConfidence) -> CapabilityConfidence:
-    """CapabilityConfidence lattice meet (least-confident wins)."""
     order = {"enumerable": 2, "partial": 1, "check_only": 0}
     if order[a] <= order[b]:
         return a
@@ -786,9 +604,7 @@ def _meet_confidence(a: CapabilityConfidence, b: CapabilityConfidence) -> Capabi
 
 
 def _attach_conditions(cap: CapabilityExpr, conditions: list[Condition]) -> CapabilityExpr:
-    """Returns a copy of ``cap`` with ``conditions`` appended.
-    conditional_universal stays conditional_universal but with the
-    extra conditions in the list (no special compress)."""
+    """A copy of ``cap`` with ``conditions`` appended."""
     if not conditions:
         return cap
     return CapabilityExpr(
@@ -804,13 +620,10 @@ def _attach_conditions(cap: CapabilityExpr, conditions: list[Condition]) -> Capa
         membership_quality=cap.membership_quality,
         blacklist_quality=cap.blacklist_quality,
         confidence=cap.confidence,
-        # Preserved so an empty-by-design ceiling that gains a side condition
-        # (e.g. an OZ accept-admin gate AND-ed with its schedule check) keeps its
-        # reason — otherwise the policy layer would re-read it as a silent gap.
+        # Keep the reason so an empty-by-design ceiling with a side condition isn't re-read as a gap.
         empty_reason=cap.empty_reason,
         last_indexed_block=cap.last_indexed_block,
-        # Side conditions narrow WHEN the set applies, never WHO is in it, so the
-        # height and the as-of of the set itself survive unchanged.
+        # Conditions narrow when, not who, so height and as-of survive.
         exact_as_of=cap.exact_as_of,
         trace=list(cap.trace),
         subject=cap.subject,
@@ -818,33 +631,22 @@ def _attach_conditions(cap: CapabilityExpr, conditions: list[Condition]) -> Capa
 
 
 def _intersect_cross_subject(a: CapabilityExpr, b: CapabilityExpr) -> CapabilityExpr:
-    """AND of two capabilities on different caller dimensions (one ``root``, one
-    ``bound``).
+    """AND of a ``root`` and a ``bound`` capability.
 
-    The bound side constrains an intermediate-contract caller (an inlined
-    downstream call's ``requiresAuth``), not the function's end-user caller — it is
-    a runtime side-condition. Fold it onto the root side as condition(s) so the
-    real caller set survives, rather than set-intersecting (``{users} ∩ {teller}``
-    = ∅). The root side keeps its kind: an empty root set stays exact-empty (→
-    ``resolved_empty``), a populated one keeps its members. Because the bound side
-    becomes a condition (not a finite_set child), an empty bound set can never make
-    the AND look ``resolved_empty``.
+    The bound side becomes a condition on the root side, so real callers survive (intersecting would give ∅), an empty
+    root stays exact-empty, and an empty bound side can't make the AND look ``resolved_empty``.
     """
     root, bound = (a, b) if b.subject == "bound" else (b, a)
     return _attach_conditions(root, _bound_as_conditions(bound))
 
 
 def _bound_as_conditions(bound: CapabilityExpr) -> list[Condition]:
-    """Render a bound-subject capability as side-condition(s): carry forward any
-    conditions it already accumulated, plus one describing the delegated check."""
+    """A bound-subject capability as side conditions: its existing conditions plus one for the delegated check."""
     return list(bound.conditions) + [Condition(kind="business", description=_bound_condition_description(bound))]
 
 
 def _external_check_as_condition(check: ExternalCheck | None) -> Condition | None:
-    """Render an ``external_check_only``'s probe as a side-condition describing the
-    denylist filter, for the ``negate(external_check_only) → cofinite`` arm. Returns
-    None when there's no probe to describe (the cofinite still carries the generic
-    ``denylist exclusion`` from the projector)."""
+    """An ``external_check_only`` probe as a denylist side condition, or None when there's no probe."""
     if check is None:
         return None
     target = check.target_address
