@@ -1,10 +1,5 @@
-"""Pin the unwitnessed-public census population definition.
-
-``status='public' AND jsonb_typeof(conditions)='null'`` selects the fall-through public
-population (351 rows locally), but the shape was incidental: a refactor giving an
-unwitnessed function an empty ARRAY instead of JSON null would break the census
-silently. A fall-through public row persists ``conditions`` as JSON null, never ``[]``;
-a witnessed public row with real conditions persists the non-empty array.
+"""The census selects ``status='public' AND jsonb_typeof(conditions)='null'``; an empty array instead of JSON null
+would break it silently.
 """
 
 from __future__ import annotations
@@ -101,16 +96,12 @@ def test_witnessed_public_with_conditions_persists_the_array(db_session):
 
 @requires_postgres
 def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_session):
-    """Every POLICY-minted row (fall-through publics, assembly fail-closed rows, the
-    ``guard_extraction_uncertain`` reroute) must reach the table with
-    ``authority_openness`` / ``authority_roles`` PROJECTED FROM its own capability_expr,
-    never the NULL documented as "written before the column existed". Runs the real
-    ``build_effective_permissions`` → ``write_effective_function_rows`` with an EMPTY
-    resolver output, the branch that dropped the answers.
+    """Policy-minted rows must reach the table with openness and roles projected from their own capability_expr,
+    never NULL. Runs the real writer with an empty resolver output, the branch that dropped them.
 
-      fall-through public     → openness 'open',           roles ``[]`` (proven absent)
-      assembly fail-closed    → openness 'not_determined', roles ``None``
-      guard-uncertain reroute → openness 'not_determined', roles ``None``
+      fall-through public     -> 'open',           roles ``[]``
+      assembly fail-closed    -> 'not_determined', roles ``None``
+      guard-uncertain reroute -> 'not_determined', roles ``None``
     """
     contract = Contract(address="0x" + "cf" * 20, chain="ethereum")
     db_session.add(contract)
@@ -172,17 +163,12 @@ def test_policy_minted_rows_carry_openness_and_roles_on_the_production_path(db_s
     assert rows["sweep"] == ("public", "open", [])
     assert rows["asmMutator"] == ("unsupported", "not_determined", None)
     assert rows["gated"] == ("unsupported", "not_determined", None)
-    # Openness rides alongside; conditions stays JSON null on the fall-through public.
     assert _conditions_typeof(db_session, contract.id, "sweep") == "null"
 
 
 @requires_postgres
 def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_session):
-    """``fallback`` and ``receive`` are BOTH selector-less; with the sentinel ``""`` a
-    contract declaring both produced two rows under one observed-carry key and the
-    carry cross-assigned observed claims. The key is now ``(selector, function_name)``.
-    Armed population: 0 realised locally, structural for the first contract declaring both.
-    """
+    """Both are selector-less, so a shared ``""`` key cross-assigned observed claims."""
     from services.effects import claims_bridge
 
     contract = Contract(address="0x" + "fb" * 20, chain="ethereum")
@@ -227,7 +213,6 @@ def test_observed_claim_carry_does_not_cross_selectorless_entry_points(db_sessio
         db_session.flush()
 
     _write([observed])
-    # A policy-only rewrite must return the observed claim to fallback() and leave receive() claim-free.
     _write([])
 
     rows = db_session.execute(

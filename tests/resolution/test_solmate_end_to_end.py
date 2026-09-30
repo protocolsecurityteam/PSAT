@@ -1,10 +1,6 @@
-"""End-to-end Solmate resolution on 100% real data.
-
-Drives the real dispatch (``evaluate_tree_with_registry`` -> ``AdapterRegistry`` ->
-``SolmateRolesAuthorityAdapter``) with the REAL predicate trees of TellerWithMultiAssetSupport
-0xe2acf9f8… and the REAL RolesAuthority 0x3994741a… event logs (``tests/fixtures/solmate/``).
-Pins the under-resolution fix: ``pause`` (role-gated) resolves to the governing 4/6 Safe;
-``setShareLockPeriod`` (no role, owner renounced) does not: a true negative, not a guess.
+"""Real TellerWithMultiAssetSupport trees and RolesAuthority logs (``tests/fixtures/solmate/``) through the real
+dispatch. ``pause`` resolves to the 4/6 Safe; ``setShareLockPeriod`` (no role, owner renounced) is a true
+negative.
 """
 
 from __future__ import annotations
@@ -25,9 +21,7 @@ SAFE_4_6 = "0xcea8039076e35a825854c5c2f85659430b06ec96"
 ZERO = "0x" + "00" * 20
 PAUSE = "0x8456cb59"
 SET_SHARE_LOCK = "0x12056e2d"
-# addAsset(ERC20): canonical EVM selector keccak("addAsset(address)") vs the
-# non-canonical keccak("addAsset(ERC20)") the resolver folded against before the
-# selector-canonicalization fix.
+# Canonical keccak("addAsset(address)"), not keccak("addAsset(ERC20)").
 ADD_ASSET_CANONICAL = "0x298410e5"
 ADD_ASSET_NONCANONICAL = "0x4fdd72aa"
 
@@ -104,10 +98,9 @@ def _resolve(tree_key: str, selector: str) -> CapabilityExpr:
 
 
 def _resolve_with_production_selector(tree_key: str) -> CapabilityExpr:
-    """Like ``_resolve`` but derives the root-frame selector from the tree key as production does
-    (``_selector_for_signature(full_name)``). Tree keys are Slither ``full_name`` signatures
-    (``addAsset(ERC20)``), so this is the path that must canonicalize the contract-type param
-    to ``address`` before the adapter folds canCall."""
+    """Tree keys are Slither ``full_name`` signatures, so this path must canonicalize contract-type params to
+    ``address``.
+    """
     return _resolve(tree_key, _selector_for_signature(tree_key) or "")
 
 
@@ -119,16 +112,12 @@ def test_teller_pause_resolves_to_governing_safe_end_to_end():
 
 
 def test_teller_set_share_lock_period_is_not_attributed_to_safe():
-    # No role capability + owner renounced => the Safe must NOT be attributed (false positive).
     cap = _resolve("setShareLockPeriod(uint64)", SET_SHARE_LOCK)
     assert SAFE_4_6 not in _members(cap)
 
 
 def test_contract_type_param_function_folds_cancall_against_canonical_selector():
-    # The tree is keyed ``addAsset(ERC20)`` but the EVM selector (and every RoleCapabilityUpdated
-    # event) is canonical ``addAsset(address)`` (0x298410e5). The adapter must fold canCall against
-    # it, NOT keccak("addAsset(ERC20)") (0x4fdd72aa): the wrong selector was a false-negative on
-    # every contract-type-param function.
+    # Folding against the non-canonical 0x4fdd72aa was a false negative on every contract-type-param function.
     assert _selector_for_signature("addAsset(ERC20)") == ADD_ASSET_CANONICAL
     cap = _resolve_with_production_selector("addAsset(ERC20)")
     selectors = _trace_selectors(cap)

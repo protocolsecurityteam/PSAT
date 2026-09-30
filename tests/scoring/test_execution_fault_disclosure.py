@@ -1,13 +1,5 @@
-"""A transport fault must be LOUD in the document it moved.
-
-The composition rule's ``withheld`` arm fires on the four ``EX.FAULT_REASONS``
-BEFORE the deletability join, so a document folded while the artifact store
-cannot answer publishes fewer composed figures than the same DB state otherwise
-yields (reference corpus, total fault: lambda 73.2508 -> 84.0166). Undisclosed,
-that looks like a code regression; these cases pin the disclosure itself.
-
-Arms: ``tests/scoring/test_three_arm_composition.py``; record shape:
-``tests/scoring/test_execution_record.py``. Neither is re-tested here.
+"""The ``withheld`` arm fires on ``EX.FAULT_REASONS`` before the deletability join, so a fault during folding moves
+the figures (reference corpus: lambda 73.2508 -> 84.0166). Undisclosed, that looks like a regression.
 """
 
 from __future__ import annotations
@@ -55,7 +47,6 @@ def _row(*carriers: dict[str, Any]) -> dict[str, Any]:
 
 
 def _published_fault_count(document: Any) -> int:
-    """The faulted records counted from the ROWS, independently of the census."""
     rows = list(document.findings) + list(document.provenance["subsumed_rows"])
     return sum(
         1
@@ -70,19 +61,12 @@ def _fault_warnings(document: Any) -> list[dict[str, Any]]:
     return [w for w in document.warnings if w["kind"] == _WARNING]
 
 
-# --------------------------------------------------------------------------
-# The document announces it
-# --------------------------------------------------------------------------
-
-
 def test_a_faulted_execution_is_announced_at_the_documents_top_level(fold):
     document = CA.composed_document(fold, signals=_faulted_signals(), deletability=CA.deletability_plane())
 
     census = document.execution_evidence_faults
     assert census is not None
     assert census["grade_qualifier"] == GRADE_FAULT_DEGRADED
-    # The count is the rows', not the branch's: counted here from the published
-    # entries and compared against what the census published.
     counted = _published_fault_count(document)
     assert counted >= 1
     assert census["records_faulted"] == counted
@@ -91,7 +75,6 @@ def test_a_faulted_execution_is_announced_at_the_documents_top_level(fold):
     assert census["execution_records_examined"] >= counted
     assert census["registered_fault_reasons"] == sorted(EX.FAULT_REASONS)
 
-    # Top level of the PERSISTED payload, not only of the dataclass.
     assert document.document()[_FIELD] == census
 
 
@@ -107,14 +90,13 @@ def test_the_warning_names_the_count_and_every_distinct_reason(fold):
     assert f"{census['records_faulted']} of {census['execution_records_examined']}" in note
     assert f"{EX.REASON_FETCH_FAILED} x{census['records_faulted']}" in note
     assert "Do not compare this document against a fault-free run" in note
-    # The claim is about what was READ, never about the store's availability.
     assert "not proof the artifact store was unavailable" in note
 
 
 def test_the_grade_stays_computed_and_the_marker_is_not_a_grade_state(fold):
-    """Two questions, two vocabularies. A fault-degraded grade is still a
-    computed one — the DB pairing constraint binds that token to the three
-    figures being present — so the marker cannot be a fourth grade_state."""
+    """The DB pairing constraint binds computed grades to the three figures, so the marker can't be a fourth
+    grade_state.
+    """
     document = CA.composed_document(fold, signals=_faulted_signals(), deletability=CA.deletability_plane())
 
     assert GRADE_FAULT_DEGRADED not in GRADE_STATES
@@ -122,14 +104,8 @@ def test_the_grade_stays_computed_and_the_marker_is_not_a_grade_state(fold):
     assert document.grade_lambda is not None
 
 
-# --------------------------------------------------------------------------
-# The counts come from the data
-# --------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize("faulted", [1, 2, 5])
 def test_the_published_count_follows_the_number_of_faulted_records(faulted: int) -> None:
-    """A census that only proved its branch fired would pass at any count."""
     findings = [_row(*(_carrier(EX.REASON_FETCH_FAILED) for _ in range(faulted)))]
     census = FOLD._execution_fault_census(findings, [])
 
@@ -140,8 +116,6 @@ def test_the_published_count_follows_the_number_of_faulted_records(faulted: int)
 
 
 def test_each_distinct_reason_keeps_its_own_count() -> None:
-    """A transcript never stored and a fetch that did not return are different
-    facts; bucketing them would hide which is happening."""
     findings = [
         _row(
             _carrier(EX.REASON_FETCH_FAILED),
@@ -157,8 +131,7 @@ def test_each_distinct_reason_keeps_its_own_count() -> None:
 
 
 def test_both_populations_are_walked_and_counted_apart() -> None:
-    """Subsumed rows carry execution blocks too; reading only findings would
-    report a fault-free document while a third of the records were unreadable."""
+    """Reading only findings would miss a third of the records."""
     census = FOLD._execution_fault_census(
         [_row(_carrier(EX.REASON_FETCH_FAILED))],
         [_row(_carrier(EX.REASON_STORAGE_KEY_MISSING), _carrier(EX.REASON_STORAGE_KEY_MISSING))],
@@ -170,10 +143,9 @@ def test_both_populations_are_walked_and_counted_apart() -> None:
 
 
 def test_a_reason_outside_the_fault_set_is_examined_and_never_counted() -> None:
-    """The corpus's common case. Every verdict in it predates the record and
-    reads ``execution_record_not_persisted``, which is a backfill gap the
-    composition rule publishes THROUGH — counting it here would announce a
-    forty-record fault on a document that lost nothing."""
+    """``execution_record_not_persisted`` is a backfill gap the rule publishes through; counting it would announce a
+    40-record fault.
+    """
     assert EX.REASON_NOT_PERSISTED not in EX.FAULT_REASONS
     findings = [_row(_carrier(EX.REASON_NOT_PERSISTED), _carrier(EX.REASON_NO_PROVING_CALL))]
 
@@ -189,19 +161,12 @@ def test_the_denominator_counts_every_record_the_walk_saw() -> None:
     assert census["execution_records_examined"] == 3
 
 
-# --------------------------------------------------------------------------
-# Absence, pinned
-# --------------------------------------------------------------------------
-
-
 def test_a_fault_free_document_publishes_no_field_and_no_warning(fold):
-    """The byte-identity invariant: a fold that found no fault adds NOTHING to the document."""
     document = CA.composed_document(fold, deletability=CA.deletability_plane())
 
     assert _published_fault_count(document) == 0
     assert document.execution_evidence_faults is None
-    # The key is absent, not present-and-null: a null would read as a census
-    # that was attempted and came back empty-handed.
+    # A null would read as an attempted census that came back empty.
     assert _FIELD not in document.document()
     assert _fault_warnings(document) == []
     assert not any(_WARNING in str(warning) for warning in document.warnings)

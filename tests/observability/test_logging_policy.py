@@ -1,14 +1,5 @@
-"""Observability locks for ``workers/policy_worker.py``.
-
-* Zero-write path (no ``Contract`` row): WARNING, ``record_degraded(phase='policy_db_write')`` and
-  ``record_stage_metric('rows_written', False)`` instead of silently writing nothing.
-* The authority-resolution line puts ``authority_status`` / ``authority_reason`` in ``extra={}``
-  and folds an ``authority_status`` metric.
-* Phase timers fold ``phase_ms_<phase>`` via ``log_timed_phase``.
-* Materialization hydration tells a DB error (rollback, warn, degraded) from a row miss (silent).
-
-``process()`` runs with DB/RPC collaborators stubbed; the ``MagicMock`` session's
-``scalar_one_or_none`` returns ``None`` so ``contract_row`` is missing.
+"""The zero-write path, authority-status fields, phase timers, and hydration DB-error vs miss handling in
+``workers/policy_worker.py``.
 """
 
 from __future__ import annotations
@@ -31,11 +22,7 @@ TARGET_ADDRESS = "0x1111111111111111111111111111111111111111"
 
 
 class _RecordCollector(logging.Handler):
-    """Collect records directly off the module logger.
-
-    The worker calls ``configure_logging()`` at BOOT, which can drop pytest's ``caplog``
-    handler; our own handler on ``workers.policy_worker`` is immune.
-    """
+    """The worker's boot-time ``configure_logging()`` can drop caplog's handler."""
 
     def __init__(self) -> None:
         super().__init__(level=logging.DEBUG)
@@ -59,8 +46,6 @@ def _job(**overrides: Any) -> SimpleNamespace:
 
 
 def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Run ``PolicyWorker.process`` with every collaborator stubbed and no ``Contract`` row;
-    returns the mock session."""
     from unittest.mock import MagicMock
 
     worker = PolicyWorker()
@@ -73,7 +58,6 @@ def _drive_process_with_missing_contract_row(monkeypatch: pytest.MonkeyPatch) ->
         "contract_name": "TestContract",
         "functions": [],
     }
-    # A non-empty controller_values + dict graph drives _resolve_authority.
     control_snapshot = {
         "contract_address": TARGET_ADDRESS,
         "controller_values": {"some_key:admin": {"value": "0xbbb"}},
@@ -145,7 +129,6 @@ def _run_capturing(monkeypatch: pytest.MonkeyPatch) -> tuple[list, dict[str, Any
 def test_zero_write_path_degrades_and_records_metric(monkeypatch: pytest.MonkeyPatch) -> None:
     degraded, metrics, records = _run_capturing(monkeypatch)
 
-    # #5: the missing-Contract-row zero-write path is now explicit.
     assert metrics["rows_written"] is False
     db_write_degraded = [e for e in degraded if e.phase == "policy_db_write"]
     assert len(db_write_degraded) == 1
@@ -153,14 +136,12 @@ def test_zero_write_path_degrades_and_records_metric(monkeypatch: pytest.MonkeyP
 
     warnings = [r for r in records if r.levelno == logging.WARNING and "wrote zero DB rows" in r.getMessage()]
     assert len(warnings) == 1
-    # The address is a queryable field, not only in the message text.
     assert getattr(warnings[0], "address", None) == TARGET_ADDRESS
 
 
 def test_authority_status_in_extra_and_metric(monkeypatch: pytest.MonkeyPatch) -> None:
     _degraded, metrics, records = _run_capturing(monkeypatch)
 
-    # #16-policy: authority status is a metric + an extra field, not %s text.
     assert metrics["authority_status"] == "no_authority"
 
     auth_lines = [r for r in records if "authority resolution complete" in r.getMessage()]
@@ -168,14 +149,11 @@ def test_authority_status_in_extra_and_metric(monkeypatch: pytest.MonkeyPatch) -
     assert getattr(auth_lines[0], "authority_status", None) == "no_authority"
     assert getattr(auth_lines[0], "authority_reason", None)
 
-    # #16-policy: phase timers fold phase_ms_<phase> via log_timed_phase.
     assert "phase_ms_effective_permissions" in metrics
     assert "phase_ms_principal_labels" in metrics
 
 
 def _drive_hydration(monkeypatch: pytest.MonkeyPatch, *, raises: bool) -> tuple[Any, list, list[logging.LogRecord]]:
-    """Drive ``_load_nested_artifacts`` over one nested bundle whose
-    ``contract_materializations`` lookup either raises or misses."""
     from unittest.mock import MagicMock
 
     from db.nested_artifacts import artifact_key
@@ -216,7 +194,7 @@ def test_hydration_db_error_warns_and_rolls_back(monkeypatch: pytest.MonkeyPatch
     ]
     assert len(warnings) == 1
     assert getattr(warnings[0], "exc_type", None) == "RuntimeError"
-    # ``bundle_address``, not ``address``: JsonFormatter drops an extra colliding with a bound context field.
+    # JsonFormatter drops an extra named ``address``.
     assert getattr(warnings[0], "bundle_address", None) == TARGET_ADDRESS
     assert getattr(warnings[0], "bundle_chain", None) == "ethereum"
 
@@ -224,7 +202,6 @@ def test_hydration_db_error_warns_and_rolls_back(monkeypatch: pytest.MonkeyPatch
     assert len(hydration) == 1
     assert hydration[0].severity == "degraded"
 
-    # A failed query leaves the session pending-rollback; the handler clears it.
     assert session.rollback.called
 
 
@@ -237,8 +214,7 @@ def test_hydration_row_miss_stays_silent(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_principal_classification_failures_collect_per_contract() -> None:
-    """D5: resolver crashes are collected so the writer can report them once
-    per contract rather than once per principal."""
+    """D5: reported once per contract, not per principal."""
     from services.policy import effective_permissions_writer as writer
 
     memo: dict[str, Any] = {}
@@ -250,5 +226,4 @@ def test_principal_classification_failures_collect_per_contract() -> None:
     for addr in ("0xaaa", "0xbbb", "0xAAA"):
         assert writer._classify_principal(addr, _boom, memo, failures=failures) == (None, None)
 
-    # The memo collapses the repeat: two distinct addresses, two failures.
     assert len(failures) == 2

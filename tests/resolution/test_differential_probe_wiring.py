@@ -40,21 +40,15 @@ def _gated_unknown_cap(selector_hint: str = "0xabcdef01") -> CapabilityExpr:
     )
 
 
-# ---------------------------------------------------------------------------
-# flag default + trigger population
-# ---------------------------------------------------------------------------
-
-
 def test_should_probe_only_gated_unknown_external_check():
     assert _should_differential_probe(_gated_unknown_cap()) is True
-    # Not a caller-gate external check (no basis tag) → downstream probe / adapter-pending, skip.
     assert (
         _should_differential_probe(
             CapabilityExpr.external_check_only(ExternalCheck(None, "0x1", extra={"basis": ["delegated_check"]}))
         )
         is False
     )
-    # Cold-index self-heal deferral → NEVER probe (would freeze the cold result).
+    # Probing a cold-index deferral would freeze the cold result.
     deferred_extra = {"basis": ["caller_tainted_authority_unresolved"], "deferred_pending_index": True}
     assert (
         _should_differential_probe(CapabilityExpr.external_check_only(ExternalCheck(None, "0x1", extra=deferred_extra)))
@@ -101,17 +95,12 @@ def test_apply_gated_result_keeps_external_check_and_attaches_evidence():
         assert out.kind == "external_check_only"
         assert out.check is not None
         assert out.check.extra["differential_probe"]["attribution"] == attribution
-        # The original caller-gate basis tag survives (still gated-unknown).
         assert "caller_tainted_authority_unresolved" in out.check.extra["basis"]
         cap_dict = capability_to_dict(out)
         surface = project_capability_surface(cap_dict)
         assert surface.authority_public is False
         assert capability_surface_status(cap_dict, surface) is None  # gated, principals unknown
 
-
-# ---------------------------------------------------------------------------
-# _maybe_differential_probe end-to-end with an injected wire
-# ---------------------------------------------------------------------------
 
 CANON = {"setClaimingOpen(uint256)": "setClaimingOpen(uint256)"}
 
@@ -171,8 +160,7 @@ def test_maybe_probe_is_noop_for_non_gated_unknown_cap():
 
 
 def test_probe_cache_skips_wire_on_second_resolve(monkeypatch):
-    # On the real-wire path (call_batch=None), the same (chain,addr,selector,block)
-    # is probed once and cached; a second resolve reuses it without hitting the wire.
+    # On the real wire a (chain, addr, selector, block) is probed once and cached.
     import services.resolution.capability_resolver as cr
 
     cr.clear_probe_cache()

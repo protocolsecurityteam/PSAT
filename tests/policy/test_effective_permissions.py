@@ -313,7 +313,6 @@ def test_build_effective_permissions_uses_semantic_capabilities_for_principals()
     manage = functions["manage(address,bytes,uint256)"]
     assert manage["selector"] == "0xf6e715d0"
     assert manage["effect_labels"] == ["arbitrary_external_call"]
-    # The Plane-1 claim provenance rides through alongside the legacy projection.
     assert [c["claim_id"] for c in manage["claims"]] == ["exec.arbitrary"]
     assert manage["action_summary"] == "Executes arbitrary external calldata from the contract."
     assert manage["authority_roles"] == []
@@ -323,7 +322,6 @@ def test_build_effective_permissions_uses_semantic_capabilities_for_principals()
     hook = functions["setBeforeTransferHook(address)"]
     assert hook["selector"] == "0x8929565f"
     assert hook["effect_targets"] == ["hook"]
-    # ``hook_update`` is the legacy projection of the ``callee_pointer.rotate`` claim; both are carried.
     assert hook["effect_labels"] == ["hook_update"]
     assert [c["claim_id"] for c in hook["claims"]] == ["callee_pointer.rotate"]
     assert hook["authority_roles"] == []
@@ -424,7 +422,6 @@ def test_build_effective_permissions_handles_vyper_dynarray_signatures():
     function = payload["functions"][0]
 
     assert function["function"] == "seal(DynArray[address,MAX_SEALABLES])"
-    # Not None: the DynArray lowers to ``address[]``, so a selector is derivable.
     selector = function["selector"]
     assert selector is not None
     assert selector.startswith("0x")
@@ -659,7 +656,6 @@ def _public_default_target() -> dict:
 
 
 def _external_call_effect() -> dict:
-    # A sensitive-sink, tree-less, capability-less entry point: what the resolver-ran branch would default to public.
     return _effects(
         _effect(
             "sweep(address)",
@@ -672,8 +668,6 @@ def _external_call_effect() -> dict:
 
 
 def test_guard_extraction_uncertain_marker_absent_defaults_public():
-    """Control: with no ``guard_extraction_uncertain`` marker a tree-less sensitive-sink entry
-    point still defaults to public when the resolver ran (the behavior the marker must NOT change wholesale)."""
     payload = build_effective_permissions(
         _public_default_target(),
         capability_resolver_output={},
@@ -686,9 +680,7 @@ def test_guard_extraction_uncertain_marker_absent_defaults_public():
 
 
 def test_guard_extraction_uncertain_marker_flips_only_marked_to_unsupported():
-    """Fail-closed policy gate: a tree-less sig the static stage flags as a caller-authority guard
-    it could not lower (``guard_extraction_uncertain``) resolves ``unsupported`` instead of
-    public, for that signature only, with an explicit reason and no ``authority_public``."""
+    """Fail-closed: only the marked signature changes."""
     payload = build_effective_permissions(
         _public_default_target(),
         capability_resolver_output={},
@@ -705,26 +697,16 @@ def test_guard_extraction_uncertain_marker_flips_only_marked_to_unsupported():
     assert fn.get("capability_expr", {}).get("unsupported_reason") == "guard_extraction_uncertain"
 
 
-# ---------------------------------------------------------------------------
-# authority_openness on the ARTIFACT plane.
-#
-# The three-state split is computed twice: in ``build_effective_permissions`` (onto the artifact the
-# API and recursive resolver read) and in ``effective_permissions_writer`` (onto the
-# ``effective_functions`` column). Existing openness tests assert only the SECOND, so reverting
-# either block here left the suite green while the artifact lost the key, and an absent key is
-# published as "written before the column existed", a claim the record doesn't have.
-# ---------------------------------------------------------------------------
+# Openness is computed on both the artifact and the DB column; tests only covered the column, so the artifact could
+# silently lose the key.
 
 
 def test_artifact_carries_openness_for_a_resolver_capability():
-    """Resolver-capability branch: the openness of the published capability travels ON the
-    record, not only into the DB column.
+    """Resolver-capability branch: openness travels on the record, not only into the DB column.
 
-    Input-shape → published-state table:
-
-      finite_set(1 member), enumerable  → 'restricted'  (witnessed restriction)
-      conditional_universal             → 'open'        (earned public)
-      unsupported(assembly_only)        → 'not_determined'
+      finite_set(1 member), enumerable  -> 'restricted'
+      conditional_universal             -> 'open'
+      unsupported(assembly_only)        -> 'not_determined'
     """
     restricted = _finite_cap("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     universal = {
@@ -756,7 +738,7 @@ def test_artifact_carries_openness_for_a_resolver_capability():
         cast("dict[str, Any]", fn)["function"]: cast("dict[str, Any]", fn) for fn in payload["functions"]
     }
 
-    # The key must be PRESENT on every record: absence is a fourth state.
+    # Absence would be a fourth state.
     for name in ("gated()", "timed()", "asm()"):
         assert "authority_openness" in by_name[name], f"{name} lost the openness key"
 
@@ -766,16 +748,10 @@ def test_artifact_carries_openness_for_a_resolver_capability():
 
 
 def test_artifact_carries_openness_for_a_policy_minted_capability():
-    """Policy-minted branch (empty resolver output): the record publishes a policy-minted
-    ``capability_expr``, so openness must be the projection of THAT dict.
+    """Policy-minted branch: openness is the projection of the policy-minted ``capability_expr``.
 
-    Input-shape → published-state table:
-
-      fall-through public (sink-bearing, tree-less) → 'open'
-      guard_extraction_uncertain reroute            → 'not_determined'
-
-    The adverse row proves the not-determined arm runs on the artifact plane, not just the
-    credit-granting one.
+      fall-through public (sink-bearing, tree-less) -> 'open'
+      guard_extraction_uncertain reroute            -> 'not_determined'
     """
     payload = build_effective_permissions(
         _public_default_target(),

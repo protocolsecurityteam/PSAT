@@ -1,21 +1,8 @@
-"""Parameter-keyed authority mappings resolve by enumerating their VALUE set from setter
-events (claim #3 group C).
+"""Parameter-keyed authority mappings resolve by enumerating their value set from setter events.
 
-ether.fi's L1/SyncPool receivers gate ``onMessageReceived`` on
-``msg.sender == receivers[originEid]``, a ``mapping(uint32 => address)`` keyed by a function
-PARAMETER in ERC-7201 storage, so there is no single getter. The static stage otherwise
-collapses it to the bare ``_getL1BaseSyncPoolStorage()`` ``view_call``, so before P4 the gate
-funneled to ``finite_set([], lower_bound)``, a silent under-resolution.
-
-Fix: STATIC stamps ``mapping_name`` on the non-caller operand
-(``_stamp_param_keyed_authority_mapping``) and ``apply_mapping_event_hint_pass`` attaches the
-``ReceiverSet`` ``mapping_writer_specs``; RESOLUTION routes it to
-``_resolve_param_keyed_authority_mapping``, folding the value set from setter events:
-receivers found -> ``finite_set`` (``lower_bound``, replay is a lower bound); no event source
-/ no setter spec / empty fold -> ``external_check_only``, never a phantom empty.
-
-Layered like ``test_internal_authority_storage_read.py``. The hypersync source is stubbed via
-an injected fake client (the wire), not by replacing the enumerator.
+ether.fi's receivers gate on ``msg.sender == receivers[originEid]``, which collapsed to a bare ``view_call`` and
+resolved to nothing. Static stamps ``mapping_name`` and the ``ReceiverSet`` writer spec; resolution folds the
+values into a lower-bound set, or ``external_check_only`` when nothing folds, never a phantom empty.
 """
 
 from __future__ import annotations
@@ -40,8 +27,7 @@ R2 = "0x" + "b2" * 20
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "authority"
 
-# The writer spec the static post-pass attaches for ``receivers`` (ReceiverSet(uint32
-# indexed originEid, address receiver): key in topic1, value in data word 0).
+# Key in topic1, value in data word 0.
 RECEIVERS_WRITER_SPEC: dict[str, Any] = {
     "mapping_name": "receivers",
     "event_signature": "ReceiverSet(uint32,address)",
@@ -53,7 +39,6 @@ RECEIVERS_WRITER_SPEC: dict[str, Any] = {
     "value_position": 1,
 }
 
-# The param-keyed mapping operand as the static stage emits it.
 PARAM_KEYED_OPERAND: dict[str, Any] = {
     "source": "view_call",
     "callee": "_getL1BaseSyncPoolStorage()",
@@ -62,24 +47,18 @@ PARAM_KEYED_OPERAND: dict[str, Any] = {
     "mapping_name": "receivers",
     "mapping_writer_specs": [RECEIVERS_WRITER_SPEC],
 }
-# Same operand minus the writer spec — a mapping with no discoverable setter event.
 PARAM_KEYED_OPERAND_NO_SPEC: dict[str, Any] = {
     "source": "view_call",
     "callee_signature": "_getL1BaseSyncPoolStorage()",
     "callee_selector": "0x98ea52ff",
     "mapping_name": "receivers",
 }
-# The pre-P4 shape (no mapping identity): the before/after witness.
+# The pre-P4 shape.
 BARE_VIEW_CALL_OPERAND: dict[str, Any] = {
     "source": "view_call",
     "callee_signature": "_getL1BaseSyncPoolStorage()",
     "callee_selector": "0x98ea52ff",
 }
-
-
-# --------------------------------------------------------------------------
-# Fake hypersync event source (the wire stub). Mirrors test_mapping_enumerator.
-# --------------------------------------------------------------------------
 
 
 def _uint_topic(value: int) -> str:
@@ -91,8 +70,6 @@ def _addr_data(addr: str) -> str:
 
 
 def _receiver_set_log(eid: int, receiver: str, block: int = 10) -> SimpleNamespace:
-    """ReceiverSet(uint32 indexed originEid, address receiver) — eid in topic1, the
-    receiver value in data word 0 (the value the fold must extract)."""
     return SimpleNamespace(
         topics=["0x" + ME._event_topic0("ReceiverSet(uint32,address)")[2:], _uint_topic(eid)],
         data=_addr_data(receiver),
@@ -133,11 +110,6 @@ class _FakeHypersyncModule:
     LogSelection = SimpleNamespace
     FieldSelection = SimpleNamespace
     LogField = _FakeFieldEnum
-
-
-# --------------------------------------------------------------------------
-# Context plumbing.
-# --------------------------------------------------------------------------
 
 
 class _Outer:
@@ -187,16 +159,12 @@ def _isolated_cache(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setenv("PSAT_MAPPING_ENUMERATION_DB_CACHE", "0")
     monkeypatch.delenv("ENVIO_API_TOKEN", raising=False)
 
-    # Stub the getter wire: the unstamped-operand witness drives the view_call getter
-    # path, which would dial the blocked rpc_url. A revert is honest there (the
-    # accessor is internal) and keeps the suite offline.
+    # The unstamped witness drives the getter path, which would dial the blocked rpc_url.
     def _revert(*_args: Any, **_kwargs: Any) -> str:
         raise RuntimeError("execution reverted")
 
     monkeypatch.setattr("services.clients.rpc.rpc_request", _revert)
 
-    # The value scan floors from_block via the floor-or-defer helper; stub a known floor
-    # so the fold runs over the seeded log without touching Etherscan/the cursor table.
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
@@ -207,14 +175,8 @@ def _isolated_cache(monkeypatch: pytest.MonkeyPatch) -> Any:
     ME.clear_enumeration_cache()
 
 
-# --------------------------------------------------------------------------
-# Resolver unit tests (literal operand; always run).
-# --------------------------------------------------------------------------
-
-
 def test_receivers_resolve_to_value_set() -> None:
-    """The folded receiver VALUES are the authorized callers (``lower_bound``: event replay
-    is a lower bound on the live set)."""
+    """Event replay is a lower bound on the live set."""
     meta = _seeded_meta(_receiver_set_log(30183, R1), _receiver_set_log(30260, R2))
     cap = evaluate_tree(_eq_tree(PARAM_KEYED_OPERAND), _ctx(meta))
 
@@ -226,8 +188,6 @@ def test_receivers_resolve_to_value_set() -> None:
 
 
 def test_param_keyed_scan_floors_from_block_at_creation_block(monkeypatch) -> None:
-    """The value scan starts at the contract's creation block, not genesis: identical
-    receiver set, no pre-deployment scan."""
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
@@ -254,7 +214,6 @@ def test_param_keyed_scan_floors_from_block_at_creation_block(monkeypatch) -> No
 
 
 def test_latest_value_per_key_is_folded() -> None:
-    """Two assignments to the same eid fold to the latest receiver only."""
     meta = _seeded_meta(
         _receiver_set_log(30183, R1, block=10),
         _receiver_set_log(30183, R2, block=20),
@@ -265,8 +224,7 @@ def test_latest_value_per_key_is_folded() -> None:
 
 
 def test_no_events_is_external_check_not_phantom_empty() -> None:
-    """An event source was reached but folded no receivers (standalone-impl case whose
-    receivers were set on the proxy): an explicit query interface, never ``finite_set([])``."""
+    """The receivers were set on the proxy, not this implementation."""
     cap = evaluate_tree(_eq_tree(PARAM_KEYED_OPERAND), _ctx(_seeded_meta()))
 
     assert cap.kind == "external_check_only"
@@ -277,10 +235,7 @@ def test_no_events_is_external_check_not_phantom_empty() -> None:
 @pytest.mark.parametrize(
     ("operand", "meta"),
     [
-        # No hypersync token and no injected client -> external check, not a silent empty.
         pytest.param(PARAM_KEYED_OPERAND, {}, id="no_event_source"),
-        # A param-keyed mapping with no discoverable setter event can't be enumerated -> external check (even with
-        # a live event source).
         pytest.param(
             PARAM_KEYED_OPERAND_NO_SPEC,
             _seeded_meta(_receiver_set_log(30183, R1)),
@@ -296,7 +251,6 @@ def test_unenumerable_mapping_is_external_check(operand, meta) -> None:
 
 
 def test_zero_receiver_values_are_dropped() -> None:
-    """A receiver set to the zero address is not an authorized caller."""
     meta = _seeded_meta(_receiver_set_log(30183, "0x" + "00" * 20), _receiver_set_log(30260, R1))
     cap = evaluate_tree(_eq_tree(PARAM_KEYED_OPERAND), _ctx(meta))
 
@@ -304,9 +258,7 @@ def test_zero_receiver_values_are_dropped() -> None:
 
 
 def test_unstamped_operand_stays_lower_bound() -> None:
-    """The before/after witness: WITHOUT the stamped ``mapping_name`` the gate funnels to
-    the silent ``lower_bound`` placeholder, so the stamp + enumeration recovers the
-    principals. Fails on the pre-P4 evaluator."""
+    """Fails on the pre-P4 evaluator."""
     cap = evaluate_tree(_eq_tree(BARE_VIEW_CALL_OPERAND), _ctx(_seeded_meta(_receiver_set_log(30183, R1))))
 
     assert cap.kind == "finite_set"
@@ -365,9 +317,6 @@ _ON_MESSAGE = "onMessageReceived(uint32,bytes32,address,uint256,uint256)"
 
 class TestL1SyncPoolReceiver:
     def test_static_stamps_mapping_identity_and_writer_spec(self) -> None:
-        """The static stage stamps ``mapping_name`` + the value-enumeration writer
-        spec (from the contract's ``ReceiverSet`` setter) onto the param-keyed
-        operand of ``onMessageReceived``."""
         op = _caller_operand(_tree_for(_receiver_contract(), _ON_MESSAGE))
         assert op.get("mapping_name") == "receivers"
         specs = op.get("mapping_writer_specs")
@@ -380,15 +329,12 @@ class TestL1SyncPoolReceiver:
         assert spec["direction"] == "set"
 
     def test_constant_keyed_mapping_is_not_stamped(self) -> None:
-        """Precision: a caller gate reading the mapping by a CONSTANT key (``receivers[0]``)
-        is not parameter-keyed; stamping it would wrongly enumerate the whole mapping."""
+        """A constant key isn't parameter-keyed; stamping it would enumerate the whole mapping."""
         op = _caller_operand(_tree_for(_receiver_contract(), "defaultReceiverGate()"))
         assert op.get("mapping_name") is None
         assert op.get("mapping_writer_specs") is None
 
     def test_resolves_receivers_end_to_end(self) -> None:
-        """End-to-end: the stamped operand routes to value enumeration and the seeded
-        ReceiverSet events fold to the receiver set."""
         tree = _tree_for(_receiver_contract(), _ON_MESSAGE)
         meta = _seeded_meta(_receiver_set_log(30183, R1), _receiver_set_log(30260, R2))
         cap = evaluate_tree(tree, _ctx(meta))

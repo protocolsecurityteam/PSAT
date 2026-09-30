@@ -12,8 +12,7 @@ from services.resolution.tracking_plan import is_primitive_scalar_read_spec
 
 @pytest.fixture(autouse=True)
 def _isolated_classify_cache():
-    # Process-wide classify cache leaks across files under xdist; clear so mocked RPC
-    # responses aren't shadowed by a stale entry.
+    # The process-wide classify cache leaks across files under xdist.
     clear_classify_cache()
     yield
     clear_classify_cache()
@@ -21,9 +20,7 @@ def _isolated_classify_cache():
 
 @pytest.fixture(autouse=True)
 def _stub_batch_probe_rpc(monkeypatch):
-    """Offline: ``classify_resolved_address`` fires a batched eth_call probe.
-    Return all-error so it falls back to the sequential classifier, which reads
-    through ``_rpc_request`` — the path these tests mock."""
+    """Batch probes return all-error so the sequential per-call mocks apply."""
     import services.resolution.tracking as _tracking
 
     monkeypatch.setattr(
@@ -233,11 +230,8 @@ def test_build_control_snapshot_handles_reverting_getter(monkeypatch):
 
 
 def test_build_control_snapshot_recovers_immutable_getter_via_impl_fallback(monkeypatch):
-    """Regression mirroring real EtherFi data (EtherFiNode): ``immutable`` authority
-    addresses live in the implementation bytecode, not proxy storage. The runtime
-    address (0x3c55986c) does not delegatecall to its impl (0xa91f8a52), so
-    ``etherFiNodesManager()`` reverts there. The snapshot must fall back to the impl,
-    else 13 EtherFiNode functions were left ownerless on the Surface.
+    """Immutable authorities live in impl bytecode and the runtime doesn't delegatecall, so the snapshot falls back
+    to the impl (13 EtherFiNode functions were ownerless).
     """
     proxy = "0x3c55986cfee455e2533f4d29006634ecf9b7c03f"  # runtime addr — getter reverts here
     impl = "0xa91f8a52f0c1b4d3fdc256fc5bebca4d627da392"  # immutable lives in this bytecode
@@ -337,10 +331,7 @@ def _avs_operator_plan(instance: str) -> ControlTrackingPlan:
 
 
 def test_build_control_snapshot_attributes_beacon_owner_to_instance(monkeypatch):
-    """An UpgradeableBeacon's owner() is the instance's upgrade authority but lives in the
-    beacon. With ``beacon_address`` set the snapshot records it as a ``beacon_owner``
-    controller, leaving the instance's own controllers untouched. Mirrors real EtherFi
-    AvsOperator/EtherFiNode data."""
+    """The beacon's owner is the instance's upgrade authority. Mirrors EtherFi AvsOperator/EtherFiNode."""
     instance = "0xf4718766a7fc8c81f788669b0985fac03d064d29"  # AvsOperator impl/instance
     beacon = "0x29b1c223be35ccb6bfbd43154528cd0b881756e9"  # UpgradeableBeacon
     manager = "2093bbb221f1d8c7c932c32ee28be6dee4a37a6a"  # beacon.owner() (AvsOperatorsManager owner)
@@ -380,8 +371,6 @@ def test_build_control_snapshot_attributes_beacon_owner_to_instance(monkeypatch)
 
 
 def test_build_control_snapshot_skips_beacon_owner_when_zero_or_reverting(monkeypatch):
-    """No empty row is minted when the beacon owner is the zero address (e.g. a
-    renounced/burned beacon) or when owner() reverts."""
     instance = "0xf4718766a7fc8c81f788669b0985fac03d064d29"
     beacon = "0x29b1c223be35ccb6bfbd43154528cd0b881756e9"
     plan = _avs_operator_plan(instance)
@@ -458,13 +447,7 @@ def test_build_control_snapshot_preserves_role_identifier_for_capability_resolve
     }
 
 
-# ---------------------------------------------------------------------------
-# build_control_snapshot parity: parallel + sequential produce identical output.
-# ---------------------------------------------------------------------------
-
-
 def _snapshot_parity_helper(monkeypatch, fanout: str):
-    """Run a multi-controller fixture under the given fanout."""
     monkeypatch.setenv("PSAT_RPC_FANOUT", fanout)
     target = "0x1111111111111111111111111111111111111111"
 
@@ -551,11 +534,9 @@ def _snapshot_parity_helper(monkeypatch, fanout: str):
 
 
 def test_build_control_snapshot_parity_parallel_vs_sequential(monkeypatch):
-    """Controller polling should resolve identically in both modes."""
     seq = _snapshot_parity_helper(monkeypatch, "1")
     par = _snapshot_parity_helper(monkeypatch, "8")
 
-    # Sort by key: sequential and parallel paths may differ in insertion order.
     def _canon(snapshot):
         return {
             "block_number": snapshot["block_number"],
@@ -566,21 +547,11 @@ def test_build_control_snapshot_parity_parallel_vs_sequential(monkeypatch):
 
     assert _canon(seq) == _canon(par)
 
-    # Phantom-EOA regression. tracking_plan admits non-address state vars (uints, bools,
-    # mappings) for the *event* pathway on the promise that "the poller filters by
-    # type_kind itself"; build_control_snapshot is that poller, and its controller_values
-    # feed ControllerValue, the recursive control graph and effective_permissions, all of
-    # which read ``value`` as an address. Before the fix a scalar < 2**160 (e.g. uint
-    # _minDelay == 864000) coerced to a no-code address, classified "eoa", and was promoted
-    # to a controller. These are the real etherfi phantoms observed on the PR95 live DB.
+    # The poller is where tracking_plan's non-address vars must be filtered; a uint like _minDelay became a phantom EOA
+    # controller (PR95 live DB).
 
 
 def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
-    """Primitive-scalar state vars must not enter the value snapshot as principals.
-
-    Uses the exact live PR95 read_specs and scalar values; only the address-typed
-    ``owner`` should survive.
-    """
     target = "0x1111111111111111111111111111111111111111"
     owner_addr = "cc" * 20
 
@@ -611,7 +582,6 @@ def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
             "type_kind": "primitive",
         }
 
-        # (source, read_spec, scalar the getter returns) - verbatim live PR95 phantoms.
 
     scalars = [
         ("_minDelay", _primitive("getMinDelay", "uint256"), 864_000),
@@ -637,7 +607,6 @@ def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
         "tracked_controllers": [_sv("owner", owner_spec), *[_sv(src, rs) for src, rs, _v in scalars]],
     }
 
-    # If the guard were removed the scalars would be read + coerced.
     word_by_selector = {selector(f"{rs['target']}()"): "0x" + format(val, "064x") for _src, rs, val in scalars}
     word_by_selector[selector("owner()")] = "0x" + "00" * 12 + owner_addr
 
@@ -667,8 +636,6 @@ def test_build_control_snapshot_skips_non_address_state_vars(monkeypatch):
 
 
 def test_build_control_snapshot_keeps_address_var_with_missing_type(monkeypatch):
-    """The guard is conservative: no/unknown type info is still classified, so real
-    address principals are never dropped."""
     target = "0x1111111111111111111111111111111111111111"
     plan: ControlTrackingPlan = {
         "schema_version": "0.1",
@@ -711,10 +678,7 @@ def test_build_control_snapshot_keeps_address_var_with_missing_type(monkeypatch)
 
 
 def test_build_control_snapshot_keeps_non_primitive_controllers(monkeypatch):
-    """The guard skips ONLY primitive scalars. A mapping-typed state var (OZ
-    AccessControl ``_roles``, etherfi ``registered``) must pass through: a bare getter
-    reverts on it and its members are enumerated elsewhere.
-    """
+    """Mapping vars (OZ ``_roles``) pass through; their members are enumerated elsewhere."""
     target = "0x1111111111111111111111111111111111111111"
     plan: ControlTrackingPlan = {
         "schema_version": "0.1",
@@ -761,9 +725,7 @@ def test_build_control_snapshot_keeps_non_primitive_controllers(monkeypatch):
     assert cvs["state_variable:registered"]["value"] is None
     assert cvs["state_variable:registered"]["resolved_type"] == "unknown"
 
-    # Multicall3 snapshot-getter prewarm parity: PSAT_SNAPSHOT_MULTICALL on/off must produce
-    # identical controller_values. ON: getters pre-read in ONE aggregate3
-    # (services.clients.rpc.rpc_request); OFF: per-controller via tracking._rpc_request.
+    # PSAT_SNAPSHOT_MULTICALL on or off must produce identical controller_values.
 
 
 def _multi_controller_plan(target: str) -> ControlTrackingPlan:
@@ -807,7 +769,6 @@ def test_build_control_snapshot_multicall_prewarm_parity(monkeypatch):
     }
     plan = _multi_controller_plan(target)
 
-    # Per-controller wire (used when prewarm is OFF; also serves eth_blockNumber always).
     def fake_rpc(_rpc_url, method, params, *, chain_id=None):
         if method == "eth_blockNumber":
             return "0x10"
@@ -853,8 +814,6 @@ def test_build_control_snapshot_multicall_prewarm_parity(monkeypatch):
 
 
 def test_snapshot_prewarm_reverting_getter_falls_through(monkeypatch):
-    """A getter that reverts is absent from the prewarm (success-only), so the controller falls
-    through to the live per-controller read + impl fallback exactly as without prewarm."""
     from eth_abi.abi import decode, encode
 
     import services.clients.rpc as rpc_mod
@@ -894,8 +853,6 @@ def test_snapshot_prewarm_reverting_getter_falls_through(monkeypatch):
     monkeypatch.setattr("services.resolution.tracking._SNAPSHOT_MULTICALL_ENABLED", True)
 
     cvs = build_control_snapshot(plan, "https://rpc.example")["controller_values"]
-    # owner served from prewarm (decoded to its address); registry/guardian reverted in prewarm → read
-    # live → recorded null.
     assert cvs["state_variable:owner"]["value"] == "0x" + "33" * 20
     assert cvs["state_variable:registry"]["value"] is None
     assert cvs["state_variable:registry"]["observed_via"] == "eth_call_error"

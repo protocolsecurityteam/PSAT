@@ -1,8 +1,4 @@
-"""Unit tests for ``probe_membership``.
-
-Uses a stub AdapterRegistry returning a pre-baked CapabilityExpr so tests focus on the
-probe's leaf-selection + membership-resolution logic, not adapter behavior.
-"""
+"""A stub registry returns a pre-baked capability so tests focus on leaf selection and membership logic."""
 
 from __future__ import annotations
 
@@ -12,10 +8,7 @@ from services.resolution.adapters import AdapterRegistry, EvaluationContext
 from services.resolution.capabilities import CapabilityExpr, ExternalCheck
 from services.resolution.probe import probe_membership
 
-# ---------------------------------------------------------------------------
-# Stub registry. Subclasses AdapterRegistry because the production probe signatures
-# type-narrow to it (no Protocol carve-out needed).
-# ---------------------------------------------------------------------------
+# The production probe signatures type-narrow to AdapterRegistry.
 
 
 class _StubRegistry(AdapterRegistry):
@@ -27,9 +20,6 @@ class _StubRegistry(AdapterRegistry):
     def enumerate(self, descriptor, ctx):
         self.calls.append((descriptor, ctx))
         return self.cap
-
-
-# Tree fixtures
 
 
 def _membership_leaf(role: str = "caller_authority") -> dict:
@@ -71,9 +61,6 @@ def _and_node(*children: dict) -> dict:
     return {"op": "AND", "children": list(children)}
 
 
-# Leaf selection
-
-
 @pytest.mark.parametrize(
     ("tree", "predicate_index", "expected"),
     [
@@ -105,7 +92,7 @@ def test_membership_probe_leaf_selection_is_unknown(tree, predicate_index, expec
 
 
 def test_index_picks_leaf_by_dfs_order():
-    """Leaves are indexed via DFS (index 0 = leftmost); pinned so the order doesn't drift."""
+    """Pinned so the order doesn't drift."""
     left = _membership_leaf("caller_authority")
     right = _equality_leaf()
     tree = _and_node(_leaf_node(left), _leaf_node(right))
@@ -122,9 +109,6 @@ def test_index_picks_leaf_by_dfs_order():
     )
     assert res1["leaf_kind"] == "equality"
     assert res1["reason"] == "non_membership_leaf"
-
-
-# CapabilityExpr resolution
 
 
 _ADDR = "0x" + "11" * 20
@@ -150,7 +134,7 @@ def _composite(kind: str, *children: CapabilityExpr) -> CapabilityExpr:
             {"result": "no", "reason": "finite_set_exact"},
             id="finite_set_exact_no",
         ),
-        # Lower bound = known members only; an absent member is unknown, not no (fail-closed).
+        # An absent member of a lower bound is unknown, not no.
         pytest.param(
             CapabilityExpr.finite_set([_ADDR], quality="lower_bound"),
             _OTHER,
@@ -224,7 +208,7 @@ def test_capability_resolution(cap, member, expected):
 
 
 def test_finite_set_upper_bound_absent_is_no():
-    """Upper bound = at most these: absent is a definitive no; presence is uncertain (state may have evicted)."""
+    """State may have evicted a present member."""
     reg = _StubRegistry(CapabilityExpr.finite_set(["0x" + "11" * 20], quality="upper_bound"))
     absent = "0x" + "22" * 20
     res_absent = probe_membership(
@@ -270,7 +254,6 @@ def test_threshold_group_signer_yes():
 
 
 def test_external_check_only_surfaces_probe_descriptor():
-    """``external_check_only`` can't be answered offline; the probe returns target + selector for the caller."""
     check = ExternalCheck(
         target_address="0x" + "ee" * 20,
         target_call_selector="0xb7009613",  # canCall
@@ -304,9 +287,6 @@ def test_unsupported_capability_passes_reason_through():
     assert res["capability_unsupported_reason"] == "no_adapter"
 
 
-# Composite (AND / OR) via constructed CapabilityExpr
-
-
 def _signature_auth_leaf(signer_state_var: str = "trustedSigner") -> dict:
     return {
         "kind": "signature_auth",
@@ -323,13 +303,9 @@ def _signature_auth_leaf(signer_state_var: str = "trustedSigner") -> dict:
     }
 
 
-# probe_signature
-
-
 @pytest.mark.parametrize(
     ("tree", "predicate_index", "expected"),
     [
-        # Reason is non_signature_leaf, distinct from the membership probe's non_membership_leaf.
         pytest.param(
             _leaf_node(_membership_leaf()),
             0,
@@ -360,10 +336,7 @@ def test_probe_signature_leaf_selection_is_unknown(tree, predicate_index, expect
 
 
 def test_probe_signature_real_evaluator_for_state_var_signer():
-    """A state-var signer yields a signature_witness wrapping a lower_bound finite_set placeholder.
-
-    Pinned as the predicate-evaluator / probe integration point: a regression on either
-    side breaks the EIP-1271 / ecrecover client flow."""
+    """The predicate-evaluator/probe integration point for the EIP-1271 / ecrecover client flow."""
     from services.resolution.adapters import AdapterRegistry
     from services.resolution.probe import probe_signature
 
@@ -377,8 +350,6 @@ def test_probe_signature_real_evaluator_for_state_var_signer():
     )
     assert res["leaf_kind"] == "signature_auth"
     assert res["capability_kind"] == "signature_witness"
-    # unknown until a backend resolves the signer (lower_bound + absent), or a clean no if the placeholder was
-    # empty exact.
     assert res["result"] in ("yes", "no", "unknown")
 
 

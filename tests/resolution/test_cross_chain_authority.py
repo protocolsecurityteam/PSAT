@@ -20,7 +20,6 @@ from workers.policy_worker import _make_principal_type_resolver
 
 BASE_CHAIN_ID = 8453
 BASE = chain_by_id(BASE_CHAIN_ID)
-# Registry constants (utils/chains.py) — the recognizer's inputs.
 BASE_MESSENGER = "0x4200000000000000000000000000000000000007"
 BASE_BRIDGE = "0x4200000000000000000000000000000000000010"
 
@@ -33,20 +32,14 @@ def _reset_executor():
 
 
 def _alias(l1: str) -> str:
-    """The L2 alias of an L1 address, computed here rather than by the module
-    under test, so the round trip is checked against arithmetic and not against
-    its own inverse."""
+    """Checked against arithmetic, not the module's own inverse."""
     return f"0x{(int(l1, 16) + L1_TO_L2_ALIAS_OFFSET) % (1 << 160):040x}"
-
-
-# --- alias arithmetic --------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "l1",
     [
         pytest.param("0x1234000000000000000000000000000000005678", id="round-trip-is-identity"),
-        # An address whose alias overflows 2**160 wraps rather than growing.
         pytest.param("0xffff000000000000000000000000000000000000", id="wraps-modulo-address-space"),
     ],
 )
@@ -61,14 +54,10 @@ def test_alias_rejects_malformed(bad):
     assert undo_l1_to_l2_alias(bad) is None
 
 
-# --- classify_cross_chain_authority ------------------------------------------
-
-
 @pytest.mark.parametrize(
     "queried, expected_address, expected_role",
     [
         pytest.param(BASE_MESSENGER, BASE_MESSENGER, "cross_domain_messenger", id="cross-domain-messenger"),
-        # Upper-cased query: recognition is case-insensitive and returns the canonical address.
         pytest.param(BASE_BRIDGE.upper(), BASE_BRIDGE, "bridge_executor", id="bridge-executor-case-insensitive"),
     ],
 )
@@ -88,7 +77,6 @@ def test_classify_recognizes_aliased_owner_of_known_address():
 
 
 def test_classify_alias_requires_known_membership():
-    # Same aliased address, but the implied L1 address is NOT in scope -> no label.
     l1 = "0x00000000000000000000000000000000000000ff"
     principal = _alias(l1)
     assert classify_cross_chain_authority(principal, chain_info=BASE, known_addresses=set()) is None
@@ -98,7 +86,6 @@ def test_classify_alias_requires_known_membership():
 def test_classify_is_noop_on_chain_without_bridge_constants():
     mainnet = chain_by_id(1)
     assert mainnet.bridge_executors == () and mainnet.cross_domain_messengers == ()
-    # Even an address that IS Base's messenger is not labelled on mainnet.
     assert classify_cross_chain_authority(BASE_MESSENGER, chain_info=mainnet) is None
     l1 = "0x00000000000000000000000000000000000000ff"
     assert classify_cross_chain_authority(_alias(l1), chain_info=mainnet, known_addresses={l1}) is None
@@ -108,19 +95,12 @@ def test_classify_ignores_ordinary_address():
     assert classify_cross_chain_authority("0xabc0000000000000000000000000000000000abc", chain_info=BASE) is None
 
 
-# --- make_cross_chain_recognizer factory -------------------------------------
-
-
 @pytest.mark.parametrize("chain_id", [1, 999999, None], ids=["mainnet", "unknown-chain", "no-chain"])
 def test_recognizer_is_none(chain_id):
     assert make_cross_chain_recognizer(chain_id) is None
 
 
-# --- build_principal_labels wiring -------------------------------------------
-
-
 def _effective_permissions_with_principal(principal_addr: str) -> dict:
-    """A single role-gated function granting ``principal_addr`` role 1."""
     return {
         "contract_address": "0x1111111111111111111111111111111111111111",
         "contract_name": "L2Vault",
@@ -142,8 +122,6 @@ def _effective_permissions_with_principal(principal_addr: str) -> dict:
 
 
 def _classify_stub(kind: str):
-    """Force the generic classifier to a fixed kind so we can prove the
-    cross-chain recognizer overrides it."""
 
     def _stub(rpc_url, address, **_kw):
         return (kind, {"address": address}, True)
@@ -176,7 +154,6 @@ def test_labels_classifies_as_cross_chain_authority(monkeypatch, address, role, 
 
 
 def test_labels_classifies_aliased_owner_with_hint(monkeypatch):
-    # An aliased L1 owner reads as a codeless EOA to the generic classifier.
     monkeypatch.setattr(
         "services.policy.principal_enrichment.classify_resolved_address_with_status",
         _classify_stub("eoa"),
@@ -196,9 +173,6 @@ def test_labels_classifies_aliased_owner_with_hint(monkeypatch):
 
 
 def test_labels_mainnet_output_is_byte_identical(monkeypatch):
-    """On chain 1 the recognizer is None: an address that happens to equal
-    Base's messenger is classified by the generic path, and the payload is
-    identical to omitting the recognizer argument entirely."""
     monkeypatch.setattr(
         "services.policy.principal_enrichment.classify_resolved_address_with_status",
         _classify_stub("eoa"),
@@ -213,9 +187,6 @@ def test_labels_mainnet_output_is_byte_identical(monkeypatch):
     assert with_mainnet_recognizer == without_arg
     principal = {p["address"]: p for p in without_arg["principals"]}[BASE_MESSENGER]
     assert principal["resolved_type"] == "eoa"
-
-
-# --- FunctionPrincipal type resolver wiring ----------------------------------
 
 
 def test_fp_resolver_prioritizes_cross_chain_over_classify(monkeypatch):

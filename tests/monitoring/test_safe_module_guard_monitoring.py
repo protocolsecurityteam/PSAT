@@ -1,10 +1,6 @@
-"""C1 monitor half: EnabledModule / DisabledModule / ChangedGuard topics and the two Safe
-storage-slot poll entries.
+"""C1 monitor half: module and guard change events plus the Safe slot poll entries.
 
-Before this the pipeline saw a module EXECUTE but not be ENABLED. The poll entries observe
-CHANGE only; membership is decided in the resolution plane
-(tests/resolution/test_classify_safe_modules_guard.py). ``TestSafeExecutionEvents`` holds the
-decoder's positive half, so one file shows what it reads and what it refuses.
+The poll observes change only; membership is decided in tests/resolution/test_classify_safe_modules_guard.py.
 """
 
 from __future__ import annotations
@@ -38,8 +34,7 @@ SAFE = "0x21f73d42eb58ba49ddb685dc29d3bf5c0f0373ca"
 
 
 def test_topics_are_registered_and_therefore_scanned():
-    """``_scan_topics_union`` is the registry ∪ per-contract tracked topics, so
-    registration is what enrolls every active Safe."""
+    """Registration is what enrolls every active Safe."""
     assert GOVERNANCE_EVENT_TOPICS[ENABLED_MODULE_TOPIC0] == "safe_module_enabled"
     assert GOVERNANCE_EVENT_TOPICS[DISABLED_MODULE_TOPIC0] == "safe_module_disabled"
     assert GOVERNANCE_EVENT_TOPICS[CHANGED_GUARD_TOPIC0] == "safe_guard_changed"
@@ -48,8 +43,6 @@ def test_topics_are_registered_and_therefore_scanned():
 
 
 def _log(topic0: str, *, indexed: bool):
-    """The same event as emitted by an indexing (1.4.1) and a non-indexing
-    (1.1.1 / 1.3.0) singleton. Same topic0 either way."""
     if indexed:
         return {
             "address": SAFE,
@@ -76,8 +69,7 @@ def _parsed(log: dict) -> dict[str, Any]:
 
 
 def test_enabled_module_decodes_on_both_indexing_conventions():
-    """A topics-only decoder returns nothing on a 1.3.0 Safe, and 1.3.0 is 9 of
-    the 19 Safe principals on this corpus."""
+    """1.3.0 is 9 of the 19 Safe principals here, and it doesn't index the address."""
     for indexed in (True, False):
         parsed = _parsed(_log(ENABLED_MODULE_TOPIC0, indexed=indexed))
         assert parsed["event_type"] == "safe_module_enabled"
@@ -96,13 +88,8 @@ def test_disabled_module_and_changed_guard_decode():
     assert parsed["effect_tags"]["writes"] == ["_safe_guard"]
 
 
-# --- strict topic/data decoding --------------------------------------------
-#
-# The address published here IS the fact — "module X was enabled on this Safe",
-# "the guard became Y" (and the zero address is how "the guard was REMOVED" is
-# written). A topic or data body that is not a whole 32-byte word decodes to no
-# address at all; left-padding it to width would mint one, and on
-# ``safe_guard_changed`` the minted one is a protection withdrawal.
+# The published address is the fact. A slot or body that is not a whole 32-byte word decodes to nothing; padding it
+# would mint an address, and on ``safe_guard_changed`` the zero address reads as "guard removed".
 
 
 def _log_with(topic0: str, *, topics_tail: list[str], data: str) -> dict:
@@ -122,10 +109,8 @@ _WORD = "0" * 24 + MODULE[2:]
 @pytest.mark.parametrize(
     ("topic0", "topics_tail", "data", "event_type", "key"),
     [
-        # No address anywhere => the key is absent, not the zero address.
         pytest.param(ENABLED_MODULE_TOPIC0, [], "0x", "safe_module_enabled", "module", id="empty-data-and-no-topic"),
-        # ``"0x"`` in the indexed slot padded to width is ``0x0000...0000`` -- a real address, and on
-        # ChangedGuard the one that reads as "guard removed".
+        # Padding ``"0x"`` would mint the zero address, which reads as "guard removed".
         pytest.param(ENABLED_MODULE_TOPIC0, ["0x"], "0x", "safe_module_enabled", "module", id="empty-topic-enabled"),
         pytest.param(DISABLED_MODULE_TOPIC0, ["0x"], "0x", "safe_module_disabled", "module", id="empty-topic-disabled"),
         pytest.param(CHANGED_GUARD_TOPIC0, ["0x"], "0x", "safe_guard_changed", "guard", id="empty-topic-guard"),
@@ -145,13 +130,11 @@ _WORD = "0" * 24 + MODULE[2:]
             "module",
             id="empty-topic-module-execution-failure",
         ),
-        # ``"0X"...`` is not stripped by a ``"0x"`` prefix strip, so the slice lands two characters
-        # late and yields a DIFFERENT, well-formed-looking address.
+        # ``"0X"`` survives a ``"0x"`` strip and yields a different, plausible address.
         pytest.param(
             ENABLED_MODULE_TOPIC0, [], "0X" + _WORD, "safe_module_enabled", "module", id="uppercase-0x-data-body"
         ),
-        # Right length, no hex. ``bytes.fromhex`` ignores ASCII whitespace, so the byte-length check
-        # after it is what rejects these.
+        # ``bytes.fromhex`` ignores whitespace, so the byte-length check rejects these.
         pytest.param(ENABLED_MODULE_TOPIC0, [], "0x" + " " * 64, "safe_module_enabled", "module", id="whitespace-body"),
         pytest.param(
             ENABLED_MODULE_TOPIC0,
@@ -169,7 +152,6 @@ _WORD = "0" * 24 + MODULE[2:]
             "module",
             id="underscore-body",
         ),
-        # A body that is not a whole number of words is not an ABI encoding.
         pytest.param(ENABLED_MODULE_TOPIC0, [], "0x", "safe_module_enabled", "module", id="partial-word-empty-body"),
         pytest.param(ENABLED_MODULE_TOPIC0, [], "0x00", "safe_module_enabled", "module", id="partial-word-one-byte"),
         pytest.param(
@@ -178,8 +160,6 @@ _WORD = "0" * 24 + MODULE[2:]
         pytest.param(
             ENABLED_MODULE_TOPIC0, [], "0x" + "0" * 65, "safe_module_enabled", "module", id="partial-word-65-nibbles"
         ),
-        # An ABI-encoded address is left-padded with zeros; a word that is not one is not an address,
-        # and its low 20 bytes are not "the address it holds".
         pytest.param(
             ENABLED_MODULE_TOPIC0,
             ["0x" + "ff" * 32],
@@ -197,8 +177,6 @@ def test_malformed_topic_or_data_publishes_no_address(topic0, topics_tail, data,
 
 
 def test_well_formed_logs_decode_byte_identically():
-    """Recall pin for the strict decoder: the real emitted shapes — indexed
-    (1.4.1) and non-indexed (1.1.1/1.3.0) — still yield exactly the module."""
     for topic0, key in (
         (ENABLED_MODULE_TOPIC0, "module"),
         (DISABLED_MODULE_TOPIC0, "module"),
@@ -207,8 +185,7 @@ def test_well_formed_logs_decode_byte_identically():
         for indexed in (True, False):
             parsed = _parsed(_log(topic0, indexed=indexed))
             assert parsed[key] == MODULE
-    # And the zero address, when a well-formed word actually carries it, is
-    # still published — "guard removed" is a real event.
+    # "Guard removed" is a real event.
     parsed = _parsed(_log_with(CHANGED_GUARD_TOPIC0, topics_tail=["0x" + "0" * 64], data="0x"))
     assert parsed["guard"] == "0x" + "0" * 40
 
@@ -221,8 +198,7 @@ def test_should_watch_respects_the_flag():
     parsed = _parsed(_log(ENABLED_MODULE_TOPIC0, indexed=True))
     assert _should_watch(cast(Any, _MC({"watch_safe_modules": True})), parsed) is True
     assert _should_watch(cast(Any, _MC({"watch_safe_modules": False})), parsed) is False
-    # Rows enrolled before the flag existed default on rather than silently
-    # dropping the event.
+    # Rows enrolled before the flag existed default on.
     assert _should_watch(cast(Any, _MC({"watch_ownership": True})), parsed) is True
 
 
@@ -237,7 +213,6 @@ def test_safe_polling_plan_carries_both_storage_slots():
     assert plan["guard"]["kind"] == "storage_slot"
     assert plan["guard"]["slot"] == SAFE_GUARD_SLOT
     assert plan["guard"]["suppress_when_scan_event_types"] == ["safe_guard_changed"]
-    # The pre-existing entry is untouched.
     assert plan["threshold"]["target"] == "getThreshold"
 
 
@@ -248,8 +223,7 @@ def test_non_safe_types_get_no_safe_slot_entries():
 
 
 class TestSafeExecutionEvents:
-    """ExecutionSuccess / ExecutionFailure are emitted for EVERY executed Safe tx (the
-    'recent activity' breadcrumb). Pin the topic→type mapping and field decode."""
+    """Emitted for every executed Safe tx."""
 
     @pytest.mark.parametrize(
         ("topic0", "hash_byte", "payment", "tx", "log_index", "event_type"),
@@ -274,7 +248,6 @@ class TestSafeExecutionEvents:
         assert ev["log_index"] == log_index
 
     def test_short_data_does_not_crash(self):
-        """Defensive: short/malformed data field should not raise."""
         log = {
             "topics": [EXECUTION_SUCCESS_TOPIC0],
             "data": "0x" + "ab" * 8,  # well under the 64+64 hex chars expected
@@ -290,11 +263,7 @@ class TestSafeExecutionEvents:
     @pytest.mark.parametrize(
         ("topic0", "address", "safe_tx_hash", "data", "block", "tx", "log_index", "event_type", "payment"),
         [
-            # The 1.4.1 singleton indexes txHash: topics[1] carries the hash, the body is payment
-            # alone. Byte-for-byte log 414 of mainnet tx
-            # ``0xf047c068b4d7311344adfb02fc56310d7200d12799a9894675b3b66ff5f2b431`` (Safe
-            # ``0x607d0c7e3578802eb46d388cb86cfba8ff657306``), one of four executions that decoded to
-            # neither field before this arm (topic0 matches the non-indexed form).
+            # Byte-for-byte log 414 of mainnet tx 0xf047c068…, which decoded to neither field before this arm.
             pytest.param(
                 EXECUTION_SUCCESS_TOPIC0,
                 "0x607d0c7e3578802eb46d388cb86cfba8ff657306",
@@ -338,9 +307,7 @@ class TestSafeExecutionEvents:
         assert ev["safe_tx_hash"] == safe_tx_hash
         assert ev["payment"] == payment
 
-    # A second topic proves txHash is indexed, so the body should be payment alone. A body that is
-    # not says the layout is not the one we can read: the hash still decodes from its own topic, and
-    # no payment is invented from a word we cannot place.
+    # A body that isn't payment alone means an unreadable layout; the hash still decodes, and no payment is invented.
     @pytest.mark.parametrize(
         "data",
         [
@@ -361,8 +328,6 @@ class TestSafeExecutionEvents:
         assert "payment" not in ev
 
     def test_indexed_variant_with_malformed_topic_publishes_no_hash(self):
-        """The payment word is still witnessed; the hash is not, and a truncated
-        topic is never left-padded into one."""
         log = {
             "topics": [EXECUTION_SUCCESS_TOPIC0, "0xabcd"],
             "data": "0x" + format(7, "x").zfill(64),
@@ -374,8 +339,6 @@ class TestSafeExecutionEvents:
         assert "safe_tx_hash" not in ev
         assert ev["payment"] == 7
 
-    # Module-triggered execution: address indexed in topics[1], no SafeTx hash or payment
-    # (pre-authorised modules such as recovery or a batch executor).
     @pytest.mark.parametrize(
         ("topic0", "module_byte", "tx", "event_type"),
         [

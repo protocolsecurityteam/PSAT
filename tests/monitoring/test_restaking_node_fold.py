@@ -1,9 +1,4 @@
-"""D1 — node enumeration: one fold, one cursor, and a set that is a lower bound.
-
-The fold proves a node EXISTS. It can never prove one does not, so every arm
-below asserts the absence side stays unclaimed: no cursor on an unresolved
-creation block, no complete node set, and no earned negative anywhere.
-"""
+"""D1: the fold proves a node exists, never that one doesn't, so no arm claims completeness or an earned negative."""
 
 from __future__ import annotations
 
@@ -26,9 +21,7 @@ from services.monitoring.restaking_enrollment import (
 from tests.conftest import requires_postgres
 from tests.support.witness_wire import stub_seed_witness
 
-# The measured emitter: the EtherFiNodesManager PROXY. Its ``contracts`` row is
-# keyed at the implementation (0xcf5928ea…), which emits nothing — the same
-# implementation-vs-proxy keying defect the balance plane documents.
+# The manager's ``contracts`` row is keyed at the implementation, which emits nothing.
 EFNM_PROXY = "0x8b71140ad2e5d1e7018d2a7f8a288bd3cd38916f"
 EFNM_IMPLEMENTATION = "0xcf5928ea7d7f164ec868ceda7a69e08a102b5e05"
 EFNM_CREATION_BLOCK = 17174453
@@ -51,7 +44,6 @@ def _log(node: str, *, address: str = EFNM_PROXY) -> dict:
 class TestTopic:
     def test_topic0_is_derived_from_the_signature(self):
         assert PUBKEY_LINKED_TOPIC0 == "0x" + keccak(text=PUBKEY_LINKED_SIGNATURE).hex()
-        # Reproduced against the chain at block 25643300.
         assert PUBKEY_LINKED_TOPIC0 == "0x5e525a525cf73653f769c8305dc71a68b85b0e62e3cc5258fe187ff9fd3e5cb9"
 
 
@@ -70,7 +62,6 @@ class TestEmitterDiscovery:
             fetch_logs=fetch,
         )
         assert emitters == {EFNM_PROXY}
-        # One request carrying the whole address set, not one probe per address.
         assert captured["addresses"] == [EFNM_PROXY, EFNM_IMPLEMENTATION]
         assert captured["topic0"] == PUBKEY_LINKED_TOPIC0
 
@@ -152,10 +143,9 @@ class TestEnrollment:
         db_session.rollback()
 
     def test_warm_siblings_never_regress_and_stay_complete(self, db_session, monkeypatch):
-        """The measured deferral: a cold cursor joins warm ones, and
-        ``index_event_group_step`` takes ``min(last_indexed_block)``, dragging the shared
-        window back 8,468,848 blocks (17 windows at 500,000). A sibling must not lose ground
-        or have its completeness reset by the enrollment itself."""
+        """A cold cursor's ``min(last_indexed_block)`` dragged the shared window back 8.5M blocks; siblings must not
+        lose ground.
+        """
         warm_topics = [
             "0x1bb6cfc6cc765f48d6e1b6b8c5e5503c0d2ee684bdd46f53e0785cc966e20fab",
             "0x2a1547b8c4fcc5c564373b299ab7eecb2d5013083f2fe08a64698fe5198e1930",
@@ -257,11 +247,9 @@ class TestNodeSet:
 
 
 def test_no_module_outside_the_plane_imports_the_position_model():
-    """Makes "zero readers modified" self-enforcing: the plane is invisible to spot-balance
-    readers only structurally (a node has no ``contracts`` row), so the import surface is asserted."""
+    """The plane is invisible to spot-balance readers only structurally, so the import surface is asserted."""
     root = pathlib.Path(__file__).resolve().parents[2]
     allowed = {
-        # The model's home and the package re-export surface.
         root / "db" / "models" / "balances.py",
         root / "db" / "models" / "__init__.py",
         root / "tests" / "monitoring" / "test_restaking_position.py",
@@ -271,21 +259,15 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         # by the positions' OWN entity keys, which cannot use spot-balance readers.
         root / "services" / "scoring" / "planes" / "value.py",
         root / "services" / "scoring" / "planes" / "provenance.py",
-        # The scorer's P4 universe builder: an ADDRESS-ONLY read (no quantity, share basis or
-        # dollar), so it cannot double-count or mis-key like a value reader. Kept outside the
-        # plane because its source-literal arm reads object storage, which the fold may not.
+        # An address-only read, so it can't double-count; its source-literal arm reads object storage, which the fold
+        # may not.
         root / "services" / "scoring" / "distill" / "universe.py",
-        # This file: the needle appears in the assertion below.
         pathlib.Path(__file__).resolve(),
-        # Metadata-registration guard: carries the table NAME in its snapshot
-        # of ``Base.metadata`` but reads no rows and imports no model.
         root / "tests" / "storage" / "test_models_metadata.py",
     }
     offenders = []
     for path in root.rglob("*.py"):
-        # Exclude on REPO-RELATIVE parts: a worktree checkout lives under
-        # .claude/worktrees/, so matching absolute parts would skip every file
-        # and pass this guard vacuously there.
+        # A worktree lives under .claude/worktrees/, so absolute parts would skip every file.
         if any(
             part in {".venv", "node_modules", "alembic", ".claude", ".local-compute", "analysis"}
             for part in path.relative_to(root).parts
@@ -294,9 +276,7 @@ def test_no_module_outside_the_plane_imports_the_position_model():
         if path in allowed:
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        # Both the mapped identifier AND the table name: a raw-SQL consumer
-        # (``FROM restaking_positions_latest``) never mentions the class, and the
-        # table name is the substring both relations share.
+        # A raw-SQL consumer never mentions the class.
         if any(needle in text for needle in ("RestakingPosition", "restaking_positions")):
             offenders.append(str(path.relative_to(root)))
     assert offenders == []

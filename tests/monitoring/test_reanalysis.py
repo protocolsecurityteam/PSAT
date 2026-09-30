@@ -1,10 +1,4 @@
-"""Integration tests for governance-event-triggered re-analysis job queuing.
-
-Covers triggering vs non-triggering events, in-flight dedup, poll-detected changes, cache
-compatibility, and Anvil deploy -> upgrade -> scan -> job queued.
-
-Requires PostgreSQL (TEST_DATABASE_URL) and anvil/cast/forge on PATH for the Anvil tests.
-"""
+"""Anvil tests need anvil/cast/forge on PATH; all need TEST_DATABASE_URL."""
 
 from __future__ import annotations
 
@@ -48,9 +42,7 @@ from tests.support.anvil import (
     anvil_env,  # noqa: F401
 )
 
-# Event types that trigger a full re-analysis; ``should_trigger_reanalysis`` derives the same
-# verdict from ``_HANDROLLED_EVENT_TYPE_TO_TAGS``. ``upgraded_revision`` is included because
-# Aave V2's revision bump IS a delegate-target swap.
+# ``upgraded_revision`` is included because Aave V2's revision bump is a delegate-target swap.
 _TRIGGERING_EVENT_TYPES = (
     "upgraded",
     "new_implementation",
@@ -65,9 +57,6 @@ _TRIGGERING_EVENT_TYPES = (
     "initialized",
 )
 
-# ---------------------------------------------------------------------------
-# Skip conditions
-# ---------------------------------------------------------------------------
 
 _has_anvil = shutil.which("anvil") is not None
 _has_cast = shutil.which("cast") is not None
@@ -85,13 +74,9 @@ pytestmark = [requires_postgres, pytest.mark.anvil, pytest.mark.compile]
 
 @pytest.fixture(autouse=True)
 def _disable_scan_confirmation_depth(monkeypatch):
-    # Anvil chains are a few blocks long; the 12-block confirmation clamp would hide events.
+    # The 12-block confirmation clamp would hide events on a short Anvil chain.
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
 
-
-# ---------------------------------------------------------------------------
-# Solidity test contracts
-# ---------------------------------------------------------------------------
 
 PAUSABLE_SOURCE = """
 // SPDX-License-Identifier: MIT
@@ -139,14 +124,8 @@ contract TestAdminProxy {
 """
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def db_session():
-    """PostgreSQL session with full schema, cleaned up after each test."""
     engine = create_engine(DATABASE_URL)
     Base.metadata.create_all(engine)
 
@@ -196,8 +175,7 @@ def _make_monitored_contract(
 ) -> MonitoredContract:
     from services.monitoring.polling_plan import build_polling_plan
 
-    # PROXY_SOURCE writes the EIP-1967 slot via assembly; the matching vendored entry lets
-    # the storage-slot poll actually read the upgraded value.
+    # The vendored EIP-1967 entry lets the storage-slot poll read the upgraded value.
     plan_proxy_type = proxy_type or ("eip1967" if contract_type == "proxy" else None)
     tracking_plan: dict | None = None
     if contract_type in ("regular", "pausable", "proxy"):
@@ -262,13 +240,7 @@ def _make_monitored_contract(
     return mc
 
 
-# ---------------------------------------------------------------------------
-# Unit tests: should_trigger_reanalysis
-# ---------------------------------------------------------------------------
-
-
 class TestShouldTriggerReanalysis:
-    """Pure logic tests, no DB."""
 
     @pytest.mark.parametrize("event_type", sorted(_TRIGGERING_EVENT_TYPES))
     def test_triggering_event_types(self, event_type):
@@ -309,11 +281,10 @@ class TestShouldTriggerReanalysis:
     @pytest.mark.parametrize(
         ("event_type", "effect_tags"),
         [
-            # Renamed admin slots (e.g. fork ``protocolOwner``) still trigger via effect_tags.
+            # Renamed admin slots (e.g. ``protocolOwner``) still trigger.
             pytest.param("controller_changed:state_variable:owner", {"writes": ["owner"]}, id="writes_owner"),
-            # A DELEGATECALL in the emitter body is unconditionally upgrade-equivalent.
             pytest.param("controller_changed:custom", {"delegates": True}, id="delegates"),
-            # Re-init detected by modifier, not slot name, so OZ forks renaming ``_initialized`` are caught.
+            # Detected by modifier, so forks renaming ``_initialized`` are caught.
             pytest.param("controller_changed:custom", {"is_initializer": True}, id="is_initializer"),
         ],
     )
@@ -321,13 +292,7 @@ class TestShouldTriggerReanalysis:
         assert should_trigger_reanalysis(event_type, {"effect_tags": effect_tags}) is True
 
 
-# ---------------------------------------------------------------------------
-# DB integration tests: maybe_queue_reanalysis
-# ---------------------------------------------------------------------------
-
-
 class TestMaybeQueueReanalysis:
-    """Tests that exercise the full DB path (requires PostgreSQL)."""
 
     def test_upgrade_queues_job(self, db_session):
         mc = _make_monitored_contract(db_session, "0x" + "aa" * 20, "proxy")
@@ -437,20 +402,17 @@ class TestMaybeQueueReanalysis:
         assert job.request.get("reanalysis_trigger") == f"poll:{field}"
 
     def test_different_event_types_dedup_each_other(self, db_session):
-        """An upgrade and an ownership_transferred for the same address produce one job."""
         addr = "0x" + "55" * 20
         mc = _make_monitored_contract(db_session, addr, "proxy")
 
         job1 = maybe_queue_reanalysis(db_session, mc, "upgraded")
         assert job1 is not None
 
-        # A different event type for the same address should still be deduped
         job2 = maybe_queue_reanalysis(db_session, mc, "ownership_transferred")
         assert job2 is None
 
     def test_cache_compatibility(self, db_session):
-        """A queued re-analysis job (status=queued, stage=discovery) must not interfere with
-        ``find_completed_static_cache``, which wants completed+done jobs."""
+        """The cache wants completed+done jobs, so a queued re-analysis must not interfere."""
         from db.queue import find_completed_static_cache, store_artifact, store_source_files
 
         addr = "0x" + "66" * 20
@@ -487,25 +449,16 @@ class TestMaybeQueueReanalysis:
         assert reanalysis_job is not None
         assert reanalysis_job.status == JobStatus.queued
 
-        # find_completed_static_cache should still find the OLD completed job
         cached = find_completed_static_cache(db_session, addr, chain="ethereum")
         assert cached is not None
         assert cached.id == old_job.id
         assert cached.status == JobStatus.completed
 
 
-# ---------------------------------------------------------------------------
-# Anvil integration tests: scan → detect → queue
-# ---------------------------------------------------------------------------
-
-
 @requires_anvil
 class TestReanalysisAnvilIntegration:
-    """Full flow tests: deploy contracts on Anvil, trigger events via
-    scan_for_events, verify re-analysis jobs are queued."""
 
     def test_proxy_upgrade_triggers_reanalysis_job(self, anvil_env, db_session):
-        """Deploy proxy, upgrade, scan → reanalysis job queued."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
 
@@ -553,7 +506,6 @@ class TestReanalysisAnvilIntegration:
         assert job.stage == JobStage.discovery
 
     def test_ownership_transfer_triggers_reanalysis_job(self, anvil_env, db_session):
-        """Deploy ownable, transfer, scan → reanalysis job queued."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
 
@@ -589,7 +541,6 @@ class TestReanalysisAnvilIntegration:
         assert jobs[0].request.get("reanalysis_trigger") == "ownership_transferred"
 
     def test_admin_changed_triggers_reanalysis_job(self, anvil_env, db_session):
-        """Deploy admin proxy, change admin, scan → reanalysis job queued."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
 
@@ -632,7 +583,6 @@ class TestReanalysisAnvilIntegration:
         assert jobs[0].request.get("reanalysis_trigger") == "admin_changed"
 
     def test_multiple_upgrades_single_scan_creates_one_job(self, anvil_env, db_session):
-        """Two upgrades in consecutive blocks → only one reanalysis job (dedup)."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
 
@@ -664,7 +614,6 @@ contract ImplV3 { uint256 public version = 3; }
         upgrade_events = [e for e in events if e.event_type == "upgraded"]
         assert len(upgrade_events) == 2
 
-        # But only ONE reanalysis job (second upgrade deduped against first)
         jobs = (
             db_session.execute(
                 select(Job).where(
@@ -678,7 +627,6 @@ contract ImplV3 { uint256 public version = 3; }
         assert len(jobs) == 1
 
     def test_poll_implementation_change_triggers_reanalysis(self, anvil_env, db_session):
-        """Poll detects impl change → reanalysis job queued."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -724,11 +672,9 @@ contract ImplV3 { uint256 public version = 3; }
         assert jobs[0].request.get("reanalysis_trigger") == "poll:implementation"
 
     def test_mixed_events_only_trigger_for_relevant(self, anvil_env, db_session):
-        """Multiple contracts, mixed events → only triggering ones get jobs."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
 
-        # Deploy ownable (trigger) and pausable (no trigger)
         ownable_addr = _compile_and_deploy(OWNABLE_SOURCE, "TestOwnable", [], rpc_url, PRIVATE_KEY, tmp_path)
         pausable_addr = _compile_and_deploy(PAUSABLE_SOURCE, "TestPausable", [], rpc_url, PRIVATE_KEY, tmp_path)
 
@@ -744,7 +690,6 @@ contract ImplV3 { uint256 public version = 3; }
         events = scan_for_events(db_session, rpc_url)
         assert len(events) >= 2
 
-        # Only the ownable contract should have a reanalysis job
         ownable_jobs = (
             db_session.execute(select(Job).where(func.lower(Job.address) == ownable_addr.lower())).scalars().all()
         )
@@ -756,17 +701,10 @@ contract ImplV3 { uint256 public version = 3; }
         assert len(pausable_jobs) == 0
 
 
-# ---------------------------------------------------------------------------
-# Webhook embed tests: event annotation + completion notification
-# ---------------------------------------------------------------------------
-
-
 @requires_anvil
 class TestEventEmbedAnnotation:
-    """Verify that the event webhook embed shows a reanalysis note."""
 
     def test_event_data_contains_reanalysis_job_id(self, anvil_env, db_session):
-        """After scan, the MonitoredEvent.data has reanalysis_job_id."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
 
@@ -784,14 +722,12 @@ class TestEventEmbedAnnotation:
         evt = ownership_events[0]
         assert evt.data is not None
         assert "reanalysis_job_id" in evt.data
-        # The job ID should match an actual queued job
         job_id = evt.data["reanalysis_job_id"]
         job = db_session.get(Job, uuid.UUID(job_id))
         assert job is not None
         assert job.status == JobStatus.queued
 
     def test_non_triggering_event_has_no_job_id(self, anvil_env, db_session):
-        """Pause events do NOT get annotated with reanalysis_job_id."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
 
@@ -807,13 +743,10 @@ class TestEventEmbedAnnotation:
             assert "reanalysis_job_id" not in data
 
 
-# ---------------------------------------------------------------------------
-# Embed shape only — no chain involved, so these stay outside the anvil class.
-# ---------------------------------------------------------------------------
+# No chain involved, so these stay outside the anvil class.
 
 
 def test_embed_includes_reanalysis_field(db_session):
-    """_format_governance_embed adds a Re-analysis field when job ID is present."""
     from services.monitoring.notifier import _format_governance_embed
 
     mc = _make_monitored_contract(db_session, "0x" + "a1" * 20)
@@ -836,7 +769,6 @@ def test_embed_includes_reanalysis_field(db_session):
 
 
 def test_embed_without_reanalysis_has_no_field(db_session):
-    """Normal event embed does NOT have a Re-analysis field."""
     from services.monitoring.notifier import _format_governance_embed
 
     mc = _make_monitored_contract(db_session, "0x" + "c3" * 20, "pausable")
@@ -858,7 +790,6 @@ def test_embed_without_reanalysis_has_no_field(db_session):
 
 
 class TestSnapshotAndDiff:
-    """Test the snapshot capture and diff logic."""
 
     def test_snapshot_captures_contract_state(self, db_session):
         from services.monitoring.reanalysis import _build_snapshot
@@ -962,7 +893,6 @@ class TestSnapshotAndDiff:
         db_session.commit()
         db_session.refresh(contract)
 
-        # Add new functions
         from db.models import EffectiveFunction
 
         for name in ["transfer", "approve", "newFunction"]:
@@ -1026,11 +956,9 @@ class TestSnapshotAndDiff:
 
 
 class TestCompletionWebhook:
-    """Test the reanalysis completion Discord notification."""
 
     @pytest.fixture()
     def _protocol_with_sub(self, db_session):
-        """Create a protocol with a Discord subscription."""
         from db.models import ProtocolSubscription
 
         proto = _make_protocol(db_session, "WebhookTest")
@@ -1096,7 +1024,6 @@ class TestCompletionWebhook:
 
     @pytest.mark.parametrize("with_protocol", [False, True], ids=["without_protocol", "without_subscriptions"])
     def test_completion_no_webhook(self, db_session, with_protocol):
-        """No protocol_id, or a protocol with no subscriptions → no webhook sent."""
         from unittest.mock import patch
 
         from services.monitoring.notifier import notify_reanalysis_complete
@@ -1160,7 +1087,6 @@ class TestCompletionWebhook:
             assert "No significant differences" in field_map["Changes detected"]
 
     def test_completion_embed_references_job_id(self, db_session, _protocol_with_sub):
-        """Both event and completion embeds reference the same Job ID."""
         from unittest.mock import MagicMock, patch
 
         from services.monitoring.notifier import _format_governance_embed, notify_reanalysis_complete
@@ -1180,7 +1106,6 @@ class TestCompletionWebhook:
         mc.contract_id = contract.id
         db_session.commit()
 
-        # Simulate: event with reanalysis_job_id
         job = Job(
             address=addr.lower(),
             status=JobStatus.completed,
@@ -1199,7 +1124,6 @@ class TestCompletionWebhook:
 
         short_id = str(job.id)[:8]
 
-        # Event embed
         evt = MonitoredEvent(
             id=uuid.uuid4(),
             monitored_contract_id=mc.id,
@@ -1216,7 +1140,6 @@ class TestCompletionWebhook:
         event_fields = {f["name"]: f["value"] for f in event_embed["fields"]}
         assert short_id in event_fields["Re-analysis"]
 
-        # Completion embed
         with patch("services.monitoring.notifier.requests.post") as mock_post:
             mock_post.return_value = MagicMock(ok=True)
             notify_reanalysis_complete(db_session, job)

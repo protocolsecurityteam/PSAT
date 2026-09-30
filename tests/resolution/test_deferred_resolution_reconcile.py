@@ -1,17 +1,8 @@
-"""Regression: index-cold capability deferrals self-heal once the durable event index
-catches up (the event-indexer cold-start resolution race).
+"""Index-cold deferrals self-heal once the event index catches up.
 
-A privileged function whose authority isn't indexed at analysis time resolves cold to
-``external_check_only`` (basis ``no_index_cursor``): fail-safe but *sticky*, since nothing
-recomputes it after backfill. Two adapter-agnostic halves are pinned:
-
-  1. The index-cold path tags its ``external_check_only`` with
-     ``check.extra.deferred_pending_index = True`` (ONLY that basis, never warm-but-empty
-     or missing-context), and the SAME resolver folds to the concrete set once indexed.
-     Pinned against the REAL ``PostgresEventLogRepo`` using etherfi's captured logs.
-  2. ``reconcile_deferred_resolutions`` re-enqueues the *policy* stage of a completed job
-     whose deferred authorities are now ``backfill_complete``, and leaves still-cold jobs
-     (no thrash) and non-deferred external checks (true negatives) untouched.
+The cold path tags ``external_check_only`` with ``deferred_pending_index`` (only for ``no_index_cursor``) and the
+same resolver folds to the real set once indexed. ``reconcile_deferred_resolutions`` re-enqueues policy only for
+jobs whose authorities are now ``backfill_complete``.
 """
 
 from __future__ import annotations
@@ -84,11 +75,7 @@ def _ctx(repo: PostgresEventLogRepo, teller: str, authority: str, selector: str)
 
 
 def _seed_role_logs(session, authority: str) -> None:
-    """Insert the captured RolesAuthority logs into ``indexed_event_logs``.
-
-    Synthetic monotonic ``(block_number, tx, log_index)`` keeps the fixture's log order (the
-    canCall fold depends on it) after ``PostgresEventLogRepo`` re-sorts.
-    """
+    """Synthetic monotonic ordering keeps the fixture's log order, which the canCall fold depends on."""
     for i, log in enumerate(_fixture()["logs"]):
         data = log.get("data") or "0x"
         body = data[2:] if isinstance(data, str) and data.startswith("0x") else ""
@@ -142,7 +129,6 @@ def test_solmate_cold_index_defers_with_marker(db_session):
     assert cap.kind == "external_check_only"
     assert cap.check is not None
     assert cap.check.extra.get("basis") == ["no_index_cursor"]
-    # The marker the reconciler keys on; without it the cold result sticks forever.
     assert cap.check.extra.get(DEFERRED_MARKER) is True
     assert cap.check.target_address == authority
 
@@ -166,7 +152,6 @@ def test_solmate_warm_index_self_heals_to_concrete_caller(db_session):
 
 @requires_postgres
 def test_solmate_backfill_incomplete_cursor_still_defers(db_session):
-    # A mid-backfill cursor must still read as cold, else partial history folds as exact.
     fixture = _fixture()
     authority, teller = fixture["authority"].lower(), fixture["teller"].lower()
     _seed_role_cursors(db_session, authority, backfill_complete=False)
@@ -220,11 +205,6 @@ def test_iter_deferred_authorities_handles_signer_and_non_dict():
     assert list(_iter_deferred_authorities(None)) == []
 
 
-# ---------------------------------------------------------------------------
-# Half 2 — the reconciler re-enqueues policy only when the index has caught up.
-# ---------------------------------------------------------------------------
-
-
 def _deferred_cap(authority: str) -> dict:
     return capability_to_dict(
         CapabilityExpr.external_check_only(
@@ -238,8 +218,7 @@ def _deferred_cap(authority: str) -> dict:
 
 
 def _seed_completed_job_with_cap(db_session, *, address: str, capability_expr: dict, chain: str = "ethereum") -> Job:
-    # conftest ``db_session`` teardown does NOT clear Job rows, and these tests re-enqueue
-    # a job to queued; a leaked job would trip the "active job" guard. Purge first.
+    # Teardown doesn't clear Job rows, and a leaked job trips the active-job guard.
     db_session.query(Contract).filter(func.lower(Contract.address) == address.lower()).delete()
     db_session.query(Job).filter(func.lower(Job.address) == address.lower()).delete()
     db_session.commit()
@@ -284,13 +263,11 @@ def test_reconciler_reenqueues_only_when_authority_backfilled(db_session):
     assert reconcile_deferred_resolutions(db_session, chain_id=1) == 1
     assert job.status == JobStatus.queued and job.stage == JobStage.policy
 
-    # Idempotent: the job is no longer completed/done, so a second pass is a no-op.
     assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
 
 
 @requires_postgres
 def test_reconciler_skips_when_address_has_an_active_job(db_session):
-    # An in-flight re-analysis for the same address blocks a second job.
     authority = "0x" + "e5" * 20
     addr = "0x" + "f6" * 20
     job = _seed_completed_job_with_cap(db_session, address=addr, capability_expr=_deferred_cap(authority))
@@ -304,7 +281,6 @@ def test_reconciler_skips_when_address_has_an_active_job(db_session):
 
 @requires_postgres
 def test_reconciler_ignores_non_deferred_external_check(db_session):
-    # A genuine external check (no deferred marker) is never re-enqueued.
     target = "0x" + "c3" * 20
     plain = capability_to_dict(
         CapabilityExpr.external_check_only(
@@ -321,8 +297,7 @@ def test_reconciler_ignores_non_deferred_external_check(db_session):
 
 @requires_postgres
 def test_reconciler_does_not_select_off_chain_twin(db_session):
-    # The same authority being warm on chain 1 must not re-enqueue a base deployment
-    # (base index still cold): the row-select is scoped to the pass's chain.
+    # The row-select is scoped to the pass's chain.
     authority = "0x" + "e5" * 20
     addr = "0x" + "f6" * 20
     base_job = _seed_completed_job_with_cap(
@@ -336,12 +311,8 @@ def test_reconciler_does_not_select_off_chain_twin(db_session):
     assert base_job.status == JobStatus.completed and base_job.stage == JobStage.done
 
 
-# ---------------------------------------------------------------------------
-# Half 2b - the ORPHANED-CONTRACT class. ``contracts.job_id`` is ``ON DELETE SET NULL``
-# and every stage finds its contract through it, so deleting a job strands the
-# contract's rows outside the reconciler forever. 2 contracts / 32 marker rows locally
-# (a LOWER bound), so these tests pin the SHAPE, not the number.
-# ---------------------------------------------------------------------------
+# ``contracts.job_id`` is SET NULL on job deletion, stranding the contract's rows outside the reconciler; these pin the
+# shape, not the count.
 
 
 def _seed_orphaned_contract(
@@ -352,8 +323,6 @@ def _seed_orphaned_contract(
     chain: str = "ethereum",
     with_job: bool = True,
 ) -> Job | None:
-    """A marker-bearing contract with NULL ``job_id`` (what job deletion leaves behind),
-    optionally with a completed job at the same ``(address, chain)``."""
     db_session.query(Contract).filter(func.lower(Contract.address) == address.lower()).delete()
     db_session.query(Job).filter(func.lower(Job.address) == address.lower()).delete()
     db_session.commit()
@@ -380,8 +349,7 @@ def _seed_orphaned_contract(
 
 @requires_postgres
 def test_orphaned_contract_marker_rows_are_reachable_at_all(db_session):
-    """Reachability: the old inner join on ``Contract.job_id == Job.id`` returned NOTHING
-    for these rows. Pins the shape (a (job, orphan contract) pair), not the corpus count."""
+    """The old inner join on ``Contract.job_id`` returned nothing for these."""
     from services.resolution.deferred_reconciler import _orphaned_marker_rows
 
     authority = "0x" + "a7" * 20
@@ -405,15 +373,12 @@ def test_orphaned_contract_marker_rows_are_reachable_at_all(db_session):
 
 @requires_postgres
 def test_orphaned_contract_is_relinked_and_reenqueued_once_warm(db_session):
-    """The fix end to end. The policy stage writes ``effective_functions`` for
-    ``Contract.job_id == job.id``, so the linkage must be REPAIRED before re-enqueue, or
-    the re-run writes zero rows and the same job is handed back every pass."""
+    """The linkage must be repaired before re-enqueue, or the re-run writes zero rows and loops."""
     authority = "0x" + "a9" * 20
     addr = "0x" + "ba" * 20
     job = _seed_orphaned_contract(db_session, address=addr, capability_expr=_deferred_cap(authority))
     assert job is not None
 
-    # Still cold → the orphan route inherits the same thrash guard.
     _seed_role_cursors(db_session, authority, backfill_complete=False)
     db_session.commit()
     assert reconcile_deferred_resolutions(db_session, chain_id=1) == 0
@@ -436,12 +401,9 @@ def test_orphaned_contract_is_relinked_and_reenqueued_once_warm(db_session):
 
 @requires_postgres
 def test_orphan_with_no_job_at_its_address_is_left_alone(db_session):
-    """The residue, and why this is not a re-enqueue storm. Deleting a job deletes its
-    artifacts too, so a contract with no job at its ``(address, chain)`` cannot be
-    re-resolved; repeated passes must stay at zero.
-
-    This is the local corpus's actual shape (contracts 79 and 640 have no job at all), so
-    those 32 rows stay unconverged; stated in the commit, not papered over here."""
+    """Job deletion takes its artifacts too, so a contract with no job at its address can't be re-resolved and must
+    stay at zero.
+    """
     authority = "0x" + "ab" * 20
     addr = "0x" + "bc" * 20
     _seed_orphaned_contract(db_session, address=addr, capability_expr=_deferred_cap(authority), with_job=False)
@@ -456,8 +418,6 @@ def test_orphan_with_no_job_at_its_address_is_left_alone(db_session):
         db_session.execute(select(Contract.job_id).where(func.lower(Contract.address) == addr.lower())).scalar() is None
     )
 
-    # The residue is COUNTED, and a completed job at its (address, chain) moves it into
-    # the convergeable set.
     stranded_before = _unreachable_orphan_contracts(db_session, 1)
     assert stranded_before >= 1
     db_session.add(Job(address=addr, status=JobStatus.completed, stage=JobStage.done, request={"chain": "ethereum"}))
@@ -468,9 +428,7 @@ def test_orphan_with_no_job_at_its_address_is_left_alone(db_session):
 
 @requires_postgres
 def test_orphan_adoption_never_steals_a_contract_from_a_job_that_has_one(db_session):
-    """Keeps the route to EXACTLY the orphaned class: a candidate job that already owns a
-    contract row is the ``copy_static_cache`` reassignment shape, and adopting would give
-    one job two contracts."""
+    """Adopting would give one job two contracts."""
     authority = "0x" + "ad" * 20
     orphan_addr = "0x" + "be" * 20
     other_addr = "0x" + "bf" * 20
@@ -501,8 +459,6 @@ def test_orphan_adoption_never_steals_a_contract_from_a_job_that_has_one(db_sess
     _seed_role_cursors(db_session, authority, backfill_complete=True)
     db_session.commit()
 
-    # Pinned at the query level too: without this arm the query guard and the loop's
-    # same-transaction re-check cover for each other.
     from services.resolution.deferred_reconciler import _orphaned_marker_rows
 
     assert all(row[3] != orphan.id for row in _orphaned_marker_rows(db_session, 1))
@@ -515,8 +471,6 @@ def test_orphan_adoption_never_steals_a_contract_from_a_job_that_has_one(db_sess
 
 @requires_postgres
 def test_orphan_adoption_is_chain_scoped(db_session):
-    """``contracts`` is scoped only by the string ``chain``, so the orphan route keys on
-    ``(address, chain)``: a base orphan is not adopted by a chain-1 pass."""
     authority = "0x" + "ae" * 20
     addr = "0x" + "c1" * 20
 
@@ -550,8 +504,6 @@ def test_orphan_adoption_is_chain_scoped(db_session):
 
 @requires_postgres
 def test_two_candidate_jobs_adopt_the_orphan_exactly_once(db_session):
-    """``contracts`` is unique on ``(address, chain)``, so one orphan can have SEVERAL
-    completed contract-less jobs. Exactly one may adopt it; the other must be skipped."""
     authority = "0x" + "c3" * 20
     addr = "0x" + "c4" * 20
 
@@ -594,8 +546,6 @@ def test_two_candidate_jobs_adopt_the_orphan_exactly_once(db_session):
 
 @requires_postgres
 def test_orphan_route_ignores_a_non_deferred_external_check(db_session):
-    """True negatives stay negative on the orphan route: no deferred marker, never
-    re-enqueued, even with a warm cursor on its target."""
     target = "0x" + "af" * 20
     addr = "0x" + "c2" * 20
     plain = capability_to_dict(
@@ -616,8 +566,7 @@ def test_orphan_route_ignores_a_non_deferred_external_check(db_session):
 
 @requires_postgres
 def test_reconciler_active_job_check_is_chain_scoped(db_session):
-    # Same address on two chains: an in-flight base twin must not block the ethereum
-    # re-enqueue (the active-job guard is per chain).
+    # The active-job guard is per chain.
     authority = "0x" + "c1" * 20
     addr = "0x" + "d2" * 20
     eth_job = _seed_completed_job_with_cap(
@@ -631,10 +580,7 @@ def test_reconciler_active_job_check_is_chain_scoped(db_session):
     assert eth_job.status == JobStatus.queued and eth_job.stage == JobStage.policy
 
 
-# ---------------------------------------------------------------------------
-# Stage 4 — role-drift arm: re-resolve an enumerated role store when a grant/
-# revoke is indexed past the trace's folded frontier (the warm self-heal).
-# ---------------------------------------------------------------------------
+# The warm self-heal for an enumerated role store drifting past its folded frontier.
 
 
 def _role_store_cap(authority: str, frontier: int, members=("0x" + "ab" * 20,)) -> dict:
@@ -701,7 +647,6 @@ def test_iter_role_store_frontiers_walks_nested():
         ]
     )
     assert set(_iter_role_store_frontiers(capability_to_dict(cap))) == {(auth, 42)}
-    # A step without a numeric frontier is skipped (defensive).
     frontierless = {"trace": [{"step": TRACE_STEP_ENUMERABLE_ROLE_STORE, "authority": auth}]}
     assert list(_iter_role_store_frontiers(frontierless)) == []
 
@@ -734,8 +679,7 @@ def test_drift_ignores_pre_frontier_row(db_session):
 
 @requires_postgres
 def test_drift_requires_backfill_complete(db_session):
-    # A post-frontier row while the cursor is mid-backfill would re-resolve into a
-    # cold deferral — gate on backfill_complete so the re-run lands a warm fold.
+    # Mid-backfill would re-resolve into a cold deferral.
     authority = "0x" + "a8" * 20
     addr = "0x" + "b9" * 20
     job = _seed_completed_job_with_cap(db_session, address=addr, capability_expr=_role_store_cap(authority, 100))
@@ -749,9 +693,6 @@ def test_drift_requires_backfill_complete(db_session):
 
 @requires_postgres
 def test_drift_row_select_is_chain_scoped(db_session):
-    # A base job's enumerated role store must not be re-enqueued by a chain-1
-    # drift pass. The post-frontier grant + warm cursor live on chain 1; the base
-    # job's own index is unrelated, so a chain-1 pass must not select it.
     authority = "0x" + "ac" * 20
     addr = "0x" + "bd" * 20
     base_job = _seed_completed_job_with_cap(
@@ -767,8 +708,7 @@ def test_drift_row_select_is_chain_scoped(db_session):
 
 @requires_postgres
 def test_drift_ignores_non_role_store_capability(db_session):
-    # A deferred (non-enumerated) cap has no enumerable_role_store trace step → the
-    # drift arm never selects it (that's the cold reconciler's job, not this one).
+    # That's the cold reconciler's job.
     authority = "0x" + "aa" * 20
     addr = "0x" + "bb" * 20
     job = _seed_completed_job_with_cap(db_session, address=addr, capability_expr=_deferred_cap(authority))
@@ -778,12 +718,6 @@ def test_drift_ignores_non_role_store_capability(db_session):
 
     assert reconcile_role_set_drift(db_session, chain_id=1) == 0
     assert job.stage == JobStage.done
-
-
-# ---------------------------------------------------------------------------
-# Wiring — the self-heal must be invoked by the event indexer loop so it can't
-# be silently unwired.
-# ---------------------------------------------------------------------------
 
 
 def test_event_indexer_loop_invokes_deferred_reconciler():

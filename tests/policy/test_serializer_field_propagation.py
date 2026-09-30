@@ -1,10 +1,3 @@
-"""Pin field propagation through the serializers.
-
-``FunctionPrincipal.principal_type`` must survive ``_function_principal_payload`` and
-``_serialize_effective_functions``; ``signature_witness`` principals get a dedicated
-bucket; ``capability_expr`` / ``conditions`` / ``status`` reach the per-function dict;
-``_safe_role_int`` returns ``None`` for non-int identifiers instead of raising.
-"""
 
 from __future__ import annotations
 
@@ -45,8 +38,7 @@ def _fp_namespace(**overrides: Any) -> SimpleNamespace:
 
 
 def test_signature_witness_bucket_in_company_function_entry() -> None:
-    """``signature_witness`` principals route to a dedicated bucket so the UI can render
-    'anyone with a valid signature from <signer>' apart from set-membership controllers."""
+    """The UI renders "anyone with a valid signature from <signer>" apart from set membership."""
     from services.governance.principals import _build_company_function_entry
 
     ef = _ef_namespace(abi_signature="permit(address,uint256,bytes)")
@@ -80,7 +72,6 @@ def test_signature_witness_bucket_in_company_function_entry() -> None:
 
 
 def test_signature_witness_in_serialize_effective_functions() -> None:
-    """The analysis-detail serializer also buckets signature_witness and surfaces principal_type."""
     from services.aggregations.analysis_detail import _serialize_effective_functions
 
     ef = _ef_namespace(abi_signature="permit(address,uint256,bytes)")
@@ -131,7 +122,6 @@ def _analysis_detail_entry(ef: SimpleNamespace) -> dict:
 @pytest.mark.parametrize(
     ("serialize", "cap_expr", "conditions", "status"),
     [
-        # Reaches the company payload's per-function entry verbatim.
         pytest.param(
             _company_entry,
             {
@@ -144,7 +134,6 @@ def _analysis_detail_entry(ef: SimpleNamespace) -> dict:
             "public",
             id="company_serializer",
         ),
-        # Reaches the ``/api/analyses/{run}`` payload via ``_serialize_effective_functions``.
         pytest.param(
             _analysis_detail_entry,
             {"kind": "unsupported", "reason": "external_check_only_unresolved"},
@@ -165,29 +154,21 @@ def test_capability_expr_propagates_through_serializer(serialize, cap_expr, cond
 
 
 def test_safe_role_int_handles_string_and_dict_without_crashing() -> None:
-    """A direct ``int(role_grant["role"])`` crashes on role-name strings and
-    Condition mappings; ``_safe_role_int`` must return ``None`` for non-int, never raise."""
+    """Role names and Condition mappings crash a bare ``int()``."""
     from services.policy.principal_enrichment import _safe_role_int as _safe_role_int_pe
     from services.resolution.recursive import _safe_role_int as _safe_role_int_rr
 
     for safe_role_int in (_safe_role_int_pe, _safe_role_int_rr):
-        # Happy path — int passes through.
         assert safe_role_int(0) == 0
         assert safe_role_int(7) == 7
-        # Numeric string also works for persisted numeric role identifiers.
         assert safe_role_int("3") == 3
-        # Non-numeric string returns None — caller decides skip/log.
         assert safe_role_int("PAUSER_ROLE") is None
-        # Condition-mapping returns None instead of TypeError.
         assert safe_role_int({"kind": "time", "description": "x"}) is None
-        # None / missing returns None.
         assert safe_role_int(None) is None
-        # Lists also return None.
         assert safe_role_int([1, 2, 3]) is None
 
 
 def test_principal_enrichment_skips_non_int_role_without_crashing() -> None:
-    """Non-int role grants are swallowed, landing on the ``role_<label>`` controller bucket."""
     from services.policy.principal_enrichment import _collect_permissions
 
     eff_perms = {
@@ -200,7 +181,6 @@ def test_principal_enrichment_skips_non_int_role_without_crashing() -> None:
                 "authority_public": False,
                 "direct_owner": None,
                 "controllers": [],
-                # Role grant carrying a role-name string instead of an int.
                 "authority_roles": [
                     {
                         "role": "PAUSER_ROLE",
@@ -221,14 +201,12 @@ def test_principal_enrichment_skips_non_int_role_without_crashing() -> None:
     addr = "0x" + "a" * 40
     assert addr in by_address
     perm = by_address[addr][0]
-    # Non-int role is None on the typed permission; the identifier survives on the controller string.
     assert perm["role"] is None
     assert perm.get("controller") == "role_PAUSER_ROLE"
 
 
 def test_recursive_role_principals_skips_non_int_role_without_crashing() -> None:
-    """The recursive resolver's role accumulator (``set[int]``) can't hold a non-int
-    role; the helper must skip those grants rather than crash."""
+    """The resolver's role accumulator is ``set[int]``."""
     from services.resolution.recursive import _role_principals_from_effective_permissions
 
     eff_perms = {
@@ -246,7 +224,6 @@ def test_recursive_role_principals_skips_non_int_role_without_crashing() -> None
                             }
                         ],
                     },
-                    # Mixed case: also accept a real int role.
                     {
                         "role": 7,
                         "principals": [
@@ -265,8 +242,6 @@ def test_recursive_role_principals_skips_non_int_role_without_crashing() -> None
 
     out = _role_principals_from_effective_permissions(eff_perms)
     addrs = {p["address"]: p for p in out}
-    # The non-int grant was skipped (no other source for its principal).
     assert "0x" + "a" * 40 not in addrs
-    # The int role grant produced its principal with role=7.
     assert "0x" + "b" * 40 in addrs
     assert addrs["0x" + "b" * 40]["roles"] == [7]

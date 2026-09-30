@@ -1,17 +1,7 @@
-"""The authority-deletability join: can this principal author the call itself?
-
-A composed magnitude is a dollar figure proven by an execution the principal
-never made; it transfers only where the principal holds a setter that repoints
-or rewrites the authority the destination's gate consults. Each test pins one
-way that decision could quietly stop being a witness: a hop count / selector
-name / contract shape standing in for the join (all three partition the
-reference corpus identically, so the only defence is that the decision reads
-``function_principals`` rows); ``principal_unit`` read where the ROW's
-``principal_addresses`` is meant; an unscoped join; an unresolvable, ambiguous
-or contradicted authority failing to "not deletable" instead of
-``not_determined``; ``membership_quality: lower_bound`` read as membership;
-``principal_type`` used as a filter (``'controller'`` on 28,689 of 28,689 rows).
-The three-arm rule that CONSUMES this verdict is not exercised here.
+"""A composed magnitude transfers only where the principal holds a setter over the authority the destination's
+gate consults. Hop count, selector name and contract shape partition the reference corpus identically, so the
+only defence is reading ``function_principals`` rows. ``principal_type`` is ``'controller'`` on 28,689 of 28,689
+rows. The three-arm rule consuming this verdict is tested elsewhere.
 """
 
 from __future__ import annotations
@@ -97,13 +87,8 @@ def _roles_setter(**over: Any) -> P.SetterPrincipal:
     return _setter(3, contract=AUTHORITY, function_name="setUserRole", principal=SAFE, **over)
 
 
-# --- (a) the two arms, each independently sufficient -------------------------
-
-
 def test_authority_arm_qualifying_row_is_deletable_and_names_its_basis():
-    """(a) A setter on the RESOLVED gating authority proves deletability, and the
-    basis names the selector and ``function_principals`` row id so the figure is
-    re-checkable by hand."""
+    """The basis names selector and row id so the figure is re-checkable by hand."""
     plane = _plane(
         (
             _setter(41, contract=AUTHORITY, function_name="setUserRole", principal=SAFE, selector="0x67aff484"),
@@ -139,8 +124,7 @@ def test_host_arm_qualifying_row_is_deletable_without_any_authority_witness():
     assert verdict.state == P.DELETABILITY_DELETABLE
     assert verdict.arm == P.DELETABILITY_ARM_HOST
     assert (verdict.basis_block() or {})["function_principal_id"] == 7
-    # No authority was resolved and none was needed; saying the cross-check
-    # "agrees" here would claim a comparison that never happened.
+    # Claiming the cross-check "agrees" would describe a comparison that never happened.
     assert verdict.gating_authorities == ()
     assert verdict.crosscheck == P.CROSSCHECK_NOT_COMPARED
 
@@ -182,13 +166,9 @@ def test_any_one_of_several_addresses_qualifying_is_enough_and_the_row_is_named(
     assert verdict.principal_addresses == tuple(sorted((EOA, TIMELOCK)))
 
 
-# --- (b)/(c)/(e)/(f) every way the join declines, each under its own token ----
-
-
 @pytest.mark.parametrize(
     "plane,principals,destination,state,reason",
     [
-        # (b) the earned negative: the join ran, both arms were asked, no row.
         pytest.param(
             _plane((_roles_setter(),), **_gated()),
             [EOA],
@@ -197,8 +177,7 @@ def test_any_one_of_several_addresses_qualifying_is_enough_and_the_row_is_named(
             P.DELETABILITY_NO_SETTER_ROW,
             id="no_qualifying_row",
         ),
-        # (f) unscoped, the corpus's EOA holds all four setters on solver
-        # contracts unrelated to these vaults and every withheld entry republishes.
+        # (f) Unscoped, the corpus's EOA holds all four setters on unrelated solver contracts.
         pytest.param(
             _plane(
                 tuple(
@@ -226,7 +205,6 @@ def test_any_one_of_several_addresses_qualifying_is_enough_and_the_row_is_named(
             P.DELETABILITY_MEMBERSHIP_NOT_EXACT,
             id="membership_absent",
         ),
-        # (e) nothing to ask the join about is not the same as asking and being told no.
         pytest.param(
             _plane(),
             [],
@@ -252,7 +230,6 @@ def test_a_join_that_does_not_qualify_a_row_publishes_its_own_typed_token(
 
 
 def _declines(plane, principals, destination, state, reason) -> None:
-    """The shape every declining outcome shares: a typed (state, reason) pair, no basis."""
     verdict = P.authority_deletability(plane, principals, destination, EXIT)
 
     assert verdict.state == state
@@ -263,14 +240,11 @@ def _declines(plane, principals, destination, state, reason) -> None:
     assert verdict.arm is None
 
 
-# The four outcomes ``constants.uncalibrated_arm_disclosures`` names by node id;
-# they stay standalone so the register's pointer keeps resolving.
+# Named by node id in ``constants.uncalibrated_arm_disclosures``; kept standalone so the pointer resolves.
 
 
 def test_unresolvable_gating_authority_is_not_determined_never_deletable():
-    """(c) No witness names the authority, so neither answer is earned; the
-    principal DOES hold setters on a RolesAuthority, so this is emphatically not
-    the earned negative."""
+    """(c) The principal does hold setters on a RolesAuthority, so this is not the earned negative."""
     _declines(
         _plane((_roles_setter(),)),
         [SAFE],
@@ -281,8 +255,7 @@ def test_unresolvable_gating_authority_is_not_determined_never_deletable():
 
 
 def test_a_tainted_destination_gate_is_not_determined_even_with_a_named_authority():
-    """(c) The gate's own resolution says it could not resolve; a trace naming an
-    authority anyway names a candidate, not the gate's answer."""
+    """(c) A trace naming an authority anyway names a candidate, not the gate's answer."""
     _declines(
         _plane((_roles_setter(),), tainted=(("ethereum", VAULT, EXIT),), **_gated()),
         [SAFE],
@@ -316,8 +289,6 @@ def test_a_lower_bound_membership_row_is_not_determined_never_deletable():
 
 
 def test_the_earned_negative_publishes_the_authority_it_asked_about():
-    """(b) The negative is only earned because a witness answered "which
-    authority", so the verdict publishes which one."""
     verdict = P.authority_deletability(_plane((_roles_setter(),), **_gated()), [EOA], VAULT_KEY, EXIT)
 
     assert verdict.state == P.DELETABILITY_PROVEN_NOT_DELETABLE
@@ -337,9 +308,6 @@ def test_a_tainted_gate_does_not_defeat_the_host_arm():
     assert verdict.arm == P.DELETABILITY_ARM_HOST
 
 
-# --- (d) the two authority sources -------------------------------------------
-
-
 def test_authority_sources_that_disagree_resolve_to_not_determined():
     plane = _plane(
         (_roles_setter(),),
@@ -352,7 +320,6 @@ def test_authority_sources_that_disagree_resolve_to_not_determined():
     assert verdict.state == P.DELETABILITY_NOT_DETERMINED
     assert verdict.reason == P.DELETABILITY_AUTHORITY_SOURCES_DISAGREE
     assert verdict.crosscheck == P.CROSSCHECK_DISAGREES
-    # Both readings are published: a reader must be able to see WHAT disagreed.
     assert verdict.gating_authorities == (AUTHORITY,)
     assert verdict.crosscheck_authorities == (OTHER_AUTHORITY,)
 
@@ -367,7 +334,6 @@ def test_an_absent_crosscheck_is_not_a_disagreement():
 
 
 def test_the_authority_is_read_per_selector_not_per_contract():
-    """One host, two selectors, two authorities; the contract-scoped read cannot separate them."""
     plane = _plane(
         (_setter(3, contract=OTHER_AUTHORITY, function_name="setUserRole", principal=SAFE),),
         gating={("ethereum", VAULT, EXIT): (AUTHORITY,), ("ethereum", VAULT, MANAGE): (OTHER_AUTHORITY,)},
@@ -377,15 +343,9 @@ def test_the_authority_is_read_per_selector_not_per_contract():
     assert P.authority_deletability(plane, [SAFE], VAULT_KEY, MANAGE).state == P.DELETABILITY_DELETABLE
 
 
-# --- (e) principal_addresses, never principal_unit ---------------------------
-
-
 def test_the_join_keys_on_principal_addresses_not_on_the_principal_unit():
-    """(e) The S3/S7 shape: the unit is the Safe, the setters are the timelock's.
-
-    On the reference corpus the row whose ``principal_unit`` is the Safe reaches
-    its destination through ``access_path: via_timelock:…``; keying on the unit
-    withholds $11,358,880.43 with no diagnostic.
+    """(e) S3/S7: the unit is the Safe but the setters are the timelock's; keying on the unit withholds
+    $11,358,880.43 silently.
     """
     plane = _plane((_setter(55, contract=VAULT, function_name="setAuthority", principal=TIMELOCK),), **_gated())
 
@@ -395,9 +355,6 @@ def test_the_join_keys_on_principal_addresses_not_on_the_principal_unit():
     assert by_addresses.state == P.DELETABILITY_DELETABLE
     assert (by_addresses.basis_block() or {})["principal_address"] == TIMELOCK
     assert by_unit.state == P.DELETABILITY_PROVEN_NOT_DELETABLE
-
-
-# --- (f) chain scoping -------------------------------------------------------
 
 
 def test_a_setter_on_the_other_chains_copy_of_the_address_does_not_qualify():
@@ -410,13 +367,10 @@ def test_a_setter_on_the_other_chains_copy_of_the_address_does_not_qualify():
     assert P.authority_deletability(plane, [SAFE], f"base::{VAULT}", EXIT).state == P.DELETABILITY_DELETABLE
 
 
-# --- (g) the two source assertions -------------------------------------------
-
-
 def test_no_filter_anywhere_on_principal_type():
-    """(g) ``principal_type`` is ``'controller'`` on 28,689 of 28,689 rows, so a
-    filter on it changes nothing on this corpus and fails open on the next; no
-    behavioural test can catch it."""
+    """(g) A filter would change nothing on this corpus and fail open on the next, so only a source assertion can
+    catch it.
+    """
     source = "".join(
         inspect.getsource(obj)
         for obj in (
@@ -487,9 +441,6 @@ def test_the_verdict_cannot_be_constructed_unpaired(kwargs):
             principal_addresses=(SAFE,),
             **kwargs,
         )
-
-
-# --- the loader --------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -596,8 +547,7 @@ def test_the_loader_reads_membership_quality_out_of_details_not_a_column(db_sess
 
 
 def test_the_loader_is_not_protocol_scoped(db_session, loaded):
-    """51 of the 262 setter rows sit on contracts whose ``protocol_id`` is NULL;
-    dropping them mints the earned negative out of our own scoping."""
+    """51 of 262 setter rows have NULL ``protocol_id``; dropping them mints a false negative."""
     _protocol, contract, function, principal, _controller_value = loaded
     vault = _addr()
     orphan = contract(vault, protocol_id=None)
@@ -615,10 +565,7 @@ def test_the_loader_is_not_protocol_scoped(db_session, loaded):
 @pytest.mark.parametrize(
     "step,taint,reason",
     [
-        # The gate's own resolution says it could not resolve, so the authority
-        # the trace names is a candidate and not the gate's answer.
         (P.SOLMATE_ROLES_AUTHORITY_STEP, True, P.DELETABILITY_AUTHORITY_TAINTED),
-        # A trace step of some other kind names no gating authority at all.
         ("owner_state_variable", False, P.DELETABILITY_AUTHORITY_UNRESOLVED),
     ],
     ids=["tainted_gate", "non_solmate_step"],

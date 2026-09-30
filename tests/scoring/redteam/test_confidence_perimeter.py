@@ -1,4 +1,3 @@
-"""Confidence perimeter admission rules."""
 
 from __future__ import annotations
 
@@ -22,8 +21,7 @@ from tests.support.scoring_builders import (
 
 
 def test_perimeter_folds_an_implementation_onto_its_proxy(fold):
-    """An impl row is the proxy's entity: admitting both hands the impl a second
-    copy of the proxy's value band that no signal could ever answer."""
+    """Admitting both would give the impl a second copy of the proxy's value band."""
     signal = sig(
         deployment_address=PROXY,
         authority_openness="restricted",
@@ -52,8 +50,6 @@ def test_perimeter_folds_an_implementation_onto_its_proxy(fold):
 
 
 def test_zero_address_is_not_a_perimeter_entity(fold):
-    """A renounced-ownership 0x0 in the closure is a burn sentinel, not an
-    entity whose capabilities could ever be assessed."""
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -75,9 +71,7 @@ def test_zero_address_is_not_a_perimeter_entity(fold):
 
 
 def test_a_proven_codeless_eoa_answers_vacuously(fold):
-    """With no code there are no functions: the capability question collapses
-    into the closure's reach answer — but only on the earned getCode witness,
-    and never for the pricing term."""
+    """Only on the earned getCode witness, and never for the pricing term."""
     key_eoa = entity_key("ethereum", EOA)
     signal = sig(
         authority_openness="restricted",
@@ -104,13 +98,9 @@ def test_a_proven_codeless_eoa_answers_vacuously(fold):
     assert detail["proven_codeless_answered"] == 1
     assert detail["reachability_answered_pct"] == 100.0
     assert detail["capability_scored_pct"] == 100.0
-    # Holding value is a question code-lessness does not answer: the unpriced
-    # EOA still charges the pricing term, and the headline stays the minimum.
     assert detail["value_priced_pct"] < 100.0
     assert witnessed.confidence_pct == detail["value_priced_pct"]
 
-    # With the EOA's holdings priced, pricing no longer binds, and the earned
-    # witness is exactly what separates a full answer from a charged gap.
     priced_kwargs = dict(
         kwargs,
         value=value_plane({KEY_C: {"usdc": 50_000_000.0}, key_eoa: {"usdc": 1_000.0}}, contracts=(KEY_C,)),

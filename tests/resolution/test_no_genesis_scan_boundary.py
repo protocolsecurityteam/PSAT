@@ -1,11 +1,5 @@
-"""Regression guard: a resolution-time HyperSync scan can never silently walk from genesis.
-
-The SDK issues a getLogs scan ONLY via ``hypersync.Query(...)`` then ``client.get(query)``.
-This pins the boundary so a 7th live-scan path can't reappear and 429-storm cold authority
-addresses: (a) the enumerator entry points reject an omitted ``from_block``; (b) a source-level
-scan catches any new ``.Query(`` site or ``from_block`` default; (c) the floor-or-defer
-helper DEFERS (None) on an unknown floor, never fails open to 0, and the recursive path
-floors when known and skips the live scan when not.
+"""No resolution-time HyperSync scan may silently walk from genesis: enumerators reject an omitted ``from_block``, a
+source scan catches any new ``.Query(`` site, and the floor helper defers rather than failing open to 0.
 """
 
 from __future__ import annotations
@@ -23,27 +17,18 @@ _REPO = Path(__file__).resolve().parents[2]
 _CREATION = "creation_block_minus_one"
 
 
-# (a) required-arg structural guard ------------------------------------------
-
-
 def test_enumerators_raise_typeerror_when_from_block_omitted():
-    """Omitting ``from_block`` must raise ``TypeError``, not default to a genesis scan. It
-    would have caught the missed recursive path (no ``from_block``)."""
+    """It would have caught the missed recursive path."""
     import asyncio
 
-    # The omitted from_block is the point of the test; pyright correctly objects,
-    # so silence it here — the runtime TypeError is what we assert.
+    # The runtime TypeError is what's asserted.
     with pytest.raises(TypeError, match="from_block"):
         asyncio.run(mapping_enumerator.enumerate_mapping_allowlist("0x" + "aa" * 20, [], bearer_token="t"))  # pyright: ignore[reportCallIssue]
     with pytest.raises(TypeError, match="from_block"):
         asyncio.run(mapping_enumerator.enumerate_mapping_values("0x" + "aa" * 20, [], bearer_token="t"))  # pyright: ignore[reportCallIssue]
 
 
-# (b) completeness grep encoded as a source assertion ------------------------
-
-# The exhaustive set of live-HyperSync scan sites. A new one must take a floored
-# ``from_block`` (via resolve_scan_floor) and route the client through the shared bound;
-# add it here deliberately.
+# A new scan site must take a floored ``from_block`` and the shared client bound; add it here deliberately.
 _KNOWN_QUERY_MODULES = {
     "services/resolution/mapping_enumerator.py",
     "services/resolution/external_check_materializer.py",
@@ -90,9 +75,8 @@ def _is_hypersync_query_call(node: ast.AST) -> bool:
 def _innermost_functions_building_hypersync_query(
     tree: ast.AST,
 ) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
-    """The INNERMOST function that directly builds a ``hypersync.Query(...)``. ``ast.walk``
-    descends into nested ``def``s, so an outer function would falsely appear to build a
-    query its inner ``_scan`` closure constructs (the predicate_evaluator shape).
+    """``ast.walk`` descends into nested defs, so an outer function would falsely appear to build its closure's
+    query.
     """
     parent: dict[int, ast.AST] = {}
     for node in ast.walk(tree):
@@ -112,8 +96,7 @@ def _innermost_functions_building_hypersync_query(
 
 
 def _calls_named(fn: ast.AST, name: str) -> bool:
-    """True if ``fn`` has an actual ``ast.Call`` to ``name``, not merely an import or
-    reference (defeats the 'keep the import line' mutation)."""
+    """Defeats the "keep the import line" mutation."""
     for node in ast.walk(fn):
         if not isinstance(node, ast.Call):
             continue
@@ -126,8 +109,6 @@ def _calls_named(fn: ast.AST, name: str) -> bool:
 
 
 def _has_is_none_defer_branch(fn: ast.AST, floor_names: set[str]) -> bool:
-    """True if ``fn`` tests ``<floor_var> is None`` — the defer sentinel branch that
-    skips the live scan on an unknown floor."""
     for node in ast.walk(fn):
         if not isinstance(node, ast.Compare):
             continue
@@ -145,8 +126,6 @@ def _has_is_none_defer_branch(fn: ast.AST, floor_names: set[str]) -> bool:
 
 
 def _floor_assignment_targets(fn: ast.AST) -> set[str]:
-    """Variable names assigned the result of a ``resolve_scan_floor(...)`` call,
-    e.g. ``floor = resolve_scan_floor(...)``."""
     names: set[str] = set()
     for node in ast.walk(fn):
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
@@ -174,13 +153,8 @@ def _from_block_kwargs_in_query_calls(fn: ast.AST) -> list[ast.keyword]:
 
 
 def test_inline_query_sites_resolve_a_floor():
-    """The two INLINE ``hypersync.Query(`` sites (predicate_evaluator's param-keyed
-    observation and the external-check candidate scan) bypass the enumerator's required
-    ``from_block``, so the required-arg guard can't protect them. Pin STRUCTURALLY that each:
-    (a) actually CALLs ``resolve_scan_floor`` (defeats 'keep the import, route a 0 into the
-    Query'); (b) has a ``floor is None`` defer branch; (c) binds every Query's ``from_block``
-    to the floored variable, never a literal. Enumerator/repo modules take a parameter and
-    are covered by the required-arg + AST-default guards.
+    """The two inline Query sites bypass the enumerator's required arg, so each must call ``resolve_scan_floor``,
+    defer on None, and bind every ``from_block`` to the floored variable.
     """
     inline_modules = {
         "services/resolution/predicate_evaluator/membership.py",
@@ -208,7 +182,6 @@ def test_inline_query_sites_resolve_a_floor():
                 "SKIP the live scan, not fall through to a genesis walk."
             )
 
-            # (c) the Query's from_block binds to the floored variable, never a literal.
             from_block_kwargs = _from_block_kwargs_in_query_calls(fn)
             assert from_block_kwargs, f"{rel}:{fn.name} builds a hypersync.Query( without a from_block= keyword"
             for kw in from_block_kwargs:
@@ -217,15 +190,12 @@ def test_inline_query_sites_resolve_a_floor():
                     f"(value={getattr(kw.value, 'value', '?')!r}) — must bind the floored variable, "
                     "not a constant (a literal 0 is the genesis footgun)."
                 )
-                # from_block must be the floor var or a loop cursor seeded from it, as a
-                # plain Name, not a call/expr.
                 assert isinstance(kw.value, ast.Name), (
                     f"{rel}:{fn.name} from_block is not a simple variable reference — "
                     "cannot prove it traces to the resolved floor."
                 )
 
-    # The loop cursor (``current_from``) must be assigned from a floor variable somewhere,
-    # so `from_block=current_from` provably traces to resolve_scan_floor.
+    # So ``from_block=current_from`` provably traces to resolve_scan_floor.
     for rel in inline_modules:
         src = (_REPO / rel).read_text()
         tree = ast.parse(src)
@@ -249,9 +219,6 @@ def test_inline_query_sites_resolve_a_floor():
                 f"{rel}:{fn.name}: hypersync.Query from_block does not provably trace to "
                 "resolve_scan_floor's result (no `cursor = floor` seed) — it could be a stray variable."
             )
-
-
-# (c) floor-or-defer semantics ----------------------------------------------
 
 
 def test_resolve_scan_floor_never_fails_open_to_zero(monkeypatch):
@@ -285,17 +252,14 @@ def test_resolve_scan_floor_does_not_cache_none_permanently(monkeypatch):
 
 
 class _FakeSession:
-    """A stand-in that satisfies the ``hasattr(session, "execute")`` live-session check;
-    ``_floor_from_cursor`` is monkeypatched in these tests so ``execute`` is never reached."""
+    """``_floor_from_cursor`` is monkeypatched, so ``execute`` is never reached."""
 
     def execute(self, *_a, **_k):
         raise AssertionError("monkeypatched _floor_from_cursor should be used, not raw execute")
 
 
 def test_resolve_scan_floor_rechecks_cursor_within_ttl_with_session(monkeypatch):
-    """Self-heal under the raised defer TTL: with a live session threaded, a cursor the
-    indexer seeds mid-run is picked up at once, WITHOUT re-hitting the rate-limited
-    Etherscan creation-block lookup."""
+    """A mid-run cursor is picked up without re-hitting the rate-limited Etherscan lookup."""
     floor_mod.clear_scan_floor_cache()
     cursor: dict[str, int | None] = {"v": None}  # cursor not yet seeded
     monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: cursor["v"])
@@ -312,15 +276,12 @@ def test_resolve_scan_floor_rechecks_cursor_within_ttl_with_session(monkeypatch)
     assert floor_mod.resolve_scan_floor(addr, 1, session=sess) is None  # defer; Etherscan consulted once
     assert es_calls["n"] == 1
     cursor["v"] = 6_000_000  # indexer backfills the cursor mid-run
-    # Within the (long) defer TTL the cheap cursor re-read picks up the floor; Etherscan is NOT re-hit.
     assert floor_mod.resolve_scan_floor(addr, 1, session=sess) == 6_000_000
     assert es_calls["n"] == 1, "Etherscan must not be re-hit once the cursor self-heals"
 
 
 def test_resolve_scan_floor_throttles_re_resolution_within_ttl_sessionless(monkeypatch):
-    """Without a threaded session a deferring address must NOT re-resolve within the defer
-    TTL (neither the fresh-SessionLocal cursor read nor Etherscan): the churn the re-tune
-    removes."""
+    """Without a session a deferring address must not re-resolve within the TTL."""
     floor_mod.clear_scan_floor_cache()
     cursor_calls = {"n": 0}
     es_calls = {"n": 0}
@@ -344,8 +305,6 @@ def test_resolve_scan_floor_throttles_re_resolution_within_ttl_sessionless(monke
 
 
 def test_resolve_scan_floor_session_recheck_still_none_throttles_etherscan(monkeypatch):
-    """A threaded-session defer whose cursor is STILL None re-reads the cheap cursor every call
-    but does NOT re-hit the rate-limited Etherscan lookup within the throttle window."""
     floor_mod.clear_scan_floor_cache()
     cursor_calls = {"n": 0}
     es_calls = {"n": 0}
@@ -371,8 +330,6 @@ def test_resolve_scan_floor_session_recheck_still_none_throttles_etherscan(monke
 
 
 def test_resolve_scan_floor_caches_resolved_int_for_process_life(monkeypatch):
-    """A resolved (immutable) creation-block floor is cached: a second call must not
-    re-issue the creation-block lookup."""
     floor_mod.clear_scan_floor_cache()
     monkeypatch.setattr(floor_mod, "_floor_from_cursor", lambda *_a, **_k: None)
     calls = {"n": 0}
@@ -407,9 +364,7 @@ def _recursive_module():
 
 
 def test_recursive_cold_no_floor_does_not_live_scan(monkeypatch):
-    """The missed path (recursive replay): with a token present but no resolvable
-    floor, the replay must DEFER — never invoke the live enumerator (which would
-    genesis-walk a cold ACL address)."""
+    """The live enumerator would genesis-walk a cold ACL address."""
     recursive = _recursive_module()
 
     monkeypatch.setenv("ENVIO_API_TOKEN", "tok")
@@ -645,9 +600,6 @@ def test_unreadable_witness_defers(monkeypatch):
     assert etherscan.calls == []
 
 
-# (e) the shared client bound -----------------------------------------------
-
-
 def test_build_hypersync_client_passes_bounded_retries():
     from services.resolution import hypersync_bound
 
@@ -687,8 +639,6 @@ def test_build_hypersync_client_falls_back_without_retry_support():
 
 
 def test_enumerator_constructs_client_through_the_bound():
-    """When no client is injected, the enumerator builds its HyperSync client via
-    the shared bound (max_num_retries set) — not a bare ClientConfig."""
     import asyncio
 
     captured: dict = {}

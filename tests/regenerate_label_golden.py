@@ -1,16 +1,11 @@
 #!/usr/bin/env python
-"""Regenerate the effect-labels golden from CURRENT producer behavior.
+"""Regenerate the effect-labels golden from current producer behavior.
 
-Run this ONLY when a producer change intentionally shifts labels/claims and the
-diff has been reviewed:
+Run only when a producer change intentionally shifts labels and the diff was reviewed:
 
     uv run python tests/regenerate_label_golden.py
 
-It compiles every corpus contract (all pinned to solc 0.8.27, installed via
-solc-select) and overwrites ``tests/fixtures/label_corpus/golden.json``. Commit
-the resulting diff alongside the producer change so the A/B gate records the
-intended update. ``--check`` recomputes without writing and exits non-zero on any
-drift — the same assertion ``tests/static/test_label_corpus.py`` makes.
+``--check`` exits non-zero on drift, the same assertion ``tests/static/test_label_corpus.py`` makes.
 """
 
 from __future__ import annotations

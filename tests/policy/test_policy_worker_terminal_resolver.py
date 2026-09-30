@@ -1,4 +1,3 @@
-"""The policy-worker contract-controller step resolver used by the authority walk."""
 
 from __future__ import annotations
 
@@ -26,7 +25,6 @@ def test_resolver_reads_controllers_and_classifies_each(monkeypatch):
 
 
 def test_resolver_returns_all_controller_planes(monkeypatch):
-    # Parallel planes flow through as distinct steps for the walk to disambiguate.
     monkeypatch.setattr("workers.policy_worker.read_contract_controllers", lambda rpc, addr, **_kw: [OWNER, AUTHORITY])
     monkeypatch.setattr(
         "workers.policy_worker.classify_resolved_address_with_status",
@@ -40,10 +38,7 @@ def test_resolver_returns_all_controller_planes(monkeypatch):
 
 
 def test_resolver_returns_empty_when_canonical_getters_are_silent(monkeypatch):
-    """``[]`` means every canonical getter answered cleanly and named nothing — probe-set
-    SILENCE, distinct from a probe error (``None``) and NOT proof of absence (the finite
-    getter set can't rule out unpauser()/kernel()/*_admin()/ERC-1967 admins). It must
-    propagate as ``[]`` so the walk reports ``controllers_not_determined``."""
+    """``[]`` is probe-set silence, not proof of absence, and must reach the walk as ``controllers_not_determined``."""
     monkeypatch.setattr("workers.policy_worker.read_contract_controllers", lambda rpc, addr, **_kw: [])
     resolver = _make_terminal_controller_resolver("http://rpc")
     assert resolver is not None
@@ -51,7 +46,6 @@ def test_resolver_returns_empty_when_canonical_getters_are_silent(monkeypatch):
 
 
 def test_resolver_returns_none_on_probe_incomplete(monkeypatch):
-    # None (a getter errored) -> None, so the walk reads unknown_unfetched, not a partial plane set.
     monkeypatch.setattr("workers.policy_worker.read_contract_controllers", lambda rpc, addr, **_kw: None)
     resolver = _make_terminal_controller_resolver("http://rpc")
     assert resolver is not None

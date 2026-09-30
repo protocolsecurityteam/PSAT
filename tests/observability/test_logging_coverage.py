@@ -1,8 +1,5 @@
-"""Offline logging tests for the coverage verify path (Backlog #13).
-
-The source-equivalence verdict and identity fields live in queryable ``extra={}``, a benign
-rebuild race is ``row_vanished`` not ``github_fetch_failed``, and a pass dominated by
-``hash_mismatch`` raises one WARNING plus a heartbeat rollup. Pure log helpers; no DB or network.
+"""Backlog #13: verdict fields live in ``extra``, a rebuild race is ``row_vanished``, and a mismatch-dominated pass
+raises one WARNING plus a heartbeat rollup.
 """
 
 from __future__ import annotations
@@ -18,7 +15,7 @@ LOGGER_NAME = "workers.coverage_verify"
 
 
 def _worker() -> cv.CoverageVerifyWorker:
-    # Bypass __init__ to avoid registering signal handlers / reconfiguring logging.
+    # Bypass __init__ to avoid signal handlers and logging reconfiguration.
     w = cv.CoverageVerifyWorker.__new__(cv.CoverageVerifyWorker)
     w.worker_id = "CoverageVerify-test"
     return w
@@ -49,7 +46,6 @@ def test_log_outcome_proven_puts_verdict_facts_in_extra(caplog):
     assert rec.matched_name == "Vault"
     assert rec.proof_kind == "clean"
     assert rec.sha == "abcdef123456"  # truncated to 12 chars
-    # Facts must NOT be interpolated into the message body.
     assert "Vault" not in rec.getMessage()
 
 
@@ -86,7 +82,6 @@ def test_summarize_pass_warns_and_beats_on_high_hash_mismatch_rate(caplog, monke
         rate = w._summarize_pass(4, verdicts)
 
     assert rate == 0.75
-    # Heartbeat carries the per-pass verdict rollup (daemon substitute for a metric).
     assert beats and beats[0]["verdicts"] == verdicts
     assert beats[0]["hash_mismatch_rate"] == 0.75
     warn = next(r for r in caplog.records if r.levelno == logging.WARNING and r.name == LOGGER_NAME)
@@ -99,7 +94,7 @@ def test_summarize_pass_warns_and_beats_on_high_hash_mismatch_rate(caplog, monke
     ("claimed", "verdicts", "expected_rate"),
     [
         pytest.param(10, {"hash_mismatch": 1, "proven": 9}, 0.1, id="rate_below_threshold"),
-        # Rate 1.0 but total 1 < warn min: the min-sample guard keeps it quiet.
+        # The min-sample guard keeps a single mismatch quiet.
         pytest.param(1, {"hash_mismatch": 1}, 1.0, id="small_sample"),
     ],
 )

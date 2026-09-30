@@ -1,4 +1,3 @@
-"""Recognized role-store standards table + proxy-hop probe-code resolution."""
 
 from __future__ import annotations
 
@@ -21,11 +20,8 @@ def _sel(sig: str) -> str:
 
 
 def _code_with(*selectors: str) -> str:
-    # A minimal dispatcher body: each selector prefixed with the PUSH4 opcode.
+    # PUSH4 before each selector.
     return "0x" + "".join("63" + s.removeprefix("0x") for s in selectors)
-
-
-# --- the table matches on-chain ground truth -------------------------------
 
 
 def test_solady_roleset_topic0_matches_ground_truth():
@@ -47,9 +43,6 @@ def test_oz_grant_revoke_polarity_and_eip165():
     assert OZ_ACCESS_CONTROL_ENUMERABLE.eip165_interface_id == "0x5a05180f"
 
 
-# --- detect_standards ------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("code", "expected"),
     [
@@ -61,7 +54,6 @@ def test_oz_grant_revoke_polarity_and_eip165():
             [OZ_ACCESS_CONTROL_ENUMERABLE],
             id="oz_all_markers",
         ),
-        # Missing one Solady marker -> no detection (falls to union-enroll upstream).
         pytest.param(_code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors[:-1]), [], id="partial_markers_inconclusive"),
         pytest.param(None, [], id="none_code"),
         pytest.param("0x", [], id="empty_code"),
@@ -71,19 +63,13 @@ def test_detect_standards(code, expected):
     assert detect_standards(code) == expected
 
 
-# --- resolve_probe_code: proxy hop -----------------------------------------
-
-
 class _FakeSession:
-    """Stand-in for a SQLAlchemy session that answers the contracts.implementation
-    lookup from an in-memory ``{address: implementation}`` map."""
 
     def __init__(self, impl_by_addr: dict[str, str]):
         self._impl = {k.lower(): v for k, v in impl_by_addr.items()}
 
     def execute(self, _stmt):
-        # The statement filters lower(address)==<addr>; recover <addr> from the
-        # compiled bind params so the fake honours whatever address was queried.
+        # Recover the queried address from the compiled bind params.
         addr = None
         for val in _stmt.compile().params.values():
             if isinstance(val, str) and val.startswith("0x") and len(val) == 42:
@@ -115,7 +101,6 @@ def test_resolve_probe_code_db_hop(monkeypatch):
         return impl_code if address.lower() == _IMPL else "0x00"
 
     monkeypatch.setattr(rss, "get_code", _fake_get_code)
-    # DB links proxy → impl; the slot read must never be consulted on the DB path.
     monkeypatch.setattr(rss, "rpc_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError("slot read")))
 
     code = resolve_probe_code(_sess({_PROXY: _IMPL}), _PROXY, 1, rpc_url="http://local")
@@ -137,14 +122,11 @@ def test_resolve_probe_code_eip1967_slot_fallback(monkeypatch):
     monkeypatch.setattr(rss, "get_code", _fake_get_code)
     monkeypatch.setattr(rss, "rpc_request", _fake_rpc)
 
-    # DB has no linkage → slot read supplies the impl hop.
     code = resolve_probe_code(_sess({}), _PROXY, 1, rpc_url="http://local")
     assert detect_standards(code) == [SOLADY_ENUMERABLE_ROLES]
 
 
 def test_resolve_probe_code_raw_when_no_proxy(monkeypatch):
-    # A non-proxy authority that itself carries the markers: no impl link, no
-    # slot → the raw code is returned.
     raw = _code_with(*OZ_ACCESS_CONTROL_ENUMERABLE.marker_selectors)
     monkeypatch.setattr(rss, "get_code", lambda rpc_url, address, **k: raw)
     monkeypatch.setattr(rss, "rpc_request", lambda *a, **k: None)
@@ -153,7 +135,6 @@ def test_resolve_probe_code_raw_when_no_proxy(monkeypatch):
 
 
 def test_resolve_probe_code_two_hop_bound(monkeypatch):
-    # proxy -> a -> b -> c; with max_hops=2 we reach b, never c.
     a, b, c = ("0x" + "aa" * 20, "0x" + "bb" * 20, "0x" + "cc" * 20)
     chain = {_PROXY: a, a: b, b: c}
     reached: list[str] = []
@@ -174,8 +155,7 @@ def test_resolve_probe_code_rejects_zero_and_bad_address():
 
 
 def test_resolve_probe_code_cycle_terminates(monkeypatch):
-    # proxy -> impl -> proxy: the impl link points back. Must not loop forever;
-    # the seen-set breaks the second hop and the code reached is still returned.
+    # The seen-set breaks the impl-to-proxy loop.
     impl_code = _code_with(*SOLADY_ENUMERABLE_ROLES.marker_selectors)
     monkeypatch.setattr(rss, "get_code", lambda u, a, **k: impl_code if a.lower() == _IMPL else "0x00")
     monkeypatch.setattr(rss, "rpc_request", lambda *a, **k: None)
@@ -184,8 +164,6 @@ def test_resolve_probe_code_cycle_terminates(monkeypatch):
 
 
 def test_resolve_probe_code_zero_impl_from_db_and_slot(monkeypatch):
-    # DB and the EIP-1967 slot both hand back the zero address: neither is a real
-    # impl, so no hop is taken and detection stays inconclusive (→ union upstream).
     monkeypatch.setattr(rss, "get_code", lambda u, a, **k: "0x00")
     monkeypatch.setattr(rss, "rpc_request", lambda *a, **k: "0x" + "00" * 32)
     code = resolve_probe_code(_sess({_PROXY: "0x" + "00" * 20}), _PROXY, 1, rpc_url="http://local")
@@ -193,8 +171,7 @@ def test_resolve_probe_code_zero_impl_from_db_and_slot(monkeypatch):
 
 
 def test_resolve_probe_code_none_rpc_url_degrades(monkeypatch):
-    # default_rpc_url yields no URL (no RPC configured): every wire hop is a no-op,
-    # so the probe returns None and detection is inconclusive — never a raise.
+    # No RPC configured: probe returns None, never raises.
     monkeypatch.setattr(rss, "default_rpc_url", lambda **k: None)
     monkeypatch.setattr(rss, "get_code", lambda *a, **k: (_ for _ in ()).throw(AssertionError("get_code with no url")))
     code = resolve_probe_code(_sess({_PROXY: _IMPL}), _PROXY, 1)

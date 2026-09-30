@@ -1,10 +1,5 @@
-"""Caller-keyed boolean mapping-ACL recovery from events (FA-R2).
-
-A truthiness read like ``allowedForwardedEigenpodCalls[msg.sender][selector]`` is a
-``mapping_membership`` descriptor with a ``set``-direction hint carrying
-``value_position`` but no ``value_predicate``; the adapter treats it as an implicit
-``{value != 0}`` and folds latest-value-per-CALLER. Drives the real fold
-(``enumerate_mapping_values``); only the HyperSync wire is stubbed.
+"""FA-R2: a truthiness read like ``allowedForwardedEigenpodCalls[msg.sender][selector]`` is folded as an implicit
+``{value != 0}`` per caller. Only the HyperSync wire is stubbed.
 """
 
 from __future__ import annotations
@@ -69,9 +64,7 @@ def _client(logs: list[Any]):
 
 
 def _patched_value_fold(monkeypatch, logs: list[Any]) -> None:
-    """Route the value fold through ``enumerate_mapping_values`` with a stubbed HyperSync
-    client so the real fold runs over ``logs``; the scan floor is stubbed to a known
-    block so the live fold runs (not defers) without Etherscan or the cursor table."""
+    """The scan floor is stubbed so the live fold runs without Etherscan or the cursor table."""
     import services.resolution.creation_block_floor as floor_mod
 
     floor_mod.clear_scan_floor_cache()
@@ -94,8 +87,6 @@ def _patched_value_fold(monkeypatch, logs: list[Any]) -> None:
     mapping_enumerator._VALUE_CACHE.clear()
 
 
-# allowedForwardedEigenpodCalls[msg.sender][selector] — caller is indexed arg 0,
-# selector indexed arg 1, value (bool) in data at arg 2.
 def _eigenpod_descriptor() -> dict:
     return {
         "kind": "mapping_membership",
@@ -160,7 +151,6 @@ _COMPOSE_QUEUE_DESC = {
 @pytest.mark.parametrize(
     "desc",
     [
-        # LayerZero composeQueue: a caller-keyed data-map with no value slot stays unsupported.
         pytest.param(_COMPOSE_QUEUE_DESC, id="value-position-absent"),
         pytest.param(
             {
@@ -176,7 +166,6 @@ _COMPOSE_QUEUE_DESC = {
             {**_eigenpod_descriptor(), "value_predicate": {"op": "eq", "rhs_values": ["3"], "value_type": "uint256"}},
             id="not-overriding-explicit-value-predicate",
         ),
-        # WeETH recover* RoleRegistry hasRole is an external_set, a different shape.
         pytest.param(
             {
                 "kind": "external_set",
@@ -194,15 +183,12 @@ def test_implicit_predicate_excluded(desc):
 @pytest.mark.parametrize(
     "desc, hint, expected",
     [
-        # caller key index 0 maps to topic index 1 -> indexed_positions[0] == event arg 0.
         pytest.param(
             _eigenpod_descriptor(),
             _eigenpod_descriptor()["enumeration_hint"][0],
             0,
             id="resolves-caller-over-inner-key",
         ),
-        # Caller key in event data (not a topic): key index 0 -> data slot 0, event arg 1
-        # (arg 0 is the indexed selector).
         pytest.param(
             {"kind": "mapping_membership", "storage_var": "consumers", "key_sources": [{"source": "msg_sender"}]},
             {"topics_to_keys": {}, "data_to_keys": {"0": 0}, "indexed_positions": [0], "value_position": 2},
@@ -225,7 +211,6 @@ def test_caller_event_arg_position(desc, hint, expected):
     "desc, expected",
     [
         pytest.param(_eigenpod_descriptor(), 55, id="scores-caller-keyed-membership-without-value-predicate"),
-        # The adapter must not claim the composeQueue shape.
         pytest.param(
             {
                 "kind": "mapping_membership",
@@ -248,7 +233,6 @@ def test_matches_score(desc, expected):
     "logs, expected_members",
     [
         pytest.param([_eigenpod_log(CALLER_A, "0x88676cad", True, block=100)], [CALLER_A], id="truthy-caller"),
-        # Same caller, three selectors, all true (audited forwardEigenPodCall) -> one principal.
         pytest.param(
             [
                 _eigenpod_log(CALLER_A, "0x88676cad", True, block=100, log_index=0),
@@ -266,7 +250,6 @@ def test_matches_score(desc, expected):
             [CALLER_A, CALLER_B],
             id="two-distinct-callers",
         ),
-        # Added then removed (latest false) -> not a member (AvsOperatorManager admin, latest AdminUpdated 0).
         pytest.param(
             [
                 _eigenpod_log(CALLER_A, "0x88676cad", True, block=100, log_index=0),
@@ -290,7 +273,6 @@ def _run(coro):
 
 
 def test_value_fold_keys_on_caller_not_inner_selector(monkeypatch):
-    # With the caller-arg key override, two selectors for one caller collapse to one caller key.
     desc = _eigenpod_descriptor()
     hint = desc["enumeration_hint"][0]
     spec = {

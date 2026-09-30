@@ -1,22 +1,8 @@
-"""Regression: caller-equality gates that read the principal through a NON-canonical
-accessor must resolve via the contract's canonical public getter.
+"""Caller-equality gates read through a non-canonical accessor resolve via the canonical public getter.
 
-Two etherfi (protocol_id=1) recall gaps with one root cause — the static stage records
-what the gate literally reads, which isn't a readable public getter:
-
-  * #4 — Governable ``onlyGovernor`` lowers to ``msg.sender == _governor()`` (INTERNAL, no
-    selector). Reading ``_governor()`` (0x95260843) reverts; fall back to ``governor()``
-    (0x0c340a24). (LRTSquaredCore 0x1cb489ef…, LRTSquaredAdmin 0xd2b8c78a…)
-  * #6 — Solady ``Ownable`` keeps the owner in the constant slot ``_OWNER_SLOT`` (assembly
-    read), so the gate names ``_OWNER_SLOT``. ``_OWNER_SLOT()`` (0x12f93717) reverts; fall
-    back to ``owner()`` (0x8da5cb5b), and never mint a dead
-    ``role_identifier:_OWNER_SLOT`` target. (TopUp 0x5bdd4b0d…, TopUpV2 0x80b1931d…,
-    owner() == 0x…dEaD on both)
-
-Generalizes the PR #104 OZ-v5 ``member_path==["_owner"]`` → ``owner()`` precedent. Literal-dict
-unit tests (stubbed RPC) always run; the ``Test...Fixture`` tests compile the REAL on-chain
-source (tests/fixtures/contracts/authority/) through the static pipeline and skip only
-without a compatible solc.
+#4: Governable ``onlyGovernor`` reads internal ``_governor()``; fall back to ``governor()``.
+#6: Solady ``Ownable`` reads the ``_OWNER_SLOT`` constant; fall back to ``owner()`` and never mint a
+``role_identifier:_OWNER_SLOT`` target. The fixture tests compile real on-chain source and skip without solc.
 """
 
 from __future__ import annotations
@@ -44,10 +30,6 @@ OWNER_SLOT_SELECTOR = "0x12f93717"  # _OWNER_SLOT()
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "contracts" / "authority"
 
 
-# Stub resolver context (mirrors test_authority_live_getter_resolution.py): ``_outer_ctx``
-# carries rpc_url + address, the only path to the live getter. No outer ⇒ no RPC.
-
-
 class _Outer:
     def __init__(self, rpc_url: str | None, contract_address: str | None, block: int | None = None) -> None:
         self.rpc_url = rpc_url
@@ -73,8 +55,6 @@ def _ctx_no_rpc() -> EvaluationContext:
 
 
 def _stub_rpc_map(monkeypatch: pytest.MonkeyPatch, returns: dict[str, str | None], recorder: list) -> None:
-    """Stub ``rpc_request`` from a selector→address map; ``None`` or an absent selector
-    reverts, like calling a function the contract doesn't expose."""
 
     def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
         selector = params[0]["data"]
@@ -91,14 +71,8 @@ def _called(recorder: list, selector: str) -> bool:
     return any(s == selector for s in recorder)
 
 
-# ==========================================================================
-# #4 — internal-accessor governor gate (view_call _governor()).
-# ==========================================================================
-
-
 def test_governor_internal_accessor_resolves_via_public_getter(monkeypatch: pytest.MonkeyPatch) -> None:
     recorder: list = []
-    # _governor() is internal (no selector); governor() resolves.
     _stub_rpc_map(monkeypatch, {INTERNAL_GOVERNOR_SELECTOR: None, GOVERNOR_SELECTOR: GOVERNOR}, recorder)
     tree = _eq_tree(
         {"source": "view_call", "callee_signature": "_governor()", "callee_selector": INTERNAL_GOVERNOR_SELECTOR}
@@ -109,13 +83,11 @@ def test_governor_internal_accessor_resolves_via_public_getter(monkeypatch: pyte
     assert cap.kind == "finite_set"
     assert cap.members == [GOVERNOR]
     assert cap.membership_quality == "exact"
-    # The canonical governor() is read directly; the dead _governor() is never called.
     assert _called(recorder, GOVERNOR_SELECTOR)
     assert not _called(recorder, INTERNAL_GOVERNOR_SELECTOR)
 
 
 def test_governor_internal_accessor_without_public_getter_stays_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail-closed: with no public ``governor()`` either, the gate stays the 'guarded but unresolved' placeholder."""
     recorder: list = []
     _stub_rpc_map(monkeypatch, {INTERNAL_GOVERNOR_SELECTOR: None, GOVERNOR_SELECTOR: None}, recorder)
     tree = _eq_tree(
@@ -131,8 +103,6 @@ def test_governor_internal_accessor_without_public_getter_stays_placeholder(monk
 
 
 def test_public_getter_view_call_not_double_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Precision: a normal public ``msg.sender == governor()`` resolves directly; the
-    de-underscore fallback is never consulted."""
     recorder: list = []
     _stub_rpc_map(monkeypatch, {GOVERNOR_SELECTOR: GOVERNOR}, recorder)
     tree = _eq_tree({"source": "view_call", "callee_signature": "governor()", "callee_selector": GOVERNOR_SELECTOR})
@@ -143,13 +113,8 @@ def test_public_getter_view_call_not_double_resolved(monkeypatch: pytest.MonkeyP
     assert recorder == [GOVERNOR_SELECTOR]  # exactly one call, the literal getter
 
 
-# Hardening: a wrong controller is worse than a missing one.
-# - A non-authority internal accessor (``_recoveryWallet()``) must NOT be de-underscored to
-#   ``recoveryWallet()``. Only owner/governor/authority (and pending variants) de-underscore; the
-#   public getter is never called even though it would return an address.
-# - A slot constant that is NOT an owner/governor/authority locator (e.g.
-#   ``BaseMessengerStorageLocation``) must not be rerouted to owner(); the literal
-#   ``BaseMessengerStorageLocation()`` is attempted (and reverts) like any bare state-var.
+# A wrong controller is worse than a missing one: only owner/governor/authority de-underscore, and only owner locators
+# reroute to owner().
 @pytest.mark.parametrize(
     ("returns", "operand", "forbidden_selector"),
     [
@@ -181,14 +146,7 @@ def test_non_authority_accessor_is_not_rerouted(
     assert not _called(recorder, forbidden_selector)
 
 
-# ==========================================================================
-# #6 — Solady owner-slot constant (state_variable _OWNER_SLOT).
-# ==========================================================================
-
-
-# ``_OWNER_SLOT()`` reverts (slot locator, not a getter); owner() resolves. OZ-v5 namespaced
-# Ownable surfaces the slot constant as a bare state-var operand (``OwnableStorageLocation``); it
-# maps to owner() too.
+# OZ-v5 surfaces the slot constant (``OwnableStorageLocation``) too.
 @pytest.mark.parametrize(
     ("returns", "slot_name"),
     [
@@ -208,12 +166,8 @@ def test_owner_slot_constant_resolves_via_owner_getter(
     assert cap.kind == "finite_set"
     assert cap.members == [OWNER]
     assert cap.membership_quality == "exact"
-    # Resolved via owner(), NOT _OWNER_SLOT().
     assert _called(recorder, OWNER_SELECTOR)
 
-
-# Integration: compile the REAL on-chain source and resolve its predicate trees
-# through the static pipeline. Skips without a compatible solc.
 
 slither = pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
@@ -243,7 +197,6 @@ def _contract(sl, name: str):
 
 
 class TestGovernableFixture:
-    """#4 against the verbatim on-chain ether.fi Governable."""
 
     def test_transfer_governance_resolves_governor_via_canonical_getter(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sl = _compile_fixture("Governable.sol", (0, 8, 25))
@@ -251,14 +204,12 @@ class TestGovernableFixture:
         trees = build_predicate_artifacts(contract)["trees"]
         tree = trees["transferGovernance(address)"]
 
-        # Sanity: the gate lowered to a view_call on the INTERNAL accessor.
         leaf = tree["leaf"]
         view_op = next(o for o in leaf["operands"] if o.get("source") == "view_call")
         assert view_op["callee_signature"] == "_governor()"
         assert view_op["callee_selector"] == INTERNAL_GOVERNOR_SELECTOR
 
         recorder: list = []
-        # On-chain governor() at the proxy is a Safe; _governor() has no external fn.
         _stub_rpc_map(monkeypatch, {INTERNAL_GOVERNOR_SELECTOR: None, GOVERNOR_SELECTOR: GOVERNOR}, recorder)
 
         cap = evaluate_tree(tree, _ctx_with_rpc())
@@ -269,16 +220,11 @@ class TestGovernableFixture:
 
 
 class TestTopUpSoladyFixture:
-    """#6 against the verbatim Solady Ownable + on-chain TopUp.processTopUp gate."""
 
-    # The fix: read the real owner(), never _OWNER_SLOT(), never mint 0x...dEaD. What the burn
-    # sentinel may CONCLUDE is narrower since A2: the ``burned-owner`` case below is an empty
-    # ``lower_bound`` ("no known caller"), never the exact "provably nobody". A live
-    # (non-renounced) owner resolves to that owner: the positive proof.
+    # Since A2 the burned owner concludes only an empty ``lower_bound``, never "provably nobody".
     @pytest.mark.parametrize(
         ("owner", "members", "quality", "empty_reason"),
         [
-            # The real on-chain owner() of TopUp/TopUpV2 is 0x...dEaD.
             pytest.param(BURN, [], "lower_bound", "owner_read_burn_address", id="burned-owner"),
             pytest.param(OWNER, [OWNER], "exact", None, id="live-owner"),
         ],
@@ -291,7 +237,6 @@ class TestTopUpSoladyFixture:
         trees = build_predicate_artifacts(contract)["trees"]
         tree = trees["processTopUp(address[])"]
 
-        # Sanity: the real gate names the bytes32 slot constant as its operand.
         assert "'state_variable_name': '_OWNER_SLOT'" in json.dumps(tree).replace('"', "'")
 
         recorder: list = []
@@ -306,12 +251,7 @@ class TestTopUpSoladyFixture:
         assert _called(recorder, OWNER_SELECTOR), "must read owner(), not _OWNER_SLOT()"
 
     def test_controller_tracking_emits_no_dead_owner_slot_role(self) -> None:
-        """No dead ``role_identifier:_OWNER_SLOT`` controller target.
-
-        Pass-1 suppressed the target downstream while ``_OWNER_SLOT`` still reached
-        ``role_definitions``; D6-reject removed it at the source (a slot pointer is an
-        equality leaf with no set descriptor). Both halves are asserted — the downstream
-        suppression must survive on its own, since it covers other routes to the tracking plane."""
+        """D6-reject removed it at the source; the downstream suppression must still hold on its own."""
         sl = _compile_fixture("TopUpSolady.sol", (0, 8, 4))
         contract = _contract(sl, "TopUpSolady")
         project_dir = FIXTURES_DIR
@@ -319,12 +259,10 @@ class TestTopUpSoladyFixture:
         effects = build_effects(contract)
         semantic = _build_semantic_control_summary(contract, project_dir, predicate_trees, effects)
 
-        # D6-reject: the slot constant is no longer minted as a role upstream …
         assert "_OWNER_SLOT" not in [r.get("role") for r in semantic.get("role_definitions", [])]
 
         targets = build_controller_tracking(contract, project_dir, predicate_trees, effects, semantic)
         controller_ids = {t["controller_id"] for t in targets}
 
-        # … but no dead role_identifier:_OWNER_SLOT target is emitted.
         assert "role_identifier:_OWNER_SLOT" not in controller_ids
         assert not any(cid.startswith("role_identifier:") and "_SLOT" in cid for cid in controller_ids)

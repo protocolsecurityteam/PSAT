@@ -1,8 +1,5 @@
-"""Observability locks for the monitoring daemons (scan / poll / TVL cycles).
-
-These run outside ``BaseWorker``, so the job-scoped ``record_degraded`` accumulator is a no-op.
-The substitute is a per-cycle ``record_heartbeat(detail={...})`` plus one unconditional INFO with
-cycle counts as queryable ``extra``, even on a 0-event / 0-contract cycle. RPC/DB wire stubbed.
+"""These daemons run outside ``BaseWorker``, so the substitute for ``record_degraded`` is a per-cycle heartbeat plus
+one INFO with counts, even on an idle cycle.
 """
 
 from __future__ import annotations
@@ -49,7 +46,6 @@ def test_emit_monitor_cycle_running_heartbeat_and_info(caplog):
                 partial=False,
             )
 
-    # A healthy quiet cycle beats "running" with the counts in detail.
     hb.assert_called_once()
     (process,), kwargs = hb.call_args
     assert process == HEARTBEAT_PROTOCOL_SCANNER
@@ -59,7 +55,6 @@ def test_emit_monitor_cycle_running_heartbeat_and_info(caplog):
     assert kwargs["detail"]["contracts_scanned"] == 7
     assert kwargs["detail"]["partial"] is False
 
-    # INFO: facts live in extra={} (queryable), not interpolated into the message.
     rec = next(r for r in caplog.records if r.message == "monitor cycle complete")
     assert rec.levelno == logging.INFO
     assert getattr(rec, "daemon") == HEARTBEAT_PROTOCOL_SCANNER
@@ -81,15 +76,13 @@ def test_emit_monitor_cycle_partial_marks_degraded():
         )
 
     _, kwargs = hb.call_args
-    # A partial cycle (an RPC chunk failed mid-scan) flips the heartbeat to degraded.
     assert kwargs["status"] == "degraded"
     assert kwargs["detail"]["partial"] is True
     assert kwargs["detail"]["note"] == "batch_rpc_failed"
 
 
 def test_scan_for_events_zero_active_contracts_still_emits_cycle(caplog):
-    # scan_for_events returns [] early but must still beat so a dead watcher is distinguishable
-    # from a healthy idle one. The columns-only index load reads ``session.execute(...).all()``.
+    # A dead watcher must be distinguishable from a healthy idle one.
     session = MagicMock()
     session.execute.return_value.all.return_value = []
     session.execute.return_value.scalars.return_value.all.return_value = []
@@ -136,18 +129,8 @@ def test_tvl_refresh_all_protocols_emits_cycle_on_empty():
     assert kwargs["status"] == "running"
     assert kwargs["detail"]["events_found"] == 0
     assert kwargs["detail"]["partial"] is False
-    # The cycle now says what it could not observe, even when that is nothing.
     assert kwargs["detail"]["protocols_failed"] == 0
     assert kwargs["detail"]["protocols_partial"] == 0
-
-
-# --- the silent-collapse class: one alarm per cycle, then a count -------------
-
-
-# --- disposition: the per-cycle outcome summary ------------------------------
-
-
-# --- proxy watcher: a transport failure is not a revert ----------------------
 
 
 def test_proxy_watcher_unanswered_probe_warns_once_per_resolution(caplog):
@@ -160,7 +143,6 @@ def test_proxy_watcher_unanswered_probe_warns_once_per_resolution(caplog):
     with patch.object(proxy_watcher, "rpc_request", _dead):
         with caplog.at_level(logging.DEBUG, logger="services.monitoring.proxy_watcher"):
             assert proxy_watcher.resolve_current_implementation("0x" + "e" * 40, "http://stub") is None
-            # Eight probes failed; the next pass over the SAME proxy repeats at DEBUG.
             assert proxy_watcher.resolve_current_implementation("0x" + "e" * 40, "http://stub") is None
 
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
@@ -175,8 +157,6 @@ def test_proxy_watcher_reverting_getter_is_not_a_transport_failure(caplog):
     def _reverts(_url, method, _params, **_kwargs):
         if method == "eth_getStorageAt":
             return "0x" + "0" * 64
-        # The shape ``rpc_request`` raises for a JSON-RPC error payload: the
-        # node's own object, stringified.
         raise RuntimeError(str({"code": -32000, "message": "execution reverted"}))
 
     proxy_watcher.reset_not_determined_warn_state()
@@ -184,12 +164,11 @@ def test_proxy_watcher_reverting_getter_is_not_a_transport_failure(caplog):
         with caplog.at_level(logging.WARNING, logger="services.monitoring.proxy_watcher"):
             assert proxy_watcher.resolve_current_implementation("0x" + "e" * 40, "http://stub") is None
 
-    # Every probe ANSWERED; "no implementation here" is a finding, not a fault.
+    # "No implementation here" is a finding, not a fault.
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
 
 def test_proxy_watcher_treats_an_unrecognised_failure_as_not_determined(caplog):
-    """The chain_id guard raises before the wire; it is not a revert."""
     from services.monitoring import proxy_watcher
 
     def _guard(*_args, **_kwargs):
@@ -213,12 +192,7 @@ def test_proxy_watcher_treats_an_unrecognised_failure_as_not_determined(caplog):
 
 
 def test_proxy_watcher_rate_limit_payload_is_not_a_proven_absence(caplog):
-    """The outage class this split exists for arrives as an error payload too.
-
-    A provider rate limit and a contract revert are both ``error`` objects; only
-    the revert says anything about the contract, so only it may read as "no
-    implementation here".
-    """
+    """Only a revert says anything about the contract."""
     from services.monitoring import proxy_watcher
 
     def _rate_limited(*_args, **_kwargs):
@@ -238,7 +212,6 @@ def test_proxy_watcher_rate_limit_payload_is_not_a_proven_absence(caplog):
 
 
 def test_proxy_watcher_storage_read_error_is_never_an_empty_slot(caplog):
-    """A storage read has no revert semantics; every error is a failure to answer."""
     from services.monitoring import proxy_watcher
 
     def _trie_gone(_url, method, _params, **_kwargs):
@@ -259,7 +232,6 @@ def test_proxy_watcher_storage_read_error_is_never_an_empty_slot(caplog):
 
 
 def test_proxy_watcher_warn_once_is_keyed_per_proxy(caplog):
-    """One subject's alarm must not stand for another subject's silence."""
     from services.monitoring import proxy_watcher
 
     def _dead(*_args, **_kwargs):
@@ -275,11 +247,7 @@ def test_proxy_watcher_warn_once_is_keyed_per_proxy(caplog):
     assert warned == ["0x" + "b1" * 20, "0x" + "b2" * 20]
 
 
-# --- the fleet's own liveness signal ----------------------------------------
-
-
 def test_heartbeat_write_failure_warns_then_rate_limits(caplog, monkeypatch):
-    """A silent heartbeat failure shows every daemon dead while they all run."""
     from db.queue import heartbeats as dbq
 
     def _no_session():
@@ -295,15 +263,10 @@ def test_heartbeat_write_failure_warns_then_rate_limits(caplog, monkeypatch):
     assert len(warnings) == 1
     assert warnings[0].daemon == "protocol_tvl"
     assert warnings[0].exc_type == "RuntimeError"
-    # The rest are still recorded, just not at a level that storms.
     assert len([r for r in caplog.records if r.levelno == logging.DEBUG]) == 3
 
 
-# --- scanner / poller: what the pass dropped ---------------------------------
-
-
 def test_undecodable_tracked_log_is_counted_for_the_scanner_heartbeat():
-    """A log that matched an enrolled spec and would not decode left no trace."""
     mc = MagicMock()
     mc.address = "0x" + "a" * 40
     mc.monitoring_config = {"tracked_topics": [{"topic0": "0x" + "1" * 64, "event_type": "x"}]}
@@ -326,7 +289,6 @@ def test_undecodable_tracked_log_is_counted_for_the_scanner_heartbeat():
 
 
 def test_poller_publishes_the_plan_entries_it_could_not_dispatch(db_session):
-    """A plan entry this build cannot dispatch vanished from all accounting."""
     import uuid as _uuid
 
     from db.models import MonitoredContract
@@ -358,18 +320,14 @@ def test_poller_publishes_the_plan_entries_it_could_not_dispatch(db_session):
 
     _process, kwargs = hb.call_args
     assert kwargs["detail"]["entries_unrecognized"] == 2
-    # Not a partial: an entry that was never dispatched failed to observe nothing.
+    # An entry never dispatched failed to observe nothing.
     assert kwargs["detail"]["contracts_selected"] == 1
-
-
-# --- notifier: a rejected post is not a sent one -----------------------------
 
 
 def test_send_discord_reports_a_rejected_post():
     from services.monitoring import notifier
 
-    # A Discord-host URL, so the SSRF host gate lets the post through and the
-    # response-handling path under test actually runs.
+    # So the SSRF host gate lets the post through.
     webhook = "https://discord.com/api/webhooks/1/test"
     with patch.object(notifier.requests, "post") as post:
         post.return_value = MagicMock(ok=False, status_code=401, text="unauthorized")

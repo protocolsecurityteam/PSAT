@@ -1,10 +1,4 @@
-"""Tests for ``utils/secrets.py`` redaction helpers and the API
-response surfaces that depend on them.
-
-The endpoint-level checks exercise the serializers (``Job.to_dict``,
-the stage_errors response, the protocol subscriptions response) via a
-mocked SessionLocal rather than a live Postgres.
-"""
+"""Endpoint-level checks use a mocked SessionLocal rather than Postgres."""
 
 from __future__ import annotations
 
@@ -45,7 +39,7 @@ class TestSanitizeUrl:
     def test_discord_webhook_token_is_masked(self):
         out = sanitize_url(_DISCORD_WEBHOOK)
         assert "FAKE_DISCORD_TOKEN_FOR_TESTS" not in out
-        # Webhook id (public-ish) survives so an admin can still tell two webhooks apart.
+        # The webhook id survives so an admin can tell two webhooks apart.
         assert "123456789012345678" in out
 
     @pytest.mark.parametrize(
@@ -57,7 +51,6 @@ class TestSanitizeUrl:
                 ("<redacted>", "123456789012345678"),
                 id="discord_legacy_host",
             ),
-            # Discord's documented base is /api/v{N}/...; unversioned /api/webhooks/ is a convenience alias.
             pytest.param(
                 "https://discord.com/api/v10/webhooks/123456789012345678/VERSIONED_TOKEN_VAL",
                 "VERSIONED_TOKEN_VAL",
@@ -76,15 +69,13 @@ class TestSanitizeUrl:
                 ("<redacted>",),
                 id="discord_ptb_subdomain_on_legacy_host",
             ),
-            # BlockPI's /v1/rpc/<key> has a short separator segment escaping the generic /vN/<long>
-            # fallback; the host list catches it.
+            # BlockPI's short separator segment escapes the generic fallback.
             pytest.param(
                 "https://ethereum.blockpi.network/v1/rpc/abc123XYZdef456GHI789jkl",
                 "abc123XYZdef456GHI789jkl",
                 ("<redacted>",),
                 id="blockpi_host_path",
             ),
-            # Dwellir puts the key directly under the host, so it relies on the host list.
             pytest.param(
                 "https://api-ethereum-mainnet.n.dwellir.com/abc123XYZdef456GHI789jkl",
                 "abc123XYZdef456GHI789jkl",
@@ -103,7 +94,6 @@ class TestSanitizeUrl:
                 ("/v10/<redacted>",),
                 id="v10_plus_path_segment_caught_by_shape",
             ),
-            # A provider not in the host list: the ``/v2/<longblob>`` shape still redacts.
             pytest.param(
                 "https://rpc.obscure-provider.example/v2/abc123XYZdef456GHI",
                 "abc123XYZdef456GHI",
@@ -127,7 +117,6 @@ class TestSanitizeUrl:
                 ("private-eth-node.example.com",),
                 id="userinfo_stripped_from_netloc",
             ),
-            # Userinfo and path-key are independent leak channels; scrub both.
             pytest.param(
                 "https://u:pwd@eth-mainnet.g.alchemy.com/v2/SECRETKEY",
                 ("pwd", "SECRETKEY"),
@@ -140,7 +129,7 @@ class TestSanitizeUrl:
                 ("eth.example.com:8545",),
                 id="preserves_port",
             ),
-            # Bare IPv6 would re-parse as host:port garbage, so the bracketed form must survive.
+            # Bare IPv6 would re-parse as host:port garbage.
             pytest.param(
                 "https://u:p@[::1]:8545/jsonrpc",
                 ("u:p",),
@@ -185,7 +174,6 @@ class TestSanitizeString:
         assert "FAKE_ETHERSCAN_KEY" not in out
 
     def test_wss_url_embedded_in_text_is_scrubbed(self):
-        # RPC providers also expose wss:// endpoints; the extractor must handle ws/wss.
         wss_url = _ALCHEMY.replace("https://", "wss://")
         msg = f"failed to connect to {wss_url}: timeout"
         out = sanitize_string(msg)
@@ -211,16 +199,10 @@ class TestSanitizeObj:
         assert out[1]["foo"] == "bar"
 
     def test_url_in_arbitrary_string_field_still_caught(self):
-        # URL pasted into a free-text field: the recursive sanitize_string() pass catches it
-        # though the key isn't in SECRET_VALUE_KEYS.
+        # The recursive pass catches keys pasted into free text.
         body = {"detail": f"trying to use {_ALCHEMY} for tracing"}
         out = sanitize_obj(body)
         assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in out["detail"]
-
-
-# ---------------------------------------------------------------------------
-# End-to-end: Job.to_dict + /api/jobs response
-# ---------------------------------------------------------------------------
 
 
 def _make_client():
@@ -237,7 +219,6 @@ def _mock_session_ctx(mock_session_cls, mock_session):
 
 
 def _build_real_job(request_body: dict, error: str | None = None):
-    """Construct a real Job ORM instance so ``to_dict`` is exercised end-to-end."""
     from db.models import Job, JobStage, JobStatus
 
     job = Job(
@@ -316,11 +297,6 @@ def test_get_job_endpoint_never_returns_raw_alchemy_url(mock_session_cls):
     assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in resp.text
 
 
-# ---------------------------------------------------------------------------
-# End-to-end: /api/jobs/{id}/errors sanitizes stage_errors body
-# ---------------------------------------------------------------------------
-
-
 @patch("routers.deps.get_artifact")
 @patch("routers.deps.SessionLocal")
 def test_job_errors_endpoint_redacts_stage_error_urls(mock_session_cls, mock_get_artifact):
@@ -355,11 +331,6 @@ def test_job_errors_endpoint_redacts_stage_error_urls(mock_session_cls, mock_get
     assert "FAKE_ALCHEMY_KEY_FOR_TESTS" not in resp.text
 
 
-# ---------------------------------------------------------------------------
-# End-to-end: /api/protocols/{id}/subscriptions sanitizes Discord webhook URL
-# ---------------------------------------------------------------------------
-
-
 @patch("routers.deps.SessionLocal")
 def test_list_protocol_subscriptions_masks_discord_webhook(mock_session_cls):
     client = _make_client()
@@ -383,13 +354,7 @@ def test_list_protocol_subscriptions_masks_discord_webhook(mock_session_cls):
     assert "<redacted>" in body[0]["discord_webhook_url"]
 
 
-# ---------------------------------------------------------------------------
-# End-to-end: dependency discovery artifacts do NOT carry rpc field
-# ---------------------------------------------------------------------------
-
-
 def test_static_dependencies_artifact_drops_rpc_field(monkeypatch):
-    """find_dependencies() does not include the resolved RPC URL in its return body."""
     from services.discovery import static_dependencies as sd
 
     monkeypatch.setattr(sd, "load_dotenv", lambda _path: None)

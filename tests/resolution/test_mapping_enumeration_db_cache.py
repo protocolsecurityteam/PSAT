@@ -1,11 +1,5 @@
-"""Cross-process L2 cache for mapping_enumerator.
-
-Regression from 9ce6fa3 ("perf: parallelize worker pipeline"): ResolutionWorker and
-PolicyWorker run in different OS processes, so the in-process ``_CACHE`` misses across the
-stage boundary and a single LinkToken job re-paid the 60s hypersync timeout per stage (the
-cause of the live concurrency-test wedge). The L2 cache in ``db.mapping_enumeration_cache``
-is keyed on ``(chain, address, specs_hash)``; tests clear L1 between calls to simulate the
-second process. Offline (PostgreSQL via requires_postgres).
+"""Resolution and policy run in different processes, so the in-process cache missed across stages and re-paid the 60s
+HyperSync timeout (the live concurrency wedge). L1 is cleared between calls to simulate the second process.
 """
 
 from __future__ import annotations
@@ -28,11 +22,7 @@ from tests.conftest import requires_postgres
 
 @pytest.fixture(autouse=True)
 def _enable_db_cache(monkeypatch):
-    """Force L2 ON and point its SessionLocal at TEST_DATABASE_URL.
-
-    ``db.mapping_enumeration_cache`` opens its own ``SessionLocal()``, which binds to
-    ``DATABASE_URL`` by default; redirecting keeps writes out of the dev database.
-    """
+    """Its own ``SessionLocal`` binds to ``DATABASE_URL``; redirect so writes stay out of the dev DB."""
     import os
 
     from sqlalchemy import create_engine
@@ -59,15 +49,11 @@ def _enable_db_cache(monkeypatch):
 
 @pytest.fixture()
 def _clean_l2(db_session):
-    """Drop rows from previous runs so address collisions can't mask a miss-then-hit."""
     db_session.query(MappingEnumerationCache).delete()
     db_session.commit()
     yield db_session
     db_session.query(MappingEnumerationCache).delete()
     db_session.commit()
-
-
-# --- minimal fakes (mirrors tests/resolution/test_mapping_enumerator.py) ---------------
 
 
 def _addr(suffix: str) -> str:
@@ -144,14 +130,8 @@ def _deny_spec():
     }
 
 
-# --- tests ------------------------------------------------------------------
-
-
 @requires_postgres
 def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
-    """The regression case: stage 1 enumerates and persists; stage 2 in a fresh process
-    (L1 cleared) reads the L2 row instead of re-running the 60s hypersync scan.
-    """
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
     pages = [([_log(rely_topic, indexed_args=[alice], block=10)], None)]
@@ -176,8 +156,7 @@ def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
     clear_enumeration_cache()
     assert not mapping_enumerator._CACHE
 
-    # Worker process 2 (policy stage): L1 is empty and a new client is passed, so a
-    # counter increment would mean L2 missed.
+    # A counter increment would mean L2 missed.
     new_client, new_counter = _fake_client(pages)
     result2 = enumerate_mapping_allowlist_sync(
         addr,
@@ -198,9 +177,7 @@ def test_l2_cache_hits_across_simulated_process_boundary(_clean_l2):
 
 @requires_postgres
 def test_l2_cache_distinguishes_specs_via_hash(_clean_l2):
-    """A different writer-spec set must NOT share an L2 row on the same address: a stale
-    hit would be a correctness bug.
-    """
+    """A stale hit across specs would be a correctness bug."""
     rely_topic = _event_topic0("Rely(address)")
     deny_topic = _event_topic0("Deny(address)")
     alice = _addr("a11ce")
@@ -248,12 +225,9 @@ def test_l2_cache_distinguishes_specs_via_hash(_clean_l2):
 
 @requires_postgres
 def test_l2_cache_persists_truncated_results(_clean_l2):
-    """``incomplete_*`` and ``error`` results are cached on purpose: re-running inside the
-    TTL would hit the same bound.
-    """
+    """Re-running within the TTL would hit the same bound."""
     rely_topic = _event_topic0("Rely(address)")
-    # next_block must strictly increase to keep the loop going; otherwise the
-    # enumerator finishes naturally before hitting max_pages.
+    # next_block must increase or the enumerator finishes before max_pages.
     pages = [
         ([_log(rely_topic, indexed_args=[_addr("a")], block=1)], 100),
         ([_log(rely_topic, indexed_args=[_addr("b")], block=200)], 300),
@@ -294,7 +268,6 @@ def test_l2_cache_persists_truncated_results(_clean_l2):
 
 @requires_postgres
 def test_l2_ttl_invalidation(monkeypatch, _clean_l2):
-    """Past the TTL, a stale row is treated as a miss — caller re-scans."""
     rely_topic = _event_topic0("Rely(address)")
     pages = [([_log(rely_topic, indexed_args=[_addr("a")], block=10)], None)]
     client, counter = _fake_client(pages)
@@ -326,22 +299,17 @@ def test_l2_ttl_invalidation(monkeypatch, _clean_l2):
     assert counter["n"] == first_calls  # original counter untouched
 
 
-# --- direct unit tests for the db module ------------------------------------
-
-
 @requires_postgres
 @pytest.mark.parametrize(
     "spec_a,spec_b,same",
     [
-        # ``indexed_positions=[1,0]`` and ``[0,1]`` describe the same spec; the fingerprint must collapse them.
         pytest.param(
             {**_rely_spec(), "indexed_positions": [0, 1]},
             {**_rely_spec(), "indexed_positions": [1, 0]},
             True,
             id="indexed_positions_order_insensitive",
         ),
-        # Flipping direction must change the fingerprint, else a Rely-only scan could return a
-        # stale Deny-bearing principal set.
+        # A Rely-only scan must not return a stale Deny-bearing set.
         pytest.param(_rely_spec(), {**_rely_spec(), "direction": "remove"}, False, id="direction_changes_it"),
     ],
 )

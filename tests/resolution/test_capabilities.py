@@ -1,7 +1,3 @@
-"""Tests for ``CapabilityExpr`` + total combinators: factory well-formedness,
-intersect/union/negate totality over the kind cross-product, quality and confidence
-lattice propagation, address canonicalization, and identities
-(intersect(A, A) ≡ A; intersect(A, universe) ≡ A)."""
 
 from __future__ import annotations
 
@@ -16,15 +12,9 @@ from services.resolution.capabilities import (
     union,
 )
 
-# Test fixtures.
 ADDR_A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ADDR_B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 ADDR_C = "0xcccccccccccccccccccccccccccccccccccccccc"
-
-
-# ---------------------------------------------------------------------------
-# Factories + canonicalization
-# ---------------------------------------------------------------------------
 
 
 def test_finite_set_and_threshold_group_canonicalize():
@@ -37,11 +27,6 @@ def test_finite_set_and_threshold_group_canonicalize():
     assert tg.threshold == (2, [ADDR_A.lower(), ADDR_B.lower()])
 
 
-# ---------------------------------------------------------------------------
-# Intersect — finite × finite
-# ---------------------------------------------------------------------------
-
-
 def test_intersect_finite_exact_exact():
     a = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
     b = CapabilityExpr.finite_set([ADDR_B, ADDR_C])
@@ -52,11 +37,7 @@ def test_intersect_finite_exact_exact():
 
 
 def test_intersect_finite_disjoint_yields_structural_and_not_empty():
-    """INVERTED (was ``..._yields_empty``, pinning the G2 HIT 3 defect): two independently
-    resolved NON-empty, non-overlapping caller sets are self-refuting evidence on a
-    deployed function ({liquidityPool} ∩ {upgradeTimelock} = ∅ on requestWithdraw), never
-    a witnessed exact-empty "provably nobody". The AND keeps both conjuncts visible; the
-    policy layer reads it as not-determined."""
+    """{liquidityPool} ∩ {upgradeTimelock} is self-refuting evidence, never a witnessed "provably nobody" (G2 HIT 3)."""
     a = CapabilityExpr.finite_set([ADDR_A])
     b = CapabilityExpr.finite_set([ADDR_B])
     out = intersect(a, b)
@@ -66,8 +47,6 @@ def test_intersect_finite_disjoint_yields_structural_and_not_empty():
 
 
 def test_intersect_inherited_empty_stays_exact_empty():
-    """Emptiness INHERITED from an already-witnessed-empty input (all-revoked role store,
-    empty-by-design ceiling) keeps resolving: the witness lives in the input."""
     empty = CapabilityExpr.finite_set([], quality="exact")
     other = CapabilityExpr.finite_set([ADDR_A])
     for a, b in ((empty, other), (other, empty), (empty, empty)):
@@ -77,40 +56,22 @@ def test_intersect_inherited_empty_stays_exact_empty():
         assert out.membership_quality == "exact"
 
 
-# ---------------------------------------------------------------------------
-# Intersect — finite × cofinite_blacklist
-# ---------------------------------------------------------------------------
-
-
 def test_intersect_finite_with_blacklist():
-    """``finite ∩ cofinite_blacklist`` = ``finite - blacklist``."""
     fin = CapabilityExpr.finite_set([ADDR_A, ADDR_B, ADDR_C])
     bl = CapabilityExpr.cofinite_blacklist([ADDR_B])
     out = intersect(fin, bl)
     assert out.kind == "finite_set"
     assert out.members == [ADDR_A.lower(), ADDR_C.lower()]
-    # Commutes: argument order does not change the result.
     assert intersect(bl, fin).members == out.members
 
 
-# ---------------------------------------------------------------------------
-# Intersect — cofinite_blacklist × cofinite_blacklist
-# ---------------------------------------------------------------------------
-
-
 def test_intersect_blacklists_unions_them():
-    """Excluding A AND excluding B = excluding (A ∪ B)."""
     a = CapabilityExpr.cofinite_blacklist([ADDR_A])
     b = CapabilityExpr.cofinite_blacklist([ADDR_B])
     out = intersect(a, b)
     assert out.kind == "cofinite_blacklist"
     assert out.blacklist is not None
     assert set(out.blacklist) == {ADDR_A.lower(), ADDR_B.lower()}
-
-
-# ---------------------------------------------------------------------------
-# Intersect — conditional_universal preserves
-# ---------------------------------------------------------------------------
 
 
 def test_intersect_finite_with_conditional_universal_keeps_set():
@@ -123,11 +84,6 @@ def test_intersect_finite_with_conditional_universal_keeps_set():
     assert any(c.kind == "time" for c in out.conditions)
 
 
-# ---------------------------------------------------------------------------
-# Intersect — unsupported absorbs
-# ---------------------------------------------------------------------------
-
-
 def test_intersect_unsupported_absorbs():
     fin = CapabilityExpr.finite_set([ADDR_A])
     u = CapabilityExpr.unsupported("opaque_control_flow")
@@ -137,11 +93,6 @@ def test_intersect_unsupported_absorbs():
     assert "opaque_control_flow" in out.unsupported_reason
     out2 = intersect(u, fin)
     assert out2.kind == "unsupported"
-
-
-# ---------------------------------------------------------------------------
-# Union — finite × finite
-# ---------------------------------------------------------------------------
 
 
 def test_union_finite_exact_exact():
@@ -168,7 +119,6 @@ def test_finite_exact_with_lower_bound_yields_lower_bound(op, a_members, b_membe
 
 @pytest.mark.parametrize("op", [intersect, union])
 def test_idempotent(op):
-    """``intersect(A, A) ≡ A`` and ``union(A, A) ≡ A`` for canonical finite sets."""
     a = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
     out = op(a, a)
     assert out.kind == "finite_set"
@@ -184,13 +134,7 @@ def test_union_identical_conditionals_collapses():
     assert out.conditions == [cond]
 
 
-# ---------------------------------------------------------------------------
-# Union — cofinite_blacklist intersects
-# ---------------------------------------------------------------------------
-
-
 def test_union_blacklists_intersects():
-    """Excluding A OR excluding B = excluding (A ∩ B)."""
     a = CapabilityExpr.cofinite_blacklist([ADDR_A, ADDR_B])
     b = CapabilityExpr.cofinite_blacklist([ADDR_B, ADDR_C])
     out = union(a, b)
@@ -198,24 +142,12 @@ def test_union_blacklists_intersects():
     assert out.blacklist == [ADDR_B.lower()]
 
 
-# ---------------------------------------------------------------------------
-# Union — finite ∪ cofinite_blacklist
-# ---------------------------------------------------------------------------
-
-
 def test_union_finite_with_blacklist_yields_blacklist_minus_finite():
     fin = CapabilityExpr.finite_set([ADDR_A])
     bl = CapabilityExpr.cofinite_blacklist([ADDR_A, ADDR_B])
     out = union(fin, bl)
-    # ADDR_A is in finite (allowed), so it's removed from the
-    # remaining blacklist. Result: anyone except ADDR_B.
     assert out.kind == "cofinite_blacklist"
     assert out.blacklist == [ADDR_B.lower()]
-
-
-# ---------------------------------------------------------------------------
-# Intersect/Union — threshold × finite stays structural
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -233,25 +165,18 @@ def test_threshold_with_finite_stays_structural(op, tg_members, fin_members, exp
     assert len(out.children) == 2
 
 
-# ---------------------------------------------------------------------------
-# Negate
-# ---------------------------------------------------------------------------
-
-
 def test_negate_finite_exact_yields_blacklist():
     fin = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
     out = negate(fin)
     assert out.kind == "cofinite_blacklist"
     assert out.blacklist == [ADDR_A.lower(), ADDR_B.lower()]
-    # Double negation: negate(negate(finite_exact)) == finite_exact (canonical).
     twice = negate(out)
     assert twice.kind == "finite_set"
     assert twice.members == fin.members
 
 
 def test_negate_finite_lower_bound_yields_lower_bound_blacklist():
-    # Part 2: a non-exact exclusion negates to a lower_bound cofinite ("anyone except an
-    # un-enumerated denylist"), not unsupported — so a partially-known denylist opens.
+    # A partially-known denylist opens.
     fin = CapabilityExpr.finite_set([ADDR_A], quality="lower_bound")
     out = negate(fin)
     assert out.kind == "cofinite_blacklist"
@@ -267,8 +192,7 @@ def test_negate_blacklist_yields_finite():
 
 
 def test_negate_lower_bound_blacklist_yields_lower_bound_finite():
-    # A lower_bound cofinite complements to a lower_bound finite set, not an "exact" one,
-    # which would falsely claim we enumerated everyone the gate admits.
+    # ``exact`` would falsely claim everyone the gate admits was enumerated.
     bl = CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound")
     out = negate(bl)
     assert out.kind == "finite_set"
@@ -281,15 +205,12 @@ def test_negate_de_morgan_and():
     b = CapabilityExpr.finite_set([ADDR_B])
     and_node = CapabilityExpr.structural_and([a, b])
     out = negate(and_node)
-    # NOT(A AND B) = NOT A OR NOT B (each becomes a blacklist).
     assert out.kind == "OR"
     assert len(out.children) == 2
     assert all(c.kind == "cofinite_blacklist" for c in out.children)
 
 
-# blacklist_quality — Part 1 representation. Describes the EXCLUDED set (vs
-# membership_quality for an allow-list); carried through every cofinite-producing
-# combinator and inert today (every cofinite is exact).
+# Describes the excluded set and is carried through every cofinite-producing combinator.
 
 
 @pytest.mark.parametrize(
@@ -308,8 +229,6 @@ def test_blacklists_thread_quality(op, a_members, b_members, c_members):
 
 
 def test_attach_conditions_preserves_blacklist_quality():
-    # A cofinite flows through _attach_conditions (cofinite ∩ conditional_universal); the
-    # quality must survive that field-by-field rebuild.
     bl = CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound")
     cu = CapabilityExpr.conditional_universal(Condition(kind="pause", description="whenNotPaused"))
     out = intersect(bl, cu)
@@ -319,10 +238,7 @@ def test_attach_conditions_preserves_blacklist_quality():
 
 
 def test_every_cofinite_states_its_denylist_quality():
-    # INVERTED (was ``test_default_cofinite_serializes_identically_to_pre_field``). The
-    # emit-when-non-default rule made ABSENCE mean ``exact``, so a consumer unaware of the
-    # key read every denylist as a COMPLETE exclusion — a default making the STRONG claim.
-    # Stating the quality beats byte-identity with the pre-field wire shape.
+    # Absence used to mean ``exact``, so every denylist read as a complete exclusion.
     from services.resolution.capability_resolver import capability_to_dict
 
     exact = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A, ADDR_B]))
@@ -332,20 +248,13 @@ def test_every_cofinite_states_its_denylist_quality():
     lower = capability_to_dict(CapabilityExpr.cofinite_blacklist([ADDR_A], blacklist_quality="lower_bound"))
     assert lower["blacklist_quality"] == "lower_bound"
 
-    # And it is emitted ONLY on a denylist, so absence means "not a denylist"
-    # rather than "a complete denylist".
     assert "blacklist_quality" not in capability_to_dict(CapabilityExpr.finite_set([ADDR_A]))
 
 
-# Part 2: negate totality — un-enumerable exclusions open through the algebra. The
-# ``falsy``/``ne`` operator is the only path to negate (the static lowering of
-# ``if (predicate) revert``, naming the EXCLUDED set), so opening its un-resolved
-# forms to a cofinite is faithful, not a guess.
+# ``falsy``/``ne`` is the only path to negate and names the excluded set, so opening it is faithful.
 
 
 def test_negate_external_check_yields_lower_bound_blacklist_carrying_probe():
-    # A denylist hook resolving to an external probe (``if (check(caller)) revert``)
-    # negates to a lower_bound cofinite, keeping the probe as a side-condition.
     check = ExternalCheck(target_address=ADDR_A, target_call_selector="0xdeadbeef")
     out = negate(CapabilityExpr.external_check_only(check))
     assert out.kind == "cofinite_blacklist"
@@ -357,29 +266,23 @@ def test_negate_external_check_yields_lower_bound_blacklist_carrying_probe():
 
 
 def test_negate_unsupported_no_adapter_stays_unsupported():
-    # THE SEAM: the no_adapter → cofinite conversion lives in the membership branch of
-    # ``_evaluate_leaf`` (narrow, falsy-only), NOT in ``negate``, which keeps every
-    # ``unsupported`` reason ``unsupported`` so a genuinely-unknown predicate can never be
-    # "helpfully" opened. Pinned so nobody widens negate into a blanket opener.
+    # The no_adapter conversion lives in ``_evaluate_leaf``'s membership branch, not ``negate``, so an unknown predicate
+    # is never opened.
     out = negate(CapabilityExpr.unsupported("no_adapter"))
     assert out.kind == "unsupported"
     assert out.unsupported_reason == "negate_of_no_adapter"
 
 
 def test_negate_threshold_and_signature_stay_gated():
-    # Only external_check_only joined finite_set/cofinite as a negate-opens arm; an M-of-N or
-    # signature gate has no faithful open complement.
+    # An M-of-N or signature gate has no faithful open complement.
     assert negate(CapabilityExpr.threshold_group(2, [ADDR_A, ADDR_B])).kind == "unsupported"
     assert negate(CapabilityExpr.signature_witness(CapabilityExpr.finite_set([ADDR_A]))).kind == "unsupported"
 
 
-# Part 2 security invariants: a denylist must NEVER open a function whose authorization
-# is a positive gate.
+# A denylist must never open a positive gate.
 
 
 def test_mixed_role_gate_and_denylist_stays_gated():
-    # role gate AND denylist → the role finite_set folds the denylist as a set-subtraction
-    # and stays gated; a denylist must never erase a positive gate.
     role = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
     denylist = CapabilityExpr.cofinite_blacklist([], blacklist_quality="lower_bound")
     out = intersect(role, denylist)
@@ -388,9 +291,7 @@ def test_mixed_role_gate_and_denylist_stays_gated():
 
 
 def test_cross_subject_root_authority_and_bound_denylist_stays_gated():
-    # A real ROOT authority AND a BOUND denylist (via an inlined hook) keeps its root
-    # callers; only a function whose SOLE gate is a denylist opens. Dropping the ``bound``
-    # tag would open an authority'd function.
+    # Only a function whose sole gate is a denylist opens; dropping ``bound`` would open an authority'd function.
     root_authority = CapabilityExpr.finite_set([ADDR_A, ADDR_B])
     bound_denylist = CapabilityExpr.cofinite_blacklist([], blacklist_quality="lower_bound", subject="bound")
     out = intersect(root_authority, bound_denylist)
@@ -398,11 +299,6 @@ def test_cross_subject_root_authority_and_bound_denylist_stays_gated():
     assert set(out.members or []) == {ADDR_A.lower(), ADDR_B.lower()}
     assert out.subject == "root"
     assert out.conditions, "the bound denylist must survive as a side-condition, not be set-intersected away"
-
-
-# ---------------------------------------------------------------------------
-# Total-function discipline: nothing raises across the kind cross-product.
-# ---------------------------------------------------------------------------
 
 
 def _all_kinds() -> list[CapabilityExpr]:
@@ -433,23 +329,15 @@ _ALL_RESULT_KINDS = (
 
 
 def test_combinators_total_over_all_kinds():
-    """No intersect/union/negate combination raises; every result is a typed CapabilityExpr."""
     for a in _all_kinds():
         for b in _all_kinds():
             assert intersect(a, b).kind in _ALL_RESULT_KINDS
             assert union(a, b).kind in _ALL_RESULT_KINDS
-        # negate's only constraint: never raises, returns a CapabilityExpr.
         assert isinstance(negate(a), CapabilityExpr)
 
 
-# ---------------------------------------------------------------------------
-# Subject dimension (root caller vs bound intermediate)
-# ---------------------------------------------------------------------------
-
-
 def test_intersect_cross_subject_preserves_root_set_as_condition():
-    # The bug: a bound intermediate ({}) intersected with the real root set zeroed it;
-    # cross-subject intersect must keep the root set and attach the bound side as a side-condition.
+    # A bound intermediate used to zero the root set.
     root = CapabilityExpr.finite_set([ADDR_A, ADDR_B])  # real end-user callers
     bound_empty = CapabilityExpr.finite_set([], subject="bound")  # inlined downstream auth, empty
     out = intersect(root, bound_empty)
@@ -469,8 +357,6 @@ def test_intersect_cross_subject_is_commutative():
 
 
 def test_intersect_cross_subject_empty_root_stays_resolved_empty():
-    # Guardrail: a genuinely-empty ROOT gate AND a bound side-condition stay exact-empty
-    # (the bound side never resurrects callers).
     root_empty = CapabilityExpr.finite_set([], quality="exact")
     bound = CapabilityExpr.finite_set([ADDR_C], subject="bound")
     out = intersect(root_empty, bound)
@@ -478,7 +364,6 @@ def test_intersect_cross_subject_empty_root_stays_resolved_empty():
 
 
 def test_intersect_same_subject_bound_uses_set_algebra():
-    # Two bound sides share a dimension → ordinary set algebra (not attach).
     a = CapabilityExpr.finite_set([ADDR_A, ADDR_B], subject="bound")
     b = CapabilityExpr.finite_set([ADDR_B], subject="bound")
     out = intersect(a, b)
@@ -487,8 +372,6 @@ def test_intersect_same_subject_bound_uses_set_algebra():
 
 
 def test_intersect_conditional_universal_runs_before_cross_subject():
-    # conditional_universal is pure side-conditions: X ∩ cond_universal keeps X across
-    # subjects (the bound check stays bound, not a public path).
     bound = CapabilityExpr.finite_set([], subject="bound")
     cu = CapabilityExpr.conditional_universal(Condition(kind="business", description="c"))
     out = intersect(cu, bound)
@@ -508,15 +391,12 @@ def test_negate_preserves_subject():
     bound = CapabilityExpr.finite_set([ADDR_A], quality="exact", subject="bound")
     out = negate(bound)
     assert out.kind == "cofinite_blacklist" and out.subject == "bound"
-    # round-trip back to finite keeps it bound too
     assert negate(out).subject == "bound"
 
 
 @pytest.mark.parametrize(
     "build, apply",
     [
-        # A bound (inlined-hook) denylist must stay ``bound`` through the negate external_check arm so the
-        # cross-subject intersect keeps it a side-condition (see the security invariants above).
         pytest.param(
             lambda: CapabilityExpr.external_check_only(
                 ExternalCheck(target_address=ADDR_A, target_call_selector="0x01")

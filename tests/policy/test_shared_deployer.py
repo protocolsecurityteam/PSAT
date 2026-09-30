@@ -30,9 +30,6 @@ def _reset_executor():
     RpcExecutor.reset_for_tests()
 
 
-# --- pure fact ---------------------------------------------------------------
-
-
 def test_fact_emitted_for_shared_group():
     groups = {A: {"deployer": DEPLOYER, "addresses": [A, B]}, B: {"deployer": DEPLOYER, "addresses": [A, B]}}
     fact = _shared_deployer_fact(A, groups)
@@ -41,9 +38,6 @@ def test_fact_emitted_for_shared_group():
 
 def test_fact_omitted_when_absent():
     assert _shared_deployer_fact(C, {A: {"deployer": DEPLOYER, "addresses": [A, B]}}) is None
-
-
-# --- DB grouping -------------------------------------------------------------
 
 
 def _contract(session, protocol_id, address, deployer):
@@ -83,7 +77,6 @@ def test_load_deployer_groups_scoped_to_protocol(db_session):
     p2 = Protocol(name="dp2")
     db_session.add_all([p1, p2])
     db_session.flush()
-    # Same deployer across protocols must NOT group cross-protocol.
     _contract(db_session, p1.id, A, DEPLOYER)
     _contract(db_session, p2.id, B, DEPLOYER)
     db_session.commit()
@@ -91,8 +84,6 @@ def test_load_deployer_groups_scoped_to_protocol(db_session):
     assert load_protocol_deployer_groups(db_session, p1.id) == {}
     assert load_protocol_deployer_groups(db_session, p2.id) == {}
 
-
-# --- build_principal_labels integration --------------------------------------
 
 TARGET = "0x1111111111111111111111111111111111111111"
 PRINCIPAL = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
@@ -176,7 +167,6 @@ def test_shared_deployer_lands_on_principal_without_org_label(monkeypatch):
     assert fact["provenance"] == "deployer_read"
     assert fact["deployer"] == DEPLOYER
     assert fact["addresses"] == [PRINCIPAL, SIBLING]
-    # The heuristic fact must NOT leak into an org-identity label / display name.
     assert DEPLOYER not in profile["labels"]
     assert DEPLOYER not in (profile["display_name"] or "")
     assert SIBLING not in profile["labels"]

@@ -1,15 +1,9 @@
-"""Plane 2 - a flow sink's asset address, or nothing at all.
+"""Plane 2: a flow sink's asset address, or nothing.
 
-Every test pins one way a resolved address could become a fiction: an accessor borrowed
-from a same-named hand-written getter (the ``getTokenOut()`` trap, where ``tokenOut()``
-reverts); a short/whitespace-padded/non-canonical word decoded anyway; a revert or transport
-failure resolving to zero, ``null`` or a present-but-empty key; a real zero answer dropped
-or priced; an address without its read height; ``immutable`` published as a runtime
-invariant behind a proxy; a row keyed by NAME rather than the minted selector.
-
-Words asserted were measured on chain at block 25643300 via eRPC and reproduced verbatim;
-``tokenOut()`` at the SyncPool proxy reverted with no data at that height while
-``getTokenOut()`` answered.
+Each test pins one way an address could become fiction: a same-named hand-written getter (``tokenOut()`` reverts
+where ``getTokenOut()`` answers), a malformed word decoded anyway, a failure resolving to a value, a zero
+priced, an address without its height, or ``immutable`` treated as invariant behind a proxy. Words were measured
+at block 25643300.
 """
 
 from __future__ import annotations
@@ -31,7 +25,6 @@ BLOCK_HASH = bytes.fromhex("21d7f476ebacbed97ff15fbe213376984bada1928166b375ab1b
 PROBE = ProbeBlock(number=BLOCK, block_hash=BLOCK_HASH)
 PROBE_NO_HASH = ProbeBlock(number=BLOCK, block_hash=None)
 
-# Runtime (proxy) addresses and the compiler-minted selectors measured on them.
 MERKLE_DROP = "0x6db24ee656843e3fe03eb8762a54d86186ba6b64"
 REDEMPTION_MGR = "0xdadef1ffbfeaab4f68a9fd181395f68b4e4e7ae0"
 REWARDS_ROUTER = "0x89e45081437c959a827d2027135bc201ab33a2c8"
@@ -50,15 +43,9 @@ ADDR_KING = "0x8f08b70456eb22f6109f57b8fafe862ed28e6040"
 ADDR_EETH = "0x35fa164735182de50811e8e2e824cfb9b6118ac2"
 ADDR_EIGEN = "0xec53bf9167f50cdeb3ae105f56099aaab9061f83"
 
-# The exact tuple ``eth_call_batch`` produced for ``tokenOut()`` at 25643300:
-# reverted, with no ``error.data`` at all.
+# The exact result ``tokenOut()`` gave at 25643300.
 MEASURED_REVERT = EthCallResult(False, "0x", None, "execution reverted")
 OK = EthCallResult(True, WORD_KING, None, None)
-
-
-# ---------------------------------------------------------------------------
-# Descriptor fixtures — the shape the static effects artifact actually stores
-# ---------------------------------------------------------------------------
 
 
 def _state_var_receiver(selector: str, variable: str, *, mutability: str = "immutable_in_implementation") -> dict:
@@ -74,7 +61,6 @@ def _state_var_receiver(selector: str, variable: str, *, mutability: str = "immu
     }
 
 
-# A receiver named by the caller: no declaration licenses a read.
 _CALLER_NAMED_RECEIVER = {
     "binding": "parameter",
     "param_scope": "entry_point",
@@ -118,7 +104,6 @@ def _run(
     proven_proxied: bool = True,
     probe_block: ProbeBlock = PROBE,
 ) -> tuple[dict, list]:
-    """Resolve with ``eth_call_batch`` stubbed; returns (payload, calls seen)."""
     seen: list = []
 
     def fake_batch(rpc_url, calls, block_tag, *, headers=None, chain_id=None):
@@ -138,17 +123,10 @@ def _run(
     return payload, seen
 
 
-# ---------------------------------------------------------------------------
-# 1. The resolved payload, byte for byte
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("host", "selector", "variable", "word", "address"),
     [
         pytest.param(REWARDS_ROUTER, SEL_REWARD_TOKEN, "rewardTokenAddress", WORD_EIGEN, ADDR_EIGEN, id="reward_token"),
-        # The measured words for ``token()`` and ``eEth()`` decode to the addresses the investigation pinned at
-        # 25643300.
         pytest.param(MERKLE_DROP, SEL_TOKEN, "token", WORD_KING, ADDR_KING, id="pinned_token"),
         pytest.param(REDEMPTION_MGR, SEL_EETH, "eEth", WORD_EETH, ADDR_EETH, id="pinned_eeth"),
     ],
@@ -156,9 +134,7 @@ def _run(
 def test_resolved_payload_is_byte_exact(
     monkeypatch: pytest.MonkeyPatch, host: str, selector: str, variable: str, word: str, address: str
 ) -> None:
-    """A full-word answer publishes the address, its block, and the invariant —
-    and nothing else. Asserted as whole-dict equality so a silently added key
-    (a name, a confidence, a defaulted null) fails the test."""
+    """Whole-dict equality so a silently added key fails."""
     effects = _effects(_sink("s0", _state_var_receiver(selector, variable)))
     payload, seen = _run(monkeypatch, effects, [EthCallResult(True, word, None, None)], deployment_address=host)
 
@@ -186,11 +162,6 @@ def test_resolved_payload_is_byte_exact(
     assert seen == [("http://stub", [{"to": host, "data": selector}], hex(BLOCK), 1)]
 
 
-# ---------------------------------------------------------------------------
-# 2. The invariant enum has exactly two members
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "proven_proxied,expected",
     [(True, "redirectable_by_upgrade_authority"), (False, "not_determined")],
@@ -205,9 +176,7 @@ def test_invariant_tracks_proven_proxiedness(
 
 @pytest.mark.parametrize("mutability", ["immutable_in_implementation", "constant"])
 def test_declaration_class_never_becomes_a_runtime_invariant(monkeypatch: pytest.MonkeyPatch, mutability: str) -> None:
-    """The declaration class is carried verbatim and is NOT promoted: an
-    ``immutable`` (or ``constant``) behind a proxy still publishes ``redirectable_by_upgrade_authority``,
-    and no value in the enum means closed."""
+    """An ``immutable`` behind a proxy is still redirectable by the upgrade authority."""
     effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token", mutability=mutability)))
     payload, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_KING, None, None)])
     row = payload["receivers"][0]
@@ -219,11 +188,6 @@ def test_declaration_class_never_becomes_a_runtime_invariant(monkeypatch: pytest
     }
 
 
-# ---------------------------------------------------------------------------
-# 3. Failure never resolves to a value
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     "result,reason",
     [
@@ -232,20 +196,16 @@ def test_declaration_class_never_becomes_a_runtime_invariant(monkeypatch: pytest
         (EthCallResult(False, "0x", None, "transport: connection reset"), "call_did_not_answer"),
         (EthCallResult(True, "0x", None, None), "malformed_return_word"),
         (EthCallResult(True, "0x" + "0" * 62, None, None), "malformed_return_word"),
-        # Over-long: 33 bytes is not the ABI this plane decodes, and taking the
-        # first or last word of it would be a guess about which.
+        # Taking either word of 33 bytes would be a guess.
         (EthCallResult(True, WORD_KING + "00", None, None), "malformed_return_word"),
-        # Non-canonical: the high-order 12 bytes are set, so this word is not an
-        # address. Truncating it would read it as one.
+        # The high 12 bytes are set, so this isn't an address.
         (
             EthCallResult(True, "0x" + "ff" * 12 + "8f08b70456eb22f6109f57b8fafe862ed28e6040", None, None),
             "malformed_return_word",
         ),
-        # ``bytes.fromhex`` ignores ASCII whitespace: 62 nibbles + two spaces is
-        # 64 characters that decode to 31 bytes.
+        # ``bytes.fromhex`` ignores whitespace.
         (EthCallResult(True, "0x" + "0" * 62 + "  ", None, None), "malformed_return_word"),
-        # One nibble short of a word still decodes under ``int(x, 16)``; the length check is what makes it a
-        # non-answer.
+        # The length check is what makes it a non-answer.
         (EthCallResult(True, WORD_KING[:-1], None, None), "malformed_return_word"),
     ],
 )
@@ -263,20 +223,13 @@ def test_a_failed_read_publishes_no_address_and_no_block(
     assert "asset_identity_invariant" not in row
 
 
-# ---------------------------------------------------------------------------
-# 4. The zero address is a real answer and is not an asset
-# ---------------------------------------------------------------------------
-
-
 def test_zero_word_is_its_own_state(monkeypatch: pytest.MonkeyPatch) -> None:
     effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token")))
     payload, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_ZERO, None, None)])
     row = payload["receivers"][0]
     assert row["asset_address_status"] == "observed_zero_address"
-    # The read completed at a known height, so the height IS published…
     assert row["observed_at_block"] == BLOCK
-    # …but the zero address is never handed to a pricer, and never invented as
-    # an identity invariant.
+    # The zero address is never handed to a pricer.
     assert "asset_address" not in row
     assert "asset_identity_invariant" not in row
 
@@ -287,11 +240,6 @@ def test_zero_row_is_not_counted_as_resolved(monkeypatch: pytest.MonkeyPatch) ->
     assert fap.count_resolved(zero) == 0
     good, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_KING, None, None)])
     assert fap.count_resolved(good) == 1
-
-
-# ---------------------------------------------------------------------------
-# 5. The address and its block are inseparable by construction
-# ---------------------------------------------------------------------------
 
 
 def test_an_observation_cannot_exist_without_a_height() -> None:
@@ -306,7 +254,6 @@ def test_an_observation_cannot_exist_without_a_height() -> None:
 
 
 def test_a_hashless_probe_block_still_publishes_the_height(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Losing the hash weakens replay-after-reorg only; the height still stands."""
     effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token")))
     payload, _ = _run(monkeypatch, effects, [EthCallResult(True, WORD_KING, None, None)], probe_block=PROBE_NO_HASH)
     row = payload["receivers"][0]
@@ -315,17 +262,10 @@ def test_a_hashless_probe_block_still_publishes_the_height(monkeypatch: pytest.M
     assert payload["probe_block_hash"] is None
 
 
-# ---------------------------------------------------------------------------
-# 6. Only the compiler-minted accessor is licensed — the getTokenOut() trap
-# ---------------------------------------------------------------------------
-
-
 def test_the_view_getter_local_mints_no_row_and_no_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``IERC20 tokenOut = IERC20(getTokenOut())`` binds a LOCAL. On chain at
-    25643300 ``getTokenOut()`` answers ``0xcd5fe23c…`` while ``tokenOut()``
-    REVERTS — so pairing the receiver with a same-named getter would publish an
-    address for a function that does not exist. The row stays not_determined by
-    never entering this plane at all."""
+    """The receiver binds a local; pairing it with a same-named getter would publish an address for a function that
+    doesn't exist.
+    """
     local_receiver = {
         "binding": "local",
         "param_scope": None,
@@ -350,9 +290,7 @@ def _token_receiver(**overrides: Any) -> dict:
 @pytest.mark.parametrize(
     "receiver",
     [
-        # Defence in depth: even if a descriptor arrived with a non-null selector on a non-state-variable binding,
-        # the binding gate refuses it. The selector's licence comes from the DECLARATION, not from the field being
-        # populated.
+        # The selector's licence comes from the declaration, not the populated field.
         pytest.param(
             {
                 "binding": "local",
@@ -384,11 +322,6 @@ def test_an_unlicensed_receiver_mints_no_row_and_is_never_called(receiver: dict 
     assert fap.collect_asset_receivers(_effects(_sink("s0", receiver))) == []
 
 
-# ---------------------------------------------------------------------------
-# 7. Rows a descriptor never reached are left exactly as they were
-# ---------------------------------------------------------------------------
-
-
 def test_a_state_variable_without_a_minted_selector_is_untouched() -> None:
     receiver = _state_var_receiver(SEL_TOKEN, "token")
     receiver["auto_getter_selector"] = None
@@ -411,8 +344,6 @@ def test_a_state_variable_without_a_minted_selector_is_untouched() -> None:
     ],
 )
 def test_an_artifact_with_nothing_readable_yields_nothing_rather_than_raising(effects: dict) -> None:
-    """The step is error-isolated, but a shape it cannot read must produce an
-    empty plane, not an exception that costs the stage its degradation budget."""
     assert fap.collect_asset_receivers(effects) == []
 
 
@@ -426,11 +357,6 @@ def test_a_functions_list_is_read_the_same_as_a_functions_map(monkeypatch: pytes
 @pytest.mark.parametrize("payload", [{}, {"receivers": None}, {"receivers": "x"}, {"receivers": ["x"]}])
 def test_count_resolved_reads_nothing_out_of_a_shape_it_cannot_read(payload: dict) -> None:
     assert fap.count_resolved(payload) == 0
-
-
-# ---------------------------------------------------------------------------
-# 8. Identity is the selector, never the name
-# ---------------------------------------------------------------------------
 
 
 def test_sinks_sharing_a_selector_fold_to_one_read(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -467,11 +393,6 @@ def test_conflicting_declaration_classes_withhold_the_mutability(monkeypatch: py
     assert receivers[0].declared_mutability is None
 
 
-# ---------------------------------------------------------------------------
-# 9. Idempotence and determinism
-# ---------------------------------------------------------------------------
-
-
 def test_two_identical_runs_produce_the_identical_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     effects = _effects(
         _sink("s1", _state_var_receiver(SEL_REWARD_TOKEN, "rewardTokenAddress")),
@@ -481,13 +402,7 @@ def test_two_identical_runs_produce_the_identical_payload(monkeypatch: pytest.Mo
     first, _ = _run(monkeypatch, effects, results)
     second, _ = _run(monkeypatch, effects, results)
     assert first == second
-    # Sorted by selector, so sink declaration order cannot reorder the payload.
     assert [r["asset_getter_selector"] for r in first["receivers"]] == sorted([SEL_TOKEN, SEL_REWARD_TOKEN])
-
-
-# ---------------------------------------------------------------------------
-# 10. Call-site wiring: pinned height, runtime address, stage isolation
-# ---------------------------------------------------------------------------
 
 
 def _stage_ctx(
@@ -524,8 +439,7 @@ def _stage_ctx(
 
 
 def test_an_unpinnable_height_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No pinned height means no read. There is no ``"latest"`` fallback: an
-    address observed at an unrecorded height may not be published."""
+    """No ``"latest"`` fallback."""
     effects = _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token")))
     ctx = _stage_ctx(monkeypatch, effects, [], probe_block=None)
     monkeypatch.setattr(fap, "eth_call_batch", lambda *a, **k: pytest.fail("must not read unpinned"))
@@ -545,8 +459,7 @@ def test_an_unpinnable_height_writes_nothing(monkeypatch: pytest.MonkeyPatch) ->
     ("effects", "probe_block", "deployment_address"),
     [
         pytest.param(None, PROBE, MERKLE_DROP, id="no_effects_artifact"),
-        # A contract whose every sink receiver is caller-named leaves no trace here: an empty plane is not
-        # published as a proven-empty one.
+        # An empty plane is not published as a proven-empty one.
         pytest.param(_effects(_sink("s0", _CALLER_NAMED_RECEIVER)), PROBE, MERKLE_DROP, id="no_licensed_receiver"),
         pytest.param(
             _effects(_sink("s0", _state_var_receiver(SEL_TOKEN, "token"))), PROBE, None, id="no_deployment_address"
@@ -571,8 +484,7 @@ def test_a_stage_with_nothing_to_resolve_writes_nothing(
 
 
 def test_the_writer_reads_the_proxy_not_the_implementation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An implementation job in proxy context resolves at the PROXY, and that is
-    also the sole licence for ``redirectable_by_upgrade_authority``."""
+    """The proxy context is also the sole licence for ``redirectable_by_upgrade_authority``."""
     import workers.resolution_worker as rw
 
     effects = _effects(_sink("s0", _state_var_receiver(SEL_REWARD_TOKEN, "rewardTokenAddress")))
@@ -601,8 +513,6 @@ def test_the_writer_reads_the_proxy_not_the_implementation(monkeypatch: pytest.M
 
 
 def test_a_failing_writer_degrades_the_step_not_the_stage(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The step is isolated exactly as the dependency-edge and role-holder steps
-    are: it records a degradation and the stage still completes."""
     import workers.resolution_worker as rw
     from tests.support.resolution_worker_stubs import _job, _patch_all
 
@@ -620,7 +530,6 @@ def test_a_failing_writer_degrades_the_step_not_the_stage(monkeypatch: pytest.Mo
     rw.ResolutionWorker().process(session, cast(Any, _job()))
 
     assert [d["phase"] for d in degraded] == ["resolution_flow_asset_plane"]
-    # The stage still stored what it did prove.
     stored = [name for name, _ in ctx["store_calls"]]
     assert "control_snapshot" in stored
     assert "resolved_control_graph" in stored

@@ -1,21 +1,10 @@
-"""Integration pins for the principal-dimension conflation fix (Veda caller-drop, #2+#3).
+"""Veda caller-drop (#2+#3) on a snapshot of the prod etherfi stack (``veda_teller_stack.json``), asserted at the
+surface level so a symptom patch at any layer is caught.
 
-Drives the REAL resolver (``resolve_contract_capabilities``) on a snapshot of the prod etherfi
-Veda stack (Teller 0x99de9e5a, BoringVault 0x917cee80, shared RolesAuthority 0x402dff43; real
-trees + role events in ``tests/fixtures/solmate/veda_teller_stack.json``) and asserts at the
-surface/status level so a symptom-patch revert at any layer is caught.
-
-The bug: a Teller's ``bulkWithdraw``/``deposit`` is gated by its own Solmate ``requiresAuth``
-(canCall on the end-user) AND internally calls ``BoringVault.enter/exit`` (``requiresAuth``
-keyed on the *Teller* as caller), a different caller dimension. Set-intersecting it (#2) or
-AND-dropping it in the writer (#3) zeroes the real end-user callers. #4: a public ``deposit``
-was dropped instead of resolving to ``public``. Each behavioral pin FAILS on main; the
-guardrail pin passes on both (a role-less own gate, owner renounced, stays ``resolved_empty``).
-
-A second regression: the writer seeded every AND/OR with its own conditions as a public path,
-so an unresolvable (``external_check_only``) or provably empty caller gate surfaced as
-``public``/``anyone``, masking the real controller. ``test_pin5_*`` reproduces it end-to-end;
-``test_seed_public_*`` assert ``public`` is earned only by a ``conditional_universal`` child.
+The Teller's own ``requiresAuth`` is keyed on the end user, but its inner ``BoringVault.enter/exit`` call is keyed
+on the Teller: a different caller dimension. Intersecting (#2) or AND-dropping it (#3) zeroed the real callers;
+#4 dropped a public ``deposit``. Separately, the writer seeded every AND/OR as a public path, so an unresolvable
+or empty gate surfaced as ``public``; ``public`` must be earned by a ``conditional_universal`` child.
 """
 
 from __future__ import annotations
@@ -37,15 +26,14 @@ from tests.conftest import _can_connect, requires_postgres
 
 _FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "veda_teller_stack.json"
 
-# RolesAuthority event topic0s (Solmate). Cursor seeding needs one row per topic.
+# Cursor seeding needs one row per topic.
 _ROLE_TOPICS = [
     "0xa52ea92e6e955aa8ac66420b86350f7139959adfcc7e6a14eee1bd116d09860e",  # RoleCapabilityUpdated
     "0x950a343f5d10445e82a71036d3f4fb3016180a25805141932543b83e2078a93e",  # PublicCapabilityUpdated
     "0x4c9bdd0c8e073eb5eda2250b18d8e5121ff27b62064fbeeeed4869bb99bc5bf2",  # UserRoleUpdated
 ]
 
-# The real role-12 holders authorized for bulkWithdraw on this authority (Solmate fold of
-# the snapshotted events). These are what the bug drops.
+# Role-12 holders for bulkWithdraw: what the bug drops.
 _BULKWITHDRAW_CALLERS = {
     "0x989468982b08aefa46e37cd0086142a86fa466d7",
     "0xabbc3e6bccd53c55fee9a785f30a3a8202e6f61e",
@@ -81,7 +69,7 @@ def session():
 
     engine = create_engine(_DB_URL)
     s = Session(engine, expire_on_commit=False)
-    # Clean at setup too, so a prior aborted run can't collide on the contract (address, chain) unique key.
+    # A prior aborted run could collide on the (address, chain) unique key.
     _wipe(s)
     try:
         yield s
@@ -94,8 +82,7 @@ def session():
 
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch):
-    """Keep the suite offline: fail the adapter's bytecode confirmation and getter probes so the
-    resolver falls back to its event-only / state-var paths."""
+    """Fail bytecode confirmation and getter probes so the resolver uses event-only paths."""
     import services.clients.rpc as rpc
 
     def _boom(*_a, **_k):
@@ -160,7 +147,7 @@ def _seed_role_events(session, *, authority: str, events: list[dict]):
             )
         )
         max_block = max(max_block, e["block_number"])
-    # backfill_complete cursors are load-bearing: without them the adapter returns index-cold external_check_only.
+    # Without backfill_complete cursors the adapter returns index-cold external_check_only.
     for topic0 in _ROLE_TOPICS:
         session.add(
             IndexedEventCursor(
@@ -177,8 +164,7 @@ def _seed_role_events(session, *, authority: str, events: list[dict]):
     session.commit()
 
 
-# Selector the inlined vault.exit canCall folds against (the teller's non-canonical exit-leaf
-# signature). Granting a role for (vault, this selector) makes the inner downstream auth NON-EMPTY.
+# The teller's non-canonical exit-leaf selector; a role grant for it makes the inner auth non-empty.
 _INNER_EXIT_SELECTOR = "0x61a3bcc8"
 # Cursor frontier for the seeded role events, and the pass pin the resolver evaluates at.
 _ROLE_FRONTIER = 30_000_000
@@ -186,8 +172,6 @@ _INNER_GRANTEE = "0xdddddddddddddddddddddddddddddddddddddddd"
 
 
 def _inner_exit_grant_events(vault: str) -> list[dict]:
-    """Events granting an unused role for (vault, exit-selector) so ``canCall(*, vault, exit)``
-    folds to a non-empty bound set (the case the empty snapshot doesn't exercise)."""
     role_cap, _pub, user_role = _ROLE_TOPICS
 
     def addr_word(a: str) -> str:
@@ -224,12 +208,9 @@ def _resolve(
     extra_events: list[dict] | None = None,
     seed_role_events: bool = True,
 ) -> dict:
-    """Seed the stack and run the production resolver against the Teller.
-
-    ``seed_vault`` toggles whether the inner ``exit``/``enter`` inlines (#2 bound finite_set) or
-    stays ``external_check_only`` (#3). ``extra_events`` appends role events.
-    ``seed_role_events=False`` leaves the RolesAuthority uncrawled so the own gate falls to
-    ``external_check_only`` (the production degraded path, #5)."""
+    """``seed_vault`` picks #2 (inner inlines) vs #3 (external_check_only); ``seed_role_events=False`` is the
+    degraded path (#5).
+    """
     from services.resolution.capability_resolver import resolve_contract_capabilities
 
     teller = fixture["teller_address"]
@@ -275,21 +256,17 @@ def _row_addresses(surface) -> set[str]:
     return {str(r.get("address")).lower() for r in surface.principal_rows}
 
 
-# #2 — inner vault.exit inlines to a bound finite_set; must NOT zero the callers
-
-
 @requires_postgres
 def test_pin2_inlined_inner_exit_does_not_zero_caller_set(session, fixture):
     out = _resolve(session, fixture, seed_vault=True)
     surface, status = _surface(out[_BULKWITHDRAW])
 
-    # On main the bound inner-exit set intersects the own caller set to ∅ (resolved_empty, 0 rows).
     assert _row_addresses(surface) == _BULKWITHDRAW_CALLERS, (
         f"the real role-12 caller set must survive the inlined vault.exit auth; "
         f"got {_row_addresses(surface)} status={status}"
     )
     assert status != "resolved_empty", "a function with real callers must not be labeled resolved_empty"
-    # The inner auth must be a SIDE-CONDITION on the callers, not a narrowing: every surviving row records conditions.
+    # The inner auth is a side-condition, not a narrowing.
     assert all(r.get("details", {}).get("conditions") for r in surface.principal_rows), (
         "the inlined inner-call auth should be attached to the caller rows as a condition"
     )
@@ -297,10 +274,8 @@ def test_pin2_inlined_inner_exit_does_not_zero_caller_set(session, fixture):
 
 @requires_postgres
 def test_pin2b_nonempty_inner_exit_neither_drops_nor_leaks(session, fixture):
-    # The empty-inner snapshot hides a second failure mode: a Solmate inner call resolves to
-    # OR[canCall, msg.sender==owner]; if the owner leaf isn't subject-tagged, a NON-EMPTY canCall
-    # keeps the OR root-tagged, the cross-subject intersect never fires, and the inner member
-    # leaks -> and_multiple_principal_shapes -> 0 rows. Grant a role for (vault, exit) to hit it.
+    # If the owner leaf in OR[canCall, msg.sender==owner] isn't subject-tagged, a non-empty canCall keeps the OR
+    # root-tagged and the inner member leaks to and_multiple_principal_shapes.
     out = _resolve(session, fixture, seed_vault=True, extra_events=_inner_exit_grant_events(fixture["vault_address"]))
     surface, status = _surface(out[_BULKWITHDRAW])
 
@@ -314,15 +289,11 @@ def test_pin2b_nonempty_inner_exit_neither_drops_nor_leaks(session, fixture):
     )
 
 
-# #3 — inner call is external_check_only; writer must keep the caller rows
-
-
 @requires_postgres
 def test_pin3_external_check_inner_call_preserves_caller_rows(session, fixture):
     out = _resolve(session, fixture, seed_vault=False)
     surface, status = _surface(out[_BULKWITHDRAW])
 
-    # On main _and_surface collapses AND[external_check_only, finite_set] to residual-only (0 rows).
     assert _row_addresses(surface) == _BULKWITHDRAW_CALLERS, (
         f"caller rows must survive an AND with a pure external check; got {_row_addresses(surface)}"
     )
@@ -331,8 +302,7 @@ def test_pin3_external_check_inner_call_preserves_caller_rows(session, fixture):
     assert attached, "the unenumerable external check must be attached, not dropped"
 
 
-# Guardrail — a role-less own gate (owner renounced) stays resolved_empty; holds on BOTH main
-# and fix (the fix must not resurrect true-negatives).
+# The fix must not resurrect true negatives.
 
 
 @requires_postgres
@@ -345,34 +315,25 @@ def test_guardrail_no_role_own_gate_stays_resolved_empty(session, fixture, seed_
     assert _row_addresses(surface) == set(), "no principals may be minted for a true-negative"
 
 
-# #4 — public capability resolves to `public` with NO phantom principals
-
-
 @requires_postgres
 @pytest.mark.parametrize("seed_vault", [True, False])
 def test_pin4_public_capability_resolves_public_without_phantoms(session, fixture, seed_vault):
     out = _resolve(session, fixture, seed_vault=seed_vault)
     surface, status = _surface(out[_DEPOSIT])
 
-    # canCall(<anyone>, teller, deposit) is true on-chain (PublicCapabilityUpdated). The adapter
-    # resolves `public`; the generic probe-materializer would enumerate event candidates (incl.
-    # low-int phantoms), so preferring the adapter keeps zero address rows.
+    # The probe-materializer would enumerate low-int phantom candidates; the adapter keeps zero address rows.
     assert surface.authority_public is True, f"public deposit must resolve authority_public; status={status}"
     assert status == "public"
     assert _row_addresses(surface) == set(), "a public capability must mint zero principal rows (no phantoms)"
 
 
-# #5 — degraded coverage: the RolesAuthority was never indexed, so the own ``canCall`` gate is
-# unresolvable. A role-gated function must NOT surface as `public`.
+# #5: with the RolesAuthority unindexed, a role-gated function must not surface as public.
 
 
 @requires_postgres
 @pytest.mark.parametrize("seed_vault", [True, False])
 def test_pin5_uncrawled_authority_does_not_surface_public(session, fixture, seed_vault):
-    # The production preview indexed only the LayerZero endpoint, never the RolesAuthority, so
-    # the adapter returns external_check_only and the function's only "public path" is the
-    # projector's own AND fold seed. Reporting a role-gated bulkWithdraw `public` masks the real
-    # controller, the worst error direction for this tool.
+    # The only "public path" is the projector's AND fold seed; reporting it public masks the controller.
     out = _resolve(session, fixture, seed_vault=seed_vault, seed_role_events=False)
     surface, status = _surface(out[_BULKWITHDRAW])
 
@@ -381,22 +342,14 @@ def test_pin5_uncrawled_authority_does_not_surface_public(session, fixture, seed
     assert _row_addresses(surface) == set(), "no principals may be minted for an unresolved gate"
 
 
-# #6 — cold-start race self-heal: the cold own gate must persist the ``deferred_pending_index``
-# marker so ``deferred_reconciler`` re-resolves it once the authority backfills.
+# #6: the cold gate persists ``deferred_pending_index`` so ``deferred_reconciler`` re-resolves it.
 
 
 @requires_postgres
 @pytest.mark.parametrize("seed_vault", [True, False])
 def test_pin6_cold_index_gate_persists_deferral_for_selfheal(session, fixture, seed_vault):
-    # The Veda cold-start race: the RolesAuthority's role events aren't indexed when the Teller
-    # resolves (the durable index backfills after). The own ``canCall`` gate must fail closed to
-    # an ``external_check_only`` tagged ``deferred_pending_index``, the marker
-    # ``deferred_reconciler`` keys on to re-enqueue the policy stage.
-    #
-    # Regression (Veda OR-unresolved 17->106): the ``external_set`` branch overwrote that tagged
-    # deferral with the inline probe / event-candidate materializer, dropping the marker, so the
-    # reconciler never re-enqueued and the cold result stuck forever. The re-enqueue half is
-    # pinned by ``test_deferred_resolution_reconcile.py``; this pins that the marker is emitted.
+    # The ``external_set`` branch overwrote the tagged deferral, so the reconciler never re-enqueued (Veda OR-unresolved
+    # 17->106). Re-enqueue is pinned in ``test_deferred_resolution_reconcile.py``.
     out = _resolve(session, fixture, seed_vault=seed_vault, seed_role_events=False)
 
     authority = fixture["authority_address"].lower()
@@ -409,9 +362,7 @@ def test_pin6_cold_index_gate_persists_deferral_for_selfheal(session, fixture, s
         )
 
 
-# Candidate hygiene (defense-in-depth): the materializer must reject small-integer event
-# words coerced to phantom addresses (0x..01 .. 0x..ff) while keeping real ones.
-# ---------------------------------------------------------------------------
+# Small-integer event words (0x..01 .. 0x..ff) are not addresses.
 
 
 def test_materializer_rejects_low_int_phantom_candidates():
@@ -427,10 +378,7 @@ def test_materializer_rejects_low_int_phantom_candidates():
     assert not _is_plausible_candidate_address("not-hex")
 
 
-# ---------------------------------------------------------------------------
-# Writer (_and_surface) unit pins — preserve rows / public paths when AND-ed with a pure
-# check; collapse to residual only when BOTH sides lack a valid path.
-# ---------------------------------------------------------------------------
+# Collapse to residual only when both sides lack a valid path.
 
 
 def test_and_surface_preserves_rows_when_anded_with_pure_check():
@@ -471,7 +419,6 @@ def test_and_surface_both_pure_checks_stays_residual():
 
 
 def test_and_surface_valid_with_empty_branch_keeps_rows():
-    # A valid side AND an empty (no rows/paths/residual) side keeps the rows verbatim.
     from services.policy.capability_surface import CapabilitySurface, _and_surface
 
     valid = CapabilitySurface(principal_rows=[{"address": "0x" + "a" * 40, "details": {}}])
@@ -493,20 +440,13 @@ def test_residual_as_conditions_variants():
     assert _residual_as_conditions("not-a-dict") == []  # pyright: ignore[reportArgumentType]  # defensive non-dict guard
 
 
-# ---------------------------------------------------------------------------
-# Seed-public pins — a `public` surface must be justified by a `conditional_universal` child,
-# never by the projector's own AND/OR fold seed or node-level conditions. Feeds the exact Veda
-# Teller tree shapes through the production serializer and writer (degraded-coverage and
-# fully-indexed prod runs).
-# ---------------------------------------------------------------------------
+# Public must be justified by a ``conditional_universal`` child, not the projector's fold seed or node conditions.
 
 _VAULT_ADDR = "0x86b5780b606940eb59a062aa85a07959518c0161"
 _AUTHORITY_ADDR = "0x3994741a5b29c60d0ab318de1024f9256fe959dc"
 
 
 def _inner_call_check() -> CapabilityExpr:
-    """The teller's inlined ``BoringVault.exit`` requiresAuth (keyed on the teller, unenumerable here): a pure
-    ``external_check_only``."""
     return CapabilityExpr.external_check_only(
         ExternalCheck(target_address=_VAULT_ADDR, target_call_selector="0x61a3bcc8"),
         conditions=[Condition(kind="business", description="assetsOut < minimumAssets")],
@@ -514,8 +454,6 @@ def _inner_call_check() -> CapabilityExpr:
 
 
 def _unresolved_own_gate() -> CapabilityExpr:
-    """The teller's own ``requiresAuth`` with RolesAuthority events unindexed: an unresolvable
-    external check OR-ed with the empty fallback set, as the degraded resolver emits it."""
     return CapabilityExpr.structural_or(
         [
             CapabilityExpr.external_check_only(
@@ -542,8 +480,6 @@ def _surface_for(cap: CapabilityExpr):
 
 
 def test_seed_public_unresolved_own_gate_is_not_public():
-    # Degraded preview: the own canCall is unresolvable, so the only "public path" is the AND fold seed. Must be
-    # unknown, not public.
     cap = CapabilityExpr.structural_and([_inner_call_check(), _unresolved_own_gate()])
     surface, status = _surface_for(cap)
     assert surface.authority_public is False, "an unresolved caller gate must not surface as `anyone`"
@@ -552,8 +488,6 @@ def test_seed_public_unresolved_own_gate_is_not_public():
 
 
 def test_seed_public_resolved_empty_own_gate_stays_resolved_empty():
-    # Fully-indexed prod run: the own gate is a provably-empty exact role set; AND-ing an inner external check
-    # must not flip resolved_empty -> public.
     own_gate = CapabilityExpr.finite_set(
         [],
         quality="exact",
@@ -572,9 +506,7 @@ def test_seed_public_resolved_empty_own_gate_stays_resolved_empty():
 
 
 def test_seed_public_or_node_condition_is_not_public():
-    # setShareLockPeriod et al: an OR over (unresolved canCall, empty set) with a node-level
-    # business condition. The condition seeds a NON-empty public path, so an "empty-path"
-    # heuristic would miss it; it must still not surface as public.
+    # The node condition seeds a non-empty public path, so an "empty-path" heuristic would miss it.
     own_gate = CapabilityExpr(
         kind="OR",
         children=list(_unresolved_own_gate().children),
@@ -587,8 +519,6 @@ def test_seed_public_or_node_condition_is_not_public():
 
 
 def test_seed_public_genuine_public_survives():
-    # Guardrail (#4): a real PublicCapabilityUpdated → conditional_universal child AND-ed
-    # with an inner external check must STILL surface as public.
     cap = CapabilityExpr.structural_and(
         [
             CapabilityExpr.conditional_universal(
@@ -604,8 +534,6 @@ def test_seed_public_genuine_public_survives():
 
 
 def test_seed_public_caller_rows_survive_inner_check():
-    # Guardrail (#3): real role holders AND-ed with an inner external check keep their rows
-    # (with the check attached as a condition) — not dropped, not surfaced as public.
     holders = ["0x" + "a" * 40, "0x" + "b" * 40]
     cap = CapabilityExpr.structural_and([CapabilityExpr.finite_set(holders, quality="exact"), _inner_call_check()])
     surface, status = _surface_for(cap)

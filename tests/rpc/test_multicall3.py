@@ -1,18 +1,4 @@
-"""Unit tests for the ``services.clients.rpc.multicall3_aggregate3`` primitive.
-
-The Multicall3 ``aggregate3`` helper collapses N read-only ``eth_call``s into one
-billable call. These tests stub only the wire (``services.clients.rpc.rpc_request``) with a
-fake that behaves like a real Multicall3 endpoint — decoding the ``aggregate3``
-calldata and re-encoding ``(bool,bytes)[]`` — so they exercise the real ABI
-encode/decode in the helper and pin:
-
-* round-trip of success + revert (allowFailure) results, aligned to input order;
-* empty input issues no RPC;
-* chunking preserves global order and bounds per-call width;
-* a malformed / wrong-length response raises (so callers fall back per-call);
-* transport errors propagate (so callers fall back);
-* the derived selector matches canonical Multicall3 ``aggregate3``.
-"""
+"""The wire stub decodes aggregate3 calldata and re-encodes ``(bool,bytes)[]``, so the real ABI code runs."""
 
 from __future__ import annotations
 
@@ -24,12 +10,7 @@ from services.clients.rpc import MULTICALL3_ADDRESS, multicall3_aggregate3
 
 
 def _fake_multicall_chain(state: dict[tuple[str, str], tuple[bool, str]], *, recorder: list | None = None):
-    """Return a fake ``rpc_request`` that answers an aggregate3 eth_call from ``state``.
-
-    ``state`` maps ``(target_lower, calldata_hex_lower) -> (success, return_hex)``; a missing
-    sub-call reverts ``(False, "0x")`` — exactly how Multicall3 reports a reverting call under
-    ``allowFailure=true``.
-    """
+    """A missing sub-call reverts ``(False, "0x")``, as Multicall3 reports under ``allowFailure=true``."""
 
     def fake(_rpc_url: str, method: str, params: list, **_kw):
         assert method == "eth_call"

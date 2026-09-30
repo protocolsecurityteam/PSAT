@@ -1,10 +1,5 @@
-"""Observability contract for the ``SelectionWorker`` (logging backlog #16-selection).
-
-Per-stage counts reach ``record_stage_metric`` (``candidates`` / ``eligible`` / ``dropped`` and
-``activity_fetched`` / ``activity_neutral``, which separates a ranking on real on-chain data from one
-collapsed to the neutral 0.5 when Etherscan is unavailable); selection facts live in ``extra={}``;
-exactly one INFO ``"Selection complete"`` summary. Only the Etherscan fetch is stubbed; the rest
-runs against the real worker and a real Postgres session.
+"""``activity_fetched`` vs ``activity_neutral`` separates a ranking on real data from one collapsed to 0.5 when
+Etherscan is down. Only the Etherscan fetch is stubbed.
 """
 
 from __future__ import annotations
@@ -23,17 +18,12 @@ from workers.base import JobHandledDirectly
 pytestmark = [requires_postgres]
 
 
-# Maps lowercased address -> last-active unix ts; absent => neutral fallback.
 _ACTIVITY_TIMES: dict[str, float] = {}
 
 
 @pytest.fixture(autouse=True)
 def _stub_activity_fetch(monkeypatch):
-    """Stub the only wire, ``services.discovery.activity.etherscan.get``.
-
-    Keeps the real ranking math; an address absent from ``_ACTIVITY_TIMES`` returns an empty
-    result, driving the neutral-score path.
-    """
+    """An address absent from ``_ACTIVITY_TIMES`` drives the neutral path."""
     from services.discovery import activity as activity_module
 
     def fake_etherscan_get(module, action, **params):
@@ -98,11 +88,7 @@ def _seed(db_session):
 
 @pytest.fixture()
 def selection_pass(db_session, worker, caplog):
-    """Run one selection pass and hand back everything it emitted.
-
-    The metrics, summary line and facts-in-``extra`` rule are asserted separately; they used to
-    share one 169-line test, so any break showed as the same red line.
-    """
+    """Split from one 169-line test so a break names what failed."""
     from types import SimpleNamespace
 
     from db.models import Job
@@ -121,8 +107,7 @@ def selection_pass(db_session, worker, caplog):
                     worker.process(db_session, job)
     finally:
         stage_metrics_var.reset(token)
-        # db_session teardown clears Contract/Protocol but not Job; drop the selection job and
-        # its analysis children so they don't perturb other selection tests.
+        # Teardown doesn't clear Job rows.
         db_session.rollback()
         db_session.query(Job).filter(Job.request["protocol_id"].as_integer() == protocol_id).delete(
             synchronize_session=False
@@ -139,7 +124,6 @@ def test_selection_reports_progress_counts_as_stage_metrics(selection_pass):
     assert metrics["candidates"] == 3
     assert metrics["eligible"] == 2
     assert metrics["dropped"] == 1
-    # One contract had on-chain activity; one fell back to the neutral 0.5.
     assert metrics["activity_fetched"] == 1
     assert metrics["activity_neutral"] == 1
     assert metrics["ranked_candidates"] == 2
@@ -165,5 +149,4 @@ def test_selection_facts_live_in_extra_not_in_the_message(selection_pass):
         assert rec.address in (selection_pass.fetched, selection_pass.neutral)
         assert hasattr(rec, "rank_score")
         assert hasattr(rec, "discovery_sources")
-        # The address is a queryable field, never baked into the human message.
         assert rec.address not in rec.getMessage()

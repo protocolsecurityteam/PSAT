@@ -22,8 +22,7 @@ from services.resolution.mapping_enumerator import (
 
 @pytest.fixture(autouse=True)
 def _isolated_cache(monkeypatch):
-    # These tests exercise the in-process L1 cache only; disable L2 so they don't need a
-    # live DB or the migrated mapping_enumeration_cache table.
+    # These cover L1 only, so they don't need a live DB.
     monkeypatch.setenv("PSAT_MAPPING_ENUMERATION_DB_CACHE", "0")
     clear_enumeration_cache()
     yield
@@ -31,8 +30,6 @@ def _isolated_cache(monkeypatch):
 
 
 def enumerate_mapping_allowlist(contract_address, writer_specs, **kwargs):
-    """Unwraps ``result["principals"]`` so legacy per-event tests stay focused. ``from_block``
-    is a required enumerator arg; these replay the full stub-log range, so default to genesis."""
     kwargs.setdefault("from_block", 0)
     result = _enumerate(contract_address, cast(Any, writer_specs), **kwargs)
 
@@ -162,7 +159,6 @@ BOB = _addr("b0b")
     ("specs", "events", "expected"),
     [
         pytest.param((_rely_spec,), [("Rely", ALICE, 10)], [(ALICE, ["add"], 10)], id="single-add"),
-        # CRITICAL: a remove after an add must drop the principal.
         pytest.param(
             (_rely_spec, _deny_spec),
             [("Rely", ALICE, 10), ("Deny", ALICE, 20)],
@@ -345,16 +341,8 @@ def test_unusable_logs_are_skipped(make_noise_log):
     assert [p["address"] for p in out] == [alice]
 
 
-# ---------------------------------------------------------------------------
-# Bound + cache + status regression tests (PSAT-speedup #1).
-#
-# The original `while True` pagination had no max_pages/timeout/lookback bound: for
-# 2017-deployed contracts (LinkToken etc.) ~190 pages x 25s = 80 min blocking the
-# resolution worker (heartbeat misses, reclaim_stuck_jobs, live tests time out at 600s).
-# Naive truncation to an empty list is a CORRECTNESS regression (a 2017 Rely(alice) with
-# no later Deny means alice is still authorized), so truncation must surface via
-# `result["status"]`.
-# ---------------------------------------------------------------------------
+# Unbounded pagination blocked the worker for up to 80 minutes on 2017 contracts; truncation must surface via ``status``
+# since an old Rely with no later Deny still authorizes.
 
 
 def test_max_pages_bound_returns_incomplete_status():
@@ -378,7 +366,6 @@ def test_max_pages_bound_returns_incomplete_status():
 
 
 def test_timeout_returns_incomplete_status():
-    """Each page sleeps 0.05s, timeout is 0.12s: ~2 pages then a timeout (definitely <20)."""
     rely_topic = _event_topic0("Rely(address)")
 
     class _SlowClient:
@@ -414,8 +401,7 @@ def test_timeout_returns_incomplete_status():
 
 
 def test_rpc_error_surfaces_status_not_silent_fallback():
-    """The original recursive.py caller had ``except Exception: enumerated = []``, silently
-    dropping principals. An RPC error must surface as status='error' with the partial data."""
+    """The old caller silently dropped principals on error."""
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
 
@@ -442,7 +428,7 @@ def test_rpc_error_surfaces_status_not_silent_fallback():
     assert result["status"] == "error"
     assert result["error"] == "hypersync 503"
     assert result["pages_fetched"] == 1
-    # Page 1 principal still surfaced: the caller must NOT conclude "no admins".
+    # The caller must not conclude "no admins".
     assert [p["address"] for p in result["principals"]] == [alice]
 
 
@@ -467,7 +453,6 @@ def test_complete_result_carries_status_complete():
 
 
 def test_sync_wrapper_caches_results():
-    """Sibling cascade jobs enumerating the same contract within the TTL share results."""
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
     pages = [([_log(rely_topic, indexed_args=[alice], block=10)], None)]
@@ -498,15 +483,7 @@ def test_sync_wrapper_caches_results():
     assert calls["n"] == calls_after_first  # no additional calls
 
 
-# ---------------------------------------------------------------------------
-# D.2 — value-aware fold (latest-value-per-key, filter by ValuePredicate)
-# ---------------------------------------------------------------------------
-
-
 def _owner_set_spec() -> dict[str, Any]:
-    """``OwnerSet(address indexed key, uint256 value)``.
-    key_position=0, value_position=1, only key is indexed.
-    """
     return {
         "mapping_name": "owners",
         "event_signature": "OwnerSet(address,uint256)",
@@ -520,7 +497,6 @@ def _owner_set_spec() -> dict[str, Any]:
 
 
 def _set_log(topic0: str, key_addr: str, value: int, *, block: int, log_index: int = 0) -> SimpleNamespace:
-    """``OwnerSet(addr indexed, uint256)`` — key is topic1, value lives in data."""
     return SimpleNamespace(
         topics=[topic0, _indexed_topic(key_addr)],
         data=_uint_topic(value),  # 32-byte word in data
@@ -531,11 +507,6 @@ def _set_log(topic0: str, key_addr: str, value: int, *, block: int, log_index: i
 
 
 def test_value_predicate_eq_filters_to_matching_keys():
-    """``OwnerSet(a, 10), OwnerSet(b, 7)`` → predicate ``eq 10`` returns ``[a]``.
-
-    Validates the core D.2 fold: latest-value-per-key, then filter by
-    op + rhs_values.
-    """
     from services.resolution.mapping_enumerator import (
         enumerate_mapping_values,
         filter_value_entries,
@@ -575,9 +546,6 @@ def test_value_predicate_eq_filters_to_matching_keys():
 
 
 def test_value_predicate_latest_value_wins_over_older_assignment():
-    """``OwnerSet(a, 10)`` then ``OwnerSet(a, 5)`` — only the second
-    value participates in filtering. ``eq 10`` returns empty.
-    """
     from services.resolution.mapping_enumerator import (
         enumerate_mapping_values,
         filter_value_entries,
@@ -612,7 +580,6 @@ def test_value_predicate_latest_value_wins_over_older_assignment():
 
 
 def test_value_predicate_passes_op_handles_addresses_and_any_nonzero():
-    """Cover the address compare path + ``any_nonzero``."""
     from services.resolution.mapping_enumerator import _value_predicate_passes
 
     addr_word = "0x" + "00" * 12 + "deadbeef".rjust(40, "0")
@@ -631,19 +598,10 @@ def test_value_predicate_passes_op_handles_addresses_and_any_nonzero():
     assert not _value_predicate_passes(zero_word, {"op": "any_nonzero", "rhs_values": [], "value_type": "uint256"})
 
 
-# ---------------------------------------------------------------------------
-# P1.3 - L1 re-key on (chain, address, specs_hash) + size cap.
-#
-# The old address-only L1 key collided across chains and writer-spec sets, defeating L2's
-# keying. These pin the re-key (distinct specs/chain MISS) AND parity (a single-chain/
-# single-specs repeat must still HIT). The autouse _isolated_cache fixture sets DB cache
-# OFF and clears L1/L2.
-# ---------------------------------------------------------------------------
+# The old address-only L1 key collided across chains and specs; a same-chain same-specs repeat must still hit.
 
 
 def test_l1_rekey_parity_same_chain_single_specs():
-    """PARITY: a repeat with the same chain + specs must still HIT L1 (no extra hypersync
-    scan)."""
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
     client, calls = _fake_client([([_log(rely_topic, indexed_args=[alice], block=10)], None)])
@@ -661,8 +619,6 @@ def test_l1_rekey_parity_same_chain_single_specs():
 
 
 def test_l1_rekey_distinguishes_specs():
-    """Two different writer-spec sets on the SAME address must not collide in L1 — the
-    old address-only key returned the first specs' principals for the second specs."""
     rely_topic = _event_topic0("Rely(address)")
     auth_topic = _event_topic0("Auth(address)")
     alice = _addr("a11ce")
@@ -685,8 +641,6 @@ def test_l1_rekey_distinguishes_specs():
 
 
 def test_l1_rekey_distinguishes_chain():
-    """The same address on two chains must not collide in L1 (the original cross-chain
-    correctness bug where L1 defeated L2's chain dimension)."""
     rely_topic = _event_topic0("Rely(address)")
     alice = _addr("a11ce")
     bob = _addr("b0b")
@@ -733,8 +687,7 @@ def test_l1_enumeration_cache_size_capped(monkeypatch):
 
 
 def test_value_cache_rekey_ignores_predicate():
-    """The value-fold L1 key omits the predicate (cached entries are predicate-independent;
-    ``filter_value_entries`` applies it downstream), so a different predicate HITs."""
+    """Cached entries are predicate-independent."""
     from services.resolution.mapping_enumerator import enumerate_mapping_values_sync
 
     topic0 = _event_topic0("OwnerSet(address,uint256)")
@@ -764,7 +717,6 @@ def test_value_cache_rekey_ignores_predicate():
 
 
 def test_value_cache_rekey_distinguishes_specs():
-    """Different value specs on the same address must not collide in the value-fold L1."""
     from services.resolution.mapping_enumerator import enumerate_mapping_values_sync
 
     owner_topic = _event_topic0("OwnerSet(address,uint256)")
@@ -784,11 +736,6 @@ def test_value_cache_rekey_distinguishes_specs():
     )
     assert calls2["n"] >= 1  # distinct specs → distinct key → real scan
     assert [e["key"] for e in r2["entries"]] == [b.lower()]
-
-
-# ---------------------------------------------------------------------------
-# G2 HIT 2: a knowingly incomplete fold must not report status="complete".
-# ---------------------------------------------------------------------------
 
 
 def _conflicted_specs():

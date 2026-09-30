@@ -1,11 +1,6 @@
-"""Regression tests for the Postgres-backed eth_getCode cache layer in ``services.clients.rpc``.
+"""PG-backed eth_getCode cache shared across workers.
 
-The in-memory ``_GETCODE_CACHE`` is per-process; the PG layer (``bytecode_cache`` table) lets
-workers share bytecode hits across the fleet. Pinned: ``PSAT_BYTECODE_PG_CACHE=0`` and DB
-outages degrade gracefully (CLI without DB keeps working); PG hits are promoted in-memory;
-wire errors are never persisted; chain_id is discovered once per URL; addresses are
-case-normalized for deterministic keys; PG-on vs PG-off parity is load-bearing for
-PSAT_RPC_FANOUT parity tests.
+Off-vs-on parity is load-bearing for PSAT_RPC_FANOUT parity tests.
 """
 
 from __future__ import annotations
@@ -24,9 +19,6 @@ def _isolated_caches():
     rpc.clear_getcode_cache()
 
 
-# Disabled flag and graceful fallback
-
-
 def _raise_db_down(*_a, **_kw):
     raise RuntimeError("DB connection refused")
 
@@ -39,7 +31,7 @@ def _fail_if_db_touched(*_a, **_kw):
     ("enabled", "session_local"),
     [
         pytest.param(False, _fail_if_db_touched, id="disabled_skips_db"),
-        # A DB connection failure must return None, not crash (CLI-without-DB relies on this).
+        # CLI-without-DB relies on this.
         pytest.param(True, _raise_db_down, id="db_unavailable"),
     ],
 )
@@ -51,9 +43,6 @@ def test_pg_layer_degrades_without_db(monkeypatch, enabled, session_local):
         rpc._pg_bytecode_put(1, "0xabc", "0x60", "0x" + "0" * 64)
         assert rpc._pg_bytecode_get_many(1, ["0xabc"]) == {}
         rpc._pg_bytecode_put_many(1, [("0xabc", "0x60", "0x" + "0" * 64)])
-
-
-# Single-address path: get_code_with_keccak
 
 
 def test_pg_hit_promotes_to_in_memory(monkeypatch):
@@ -107,8 +96,7 @@ def test_pg_miss_writes_back(monkeypatch):
 
 
 def test_rpc_error_not_persisted_to_pg(monkeypatch):
-    """Wire failures must NOT be persisted (matches in-memory behaviour at services/clients/rpc.py:105-107);
-    cementing a transient RPC error would poison the cross-process cache for every worker."""
+    """A cemented transient error would poison the cache for every worker."""
     monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", True)
     monkeypatch.setattr(rpc, "_resolve_chain_id", lambda *_a, **_kw: 1)
     monkeypatch.setattr(rpc, "_pg_bytecode_get", lambda *_a, **_kw: None)
@@ -138,9 +126,6 @@ def test_no_chain_id_skips_pg(monkeypatch):
     assert code == "0x6080"
 
 
-# chain_id discovery
-
-
 def test_chain_id_kwarg_skips_discovery(monkeypatch):
     rpc._chain_id_cache.clear()
 
@@ -161,9 +146,6 @@ def test_chain_id_discovery_failure_returns_none(monkeypatch):
     rpc._chain_id_cache.clear()
     monkeypatch.setattr(rpc, "rpc_request", lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom")))
     assert rpc._resolve_chain_id("https://rpc-down") is None
-
-
-# Batch path
 
 
 def test_batch_pg_hits_skip_wire(monkeypatch):
@@ -228,9 +210,6 @@ def test_batch_no_db_falls_through_to_wire(monkeypatch):
     addrs = [("0x" + f"{i:040x}").lower() for i in range(3)]
     out = rpc.get_code_batch("https://rpc", addrs)
     assert len(out) == 3
-
-
-# Parity (PSAT_RPC_FANOUT-style: PG off vs on, same outputs)
 
 
 def test_parity_pg_off_vs_on_byte_identical(monkeypatch):

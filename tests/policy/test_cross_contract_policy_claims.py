@@ -1,10 +1,5 @@
-"""Two-contract integration tests for the policy-stage cross-contract path.
-
-Drives ``PolicyWorker._enrich_cross_contract`` against a real Postgres session: a sibling job whose
-stored ``effects``/``control_snapshot`` carry Plane-1 claims, a target job with stored ``effects``,
-and target ``EffectiveFunction`` rows to update. Only ``SessionLocal`` is stubbed (repointed at the
-test engine so the parallel sibling fetch sees committed rows). Scope is the PolicyWorker plumbing;
-the four typed derivations are unit-tested in ``tests/static/test_cross_contract_effects.py``.
+"""PolicyWorker plumbing against real Postgres; the four derivations are unit-tested in
+``tests/static/test_cross_contract_effects.py``.
 """
 
 from __future__ import annotations
@@ -40,8 +35,6 @@ def _std(claim_id: str) -> dict:
 
 @pytest.fixture
 def _repoint_session_local(db_session, monkeypatch):
-    """Point the worker's ``SessionLocal`` (threaded sibling fetch) at the test engine so committed
-    sibling artifacts are visible."""
     factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
     monkeypatch.setattr("workers.policy_worker.SessionLocal", factory)
     return factory
@@ -87,11 +80,6 @@ def _ef(session, contract: Contract, abi_signature: str) -> EffectiveFunction:
         .filter(EffectiveFunction.contract_id == contract.id, EffectiveFunction.abi_signature == abi_signature)
         .one()
     )
-
-
-# ---------------------------------------------------------------------------
-# Derivation 1: value flow propagates a sibling's standard-tier claim
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -149,16 +137,7 @@ def test_value_flow_claim_propagates_to_effective_function(db_session, _repoint_
     ef = _ef(db_session, contract, "sweep(address)")
     ids = {c["claim_id"] for c in (ef.claims or [])}
     assert "flow.out" in ids
-    # Legacy label column is left as it was (no propagate-every-label).
     assert ef.effect_labels == ["external_contract_call"]
-
-
-# ---------------------------------------------------------------------------
-# Silence when there is no cross-contract evidence
-#
-# Per-derivation logic lives in test_cross_contract_effects; this DB module proves only the
-# PolicyWorker plumbing (sibling fetch + EF-row write above, empty-evidence early return below).
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
@@ -176,7 +155,6 @@ def test_no_claims_without_matching_evidence(db_session, _repoint_session_local)
         },
     )
     store_artifact(db_session, sibling_job.id, "control_snapshot", data={"controller_values": {}})
-    # Target calls a DIFFERENT (unresolved) contract var.
     store_artifact(
         db_session,
         target_job.id,
@@ -208,11 +186,6 @@ def test_no_claims_without_matching_evidence(db_session, _repoint_session_local)
     assert enriched == {}
 
 
-# ---------------------------------------------------------------------------
-# _apply_cross_contract_claims merges onto the effective_permissions payload
-# ---------------------------------------------------------------------------
-
-
 def test_apply_cross_contract_claims_merges_and_dedups():
     payload: dict[str, Any] = {
         "functions": [
@@ -230,27 +203,17 @@ def test_apply_cross_contract_claims_merges_and_dedups():
     PolicyWorker()._apply_cross_contract_claims(payload, enriched)
 
     sweep = payload["functions"][0]
-    # Same claim id at two tiers collapses to the strongest (standard_exact wins).
     assert len(sweep["claims"]) == 1
     assert sweep["claims"][0]["tier"] == "standard_exact"
     assert payload["functions"][1]["claims"] == []
 
 
-# ---------------------------------------------------------------------------
-# The equal-tier hazard both merge sites share, and why it cannot fire
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
-    """Why the equal-tier hazard cannot fire at ``_enrich_cross_contract``'s EF write.
+    """``policy_derived`` claims land on rows the next run replaces wholesale, carrying only observed-tier claims.
 
-    ``policy_derived`` is minted in one module (``static.cross_contract``) imported by one caller,
-    and lands on rows the NEXT run replaces wholesale, carrying only observed-tier claims forward.
-    So last run's policy_derived claim is gone before the re-derived one arrives. That is a
-    precondition held in another module, the coupling that let the effects bridge diverge
-    unnoticed: if the carry widens past observed-tier this goes red and both merge sites need the
-    explicit stale-drop the bridge uses."""
+    If that carry widens this goes red, and both merge sites need the bridge's explicit stale-drop.
+    """
     from services.policy.effective_permissions_writer import write_effective_function_rows
 
     company = f"co-{uuid.uuid4()}"
@@ -276,21 +239,14 @@ def test_the_row_replace_drops_last_run_s_policy_derived_claims(db_session):
 
     tiers = {c["tier"] for c in _ef(db_session, contract, "sweep(address)").claims or []}
     assert "policy_derived" not in tiers
-    # ...while the observed claim is the thing the carry exists to preserve.
     assert "behavioral_observed" in tiers
-
-
-# ---------------------------------------------------------------------------
-# The two planes name a struct-param function differently; the join must not
-# ---------------------------------------------------------------------------
 
 
 @requires_postgres
 def test_struct_param_function_still_matches_its_row(db_session, _repoint_session_local):
-    """The derivations key on the Slither full_name the effects artifact uses; the row stores the
-    canonical ABI signature. For a struct parameter these differ, so a join on signature silently
-    drops the enrichment (claims derived, landing nowhere). The selector, from the payload the row
-    was written from, is the value both planes agree on."""
+    """The artifact keys on Slither full_name and the row on the ABI signature, which differ for struct params; the
+    selector is what both agree on.
+    """
     company = f"co-{uuid.uuid4()}"
     target_job = _make_job(db_session, address=TARGET, company=company)
     sibling_job = _make_job(db_session, address=TOKEN, company=company)
@@ -333,7 +289,6 @@ def test_struct_param_function_still_matches_its_row(db_session, _repoint_sessio
         },
     )
 
-    # The row as the writer leaves it: canonical signature, canonical selector.
     contract = Contract(job_id=target_job.id, address=TARGET, contract_name="Target")
     db_session.add(contract)
     db_session.flush()
@@ -358,16 +313,10 @@ def test_struct_param_function_still_matches_its_row(db_session, _repoint_sessio
         function_records=[{"function": full_name, "abi_signature": canonical, "selector": selector}],
     )
 
-    # The derivation keys on the full_name and always worked...
     assert full_name in enriched
-    # ...what regressed is whether the claim reaches the row.
     ef = _ef(db_session, contract, canonical)
     assert "flow.out" in {c["claim_id"] for c in (ef.claims or [])}
 
-
-# ---------------------------------------------------------------------------
-# One impl row, N proxy deployments: the claims belong to the one that derived
-# ---------------------------------------------------------------------------
 
 D1 = "0x44cc000000000000000000000000000000000000"
 D2 = "0x55dd000000000000000000000000000000000000"
@@ -375,10 +324,9 @@ D2 = "0x55dd000000000000000000000000000000000000"
 
 @requires_postgres
 def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_session_local):
-    """A shared implementation backs N proxy deployments, each with its own function rows under
-    the same ``contract_id``. Claims derive from THIS job's control snapshot (the proxy's
-    storage), so writing them onto a sibling deployment's row would publish one proxy's wiring as
-    another's. Unscoped, the selector also matches both rows and the single-row read raises."""
+    """Claims come from this proxy's storage; a sibling deployment's row would get the wrong wiring, and the unscoped
+    read raises.
+    """
     company = f"co-{uuid.uuid4()}"
     target_job = _make_job(db_session, address=TARGET, company=company, request={"proxy_address": D1})
     sibling_job = _make_job(db_session, address=TOKEN, company=company)
@@ -417,7 +365,6 @@ def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_ses
         },
     )
 
-    # One contract row, two deployments' function rows — same selector on both.
     contract = Contract(job_id=target_job.id, address=TARGET, contract_name="Target")
     db_session.add(contract)
     db_session.flush()
@@ -455,9 +402,7 @@ def test_enrichment_lands_only_on_this_job_s_deployment(db_session, _repoint_ses
 
 @requires_postgres
 def test_ambiguous_row_match_is_skipped_not_raised(db_session, _repoint_session_local, caplog):
-    """``deployment_scope`` ORs in legacy untagged rows on purpose, so a tagged and a NULL row can
-    both answer for one selector even after scoping. Reading a single row then raises uncaught,
-    taking down the whole policy stage. A claim we can't place is worth losing; the stage isn't."""
+    """A claim we can't place is worth losing; the stage isn't."""
     company = f"co-{uuid.uuid4()}"
     target_job = _make_job(db_session, address=TARGET, company=company, request={"proxy_address": D1})
     sibling_job = _make_job(db_session, address=TOKEN, company=company)
@@ -496,7 +441,6 @@ def test_ambiguous_row_match_is_skipped_not_raised(db_session, _repoint_session_
         },
     )
 
-    # A row tagged for this deployment AND a legacy untagged row: both in scope.
     contract = Contract(job_id=target_job.id, address=TARGET, contract_name="Target")
     db_session.add(contract)
     db_session.flush()
@@ -518,7 +462,6 @@ def test_ambiguous_row_match_is_skipped_not_raised(db_session, _repoint_session_
     with caplog.at_level("WARNING", logger="workers.policy_worker"):
         enriched = PolicyWorker()._enrich_cross_contract(db_session, target_job, {}, control_snapshot)
 
-    # The derivation still ran; only the placement was declined.
     assert "sweep(address)" in enriched
     assert any("matched 2 effective_function rows" in r.getMessage() for r in caplog.records)
     rows = db_session.query(EffectiveFunction).filter(EffectiveFunction.contract_id == contract.id).all()

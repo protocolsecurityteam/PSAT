@@ -1,10 +1,5 @@
-"""Per-kind row representation tests for ``build_effective_permissions`` +
-``write_effective_function_rows``.
-
-Each test fabricates a ``CapabilityExpr`` directly (no Slither) and asserts the
-``EffectiveFunction`` columns and ``FunctionPrincipal`` row counts per kind. Runs
-against in-memory SQLite; Postgres-only types (JSONB, ARRAY, GIN) are swapped in
-``_in_memory_session`` so the suite runs offline.
+"""Per-kind row representation for ``build_effective_permissions`` + ``write_effective_function_rows``, on in-memory
+SQLite with Postgres-only types swapped.
 
 | kind                          | EF columns                       | FP rows |
 |-------------------------------|----------------------------------|---------|
@@ -51,8 +46,6 @@ from services.resolution.capabilities import (
     ExternalCheck,
 )
 from services.resolution.capability_resolver import capability_to_dict
-
-# In-memory SQLite mirror of the columns the writer touches.
 
 
 _TestBase = declarative_base()
@@ -102,7 +95,6 @@ class _TFunctionPrincipal(_TestBase):
 
 @pytest.fixture
 def db_session(monkeypatch: pytest.MonkeyPatch):
-    """In-memory SQLite session with the writer's models swapped for JSON-friendly types."""
     engine = create_engine("sqlite:///:memory:")
     _TestBase.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
@@ -123,11 +115,6 @@ def db_session(monkeypatch: pytest.MonkeyPatch):
     yield session
     session.close()
     engine.dispose()
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _fn_record(signature: str, **overrides: Any) -> dict[str, Any]:
@@ -153,11 +140,6 @@ def _ef_row(session) -> Any:
 
 def _principals(session) -> list[Any]:
     return list(session.query(_TFunctionPrincipal).order_by(_TFunctionPrincipal.address).all())
-
-
-# ---------------------------------------------------------------------------
-# finite_set
-# ---------------------------------------------------------------------------
 
 
 def test_finite_set_emits_n_principal_rows(db_session) -> None:
@@ -250,11 +232,6 @@ def test_lower_bound_empty_finite_set_stays_unresolved_gap(db_session) -> None:
     assert ef.capability_expr["membership_quality"] == "lower_bound"
 
 
-# ---------------------------------------------------------------------------
-# threshold_group (Safe)
-# ---------------------------------------------------------------------------
-
-
 def test_threshold_group_emits_one_safe_row(db_session) -> None:
     signers = [f"0x{(0x10 + i):040x}" for i in range(5)]
     cap = CapabilityExpr.threshold_group(3, signers)
@@ -283,11 +260,6 @@ def test_threshold_group_emits_one_safe_row(db_session) -> None:
     assert ef.capability_expr["kind"] == "threshold_group"
     assert ef.capability_expr["threshold"]["m"] == 3
     assert len(ef.capability_expr["threshold"]["signers"]) == 5
-
-
-# ---------------------------------------------------------------------------
-# signature_witness
-# ---------------------------------------------------------------------------
 
 
 def test_signature_witness_finite_emits_signer_rows(db_session) -> None:
@@ -333,16 +305,8 @@ def test_signature_witness_external_emits_zero_rows(db_session) -> None:
     assert ef.capability_expr["signer"]["kind"] == "external_check_only"
 
 
-# ---------------------------------------------------------------------------
-# cofinite_blacklist / external_check_only
-# ---------------------------------------------------------------------------
-
-
 def test_cofinite_blacklist_is_public_with_no_rows(db_session) -> None:
-    # "Anyone except a finite exclusion" is permissionless modulo a denylist: it projects
-    # to a PUBLIC path with no enumerated principals, carrying the exclusion as a business
-    # side-condition so a reviewer still sees the filter — NOT an under-resolved residual
-    # (status=None), which is the dead-end behavior this asserts we no longer produce.
+    # A public path with the exclusion as a side-condition, not an under-resolved residual.
     cap = CapabilityExpr.cofinite_blacklist(["0x" + "a" * 40, "0x" + "b" * 40])
 
     write_effective_function_rows(
@@ -388,11 +352,6 @@ def test_external_check_only_emits_zero_rows(db_session) -> None:
     assert ef.capability_expr["check"]["target_call_selector"] == "0xdeadbeef"
 
 
-# ---------------------------------------------------------------------------
-# conditional_universal / unsupported
-# ---------------------------------------------------------------------------
-
-
 def test_conditional_universal_emits_zero_rows_authority_public_true(db_session) -> None:
     cap = CapabilityExpr.conditional_universal(
         Condition(kind="time", description="after 2026-01-01"),
@@ -433,15 +392,8 @@ def test_unsupported_emits_zero_rows_status_unsupported(db_session) -> None:
     assert ef.capability_expr["unsupported_reason"] == "opaque_authority_check"
 
 
-# ---------------------------------------------------------------------------
-# AND / OR
-# ---------------------------------------------------------------------------
-
-
 def test_irreducible_and_emits_zero_rows_with_tree(db_session) -> None:
-    """``finite_set AND threshold_group`` doesn't reduce to one kind (``intersect``
-    returns ``structural_and``). Zero principal rows: no consumer should treat one
-    leaf in isolation as 'address can call as itself'."""
+    """No consumer should treat one leaf in isolation as "address can call as itself"."""
     finite = CapabilityExpr.finite_set(["0x" + "a" * 40])
     safe = CapabilityExpr.threshold_group(2, ["0x" + "b" * 40, "0x" + "c" * 40])
     cap = CapabilityExpr.structural_and([finite, safe])
@@ -514,11 +466,6 @@ def test_and_of_mixed_or_and_side_condition_preserves_both_paths(db_session) -> 
     ]
 
 
-# ---------------------------------------------------------------------------
-# Pure-function helpers
-# ---------------------------------------------------------------------------
-
-
 def test_column_values_public_or_composite() -> None:
     left = CapabilityExpr.conditional_universal(Condition(kind="business", description="initialized branch"))
     right = CapabilityExpr.conditional_universal(Condition(kind="business", description="constructor branch"))
@@ -534,19 +481,8 @@ def test_column_values_public_or_composite() -> None:
     ]
 
 
-# ---------------------------------------------------------------------------
-# resolve_principal_type — write-time typing of caller principals
-# ---------------------------------------------------------------------------
-
-
 def test_finite_set_rows_typed_via_resolver(db_session) -> None:
-    """Regression: finite_set caller rows are typed via the injected classifier, so
-    ``function_principals.resolved_type`` carries Safe/Timelock/EOA instead of NULL.
-
-    The capability surface projects members with ``resolved_type=None``; untyped, a
-    governance Safe reachable only via per-function authority never surfaces in
-    ``_fp_governance`` / primary-controller assignment.
-    """
+    """Untyped, a Safe reachable only via per-function authority never surfaces in ``_fp_governance``."""
     safe_addr = "0x" + "a" * 40
     eoa_addr = "0x" + "b" * 40
     cap = CapabilityExpr.finite_set([safe_addr, eoa_addr])
@@ -570,14 +506,12 @@ def test_finite_set_rows_typed_via_resolver(db_session) -> None:
 
     rows = {r.address: r for r in _principals(db_session)}
     assert rows[safe_addr.lower()].resolved_type == "safe"
-    # Classifier details (owners/threshold) are merged alongside the surface trace.
     assert rows[safe_addr.lower()].details.get("owners") == ["0x" + "1" * 40]
     assert rows[eoa_addr.lower()].resolved_type == "eoa"
 
 
 def test_resolver_not_called_for_signature_witness(db_session) -> None:
-    """Signature-witness rows are signers, not callers, and are excluded from
-    governance/primary-controller consumers — no classify probe should be spent."""
+    """Signers are excluded from governance consumers, so no classify probe is spent."""
     inner = CapabilityExpr.finite_set(["0x" + "a" * 40, "0x" + "b" * 40])
     cap = CapabilityExpr.signature_witness(inner)
 
@@ -600,7 +534,6 @@ def test_resolver_not_called_for_signature_witness(db_session) -> None:
 
 
 def test_resolver_does_not_override_threshold_group_safe(db_session) -> None:
-    """threshold_group already resolves to 'safe'; the resolver must not override it."""
     signers = [f"0x{(0x10 + i):040x}" for i in range(3)]
     cap = CapabilityExpr.threshold_group(2, signers)
 
@@ -621,15 +554,8 @@ def test_resolver_does_not_override_threshold_group_safe(db_session) -> None:
     assert rows[0].resolved_type == "safe"
 
 
-# ---------------------------------------------------------------------------
-# The row's abi_signature must be the one its own selector was computed from
-# ---------------------------------------------------------------------------
-
-
 def test_row_abi_signature_is_the_canonical_one(db_session) -> None:
-    """The canonical signature and selector are computed together; writing the
-    Slither full_name left an ``abi_signature`` that doesn't hash to its own
-    ``selector`` (and for struct params has no tuple layout, so it can't be encoded)."""
+    """The Slither full_name doesn't hash to the selector and can't encode struct params."""
     from eth_utils.crypto import keccak
 
     canonical = "requestWithdrawWithPermit(uint256,address,(uint256,uint256,uint8,bytes32,bytes32))"
@@ -656,7 +582,6 @@ def test_row_abi_signature_is_the_canonical_one(db_session) -> None:
 
 
 def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
-    """Older/degraded records carry no ``abi_signature``; the row must still name the function."""
     write_effective_function_rows(
         db_session,
         contract_id=1,
@@ -667,11 +592,7 @@ def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
     assert _ef_row(db_session).abi_signature == "doThing()"
 
 
-# ---------------------------------------------------------------------------
-# authority_openness — the three-state split of the authority_public bool
-# ``authority_public=False`` reported a WITNESSED caller
-# restriction and "the authority could not be determined" with one value.
-# ---------------------------------------------------------------------------
+# ``authority_public=False`` used to report a witnessed restriction and "not determined" with one value.
 
 
 @pytest.mark.parametrize(
@@ -684,25 +605,22 @@ def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
         ),
         pytest.param(
             CapabilityExpr.finite_set(["0x" + "a" * 40]),
-            # authority_roles == [] here: proven not role-gated
             {"authority_public": False, "authority_openness": "restricted", "authority_roles": []},
             id="restricted_on_resolved_finite_set",
         ),
-        # ``resolved_empty`` is a WITNESSED restriction (a complete enumeration that admits nobody), the same
-        # bucket as a populated set, not not-determined.
+        # A complete enumeration admitting nobody is a witnessed restriction.
         pytest.param(
             CapabilityExpr.finite_set([], quality="exact"),
             {"status": "resolved_empty", "authority_openness": "restricted"},
             id="restricted_on_witnessed_empty_set",
         ),
-        # CRITICAL (fail-open polarity): an unsupported gate must not read as restricted.
+        # Fail-open polarity: an unsupported gate must not read as restricted.
         pytest.param(
             CapabilityExpr.unsupported("guard_extraction_uncertain"),
             {"authority_public": False, "status": "unsupported", "authority_openness": "not_determined"},
             id="not_determined_on_unsupported",
         ),
-        # CRITICAL: the exact collapse the bool caused: a probe interface with no enumeration got the same
-        # ``False`` a fully-resolved gated function gets.
+        # The exact collapse the bool caused.
         pytest.param(
             CapabilityExpr.external_check_only(
                 ExternalCheck(target_address="0x" + "b" * 40, target_call_selector="0xdeadbeef")
@@ -710,9 +628,7 @@ def test_row_abi_signature_falls_back_to_the_full_name(db_session) -> None:
             {"authority_public": False, "authority_openness": "not_determined"},
             id="not_determined_on_external_check_only",
         ),
-        # A record from a caller that does not carry the key leaves the column NULL: "this producer could not
-        # say" is a FOURTH state and must not be folded into the resolver's own 'not_determined'. With no
-        # capability resolved, authority_roles is NULL too.
+        # A producer that can't say leaves NULL, a fourth state distinct from the resolver's 'not_determined'.
         pytest.param(
             None,
             {"authority_openness": None, "authority_roles": None},
@@ -733,7 +649,6 @@ def test_authority_openness_and_roles(db_session, cap, expected) -> None:
 
 
 def test_authority_roles_persists_witnessed_role_grant(db_session) -> None:
-    """A single-role Solmate capability persists a real (role, principals) grant, not []."""
     cap = {
         "kind": "finite_set",
         "members": ["0x" + "a" * 40],
@@ -754,8 +669,7 @@ def test_authority_roles_persists_witnessed_role_grant(db_session) -> None:
 
 
 def test_authority_roles_null_when_role_identity_dissolved(db_session) -> None:
-    """Role-gated with the role NOT determined must persist NULL, not [] (which
-    means proven-absent and would erase the middle state)."""
+    """``[]`` means proven-absent and would erase the middle state."""
     cap = {
         "kind": "finite_set",
         "members": ["0x" + "a" * 40],
@@ -772,8 +686,7 @@ def test_authority_roles_null_when_role_identity_dissolved(db_session) -> None:
 
 
 def test_resolver_crash_warns_once_per_contract_and_records_degraded(db_session, caplog) -> None:
-    """A crashing principal resolver leaves ``resolved_type`` NULL, which reads
-    downstream as "not a Safe/Timelock" — so the writer warns once per contract."""
+    """A NULL ``resolved_type`` reads downstream as "not a Safe/Timelock"."""
     import logging
 
     from utils.logging import degraded_errors_var
@@ -797,7 +710,6 @@ def test_resolver_crash_warns_once_per_contract_and_records_degraded(db_session,
     finally:
         degraded_errors_var.reset(token)
 
-    # Two functions × two principals = four classify attempts, one line.
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert warnings[0].contract_id == 1
@@ -806,7 +718,6 @@ def test_resolver_crash_warns_once_per_contract_and_records_degraded(db_session,
 
     entries = [e for e in degraded if e.phase == "principal_classification"]
     assert len(entries) == 1
-    # The resolver's own text is what tells a 402 from a timeout downstream.
     assert "classify service down" in entries[0].message
 
     assert all(row.resolved_type is None for row in _principals(db_session))

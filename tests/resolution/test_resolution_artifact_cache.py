@@ -1,10 +1,5 @@
-"""Regression tests for cross-cascade materialization dedup via ``contract_materializations``.
-
-Within a cascade the BFS dedupes by address; the persistent cache reuses work across sibling
-jobs walking the same library/implementation. Pinned: static artifacts are keyed by
-``(chain, bytecode_keccak)``; snapshot + permissions are rebuilt fresh every call (RPC-state
-dependent, never stale); returns are deepcopies; concurrent requests serialize on a Postgres
-advisory lock so the loser reads the winner's result.
+"""Static artifacts are keyed by ``(chain, bytecode_keccak)``, snapshots and permissions are rebuilt every call, and
+concurrent requests serialize on an advisory lock.
 """
 
 from __future__ import annotations
@@ -20,12 +15,7 @@ from services.resolution.recursive import _materialize_contract_artifacts
 
 @pytest.fixture(autouse=True)
 def _isolated_contract_materializations(monkeypatch):
-    """Point ``db.contract_materializations`` at the test DB and wipe the stub keccak row per test.
-
-    Otherwise the cache writes to whatever ``DATABASE_URL`` points to (often a dev DB) and a
-    leftover row keyed on the stub keccak ``0xab*32`` stops every later stubbed pipeline
-    from executing, breaking the scaffold/collect counters.
-    """
+    """Otherwise writes go to the dev DB and a leftover stub-keccak row breaks every later stubbed pipeline."""
     import os
 
     from sqlalchemy import create_engine
@@ -94,7 +84,7 @@ def _patch_pipeline(monkeypatch, *, scaffold_calls, collect_calls, snapshot_call
     monkeypatch.setattr(recursive, "build_control_tracking_plan", _build_plan)
     monkeypatch.setattr(recursive, "build_control_snapshot", _build_snapshot)
     monkeypatch.setattr(recursive, "_build_effective_permissions", _build_perms)
-    # Stub get_code_with_keccak (bytecode-keccak index) so tests make no real eth_getCode RPCs (~20s each).
+    # Each real eth_getCode takes ~20s.
     monkeypatch.setattr(
         "services.clients.rpc.get_code_with_keccak",
         lambda _rpc, _addr, chain_id=None: ("0x60", "0x" + "ab" * 32),
@@ -120,7 +110,6 @@ def test_second_call_serves_static_artifacts_from_cache(monkeypatch):
 
 
 def test_snapshot_always_rebuilt(monkeypatch):
-    """Snapshot reads on-chain state; must not be cached."""
     scaffold_calls: list[Any] = []
     collect_calls: list[Any] = []
     snapshot_calls: list[Any] = []
@@ -159,7 +148,6 @@ def test_cached_artifacts_are_deep_copied(monkeypatch):
 
 
 def test_cache_keyed_by_effective_address_not_input(monkeypatch):
-    """Two proxies pointing at the same impl share cached artifacts (key is the impl address)."""
     scaffold_calls: list[Any] = []
     collect_calls: list[Any] = []
     snapshot_calls: list[Any] = []
@@ -187,14 +175,10 @@ def test_cache_keyed_by_effective_address_not_input(monkeypatch):
     assert len(scaffold_calls) == 1, "same impl must be scaffolded once even for different proxies"
 
 
-# bytecode-keccak hit must retarget plan to the new address
-
-
 def test_bytecode_keccak_hit_retargets_plan_to_new_address(monkeypatch):
-    """Codex iter-4 P1: a keccak-index hit returns a plan cached for a DIFFERENT address with
-    the same bytecode (e.g. two UUPSProxy instances), so plan["contract_address"] points at the
-    FIRST address and build_control_snapshot would read the wrong contract's storage. On a hit
-    the cache must deepcopy and retarget to the address THIS call is materializing."""
+    """A keccak hit returns a plan for a different address with the same bytecode, so it must be retargeted or the
+    snapshot reads the wrong contract.
+    """
     snapshot_calls: list[Any] = []
     scaffold_calls: list[Any] = []
     collect_calls: list[Any] = []
@@ -205,7 +189,6 @@ def test_bytecode_keccak_hit_retargets_plan_to_new_address(monkeypatch):
         snapshot_calls=snapshot_calls,
     )
 
-    # Both addresses share the same bytecode → same keccak.
     keccak = "0x" + "ab" * 32
     monkeypatch.setattr(
         "services.clients.rpc.get_code_with_keccak", lambda _rpc, _addr, chain_id=None: ("0x60", keccak)
@@ -218,25 +201,12 @@ def test_bytecode_keccak_hit_retargets_plan_to_new_address(monkeypatch):
     _materialize_contract_artifacts(addr_b, "http://rpc", workspace_prefix="test", chain="ethereum")
 
     assert len(snapshot_calls) == 2
-    # First call is a cache MISS (fixture's hardcoded "0xabc" plan; not under test). The second
-    # is a keccak-index HIT and must retarget plan["contract_address"] from "0xabc" to addr_b.
     assert snapshot_calls[1]["contract_address"] == addr_b.lower()
 
 
-# ---------------------------------------------------------------------------
-# Cross-process / cross-job materialization dedup: ``contract_materializations`` is keyed by
-# (chain, bytecode_keccak) with pg_advisory_xact_lock request-coalescing. Tests rely on the
-# autouse ``_isolated_contract_materializations`` fixture.
-# ---------------------------------------------------------------------------
-
-
 def test_two_concurrent_requests_dedup_via_advisory_lock(monkeypatch):
-    """Two concurrent requests for the same ``(chain, bytecode_keccak)`` collapse to **one stored row**.
-
-    The cache layer no longer holds the advisory lock across ``builder()`` (that caused Neon SSL
-    idle drops mid-forge-build): short-lock -> unlocked build -> short-lock recheck-and-upsert.
-    Under contention both callers can build, so the build count is 1 or 2; the invariant is a
-    single ``status='ready'`` row.
+    """The lock is no longer held across ``builder()`` (Neon SSL idle drops), so both callers may build; the
+    invariant is one ready row.
     """
     import threading
 
@@ -265,11 +235,9 @@ def test_two_concurrent_requests_dedup_via_advisory_lock(monkeypatch):
     t1.join()
     t2.join()
 
-    # Build count is non-deterministic under tight contention.
     assert 1 <= len(scaffold_calls) <= 2
     assert len(collect_calls) == len(scaffold_calls)
 
-    # The invariant: exactly one ready row stored for this keccak.
     with cm.SessionLocal() as session:
         row = cm.find_by_keccak(session, chain="ethereum", bytecode_keccak="0x" + "ab" * 32)
     assert row is not None, "concurrent requests must produce exactly one stored row"
@@ -277,8 +245,6 @@ def test_two_concurrent_requests_dedup_via_advisory_lock(monkeypatch):
 
 
 def test_materialization_persists_a_row_keyed_by_chain_and_keccak(monkeypatch):
-    """A row per (chain, bytecode_keccak) lets operators answer "have we ever materialized this?" without resolving
-    artifacts."""
     from db import contract_materializations as cm  # provided by the fix
 
     scaffold_calls: list[Any] = []
@@ -302,8 +268,7 @@ def test_materialization_persists_a_row_keyed_by_chain_and_keccak(monkeypatch):
 
 
 def test_materialize_records_build_then_cache_hit_metrics(monkeypatch):
-    """Build-vs-cache-hit fold against the real ``materialize_or_wait``; only the build wire is stubbed.
-    A cache-hit-rate collapse is the redundant-rebuild signal this fold surfaces."""
+    """A cache-hit collapse is the redundant-rebuild signal."""
     from utils.logging import stage_metrics_var
 
     scaffold_calls: list[Any] = []

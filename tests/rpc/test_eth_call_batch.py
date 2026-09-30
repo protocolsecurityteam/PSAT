@@ -1,6 +1,3 @@
-"""Unit tests for ``services.clients.rpc.eth_call_batch`` — the revert-data-preserving
-JSON-RPC array batch the differential probe rides on. Stubs the HTTP session so
-no live RPC is touched (fully deterministic)."""
 
 from __future__ import annotations
 
@@ -64,7 +61,6 @@ def test_eth_call_batch_preserves_success_revert_and_node_error(monkeypatch):
     assert out[2].success is False
     assert out[2].revert_data is None  # no data → indeterminate, never attributable
 
-    # The per-call ``from`` override is actually sent on the wire.
     assert session.posted[0]["params"][0]["from"] == "0x" + "11" * 20
     assert session.posted[0]["params"][1] == "0x10"  # pinned block tag
 

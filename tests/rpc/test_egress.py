@@ -1,8 +1,3 @@
-"""Unit tests for the SSRF egress guard (``utils.egress``).
-
-Pure: ``socket.getaddrinfo`` and ``requests.get`` are stubbed so no network
-is touched and resolution is deterministic.
-"""
 
 from __future__ import annotations
 
@@ -31,14 +26,11 @@ def _addrinfo(ip: str):
         ("http://mapped/", "::ffff:127.0.0.1"),
         ("http://mapped2/", "::ffff:10.0.0.5"),
         ("http://uniquelocal/", "fd00::1"),
-        # RFC 6598 CGNAT (100.64.0.0/10): Alibaba metadata, k8s NAT fabrics.
-        # Python tags it neither is_private nor is_global, so the is_global
-        # allowlist is what refuses it.
+        # CGNAT (Alibaba metadata, k8s NAT) is neither is_private nor is_global in Python; the is_global allowlist
+        # refuses it.
         ("http://cgnat-metadata/", "100.100.100.200"),
         ("http://cgnat-low/", "100.64.0.1"),
-        # Decimal (2130706433) and hex (0x7f000001) integer spellings of 127.0.0.1: the guard
-        # classifies on the RESOLVED address, so however the literal is spelled it resolves to
-        # loopback and is refused. Pins that a refactor can't start deciding on the textual host.
+        # The guard classifies the resolved address, not the textual host.
         ("http://2130706433/", "127.0.0.1"),
         ("http://0x7f000001/", "127.0.0.1"),
     ],
@@ -56,11 +48,7 @@ def test_rejects_non_http_schemes(url):
 
 
 def test_rejects_backslash_authority_ssrf_bypass():
-    # urlparse reads the host as example.com (userinfo), but urllib3 — the parser
-    # requests connects with — dials 169.254.169.254. Deriving the guarded host
-    # from urlparse would validate a different host than the socket opens. Getaddrinfo
-    # is left to blow up (KeyError) if the guard ever reaches resolution: rejection
-    # must happen at authority parsing, before any host is resolved.
+    # urlparse reads the host as example.com but urllib3 dials 169.254.169.254. Rejection must happen before resolution.
     def unreached(host, *a, **k):
         raise AssertionError(f"resolution reached for {host!r}; authority should reject first")
 
@@ -70,9 +58,7 @@ def test_rejects_backslash_authority_ssrf_bypass():
 
 
 def test_rejects_userinfo_host_smuggle():
-    # https://real@evil.com/ connects to evil.com; the guard must classify evil.com,
-    # not the userinfo. Resolve evil.com to an internal IP so acceptance would be
-    # a metadata read.
+    # https://real@evil.com/ connects to evil.com.
     with patch("socket.getaddrinfo", return_value=_addrinfo("169.254.169.254")):
         with pytest.raises(UnsafeUrlError):
             assert_public_http_url("http://public.example@evil.internal/")
@@ -80,8 +66,7 @@ def test_rejects_userinfo_host_smuggle():
 
 @pytest.mark.parametrize("url", ["http://host:99999/", "http://host:b/", "http://host:-1/"])
 def test_malformed_port_raises_unsafe_not_bare_valueerror(url):
-    # F6: a malformed port must surface as UnsafeUrlError. Callers catch only that;
-    # a bare ValueError ("Port out of range") from the parser would 500 instead.
+    # F6: callers catch only UnsafeUrlError, so a bare ValueError would 500.
     with patch("socket.getaddrinfo", return_value=_addrinfo("93.184.216.34")):
         with pytest.raises(UnsafeUrlError):
             assert_public_http_url(url)
@@ -119,15 +104,11 @@ def test_safe_get_returns_non_redirect():
         with patch("requests.get", return_value=_FakeResp(200)) as mock_get:
             resp = safe_get("https://example.com/", timeout=5)
     assert resp.status_code == 200
-    # allow_redirects is forced off — redirects are followed manually.
     assert mock_get.call_args.kwargs["allow_redirects"] is False
 
 
 @pytest.mark.parametrize("injected", [False, True], ids=["module-requests", "injected-session"])
 def test_safe_get_refuses_redirect_to_internal_host(injected):
-    # First hop resolves public and returns a redirect to an internal host; the redirect target must
-    # be re-validated and rejected. An injected session is used for the connection, and the redirect
-    # is still refused rather than followed.
     resolutions = {"example.com": "93.184.216.34", "internal.local": "169.254.169.254"}
 
     def fake_getaddrinfo(host, *a, **k):
@@ -140,7 +121,6 @@ def test_safe_get_refuses_redirect_to_internal_host(injected):
         with patch("requests.get", return_value=redirect) as requests_get:
             with pytest.raises(UnsafeUrlError):
                 safe_get("https://example.com/", timeout=5, **({"session": session} if injected else {}))
-    # Only the first (public) hop was fetched; the internal target never was.
     assert (session.get if injected else requests_get).call_count == 1
 
 
@@ -161,8 +141,6 @@ def test_safe_get_follows_public_redirect():
 
 
 def test_download_audit_body_refuses_redirect_to_internal():
-    # End-to-end on the text-extraction path: a discovery-sourced URL that
-    # 302s to the metadata IP must be refused, not stored/served.
     from services.audits.text_extraction import PdfDownloadError, download_audit_body
 
     resolutions = {"example.com": "93.184.216.34", "internal.local": "169.254.169.254"}
@@ -175,5 +153,4 @@ def test_download_audit_body_refuses_redirect_to_internal():
     with patch("socket.getaddrinfo", side_effect=fake_getaddrinfo):
         with pytest.raises(PdfDownloadError, match="non-public"):
             download_audit_body("https://example.com/audit.md", session=session, kind="text")
-    # The internal redirect target was never fetched for its body.
     assert session.get.call_count == 1

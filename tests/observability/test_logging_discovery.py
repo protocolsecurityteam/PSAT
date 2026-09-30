@@ -1,12 +1,5 @@
-"""Offline observability tests for the discovery service layer. All stubbed at the wire.
-
-* classifier swallows downgrading a contract to ``regular`` pair a WARNING with
-  ``record_degraded(phase='classify')`` and a ``classify_fallbacks`` metric (Backlog #8);
-* ``run_discovery`` folds budget counters into stage metrics and times sub-phases via
-  ``log_timed_phase`` (Backlog #16);
-* the inventory deployer-expansion swallow records a degraded breadcrumb (Backlog #8);
-* DEBUG-only swallows that hid two prior audit-discovery collapses (chain probes,
-  classification LLM calls, explorer lookups) now WARN with chain/company and ``exc_type``.
+"""Classifier fallbacks, run_discovery metrics and inventory swallows record degraded breadcrumbs (Backlog #8/#16);
+the DEBUG-only swallows that hid two audit-discovery collapses now WARN.
 """
 
 from __future__ import annotations
@@ -23,7 +16,6 @@ from utils.logging import (
 
 @contextmanager
 def _job_context():
-    """Bind the per-job degraded + stage-metric accumulators a worker installs."""
     metrics: dict = {}
     errors: list = []
     m_token = stage_metrics_var.set(metrics)
@@ -44,7 +36,6 @@ def _job_context():
 def test_classifier_fallback_records_degraded_and_metric(monkeypatch):
     from services.discovery import classifier
 
-    # Every classify attempt fails, so classify_contracts must fall back to "regular".
     def _boom(addr, rpc_url, code_cache=None):
         raise RuntimeError("rpc down")
 
@@ -94,19 +85,16 @@ def test_run_discovery_folds_budget_metrics(monkeypatch):
     with _job_context() as (metrics, _errors):
         out = rd.run_discovery("stubproto")
 
-    # The two unconditional deep-research charges (audit seeds + addresses).
     assert metrics["research_calls"] == 2
     assert metrics["search_calls"] == 0
     assert metrics["estimated_cost_usd"] == out["meta"]["estimated_cost_usd"]
     assert metrics["dependency_pass_triggered"] is False
-    # log_timed_phase folded per-phase timings for the wrapped sub-phases.
     assert "phase_ms_discovery_audits" in metrics
     assert "phase_ms_discovery_addresses" in metrics
 
 
 def test_probe_chain_survives_a_bound_job_chain(monkeypatch, caplog):
-    """The probed chain is not the job's chain. JsonFormatter writes bound context first and
-    skips a colliding ``extra``, so a key named ``chain`` would be replaced by the job's."""
+    """JsonFormatter writes bound context first, so a ``chain`` extra would be replaced by the job's."""
     import json
 
     from services.discovery import chain_resolver
@@ -129,8 +117,7 @@ def test_probe_chain_survives_a_bound_job_chain(monkeypatch, caplog):
 
 
 def test_chain_probe_failure_warns_instead_of_reading_as_no_code(monkeypatch, caplog):
-    """D3: an empty probe result is indistinguishable from "no code here", so the failure
-    must survive as a WARNING."""
+    """D3: an empty probe result is indistinguishable from "no code here"."""
     from services.discovery import chain_resolver
 
     monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
@@ -147,7 +134,6 @@ def test_chain_probe_failure_warns_instead_of_reading_as_no_code(monkeypatch, ca
     assert hits == set()
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    # ``probe_chain``, not ``chain``: JsonFormatter drops an extra colliding with a context field.
     assert warnings[0].probe_chain == "base"
     assert not hasattr(warnings[0], "chain")
     assert warnings[0].exc_type == "TimeoutError"
@@ -155,13 +141,12 @@ def test_chain_probe_failure_warns_instead_of_reading_as_no_code(monkeypatch, ca
     degraded = [e for e in errors if e.phase == "chain_probe"]
     assert len(degraded) == 1
     assert degraded[0].context["probe_chain"] == "base"
-    # The provider's own text is what separates a 402 from a 401 from a timeout.
+    # The provider's text separates a 402 from a 401 from a timeout.
     assert "probe timed out" in degraded[0].message
 
 
 def test_chain_probe_error_fills_warn_even_when_the_batch_returns(monkeypatch, caplog):
-    """D3, the live path: ``_batch_get_code`` swallows transport errors and answers ``"0x"``, so
-    a chain-wide outage *returns successfully*; the error-fill count is the only signal."""
+    """``_batch_get_code`` answers ``"0x"`` on transport errors, so a chain outage returns successfully."""
     import urllib.error
 
     from services.discovery import chain_resolver, static_dependencies
@@ -174,7 +159,6 @@ def test_chain_probe_error_fills_warn_even_when_the_batch_returns(monkeypatch, c
     def _no_code(*_a, **_kw):
         raise RuntimeError("rpc 500")
 
-    # Batch rejected -> individual fallback; every individual read fails too.
     monkeypatch.setattr(chain_resolver.urllib.request, "urlopen", _no_batch)
     monkeypatch.setattr(static_dependencies, "get_code", _no_code)
 
@@ -196,8 +180,7 @@ def test_chain_probe_error_fills_warn_even_when_the_batch_returns(monkeypatch, c
 
 
 def test_chain_probe_counts_per_item_rpc_errors(monkeypatch, caplog):
-    """A batch item with ``error`` and no ``result`` lands as ``"0x"``, the same shape as a real
-    no-code answer, so it must be counted as an error-fill where it happens."""
+    """An errored item lands as ``"0x"``, the same shape as real no-code."""
     import json
 
     from services.discovery import chain_resolver
@@ -228,15 +211,12 @@ def test_chain_probe_counts_per_item_rpc_errors(monkeypatch, caplog):
     assert hits == set()
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    # Only the erroring item counts; the second address genuinely answered "0x".
     assert warnings[0].probe_failed == 1
     assert warnings[0].exc_type is None
-    # No exception to attach, so nothing lands in stage_errors for this shape.
     assert [e for e in errors if e.phase == "chain_probe"] == []
 
 
 def test_chain_probe_stays_silent_when_every_address_answers(monkeypatch, caplog):
-    """A real "no code" answer must not warn; the WARNING has to stay a signal."""
     from services.discovery import chain_resolver
 
     monkeypatch.setattr(chain_resolver, "_erpc_url_for_chain", lambda _chain: "http://stub")
@@ -252,8 +232,7 @@ def test_chain_probe_stays_silent_when_every_address_answers(monkeypatch, caplog
 
 
 def test_audit_classification_llm_failure_warns(monkeypatch, caplog):
-    """D2: the shape behind both prior audit-discovery collapses; an empty classification must
-    not be the only trace of a provider outage."""
+    """D2: the shape behind both prior audit-discovery collapses."""
     from services.discovery import audit_reports_llm
 
     def _boom(*_a, **_kw):
@@ -275,13 +254,10 @@ def test_audit_classification_llm_failure_warns(monkeypatch, caplog):
 
     degraded = [e for e in errors if e.phase == "audit_classification"]
     assert len(degraded) == 1
-    # exc_type alone renders a 402, a 401 and a timeout identically.
     assert "402 payment required" in degraded[0].message
 
 
 def test_activity_fetch_failures_summarized_once_per_pass(monkeypatch, caplog):
-    """D2: per-contract explorer failures collapse into one line saying how much of the ranking
-    ran on the neutral score."""
     from services.discovery import activity
 
     def _boom(*_a, **_kw):
@@ -303,5 +279,5 @@ def test_activity_fetch_failures_summarized_once_per_pass(monkeypatch, caplog):
     degraded = [e for e in errors if e.phase == "activity_enrichment"]
     assert len(degraded) == 1
     assert "etherscan down" in degraded[0].message
-    # The neutral score is still published — the log is what says it was a guess.
+    # The log is what says the neutral score was a guess.
     assert all(c["activity"]["score"] == 0.5 for c in contracts)

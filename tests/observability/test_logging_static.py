@@ -1,9 +1,5 @@
-"""Logging locks for the static stage (Wave-1 instrumentation).
-
-``core.py`` semantic-emit swallows are WARNING + ``record_degraded`` (no ``logger.exception`` on a
-continue path) plus ``secondary_impl_pointers`` and ``phase_ms_<phase>`` metrics;
-``predicate_artifacts`` emits ``predicate_fns_attempted`` vs ``predicate_trees_built`` so an empty
-semantic artifact is chartable. Offline: Slither and per-phase helpers are stubbed.
+"""Semantic-emit swallows are WARNING + ``record_degraded``, and ``predicate_fns_attempted`` vs
+``predicate_trees_built`` makes an empty semantic artifact chartable.
 """
 
 from __future__ import annotations
@@ -22,7 +18,6 @@ from utils.logging import (
 
 
 def _stub_analysis_phases(monkeypatch):
-    """Stub everything past the Slither parse so the pipeline reaches the semantic-emit swallows."""
     subject = SimpleNamespace(name="C", functions=[])
     monkeypatch.setattr(core, "Slither", lambda _target: object())
     monkeypatch.setattr(core, "_select_subject_contract", lambda *_a, **_k: subject)
@@ -47,9 +42,6 @@ def _stub_analysis_phases(monkeypatch):
 
 
 def test_core_predicate_emit_failure_records_degraded_not_exception(monkeypatch, tmp_path, caplog):
-    """A raising predicate build is swallowed as a degraded WARNING + ``record_degraded``, never a
-    ``logger.exception`` (ERROR), and the pipeline still yields an analysis dict with the
-    ``secondary_impl_pointers`` + ``phase_ms`` metrics."""
     _stub_analysis_phases(monkeypatch)
 
     def _boom(_contract):
@@ -88,8 +80,7 @@ def test_core_predicate_emit_failure_records_degraded_not_exception(monkeypatch,
 
 
 def test_unknown_parent_chain_reports_once_per_job(caplog):
-    """The ``"ethereum"`` fallback is a wrong answer, not a missing one, so it warns + records
-    degraded once per job, though ``process()`` asks for the parent chain from ~10 places."""
+    """The ``"ethereum"`` fallback is a wrong answer, reported once per job though ``process()`` asks ~10 times."""
     import logging
     from typing import Any, cast
 
@@ -119,8 +110,7 @@ def test_unknown_parent_chain_reports_once_per_job(caplog):
     assert len(entries) == 1
     assert entries[0].severity == "degraded"
 
-    # The next job reports again. The K=1 worker loop reuses one context, so the dedup must
-    # key on the job row, not contextvar state.
+    # The K=1 worker loop reuses one context, so the dedup keys on the job row.
     deg_token = degraded_errors_var.set(accumulator)
     try:
         with bind_trace_context(trace_id="t", job_id="job-2", stage="static", worker_id="StaticWorker-1"):

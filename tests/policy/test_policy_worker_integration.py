@@ -1,4 +1,3 @@
-"""Integration tests for PolicyWorker — _resolve_authority() and process() flows."""
 
 from __future__ import annotations
 
@@ -8,9 +7,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 from tests.support.policy_builders import (
     AUTH_ADDRESS,
     TARGET_ADDRESS,
@@ -23,10 +19,6 @@ from tests.support.policy_builders import (
 )
 from workers.policy_worker import PolicyWorker
 
-# ---------------------------------------------------------------------------
-# _resolve_authority tests (now takes session, job, graph, snapshot, nested)
-# ---------------------------------------------------------------------------
-
 
 _AUTH_BUNDLE = _authority_bundle()
 
@@ -34,9 +26,7 @@ _AUTH_BUNDLE = _authority_bundle()
 @pytest.mark.parametrize(
     ("controller_values", "graph_nodes", "nested", "status", "reason_fragment", "authority_snapshot"),
     [
-        # controller_values has keys but none resolve to a nested snapshot bundle.
         pytest.param({"owner_slot:admin": {"value": "0xbbb"}}, [], {}, "no_authority", "", None, id="no-authority"),
-        # Authority exists but is the zero address.
         pytest.param(
             {"state_variable:authority": {"value": ZERO_ADDRESS}},
             [],
@@ -46,7 +36,6 @@ _AUTH_BUNDLE = _authority_bundle()
             None,
             id="zero-address",
         ),
-        # A nested controller address is known but its snapshot is missing.
         pytest.param(
             {"external_contract:policy": {"value": AUTH_ADDRESS}},
             [{"address": AUTH_ADDRESS, "artifacts": {}}],
@@ -56,7 +45,6 @@ _AUTH_BUNDLE = _authority_bundle()
             None,
             id="no-snapshot",
         ),
-        # A nested controller snapshot is joined without any policy-state backfill.
         pytest.param(
             {"external_contract:policy": {"value": AUTH_ADDRESS}},
             [{"address": AUTH_ADDRESS, "artifacts": {"data_key": f"recursive:{AUTH_ADDRESS}"}}],
@@ -86,13 +74,7 @@ def test_resolve_authority_status(
     assert result.get("authority_snapshot") == authority_snapshot
 
 
-# ---------------------------------------------------------------------------
-# process() integration tests
-# ---------------------------------------------------------------------------
-
-
 class TestProcessSemanticInputs:
-    """Missing semantic inputs are degraded instead of using a static-summary fallback."""
 
     def test_missing_predicate_trees_and_effects_records_degraded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = PolicyWorker()
@@ -156,7 +138,6 @@ class TestProcessSemanticInputs:
 
 
 class TestGraphRefreshAfterEffectivePermissions:
-    """resolve_control_graph refresh runs AFTER build_effective_permissions."""
 
     def test_refresh_runs_after_effective_permissions(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = PolicyWorker()
@@ -210,8 +191,6 @@ class TestGraphRefreshAfterEffectivePermissions:
 
 
 class TestCrossContractEnrichmentArtifactSync:
-    """Cross-contract enrichment merges policy-derived claims into the
-    effective_permissions artifact and leaves legacy effect_labels untouched."""
 
     def test_enrichment_rewrites_effective_permissions_artifact(self, monkeypatch: pytest.MonkeyPatch) -> None:
         worker = PolicyWorker()
@@ -287,18 +266,14 @@ class TestCrossContractEnrichmentArtifactSync:
         effective_payloads = [data for name, data in store_calls if name == "effective_permissions"]
         assert len(effective_payloads) == 2
         fn = effective_payloads[-1]["functions"][0]
-        # Legacy labels stay exactly as the static stage produced them.
         assert [c["claim_id"] for c in fn["claims"]] == ["flow.out"]
         assert fn["effect_labels"] == ["role_management"]
 
 
-# Full process() with 50+ principals must store identical artifacts under
-# PSAT_RPC_FANOUT=1 vs =8, and the per-job classify_cache must collapse repeat probes.
+# PSAT_RPC_FANOUT=1 vs =8 must store identical artifacts, and the classify cache must collapse repeats.
 
 
 class TestProcessFanoutParity:
-    """Drive ``PolicyWorker.process`` end-to-end (real ``build_principal_labels``)
-    and assert sequential vs parallel parity."""
 
     @staticmethod
     def _run(monkeypatch: pytest.MonkeyPatch, fanout: str) -> tuple[Any, dict[str, Any]]:
@@ -392,7 +367,6 @@ class TestProcessFanoutParity:
         ) -> None:
             store_calls.append((name, data))
 
-        # Track classify calls to assert no spurious re-probes on the parallel path.
         classify_calls: list[str] = []
 
         def fake_classify(_rpc, address, *, chain_id=None):
@@ -436,16 +410,13 @@ class TestProcessFanoutParity:
         for seq_p, par_p in zip(seq_payload["principals"], par_payload["principals"]):
             assert seq_p == par_p
 
-        # ~1 classify per unknown principal. Parallel may double-probe on a benign
-        # miss race, but >2x the sequential count means the cache lock isn't collapsing misses.
+        # >2x the sequential count means the cache lock isn't collapsing misses.
         assert len(seq_stats["classify_calls"]) == 60
         assert len(par_stats["classify_calls"]) <= 60 * 2
 
 
 class TestGraphRefreshRewritesTables:
-    """The graph refresh must rewrite the CGN/CGE tables, not just the artifact:
-    role_principal edges are projected only at this stage, so an artifact-only rewrite
-    leaves the persisted plane a strict subset of what the artifact asserts."""
+    """role_principal edges are projected only here, so an artifact-only rewrite leaves the tables a subset."""
 
     @staticmethod
     def _run_process(monkeypatch: pytest.MonkeyPatch, *, contract_row: Any) -> tuple[list[dict], dict]:
@@ -522,13 +493,10 @@ class TestGraphRefreshRewritesTables:
         assert len(replace_calls) == 1, "policy stage must rewrite CGN/CGE once, with the refreshed graph"
         call = replace_calls[0]
         assert call["contract_id"] == 42
-        # The impl-in-proxy-context deployment scoping the row writes use.
         assert call["deployment_address"] == "0x" + "77" * 20
         assert call["resolved_graph"] is refreshed_graph
         assert any(edge["relation"] == "role_principal" for edge in call["resolved_graph"]["edges"])
 
     def test_no_contract_row_skips_the_table_rewrite(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Without a Contract row there is nothing to key rows on; the artifact-only
-        path (already degraded upstream) must not crash or write."""
         replace_calls, _ = self._run_process(monkeypatch, contract_row=None)
         assert replace_calls == []

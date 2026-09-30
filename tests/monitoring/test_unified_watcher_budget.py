@@ -30,11 +30,7 @@ def _addr_topic(addr: str) -> str:
 
 
 def _ownership_log(address: str, new_owner: str, block: int, log_index: int = 0) -> dict:
-    """A fully-formed OwnershipTransferred RPC log the fetcher will decode.
-
-    ``RpcEventLogFetcher._decode_log`` silently drops logs missing blockHash/transactionHash/
-    indices, so the whole shape is built.
-    """
+    """``_decode_log`` silently drops logs missing block/tx fields."""
     tx = "0x" + f"{block:064x}"
     return {
         "address": address,
@@ -53,12 +49,7 @@ def _ownership_log(address: str, new_owner: str, block: int, log_index: int = 0)
 
 
 class Wire:
-    """Stubs both RPC entry points scan_for_events reaches.
-
-    Head (``eth_blockNumber``) goes through ``unified_watcher.rpc_request``; getLogs through
-    ``event_logs_rpc.rpc_request``. Every getLogs call is captured and its address list
-    asserted non-empty (an empty list matches ANY address on the wire).
-    """
+    """An empty getLogs address list matches any address."""
 
     def __init__(self, head: int, *, fail_from: int | None = None, logs: list[dict] | None = None):
         self.head = head
@@ -82,8 +73,6 @@ class Wire:
         frm = int(p["fromBlock"], 16)
         to = int(p["toBlock"], 16)
         if self.fail_from is not None and frm >= self.fail_from:
-            # Provider range/response-cap shape → the fetcher bisects, then
-            # (at the span floor) re-raises this.
             raise RuntimeError("Limit exceeded: too many logs")
         addrs = {a.lower() for a in p["address"]}
         return [lg for lg in self.logs if lg["address"].lower() in addrs and frm <= int(lg["blockNumber"], 16) <= to]
@@ -130,11 +119,6 @@ def _cursor(session, mc_id: uuid.UUID) -> int:
     ).scalar_one()
 
 
-# ---------------------------------------------------------------------------
-# Cohort formation
-# ---------------------------------------------------------------------------
-
-
 def test_cohort_split_at_address_batch(db_session, monkeypatch):
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -170,20 +154,8 @@ def test_most_behind_cohort_scanned_first(db_session, monkeypatch):
     assert first_addrs == {behind.lower()}
 
 
-# ---------------------------------------------------------------------------
-# Budgets
-# ---------------------------------------------------------------------------
-
-
-# The single-cohort 50-window pass cap (windows_scanned==50, budget_exhausted,
-# cursor at 50×MAX_BLOCK_RANGE) is asserted by pass 1 of
-# ``test_36_day_gap_converges_in_three_passes`` below, which additionally pins
-# cohorts==1 and flat single-address hydration.
-
-
 def test_per_cohort_turn_cap_hands_off_within_pass(db_session, monkeypatch):
-    """Per-cohort turn cap (25) yields to the next-most-behind cohort so the
-    50-window pass budget splits 25/25 across two equally-behind cohorts."""
+    """Two equally-behind cohorts split the 50-window budget 25/25."""
     from services.monitoring.unified_watcher import scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
@@ -204,11 +176,8 @@ def test_per_cohort_turn_cap_hands_off_within_pass(db_session, monkeypatch):
 
 
 def test_runaway_cohort_yields_to_the_fleet_and_is_capped(db_session, monkeypatch):
-    """A cursor implausibly far behind head (the audited floor-0 legacy row, ~16M blocks
-    back) must not win most-behind-first every pass forever.
-
-    It is served last and capped at one window per pass (still advancing), while
-    contracts at head are scanned in the same pass. The condition is counted.
+    """The audited floor-0 legacy row would otherwise win most-behind-first forever; it's served last, one window per
+    pass.
     """
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -220,7 +189,6 @@ def test_runaway_cohort_yields_to_the_fleet_and_is_capped(db_session, monkeypatc
 
     result = scan_for_events(db_session, "http://stub")
 
-    # The fleet was served first, despite the runaway's much larger lag.
     assert {a.lower() for a in wire.getlogs_calls[0]["address"]} == {ADDR(2).lower()}
     assert _cursor(db_session, healthy_id) == head
     assert _cursor(db_session, runaway_id) == MAX_BLOCK_RANGE
@@ -229,8 +197,7 @@ def test_runaway_cohort_yields_to_the_fleet_and_is_capped(db_session, monkeypatc
 
 
 def test_runaway_cap_is_per_pass_not_per_turn(db_session, monkeypatch):
-    """With nothing else to scan, the runaway still gets only its per-pass
-    slice — otherwise the backstop would just re-serve it in a loop."""
+    """Otherwise the backstop would re-serve it in a loop."""
     from services.monitoring.unified_watcher import scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
@@ -246,13 +213,7 @@ def test_runaway_cap_is_per_pass_not_per_turn(db_session, monkeypatch):
 
 
 def test_runaway_threshold_is_chain_time_not_block_count(db_session, monkeypatch):
-    """Review finding 3: the budget is wall clock on the cohort's OWN chain.
-
-    1M blocks is ~139 days of mainnet but ~23 days of Base, so a block-count threshold
-    would demote a Base fleet recovering from a month-long outage exactly when catch-up
-    matters. The same 2M-block lag is a runaway on ethereum
-    (``test_runaway_cap_is_per_pass_not_per_turn``) and normal backfill here.
-    """
+    """The budget is wall clock on the cohort's own chain; 1M blocks is ~139 days of mainnet but ~23 of Base."""
     from services.monitoring.unified_watcher import _runaway_lag_blocks_for, scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
@@ -271,10 +232,7 @@ def test_runaway_threshold_is_chain_time_not_block_count(db_session, monkeypatch
 
 
 def test_backstop_disabled_restores_the_starvation_it_prevents(db_session, monkeypatch):
-    """The threshold is an operator lever; 0 turns the backstop off and the fleet then
-    reproduces the observed starvation: the runaway consumes the whole pass budget and
-    the contract at head is never scanned.
-    """
+    """With the backstop off the runaway eats the whole budget and the head contract is never scanned."""
     from services.monitoring.unified_watcher import scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
@@ -292,11 +250,6 @@ def test_backstop_disabled_restores_the_starvation_it_prevents(db_session, monke
     assert result.runaway_cohorts == 0
 
 
-# ---------------------------------------------------------------------------
-# Confirmation depth
-# ---------------------------------------------------------------------------
-
-
 def test_confirmation_depth_clamps_window_end(db_session, monkeypatch):
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -312,21 +265,13 @@ def test_confirmation_depth_clamps_window_end(db_session, monkeypatch):
     assert result.max_lag_blocks == 12  # raw head − cursor
 
 
-# ---------------------------------------------------------------------------
-# Failure invariant: behind ≠ skipped
-# ---------------------------------------------------------------------------
-
-
 def test_failed_window_does_not_advance_cursor_and_persists_prior_windows(db_session, monkeypatch):
-    """Windows 1–2 commit durably; window 3 fails → cursor stays at window 2's
-    end and the pass reports degraded, but window-1's event is persisted."""
     from services.monitoring.unified_watcher import scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
     addr = ADDR(1)
     mc_id = _mk(db_session, addr, 0)
 
-    # Window 1 = [1,2000], window 2 = [2001,4000], window 3 = [4001,6000].
     new_owner = ADDR(0xBEEF)
     logs = [_ownership_log(addr, new_owner, block=1500)]  # lands in window 1
     Wire(head=10_000, fail_from=4001, logs=logs).install(monkeypatch)
@@ -335,7 +280,6 @@ def test_failed_window_does_not_advance_cursor_and_persists_prior_windows(db_ses
 
     assert result.degraded is True
     assert _cursor(db_session, mc_id) == 2 * MAX_BLOCK_RANGE
-    # Window-1's event survived the later-window failure (per-window commit).
     events = (
         db_session.execute(select(MonitoredEvent).where(MonitoredEvent.monitored_contract_id == mc_id)).scalars().all()
     )
@@ -353,7 +297,6 @@ def test_failure_isolates_to_its_cohort(db_session, monkeypatch):
     bad_id = _mk(db_session, bad, 0)
     good_id = _mk(db_session, good, 0)
 
-    # Fail only bad's address by failing all getLogs whose address set is {bad}.
     class TwoCohortWire(Wire):
         def getlogs_rpc(self, url, method, params, *, chain_id=None):
             p = params[0]
@@ -378,11 +321,6 @@ def test_failure_isolates_to_its_cohort(db_session, monkeypatch):
     assert _cursor(db_session, good_id) == 1500  # scanned cleanly
 
 
-# ---------------------------------------------------------------------------
-# Cursor monotonicity
-# ---------------------------------------------------------------------------
-
-
 def test_lower_head_second_pass_does_not_rewind(db_session, monkeypatch):
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -399,20 +337,8 @@ def test_lower_head_second_pass_does_not_rewind(db_session, monkeypatch):
     assert _cursor(db_session, mc_id) == 6000  # unchanged
 
 
-# The GREATEST cursor monotonicity (a stale/zombie writer replaying an old
-# window end can never rewind) is asserted through the real ``scan_for_events``
-# in ``test_lower_head_second_pass_does_not_rewind`` above; a raw-UPDATE
-# re-assertion here would only re-test Postgres ``GREATEST``.
-
-
 def test_cohort_greatest_does_not_rewind_ahead_member(db_session, monkeypatch):
-    """Within one cohort the shared per-window UPDATE commits ``window_end`` to every
-    member, but GREATEST keeps a member already AHEAD of it from being rewound.
-
-    A (cursor 100) and B (1500) share block-bucket 0, so the cohort cursor is 100. With
-    head 1000 the window ends at 1000, below B's 1500 (B was scanned further in a prior
-    pass, then head went lower). Dropping GREATEST from the production UPDATE rewinds B.
-    """
+    """B was scanned further in a prior pass, then head went lower; dropping GREATEST would rewind it."""
     from services.monitoring.unified_watcher import scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
@@ -427,14 +353,7 @@ def test_cohort_greatest_does_not_rewind_ahead_member(db_session, monkeypatch):
     assert _cursor(db_session, b_id) == 1500  # NOT rewound to 1000
 
 
-# ---------------------------------------------------------------------------
-# Convergence + metrics
-# ---------------------------------------------------------------------------
-
-
 def test_36_day_gap_converges_in_three_passes(db_session, monkeypatch):
-    """250k-block backlog = 125 windows ⇒ 50 + 50 + 25 across three passes,
-    with one cohort and a single-address getLogs each window (flat hydration)."""
     from services.monitoring.unified_watcher import scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
@@ -464,7 +383,6 @@ def test_max_lag_blocks_is_head_minus_min_cursor(db_session, monkeypatch):
     from services.monitoring.unified_watcher import scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
-    # Two cohorts; only enough budget-free work that one stays far behind.
     _mk(db_session, ADDR(1), 0)  # bucket 0 — will drain to head
     _mk(db_session, ADDR(2), 240_000)  # bucket 120 — near head
     head = 250_000
@@ -472,18 +390,11 @@ def test_max_lag_blocks_is_head_minus_min_cursor(db_session, monkeypatch):
 
     result = scan_for_events(db_session, "http://stub")
 
-    # The deeply-behind cohort can't finish in one 50-window pass (needs 125),
-    # so max_lag reflects its remaining distance from head.
+    # The deeply-behind cohort needs 125 windows, so it can't finish in one pass.
     assert result.max_lag_blocks == head - 100_000  # advanced 50 windows
 
 
-# ---------------------------------------------------------------------------
-# Empty-address guard
-# ---------------------------------------------------------------------------
-
-
 def test_no_getlogs_with_empty_address_list(db_session, monkeypatch):
-    """Every getLogs carries a non-empty address list (empty = match-any)."""
     from services.monitoring.unified_watcher import scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
@@ -498,14 +409,8 @@ def test_no_getlogs_with_empty_address_list(db_session, monkeypatch):
     assert all(call["address"] for call in wire.getlogs_calls)
 
 
-# ---------------------------------------------------------------------------
-# Per-window notify
-# ---------------------------------------------------------------------------
-
-
 def test_notify_fires_once_per_window(db_session, monkeypatch):
-    """notify_protocol_events is called per window with that window's events,
-    not once at pass end — so a long catch-up doesn't buffer notifications."""
+    """A long catch-up must not buffer notifications."""
     import services.monitoring.notifier as notifier
     from services.monitoring.unified_watcher import scan_for_events
 
@@ -536,11 +441,6 @@ def test_notify_fires_once_per_window(db_session, monkeypatch):
     assert stored == 2
 
 
-# ---------------------------------------------------------------------------
-# Pre-enrollment notification floor (enrollment_block)
-# ---------------------------------------------------------------------------
-
-
 def _install_notify_capture(monkeypatch) -> list:
     import services.monitoring.notifier as notifier
 
@@ -558,14 +458,12 @@ def _jobs_for(session, address: str) -> int:
 
 
 def test_pre_enrollment_event_recorded_but_not_notified_or_reanalyzed(db_session, monkeypatch):
-    """An event below enrollment_block is pre-enrollment history: persisted with a
-    ``historical`` marker but never notified and never queues reanalysis (the observed
-    2018-USDC failure mode). The cohort scans from the low cursor, so the ancient event
-    is fetched even though the floor is higher."""
+    """Pre-enrollment history is persisted as ``historical`` but never notified or reanalyzed (the 2018-USDC
+    failure).
+    """
     from services.monitoring.unified_watcher import scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
-    # cursor below the event, floor above it → the event is scanned but historical.
     mc_id = _mk(db_session, ADDR(1), cursor=100, enrollment_block=1000)
     Wire(head=2000, logs=[_ownership_log(ADDR(1), ADDR(0xBEEF), block=500)]).install(monkeypatch)
     notified = _install_notify_capture(monkeypatch)
@@ -584,7 +482,6 @@ def test_pre_enrollment_event_recorded_but_not_notified_or_reanalyzed(db_session
 
 
 def test_post_enrollment_event_notified_and_reanalyzed(db_session, monkeypatch):
-    """A fresh event at/above enrollment_block notifies once and queues reanalysis."""
     from services.monitoring.unified_watcher import scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
@@ -606,16 +503,12 @@ def test_post_enrollment_event_notified_and_reanalyzed(db_session, monkeypatch):
 
 
 def test_catch_up_event_after_enrollment_is_notified(db_session, monkeypatch):
-    """Chosen catch-up semantics: an event after enrollment (block >= enrollment_block)
-    that monitoring hadn't reached yet is a real change the operator hasn't seen, so it
-    notifies even though it is far from head."""
+    """A post-enrollment event monitoring hadn't reached is a real change the operator hasn't seen."""
     from services.monitoring.unified_watcher import scan_for_events
 
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
     monkeypatch.setenv("PSAT_SCAN_MAX_WINDOWS_PER_COHORT", "50")
     monkeypatch.setenv("PSAT_SCAN_MAX_WINDOWS_PER_PASS", "50")
-    # Enrolled at 100, badly behind (cursor 100, head 50000); a post-enrollment
-    # governance change at block 10000 that the backlog hadn't reached yet.
     mc_id = _mk(db_session, ADDR(1), cursor=100, enrollment_block=100)
     Wire(head=50000, logs=[_ownership_log(ADDR(1), ADDR(0xBEEF), block=10000)]).install(monkeypatch)
     notified = _install_notify_capture(monkeypatch)
@@ -630,19 +523,8 @@ def test_catch_up_event_after_enrollment_is_notified(db_session, monkeypatch):
     assert not (rows[0].data or {}).get("historical")
 
 
-# =========================================================================
-# Per-contract scan block filtering
-# =========================================================================
-
-
 @requires_postgres
 class TestCohortScanBlock:
-    """The cohort scanner groups contracts by block bucket and never re-scans a block
-    range a cohort has already covered.
-
-    Both RPC entry points are stubbed: the head read on ``unified_watcher.rpc_request``
-    and getLogs on the shared fetcher's ``rpc_request``.
-    """
 
     @staticmethod
     def _install(monkeypatch, head, calls):
@@ -702,7 +584,6 @@ class TestCohortScanBlock:
 
         behind_calls = [c for c in log_calls if behind.lower() in {a.lower() for a in c[1][0]["address"]}]
         ahead_calls = [c for c in log_calls if ahead.lower() in {a.lower() for a in c[1][0]["address"]}]
-        # The ahead cohort starts at 5001 — its already-scanned range is never re-read.
         assert min(int(c[1][0]["fromBlock"], 16) for c in ahead_calls) == 5001
         assert min(int(c[1][0]["fromBlock"], 16) for c in behind_calls) == 101
 
@@ -750,12 +631,8 @@ class TestCohortScanBlock:
 
 @requires_postgres
 class TestBatchTimelockDedupe:
-    """OZ Timelock scheduleBatch / executeBatch emit one CallScheduled / CallExecuted log
-    per call, sharing tx_hash + block_number + event_type but with distinct logIndex.
-
-    A 4-tuple dedupe key (mc, tx, block, type) collapsed those to one MonitoredEvent row,
-    hiding the rest of the batch from the UI. Dedupe is now a DB-level 4-tuple guard plus an
-    in-scan 5-tuple guard that includes log_index.
+    """Batch timelock ops emit one log per call with the same tx, block and type; a 4-tuple dedupe hid the rest of
+    the batch.
     """
 
     def test_batch_call_scheduled_logs_persist_separately(self, db_session: SASession):
@@ -777,9 +654,7 @@ class TestBatchTimelockDedupe:
         db_session.add(mc)
         db_session.commit()
 
-        # Two CallScheduled logs from the same tx — distinct logIndex.
-        # data layout: 5 head words (target/value/bytes_off/predecessor/delay)
-        # + bytes_len + selector. Bytes_off is 5*32 = 160 (0xa0).
+        # Data: 5 head words, bytes_len, selector.
         head = (
             "0" * 24
             + "00" * 19
@@ -843,11 +718,7 @@ class TestBatchTimelockDedupe:
             assert e.block_number == 150
 
     def test_batch_call_executed_logs_persist_separately(self, db_session: SASession):
-        """Same batch-dedupe story for executeBatch.
-
-        The path is event-type agnostic, but CallExecuted is what the UI renders in
-        'recent activity', so both lifecycle halves stay pinned.
-        """
+        """CallExecuted is what the UI renders in recent activity."""
         from services.monitoring.event_topics import CALL_EXECUTED_TOPIC0
         from services.monitoring.unified_watcher import scan_for_events
 
@@ -866,7 +737,6 @@ class TestBatchTimelockDedupe:
         db_session.add(mc)
         db_session.commit()
 
-        # CallExecuted has 3 head words (target/value/bytes_off).
         head = (
             "0" * 24
             + "00" * 19

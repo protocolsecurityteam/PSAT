@@ -1,8 +1,3 @@
-"""Pure-function unit coverage for the one-shot static + resolver helpers.
-
-No Slither, no wire: guard/classify/decode primitives and proxy-standard fallbacks
-(implementation() getter, EIP-2535 diamond), independent of the real-compile fixtures.
-"""
 
 from __future__ import annotations
 
@@ -36,11 +31,6 @@ def _word(value: int) -> str:
     return "0x" + format(value, "064x")
 
 
-# ---------------------------------------------------------------------------
-# Static guard primitives (one_shot.py)
-# ---------------------------------------------------------------------------
-
-
 def test_write_falsifies_guard_every_operator():
     assert _write_falsifies_guard("falsy", None, 1) is True
     assert _write_falsifies_guard("falsy", None, 0) is False
@@ -61,7 +51,6 @@ def test_monotonic_ascent_latch_excludes_rearmable_and_descending():
     assert _is_monotonic_ascent_latch("falsy", None, {0}) is False  # writing 0 doesn't consume
     assert _is_monotonic_ascent_latch("eq", 0, {1, 2}) is True
     assert _is_monotonic_ascent_latch("eq", 1, {2}) is True
-    # inverted / descending forms are NOT latches (re-armable)
     assert _is_monotonic_ascent_latch("truthy", None, {0}) is False
     assert _is_monotonic_ascent_latch("ne", 0, {1}) is False
     assert _is_monotonic_ascent_latch("eq", None, {1}) is False
@@ -94,9 +83,7 @@ def _eq_leaf(operands: list[dict[str, Any]]) -> LeafPredicate:
 
 
 def test_scalar_candidate_partitions_operands_by_position():
-    """The non-state-variable operands are the complement of the state-variable POSITIONS.
-    This pins that semantics; it is not evidence of a fixed defect (it holds for the
-    dict-equality form too). Widening the state-variable test would separate the forms."""
+    """This pins semantics, not a fixed defect."""
     sv = {"source": "state_variable", "state_variable_name": "initialized"}
     const = {"source": "constant", "constant_value": "0"}
     contract = _latch_contract("initialized")
@@ -107,13 +94,9 @@ def test_scalar_candidate_partitions_operands_by_position():
     assert candidate["variable"] == "initialized"
     assert candidate["slot"] == "0x" + "0" * 63 + "3"
 
-    # Two equal state-variable operands occupy two positions: two latch reads,
-    # not one read counted once.
     twins = _eq_leaf([dict(sv), dict(sv), dict(const)])
     assert _scalar_candidate(contract, twins, writes) is None
 
-    # A structural twin with one extra field is judged on its own: neither a state-variable
-    # operand nor a constant, so the candidate is refused.
     asymmetric = _eq_leaf([dict(sv), {**sv, "member_path": ["flag"]}, dict(const)])
     assert _scalar_candidate(contract, asymmetric, writes) is None
 
@@ -126,11 +109,6 @@ def test_parse_constant_forms():
     assert _parse_constant("false") == 0
     assert _parse_constant("not-a-number") is None
     assert _parse_constant(None) is None
-
-
-# ---------------------------------------------------------------------------
-# Resolver decode primitives (one_shot_probe.py)
-# ---------------------------------------------------------------------------
 
 
 def test_guard_allows_every_operator():
@@ -155,8 +133,7 @@ def test_parse_guard_constant_forms():
 
 
 def test_classify_value_standard_storage_layout():
-    """The classification AND the oracle that produced it: consumed via the sentinel, the
-    version compare and the bare non-zero compare are three different claims."""
+    """Sentinel, version compare and bare non-zero are three different claims."""
     v4 = {"standard": "storage_layout", "size_bytes": 1, "expected_version": 1}
     assert _classify_value(v4, 1) == ("consumed", "version_ge")
     assert _classify_value(v4, 0) == ("armed", "version_ge")
@@ -180,7 +157,6 @@ def test_classify_value_structural_guard():
 def test_read_latch_value_byte_offset_extraction():
     class _Rpc:
         def __call__(self, *a, **k):
-            # a packed word: byte 20 = 0x01 (FiatToken initialized after an address)
             return _word(0x01 << (8 * 20))
 
     latch = {"slot": _ZERO, "byte_offset": 20, "size_bytes": 1}

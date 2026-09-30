@@ -1,4 +1,5 @@
-"""P4 guard: caller-keyed time predicates under the Part-2 openness.
+"""P4 forward guard: a caller-keyed time predicate opens modulo a runtime condition, except a deny-by-default time
+allowlist, which stays gated.
 
 Part-2 decision (plan): a caller-keyed time/threshold predicate lowers to a runtime
 side-condition (open-modulo-condition), EXCEPT a deny-by-default time **allowlist**, which
@@ -33,8 +34,7 @@ from services.static.contract_analysis_pipeline.predicates import build_predicat
 from services.static.contract_analysis_pipeline.reentrancy_pause import apply_reentrancy_pause_pass  # noqa: E402
 from services.static.contract_analysis_pipeline.writer_gate import apply_writer_gate_pass  # noqa: E402
 
-# Admin-written mappings (owner-gated setters) so the allowlist reads classify as
-# caller_authority rather than inert business reads.
+# Owner-gated setters make the reads classify as caller_authority.
 _SOURCE = """
 pragma solidity ^0.8.19;
 contract C {
@@ -89,22 +89,19 @@ def _status(tmp_path: Path, signature: str) -> str | None:
             "require(adminAllowlist[msg.sender]) is a positive caller gate — must NOT open to public",
             id="truthy_caller_allowlist_stays_gated",
         ),
-        # CRITICAL: a deny-by-default time allowlist must never silently open to public.
         pytest.param(
             "timeAllowlistGate()",
             False,
             "a caller-keyed deny-by-default time allowlist must NOT silently grant public access",
             id="caller_keyed_time_allowlist_stays_gated",
         ),
-        # Operand order varies; the discriminator keys on the proceed-relation, so the reversed form
-        # (``block.timestamp > allowedUntil[msg.sender]``) gates too.
+        # The discriminator keys on the proceed-relation, so operand order doesn't matter.
         pytest.param(
             "timeAllowlistReversed()",
             False,
             "the time-allowlist must gate regardless of which side the caller value is written on",
             id="time_allowlist_gated_regardless_of_operand_order",
         ),
-        # If the discriminator ever caught this, every share-lock would be wrongly gated.
         pytest.param(
             "shareLockKeyedOnCaller()",
             True,

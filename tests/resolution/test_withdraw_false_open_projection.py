@@ -1,17 +1,8 @@
-"""Solmate ``requiresAuth`` projection: an empty-exact role enumeration gates.
+"""A Solmate ``requiresAuth`` function that is not public and holds no role is an exact-empty ``finite_set``;
+AND-ed with the Teller's ``beforeTransfer`` hook it must stay gated.
 
-A ``requiresAuth`` function that is not public and holds no role authorizes no caller; the
-Solmate adapter reads it as an EXACT EMPTY ``finite_set`` (carrying the ``solmate_roles_authority``
-trace step). AND-ed with the Teller's ``beforeTransfer`` hook (a ``conditional_universal`` that
-opens when the permissioned-transfer flag is off) it must stay GATED: the authority side
-provably admits nobody.
-
-Driven on real data: the REAL adapter folds the REAL RolesAuthority ``0x3994741a…`` logs, then
-the REAL ``capability_to_dict`` / ``project_capability_surface``. Only the event-log backend is a fixture.
-
-Ground truth (RolesAuthority ``0x3994741a`` @ block 25383512, ``isCapabilityPublic``):
-``withdraw`` (0x16762eed) = False (gated); ``bridge`` (0x05921740) / ``deposit`` (0x8b6099db) /
-``depositAndBridge`` (0xf8b7b66d) = True (genuinely public).
+Ground truth, RolesAuthority 0x3994741a @ 25383512 ``isCapabilityPublic``: ``withdraw`` (0x16762eed) False;
+``bridge`` / ``deposit`` / ``depositAndBridge`` True.
 """
 
 from __future__ import annotations
@@ -34,16 +25,13 @@ from services.resolution.adapters.solmate_roles import (
 from services.resolution.capability_resolver import capability_to_dict
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "solmate" / "roles_authority_3994741a.json"
-# The LayerZeroTeller deployment governed by RolesAuthority 0x3994741a whose
-# ``withdraw`` is the audited false-open; PublicCapabilityUpdated keys to it.
 TELLER_TARGET = "0x35dd2463fa7a335b721400c5ad8ba40bd85c179b"
 WITHDRAW = "0x16762eed"
 BRIDGE = "0x05921740"
 DEPOSIT = "0x8b6099db"
 DEPOSIT_AND_BRIDGE = "0xf8b7b66d"
 
-# The Teller's ``beforeTransfer`` hook, modeled exactly as the static pass emits
-# it: a public path (the flag is off) OR an unresolved caller-tainted check.
+# Public when the flag is off, OR an unresolved caller-tainted check.
 _BEFORE_TRANSFER = {
     "kind": "OR",
     "children": [
@@ -70,8 +58,7 @@ def _event_rows() -> list[SimpleNamespace]:
 
 
 class FixtureRepo:
-    """In-memory ``iter_event_rows`` over the captured logs (the wire); a non-None ``min_indexed_block`` marks the
-    authority warm."""
+    """A non-None ``min_indexed_block`` marks the authority warm."""
 
     def __init__(self, rows: list[SimpleNamespace]):
         self.rows = rows
@@ -116,8 +103,6 @@ def earned_public(monkeypatch):
 
 
 def test_withdraw_empty_exact_solmate_set_gates_the_and(earned_public):
-    # Provably-nobody empty-exact Solmate authority leaf: the sibling beforeTransfer public path must NOT open
-    # the function.
     auth = _authority_cap_dict(WITHDRAW)
     assert auth["kind"] == "finite_set"
     assert auth["members"] == []
@@ -131,7 +116,6 @@ def test_withdraw_empty_exact_solmate_set_gates_the_and(earned_public):
 
 @pytest.mark.parametrize("selector", [BRIDGE, DEPOSIT, DEPOSIT_AND_BRIDGE])
 def test_public_capability_function_stays_public(earned_public, selector):
-    # PublicCapabilityUpdated(target, sig, true) => conditional_universal, not an empty set: genuinely public.
     auth = _authority_cap_dict(selector)
     assert auth["kind"] == "conditional_universal"
 
@@ -140,17 +124,14 @@ def test_public_capability_function_stays_public(earned_public, selector):
 
 
 def test_bare_empty_exact_set_without_solmate_trace_does_not_gate(earned_public):
-    # A generic exact-empty set (accept-side ceiling, no Solmate enumeration) stays a
-    # side-condition next to a public path; only the Solmate provably-nobody read blocks.
+    # Only the Solmate provably-nobody read blocks; a generic exact-empty set stays a side-condition.
     bare = {"kind": "finite_set", "members": [], "membership_quality": "exact", "confidence": "enumerable"}
     surface = project_capability_surface({"kind": "AND", "children": [_BEFORE_TRANSFER, bare]})
     assert surface.authority_public
 
 
 def test_empty_lower_bound_solmate_like_set_does_not_manufacture_a_gate(earned_public):
-    # An empty LOWER_BOUND set (cold index) must NOT become a confident gate even with the trace
-    # step: only an EXACT read is provably-nobody (the adapter defers cold sets to a probe, so
-    # this shape shouldn't reach projection; pin that the gate keys on exactness).
+    # Only an exact read is provably-nobody.
     under_resolved = {
         "kind": "finite_set",
         "members": [],
@@ -158,14 +139,12 @@ def test_empty_lower_bound_solmate_like_set_does_not_manufacture_a_gate(earned_p
         "trace": [{"step": "solmate_roles_authority", "roles": []}],
     }
     surface = project_capability_surface({"kind": "AND", "children": [_BEFORE_TRANSFER, under_resolved]})
-    # An empty lower_bound caller equality already blocks under earned-public, but NOT via the
-    # exact provably-nobody path; the helper is checked directly below.
+    # Blocked, but not via the provably-nobody path.
     assert not surface.authority_public
 
     from services.policy.capability_surface import _is_role_store_provably_empty
 
     assert not _is_role_store_provably_empty(under_resolved)
-    # Non-finite-set and non-empty Solmate sets are never the provably-nobody gate.
     assert not _is_role_store_provably_empty({"kind": "external_check_only"})
     assert not _is_role_store_provably_empty(
         {

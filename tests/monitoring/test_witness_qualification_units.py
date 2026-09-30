@@ -35,10 +35,6 @@ from services.static.contract_analysis_pipeline.writer_openness import (
 )
 from utils.scoring_status import OPENNESS_NOT_DETERMINED, OPENNESS_RESTRICTED
 
-# ---------------------------------------------------------------------------
-# writer_openness — "the gate holds on every path"
-# ---------------------------------------------------------------------------
-
 
 def _leaf(**kwargs):
     leaf = {
@@ -56,8 +52,7 @@ def _leaf(**kwargs):
 
 _OWNER_GATE = _leaf()
 _BUSINESS = _leaf(authority_role="business")
-# ``require(!denied[msg.sender])``: a cofinite denylist admits every unnamed address, which
-# the resolution plane's earned-public projection calls open. It carries an authority role anyway.
+# A cofinite denylist admits every unnamed address, yet carries an authority role.
 _DENYLIST = _leaf(
     kind="membership",
     operator="falsy",
@@ -76,12 +71,9 @@ def _trees(**named):
         (_OWNER_GATE, True),
         (_BUSINESS, False),
         (_DENYLIST, False),
-        # One restricting conjunct is enough — the other conditions only narrow.
         ({"op": "AND", "children": [_BUSINESS, _OWNER_GATE]}, True),
-        # An OR needs every branch to restrict: one open branch is an open path.
         ({"op": "OR", "children": [_OWNER_GATE, _BUSINESS]}, False),
         ({"op": "OR", "children": [_OWNER_GATE, _OWNER_GATE]}, True),
-        # A denylist OR'd with a real gate is still reachable by everyone.
         ({"op": "OR", "children": [_OWNER_GATE, _DENYLIST]}, False),
         ({"op": "AND", "children": []}, False),
         ({"op": "LEAF", "leaf": None}, False),
@@ -92,8 +84,7 @@ def test_restriction_requires_every_path_to_pass_a_gate(tree, restricted):
 
 
 def test_a_value_movement_call_is_not_a_gate():
-    """``require(token.transferFrom(msg.sender, …))`` taints from the caller and moves the
-    caller's own assets; the gate-shape guard keeps it out."""
+    """It moves the caller's own assets."""
     leaf = _leaf(
         kind="external_bool",
         operator="truthy",
@@ -107,7 +98,6 @@ def test_a_value_movement_call_is_not_a_gate():
 
 
 def test_a_function_without_a_tree_is_not_determined():
-    """No tree means the gate question was never answered: not "no gate", and not "gated"."""
     assert restricted_function_signatures(None) == frozenset()
     assert restricted_function_signatures({"schema_version": "semantic", "error": "boom"}) == frozenset()
 
@@ -116,12 +106,9 @@ def test_one_unrestricted_path_demotes_the_event():
     restricted = frozenset({"a()", "b()"})
     assert openness_of_write_paths({"a()"}, {"a()"}, restricted) == OPENNESS_RESTRICTED
     assert openness_of_write_paths({"a()"}, {"a()", "b()"}, restricted) == OPENNESS_RESTRICTED
-    # An open EMITTER demotes.
     assert openness_of_write_paths({"a()", "c()"}, {"a()", "c()"}, restricted) == OPENNESS_NOT_DETERMINED
-    # An open WRITER demotes even when every emitter we found is gated — this
-    # is the arm that survives an emitter set the IR walk could not complete.
+    # This arm survives an emitter set the IR walk couldn't complete.
     assert openness_of_write_paths({"a()"}, {"a()", "c()"}, restricted) == OPENNESS_NOT_DETERMINED
-    # Nothing proven about paths we never found.
     assert openness_of_write_paths(set(), {"a()"}, restricted) == OPENNESS_NOT_DETERMINED
     assert openness_of_write_paths({"a()"}, set(), restricted) == OPENNESS_NOT_DETERMINED
 
@@ -142,7 +129,6 @@ def _fact(var="s", member=None, hygiene="normal", origin: str | None = "body"):
 
 
 def _guard_write(var="s"):
-    """The modifier's own set-and-restore, the write the latch proof is about."""
     return _fact(var=var, hygiene="reentrancy_guard", origin="guard")
 
 
@@ -152,24 +138,16 @@ _IR_PROVEN = frozenset({"s"})
 @pytest.mark.parametrize(
     "facts,member_path,survives",
     [
-        # Nothing recorded about this function — not determined, so kept.
         (None, None, True),
         ([], None, True),
-        # Recorded, but about a different variable — this one is unconstrained.
         ([_fact(var="other")], None, True),
-        # Every write here is the modifier's own set-and-restore.
         ([_guard_write()], None, False),
-        # One real write beside it keeps the writer.
         ([_guard_write(), _fact()], None, True),
-        # The latch CLASS on a body write is an owner-controlled mutation of the
-        # same variable: the class is variable-granular, the origin is not.
+        # The class is variable-granular; the origin is not.
         ([_fact(hygiene="reentrancy_guard", origin="body")], None, True),
-        # An origin that was never recorded is not the guard origin.
         ([_fact(hygiene="reentrancy_guard", origin=None)], None, True),
-        # Member-scoped: proven to write a sibling member only.
         ([_fact(member=["b"])], ("a",), False),
         ([_fact(member=["a"])], ("a",), True),
-        # Var-granularity names no member, so it cannot prove this one was spared.
         ([_fact()], ("a",), True),
     ],
 )
@@ -178,9 +156,7 @@ def test_writer_hygiene_subtracts_only_what_is_proven(facts, member_path, surviv
 
 
 def test_the_latch_class_alone_subtracts_nothing():
-    """``hygiene_class`` has a name fallback ({locked, _status, *reentran*}) with no IR behind
-    it and is VARIABLE-granular (an admin setter's write is stamped too). Neither may delete a
-    controller alone: the drop needs the var in the IR-proven set AND the modifier's own write."""
+    """The name fallback has no IR behind it; the drop needs the IR-proven var and the modifier's own write."""
     guard = [_guard_write()]
     assert _writer_survives_hygiene(guard, "s", None, frozenset()) is True
     assert _writer_survives_hygiene(guard, "s", None, _IR_PROVEN) is False
@@ -190,7 +166,6 @@ def test_the_latch_class_alone_subtracts_nothing():
 
 
 def test_the_opaque_set_reads_both_shapes_the_artifact_records():
-    """Inline-assembly storage access and delegatecall are the two unattributable write shapes."""
     from services.static.contract_analysis_pipeline.tracking import _unattributable_write_functions
 
     effects = {
@@ -231,20 +206,15 @@ _UINT = {"name": "n", "type": "uint96", "abi_type": "uint96", "type_kind": "prim
     [
         ([_ADDRESS, _UINT], ("a",), 0),
         ([_UINT, _ADDRESS], ("a",), 1),
-        # A dynamic member puts an OFFSET in the head, so no member's word index
-        # is knowable from the declaration order any more.
+        # A dynamic member puts an offset in the head.
         ([_ADDRESS, {"name": "s", "type": "string", "abi_type": "string", "type_kind": "primitive"}], ("a",), None),
         ([_ADDRESS, {"name": "b", "type": "bytes", "abi_type": "bytes", "type_kind": "primitive"}], ("a",), None),
-        # An auto-getter OMITS mapping and array members, shifting every later
-        # index — including, in general, this one's.
+        # Auto-getters omit mapping and array members, shifting later indexes.
         ([_ADDRESS, {"name": "m", "type": "mapping", "abi_type": "mapping", "type_kind": "mapping"}], ("a",), None),
         ([_ADDRESS, {"name": "xs", "type": "uint256[]", "abi_type": "uint256[]", "type_kind": "array"}], ("a",), None),
-        # Nested struct — a tuple head, same problem.
         ([_ADDRESS, {"name": "t", "type": "T", "abi_type": "(address,uint96)", "type_kind": "struct"}], ("a",), None),
-        # The named member is not in the component list at all.
         ([_UINT], ("a",), None),
         ([], ("a",), None),
-        # Deeper paths are not projected: only one hop is proven.
         ([_ADDRESS, _UINT], ("a", "b"), None),
     ],
 )
@@ -265,9 +235,8 @@ def test_a_member_free_read_spec_is_unaffected():
         ({}, "0x" + "11" * 32 + "22" * 32),
         ({"member_word_index": 0}, "0x" + "11" * 32),
         ({"member_word_index": 1}, "0x" + "22" * 32),
-        # Past the end of the answer: the member is not in it.
         ({"member_word_index": 2}, None),
-        # ``True`` is an int in Python and must not read as word 1.
+        # ``True`` is an int in Python.
         ({"member_word_index": True}, "0x" + "11" * 32 + "22" * 32),
         ({"member_word_index": -1}, "0x" + "11" * 32 + "22" * 32),
     ],
@@ -280,11 +249,6 @@ def test_projection_of_a_missing_answer_is_missing():
     assert project_entry_return(None, {"member_word_index": 0}) is None
     assert project_entry_return("0x", {"member_word_index": 0}) is None
     assert project_entry_return(None, {}) is None
-
-
-# ---------------------------------------------------------------------------
-# Vocabulary
-# ---------------------------------------------------------------------------
 
 
 def _plan_with(member_witness, openness="restricted"):
@@ -310,19 +274,16 @@ def _plan_with(member_witness, openness="restricted"):
 
 
 def test_a_record_naming_no_variable_mints_no_member_type():
-    """A bare ``member_changed`` would say an entry moved somewhere."""
     assert member_witness_mapping_var({"key_position": 0, "direction": "add"}) == ""
     spec = extract_governance_topics(_plan_with({"key_position": 0, "direction": "add"}))[0]
     assert spec["event_type"] == "state_changed:state_variable:m"
-    # The TIER falls with the type: a spec publishing under the slot stem while classified
-    # self_describing would put an entry key into last_known_state / ControllerValue as the
-    # slot's value, since is_member_changed_event_type guards key off the type.
+    # Guards key off the type, so a self-describing spec under the slot stem would put an entry key in
+    # ``last_known_state``.
     assert spec["witness_tier"] == WITNESS_TIER_ACTIVITY
     assert "member_witness" not in spec
 
 
 def test_a_key_outside_the_events_arg_list_mints_no_member_type():
-    """The type names the mapping; only ``data.key`` names the entry."""
     witness = {"mapping_name": "m", "key_position": 3, "direction": "add"}
     spec = extract_governance_topics(_plan_with(witness))[0]
     assert spec["event_type"] == "state_changed:state_variable:m"
@@ -331,8 +292,6 @@ def test_a_key_outside_the_events_arg_list_mints_no_member_type():
 
 
 def test_a_log_that_cannot_name_the_entry_publishes_nothing():
-    """A qualified spec decoding a log whose args miss the proven key position would claim
-    "some entry of m moved" and name none; refused, like an undecodable log."""
     spec = {
         "event_type": "member_changed:m",
         "inputs": [{"name": "user", "type": "address", "indexed": True}],
@@ -351,8 +310,7 @@ def test_a_log_that_cannot_name_the_entry_publishes_nothing():
 
 
 def test_a_mapping_name_that_would_overflow_the_column_mints_no_member_type():
-    """``monitored_events.event_type`` is the row's identity; a truncated one names a
-    different mapping."""
+    """A truncated event type names a different mapping."""
     long_name = "m" * MAX_EVENT_TYPE_LENGTH
     spec = extract_governance_topics(_plan_with({"mapping_name": long_name, "key_position": 0, "direction": "add"}))[0]
     assert not is_member_changed_event_type(spec["event_type"])
@@ -368,8 +326,7 @@ def test_an_unproven_writer_mints_no_member_type(openness):
 
 
 def test_one_topic0_on_two_controllers_resolves_by_evidence():
-    """A donated topic0 can appear under several controllers; which spec wins decides the
-    published claim, and it used to be decided by alphabetical label order."""
+    """The winner used to be decided by alphabetical label order."""
     topic0 = "0x" + "ab" * 32
     weak = {
         "controller_id": "state_variable:aaa",
@@ -388,15 +345,8 @@ def test_one_topic0_on_two_controllers_resolves_by_evidence():
         assert specs[0]["controller_id"] == "state_variable:zzz"
 
 
-# ---------------------------------------------------------------------------
-# The slot-shaped consumers skip the member vocabulary
-# ---------------------------------------------------------------------------
-
-
 def test_a_legacy_witness_under_a_slot_type_does_not_promote():
-    """``_resolve_spec_tier`` re-classifies a spec persisted before the taxonomy. Honouring a
-    record regardless of published type would promote a row publishing as ``state_changed:``,
-    landing the entry key in ``last_known_state`` / ``ControllerValue`` as the slot's value."""
+    """Honouring the record regardless of published type would land the entry key as the slot's value."""
     from services.monitoring.unified_watcher import _resolve_spec_tier
 
     mc = SimpleNamespace(monitoring_config={"polling_plan": []})
@@ -414,8 +364,6 @@ def test_a_legacy_witness_under_a_slot_type_does_not_promote():
 
 
 def test_member_change_never_reflects_into_last_known_state():
-    """One entry of a mapping is not the mapping's value. The stub has no SQLAlchemy identity,
-    so a path that did NOT skip would raise on the write."""
     from services.monitoring.unified_watcher import _update_state_from_event
 
     mc = SimpleNamespace(last_known_state={"m": "before"})
@@ -427,7 +375,6 @@ def test_member_change_never_reflects_into_last_known_state():
 
 
 def test_member_change_never_writes_a_controller_value_row():
-    """Same reason. ``session=None`` makes the skip provable: any row write would dereference it."""
     from services.monitoring.unified_watcher import _sync_relational_tables
 
     mc = SimpleNamespace(contract_id=1, address="0x" + "11" * 20, chain="ethereum")

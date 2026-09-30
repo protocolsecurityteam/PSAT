@@ -1,7 +1,3 @@
-"""Observability locks for the resolution stage (backlog #6/#14/#15). Offline: external reads
-are stubbed. Asserts the degraded breadcrumbs, split stage metrics and per-decision DEBUG
-``extra={}`` fields the monitor/Loki surfaces depend on.
-"""
 
 from __future__ import annotations
 
@@ -14,8 +10,6 @@ from utils.logging import bind_trace_context, degraded_errors_var, stage_metrics
 
 
 def test_incomplete_mapping_enumeration_degrades_and_counts(monkeypatch):
-    """A truncated mapping scan must land in stage_errors AND bump ``mapping_enum_incomplete``,
-    not silently drop authorized addrs."""
     monkeypatch.setenv("ENVIO_API_TOKEN", "test-token")
     monkeypatch.setattr(
         "services.resolution.creation_block_floor.resolve_scan_floor",
@@ -59,8 +53,7 @@ def test_incomplete_mapping_enumeration_degrades_and_counts(monkeypatch):
 
 
 def test_solmate_decline_emits_decision_extra(caplog):
-    """The Veda cold-index race shows as an adapter 'deferred' decision, queryable by
-    adapter/address/decision/reason."""
+    """The Veda cold-index race shows as an adapter 'deferred' decision."""
     authority = "0x" + "cd" * 20
     with caplog.at_level(logging.DEBUG, logger="services.resolution.adapters.solmate_roles"):
         solmate_roles._check_only(authority, {"callee_selector": None}, ["no_index_cursor"])
@@ -114,9 +107,7 @@ def _reverting_plan(controller_ids: list[str]) -> dict:
 
 
 def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch, caplog):
-    """492 identical "controller read reverted" WARNINGs in one run read as 492 incidents. The
-    per-occurrence line is DEBUG (durable witness: the per-controller ``record_degraded``); the
-    per-snapshot census (how many of how many) is the WARNING."""
+    """492 identical WARNINGs read as 492 incidents; the per-snapshot census is the WARNING."""
     from services.resolution import tracking
 
     def fake_rpc(_rpc_url, method, _params, *, chain_id=None):
@@ -132,9 +123,7 @@ def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch,
     accumulator: list = []
     token = degraded_errors_var.set(accumulator)
     try:
-        # A deliberately DIFFERENT ambient address than the plan's subject: an ``address`` key in
-        # the summary's ``extra`` would be dropped for the bound one (JsonFormatter writes
-        # contextvars first), misattributing the census.
+        # A different ambient address, so an ``address`` extra would be dropped and misattribute the census.
         with bind_trace_context(job_id="1", stage="resolution", address="0x" + "99" * 20):
             with caplog.at_level(logging.DEBUG, logger="services.resolution.tracking"):
                 snapshot = tracking.build_control_snapshot(
@@ -156,7 +145,6 @@ def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch,
     assert len(summaries) == 1
     assert summaries[0].reverted_controllers == 3
     assert summaries[0].tracked_controllers == 3
-    # Survives the ambient bind because it is not named ``address``.
     assert summaries[0].contract_address == "0x" + "11" * 20
     assert not hasattr(summaries[0], "address")
     assert summaries[0].reverted_sample == [
@@ -167,7 +155,6 @@ def test_reverting_controller_reads_collapse_to_one_summary_warning(monkeypatch,
 
 
 def test_no_summary_warning_when_every_controller_read_succeeds(monkeypatch, caplog):
-    """The summary is a degradation report, not a per-snapshot heartbeat."""
     from services.resolution import tracking
 
     owner = "0x" + "22" * 20

@@ -1,8 +1,7 @@
-"""Integration tests that governance events detected by the unified watcher propagate to the
-relational tables (Contract, ControllerValue, UpgradeEvent), not just MonitoredEvent /
-last_known_state. Deploys on Anvil, triggers governance actions, scans, asserts the tables.
+"""Governance events the watcher detects must reach Contract, ControllerValue and UpgradeEvent, not just
+MonitoredEvent.
 
-Requires anvil/cast/forge on PATH and TEST_DATABASE_URL.
+Needs anvil/cast/forge and TEST_DATABASE_URL.
 """
 
 from __future__ import annotations
@@ -41,9 +40,6 @@ from tests.support.anvil import (
     anvil_env,  # noqa: F401
 )
 
-# ---------------------------------------------------------------------------
-# Skip conditions
-# ---------------------------------------------------------------------------
 
 _has_anvil = shutil.which("anvil") is not None
 _has_cast = shutil.which("cast") is not None
@@ -65,16 +61,11 @@ PROTO_NAME = "__test_relational_sync__"
 
 @pytest.fixture(autouse=True)
 def _disable_scan_confirmation_depth(monkeypatch):
-    # Anvil chains are a few blocks long; the 12-block confirmation clamp would hide events.
+    # The 12-block confirmation clamp would hide events on a short Anvil chain.
     monkeypatch.setenv("PSAT_SCAN_CONFIRMATION_DEPTH", "0")
 
 
-# ---------------------------------------------------------------------------
-# Solidity sources
-# ---------------------------------------------------------------------------
-
-# Local variant: unlike the shared ``PROXY_SOURCE`` this one also owns the
-# EIP-1967 admin slot, which these tests rotate via ``changeAdmin``.
+# This variant also owns the EIP-1967 admin slot, which ``changeAdmin`` rotates.
 PROXY_SOURCE = """
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -119,14 +110,8 @@ contract TestProxy {
 """
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def pg_session():
-    """Full-schema PostgreSQL session. Cleans up test rows on teardown."""
     engine = create_engine(DATABASE_URL)
     Base.metadata.create_all(engine)
     session = Session(engine, expire_on_commit=False)
@@ -209,7 +194,7 @@ def _setup_monitored(
 ) -> MonitoredContract:
     from services.monitoring.polling_plan import build_polling_plan
 
-    # Match enrollment's polling plan so tests flipping needs_polling exercise production dispatch.
+    # Matches enrollment's polling plan, so needs_polling exercises production dispatch.
     plan_proxy_type = (contract.proxy_type or None) or ("custom" if contract_type == "proxy" else None)
     tracking_plan: dict | None = None
     if contract_type in ("regular", "pausable", "proxy"):
@@ -276,18 +261,9 @@ def _setup_monitored(
     return mc
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-
 class TestUpgradeUpdatesContractTable:
-    """Gap 1: Upgrade events must update Contract.implementation and create
-    UpgradeEvent rows."""
 
     def test_upgrade_updates_contract_implementation(self, anvil_env, pg_session):
-        """After scan detects an Upgraded event, Contract.implementation
-        must reflect the new implementation address."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
 
@@ -329,13 +305,11 @@ class TestUpgradeUpdatesContractTable:
         )
         pg_session.commit()
 
-        # Upgrade the proxy
         _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
 
         events = scan_for_events(pg_session, rpc_url)
         assert any(e.event_type == "upgraded" for e in events)
 
-        # --- The critical assertion: Contract.implementation must be updated ---
         pg_session.refresh(contract)
         assert contract.implementation is not None
         assert contract.implementation.lower() == impl_v2.lower(), (
@@ -343,8 +317,6 @@ class TestUpgradeUpdatesContractTable:
         )
 
     def test_upgrade_creates_upgrade_event_row(self, anvil_env, pg_session):
-        """After scan detects an Upgraded event, an UpgradeEvent row must
-        be created in the relational table."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
 
@@ -375,7 +347,6 @@ class TestUpgradeUpdatesContractTable:
         _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
         scan_for_events(pg_session, rpc_url)
 
-        # --- The critical assertion: UpgradeEvent row must exist ---
         ue_rows = (
             pg_session.execute(select(UpgradeEvent).where(UpgradeEvent.contract_id == contract.id)).scalars().all()
         )
@@ -387,11 +358,8 @@ class TestUpgradeUpdatesContractTable:
 
 
 class TestAdminChangedPropagation:
-    """Gap 2: AdminChanged events must update Contract.admin and
-    MonitoredContract.last_known_state['admin']."""
 
     def test_admin_changed_updates_contract_admin(self, anvil_env, pg_session):
-        """After scan detects AdminChanged, Contract.admin must be updated."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
 
@@ -421,20 +389,17 @@ class TestAdminChangedPropagation:
         )
         pg_session.commit()
 
-        # Change admin
         _cast_send(proxy_addr, "changeAdmin(address)", [new_admin], rpc_url, PRIVATE_KEY)
 
         events = scan_for_events(pg_session, rpc_url)
         assert any(e.event_type == "admin_changed" for e in events)
 
-        # --- Critical assertion: Contract.admin must be updated ---
         pg_session.refresh(contract)
         assert contract.admin is not None
         assert contract.admin.lower() == new_admin.lower(), (
             f"Contract.admin not updated: expected {new_admin.lower()}, got {contract.admin}"
         )
 
-        # --- Critical assertion: last_known_state must track admin ---
         pg_session.refresh(mc)
         assert mc.last_known_state is not None
         assert mc.last_known_state.get("admin", "").lower() == new_admin.lower(), (
@@ -443,11 +408,8 @@ class TestAdminChangedPropagation:
 
 
 class TestOwnershipUpdatesControllerValue:
-    """Gap 3: Ownership transfers must update ControllerValue rows."""
 
     def test_ownership_transfer_updates_controller_value(self, anvil_env, pg_session):
-        """After scan detects OwnershipTransferred, the ControllerValue row
-        for 'owner' must be updated to the new owner address."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import scan_for_events
 
@@ -458,7 +420,6 @@ class TestOwnershipUpdatesControllerValue:
         proto = _setup_protocol(pg_session)
         contract = _setup_contract(pg_session, addr, proto, name="TestOwnable")
 
-        # Set up initial ControllerValue for owner (as the resolution worker would)
         cv = ControllerValue(
             contract_id=contract.id,
             controller_id="owner",
@@ -479,13 +440,11 @@ class TestOwnershipUpdatesControllerValue:
         )
         pg_session.commit()
 
-        # Transfer ownership
         _cast_send(addr, "transferOwnership(address)", [new_owner], rpc_url, PRIVATE_KEY)
 
         events = scan_for_events(pg_session, rpc_url)
         assert any(e.event_type == "ownership_transferred" for e in events)
 
-        # --- Critical assertion: ControllerValue must be updated ---
         pg_session.refresh(cv)
         assert cv.value is not None
         assert cv.value.lower() == new_owner.lower(), (
@@ -494,12 +453,8 @@ class TestOwnershipUpdatesControllerValue:
 
 
 class TestUpgradePollingUpdatesRelational:
-    """Gap 4: Polling-detected implementation changes must also propagate
-    to the Contract table and create UpgradeEvent rows."""
 
     def test_poll_upgrade_updates_contract_implementation(self, anvil_env, pg_session):
-        """When poll_for_state_changes detects an implementation change,
-        Contract.implementation must be updated."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -509,9 +464,8 @@ class TestUpgradePollingUpdatesRelational:
         current_block = int(_cast(["block-number"], rpc_url))
 
         proto = _setup_protocol(pg_session)
-        # PROXY_SOURCE writes the EIP-1967 slot via assembly and has no ``implementation()``
-        # getter, so its proxy_type is ``eip1967`` despite the "custom" framing; the plan
-        # builder keys the vendored entry (slot vs getter) off proxy_type.
+        # PROXY_SOURCE has no ``implementation()`` getter, so its proxy_type is ``eip1967``; the plan keys slot vs
+        # getter off it.
         contract = _setup_contract(
             pg_session,
             proxy_addr,
@@ -531,13 +485,11 @@ class TestUpgradePollingUpdatesRelational:
         mc.needs_polling = True
         pg_session.commit()
 
-        # The poll reads the EIP-1967 slot directly (the ``eip1967`` vendored entry).
         _cast_send(proxy_addr, "upgradeTo(address)", [impl_v2], rpc_url, PRIVATE_KEY)
 
         events = poll_for_state_changes(pg_session, rpc_url)
         assert any(e.data and e.data.get("field") == "implementation" for e in events)
 
-        # --- Critical assertion ---
         pg_session.refresh(contract)
         assert contract.implementation is not None
         assert contract.implementation.lower() == impl_v2.lower(), (
@@ -546,11 +498,8 @@ class TestUpgradePollingUpdatesRelational:
 
 
 class TestPollOwnershipUpdatesControllerValue:
-    """Gap 5: Polling-detected ownership changes must update ControllerValue."""
 
     def test_poll_ownership_updates_controller_value(self, anvil_env, pg_session):
-        """When poll_for_state_changes detects an owner change,
-        ControllerValue must be updated."""
         rpc_url, tmp_path = anvil_env
         from services.monitoring.unified_watcher import poll_for_state_changes
 
@@ -587,7 +536,6 @@ class TestPollOwnershipUpdatesControllerValue:
         events = poll_for_state_changes(pg_session, rpc_url)
         assert any(e.data and e.data.get("field") == "owner" for e in events)
 
-        # --- Critical assertion ---
         pg_session.refresh(cv)
         assert cv.value is not None
         assert cv.value.lower() == new_owner.lower(), (

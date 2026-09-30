@@ -1,11 +1,3 @@
-"""Regression tests for the process-wide eth_getCode cache in ``services.clients.rpc``.
-
-Bytecode is effectively immutable for a cascade, which probes the same addresses across stages
-and sibling jobs, so caching bytecode + keccak saves the RTT. Pinned: repeat calls hit the
-cache; RPC errors are NOT cached (a transient failure would cement an empty reading); TTL
-expiry re-fetches; ``get_code`` and ``get_code_with_keccak`` share one cache; the keccak is
-correct (load-bearing for the B10 Slither result cache); empty bytecode (``"0x"``) is cached.
-"""
 
 from __future__ import annotations
 
@@ -17,8 +9,7 @@ from services.clients import rpc
 
 @pytest.fixture(autouse=True)
 def _isolated_cache(monkeypatch):
-    # The PG bytecode layer would inject an extra eth_chainId call into every test here (they
-    # count rpc_request invocations); pin it off. Covered in tests/rpc/test_bytecode_pg_cache.py.
+    # The PG layer adds an eth_chainId call and these tests count rpc_request calls.
     monkeypatch.setattr(rpc, "_PG_BYTECODE_CACHE_ENABLED", False)
     rpc.clear_getcode_cache()
     yield
@@ -63,7 +54,6 @@ def test_different_addresses_keep_separate_slots(monkeypatch):
 
 
 def test_rpc_error_does_not_cache(monkeypatch):
-    """Cementing a transient error would make the next classify misread an EOA / wrong contract."""
     raises = {"n": 0}
 
     def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
@@ -127,7 +117,6 @@ def test_keccak_matches_eth_utils_for_real_bytecode(monkeypatch):
 
 
 def test_empty_bytecode_is_cached_with_correct_keccak(monkeypatch):
-    """EOAs return ``"0x"``; caching it is fine (keccak of empty bytes is stable) so classify doesn't re-probe EOAs."""
     calls = {"n": 0}
 
     def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
@@ -146,7 +135,6 @@ def test_empty_bytecode_is_cached_with_correct_keccak(monkeypatch):
 
 
 def test_address_normalization_keys_lowercased(monkeypatch):
-    """Checksummed and lowercase addresses must hit the same slot (a mismatch would silently double cache pressure)."""
     calls = {"n": 0}
 
     def _fake_rpc(_url, _method, _params, retries=1, *, chain_id=None):
@@ -163,15 +151,11 @@ def test_address_normalization_keys_lowercased(monkeypatch):
 
 
 def test_cache_eviction_under_ceiling(monkeypatch):
-    """Long-lived workers probe many addresses; the bound + oldest-quartile eviction must keep memory bounded."""
     monkeypatch.setattr(rpc, "rpc_request", lambda *_a, **_kw: "0x60")
     monkeypatch.setattr(rpc, "_GETCODE_CACHE_MAX", 8)
     for i in range(20):
         rpc.get_code("https://rpc", f"0x{i:040x}")
     assert len(rpc._GETCODE_CACHE) <= rpc._GETCODE_CACHE_MAX
-
-
-# Phase B Step 4: get_code_batch — batch eth_getCode for many addresses
 
 
 def test_get_code_batch_single_request_for_n_addresses(monkeypatch):
@@ -218,7 +202,7 @@ def test_get_code_batch_empty_input_no_http(monkeypatch):
 
 
 def test_get_code_batch_omits_errored_slots(monkeypatch):
-    """Per-call errors OMIT that address from the map; the caller treats absence as a trigger to retry per-address."""
+    """Absence triggers a per-address retry."""
     rpc.clear_getcode_cache()
 
     def _fake_batch(_url, calls_list, *, chain_id=None):
@@ -233,8 +217,7 @@ def test_get_code_batch_omits_errored_slots(monkeypatch):
 
 
 def test_get_code_batch_populates_keccak_index(monkeypatch):
-    """A later get_code_with_keccak must hit the batch-populated cache (keccak stored alongside the
-    bytecode; load-bearing for the bytecode-keccak content cache and classifier shortcut)."""
+    """The bytecode-keccak content cache and classifier shortcut depend on it."""
     rpc.clear_getcode_cache()
 
     def _fake_batch(_url, calls_list, *, chain_id=None):
@@ -257,12 +240,8 @@ def test_get_code_batch_populates_keccak_index(monkeypatch):
     assert follow_up_calls["n"] == 0, "follow-up must hit cache from the batch"
 
 
-# Codex iter-4 P2: providers may return "0x0" for empty bytecode
-
-
 def test_get_code_with_keccak_handles_0x0_provider_response(monkeypatch):
-    """Codex iter-4 P2: some providers return empty bytecode as odd-length "0x0", which would crash
-    bytes.fromhex; normalize to "0x" so the EOA keccak is keccak(b'')."""
+    """Odd-length "0x0" would crash bytes.fromhex."""
     rpc.clear_getcode_cache()
     monkeypatch.setattr(rpc, "rpc_request", lambda *_a, **_kw: "0x0")
     code, keccak_hex = rpc.get_code_with_keccak("https://rpc", "0x" + "11" * 20)
@@ -285,12 +264,7 @@ def test_get_code_batch_handles_0x0_provider_response(monkeypatch):
     assert keccak_hex == "0x" + keccak(b"").hex()
 
 
-# Codex iter-5 P2: batch insert path must honour the cache bound
-
-
 def test_get_code_batch_evicts_when_over_ceiling(monkeypatch):
-    """Codex iter-5 P2: get_code_batch inserted straight into _GETCODE_CACHE without the
-    oldest-quartile eviction, so repeated large batches would exceed _GETCODE_CACHE_MAX."""
     rpc.clear_getcode_cache()
     monkeypatch.setattr(rpc, "_GETCODE_CACHE_MAX", 8)
 
@@ -309,7 +283,6 @@ def test_get_code_batch_evicts_when_over_ceiling(monkeypatch):
 
 
 def test_get_code_batch_eviction_keeps_recent_entries(monkeypatch):
-    """Dropping the oldest 25% must preserve the most recent entries (likely re-hit on the next BFS layer)."""
     rpc.clear_getcode_cache()
     monkeypatch.setattr(rpc, "_GETCODE_CACHE_MAX", 4)
 

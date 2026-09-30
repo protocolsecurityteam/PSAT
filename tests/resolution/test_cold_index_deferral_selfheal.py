@@ -1,12 +1,5 @@
-"""PoC regression pins for the Veda RolesAuthority cold-start race.
-
-When a Solmate ``requiresAuth`` function resolves *before* its authority's role events are
-indexed, ``SolmateRolesAuthorityAdapter`` fails closed to ``external_check_only`` tagged
-``check.extra.deferred_pending_index`` (the marker ``deferred_reconciler`` re-resolves on).
-The bug: the predicate evaluator's ``external_set`` branch overwrote that deferral with the
-inline probe / event-candidate materializer, dropping the marker, so the cold result stuck
-forever. Real adapter registry, evaluator and reconciler walker; only the event-log
-backend is an in-memory cold/warm stub (no DB).
+"""The Veda RolesAuthority cold-start race: the evaluator's ``external_set`` branch overwrote the adapter's
+``deferred_pending_index`` marker, so the cold result stuck forever. Only the event-log backend is stubbed.
 """
 
 from __future__ import annotations
@@ -35,7 +28,6 @@ def _sel(signature: str) -> str:
 
 
 class _Row:
-    """Minimal IndexedEventLog stand-in: the adapter reads ``.topics`` / ``.data_words``."""
 
     def __init__(self, topics: list[str], data_words: list[str]) -> None:
         self.topics = topics
@@ -43,8 +35,7 @@ class _Row:
 
 
 class _ColdRepo:
-    """No rows, no cursor: the state the first contract to reference a fresh RolesAuthority
-    sees. The adapter must defer, not assert an empty/under-confident set."""
+    """The state the first contract referencing a fresh RolesAuthority sees."""
 
     def iter_event_rows(self, *, chain_id, event_address, topic0s, block=None):
         return []
@@ -54,8 +45,7 @@ class _ColdRepo:
 
 
 class _WarmEmptyRepo:
-    """Backfilled to head but no role enables the (target, selector): the genuine ``nobody``
-    answer, proving the fix doesn't strand a real warm resolution as a deferral."""
+    """Proves the fix doesn't strand a real warm answer as a deferral."""
 
     def __init__(self) -> None:
         user_role_topic = _ROLE_TOPICS[2]
@@ -74,9 +64,7 @@ class _WarmEmptyRepo:
 
 
 class _PartialColdRepo:
-    """Sub-state B: SOME role rows are indexed but the cursor is not ``backfill_complete``.
-    The partial fold may miss un-indexed grants and a bare ``lower_bound`` carries no
-    self-heal marker, so it would freeze. The adapter must DEFER."""
+    """A partial fold may miss grants and a bare lower_bound has no self-heal marker."""
 
     def __init__(self, target: str, selector: str, holder: str) -> None:
         role_cap, _pub, user_role = _ROLE_TOPICS
@@ -136,7 +124,6 @@ def _ctx(repo, fixture: dict) -> EvaluationContext:
 
 
 def _deny_all_tree(fixture: dict) -> PredicateTree:
-    # Real prod snapshot of a Teller `requiresAuth` gate: OR[AND[authority!=0, canCall], owner].
     return cast(PredicateTree, fixture["teller_trees"]["trees"]["denyAll(address)"])
 
 
@@ -153,8 +140,6 @@ def test_cold_index_canCall_deferral_persists_marker(fixture):
 
 
 def test_cold_index_gate_is_a_deferred_external_check_not_a_populated_set(fixture):
-    # The deferred marker is the load-bearing, fix-dependent half (pre-fix the overwrite
-    # emits a plain external_check); no members guards against phantom sets.
     cap = evaluate_tree_with_registry(_deny_all_tree(fixture), _registry(), _ctx(_ColdRepo(), fixture))
     cap_dict = capability_to_dict(cap)
 
@@ -184,8 +169,6 @@ def test_warm_resolution_does_not_spuriously_defer(fixture):
 
 
 def test_partial_cold_index_defers_instead_of_freezing_lower_bound(fixture):
-    # Sub-state B: without the adapter fix this returns a markerless
-    # `finite_set([holder], lower_bound)` that never self-heals, so both assertions fail.
     holder = "0x" + "cd" * 20
     selector = _sel("denyAll(address)")
     repo = _PartialColdRepo(fixture["teller_address"].lower(), selector, holder)

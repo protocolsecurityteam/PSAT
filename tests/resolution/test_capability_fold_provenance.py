@@ -1,15 +1,8 @@
-"""A2 — fold provenance survives the combinators, fail-closed.
+"""A2: fold provenance survives the combinators, fail-closed.
 
-Every combinator rebuilt its result through a factory that cannot see the operands,
-silently dropping the height the adapter leaf had computed (on every solmate fold in
-the corpus). Drives the REAL ``intersect`` / ``union`` / ``negate`` + ``capability_to_dict``
-with byte-exact dicts, including arms that must publish NOTHING. Rules:
-
-* a height propagates only when EVERY operand carries one (``min``-of-present would stamp
-  a fold height onto a composition with an unpinned live read);
-* ``exact_as_of`` is licensed only by EQUAL operand heights and only for inherited
-  emptiness (the MIN is a staleness floor; as an as-of it's false across heights);
-* ``empty_reason`` propagates only on emptiness a combinator INHERITED, never created.
+Combinators rebuilt results through factories blind to the operands, dropping the adapter's fold height. A
+height propagates only when every operand carries one; ``exact_as_of`` needs equal heights and inherited
+emptiness (MIN is a staleness floor); ``empty_reason`` propagates only on inherited emptiness.
 """
 
 from __future__ import annotations
@@ -29,14 +22,12 @@ from services.resolution.capability_resolver import capability_to_dict
 ADDR_A = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 ADDR_B = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-# The two heights the investigation measured inside ONE resolution job — 203
-# blocks apart while both were presented as equally current.
+# Two heights measured inside one resolution job, 203 blocks apart yet presented as equally current.
 B1 = 25619032
 B2 = 25619235
 
 
 def _fold(members: list[str], *, block: int | None, reason=None) -> CapabilityExpr:
-    """An adapter-shaped leaf: an exact enumeration folded to a cursor height."""
     return CapabilityExpr.finite_set(
         members,
         quality="exact",
@@ -48,8 +39,7 @@ def _fold(members: list[str], *, block: int | None, reason=None) -> CapabilityEx
 
 
 def _blockless_live_getter(members: list[str]) -> CapabilityExpr:
-    """The live ``owner()`` read: exact, enumerable, and blockless by construction (the
-    eth_call falls back to ``"latest"`` with no pinned height)."""
+    """Blockless because the eth_call falls back to ``"latest"``."""
     return CapabilityExpr.finite_set(
         members,
         quality="exact",
@@ -58,21 +48,10 @@ def _blockless_live_getter(members: list[str]) -> CapabilityExpr:
     )
 
 
-# ---------------------------------------------------------------------------
-# Leaf — the value that used to be thrown away
-# ---------------------------------------------------------------------------
-
-
 def test_leaf_height_is_preserved_on_the_wire():
     out = capability_to_dict(_fold([ADDR_A], block=B1))
     assert out["last_indexed_block"] == B1
-    # A leaf never computed an as-of: absent, not "not_determined".
     assert "exact_as_of" not in out
-
-
-# ---------------------------------------------------------------------------
-# intersect / union of two finite sets
-# ---------------------------------------------------------------------------
 
 
 def test_equal_heights_license_an_exact_as_of():
@@ -82,11 +61,6 @@ def test_equal_heights_license_an_exact_as_of():
         assert out["exact_as_of"] == B1
 
 
-# ---------------------------------------------------------------------------
-# finite ∩ cofinite (the subtractive path — no structural-AND diversion)
-# ---------------------------------------------------------------------------
-
-
 def _blacklist(members: list[str], *, block: int | None, quality: str = "exact") -> CapabilityExpr:
     cap = CapabilityExpr.cofinite_blacklist(members, confidence="enumerable", blacklist_quality=quality)  # pyright: ignore[reportArgumentType]
     cap.last_indexed_block = block
@@ -94,13 +68,11 @@ def _blacklist(members: list[str], *, block: int | None, quality: str = "exact")
 
 
 def test_subtraction_that_creates_emptiness_publishes_no_as_of_and_no_reason():
-    """``{X} − {X}`` = ∅. This path has no structural-AND diversion, so the empty set is
-    REAL output — created by this operation, so it inherits no witness."""
+    """This path has no structural-AND diversion, so the empty set is created here and inherits no witness."""
     out = capability_to_dict(intersect(_fold([ADDR_A], block=B1), _blacklist([ADDR_A], block=B1)))
     assert out["members"] == []
     assert "exact_as_of" not in out
     assert "empty_reason" not in out
-    # The staleness floor still carries: it says only how current the operands were.
     assert out["last_indexed_block"] == B1
 
 
@@ -109,11 +81,6 @@ def test_already_empty_allow_list_carries_its_reason_through_subtraction():
     assert out["members"] == []
     assert out["empty_reason"] == "owner_read_zero"
     assert out["exact_as_of"] == B1
-
-
-# ---------------------------------------------------------------------------
-# negate — all three arms
-# ---------------------------------------------------------------------------
 
 
 def test_negate_exact_finite_carries_the_height():
@@ -125,7 +92,6 @@ def test_negate_exact_finite_carries_the_height():
 
 
 def test_negate_lower_bound_finite_carries_the_height_but_no_as_of():
-    """A lower_bound exclusion complements to a lower_bound cofinite: not exact at any height, so no as-of."""
     cap = CapabilityExpr.finite_set([ADDR_A], quality="lower_bound", last_indexed_block=B1)
     out = capability_to_dict(negate(cap))
     assert out["blacklist_quality"] == "lower_bound"
@@ -134,8 +100,7 @@ def test_negate_lower_bound_finite_carries_the_height_but_no_as_of():
 
 
 def test_negate_cofinite_carries_the_height_but_never_an_empty_reason():
-    """The complement of an empty denylist is an empty allow-list; why the denylist was
-    empty says nothing about why its complement is, so no reason is minted."""
+    """Why a denylist was empty says nothing about why its complement is."""
     source = CapabilityExpr.cofinite_blacklist([], confidence="enumerable")
     source.last_indexed_block = B1
     source.empty_reason = "owner_read_zero"
@@ -147,9 +112,10 @@ def test_negate_cofinite_carries_the_height_but_never_an_empty_reason():
 
 
 def test_negate_external_check_only_is_a_stated_non_site():
-    """The tenth mint site, deliberately excluded: an ``external_check_only`` operand is a
-    probe interface, never an enumeration, so it carries no height. Pinned so the omission
-    can't later read as an oversight."""
+    """Deliberately excluded: a probe interface is never an enumeration.
+
+    Pinned so the omission isn't read as an oversight.
+    """
     probe = CapabilityExpr.external_check_only(ExternalCheck(target_address=ADDR_A, target_call_selector="0x12345678"))
     probe.last_indexed_block = B1  # even if something upstream set one
     out = capability_to_dict(negate(probe))
@@ -158,13 +124,7 @@ def test_negate_external_check_only_is_a_stated_non_site():
     assert "exact_as_of" not in out
 
 
-# ---------------------------------------------------------------------------
-# cofinite ∩ cofinite, cofinite ∪ cofinite, finite ∪ cofinite
-# ---------------------------------------------------------------------------
-
-
-# Heights present but heterogeneous: an EARNED refusal of the as-of, not an omission; the
-# published height is the MIN (a staleness floor).
+# Heterogeneous heights are an earned refusal; the published height is the MIN.
 @pytest.mark.parametrize(
     ("make", "expected"),
     [
@@ -208,11 +168,10 @@ def test_combinators_propagate_min_height_and_refuse_as_of(make, expected):
     assert out["exact_as_of"] == "not_determined", out
 
 
-# A height propagates only when EVERY operand carries one, so any blockless operand publishes nothing.
 @pytest.mark.parametrize(
     "make",
     [
-        # THE fail-closed arm: the shape of all 261 solmate rows, ``OR(fold, live owner() read)``.
+        # The shape of all 261 solmate rows: ``OR(fold, live owner() read)``.
         pytest.param(
             lambda: intersect(_fold([ADDR_A], block=B1), _blockless_live_getter([ADDR_A])),
             id="intersect-with-live-getter",
@@ -251,11 +210,6 @@ def test_blockless_operand_publishes_no_height(make):
     assert "exact_as_of" not in out, out
 
 
-# ---------------------------------------------------------------------------
-# empty_reason: inherited vs created
-# ---------------------------------------------------------------------------
-
-
 def test_inherited_emptiness_keeps_its_reason():
     out = capability_to_dict(intersect(_fold([], block=B1, reason="empty_by_design"), _fold([ADDR_A], block=B1)))
     assert out["members"] == []
@@ -263,8 +217,6 @@ def test_inherited_emptiness_keeps_its_reason():
 
 
 def test_created_emptiness_diverts_to_structural_and_and_mints_no_reason():
-    """Two non-empty, non-overlapping sets: the structural-AND diversion still fires and no
-    reason is invented for an emptiness nothing witnessed."""
     out = capability_to_dict(intersect(_fold([ADDR_A], block=B1), _fold([ADDR_B], block=B1)))
     assert out["kind"] == "AND"
     assert "empty_reason" not in out
@@ -286,15 +238,8 @@ def test_union_of_two_empties_carries_the_agreed_reason():
     assert out["exact_as_of"] == B1
 
 
-# ---------------------------------------------------------------------------
-# The refused as-of must not be re-minted downstream
-# ---------------------------------------------------------------------------
-
-
 def test_a_refused_as_of_poisons_every_later_composition():
-    """After ``intersect(fold@b1, fold@b2)`` the result has ONE height (the MIN) and
-    ``exact_as_of == "not_determined"``; a second combinator would read "all heights equal"
-    and re-mint the refused as-of from the staleness floor. It must not."""
+    """A second combinator would read "all heights equal" off the MIN and re-mint the refused as-of."""
     first = intersect(_fold([ADDR_A, ADDR_B], block=B1), _fold([ADDR_A], block=B2))
     assert first.exact_as_of == "not_determined"
     second = capability_to_dict(intersect(first, _fold([ADDR_A], block=B1)))
@@ -305,11 +250,7 @@ def test_a_refused_as_of_poisons_every_later_composition():
 
 
 def test_empty_result_at_heterogeneous_heights_still_refuses():
-    """The empty-result case of the same rule, on its own because deleted arm (i) got it
-    wrong: an inherited-empty intersection at UNEQUAL heights publishes ``"not_determined"``,
-    never the MIN. Both fold families publish state-AT-h with revocations applied, so a
-    member revoked from the later operand in (b1, b2] is absent while the true set at b1
-    still held it."""
+    """A member revoked from the later operand is absent while the true set at b1 still held it."""
     out = capability_to_dict(intersect(_fold([], block=B1, reason="owner_read_zero"), _fold([ADDR_A], block=B2)))
     assert out["members"] == []
     assert out["last_indexed_block"] == B1
@@ -317,18 +258,11 @@ def test_empty_result_at_heterogeneous_heights_still_refuses():
     assert out["exact_as_of"] != B1
 
 
-# Laundering through the early returns
-#
-# Three working attacks, reproduced verbatim: an operation that should refuse an as-of
-# returned early (unlicensed created emptiness, or a non-exact lower_bound cofinite),
-# leaving a heterogeneous MIN in ``last_indexed_block`` with NO refusal recorded —
-# indistinguishable from a leaf, so the NEXT combinator minted the as-of. The refusal is
-# now recorded before both early returns.
+# Early returns used to leave a heterogeneous MIN with no refusal recorded, so the next combinator minted the as-of; the
+# refusal is now recorded before both.
 
 
 def test_created_empty_subtraction_does_not_launder_a_heterogeneous_as_of():
-    """Attack (i). ``{A}@b1 − {A}@b2`` is a created emptiness, so no as-of — but it must
-    publish the REFUSAL, or re-composing with a fold@b1 yields a false ``exact_as_of: b1``."""
     created_empty = intersect(_fold([ADDR_A], block=B1), _blacklist([ADDR_A], block=B2))
     assert created_empty.members == []
     assert created_empty.exact_as_of == "not_determined"
@@ -339,7 +273,6 @@ def test_created_empty_subtraction_does_not_launder_a_heterogeneous_as_of():
 
 
 def test_negating_a_created_empty_does_not_launder_a_heterogeneous_as_of():
-    """Attack (ii). The complement of that created empty is "everyone", once published as exactly known at b1."""
     created_empty = intersect(_fold([ADDR_A], block=B1), _blacklist([ADDR_A], block=B2))
     out = capability_to_dict(negate(created_empty))
     assert out["kind"] == "cofinite_blacklist"
@@ -348,9 +281,7 @@ def test_negating_a_created_empty_does_not_launder_a_heterogeneous_as_of():
 
 
 def test_lower_bound_cofinite_does_not_launder_a_heterogeneous_as_of():
-    """Attack (iii). ``union(fold@b1, lower_bound blacklist@b2)`` returns a ``lower_bound``
-    cofinite that used to exit at the quality gate with no refusal; intersecting it back
-    with a fold@b1 then published a false ``exact_as_of: b1`` (the denylist was observed at b2)."""
+    """The denylist was observed at b2."""
     lower_bound_cofinite = union(
         _fold([ADDR_A], block=B1),
         _blacklist([ADDR_A, ADDR_B], block=B2, quality="lower_bound"),
@@ -364,7 +295,6 @@ def test_lower_bound_cofinite_does_not_launder_a_heterogeneous_as_of():
 
 
 def test_side_conditions_preserve_height_and_as_of():
-    """``X ∩ conditional_universal(c)`` narrows WHEN the set applies, never WHO is in it."""
     folded = intersect(_fold([ADDR_A], block=B1), _fold([ADDR_A], block=B1))
     gated = intersect(folded, CapabilityExpr.conditional_universal(Condition(kind="business", description="paused")))
     out = capability_to_dict(gated)

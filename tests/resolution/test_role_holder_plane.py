@@ -1,18 +1,7 @@
-"""D6-accept — a role's holders as a PROVEN LOWER BOUND, never a membership set.
+"""D6-accept: a role's holders are a proven lower bound, never a membership set.
 
-The fold proposes candidates; a pinned ``hasRole`` read witnesses each one. Every
-test here exists to pin one of the ways that could quietly become a set:
-
-  * an empty array standing in for "nobody holds this role";
-  * a reverting read decoded as false and published as a proven non-holder;
-  * Solady's ``uint256`` role space folded through OZ's ``bytes32`` topic
-    positions, where a cast role word reads the mapping's zero default and
-    returns false SUCCESSFULLY — a completed read that witnesses nothing;
-  * a name attached to a hash it is not the preimage of;
-  * residual counters that let a reader reconstruct the banned empty set.
-
-The corpus values pinned below were measured on the local replica and
-re-verified on-chain at block 25643300 (20 protocol-1 probes, 20 agreeing).
+The fold proposes candidates and a pinned ``hasRole`` read witnesses each. Corpus values were measured on the
+local replica and re-verified on-chain at block 25643300.
 """
 
 from __future__ import annotations
@@ -44,8 +33,7 @@ SOLADY_REGISTRY = "0x62247d29b4b9becf4bb73e0c722cf6445cfc7ce9"
 
 RG = rhp.ROLE_GRANTED_TOPIC0
 RR = rhp.ROLE_REVOKED_TOPIC0
-# Solady ``RoleSet(address,uint256,bool)`` — present in the same corpus, in a
-# different role identity space. role_topic_index=2, not 1.
+# Solady's role space; the role is at topic index 2, not 1.
 ROLE_SET_TOPIC0 = "0xaddc47d7e02c95c00ec667676636d772a589ffbf0663cfd7cd4dd3d4758201b8"
 
 ZERO_ROLE = "0x" + "00" * 32
@@ -61,8 +49,7 @@ OPS_HOLDER = "0xd8f3803d8412e61e04f53e1c9394e13ec8b32550"
 
 PROBE_BLOCK = rhp.ProbeBlock(number=25643300, block_hash=b"\xab" * 32)
 
-# The exact tuple ``eth_call_batch`` produces for every one of the four corpus
-# addresses whose ``hasRole`` reverts, measured at 25643300.
+# What ``eth_call_batch`` returns for the four corpus addresses whose ``hasRole`` reverts.
 MEASURED_REVERT = EthCallResult(False, "0x", None, "execution reverted")
 TRUE_WORD = EthCallResult(True, "0x" + "0" * 63 + "1", None, None)
 FALSE_WORD = EthCallResult(True, "0x" + "0" * 64, None, None)
@@ -159,16 +146,9 @@ def _by_role(rows):
     return {row["role_hash"]: row for row in rows}
 
 
-# A1 — identity space
-
-
 def test_solady_roleset_logs_mint_no_row(db_session, monkeypatch):
-    """Solady's ``RoleSet`` shares the registry but not the role identity space.
-
-    Folded through OZ's topic positions its ``uint256`` role becomes a bytes32 key that
-    ``hasRole`` answers from the mapping's ZERO DEFAULT, successfully returning false: a
-    completed read witnessing nothing, which would publish 40 unqualified rows. No row is
-    the honest outcome; row-absence means not_determined.
+    """Folded through OZ topic positions, the uint256 role reads the mapping's zero default and returns false
+    successfully, which would publish 40 unqualified rows.
     """
     session = db_session
     logs = [
@@ -181,7 +161,6 @@ def test_solady_roleset_logs_mint_no_row(db_session, monkeypatch):
             block_number=21000000 + i,
             block_hash=b"\x44" * 32,
             transaction_index=0,
-            # RoleSet(holder@1, role@2, active@3) — note role is at index 2.
             topics=[ROLE_SET_TOPIC0, _word(ADMIN_HOLDER), _word("0x01"), _word("0x01")],
             data_words=[],
         )
@@ -216,28 +195,16 @@ def test_fold_ignores_non_accesscontrol_topics():
     assert _word("0x07") not in folded
 
 
-# A3 — the classifier boundary, where the three states must stay three
-
-
 def test_classify_candidate_keeps_three_distinct_states():
-    """A read that completed and said no is not a read that never happened.
-
-    Asserted at the classifier because a correct implementation and one calling
-    ``decode_bool_word`` without branching on ``success`` both give zero confirmations from
-    an all-reverting registry; the end-to-end arm cannot tell them apart.
+    """Asserted here because an implementation that ignores ``success`` looks identical end-to-end on an
+    all-reverting registry.
     """
     assert rhp.classify_candidate(TRUE_WORD) == rhp.CANDIDATE_CONFIRMED
     assert rhp.classify_candidate(FALSE_WORD) == rhp.CANDIDATE_READ_COMPLETED_NOT_CONFIRMED
     assert rhp.classify_candidate(MEASURED_REVERT) == rhp.CANDIDATE_UNCONFIRMED
     assert rhp.CANDIDATE_UNCONFIRMED != rhp.CANDIDATE_READ_COMPLETED_NOT_CONFIRMED
-    # Transport failure carries no revert data and must land in the same state
-    # as a revert — indeterminate, never an answer.
     assert rhp.classify_candidate(EthCallResult(False, "0x", None, "transport: boom")) == rhp.CANDIDATE_UNCONFIRMED
-    # An empty return decodes to False; it must NOT be read as a completed no.
     assert rhp.classify_candidate(EthCallResult(False, "0x", "0x", "reverted")) == rhp.CANDIDATE_UNCONFIRMED
-
-
-# The positive: a lower bound
 
 
 def test_corpus_rows_publish_confirmed_lower_bound(db_session, monkeypatch):
@@ -275,16 +242,11 @@ def test_corpus_rows_publish_confirmed_lower_bound(db_session, monkeypatch):
     assert ops["holders"] == [OPS_HOLDER]
     assert ops["role_name"] == "OPERATING_ADMIN_ROLE"
 
-    # Unconditional, on every row, regardless of anything above.
     assert {row["holder_set_exhaustive"] for row in rows.values()} == {"not_determined"}
-    # Today's cursors witness no lower bound and no page completeness.
     assert {row["cursor_first_indexed_block_basis"] for row in rows.values()} == {"not_determined"}
     assert {row["cursor_first_indexed_block"] for row in rows.values()} == {None}
     assert {row["cursor_page_completeness"] for row in rows.values()} == {"not_determined"}
     assert {row["cursor_last_indexed_block"] for row in rows.values()} == {25641245}
-
-
-# Fail-closed arms
 
 
 @pytest.mark.parametrize(
@@ -313,11 +275,10 @@ def test_cold_or_missing_cursor_withholds_every_holder_set(db_session, monkeypat
 @pytest.mark.parametrize(
     "verdicts",
     [
-        # The 0xd5edf773 / USDC shape: warm cursors, but no AccessControl beneath (every probe
-        # falls through to MEASURED_REVERT).
+        # The 0xd5edf773 / USDC shape: warm cursors, no AccessControl beneath.
         pytest.param({}, id="all-candidates-revert"),
-        # A genuinely fully-revoked role publishes NULL, never ``[]``: a direct storage write the
-        # recording surface never saw would appear in neither the fold nor this arm.
+        # A fully revoked role publishes NULL, never ``[]``: a direct storage write would appear in neither the fold nor
+        # this arm.
         pytest.param(
             {
                 (role, account): FALSE_WORD
@@ -339,10 +300,8 @@ def test_all_candidates_withhold(db_session, monkeypatch, verdicts):
 
 
 def test_all_false_and_all_revert_rows_are_indistinguishable(db_session, monkeypatch):
-    """A2 — the residual counters must not reconstruct the banned empty set.
-
-    "N probed, every read completed, none confirmed" IS ``[]``; if the all-false row differed
-    from the all-revert row in any column, a reader could recover it.
+    """A2: "N probed, all completed, none confirmed" is ``[]``, so the all-false row must not differ from the
+    all-revert row in any column.
     """
     session = db_session
     _seed(session)
@@ -373,7 +332,6 @@ def test_partial_reverts_still_publish_the_confirmed_floor(db_session, monkeypat
 
 
 def test_unpinnable_probe_block_withholds(db_session, monkeypatch):
-    """No pinned height means no probe — never a retry against ``latest``."""
     session = db_session
     _seed(session)
     monkeypatch.setattr(rhp, "pin_probe_block", lambda *a, **k: None)
@@ -390,12 +348,8 @@ def test_registry_with_no_role_logs_yields_no_rows(db_session, monkeypatch):
     assert _run(session, monkeypatch, {}) == []
 
 
-# role_name — a proven preimage, or the key is absent
-
-
 def test_role_name_absent_without_a_preimage(db_session, monkeypatch):
-    """TIMELOCK_ADMIN_ROLE is in no ``role_definitions`` row, so it gets no name (why B0b's
-    anti-decoy credit stays CONFIDENCE)."""
+    """TIMELOCK_ADMIN_ROLE has no ``role_definitions`` row, so it gets no name."""
     session = db_session
     _seed(session, logs=[_log(RG, TIMELOCK_ADMIN, ADMIN_HOLDER, block=19298624, log_index=121)])
     row = _by_role(_run(session, monkeypatch, {(TIMELOCK_ADMIN, ADMIN_HOLDER): TRUE_WORD}))[TIMELOCK_ADMIN]
@@ -407,7 +361,7 @@ def test_role_name_absent_without_a_preimage(db_session, monkeypatch):
 @pytest.mark.parametrize(
     "role, pool, has_role_answered, expected",
     [
-        # CRITICAL, the hard ban: a role-shaped name may not be attached to a hash it does not hash to.
+        # A role-shaped name may not be attached to a hash it does not hash to.
         pytest.param(
             "0x" + "de" * 32,
             ["PAUSER_ROLE", "DEFAULT_ADMIN_ROLE"],
@@ -415,8 +369,7 @@ def test_role_name_absent_without_a_preimage(db_session, monkeypatch):
             (None, "not_determined"),
             id="keccak-mismatch-refused",
         ),
-        # D6-reject stops MINTING these, but existing rows persist until re-analysis; the keccak
-        # gate makes that harmless.
+        # Existing mis-minted rows persist until re-analysis; the keccak gate makes that harmless.
         pytest.param(
             PAUSER,
             ["OwnableStorageLocation", "AccessControlDefaultAdminRulesStorageLocation"],
@@ -424,8 +377,7 @@ def test_role_name_absent_without_a_preimage(db_session, monkeypatch):
             (None, "not_determined"),
             id="misparsed-storage-pointers-cannot-leak-a-name",
         ),
-        # A6: the zero-word arm is an AccessControl convention; it may not fire on an emitter
-        # proven not to implement ``hasRole``.
+        # A6: the zero-word convention may not fire on an emitter proven not to implement ``hasRole``.
         pytest.param(
             ZERO_ROLE,
             [],
@@ -449,9 +401,9 @@ def test_default_admin_name_withheld_when_registry_never_answers(db_session, mon
 
 
 def test_candidate_pool_reads_declared_names_across_contracts(db_session):
-    """The pool is not contract-scoped: a preimage is a preimage whoever offered it, so the proxy's
-    role name may come from the IMPLEMENTATION's row (events emit at the proxy;
-    ``role_definitions`` hangs off the implementation)."""
+    """Events emit at the proxy but ``role_definitions`` hangs off the implementation, so the pool is not
+    contract-scoped.
+    """
     session = db_session
     contract = Contract(address=REGISTRY, chain="ethereum", contract_name="Impl", is_proxy=False)
     session.add(contract)
@@ -463,19 +415,14 @@ def test_candidate_pool_reads_declared_names_across_contracts(db_session):
     pool = rhp.candidate_name_pool(session)
     assert "PAUSER_ROLE" in pool and "OwnableStorageLocation" in pool
     assert rhp.resolve_role_name(PAUSER, pool, has_role_answered=True) == ("PAUSER_ROLE", "keccak_preimage")
-    # The mis-parsed pointer is in the pool and still cannot be published.
     assert rhp.resolve_role_name(TIMELOCK_ADMIN, pool, has_role_answered=True) == (None, "not_determined")
     session.rollback()
 
 
-# Disagreement — recorded, never diagnosed
-
-
 def test_fold_inactive_but_chain_true_is_admitted(db_session, monkeypatch):
-    """The read is the witness, so it wins in both directions.
+    """The read wins in both directions.
 
-    Admitting a fold-inactive address does not conflate administration with membership: OZ
-    expresses "may administer X" as membership in a different bytes32 (a different key).
+    OZ expresses administration as membership in a different role, so this doesn't conflate the two.
     """
     session = db_session
     _seed(session)
@@ -520,11 +467,8 @@ def test_fold_active_but_chain_false_is_omitted(db_session, monkeypatch):
 
 
 def test_disagreement_records_carry_no_cause(db_session, monkeypatch):
-    """A9 — the permitted key set, exactly.
-
-    ``as_of_block`` sits above the cursor head, so "the fold missed a log" and "state changed
-    after the cursor stopped" are indistinguishable: no reason/cause/likely_* key may appear,
-    even if a future run pins the two heights equal.
+    """A9: "the fold missed a log" and "state changed after the cursor" are indistinguishable, so no cause key may
+    appear.
     """
     session = db_session
     _seed(session)
@@ -532,18 +476,14 @@ def test_disagreement_records_carry_no_cause(db_session, monkeypatch):
     row = _by_role(_run(session, monkeypatch, verdicts))[PAUSER]
     for record in row["fold_chain_disagreements"]:
         assert set(record) == rhp.DISAGREEMENT_KEYS
-    # A revert is not a disagreement — nothing was read to disagree with.
     reverted = _by_role(_run(session, monkeypatch, {(PAUSER, ADMIN_HOLDER): TRUE_WORD}))[PAUSER]
     assert reverted["fold_chain_disagreements"] == []
-
-
-# Cursor bounds consumed from U10A
 
 
 @pytest.mark.parametrize(
     "cursor_kwargs, expected",
     [
-        # A caller-supplied seed is not a witness; the number goes with the basis so nothing can cite it.
+        # A caller seed is not a witness.
         pytest.param(
             [
                 {"first_indexed_block": 100, "first_indexed_block_basis": FIRST_INDEXED_BASIS_EXPLICIT},
@@ -552,8 +492,7 @@ def test_disagreement_records_carry_no_cause(db_session, monkeypatch):
             {"cursor_first_indexed_block": None, "cursor_first_indexed_block_basis": "not_determined"},
             id="explicit-seed-dropped",
         ),
-        # Weakest link: the pair is only covered from the HIGHER of the two. A lower bound alone
-        # licenses nothing (never exhaustiveness).
+        # Coverage is from the higher of the two; a lower bound alone never licenses exhaustiveness.
         pytest.param(
             [
                 {"first_indexed_block": 20933000, "first_indexed_block_basis": FIRST_INDEXED_BASIS_CREATION},
@@ -584,9 +523,6 @@ def test_cursor_lower_bound_basis(db_session, monkeypatch, cursor_kwargs, expect
     assert {key: row[key] for key in expected} == expected
 
 
-# The pinned probe block itself (R2)
-
-
 HEAD = 25643312
 
 
@@ -607,8 +543,7 @@ def _rpc_stub(calls: list[tuple[str, list[Any]]], *, head=hex(HEAD), block=None,
 
 
 def test_probe_block_is_confirmation_depth_below_head(monkeypatch):
-    """The height is head - DEFAULT_CONFIRMATION_DEPTH, asked for by NUMBER: a bare head can be
-    reorged out from under a persisted `as_of_block`, and ``"latest"`` makes the citation unrepeatable."""
+    """A bare head can be reorged under a persisted ``as_of_block``, and ``"latest"`` is unrepeatable."""
     calls: list[tuple[str, list[Any]]] = []
     monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls))
     pinned = rhp.pin_probe_block("http://stub", chain_id=1)
@@ -626,7 +561,6 @@ def test_probe_block_is_confirmation_depth_below_head(monkeypatch):
 @pytest.mark.parametrize(
     "stub_kwargs",
     [
-        # The height stands on its own; only replay-after-reorg is weaker (hash is persisted WHEN READABLE).
         pytest.param({"fail_hash": True}, id="survives-an-unreadable-hash"),
         pytest.param({"block": {}}, id="hash-absent-from-payload-is-not-invented"),
     ],
@@ -651,9 +585,6 @@ def test_no_probe_block(monkeypatch, stub_kwargs):
     calls: list[tuple[str, list[Any]]] = []
     monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, **stub_kwargs))
     assert rhp.pin_probe_block("http://stub", chain_id=1) is None
-
-
-# The bans, enforced by the database
 
 
 def _valid_row(**overrides: Any) -> dict[str, Any]:
@@ -728,11 +659,9 @@ def test_database_refuses_unprovable_rows(db_session, overrides, reason):
     ],
 )
 def test_discriminators_reject_an_explicit_null(db_session, column):
-    """A CHECK that evaluates to NULL PASSES in Postgres, so NOT NULL (not the CHECK) is what makes
-    these constraints binding (e.g. ``holder_set_exhaustive = 'not_determined'`` accepts NULL).
+    """A CHECK evaluating to NULL passes in Postgres, so NOT NULL is what binds.
 
-    Asserted through raw SQL because the ORM's server_default would substitute a value for an
-    omitted column and hide the hole.
+    Raw SQL because the ORM's server_default would hide the hole.
     """
     session = db_session
     row = _valid_row()
@@ -763,11 +692,8 @@ def _withheld_orm_row(**overrides: Any) -> dict[str, Any]:
 
 
 def test_orm_writes_sql_null_not_the_jsonb_scalar_null(db_session):
-    """``none_as_null``, pinned.
-
-    Without it SQLAlchemy stores Python None as the jsonb scalar ``null``, a PRESENT payload to
-    every SQL null test (the invariant in ``test_jsonb_null_predicates``). ``jsonb_typeof``
-    returns SQL NULL for SQL NULL and ``'null'`` for the scalar, separating the two states.
+    """Without ``none_as_null`` SQLAlchemy stores the jsonb scalar ``null``, a present payload to every SQL null
+    test.
     """
     session = db_session
     session.add(RoleHolderPlane(**_withheld_orm_row()))
@@ -780,8 +706,7 @@ def test_orm_writes_sql_null_not_the_jsonb_scalar_null(db_session):
         {"r": PAUSER},
     ).one()
     assert typeof is None, "a withheld row must be SQL NULL, not the jsonb scalar 'null'"
-    # The disagreement ledger needs the same guard: its withheld predicate deliberately counts
-    # the scalar null, so the CHECKs stay satisfied while naive IS NULL consumers see evidence.
+    # The withheld predicate counts the scalar null, so naive IS NULL consumers would see evidence.
     assert disagreements_typeof is None, "a withheld disagreement ledger must be SQL NULL too"
     session.rollback()
 
@@ -796,7 +721,6 @@ def _raw_insert(session, holders_sql: str, **cols: str) -> None:
         "cursor_page_completeness": "'not_determined'",
         "coverage": "'partial'",
         "role_name_basis": "'not_determined'",
-        # NULL, matching the withheld shape these raw inserts build.
         "fold_chain_disagreements": "NULL",
     }
     defaults.update(cols)
@@ -810,9 +734,7 @@ def _raw_insert(session, holders_sql: str, **cols: str) -> None:
 
 
 def test_jsonb_scalar_null_is_treated_as_withheld(db_session):
-    """Raw SQL can still reach the column, so the trap is NEUTRALISED: the scalar null counts as
-    withheld everywhere, like SQL NULL. Read as a payload, five constraints would stop
-    discriminating at once."""
+    """Raw SQL can still write the scalar null, so it must count as withheld everywhere."""
     session = db_session
     _raw_insert(session, "'null'::jsonb")
     stored = session.get(RoleHolderPlane, (1, REGISTRY, PAUSER))
@@ -833,10 +755,8 @@ def test_jsonb_scalar_null_cannot_carry_a_proven_basis(db_session):
 
 
 def test_withheld_row_cannot_claim_no_disagreement(db_session):
-    """R4 — ``[]`` on a withheld row is an unearned negative.
-
-    On an all-reverting registry nothing was read (not_determined); on an all-false registry
-    disagreements WERE observed and ``[]`` would suppress them. Both must be NULL.
+    """R4: ``[]`` on a withheld row is an unearned negative, and on an all-false registry would suppress real
+    disagreements.
     """
     session = db_session
     with pytest.raises(IntegrityError):
@@ -878,10 +798,8 @@ def test_withheld_rows_carry_a_null_disagreement_log(db_session, monkeypatch):
     ],
 )
 def test_cursor_bound_columns_are_domain_checked(db_session, cols):
-    """R1 + R3 — gates that lived only in code, now in the schema.
-
-    A ``creation_block_minus_one`` basis with no block claims an uncitable height;
-    ``explicit_seed`` is a caller's number the writer normalises away, so it must not be storable either.
+    """R1 + R3: a ``creation_block_minus_one`` basis with no block is uncitable, and ``explicit_seed`` is a caller's
+    number.
     """
     session = db_session
     with pytest.raises(IntegrityError):
@@ -913,7 +831,6 @@ def test_non_array_holders_are_rejected(db_session):
             _valid_row(), {"holders": [ADMIN_HOLDER], "holder_set_exhaustive": "not_determined"}, id="valid-row"
         ),
         pytest.param(_withheld_orm_row(), {"holders": None, "fold_chain_disagreements": None}, id="withheld-row"),
-        # Positive control for the CHECKs: a published row may carry an empty disagreement log.
         pytest.param(
             _valid_row(fold_chain_disagreements=[]),
             {"fold_chain_disagreements": []},
@@ -941,26 +858,19 @@ def test_persist_upserts(db_session, monkeypatch):
     assert stored is not None and stored.holders == [ADMIN_HOLDER]
 
 
-# ---------------------------------------------------------------------------
-# Tolerant decoders on a registered witness plane (fix 3): three instances of a value nobody
-# observed being padded/coerced into one that looks observed, publishing a POSITIVE fact
-# (role name, replay citation, "the chain answered false") from a read that answered nothing.
-# ---------------------------------------------------------------------------
+# Tolerant decoders on a witness plane: a value nobody observed must not be coerced into one that looks observed.
 
 
 def test_empty_word_is_never_padded_into_the_default_admin_role():
-    """FALSIFIER: ``"0x"`` left-padded is bit-identical to ``DEFAULT_ADMIN_ROLE_HASH``, so the
-    tolerant normalizer turned a no-data read into the zero role AND its convention-based name."""
+    """``"0x"`` left-padded is bit-identical to ``DEFAULT_ADMIN_ROLE_HASH``."""
     assert rhp._normalize_word("0x") is None
     assert rhp.resolve_role_name("0x", [], has_role_answered=True) == (None, "not_determined")
     assert rhp.resolve_role_name("0x00", [], has_role_answered=True) == (None, "not_determined")
     assert rhp.resolve_role_name("0xzz" + "0" * 62, [], has_role_answered=True) == (None, "not_determined")
-    # RECALL: a genuine zero WORD still earns the convention name.
     assert rhp.resolve_role_name(ZERO_ROLE, [], has_role_answered=True) == (
         "DEFAULT_ADMIN_ROLE",
         "accesscontrol_default_admin_literal",
     )
-    # RECALL: a full-width word still folds and still resolves by preimage.
     assert rhp._normalize_word("0x" + "AB" * 32) == "0x" + "ab" * 32
     assert rhp.resolve_role_name(PAUSER, ["PAUSER_ROLE"], has_role_answered=False) == (
         "PAUSER_ROLE",
@@ -975,8 +885,7 @@ def test_an_empty_word_topic_folds_to_no_candidate(db_session, monkeypatch):
 
 
 def test_block_hash_of_an_empty_return_is_absent_not_empty_bytes(monkeypatch):
-    """FALSIFIER: the replay witness was decoded via ``bytes.fromhex`` with no length check, so ``"0x"`` published
-    ``b""``."""
+    """``bytes.fromhex`` with no length check published ``b""``."""
     calls: list[tuple[str, list[Any]]] = []
     monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls, block={"hash": "0x"}))
     pinned = rhp.pin_probe_block("http://stub", chain_id=1)
@@ -990,7 +899,6 @@ def test_block_hash_of_an_empty_return_is_absent_not_empty_bytes(monkeypatch):
         short = rhp.pin_probe_block("http://stub", chain_id=1)
         assert short is not None and short.block_hash is None
 
-    # RECALL: a genuine 32-byte hash is still stored, at full width.
     calls.clear()
     monkeypatch.setattr(rhp, "rpc_request", _rpc_stub(calls))
     good = rhp.pin_probe_block("http://stub", chain_id=1)
@@ -1001,16 +909,15 @@ def test_block_hash_of_an_empty_return_is_absent_not_empty_bytes(monkeypatch):
 
 
 def test_success_with_empty_returndata_is_a_failed_read(db_session, monkeypatch):
-    """FALSIFIER: ``eth_call_batch`` reports an unreadable result as ``EthCallResult(True, "0x", ...)``;
-    ``decode_bool_word("0x")`` is False, so a NO-DATA call published ``chain_state: "false"`` AND
-    satisfied ``has_role_answered``."""
+    """``decode_bool_word("0x")`` is False, so a no-data call published ``chain_state: "false"`` and satisfied
+    ``has_role_answered``.
+    """
     empty_success = EthCallResult(True, "0x", None, None)
     assert rhp.classify_candidate(empty_success) == rhp.CANDIDATE_UNCONFIRMED
     assert rhp.classify_candidate(EthCallResult(True, "0x0", None, None)) == rhp.CANDIDATE_UNCONFIRMED
     assert rhp.classify_candidate(EthCallResult(True, "0x" + "00" * 31, None, None)) == rhp.CANDIDATE_UNCONFIRMED
 
     session = db_session
-    # One GRANTED log for the zero role: a completed "false" would be a recorded disagreement.
     _seed(session, logs=[_log(RG, ZERO_ROLE, ADMIN_HOLDER, block=19298624, log_index=3)])
     rows = _run(session, monkeypatch, {(ZERO_ROLE, ADMIN_HOLDER): empty_success})
 
@@ -1018,13 +925,11 @@ def test_success_with_empty_returndata_is_a_failed_read(db_session, monkeypatch)
     assert row["holders"] is None
     assert row["holders_basis"] == "not_determined"
     assert row["fold_chain_disagreements"] is None
-    # `has_role_answered` must NOT be satisfied, so the zero-word naming convention has nothing to stand on.
     assert row["role_name"] is None
     assert row["role_name_basis"] == "not_determined"
 
 
 def test_a_genuine_full_word_false_is_still_a_recorded_disagreement(db_session, monkeypatch):
-    """RECALL for the arm above: a completed read of a real 32-byte zero word still records ``chain_state: "false"``."""
     session = db_session
     _seed(
         session,
@@ -1045,7 +950,6 @@ def test_a_genuine_full_word_false_is_still_a_recorded_disagreement(db_session, 
     assert rows[ZERO_ROLE]["role_name"] is None  # withheld: no confirmed holder
     assert rows[PAUSER]["holders"] == [PAUSER_EXTRA]
 
-    # And the disagreement itself, on a role whose fold/chain states differ.
     _seed(session, logs=[_log(RR, PAUSER, PAUSER_EXTRA, block=19298626, log_index=5)], cursors=[])
     again = _by_role(_run(session, monkeypatch, {(PAUSER, PAUSER_EXTRA): TRUE_WORD}))
     assert again[PAUSER]["fold_chain_disagreements"] == [

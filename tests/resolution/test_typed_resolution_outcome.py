@@ -1,14 +1,6 @@
-"""P1 — typed resolution outcome: the read-failure reason is carried end-to-end.
-
-The binary ``exact``/``lower_bound`` collapse discarded *why* an authority read came back
-empty (revert vs empty-return vs nothing-attempted). P1 attaches a machine-readable
-``empty_reason`` to the labeled empty and threads it through the persisted ``capability_expr``
-WITHOUT changing the outcome (kind / quality / members / surface status). On main the
-serialized capability has no ``empty_reason`` key, so every assertion here fails.
-
-P1 cases use NON-pending operands to isolate labeling from the empty-by-design promotion (P2,
-tested separately). The second half is the claim-#3 characterization net (see its header).
-Pure/offline; the global ``_stub_live_authority`` fixture is deliberately not used.
+"""P1: ``empty_reason`` (revert vs empty-return vs nothing-attempted) rides through to the persisted
+``capability_expr`` without changing the outcome. Non-pending operands isolate this from the P2 empty-by-design
+promotion; the global ``_stub_live_authority`` fixture is deliberately not used.
 """
 
 from __future__ import annotations
@@ -25,9 +17,7 @@ from tests.support.eq_tree import eq_tree as _eq_tree
 
 CONTRACT = "0x" + "11" * 20
 
-# Non-pending operands (so the read-failure reason, not empty_by_design, rides through).
-# ``receivers[originEid]`` is a param-keyed mapping read modeled as a member operand with no
-# nullary getter (nothing is read).
+# ``receivers[originEid]`` has no nullary getter, so nothing is read.
 REVERTING_VAR = {"source": "state_variable", "state_variable_name": "membershipManager"}
 EMPTY_RETURN_VAR = {"source": "state_variable", "state_variable_name": "vault"}
 UNREAD_MEMBER = {"source": "state_variable", "state_variable_name": "receivers", "member_path": ["originEid"]}
@@ -54,7 +44,6 @@ def _ctx_with_rpc(rpc_url: str = "http://rpc.test") -> EvaluationContext:
 
 
 def _stub_rpc(monkeypatch: pytest.MonkeyPatch, mode: str, *, recorder: list | None = None) -> None:
-    """``mode``: ``revert`` (raise) or ``empty`` (bare ``0x`` — empty/no-code)."""
 
     def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
         if recorder is not None:
@@ -86,7 +75,6 @@ def _assert_unchanged_empty(cap_dict: dict[str, Any]) -> None:
     [
         pytest.param("revert", REVERTING_VAR, "unreadable_revert", True, id="revert"),
         pytest.param("empty", EMPTY_RETURN_VAR, "unreadable_empty", True, id="empty-return"),
-        # not_read means no RPC was attempted at all.
         pytest.param("revert", UNREAD_MEMBER, "not_read", False, id="nothing-attempted"),
     ],
 )
@@ -103,7 +91,6 @@ def test_empty_reason_labels_why_the_set_is_empty(
 
 
 def test_empty_reason_absent_on_populated_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Precision: a populated authority carries NO empty_reason (emit-when-non-default keeps its wire shape)."""
     addr = "0x" + "ab" * 20
     monkeypatch.setattr(
         "services.clients.rpc.rpc_request",
@@ -115,20 +102,11 @@ def test_empty_reason_absent_on_populated_set(monkeypatch: pytest.MonkeyPatch) -
     assert "empty_reason" not in cap_dict
 
 
-# ==========================================================================
-# Claim-#3 characterization net.
-#
-# Pins the lowering of the operand shapes behind the etherfi (protocol_id=1, run
-# ``1279e07382b24d32``) ``finite_set/lower_bound`` under-resolved functions. Operands are the
-# REAL shapes from compiling on-chain source through the production static pipeline:
-#   * A ``claimGovernance`` — ``view_call _pendingGovernor()`` (internal; reverts/empties everywhere).
-#   * B ``acceptDefaultAdminTransfer`` — ``state_variable _pendingDefaultAdmin`` member
-#     ``newAdmin`` (OZ's public getter is inlined to the struct read: nothing is read).
-#
-# Locks what holds on both main and the P1/P2 branch: A/B resolve to an EMPTY caller set with
-# NO principal rows. The flip to ``resolved_empty`` is pinned by ``test_pending_transfer_ceiling``,
-# so this net stays a stable scope witness: non-pending getter-less authorities must NOT flip.
-# ==========================================================================
+# Claim-#3 net: real operand shapes behind the etherfi under-resolved functions (run 1279e07382b24d32).
+#   A ``claimGovernance``: ``view_call _pendingGovernor()``, internal, reverts everywhere.
+#   B ``acceptDefaultAdminTransfer``: ``_pendingDefaultAdmin.newAdmin``; OZ's getter inlines to the struct read.
+# Both resolve to an empty caller set with no principal rows. The flip to ``resolved_empty`` is pinned in
+# ``test_pending_transfer_ceiling``; non-pending getter-less authorities must not flip.
 
 OWNER_SELECTOR = "0x8da5cb5b"  # owner()
 

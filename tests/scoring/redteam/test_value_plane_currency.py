@@ -1,4 +1,3 @@
-"""Value plane: which observation is current, and what a $0.00 reading proves."""
 
 from __future__ import annotations
 
@@ -22,11 +21,8 @@ from tests.support.scoring_builders import (
 
 
 def test_one_account_read_twice_publishes_the_LATER_read_not_the_larger():
-    """MAX across two heights of one account is a high-water mark, not a holding.
-
-    Fired on the real corpus: a proxy's live row and its implementation's frozen
-    row are the SAME on-chain account read at two heights, folded into one bucket
-    by the alias map. MAX republishes a balance that had already moved.
+    """A proxy's live row and its impl's frozen row are one account at two heights; MAX republished a balance that
+    had moved.
     """
     account = "0x" + "1" * 40
     values, states, reduction = _reduce(
@@ -34,18 +30,13 @@ def test_one_account_read_twice_publishes_the_LATER_read_not_the_larger():
     )
     assert values["k"]["asset"] == 14_346_384.46
     assert states["k"]["asset"] == P.ASSET_PRICED
-    # The drop is disclosed, not silently absorbed.
     assert reduction["stale_high_water_marks_dropped"] == 1
     assert reduction["stale_high_water_usd_dropped"] == round(26_404_230.63 - 14_346_384.46, 2)
     assert reduction["height_witnessed_accounts"] == 1
 
 
 def test_two_DISTINCT_accounts_are_two_holdings_and_the_entity_holds_their_sum():
-    """The account is the discriminator: same account = one holding, two = two.
-
-    Unexercised on the shipped corpus (every competing pair observes one
-    address), so pinned here.
-    """
+    """Unexercised on the shipped corpus."""
     a, b = "0x" + "1" * 40, "0x" + "2" * 40
     values, _, reduction = _reduce(**{a: [_Row(1000.0, block=10, rid=1)], b: [_Row(400.0, block=10, rid=2)]})
     assert values["k"]["asset"] == 1400.0
@@ -54,21 +45,14 @@ def test_two_DISTINCT_accounts_are_two_holdings_and_the_entity_holds_their_sum()
 
 
 def test_an_unwitnessed_account_identity_is_never_summed():
-    """Summing readings that may be one account twice re-mints the double count.
-
-    Where the identity is missing the reduction falls back to MAX and says so.
-    """
+    """Missing identity falls back to MAX and says so."""
     values, _, reduction = _reduce(**{"": [_Row(1000.0, rid=1)], "0x" + "2" * 40: [_Row(400.0, rid=2)]})
     assert values["k"]["asset"] == 1000.0
     assert reduction["unwitnessed_account_buckets"] == 1
 
 
 def test_a_read_height_nobody_recorded_falls_back_to_write_order_and_says_so():
-    """ERC-20 rows are never height-pinned, so most orderings are write order.
-
-    A fact about this database, not the chain; counted so the fiat is stated
-    rather than passed off as an as-of-block reading.
-    """
+    """ERC-20 rows are never height-pinned, so the write-order fiat is counted and stated."""
     import datetime as _dt
 
     early = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
@@ -81,12 +65,7 @@ def test_a_read_height_nobody_recorded_falls_back_to_write_order_and_says_so():
 
 
 def test_a_rounding_floor_reading_is_not_a_proven_zero():
-    """``usd_value`` is a scaled decimal column: a holding below its last digit
-    (the eighteenth decimal) stores as zero.
-
-    Publishing that as a determined 0.0 mints a proven-empty balance sheet from a
-    price lookup that answered "below the column's resolution".
-    """
+    """A holding below ``usd_value``'s eighteenth decimal stores as zero; that is not a proven-empty sheet."""
     plane = P.ValuePlane()
     plane.per_asset, plane.per_asset_state, _ = _reduce(**{"0x" + "1" * 40: [_Row(0.0, rid=1, raw="12345")]})
     assert plane.per_asset_state["k"]["asset"] == P.ASSET_BELOW_RESOLUTION
@@ -96,14 +75,7 @@ def test_a_rounding_floor_reading_is_not_a_proven_zero():
 
 
 def test_a_sub_resolution_priced_reading_keeps_its_magnitude_through_the_reduction():
-    """Pins the ROUNDING guard, and only it.
-
-    A holding worth $2e-9 is a determined NON-ZERO reading, and the plane rounds
-    to six decimals. Rounding to completion would replace the measured figure
-    with 0.0, the input from which ``sheet_state``'s magnitude arm would read an
-    empty sheet. Asserts the figure SURVIVES; the state arm is asserted below,
-    because with the magnitude preserved this case cannot tell the guards apart.
-    """
+    """Pins only the rounding guard; the state arm can't be distinguished here and is asserted below."""
     plane = P.ValuePlane()
     plane.per_asset, plane.per_asset_state, _ = _reduce(**{"0x" + "1" * 40: [_Row(2e-9, rid=1, raw="1")]})
     plane.asset_set_proven_complete["k"] = SCANNED
@@ -116,15 +88,7 @@ def test_a_sub_resolution_priced_reading_keeps_its_magnitude_through_the_reducti
 
 
 def test_a_priced_reading_whose_magnitude_is_zero_is_still_never_a_proven_empty_sheet():
-    """Pins the STATE arm, and only it.
-
-    Magnitude is 0.0 and the asset list proven whole, so every input the
-    magnitude arm sees says "empty" (the shape any future rounding, truncation
-    or unit change could hand ``sheet_state``). The reading's STATE says a price
-    answered on a non-zero quantity; publishing ``proven_empty`` would assert
-    every quantity proven zero of a sheet proven otherwise. The guards are
-    independent; this fails if the state arm is dropped.
-    """
+    """Pins only the state arm: every magnitude input says empty, but a price answered on a non-zero quantity."""
     plane = value_plane(
         per_asset={"k": {"asset": 0.0}},
         per_asset_state={"k": {"asset": P.ASSET_PRICED}},
@@ -136,17 +100,11 @@ def test_a_priced_reading_whose_magnitude_is_zero_is_still_never_a_proven_empty_
 
 
 def test_a_proven_zero_QUANTITY_is_the_only_witness_of_an_empty_sheet():
-    """The quantity, not the price, is what proves a sheet empty.
-
-    Zero of an asset is worth zero at any price, so 0.00 is a number only here.
-    Unexercised on the shipped corpus (no zero raw balance anywhere), so pinned.
-    """
+    """Only a zero quantity proves empty. Unexercised on the shipped corpus."""
     plane = P.ValuePlane()
     plane.per_asset, plane.per_asset_state, _ = _reduce(**{"0x" + "1" * 40: [_Row(0.0, rid=1, raw="0")]})
     assert plane.per_asset_state["k"]["asset"] == P.ASSET_PROVEN_ZERO
-    # The quantity is half of it. The other half is the SET those quantities
-    # cover: without a scan proving the list whole, zeros over an unestablished
-    # list are refused and publish unpriced, never a $0.
+    # Zeros over a list no scan proved whole publish unpriced, never $0.
     assert plane.sheet_state("k") == P.SHEET_UNPRICED
     assert plane.total("k") is None
     plane.asset_set_proven_complete["k"] = SCANNED
@@ -178,11 +136,7 @@ def test_a_positive_row_beside_dust_keeps_its_positive_floor():
 
 
 def test_an_all_dust_sheet_charges_no_finding_a_proven_zero_exposure(fold):
-    """The published shape R6 forbids: exposure 0.0 beside a proven reach.
-
-    ``value_at_stake 0.0 / proven_reach / exposure 0.0`` reads as an earned
-    negative minted by a price lookup that answered below its own resolution.
-    """
+    """R6 forbids exposure 0.0 beside a proven reach from a sub-resolution price."""
     dust_key = entity_key("base", VAULT)
     plane = value_plane(
         per_asset={KEY_PROXY: {"token": 5_000_000.0}},
@@ -212,6 +166,4 @@ def test_an_all_dust_sheet_charges_no_finding_a_proven_zero_exposure(fold):
     assert row["value_at_stake_usd"] is None
     assert row["exposure_usd"] is None
     assert row["value_band"] == "not_determined"
-    # The priced row beside it still scores, so this is the dust entity's own
-    # answer and not a withheld grade standing in for one.
     assert document["grade_exposure"] is not None

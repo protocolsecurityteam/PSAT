@@ -1,4 +1,3 @@
-"""Weakness axis."""
 
 from __future__ import annotations
 
@@ -36,7 +35,6 @@ from tests.support.scoring_builders import (
 
 
 def test_f3_unread_owner_set_is_not_a_k_of_k_safe(fold):
-    """n backfilled from k publishes the strongest rung out of an absent witness."""
     signal = sig(
         authority_openness="restricted",
         principal_state="enumerated",
@@ -73,12 +71,7 @@ def test_f3_proven_owner_set_still_earns_its_rung(fold):
 
 
 def test_f2_an_unread_pauser_key_set_moves_severity_in_neither_direction(fold):
-    """The freezing key set was never read, so independence is uncomputable.
-
-    Nothing may move: not the recoverable credit (needs proven independence) nor
-    the sustainable component (needs proven dependence). The question is
-    published instead.
-    """
+    """Neither the recoverable credit nor the sustainable component may move; the question is published instead."""
     document = _pause_document(
         fold,
         facts(1, SAFE, "safe", threshold=1),  # owner set never resolved
@@ -87,7 +80,6 @@ def test_f2_an_unread_pauser_key_set_moves_severity_in_neither_direction(fold):
     finding = document.findings[0]
     assert not any("keyset_independent" in note for note in finding["witness_notes"])
     assert finding["severity_proven"] == FREEZE_CAPABILITY_PROVEN
-    # The single-signer cliff is not waived on the strength of a non-witness.
     assert finding["weakness"] == WEAKNESS_SAFE_UNCREDITED
     assert "freeze_recovery_independence_not_determined" in {w["kind"] for w in document.warnings}
     assert "freeze_recovery_independence_not_determined" in finding["severity_basis"]
@@ -112,7 +104,6 @@ def test_f2_proven_dependence_adds_the_sustainable_component(fold):
     )
     finding = document.findings[0]
     assert finding["severity_proven"] == FREEZE_SUSTAINABLE
-    # And the single-signer cliff stands, because independence was refuted.
     assert finding["weakness"] == WEAKNESS_SAFE_SINGLE_SIGNER
     assert "freeze_keyset_not_independent" in finding["severity_basis"]
 
@@ -211,7 +202,6 @@ def _timelock_population(include_execute: bool) -> list[FunctionSignal]:
 
 
 def test_f8_propose_only_does_not_collapse_a_timelock(fold):
-    """The collapse asserts the Safe can ACT AS the timelock: both halves or none."""
     principals = {
         1: facts(1, SAFE, "safe", owners=OWNERS, threshold=2),
         2: facts(2, TIMELOCK, "timelock", delay=172800.0),
@@ -226,8 +216,6 @@ def test_f8_propose_only_does_not_collapse_a_timelock(fold):
     timelock_row = next(f for f in propose_only.findings if f["principal_unit"] == entity_key("ethereum", TIMELOCK))
     assert timelock_row["weakness"] == WEAKNESS_TIMELOCK_UNDETERMINED
 
-    # With both halves proven the collapse runs, and the delayed value is still
-    # charged at the DISCOUNTED weakness rather than the Safe's direct one.
     collapsed = [
         f for f in both.findings + both.provenance["subsumed_rows"] if f["capability"] == "upgrade.implementation"
     ]
@@ -249,7 +237,6 @@ def test_w4_an_unread_proposer_threshold_cannot_rank_as_the_strongest(fold):
     timelock_rows = [f for f in rows if "timelock" in str(f["weakest_gate"])]
     assert timelock_rows, "the timelock row should still be published"
     assert "k not_determined" in str(timelock_rows[0]["weakest_gate"])
-    # Uncredited quorum × the proven delay discount — never a fabricated n/n.
     assert timelock_rows[0]["weakness"] == round(WEAKNESS_SAFE_UNCREDITED * (delay_discount(172800) or 1.0), 4)
 
 

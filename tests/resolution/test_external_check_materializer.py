@@ -47,9 +47,7 @@ def test_materialize_external_check_probes_event_candidates(monkeypatch):
 
 
 def test_materialize_external_check_multicall_parity(monkeypatch):
-    """The Multicall3 candidate-probe path (PSAT_EXTERNAL_CHECK_MULTICALL) must select the same
-    allowed set as the JSON-RPC-batch path. The checker takes the candidate as an explicit arg, so
-    routing through Multicall3 (which becomes msg.sender) cannot change which candidates pass."""
+    """The checker takes the candidate as an explicit arg, so Multicall3 as msg.sender can't change which pass."""
     from eth_abi.abi import decode, encode
 
     import services.clients.rpc as rpc_mod
@@ -76,7 +74,6 @@ def test_materialize_external_check_multicall_parity(monkeypatch):
 
     monkeypatch.setattr(mod, "rpc_batch_request_with_status", fake_batch)
 
-    # Multicall3 wire (ON path): decide by the candidate address embedded in each sub-call's calldata.
     def fake_multicall(_rpc_url, method, params, **_kw):
         assert method == "eth_call"
         assert params[0]["to"].lower() == rpc_mod.MULTICALL3_ADDRESS.lower()
@@ -111,8 +108,6 @@ def test_materialize_external_check_multicall_parity(monkeypatch):
 
 
 def test_materialize_external_check_multicall_falls_back_to_batch(monkeypatch):
-    """If the aggregate3 call raises, _eval_candidate_calls falls back to the JSON-RPC batch and
-    selects the same set — enabling Multicall3 never degrades the result on a chain without it."""
     import services.clients.rpc as rpc_mod
     import services.resolution.external_check_materializer as mod
 
@@ -137,8 +132,6 @@ def test_materialize_external_check_multicall_falls_back_to_batch(monkeypatch):
 
 
 def test_candidate_hypersync_scan_floors_from_block_at_creation_block(monkeypatch):
-    """The candidate-enumeration HyperSync scan starts at the checker's creation
-    block, not genesis: identical candidate set, no pre-deployment 429-storm."""
     import asyncio
 
     import hypersync

@@ -32,8 +32,6 @@ def test_spawn_dedup_is_case_insensitive(db_session):
 
     parent_addr, child_addr = _addr(), _addr()
     parent = create_job(db_session, {"address": parent_addr})
-    # An admin-submitted job stored with a checksummed address at the same
-    # contract the cascade is about to discover (lowercase).
     create_job(db_session, {"address": child_addr[:2] + child_addr[2:].upper()})
     db_session.commit()
 
@@ -51,7 +49,6 @@ def test_spawn_dedup_is_chain_scoped(db_session, monkeypatch):
     monkeypatch.setenv("PSAT_SUPPORTED_CHAIN_IDS", "1,8453")
     parent_addr, child_addr = _addr(), _addr()
     parent = create_job(db_session, {"address": parent_addr, "chain": "base"})
-    # A same-address twin job on ANOTHER chain must not suppress the base child.
     create_job(db_session, {"address": child_addr, "chain": "ethereum"})
     db_session.commit()
 

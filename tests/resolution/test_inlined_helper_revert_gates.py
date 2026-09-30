@@ -1,16 +1,5 @@
-"""Regression tests for inlined-helper internal revert-gate conjunction.
-
-``require(helper(msg.sender))`` admits a caller only when the helper returns true AND none
-of its own ``require`` gates reverted. The predicate builder used to inline ONLY the
-helper's return expression (RevertDetector skips callees whose result is read), so a
-caller-keyed allowlist inside the helper vanished and the caller classified public.
-
-Production false-open: ``EtherFiOracle.submitReport`` gates on ``shouldSubmitReport(msg.sender)``,
-whose body requires ``committeeMemberStates[_member].registered``. The fix
-(``_internal_call_revert_gate_subtrees``, kill-switch ``PSAT_INLINE_HELPER_REVERT_GATES``)
-conjoins the helper's caller-tainted revert gates at the call site. Real Slither fixture,
-production path (``build_predicate_artifacts`` -> null-adapter ``evaluate_tree`` -> policy
-projection). No DB, no RPC.
+"""``require(helper(msg.sender))`` also depends on the helper's own ``require`` gates, which inlining the return
+expression dropped; ``EtherFiOracle.submitReport`` fell open this way. Real Slither fixture, no DB or RPC.
 """
 
 from __future__ import annotations
@@ -26,11 +15,7 @@ from services.static.contract_analysis_pipeline.predicate_artifacts import (  # 
     build_predicate_artifacts,
 )
 
-# Mirrors the cid-342 shape: an owner-written allowlist (plain mapping AND the
-# struct-member variant), checked inside a view helper that then returns a
-# business expression; external entry points gate on require(helper(msg.sender)).
-# ``_openHelper``/``poke`` pin the conservative side: a business-only internal
-# gate must NOT be conjoined (no manufactured false-gate).
+# Mirrors cid-342; ``_openHelper``/``poke`` pin that a business-only internal gate is not conjoined.
 SOURCE = """
 pragma solidity ^0.8.19;
 
@@ -98,14 +83,12 @@ def subject(tmp_path_factory):
 
 
 def _authority_public(tree) -> bool:
-    """Null-adapter evaluation + policy projection (harness.evaluate_tree_verdict's chain).
-    Imports are function-scope to stay clear of the policy<->resolution init cycle."""
+    """Function-scope imports avoid the policy/resolution init cycle."""
     from services.policy.capability_surface import project_capability_surface
     from services.resolution.capability_resolver import capability_to_dict
     from services.resolution.predicate_evaluator import evaluate_tree
 
     if tree is None:
-        # effective_permissions._public_capability(): absent from trees -> public.
         return True
     cap = evaluate_tree(tree)
     cap_dict = capability_to_dict(cap)
@@ -114,8 +97,6 @@ def _authority_public(tree) -> bool:
 
 
 def _verdicts(subject, monkeypatch, inline_gates_flag: str) -> dict[str, bool]:
-    """Build trees under the given PSAT_INLINE_HELPER_REVERT_GATES value and evaluate every
-    entry point under the earned-public default."""
     monkeypatch.setenv("PSAT_AUTHORITY_EARNED_PUBLIC", "1")
     monkeypatch.setenv("PSAT_INLINE_HELPER_REVERT_GATES", inline_gates_flag)
     trees = build_predicate_artifacts(subject).get("trees") or {}
@@ -126,8 +107,6 @@ def _verdicts(subject, monkeypatch, inline_gates_flag: str) -> dict[str, bool]:
 
 
 def test_helper_allowlist_gates_survive_inlining(subject, monkeypatch):
-    """The cid-342 regression: an entry point whose only caller gate lives inside an
-    inlined helper resolves GATED, for plain-mapping and struct-member allowlists."""
     verdicts = _verdicts(subject, monkeypatch, inline_gates_flag="1")
 
     assert verdicts["act()"] is False, "registered[msg.sender] allowlist dropped on inlining"
@@ -137,8 +116,6 @@ def test_helper_allowlist_gates_survive_inlining(subject, monkeypatch):
 
 
 def test_conjunction_only_adds_caller_gates(subject, monkeypatch):
-    """A business-only internal gate is NOT conjoined (poke stays public), gate-less
-    functions stay public, and the direct owner gate still gates."""
     verdicts = _verdicts(subject, monkeypatch, inline_gates_flag="1")
 
     assert verdicts["poke(uint256)"] is True, "business-only helper gate manufactured a false-gate"
@@ -147,8 +124,7 @@ def test_conjunction_only_adds_caller_gates(subject, monkeypatch):
 
 
 def test_kill_switch_restores_return_only_inlining(subject, monkeypatch):
-    """PSAT_INLINE_HELPER_REVERT_GATES=0 reproduces the pre-fix trees (helper-gated entry
-    points fall open), proving this suite fails if the fix is reverted."""
+    """Proves the suite fails if the fix is reverted."""
     verdicts = _verdicts(subject, monkeypatch, inline_gates_flag="0")
 
     assert verdicts["act()"] is True

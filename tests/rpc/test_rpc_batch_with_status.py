@@ -1,14 +1,5 @@
-"""Regression tests for ``services.clients.rpc.rpc_batch_request_with_status``.
-
-``rpc_batch_request`` returns ``None`` for both error AND "function returned no data", which is
-fatal for cache layers like ``classify_resolved_address`` (a transient RPC failure read as
-"function absent" would cement a misclassification). The ``_with_status`` variant returns
-``(result, had_error)``; this pins that contract so a refactor can't revert to the lossy shape.
-
-Also pinned: a successful ``"0x"`` passes through verbatim (the caller decides what it means),
-and the three-state core ``rpc_batch_request_classified`` keeps an answered per-call error
-(``"error"``) apart from a batch the node never answered (``"transport"``), which the
-``_with_status`` wrapper collapses; callers publishing an earned negative use the classified form.
+"""``rpc_batch_request`` returns None for both error and no data; a cache reading transient failure as "function
+absent" would cement a misclassification.
 """
 
 from __future__ import annotations
@@ -68,8 +59,7 @@ def test_per_call_error_does_not_taint_neighbours():
 
 
 def test_whole_chunk_transport_failure_marks_all_errored():
-    """If the HTTP call itself fails (network, DNS, 5xx) every slot must be flagged; conflating with
-    success would make callers cache (None, False) and never re-probe."""
+    """Otherwise callers would cache (None, False) and never re-probe."""
     _reset_thread_session()
     session = rpc._get_session()
     with patch.object(session, "post", side_effect=ConnectionError("DNS")):
@@ -126,8 +116,6 @@ def test_empty_calls_short_circuits_without_http():
 
 
 def test_successful_null_result_preserved_with_error_false():
-    """eth_call to a missing function returns ``"0x"`` (success, no data) and must come back as
-    (``"0x"``, False); conflating with error would lose "function absent" vs "failed"."""
     _reset_thread_session()
     response = _make_response(
         200,
@@ -139,12 +127,7 @@ def test_successful_null_result_preserved_with_error_false():
     assert results == [("0x", False)]
 
 
-# rpc_batch_request_classified — the three-state core
-
-
 def test_classified_per_call_error_is_error_not_transport():
-    """A revert is an ANSWERED call (observed, said no): never the transport shape; the ok neighbour
-    keeps its result."""
     _reset_thread_session()
     response = _make_response(
         200,
@@ -189,8 +172,7 @@ def test_classified_skipped_id_stays_transport():
 
 
 def test_classified_empty_return_is_ok_with_verbatim_result():
-    """``"0x"`` from a permissive fallback is an answered, error-free call: ``("0x", "ok")`` verbatim;
-    the CALLER decides what it means (the poll loop publishes ``no_value``)."""
+    """The caller decides what it means."""
     _reset_thread_session()
     response = _make_response(200, [{"jsonrpc": "2.0", "id": 0, "result": "0x"}])
     session = rpc._get_session()

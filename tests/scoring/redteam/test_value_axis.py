@@ -1,4 +1,3 @@
-"""Value axis."""
 
 from __future__ import annotations
 
@@ -135,14 +134,7 @@ def test_f10_the_transitive_branch_reads_the_signals_value_state(fold):
 
 
 def test_v3_the_transitive_branch_discloses_unpriced_closure_entities(fold):
-    """Every closure entity is NAMED, priced or not, and none is priced by its sheet.
-
-    A reach with no magnitude witness is not_determined at BOTH entities, and
-    both are named; membership is untouched. Asked of GATE control, which the
-    sheet may never price: the vault's code, share math and caller conditions
-    are all unexamined. Code control's one narrow exception (its own controlled
-    node) is pinned separately (``test_cc3_*``).
-    """
+    """Gate control never prices from the sheet; code control's exception is pinned in ``test_cc3_*``."""
     signal = sig(
         claim_id="authority.replace",
         authority_openness="restricted",
@@ -161,8 +153,6 @@ def test_v3_the_transitive_branch_discloses_unpriced_closure_entities(fold):
     assert finding["reach_entities"] == sorted([KEY_C, KEY_V])
     assert finding["value_at_stake_usd"] is None
     assert finding["value_band"] == "not_determined"
-    # The floor flag is about a priced total that under-covers; there is no
-    # total here, so it is False rather than a floor over nothing.
     assert finding["value_at_stake_is_floor"] is False
     named = {row["entity"] for row in finding["undetermined_instances"]}
     assert named == {KEY_C, KEY_V}
@@ -194,17 +184,11 @@ def test_v4_exposure_caps_on_the_entity_contribution_not_the_row_total(fold):
     finding = document.findings[0]
     assert finding["value_at_stake_usd"] == 200.0
     assert finding["value_by_entity"] == {KEY_C: 100.0, KEY_V: 100.0}
-    # Each entity contributes at most its own $100, never the row's $200.
     assert finding["exposure_usd"] <= 200.0
 
 
 def test_p0_a_proxy_and_its_implementation_are_one_priced_entity(fold):
-    """Reaching both keys of one proxy pair charges one balance, not two.
-
-    The plane folds the implementation's balance onto its proxy; keying
-    contributions on the raw keys published a value at stake and an exposure
-    both exactly 2x real.
-    """
+    """Keying contributions on raw keys published value and exposure at exactly 2x."""
     signal = sig(
         deployment_address=PROXY,
         authority_openness="restricted",
@@ -226,18 +210,12 @@ def test_p0_a_proxy_and_its_implementation_are_one_priced_entity(fold):
     assert finding["exposure_entities_charged"] == [KEY_PROXY]
     fraction = finding["severity_proven"] * finding["weakness"]
     assert finding["exposure_usd"] == round(fraction * 100_000_000.0, 2)
-    # The denominator holds that same single balance, so charging the pair twice
-    # spent more than the protocol tracks and drove the grade negative.
+    # Double-charging the pair drove the grade negative.
     assert document.grade_exposure == round(100.0 * (1.0 - fraction), 3)
 
 
 def test_host_entities_name_the_deployments_not_the_reach(fold):
-    """The row publishes WHERE its instances live, apart from what they reach.
-
-    A transitive row's reach set can omit an unpriced host, leaving a consumer no
-    way to name the contract the function is on; host_entities carries the
-    deployment keys verbatim.
-    """
+    """A transitive row's reach set can omit an unpriced host."""
     signal = sig(
         deployment_address=C,
         authority_openness="restricted",

@@ -1,12 +1,6 @@
-"""Getter-less ``pending`` authority gates resolve by reading the live storage slot,
-not by guessing ``resolved_empty`` from the accessor name.
-
-LRTSquared ``claimGovernance`` is gated by INTERNAL ``_pendingGovernor()`` (an sload of a
-keccak slot, no public getter). The old name-based guess lowered it to "provably nobody",
-but the live slot is non-zero (== governor(); never cleared), so it is callable.
-Resolution reads the slot: non-zero -> finite_set, zero -> resolved_empty, unreadable ->
-lower_bound (never a fabricated resolved_empty). The global ``_stub_live_authority``
-fixture is deliberately not used.
+"""LRTSquared ``claimGovernance`` reads internal ``_pendingGovernor()``; the name-based guess lowered it to "nobody",
+but the live slot is non-zero, so it's read instead. The global ``_stub_live_authority`` fixture is deliberately
+not used.
 """
 
 from __future__ import annotations
@@ -36,8 +30,7 @@ A_PENDING_GOVERNOR_SLOT: dict[str, Any] = {
     "callee_selector": INTERNAL_PENDING_GOVERNOR_SELECTOR,
     "storage_slot": PENDING_GOVERNOR_SLOT,
 }
-# The pre-fix shape (no slot carried) — exercises the name-based fallback that
-# only survives for getter-less, slot-less pending operands (OZ struct member).
+# Only getter-less, slot-less pending operands keep the name-based fallback.
 A_PENDING_GOVERNOR_NO_SLOT: dict[str, Any] = {
     "source": "view_call",
     "callee_signature": "_pendingGovernor()",
@@ -70,9 +63,6 @@ def _eq_tree(other_operand: dict[str, Any]) -> PredicateTree:
 
 
 def _stub(monkeypatch: pytest.MonkeyPatch, *, slot: str, getter: str = "revert", recorder: list | None = None) -> None:
-    """``eth_call`` getters use ``getter`` ('revert' to raise; else returned
-    verbatim — there is no public ``pendingGovernor()``); ``eth_getStorageAt``
-    returns ``slot`` ('revert' to simulate an unreadable slot)."""
 
     def fake(rpc_url: str, method: str, params: list, retries: int = 1, **_: Any) -> str:
         if recorder is not None:
@@ -97,13 +87,7 @@ def _status(cap: CapabilityExpr) -> str | None:
     return capability_surface_status(cap_dict, project_capability_surface(cap_dict))
 
 
-# --------------------------------------------------------------------------
-# Resolver unit tests (literal operand; always run).
-# --------------------------------------------------------------------------
-
-
 def test_nonzero_slot_resolves_to_pending_governor(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The live (non-empty) pending slot IS the authorized caller, not 'provably nobody'."""
     recorder: list = []
     _stub(monkeypatch, slot=_word(PENDING_GOVERNOR), recorder=recorder)
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
@@ -117,12 +101,7 @@ def test_nonzero_slot_resolves_to_pending_governor(monkeypatch: pytest.MonkeyPat
 
 
 def test_confirmed_zero_slot_is_resolved_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A read-confirmed zero slot (PriceProvider reality) is a genuine accept-side ceiling.
-
-    The reason is ``slot_read_zero`` (the read that happened), not ``empty_by_design``
-    (a default-argument classification); the ``pending``-prefix basis lives only in
-    ``_pending_ceiling_capability``.
-    """
+    """The reason names the read that happened, not a classification."""
     _stub(monkeypatch, slot="0x" + "00" * 32)
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
 
@@ -131,13 +110,11 @@ def test_confirmed_zero_slot_is_resolved_empty(monkeypatch: pytest.MonkeyPatch) 
     assert cap.membership_quality == "exact"
     assert cap.empty_reason == "slot_read_zero"
     assert _status(cap) == "resolved_empty"
-    # The read that produced it is on the row, so the empty is reconstructible.
     assert cap.trace[0]["step"] == "live_slot_resolution"
     assert cap.trace[0]["slot"] == PENDING_GOVERNOR_SLOT
 
 
 def test_unreadable_slot_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Anti-regression: getter AND slot unreadable -> ``lower_bound``, never a fabricated resolved_empty."""
     _stub(monkeypatch, slot="revert")
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_SLOT), _ctx_with_rpc())
 
@@ -149,8 +126,7 @@ def test_unreadable_slot_stays_lower_bound(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_no_rpc_with_slot_is_lower_bound_not_guess(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A slot-bearing operand with no reachable RPC stays an honest unknown — the
-    presence of a slot disables the name-based empty-by-design guess entirely."""
+    """A slot disables the name-based guess entirely."""
     cap = evaluate_tree(
         _eq_tree(A_PENDING_GOVERNOR_SLOT), EvaluationContext(contract_address=CONTRACT, adapter=_Adapter(None))
     )
@@ -160,8 +136,6 @@ def test_no_rpc_with_slot_is_lower_bound_not_guess(monkeypatch: pytest.MonkeyPat
 
 
 def test_slotless_pending_operand_keeps_empty_by_design_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A getter-less, slot-less ``pending`` accessor (OZ ``_pendingDefaultAdmin.newAdmin``) still lowers to empty-by-
-    design."""
     _stub(monkeypatch, slot="revert")  # eth_call getter reverts; no slot on the operand
     cap = evaluate_tree(_eq_tree(A_PENDING_GOVERNOR_NO_SLOT), _ctx_with_rpc())
 
@@ -169,10 +143,6 @@ def test_slotless_pending_operand_keeps_empty_by_design_fallback(monkeypatch: py
     assert cap.empty_reason == "empty_by_design"
     assert _status(cap) == "resolved_empty"
 
-
-# --------------------------------------------------------------------------
-# Integration: compile the verbatim on-chain Governable. Skips without solc.
-# --------------------------------------------------------------------------
 
 pytest.importorskip("slither")
 from slither import Slither  # noqa: E402
@@ -184,9 +154,6 @@ pytestmark = pytest.mark.compile
 
 
 def _claim_governance_tree() -> Any:
-    # Returns the compiled tree as Any (a PredicateTree at runtime) — the
-    # integration assertions subscript NotRequired keys, mirroring the untyped
-    # access in test_canonical_authority_getter_resolution.py.
     solc = _solc_path_for((0, 8, 25))
     if solc is None:
         pytest.skip("no installed solc satisfies ^0.8.25 for Governable.sol")
@@ -208,7 +175,6 @@ class TestGovernableClaimGovernanceSlot:
     @pytest.mark.parametrize(
         ("slot", "expected_rows", "resolved_empty"),
         [
-            # End-to-end: getter reverts, the carried slot is read, claimGovernance is NOT resolved_empty.
             pytest.param(_word(PENDING_GOVERNOR), [PENDING_GOVERNOR], False, id="live_pending_governor"),
             pytest.param("0x" + "00" * 32, [], True, id="confirmed_zero_slot"),
             pytest.param("revert", [], False, id="unreadable_slot"),

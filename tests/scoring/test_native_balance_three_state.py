@@ -1,12 +1,7 @@
-"""B2: the native/asset three-state, and the blast radius of delivering it.
+"""B2's damage population is 0 rows, so every arm is argued from the contract.
 
-B2's own damage population is 0 rows, so every arm is argued from the code
-contract. What is defended is the DELIVERY: the discriminator must not make
-``contract_balances`` row existence mean something new, because
-``services.effects.selection`` reads it as "this deployment holds this asset"
-and feeds the published reach rows. The second half is the reader side, where
-an absence manufactured by a failed fetch, a retention prune or a view predicate
-becomes a published ``$0.00`` two hops downstream.
+``contract_balances`` row existence means "holds this asset" to ``services.effects.selection``, and an absence from a
+failed fetch, prune or view predicate must not become a published ``$0.00`` downstream.
 """
 
 from __future__ import annotations
@@ -153,57 +148,41 @@ def _view_ids(session, contract_id: int) -> set[int]:
     )
 
 
-# ---------------------------------------------------------------------------
-# The status vocabulary itself
-# ---------------------------------------------------------------------------
-
-
 class TestNativeStatusVocabulary:
     def test_every_failure_shape_lands_on_a_non_polarity(self):
         assert native_status_for(wei=None, pinned=True, failed=True) == NATIVE_STATUS_FETCH_FAILED
         assert native_status_for(wei=None, pinned=False, failed=False) == NATIVE_STATUS_FETCH_FAILED
-        # A zero is only ever a PROVEN zero with a height behind it.
         assert native_status_for(wei=0, pinned=True, failed=False) == NATIVE_STATUS_PROVEN_ZERO
         assert native_status_for(wei=0, pinned=False, failed=False) == NATIVE_STATUS_NOT_DETERMINED
         assert native_status_for(wei=5, pinned=False, failed=False) == NATIVE_STATUS_PROVEN_NONZERO
 
     def test_the_fact_is_the_pair_never_the_status_alone(self):
-        """``proven_nonzero`` means two different things at NULL and non-NULL block."""
         assert native_balance_fact(NATIVE_STATUS_PROVEN_NONZERO, None) == "nonzero_at_unrecorded_height"
         assert native_balance_fact(NATIVE_STATUS_PROVEN_NONZERO, 25643300) == "proven_nonzero_at_block_25643300"
         assert native_balance_fact(NATIVE_STATUS_PROVEN_ZERO, 25643300) == "proven_zero_at_block_25643300"
-        # Both non-facts collapse to the same honest answer.
         assert native_balance_fact(NATIVE_STATUS_FETCH_FAILED, None) == "not_determined"
         assert native_balance_fact(NATIVE_STATUS_NOT_DETERMINED, None) == "not_determined"
-        # Even constructed in memory, a blockless proven_zero asserts nothing.
         assert native_balance_fact(NATIVE_STATUS_PROVEN_ZERO, None) == "not_determined"
 
 
 class TestCompletenessMappingIsTotalAndCannotSayComplete:
-    """A13 — the merged ``asset_set_status`` must not leak a whole-list reading."""
+    """A13."""
 
     @pytest.mark.parametrize("status", ASSET_SET_STATUSES + (None,))
     def test_total_over_the_whole_vocabulary(self, status):
         out = _completeness_from_fetch(status)
         assert out in (HOLDINGS_COMPLETENESS_AT_PAGE_CAP, HOLDINGS_COMPLETENESS_NOT_DETERMINED)
-        # There is no "complete" member to return, and that is the invariant:
-        # a status other than at-cap is consistent with a whole list AND with a
-        # list the fetch simply never proved whole.
+        # A non-cap status is consistent with both a whole list and an unproven one.
         assert out != "complete"
 
     def test_only_the_status_witnesses_the_cap(self):
-        """The fetch's own status, never a length.
-
-        The fetch pages to exhaustion, so an exhausted list of exactly
-        ``TOKEN_BALANCE_PAGE_SIZE`` entries or more was never cut off; only
-        ``at_page_cap`` says the stored list is a prefix.
-        """
+        """The fetch pages to exhaustion, so only ``at_page_cap`` says the list is a prefix, never a length."""
         assert _completeness_from_fetch(ASSET_SET_STATUS_AT_PAGE_CAP) == HOLDINGS_COMPLETENESS_AT_PAGE_CAP
         assert _completeness_from_fetch(ASSET_SET_STATUS_RETURNED_ASSETS) == HOLDINGS_COMPLETENESS_NOT_DETERMINED
 
 
 class TestPositiveQuantityGuardFailsClosedWithoutRaising:
-    """A10 — an unparseable stored quantity excludes the row, never crashes."""
+    """A10."""
 
     @pytest.mark.parametrize("raw", ["1", "1000000000000000000"])
     def test_positive(self, raw):
@@ -215,7 +194,7 @@ class TestPositiveQuantityGuardFailsClosedWithoutRaising:
 
 
 class TestHistoryDepthValidation:
-    """A4 — depth 0 would prune every fetch and resurrect the legacy rows."""
+    """A4: depth 0 would prune every fetch and resurrect the legacy rows."""
 
     @pytest.mark.parametrize("bad", ["0", "-1", "nonsense"])
     def test_rejects_below_one(self, monkeypatch, bad):
@@ -224,14 +203,9 @@ class TestHistoryDepthValidation:
             balance_history_depth()
 
 
-# ---------------------------------------------------------------------------
-# The view
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 class TestViewLegacyArm:
-    """A1 — a FAILED first fetch must not delete history from the view."""
+    """A1."""
 
     def test_legacy_rows_survive_an_all_failed_first_fetch(self, db_session):
         proto = _protocol(db_session, "3s-legacy")
@@ -244,8 +218,6 @@ class TestViewLegacyArm:
         _fetch(db_session, c, native=NATIVE_STATUS_FETCH_FAILED, assets=ASSET_SET_STATUS_FETCH_FAILED)
         db_session.commit()
 
-        # A failed fetch learned nothing, so the last thing that WAS observed is
-        # still the best available answer.
         assert _view_ids(db_session, c.id) == {legacy.id, legacy_tok.id}
 
     def test_a_successful_fetch_does_supersede_the_legacy_rows(self, db_session):
@@ -260,7 +232,7 @@ class TestViewLegacyArm:
 
 @requires_postgres
 class TestViewIsPerRowClass:
-    """A2 — a token-class failure must not withdraw the native holding."""
+    """A2."""
 
     def test_native_from_f2_tokens_from_f1(self, db_session):
         proto = _protocol(db_session, "3s-perclass")
@@ -274,15 +246,13 @@ class TestViewIsPerRowClass:
         f2_native = _row(db_session, c, token=None, fetch=f2)
         db_session.commit()
 
-        # The newer fetch wins the class it observed; the older one keeps the
-        # class the newer one failed at. Zero rows come from the failed class.
         assert _view_ids(db_session, c.id) == {f2_native.id, f1_tok.id}
         assert f1_native.id not in _view_ids(db_session, c.id)
 
 
 @requires_postgres
 class TestViewSynthesizesNothing:
-    """A3 — the view is a pure projection: no join may multiply or invent a row."""
+    """A3."""
 
     def _assert_projection(self, db_session):
         base_ids = set(db_session.execute(select(ContractBalance.id)).scalars().all())
@@ -291,7 +261,6 @@ class TestViewSynthesizesNothing:
         base_n = db_session.execute(select(func.count()).select_from(ContractBalance)).scalar_one()
         view_n = db_session.execute(select(func.count()).select_from(ContractBalanceLatest)).scalar_one()
         assert view_n <= base_n
-        # And no id is duplicated by the UNION arms.
         dupes = db_session.execute(
             select(ContractBalanceLatest.id).group_by(ContractBalanceLatest.id).having(func.count() > 1)
         ).all()
@@ -320,7 +289,7 @@ class TestViewSynthesizesNothing:
 
 @requires_postgres
 class TestRetentionNeverEvictsThePublishedObservation:
-    """A4 — ``depth`` consecutive failures must not CASCADE away the last good fetch."""
+    """A4."""
 
     def test_good_fetch_survives_depth_failures(self, db_session, monkeypatch):
         monkeypatch.setenv("PSAT_BALANCE_HISTORY_DEPTH", "3")
@@ -343,7 +312,6 @@ class TestRetentionNeverEvictsThePublishedObservation:
             .all()
         )
         assert good.id in surviving
-        # The rows it published are still there, and still what the view returns.
         assert _view_ids(db_session, c.id) == {good_row.id}
 
     def test_pruning_does_bound_growth(self, db_session, monkeypatch):
@@ -361,19 +329,10 @@ class TestRetentionNeverEvictsThePublishedObservation:
         assert n == 2
 
 
-# ---------------------------------------------------------------------------
-# The readers — where this unit's own gap-widening risk lives
-# ---------------------------------------------------------------------------
-
-
 @requires_postgres
 class TestFailedFetchIsAbsentNotZero:
-    """A11 — an absent balance must not become a published ``$0.00`` floor.
-
-    ``recipes._add_reach`` publishes ``graph.deployment_balance.get(acting,
-    _ZERO_USD)`` as ``observed_reach_floor_usd``; a LEFT JOIN, or a 0 entry for a
-    failed-fetch contract, would put a confident zero on a function that may move
-    millions.
+    """A11: ``recipes._add_reach`` defaults to ``_ZERO_USD``, so a LEFT JOIN or a 0 for a failed fetch would publish
+    a confident zero.
     """
 
     def test_contract_with_only_a_failed_fetch_has_no_balance_key(self, db_session):
@@ -387,14 +346,12 @@ class TestFailedFetchIsAbsentNotZero:
 
         graph = build_authority_graph(db_session, proto.id)
         assert _addr("51").lower() in graph.balance
-        # ABSENT, not 0. The distinction is the whole point.
         assert _addr("52").lower() not in graph.balance
         assert _addr("52").lower() not in graph.deployment_balance
 
 
 @requires_postgres
 class TestHoldingsRequireAPositiveWitness:
-    """The delivery trap: row EXISTENCE must not mean "holds this asset"."""
 
     def test_zero_and_unparseable_rows_are_not_holdings(self, db_session):
         proto = _protocol(db_session, "3s-guard")
@@ -422,12 +379,7 @@ class TestHoldingsRequireAPositiveWitness:
 
 @requires_postgres
 class TestReachInputsOnAMixedFetchContract:
-    """A14(c) — the whole reader chain over a contract that HAS fetches.
-
-    The corpus-wide differential only shows the legacy path is untouched (every
-    new column is NULL on all 1617 rows); this exercises the new plane end to
-    end and pins the exact tuple.
-    """
+    """A14(c): the corpus differential only covers the legacy path (new columns are NULL on all 1617 rows)."""
 
     def test_exact_asset_holding_tuple(self, db_session):
         proto = _protocol(db_session, "3s-mixed-chain")
@@ -443,21 +395,18 @@ class TestReachInputsOnAMixedFetchContract:
 
         holdings = _asset_holdings_by_deployment(db_session, proto.id)
         got = sorted((h.holder, h.asset, h.usd_value, h.completeness) for h in holdings[_addr("71").lower()])
-        # Sorted by (holder, asset): the token address precedes the native
-        # emitter sentinel. The newer fetch's PRICED copy wins the MAX, and the
-        # native row is unpriced — carried as None, never as 0.
+        # The priced copy wins the MAX; the unpriced native row is None, never 0.
         assert got == [
             (_addr("71").lower(), tok, 9.0, "not_determined"),
             (_addr("71").lower(), "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", None, "not_determined"),
         ]
 
     def test_a_capped_sibling_weakens_the_whole_holder(self, db_session):
-        """A13 — weakest wins. One capped fetch means the holder's list may be short."""
+        """A13."""
         proto = _protocol(db_session, "3s-weakest")
         proxy = _contract(db_session, proto.id, _addr("81"))
         sibling = _contract(db_session, proto.id, _addr("82"))
-        # Both code rows run behind the ONE proxy, which is the holder key
-        # ``_deployment_by_contract`` builds from ``effective_functions``.
+        # ``_deployment_by_contract`` keys both code rows on the one proxy.
         for c in (proxy, sibling):
             db_session.add(
                 EffectiveFunction(
@@ -477,13 +426,12 @@ class TestReachInputsOnAMixedFetchContract:
         holdings = _asset_holdings_by_deployment(db_session, proto.id)
         items = holdings[proxy.address.lower()]
         assert {h.asset for h in items} == {"0x" + "91" * 20, "0x" + "92" * 20}
-        # WEAKEST WINS: the clean sibling does not launder the capped one.
         assert {h.completeness for h in items} == {HOLDINGS_COMPLETENESS_AT_PAGE_CAP}
 
 
 @requires_postgres
 class TestSnapshotDoesNotPublishAFailedReadAsMoney:
-    """A12 — the read-existing branch must not report a lower total as complete."""
+    """A12."""
 
     def test_failed_contract_is_omitted_and_flags_partial(self, db_session):
         proto = _protocol(db_session, "3s-snapshot")
@@ -497,15 +445,13 @@ class TestSnapshotDoesNotPublishAFailedReadAsMoney:
         breakdown, partial = _read_existing_balances(db_session, proto.id)
 
         assert partial is True
-        # No ``total_usd: 0.0`` entry for the contract whose read failed: that
-        # number would enter TvlSnapshot.total_usd as a measurement.
+        # That number would enter TvlSnapshot.total_usd as a measurement.
         keys = {k for k in breakdown}
         assert not any(_addr("a2") in k for k in keys)
         assert any(_addr("a1") in k for k in keys)
         assert [v["total_usd"] for k, v in breakdown.items() if _addr("a1") in k] == [250.0]
 
     def test_missing_set_is_empty_when_nothing_was_ever_fetched(self, db_session):
-        """A contract with no fetch plane at all is not a FAILED contract."""
         proto = _protocol(db_session, "3s-snapshot-legacy")
         c = _contract(db_session, proto.id, _addr("a3"))
         _row(db_session, c, token=None, usd=5.0)
@@ -517,11 +463,7 @@ class TestSnapshotDoesNotPublishAFailedReadAsMoney:
 
 @requires_postgres
 class TestAbsentNativeRowIsNeverZero:
-    """The reject-list item itself: an absent native row must not read as $0.
-
-    ``recipes._add_reach`` returns before writing anything when the holder set is
-    empty, so the "measured reach" key is ABSENT, not present-and-zero.
-    """
+    """``recipes._add_reach`` returns before writing when the holder set is empty."""
 
     def test_no_holder_entry_and_no_zero_valued_pair(self, db_session):
         from services.effects.recipes import _add_reach
@@ -535,10 +477,7 @@ class TestAbsentNativeRowIsNeverZero:
         assert holdings.get(_addr("b1").lower()) is None
 
         concrete: dict = {}
-        # The base call is never touched on this branch: ``_add_reach`` returns
-        # before reading it when the holder set is empty.
         _add_reach(concrete, cast(Any, object()), (), 0.0, None)
-        # Not "$0 of reach" — no reach claim of any kind.
         assert concrete == {}
         assert "observed_reach_value_usd" not in concrete
         assert "reach_determined" not in concrete
@@ -546,12 +485,8 @@ class TestAbsentNativeRowIsNeverZero:
 
 @requires_postgres
 class TestRowlessNonFailedFetchIsAnIntegrityViolation:
-    """R3 — a class status that outruns its rows must flip ``partial``.
-
-    The writers can no longer produce this shape (a non-failed class status
-    promises its row set was written), so it is constructed directly. If it
-    reappears the view publishes the class from a row set nobody wrote, and the
-    snapshot must refuse to call that a measurement.
+    """R3: writers can't produce this shape anymore, so it's built directly; if it reappears the snapshot must refuse
+    it.
     """
 
     def test_proven_nonzero_with_no_native_row_is_missing(self, db_session):
@@ -559,7 +494,6 @@ class TestRowlessNonFailedFetchIsAnIntegrityViolation:
         c = _contract(db_session, proto.id, _addr("c1"))
         good = _fetch(db_session, c)
         _row(db_session, c, token=None, usd=99.0, fetch=good)
-        # A later fetch claiming a positive native quantity, with no row.
         _fetch(db_session, c, native=NATIVE_STATUS_PROVEN_NONZERO, assets=ASSET_SET_STATUS_RETURNED_EMPTY)
         db_session.commit()
 
@@ -581,11 +515,8 @@ class TestRowlessNonFailedFetchIsAnIntegrityViolation:
         assert contracts_missing_current_rows(db_session, [c.id]) == set()
 
     def test_returned_assets_with_no_rows_is_NOT_missing(self, db_session):
-        """A page whose every entry was zero-balance is a real observation.
-
-        ``get_token_balances_page`` drops those entries, so ``returned_assets``
-        with zero persisted rows is reachable without an integrity break; hence
-        no asset-class analogue of the native rule.
+        """``get_token_balances_page`` drops zero-balance entries, so no rows is reachable without an integrity
+        break.
         """
         proto = _protocol(db_session, "3s-rowless-assets")
         c = _contract(db_session, proto.id, _addr("c3"))
@@ -603,13 +534,8 @@ class TestRowlessNonFailedFetchIsAnIntegrityViolation:
 
 @requires_postgres
 class TestViewCurrencyIsPerContractNotPerObservedAddress:
-    """R4 — documented semantics, pinned.
-
-    The view resolves currency per ``contract_id`` and IGNORES
-    ``observed_address``: a contract fetched at two addresses publishes whichever
-    writer wrote LAST. Deliberate: it preserves the pre-migration last-writer-wins
-    DELETE semantics, and per-address currency would double-count proxy/impl
-    pairs in ``build_authority_graph``'s per-contract sum.
+    """R4: currency is per ``contract_id`` and last-writer-wins, matching pre-migration semantics; per-address would
+    double-count proxy/impl pairs in ``build_authority_graph``.
     """
 
     def test_last_writer_wins_across_two_observed_addresses(self, db_session):
@@ -623,28 +549,18 @@ class TestViewCurrencyIsPerContractNotPerObservedAddress:
         proxy_row = _row(db_session, c, token=None, usd=999.0, fetch=at_proxy)
         db_session.commit()
 
-        # Exactly ONE native row is current, and it is the later write — not the
-        # union of both addresses.
         assert _view_ids(db_session, c.id) == {proxy_row.id}
         assert self_row.id not in _view_ids(db_session, c.id)
 
-        # And the per-contract sum is that one row, never 10 + 999. Compared as a
-        # NUMBER: the sum stays exact Decimal all the way through, but its scale
-        # is the storage column's and carries no claim, so pinning the rendering
-        # would pin the column width rather than the arithmetic under test.
+        # Compared as a number: the Decimal scale is the column's and carries no claim.
         graph = build_authority_graph(db_session, proto.id)
         assert graph.balance[c.address.lower()] == Decimal("999.00")
 
 
 @requires_postgres
 class TestValuePlaneReadsAssetSetCompleteness:
-    """The scorer's half of the at-cap fact: it reaches the sheet, not just the row.
-
-    ``asset_set_status`` was written by producers and read by nothing on the
-    scoring side, so a sheet from a list cut off at entry 100 published the same
-    state as one from a whole list, and ``ceiling_for`` bounded a move from above
-    with a prefix of the holdings. The plane carries the truncated case per
-    ENTITY so the ceiling can refuse it.
+    """``asset_set_status`` was never read by scoring, so ``ceiling_for`` bounded a move with a prefix of the
+    holdings.
     """
 
     def test_the_latest_at_cap_fetch_marks_the_entity_truncated(self, db_session):
@@ -664,11 +580,9 @@ class TestValuePlaneReadsAssetSetCompleteness:
 
         plane = load_value_plane(db_session, proto.id)
         assert plane.asset_set_is_truncated(f"ethereum::{capped.address.lower()}")
-        # The other contract is not marked — and not thereby claimed complete.
         assert plane.asset_set_is_truncated(f"ethereum::{whole.address.lower()}") is False
 
     def test_a_later_uncapped_read_supersedes_the_capped_one(self, db_session):
-        """LATEST fetch, so re-reading a shorter list withdraws the refusal."""
         from services.scoring.planes import load_value_plane
 
         proto = _protocol(db_session, "3s-plane-atcap-super")
@@ -743,7 +657,6 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert plane.sheet_state(key) == P.SHEET_PROVEN_EMPTY
         assert plane.total(key) == 0.0
         assert P.ceiling_for(plane, key) == (0.0, P.CEILING_PROVEN_EMPTY)
-        # The published record is the CARRIER's, not a sentence written here.
         record = plane.asset_set_proven_complete[key]
         assert record["swept_through_block"] == 21_000_000 and record["swept_from_block"] == 0
         assert record["basis"] == [self.SCAN_BASIS]
@@ -779,12 +692,7 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
 
     @pytest.mark.parametrize("answer", [ASSET_SET_STATUS_RETURNED_EMPTY, ASSET_SET_STATUS_RETURNED_ASSETS])
     def test_the_scan_publishes_whatever_the_index_answered(self, db_session, answer: str):
-        """The Etherscan status is not a conjunct in either direction.
-
-        At-cap, persistently failing and never-indexed sheets are all publishable
-        once the SCAN proves them empty, so the sheet state reads the scan, never
-        the answer that triggered it.
-        """
+        """The sheet state reads the scan, never the answer that triggered it."""
         from services.scoring import planes as P
 
         proto = _protocol(db_session, f"3s-plane-anyanswer-{answer}")
@@ -832,7 +740,6 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert plane.sheet_state(key) == P.SHEET_PROVEN_EMPTY
 
     def test_a_malformed_typed_record_refuses_rather_than_degrading_to_empty(self, db_session):
-        """Evidence nobody can read is not evidence of nothing."""
         from services.scoring import planes as P
 
         proto = _protocol(db_session, "3s-plane-typed-bad")
@@ -844,12 +751,8 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert plane.sheet_state(f"ethereum::{c.address.lower()}") == P.SHEET_UNPRICED
 
     def test_an_unscanned_account_of_the_same_sheet_refuses_it(self, db_session):
-        """The alias fold makes two accounts one asset list, so both must be scanned.
-
-        No exemption for an implementation nothing has read: its rows fold into
-        this sheet, so publishing it empty asserts its address holds nothing and
-        nobody looked. The refusal carries its own token and names the address,
-        because one producer cycle closes it.
+        """Folded accounts are one asset list; the refusal names the unscanned address because one producer cycle
+        closes it.
         """
         from services.scoring import planes as P
 
@@ -901,19 +804,11 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         proxy_key = f"ethereum::{proxy.address.lower()}"
         assert plane.asset_set_is_truncated(proxy_key) is True
         assert plane.asset_set_is_proven_complete(proxy_key) is False
-        # No completeness witness, so the pinned zero native never becomes a
-        # sheet reading and the sheet is back to having observed nothing.
         assert plane.sheet_state(proxy_key) == P.SHEET_NO_ROWS
         assert P.ceiling_for(plane, proxy_key) == (None, P.CEILING_ASSET_LIST_TRUNCATED)
 
     def test_an_implementation_nobody_ever_read_refuses_the_sheet(self, db_session):
-        """The fail-open this rule closes, in its live shape.
-
-        The implementation has one fetch, observed AT THE PROXY (the
-        divergent-address policy's legacy). Nothing has read the implementation's
-        own address, so the proxy's sheet cannot be shown whole, and "we never
-        looked" is not_determined rather than $0.
-        """
+        """The implementation's only fetch was observed at the proxy, so nobody read its own address."""
         from services.scoring import planes as P
 
         proto = _protocol(db_session, "3s-plane-unread-impl")
@@ -923,7 +818,6 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         impl = _contract(db_session, proto.id, impl_address)
         db_session.flush()
         self._swept(db_session, proxy)
-        # The implementation's only fetch: a read of the PROXY, filed here.
         _fetch(
             db_session,
             impl,
@@ -940,7 +834,6 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert plane.proven_empty_refusal(proxy_key) == P.EMPTY_REFUSED_UNSCANNED_ACCOUNT
         assert plane.sheet_state(proxy_key) == P.SHEET_NO_ROWS
 
-        # One producer cycle at the implementation's OWN address closes it.
         self._swept(db_session, impl)
         db_session.commit()
         reread = P.load_value_plane(db_session, proto.id)
@@ -950,12 +843,7 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert reread.sheet_state(proxy_key) == P.SHEET_PROVEN_EMPTY
 
     def test_a_scan_filed_against_a_row_but_issued_elsewhere_scans_nothing(self, db_session):
-        """A fetch names its contract and the address it read.
-
-        The recipient-topic filter that makes a scan a proof is built from the
-        address, so a scan of one address filed against another contract's row
-        proves nothing about that contract.
-        """
+        """The scan's recipient-topic filter is built from the address read."""
         from services.scoring import planes as P
 
         proto = _protocol(db_session, "3s-plane-foreign-scan")
@@ -971,12 +859,8 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert plane.sheet_state(key) == P.SHEET_NO_ROWS
 
     def test_two_accounts_that_disagree_about_the_native_balance_publish_neither(self, db_session):
-        """A folded account's zero is not this entity's zero.
-
-        Live shape: a proxy holding ETH read ``proven_nonzero`` at its own address
-        while its implementation row carried a stale ``proven_zero``, and the
-        higher ``contracts.id`` won the map. The plane cannot say which polarity
-        is wrong, so it publishes the third state and the sheet earns no empty.
+        """Live: a proxy read ``proven_nonzero`` while its impl carried a stale ``proven_zero``, and the higher id
+        won.
         """
         from services.scoring import planes as P
 
@@ -999,11 +883,6 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
         assert plane.provenance["asset_set_completeness"]["native_facts_refused_on_cross_account_disagreement"] == 1
 
     def test_the_entitys_own_account_is_what_answers_its_native_balance(self, db_session):
-        """Agreeing polarities, different heights: the entity's own read wins.
-
-        Both accounts say proven_zero, so nothing is refused, but the block
-        published is the one read AT the entity, not whichever row sorted last.
-        """
         from services.scoring import planes as P
 
         proto = _protocol(db_session, "3s-plane-native-own")
@@ -1024,13 +903,8 @@ class TestValuePlaneReadsAChainScanAsAnEmptySheet:
 
 @requires_postgres
 class TestValuePlaneReadsEntityKeyedSheets:
-    """A perimeter entity with no ``contracts`` row still has a balance sheet.
-
-    Proven-codeless principals (Safe owners, capability principals) are in the
-    scored perimeter with no ``contracts`` row, so nothing could read them and
-    their sheets published ``no_rows`` forever: "nobody looked". Their records are
-    keyed on ``(chain, address)`` and the plane reads them through the SAME
-    conjunction as a contract, never a weaker one.
+    """Proven-codeless principals have no ``contracts`` row; their records are keyed on ``(chain, address)`` and read
+    through the same conjunction.
     """
 
     SCAN_BASIS = "chain log sweep of Transfer/TransferSingle/TransferBatch, blocks 0-21000000"
@@ -1100,14 +974,11 @@ class TestValuePlaneReadsEntityKeyedSheets:
         plane = P.load_value_plane(db_session, proto.id)
         key = f"ethereum::{eoa.lower()}"
         assert plane.asset_set_is_proven_complete(key) is True
-        # The account is the entity, so the scanned/folded pair is 1/1 — the
-        # conjunct is ASKED of it, not waived.
         record = plane.asset_set_proven_complete[key]
         assert (record["accounts_scanned"], record["accounts_folded"]) == (1, 1)
         assert record["accounts"] == [eoa.lower()]
         assert plane.sheet_state(key) == P.SHEET_PROVEN_EMPTY
         assert plane.total(key) == 0.0
-        # ...and the carrier never leaked into the contracts plane.
         assert key not in plane.contract_entities
         assert plane.provenance["contract_entities"] == len(plane.contract_entities)
 
@@ -1132,11 +1003,7 @@ class TestValuePlaneReadsEntityKeyedSheets:
         assert plane.sheet_state(key) != P.SHEET_PROVEN_EMPTY
 
     def test_an_entity_outside_the_earned_eoa_witness_is_not_read_at_all(self, db_session):
-        """A record with no getCode witness behind it is not admitted by existence.
-
-        Rows exist for this address, but nothing says it is codeless. The plane's
-        population is the witness, never the row.
-        """
+        """Admission is by getCode witness, never by row existence."""
         from services.scoring import planes as P
 
         proto = _protocol(db_session, "3s-plane-entity-unwitnessed")

@@ -1,4 +1,3 @@
-"""Collection changes retain the established monetary scoring policy."""
 
 from types import SimpleNamespace
 
