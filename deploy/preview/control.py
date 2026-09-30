@@ -94,14 +94,12 @@ def build_plan(pr_number: str | int, organization: str, app_prefix: str) -> Prev
     )
 
 
-# A preview runs production's fly.toml. These are the only permitted differences;
-# tests/deploy/test_private_preview.py fails on any other divergence.
+# Previews run production's fly.toml; these are the only permitted differences (enforced by
+# tests/deploy/test_private_preview.py).
 PREVIEW_ENV = {
     "PSAT_EDGE_MODE": "preview",
-    # Live tests read the chain as of these finalized heights so eRPC's
-    # forever-cache replays repeat runs instead of billing Alchemy. The pipeline
-    # still analyzes everything; only its chain inputs are fixed. Roll forward
-    # by editing these (the first run at a new pin pays once to warm the cache).
+    # Pinned heights let eRPC's forever-cache replay runs instead of billing Alchemy. Roll forward by editing; the first
+    # run at a new pin warms the cache.
     "PSAT_PIN_BLOCKS": "1:26079000,8453:51927000,10:157522000",
 }
 # The per-PR Flycast origin is staged as a secret.

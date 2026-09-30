@@ -16,8 +16,7 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str], None]
 
-# Hard cap: a hung wallet-connect flow used to wedge the worker past the stale-job sweep
-# because the blocked asyncio.run never released playwright. Timeout lets us fail cleanly.
+# A hung wallet-connect flow used to wedge the worker past the stale-job sweep.
 _DAPP_CRAWL_TIMEOUT_SECONDS = int(os.environ.get("PSAT_DAPP_CRAWL_TIMEOUT", "300"))
 
 

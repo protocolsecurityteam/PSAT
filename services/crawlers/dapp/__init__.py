@@ -1,4 +1,4 @@
-"""DApp crawler — honeypot wallet that discovers smart contract interactions."""
+"""DApp crawler: a honeypot wallet that discovers contract interactions."""
 
 from services.crawlers.dapp.interaction_log import CapturedInteraction, InteractionLog
 
