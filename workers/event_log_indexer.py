@@ -621,8 +621,10 @@ def index_event_group_steps(
                 cursor.last_indexed_block_hash = None
                 # Keep the RPC page's count and cap even if only a prefix was committed.
                 _fold_window_stats(cursor, window_stats)
-            cursor.backfill_complete = int(cursor.last_indexed_block or 0) >= target
-            if cursor.backfill_complete:
+            # Monotonic: a warm sibling waiting while a new topic backfills stays complete; coverage of the evaluated
+            # block is judged by position, and only the reorg rewind above resets the flag.
+            if int(cursor.last_indexed_block or 0) >= target:
+                cursor.backfill_complete = True
                 members_at_target += 1
                 if cursor.last_indexed_block_hash is None:
                     cursor.last_indexed_block_hash = memo[(chain_id, int(cursor.last_indexed_block))]
